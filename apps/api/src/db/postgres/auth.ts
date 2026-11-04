@@ -6,7 +6,7 @@
  * (and projects). A write whose user or project was deleted meanwhile throws StoreReferenceMissingError (409), not the
  * raw 23503.
  */
-import { type Store } from "../store.js";
+import { type Store, type UserInviteCreate, type UserInviteRecord } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { withReferenceCheck } from "../store-errors.js";
@@ -127,6 +127,114 @@ export async function listUsers(ctx: PgContext): Promise<Array<{
   }));
 }
 
+type UserInviteRow = {
+  id: string;
+  user_id: string;
+  email: string;
+  role: string;
+  created_by: string | null;
+  created_at: string;
+  expires_at: string;
+  accepted_at: string | null;
+};
+
+const USER_INVITE_COLUMNS = "id, user_id, email, role, created_by, created_at, expires_at, accepted_at";
+
+function userInviteFromRow(row: UserInviteRow): UserInviteRecord {
+  return {
+    id: toStr(row.id),
+    userId: toStr(row.user_id),
+    email: toStr(row.email),
+    role: toStr(row.role),
+    createdBy: row.created_by ? toStr(row.created_by) : null,
+    createdAt: toStr(row.created_at),
+    expiresAt: toStr(row.expires_at),
+    acceptedAt: row.accepted_at ? toStr(row.accepted_at) : null
+  };
+}
+
+export async function createUserInvite(ctx: PgContext, input: UserInviteCreate): ReturnType<Store["createUserInvite"]> {
+  return ctx.withTransaction(async (client) => {
+    // The user row is locked, so a concurrent invite or accept of the same email waits for this one.
+    const existing = await client.query<{ id: string }>(`SELECT id FROM users WHERE email = $1 FOR UPDATE`, [input.email]);
+    let userId = input.userId;
+    let created = true;
+    if (existing.rows[0]) {
+      userId = toStr(existing.rows[0].id);
+      const open = await client.query(`SELECT id FROM user_invites WHERE user_id = $1 AND accepted_at IS NULL LIMIT 1`, [userId]);
+      if ((open.rowCount ?? 0) === 0) return null;
+      created = false;
+      await client.query(`DELETE FROM user_invites WHERE user_id = $1`, [userId]);
+      await client.query(`UPDATE users SET role = $1, updated_at = $2 WHERE id = $3`, [input.role, input.createdAt, userId]);
+    } else {
+      // An empty password hash never verifies: the pending user cannot sign in with a password until it accepts.
+      const inserted = await client.query(
+        `INSERT INTO users (id, email, password_hash, role, created_at, updated_at) VALUES ($1, $2, '', $3, $4, $4)
+         ON CONFLICT (email) DO NOTHING`,
+        [userId, input.email, input.role, input.createdAt]
+      );
+      // Another request created the user between the read and the insert.
+      if ((inserted.rowCount ?? 0) === 0) return null;
+    }
+    await client.query(
+      `INSERT INTO user_invites (id, user_id, email, role, token_hash, created_by, created_at, expires_at, accepted_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)`,
+      [input.inviteId, userId, input.email, input.role, input.tokenHash, input.createdBy, input.createdAt, input.expiresAt]
+    );
+    return {
+      invite: {
+        id: input.inviteId,
+        userId,
+        email: input.email,
+        role: input.role,
+        createdBy: input.createdBy,
+        createdAt: input.createdAt,
+        expiresAt: input.expiresAt,
+        acceptedAt: null
+      },
+      created
+    };
+  });
+}
+
+export async function listOpenUserInvites(ctx: PgContext): Promise<UserInviteRecord[]> {
+  const rows = await ctx.query<UserInviteRow>(`SELECT ${USER_INVITE_COLUMNS} FROM user_invites WHERE accepted_at IS NULL ORDER BY created_at ASC, id COLLATE "C" ASC`);
+  return rows.map(userInviteFromRow);
+}
+
+export async function findUserInviteByTokenHash(ctx: PgContext, tokenHash: string): Promise<UserInviteRecord | null> {
+  const row = await ctx.queryOne<UserInviteRow>(`SELECT ${USER_INVITE_COLUMNS} FROM user_invites WHERE token_hash = $1`, [tokenHash]);
+  return row ? userInviteFromRow(row) : null;
+}
+
+export async function acceptUserInvite(ctx: PgContext, input: { tokenHash: string; passwordHash: string; now: string }): ReturnType<Store["acceptUserInvite"]> {
+  return ctx.withTransaction(async (client) => {
+    // One statement claims the invite, so two accepts of the same token never both succeed.
+    const claimed = await client.query<{ user_id: string }>(
+      `UPDATE user_invites SET accepted_at = $2 WHERE token_hash = $1 AND accepted_at IS NULL AND expires_at > $2 RETURNING user_id`,
+      [input.tokenHash, input.now]
+    );
+    const userId = claimed.rows[0]?.user_id;
+    if (!userId) return null;
+    const updated = await client.query<{ id: string; email: string; role: string }>(
+      `UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3 RETURNING id, email, role`,
+      [input.passwordHash, input.now, userId]
+    );
+    const user = updated.rows[0];
+    if (!user) {
+      // The user was deleted meanwhile: leave the invite as it was.
+      await client.query(`UPDATE user_invites SET accepted_at = NULL WHERE token_hash = $1`, [input.tokenHash]);
+      return null;
+    }
+    return { id: toStr(user.id), email: toStr(user.email), role: toStr(user.role) };
+  });
+}
+
+export async function closeUserInvites(ctx: PgContext, userId: string, now: string): Promise<number> {
+  const closed = await ctx.query<{ id: string }>(`UPDATE user_invites SET accepted_at = $2 WHERE user_id = $1 AND accepted_at IS NULL RETURNING id`, [userId, now]);
+  return closed.length;
+}
+
 export async function listUsersPage(ctx: PgContext, options: Parameters<Store["listUsersPage"]>[0]): ReturnType<Store["listUsersPage"]> {
   const count = await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM users`);
   const rows = await ctx.query<{ id: string; email: string; role: string; created_at: string; updated_at: string }>(
@@ -165,6 +273,7 @@ export async function deleteUser(ctx: PgContext, id: string): Promise<boolean> {
     await client.query(`DELETE FROM mfa_secrets WHERE user_id = $1`, [id]);
     await client.query(`DELETE FROM sso_identities WHERE user_id = $1`, [id]);
     await client.query(`DELETE FROM user_project_roles WHERE user_id = $1`, [id]);
+    await client.query(`DELETE FROM user_invites WHERE user_id = $1`, [id]);
     const result = await client.query(`DELETE FROM users WHERE id = $1`, [id]);
     return (result.rowCount ?? 0) > 0;
   });

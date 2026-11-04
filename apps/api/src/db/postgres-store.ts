@@ -371,6 +371,21 @@ export class PostgresStore implements Store {
   async listUsers(...args: Parameters<Store["listUsers"]>): ReturnType<Store["listUsers"]> {
     return auth.listUsers(this.ctx, ...args);
   }
+  async createUserInvite(...args: Parameters<Store["createUserInvite"]>): ReturnType<Store["createUserInvite"]> {
+    return auth.createUserInvite(this.ctx, ...args);
+  }
+  async listOpenUserInvites(...args: Parameters<Store["listOpenUserInvites"]>): ReturnType<Store["listOpenUserInvites"]> {
+    return auth.listOpenUserInvites(this.ctx, ...args);
+  }
+  async findUserInviteByTokenHash(...args: Parameters<Store["findUserInviteByTokenHash"]>): ReturnType<Store["findUserInviteByTokenHash"]> {
+    return auth.findUserInviteByTokenHash(this.ctx, ...args);
+  }
+  async acceptUserInvite(...args: Parameters<Store["acceptUserInvite"]>): ReturnType<Store["acceptUserInvite"]> {
+    return auth.acceptUserInvite(this.ctx, ...args);
+  }
+  async closeUserInvites(...args: Parameters<Store["closeUserInvites"]>): ReturnType<Store["closeUserInvites"]> {
+    return auth.closeUserInvites(this.ctx, ...args);
+  }
   async listUsersPage(...args: Parameters<Store["listUsersPage"]>): ReturnType<Store["listUsersPage"]> {
     return auth.listUsersPage(this.ctx, ...args);
   }

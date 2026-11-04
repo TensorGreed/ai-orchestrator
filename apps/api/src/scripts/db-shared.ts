@@ -90,6 +90,7 @@ export const EXPORTED_TABLES = [
   "external_secret_providers",
   // Auth
   "users",
+  "user_invites",
   "api_keys",
   "mfa_secrets",
   "sso_identities",

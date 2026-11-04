@@ -118,7 +118,9 @@ import type {
   McpPolicySuggestionWrite,
   McpToolCallScanFilter,
   McpToolPolicyPatch,
-  Store
+  Store,
+  UserInviteCreate,
+  UserInviteRecord
 } from "./store.js";
 import {
   decideLostJob,
@@ -2304,6 +2306,31 @@ function parseTagsJson(value: unknown): string[] | undefined {
   return tags.length > 0 ? tags : [];
 }
 
+interface UserInviteRow {
+  id: string;
+  user_id: string;
+  email: string;
+  role: string;
+  token_hash: string;
+  created_by: string | null;
+  created_at: string;
+  expires_at: string;
+  accepted_at: string | null;
+}
+
+function userInviteFromRow(row: UserInviteRow): UserInviteRecord {
+  return {
+    id: toString(row.id),
+    userId: toString(row.user_id),
+    email: toString(row.email),
+    role: toString(row.role),
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdAt: toString(row.created_at),
+    expiresAt: toString(row.expires_at),
+    acceptedAt: row.accepted_at ? toString(row.accepted_at) : null
+  };
+}
+
 function workflowListItemFromRow(row: Omit<WorkflowRow, "workflow_json">): WorkflowListItem {
   return {
     id: toString(row.id),
@@ -4049,6 +4076,22 @@ export class SqliteStore implements Store {
     // 12.2 (v56) — the session labels that drove a held gateway call (null on older requests).
     this.ensureColumn("mcp_gateway_approvals", "labels_json", "TEXT");
 
+    // 7.3 (v57) — deployment-level user invites.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS user_invites (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        role TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        accepted_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_invites_user ON user_invites (user_id);
+    `);
+
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
@@ -4678,6 +4721,83 @@ export class SqliteStore implements Store {
     }));
   }
 
+  async createUserInvite(input: UserInviteCreate): ReturnType<Store["createUserInvite"]> {
+    const result = this.db.transaction(() => {
+      const existing = this.queryOne<{ id: string }>(`SELECT id FROM users WHERE email = ?`, [input.email]);
+      let userId = input.userId;
+      let created = true;
+      if (existing) {
+        userId = toString(existing.id);
+        const open = this.queryOne<{ id: string }>(`SELECT id FROM user_invites WHERE user_id = ? AND accepted_at IS NULL LIMIT 1`, [userId]);
+        if (!open) return null;
+        created = false;
+        this.exec(`DELETE FROM user_invites WHERE user_id = ?`, [userId]);
+        this.exec(`UPDATE users SET role = ?, updated_at = ? WHERE id = ?`, [input.role, input.createdAt, userId]);
+      } else {
+        // An empty password hash never verifies: the pending user cannot sign in with a password until it accepts.
+        this.exec(`INSERT INTO users (id, email, password_hash, role, created_at, updated_at) VALUES (?, ?, '', ?, ?, ?)`, [
+          userId,
+          input.email,
+          input.role,
+          input.createdAt,
+          input.createdAt
+        ]);
+      }
+      this.exec(
+        `INSERT INTO user_invites (id, user_id, email, role, token_hash, created_by, created_at, expires_at, accepted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        [input.inviteId, userId, input.email, input.role, input.tokenHash, input.createdBy, input.createdAt, input.expiresAt]
+      );
+      return {
+        invite: {
+          id: input.inviteId,
+          userId,
+          email: input.email,
+          role: input.role,
+          createdBy: input.createdBy,
+          createdAt: input.createdAt,
+          expiresAt: input.expiresAt,
+          acceptedAt: null
+        },
+        created
+      };
+    })();
+    this.persist();
+    return result;
+  }
+
+  async listOpenUserInvites(): Promise<UserInviteRecord[]> {
+    return this.queryAll<UserInviteRow>(`SELECT * FROM user_invites WHERE accepted_at IS NULL ORDER BY created_at ASC, id ASC`).map(userInviteFromRow);
+  }
+
+  async findUserInviteByTokenHash(tokenHash: string): Promise<UserInviteRecord | null> {
+    const row = this.queryOne<UserInviteRow>(`SELECT * FROM user_invites WHERE token_hash = ?`, [tokenHash]);
+    return row ? userInviteFromRow(row) : null;
+  }
+
+  async acceptUserInvite(input: { tokenHash: string; passwordHash: string; now: string }): ReturnType<Store["acceptUserInvite"]> {
+    const result = this.db.transaction(() => {
+      const invite = this.queryOne<UserInviteRow>(
+        `SELECT * FROM user_invites WHERE token_hash = ? AND accepted_at IS NULL AND expires_at > ?`,
+        [input.tokenHash, input.now]
+      );
+      if (!invite) return null;
+      const user = this.queryOne<UserRow>(`SELECT id, email, password_hash, role, created_at, updated_at FROM users WHERE id = ?`, [invite.user_id]);
+      if (!user) return null;
+      this.exec(`UPDATE user_invites SET accepted_at = ? WHERE id = ?`, [input.now, invite.id]);
+      this.exec(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, [input.passwordHash, input.now, user.id]);
+      return { id: toString(user.id), email: toString(user.email), role: toString(user.role) };
+    })();
+    this.persist();
+    return result;
+  }
+
+  async closeUserInvites(userId: string, now: string): Promise<number> {
+    const { changes } = this.db.prepare(`UPDATE user_invites SET accepted_at = ? WHERE user_id = ? AND accepted_at IS NULL`).run(now, userId);
+    if (changes > 0) this.persist();
+    return changes;
+  }
+
   async listUsersPage(options: Parameters<Store["listUsersPage"]>[0]): ReturnType<Store["listUsersPage"]> {
     const count = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM users`);
     const rows = this.queryAll<UserRow>(
@@ -4719,6 +4839,7 @@ export class SqliteStore implements Store {
       this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [id]);
       this.exec(`DELETE FROM sso_identities WHERE user_id = ?`, [id]);
       this.exec(`DELETE FROM user_project_roles WHERE user_id = ?`, [id]);
+      this.exec(`DELETE FROM user_invites WHERE user_id = ?`, [id]);
       return this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id).changes > 0;
     })();
     this.persist();

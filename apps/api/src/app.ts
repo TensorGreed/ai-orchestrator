@@ -202,6 +202,7 @@ import { bindTriggerTrust, triggerTrustDenial, withoutTriggerTrust, withStoredTr
 import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
+import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
@@ -5529,6 +5530,8 @@ export async function createApp(
     if (!storeUser) {
       throw new Error("Failed to provision SSO user");
     }
+    // Roadmap 7.3 — an invited (pending) user who signs in with SSO no longer needs the invite link.
+    if (!created) await store.closeUserInvites(storeUser.id, new Date().toISOString());
 
     // Apply project-level role assignments from group mappings.
     const projectAssignments = await ssoRoles.listProjectRoleAssignments(input.groups);
@@ -5884,6 +5887,7 @@ export async function createApp(
     const AUTH_BURST_PREFIXES = [
       "/api/auth/login",
       "/api/auth/register",
+      "/api/auth/invite",
       "/api/auth/saml/login",
       "/api/auth/saml/callback",
       "/api/auth/ldap/login",
@@ -14006,24 +14010,31 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   // ── Phase 7.3: User management (admin only) ─────────────────────────
 
+  registerUserInviteRoutes({
+    app,
+    store,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event),
+    webBaseUrl: config.APP_PUBLIC_URL || ssoPostLoginUrl(config.WEB_ORIGIN),
+    sendEmail: async (message) => await notificationService.sendDirectEmail(message)
+  });
+
   app.get("/api/users", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const pageRequest = pageRequestFromQuery(request.query);
-    const userView = (u: { id: string; email: string; role: string; createdAt: string }) => ({ id: u.id, email: u.email, role: u.role, createdAt: u.createdAt });
+    // Roadmap 7.3 — an invited user who has not accepted yet carries `pending` and its invite's expiry.
+    const invites = new Map((await store.listOpenUserInvites()).map((invite) => [invite.userId, invite]));
+    const userView = (u: { id: string; email: string; role: string; createdAt: string }) => {
+      const invite = invites.get(u.id);
+      return { id: u.id, email: u.email, role: u.role, createdAt: u.createdAt, ...(invite ? { pending: true, inviteExpiresAt: invite.expiresAt } : {}) };
+    };
     if (pageRequest) {
       const { items, total } = await store.listUsersPage({ limit: pageRequest.pageSize, offset: pageRequest.offset });
       return pageEnvelope(items.map(userView), total, pageRequest);
     }
     const users = await store.listUsers();
-    return {
-      users: users.map((u) => ({
-        id: u.id,
-        email: u.email,
-        role: u.role,
-        createdAt: u.createdAt
-      }))
-    };
+    return { users: users.map(userView) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/users/:id", async (request, reply) => {

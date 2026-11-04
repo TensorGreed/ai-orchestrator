@@ -232,6 +232,28 @@ describe("OIDC SSO login", () => {
     expect(await context.store.getUserByEmail("erin.new@example.com")).toBeNull();
   });
 
+  it("signs an invited (pending) user in by verified email and closes the invite", async () => {
+    const context = await createContext();
+    const admin = await adminCookie(context);
+    const invited = await context.app.inject({
+      method: "POST",
+      url: "/api/users/invite",
+      cookies: { ao_session: admin },
+      payload: { email: "ivy@example.com", role: "builder" }
+    });
+    expect(invited.statusCode).toBe(201);
+    const { user, inviteUrl } = invited.json() as { user: { id: string }; inviteUrl: string };
+    context.provider.user = { sub: "kc-ivy", email: "ivy@example.com", email_verified: true };
+    const login = await runLogin(context);
+    expect(login.finish.headers.location).toBe(`${WEB}/`);
+    const me = await context.app.inject({ method: "GET", url: "/api/auth/me", cookies: { ao_session: login.session! } });
+    expect((me.json() as { user: { id: string; role: string } }).user).toMatchObject({ id: user.id, role: "builder" });
+    expect(await context.store.listOpenUserInvites()).toEqual([]);
+    const token = new URL(inviteUrl).searchParams.get("invite");
+    const accept = await context.app.inject({ method: "POST", url: "/api/auth/invite/accept", payload: { token, password: "Too-Late-Pass-1" } });
+    expect(accept.statusCode).toBe(404);
+  });
+
   it("never links or creates a user from an unverified email", async () => {
     const context = await createContext();
     const victim = await context.authService.register({ email: "frank@example.com", password: "FrankPassword123!", role: "admin" });

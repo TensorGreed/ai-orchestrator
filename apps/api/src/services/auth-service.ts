@@ -20,7 +20,7 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-function hashPassword(password: string): string {
+export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString("base64");
   const hash = crypto.scryptSync(password, salt, 64).toString("base64");
   return `${salt}:${hash}`;
