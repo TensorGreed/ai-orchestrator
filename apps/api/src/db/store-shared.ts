@@ -173,6 +173,20 @@ export function mapMcpGatewayApproval(row: Record<string, unknown>): McpGatewayA
   };
 }
 
+/**
+ * 12.2 — a repeated held call joins its pending request: the labels of the first request and of the repeat, as a
+ * union. A session's labels only ever grow, so the row never shows less than the session had seen. Null when neither has any.
+ */
+export function mergeRecordedCallLabels(stored: unknown, incoming: unknown): McpGatewayApproval["labels"] {
+  const before = parseRecordedCallLabels(stored);
+  const after = parseRecordedCallLabels(incoming);
+  if (!before && !after) return null;
+  const provenance = [...new Set([...(before?.provenance ?? []), ...(after?.provenance ?? [])])];
+  const dataClasses = [...new Set([...(before?.dataClasses ?? []), ...(after?.dataClasses ?? [])])];
+  // The parser's shape: data classes belong to tracked labels only.
+  return before?.tracked || after?.tracked ? { provenance, dataClasses, tracked: true } : { provenance, tracked: false };
+}
+
 /** Phase 12.4 — the argument summary and subject columns of an mcp_tool_calls row (shared with the Postgres store). */
 export function mapMcpToolCallContext(row: {
   args_summary_json?: unknown;

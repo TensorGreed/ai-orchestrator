@@ -1200,7 +1200,7 @@ function GatewayApprovals() {
                   <div>
                     <dt>Session data</dt>
                     <dd>
-                      <DataLabelChips labels={approval.labels} />
+                      <DataLabelChips labels={approval.labels} title="What this client session had seen when the call was held" />
                     </dd>
                   </div>
                 )}

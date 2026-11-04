@@ -19,6 +19,14 @@ describe("data label chips", () => {
     expect(renderToStaticMarkup(<DataLabelChips labels={undefined} />)).toBe("");
   });
 
+  it("takes the tooltip of the place it is shown in; a node's by default", () => {
+    const labels = { provenance: ["untrusted_external"] };
+    expect(renderToStaticMarkup(<DataLabelChips labels={labels} />)).toContain("Where this node&#x27;s data came from");
+    const session = renderToStaticMarkup(<DataLabelChips labels={labels} title="What this client session had seen when the call was held" />);
+    expect(session).toContain("What this client session had seen when the call was held");
+    expect(session).not.toContain("node");
+  });
+
   it("renders one chip per word", () => {
     const html = renderToStaticMarkup(<DataLabelChips labels={{ provenance: ["untrusted_external"], dataClasses: ["email"], source: "propagated" }} />);
     expect(html).toContain("from outside");

@@ -42,6 +42,7 @@ import {
 import type { PoolClient } from "pg";
 import {
   mapMcpGatewayApproval,
+  mergeRecordedCallLabels,
   mapMcpPolicySuggestion,
   mapMcpToolCallContext,
   mcpToolCallScanWhere,
@@ -1298,7 +1299,7 @@ export async function createMcpGatewayApproval(
         `SELECT * FROM mcp_gateway_approvals WHERE client_id = $1 AND server_id = $2 AND tool_name = $3 AND args_hash = $4 AND status = 'pending'`,
         [input.clientId, input.serverId, input.toolName, input.argsHash]
       );
-      if (existing) return { approval: mapMcpGatewayApproval(existing), created: false };
+      if (existing) return { approval: await mergePendingApprovalLabels(client, existing, input.labels), created: false };
       const pending = await one(client, `SELECT COUNT(*)::int AS count FROM mcp_gateway_approvals WHERE client_id = $1 AND status = 'pending'`, [
         input.clientId
       ]);
@@ -1339,8 +1340,16 @@ export async function createMcpGatewayApproval(
       [input.clientId, input.serverId, input.toolName, input.argsHash]
     );
     if (!existing) throw new Error("Gateway approval request could not be created");
-    return { approval: mapMcpGatewayApproval(existing), created: false };
+    return { approval: await mergePendingApprovalLabels(client, existing, input.labels), created: false };
   });
+}
+
+/** 12.2 — a repeated held call: the pending request keeps the union of its labels and the repeat's (labels only grow). */
+async function mergePendingApprovalLabels(client: Queryable, existing: Row, incoming: unknown): Promise<ReturnType<typeof mapMcpGatewayApproval>> {
+  const merged = mergeRecordedCallLabels(existing.labels_json, incoming);
+  if (!merged) return mapMcpGatewayApproval(existing);
+  const updated = await one(client, `UPDATE mcp_gateway_approvals SET labels_json = $1 WHERE id = $2 RETURNING *`, [JSON.stringify(merged), existing.id]);
+  return mapMcpGatewayApproval(updated ?? existing);
 }
 
 export async function getMcpGatewayApproval(ctx: PgContext, ...[id]: Parameters<Store["getMcpGatewayApproval"]>): ReturnType<Store["getMcpGatewayApproval"]> {

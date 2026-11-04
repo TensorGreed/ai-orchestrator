@@ -155,6 +155,25 @@ describeStoreContract("store contract: argument-aware MCP tool rules", (ctx) => 
     expect((await store.getMcpGatewayApproval("mga_l"))?.labels).toEqual(labels);
   });
 
+  it("a repeated held call adds the session's newer labels to its pending request; labels only grow", async () => {
+    const store = ctx.store();
+    const first = { provenance: ["user" as const], tracked: true };
+    await store.createMcpGatewayApproval(approvalInput("mga_g", { labels: first }), T0);
+    const later = { provenance: ["untrusted_external" as const, "user" as const], dataClasses: ["email"], tracked: true };
+    const again = await store.createMcpGatewayApproval(approvalInput("mga_g2", { labels: later }), at(1));
+    expect(again).toMatchObject({ created: false, approval: { id: "mga_g", labels: { provenance: ["user", "untrusted_external"], dataClasses: ["email"], tracked: true } } });
+    // A repeat with fewer or no labels never removes any.
+    const fewer = await store.createMcpGatewayApproval(approvalInput("mga_g3", { labels: first }), at(2));
+    expect(fewer.approval?.labels).toEqual({ provenance: ["user", "untrusted_external"], dataClasses: ["email"], tracked: true });
+    const none = await store.createMcpGatewayApproval(approvalInput("mga_g4"), at(3));
+    expect(none.approval?.labels).toEqual({ provenance: ["user", "untrusted_external"], dataClasses: ["email"], tracked: true });
+    expect((await store.getMcpGatewayApproval("mga_g"))?.labels).toEqual({ provenance: ["user", "untrusted_external"], dataClasses: ["email"], tracked: true });
+    // A pending request with no labels takes the repeat's.
+    await store.createMcpGatewayApproval(approvalInput("mga_h", { argsHash: "hash-h" }), T0);
+    const filled = await store.createMcpGatewayApproval(approvalInput("mga_h2", { argsHash: "hash-h", labels: first }), at(1));
+    expect(filled.approval?.labels).toEqual({ ...first, dataClasses: [] });
+  });
+
   it("gateway approvals: an approval past its window cannot be used, and a pending request expires", async () => {
     const store = ctx.store();
     await store.createMcpGatewayApproval(approvalInput("mga_w", { expiresAt: at(60) }), T0);

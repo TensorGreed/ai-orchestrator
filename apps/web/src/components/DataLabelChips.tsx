@@ -40,11 +40,11 @@ export function describeDataLabels(value: unknown): string[] {
   return [...origins, ...contents];
 }
 
-export function DataLabelChips({ labels }: { labels: unknown }) {
+export function DataLabelChips({ labels, title = "Where this node's data came from and what it contains" }: { labels: unknown; title?: string }) {
   const words = describeDataLabels(labels);
   if (words.length === 0) return null;
   return (
-    <span className="data-label-chips" aria-label={`Data labels: ${words.join(" · ")}`} title="Where this node's data came from and what it contains">
+    <span className="data-label-chips" aria-label={`Data labels: ${words.join(" · ")}`} title={title}>
       {words.map((word) => (
         <span key={word} className={word.startsWith("contains") ? "data-label-chip is-class" : word === PROVENANCE_WORDS.untrusted_external ? "data-label-chip is-external" : "data-label-chip"}>
           {word}

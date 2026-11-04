@@ -57,6 +57,7 @@ import { parseStoredGatewayRateLimit, type BudgetScopeType, type McpGatewayRateL
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   mapMcpGatewayApproval,
+  mergeRecordedCallLabels,
   mapMcpPolicySuggestion,
   mapMcpToolCallContext,
   mcpToolCallScanWhere,
@@ -12697,7 +12698,11 @@ export class SqliteStore implements Store {
         `SELECT * FROM mcp_gateway_approvals WHERE client_id = ? AND server_id = ? AND tool_name = ? AND args_hash = ? AND status = 'pending'`,
         [input.clientId, input.serverId, input.toolName, input.argsHash]
       );
-      if (existing) return { approval: mapMcpGatewayApproval(existing), created: false };
+      if (existing) {
+        const merged = mergeRecordedCallLabels(existing.labels_json, input.labels);
+        if (merged) this.exec(`UPDATE mcp_gateway_approvals SET labels_json = ? WHERE id = ?`, [JSON.stringify(merged), String(existing.id)]);
+        return { approval: this.getMcpGatewayApprovalSync(String(existing.id))!, created: false };
+      }
       if (options.maxPendingPerClient !== undefined) {
         const pending = this.queryOne<{ count: number }>(
           `SELECT COUNT(*) AS count FROM mcp_gateway_approvals WHERE client_id = ? AND status = 'pending'`,
