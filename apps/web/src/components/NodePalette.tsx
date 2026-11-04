@@ -2,11 +2,18 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEven
 import { NodeTypeIcon, PaletteIcon, type PaletteCategoryIconKey } from "./node-icons";
 
 export interface PaletteDefinition {
+  /** Set on a preset (a node type with a ready configuration, such as a built-in tool); unique in the palette. */
+  presetId?: string;
   type: string;
   label: string;
   category: string;
   description: string;
   sampleConfig: Record<string, unknown>;
+}
+
+/** A palette row's identity: its preset id, else its node type (also what a drag carries). */
+export function paletteKey(item: Pick<PaletteDefinition, "presetId" | "type">): string {
+  return item.presetId ?? item.type;
 }
 
 export interface PaletteSection {
@@ -150,7 +157,7 @@ export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             aria-label="Search nodes"
-            aria-activedescendant={rows[activeIndex] ? `palette-row-${rows[activeIndex]!.item.type}` : undefined}
+            aria-activedescendant={rows[activeIndex] ? `palette-row-${paletteKey(rows[activeIndex]!.item)}` : undefined}
             autoComplete="off"
           />
           <kbd>Esc</kbd>
@@ -176,20 +183,21 @@ export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage
             )}
             <div className="node-palette-list" role="listbox" aria-label={section.title}>
               {section.items.map((item) => {
+                const itemKey = paletteKey(item);
                 rowCursor += 1;
                 const rowIndex = rowCursor;
                 const active = rowIndex === activeIndex;
                 return (
                   <button
-                    key={item.type}
-                    id={`palette-row-${item.type}`}
+                    key={itemKey}
+                    id={`palette-row-${itemKey}`}
                     type="button"
                     role="option"
                     aria-selected={active}
                     data-row-index={rowIndex}
                     className={`node-palette-node-row${active ? " active" : ""}`}
                     draggable
-                    onDragStart={(event) => onDragStart(event, item.type)}
+                    onDragStart={(event) => onDragStart(event, itemKey)}
                     onMouseEnter={() => setActiveIndex(rowIndex)}
                     onClick={() => onPick(item)}
                     title={item.description}

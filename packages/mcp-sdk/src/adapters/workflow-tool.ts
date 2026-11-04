@@ -3,6 +3,7 @@ import {
   WORKFLOW_TOOL_ADAPTER_ID,
   toWorkflowToolName,
   workflowIdOfToolServerKey,
+  workflowToolServerKey,
   type McpToolAnnotations,
   type MCPServerConfig,
   type MCPToolDefinition,
@@ -88,6 +89,10 @@ export class WorkflowToolMCPServerAdapter implements MCPServerAdapter {
   async invokeTool(toolName: string, args: Record<string, unknown>, config: MCPServerConfig, context: MCPExecutionContext): Promise<MCPToolResult> {
     const tool = readWorkflowToolConnection(config);
     if (!tool) return { ok: false, output: null, error: "A workflow tool needs the workflow it runs.", errorKind: "tool" };
+    // Only the engine's own config (filed under workflow:<id>) runs a workflow: an MCP Tool node naming this adapter cannot.
+    if (config.registryServerId !== workflowToolServerKey(tool.workflowId)) {
+      return { ok: false, output: null, error: "Add a Workflow Tool node to call a workflow as a tool.", errorKind: "tool" };
+    }
     if (toolName !== tool.toolName) return { ok: false, output: null, error: `This workflow tool is '${tool.toolName}', not '${toolName}'.`, errorKind: "invalid_arguments" };
     if (!context.runWorkflowTool) {
       return { ok: false, output: null, error: "Workflow tools run only inside an agent of a workflow run.", errorKind: "tool" };

@@ -215,6 +215,10 @@ describe("summarizeNode", () => {
       "mock-mcp · get_current_time"
     );
   });
+  it("summarises built-in tools and workflow tools (6.4)", () => {
+    expect(summarizeNode({ type: "mcp_tool", config: { serverId: "l2m-tools", toolName: "__all__", connection: { provider: "wikipedia" } } })).toBe("built-in · wikipedia");
+    expect(summarizeNode({ type: "workflow_tool", config: { workflowId: "wf-lookup", readOnly: true } })).toBe("wf-lookup · read-only");
+  });
   it("summarises webhook_input and schedule_trigger", () => {
     expect(summarizeNode({ type: "webhook_input", config: { method: "POST", path: "agent-demo", authMode: "none" } })).toBe(
       "POST · /webhook/agent-demo · auth none"

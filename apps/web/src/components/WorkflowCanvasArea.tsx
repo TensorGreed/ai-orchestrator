@@ -38,7 +38,7 @@ import {
   tidyLayout,
   type Point
 } from "../lib/stages";
-import { NodePalette, type PaletteDefinition, type PaletteSection } from "./NodePalette";
+import { NodePalette, paletteKey, type PaletteDefinition, type PaletteSection } from "./NodePalette";
 import { RunTape } from "./RunTape";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import type { LiveNodeResult } from "../lib/run-trace";
@@ -141,7 +141,8 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "mcp_tool",
         "http_request",
         "web_browse",
-        "execute_workflow"
+        "execute_workflow",
+        "workflow_tool"
       ].includes(node.type)
   },
   {
@@ -306,7 +307,7 @@ export function WorkflowCanvasArea({
     const byType = new Map<string, DefinitionNode>();
     for (const items of groupedDefinitions.values()) {
       for (const item of items) {
-        byType.set(item.type, item);
+        byType.set(paletteKey(item), item);
       }
     }
     return [...byType.values()].sort((a, b) => a.label.localeCompare(b.label));
@@ -315,8 +316,8 @@ export function WorkflowCanvasArea({
   const paletteSections = useMemo<PaletteSection[]>(() => {
     const seen = new Set<string>();
     return PALETTE_CATEGORIES.map((section) => {
-      const items = allDefinitions.filter((node) => !seen.has(node.type) && section.match(node));
-      for (const item of items) seen.add(item.type);
+      const items = allDefinitions.filter((node) => !seen.has(paletteKey(node)) && section.match(node));
+      for (const item of items) seen.add(paletteKey(item));
       return { key: section.key, title: section.title, description: section.description, icon: section.icon, items };
     }).filter((section) => section.items.length > 0);
   }, [allDefinitions]);

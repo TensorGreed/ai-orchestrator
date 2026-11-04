@@ -560,8 +560,14 @@ export function summarizeNode(node: { type: string; config?: unknown }): string 
       return join([str(c.agentType) ?? "tools", typeof c.maxIterations === "number" ? `max ${c.maxIterations} iter` : null]);
     case "supervisor_node":
       return join(["supervisor", typeof c.maxIterations === "number" ? `max ${c.maxIterations} iter` : null]);
-    case "mcp_tool":
+    case "mcp_tool": {
+      // 6.4 — a built-in tools node names its provider.
+      const provider = str((c.connection as Record<string, unknown> | undefined)?.provider);
+      if (c.serverId === "l2m-tools" && provider) return join(["built-in", provider]);
       return join([str(c.serverId), str(c.toolName)]) || "no tool selected";
+    }
+    case "workflow_tool":
+      return join([str(c.workflowId, 24) ?? "no workflow", c.readOnly === true ? "read-only" : null]);
     case "local_memory":
       return join([`ns ${str(c.namespace) ?? "default"}`, typeof c.maxMessages === "number" ? `${c.maxMessages} msgs` : null]);
     case "http_request":

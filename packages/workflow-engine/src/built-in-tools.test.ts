@@ -189,6 +189,17 @@ describe("built-in tools on an agent", () => {
     expect(invoked).toEqual(["push"]);
   });
 
+  it("is read-only for the write-tool gate: a search never waits for approval", async () => {
+    const fetched: string[] = [];
+    const gated = { ...agentWorkflow({ provider: "wikipedia" }), settings: { writeToolApproval: { enabled: true } } };
+    const result = await executeWorkflow(
+      { workflow: gated, webhookPayload: { user_prompt: "What is Rust?" } },
+      deps({ calls: [{ name: "l2m-tools__wikipedia_search", arguments: { query: "rust" } }], fetched })
+    );
+    expect(result.status).toBe("success");
+    expect(fetched).toHaveLength(1);
+  });
+
   it("traces the agent's Think calls as thoughts beside the tool calls, never as an MCP tool", async () => {
     const fetched: string[] = [];
     const activity: Array<{ nodeId: string; kind: string; text?: string }> = [];
