@@ -42,7 +42,7 @@ interface UpstreamRequest {
 
 type UpstreamAnswer =
   | { json: unknown; status?: number }
-  | { sse: Array<unknown>; gapMs?: number; hang?: boolean };
+  | { sse: Array<unknown>; gapMs?: number; hang?: boolean; drop?: boolean };
 
 interface Upstream {
   baseUrl: string;
@@ -113,6 +113,10 @@ async function startUpstream(): Promise<Upstream> {
           if (answer.gapMs) await new Promise((resolve) => setTimeout(resolve, answer.gapMs));
         }
         if (answer.hang) return;
+        if (answer.drop) {
+          res.destroy();
+          return;
+        }
         res.write("data: [DONE]\n\n");
         finished = true;
         res.end();
@@ -362,6 +366,19 @@ describe("/v1/chat/completions", () => {
     await fixture.upstream.closedEarly;
     const row = await until(async () => (await requestsOf(fixture))[0], "the usage row");
     expect(row.status).toBe("client_closed");
+  });
+
+  it("ends a stream whose upstream fails midway with an error event and [DONE]", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ sse: [chunk({ role: "assistant", content: "" }), chunk({ content: "partial " })], gapMs: 20, drop: true });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    expect(response.status).toBe(200);
+    const list = frames(await response.text());
+    expect(streamedText(list)).toBe("partial ");
+    expect((list.at(-2) as Frame).error?.code).toBe("upstream_error");
+    expect(list.at(-1)).toBe("[DONE]");
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "upstream_error", stream: true });
   });
 
   it("passes tools through and returns the tool calls", async () => {
