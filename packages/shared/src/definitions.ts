@@ -792,6 +792,30 @@ const baseNodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "workflow_tool",
+    label: "Workflow Tool",
+    category: "Agent",
+    description:
+      "Lets an agent call another workflow as a tool. Attach it to an Agent or Supervisor tool port. The tool's name, description and input schema come from the workflow's Expose as MCP Tool or Sub-Workflow Trigger node.",
+    configSchema: {
+      type: "object",
+      properties: {
+        workflowId: { type: "string" },
+        /** Overrides the derived tool name (letters, digits, _ and -). */
+        toolName: { type: "string" },
+        /** Overrides the derived description the model reads. */
+        toolDescription: { type: "string" },
+        /** The workflow only reads: the write-tool gate skips it. Off unless set. */
+        readOnly: { type: "boolean" }
+      },
+      required: ["workflowId"]
+    },
+    sampleConfig: {
+      workflowId: "",
+      readOnly: false
+    }
+  },
+  {
     type: "rag_retrieve",
     label: "RAG Retrieve",
     category: "RAG",

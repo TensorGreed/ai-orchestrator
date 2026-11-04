@@ -141,6 +141,8 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
 
   // MCP.
   mcp_tool: "mcp",
+  // 6.4 — an agent's call of another workflow goes through the MCP layer: the cassette answers it.
+  workflow_tool: "mcp",
 
   // User code: neither the JavaScript sandbox (a `vm` context, not an
   // isolate) nor the Python subprocess is cut off from the network, so code
@@ -1056,6 +1058,7 @@ export const REPLAY_LIVE_READ_POLICY: Readonly<Record<WorkflowNodeType, ReplayLi
   guard_protection: "refused",
   output_guardrail: "refused",
   mcp_tool: "refused",
+  workflow_tool: "refused",
   code_node: "refused",
   local_memory: "refused",
   session_artifact_save: "refused",

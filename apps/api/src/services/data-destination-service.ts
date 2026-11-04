@@ -16,6 +16,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  BUILT_IN_TOOLS_ADAPTER_ID,
   BUILTIN_DESTINATIONS,
   chatModelDestinationOf,
   connectorAddressInSecret,
@@ -140,7 +141,8 @@ function collectNodes(
         out.push({ ref: { kind: "mcp_server", id: registryId }, seenIn });
       } else if (registryId) {
         out.push({ ref: networkDestinationRef("mcp_server", registryId, registered), seenIn });
-      } else if (endpoint) {
+      } else if (endpoint || config.serverId === BUILT_IN_TOOLS_ADAPTER_ID) {
+        // 6.4 — a built-in tools node with no endpoint goes to its provider's default one.
         const ref = mcpServerDestinationRef({ serverId: typeof config.serverId === "string" ? config.serverId : undefined, connection: config.connection });
         if (ref) out.push({ ref, seenIn });
       }

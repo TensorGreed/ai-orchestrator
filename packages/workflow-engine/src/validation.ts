@@ -894,6 +894,31 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       }
     }
 
+    if (node.type === "workflow_tool") {
+      if (typeof config.workflowId !== "string" || !config.workflowId.trim()) {
+        issues.push({
+          code: "missing_workflow_tool_id",
+          message: "Workflow Tool node requires the workflow it runs (workflowId).",
+          nodeId: node.id
+        });
+      } else if (config.workflowId.trim() === workflow.id) {
+        issues.push({
+          code: "workflow_tool_self_reference",
+          message: "A Workflow Tool cannot call the workflow it belongs to.",
+          nodeId: node.id
+        });
+      }
+      const attached = workflow.edges.some((edge) => edge.target === node.id && edge.sourceHandle === "tool");
+      const executed = workflow.edges.some((edge) => (edge.target === node.id || edge.source === node.id) && edge.sourceHandle !== "tool");
+      if (!attached || executed) {
+        issues.push({
+          code: "workflow_tool_not_attached",
+          message: "A Workflow Tool runs only as an agent's tool: connect it to an Agent or Supervisor tool port, and to nothing else.",
+          nodeId: node.id
+        });
+      }
+    }
+
     if (node.type === "execute_workflow") {
       if (typeof config.workflowId !== "string" || !config.workflowId.trim()) {
         issues.push({
@@ -1170,10 +1195,10 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       });
     }
 
-    if (edge.sourceHandle === "tool" && targetNode.type !== "mcp_tool") {
+    if (edge.sourceHandle === "tool" && targetNode.type !== "mcp_tool" && targetNode.type !== "workflow_tool") {
       issues.push({
         code: "invalid_tool_attachment",
-        message: "Agent tool attachment must target an MCP Tool node.",
+        message: "Agent tool attachment must target an MCP Tool or Workflow Tool node.",
         edgeId: edge.id
       });
     }

@@ -52,6 +52,7 @@ export type WorkflowNodeType =
   | "chat_intent_router"
   | "helper_chat_response"
   | "mcp_tool"
+  | "workflow_tool"
   | "rag_retrieve"
   | "rerank"
   | "extract_citations"

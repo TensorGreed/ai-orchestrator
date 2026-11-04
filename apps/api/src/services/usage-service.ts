@@ -267,6 +267,11 @@ function collectTelemetry(nodeResults: Record<string, unknown>): NodeTelemetry[]
     if (t && typeof t === "object") {
       out.push(t as NodeTelemetry);
     }
+    // Phase 6.4 — model usage of the workflows an agent called as tools (each blob priced by its own model).
+    const children = (value as Record<string, unknown>)._childTelemetry;
+    if (Array.isArray(children)) {
+      for (const child of children) if (child && typeof child === "object") out.push(child as NodeTelemetry);
+    }
   }
   return out;
 }

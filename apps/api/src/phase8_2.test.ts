@@ -123,6 +123,31 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
       expect(ev.providers.find((p) => p.providerId === "anthropic")!.calls).toBe(2);
     });
 
+    it("counts the model spend of workflows an agent called as tools (6.4), each at its own model's price", async () => {
+      const u = new UsageService(store);
+      const result = await u.recordExecution({
+        executionId: "exec_child",
+        workflowId: "wf_parent",
+        userEmail: null,
+        projectId: null,
+        triggerType: "manual",
+        status: "success",
+        durationMs: 10,
+        nodeResults: {
+          agent: {
+            answer: "done",
+            _telemetry: { providerId: "openai", model: "gpt-4o", usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 } },
+            _childTelemetry: [{ providerId: "anthropic", model: "claude-sonnet-4", usage: { inputTokens: 1_000_000, outputTokens: 0, totalTokens: 1_000_000 }, llmCallCount: 2 }]
+          }
+        }
+      });
+      expect(result.totalTokens).toBe(1_000_110);
+      expect(result.llmCallCount).toBe(3);
+      expect(result.costUsd).toBeCloseTo(u.priceTelemetry("openai", "gpt-4o", 100, 10, 0) + u.priceTelemetry("anthropic", "claude-sonnet-4", 1_000_000, 0, 0), 6);
+      const events = await store.listUsageEvents({ workflowId: "wf_parent" });
+      expect(events[0]!.providers.map((p) => p.providerId).sort()).toEqual(["anthropic", "openai"]);
+    });
+
     it("records a zero-cost row for executions with no LLM calls (still attributes spend correctly)", async () => {
       const u = new UsageService(store);
       const result = await u.recordExecution({
