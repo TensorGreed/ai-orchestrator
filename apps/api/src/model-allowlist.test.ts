@@ -245,16 +245,17 @@ async function registerSamplingServer(context: TestContext, admin: string): Prom
 }
 
 describe("migration v55", () => {
-  it("adds the allowlist table with a rollback, after the reserved v53 and v54", () => {
+  it("adds the allowlist table with a rollback, right after v53 and v54", () => {
     const versions = MIGRATIONS.map((entry) => entry.version).sort((a, b) => a - b);
     expect(versions).toEqual(contiguousMigrationVersions(versions));
+    expect(versions.filter((version) => version >= 53)).toEqual([53, 54, 55]);
     const migration = MIGRATIONS.find((entry) => entry.version === 55)!;
     expect(migration.up).toContain("CREATE TABLE IF NOT EXISTS model_allowlist_entries");
     expect(migration.up).toContain("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_allowlist_entries_match");
     expect(migration.down).toContain("DROP TABLE IF EXISTS model_allowlist_entries");
   });
 
-  it("upgrades an existing v52 database, which then allows every model until an admin adds an entry", async () => {
+  it("upgrades an existing v54 database, which then allows every model until an admin adds an entry", async () => {
     const context = await createTestContext();
     const sql = testSql(context.store);
     // A database from before v55: no table, and (Postgres) no v55 in schema_migrations.
@@ -267,7 +268,7 @@ describe("migration v55", () => {
       expect(await reopened.listModelAllowlistEntries()).toEqual([]);
       if (sql.kind === "postgres") {
         const versions = await testSql(reopened).all<{ version: number | string }>("SELECT version FROM schema_migrations WHERE version >= 52 ORDER BY version");
-        expect(versions.map((row) => Number(row.version))).toEqual([52, 55]);
+        expect(versions.map((row) => Number(row.version))).toEqual([52, 53, 54, 55]);
       }
       const entry: ModelAllowlistEntry = { id: "mal_1", scope: "project", projectId: "p1", providerId: "openai", modelGlob: "gpt-4o*", note: null, createdAt: new Date().toISOString(), createdBy: "a@example.com" };
       expect(await reopened.insertModelAllowlistEntry(entry, 200)).toEqual({ ok: true, entry });
@@ -492,6 +493,57 @@ describe("builder warnings and the check endpoint", () => {
     expect(await check("providerId=echo&model=nope")).toMatchObject({ allowed: false, reason: "deployment" });
     expect(await check("providerId=azure_openai&model=x&deployment=prod-eu")).toMatchObject({ allowed: true, model: "prod-eu" });
     expect((await call(builder, "GET", "/api/model-allowlist/check")).statusCode).toBe(400);
+  });
+
+  it("N1: validation warns for a RAG node's embedder and the Azure OpenAI embeddings deployment, not the token embedder", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const call = caller(context);
+    await addEntry(context, admin, { scope: "deployment", providerId: "ollama", modelGlob: "*" });
+    await context.store.upsertWorkflow({
+      id: "wf-embed-warn",
+      name: "Embed warn",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "p1",
+      nodes: [
+        { id: "text", type: "text_input", name: "Text", position, config: { text: "find it" } },
+        { id: "rag", type: "rag_retrieve", name: "Retrieve", position, config: { embedderId: "openai-embedder", vectorStoreId: "in-memory-vector-store" } },
+        { id: "local", type: "rag_retrieve", name: "Local", position, config: { embedderId: "token-embedder", vectorStoreId: "in-memory-vector-store" } },
+        { id: "embed", type: "embeddings_azure_openai", name: "Embed", position, config: { endpoint: "https://x.openai.azure.com", deployment: "prod-embed" } },
+        { id: "out", type: "output", name: "Out", position, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "text", target: "rag" },
+        { id: "e2", source: "rag", target: "local" },
+        { id: "e3", source: "local", target: "embed" },
+        { id: "e4", source: "embed", target: "out" }
+      ]
+    });
+    // Other issues of this sketch workflow (missing secrets) do not matter here: only the allowlist's warnings.
+    const validation = (await call(builder, "POST", "/api/workflows/wf-embed-warn/validate", {})).json<WorkflowValidationResult>();
+    expect(validation.issues.filter((issue) => issue.code === "model_not_allowed")).toEqual([
+      expect.objectContaining({ severity: "warning", nodeId: "rag", message: expect.stringContaining('Retrieve: Model "text-embedding-3-small" on provider "openai"') }),
+      expect.objectContaining({ severity: "warning", nodeId: "embed", message: expect.stringContaining('Embed: Model "prod-embed" on provider "azure_openai"') })
+    ]);
+  });
+
+  it("N4: a check without a project answers for the default project, whose list a project-less workflow's runs use", async () => {
+    const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const call = caller(context);
+    await addEntry(context, admin, { scope: "project", projectId: "default", providerId: "echo", modelGlob: "small" });
+    const unscoped = llmWorkflow("wf-no-project", "default", "large");
+    delete (unscoped as Partial<Workflow>).projectId;
+    await context.store.upsertWorkflow(unscoped);
+    expect((await run(context, admin, "wf-no-project")).nodeResults.find((entry) => entry.nodeId === "llm")).toMatchObject({ status: "error", errorCategory: "model_not_allowed" });
+    // The builder has no role in the default project; the implicit default still answers, as the run would refuse.
+    expect((await call(builder, "GET", "/api/model-allowlist/check?providerId=echo&model=large")).json()).toMatchObject({ allowed: false, reason: "project", projectId: "default" });
+    expect((await call(builder, "GET", "/api/model-allowlist/check?providerId=echo&model=small")).json()).toMatchObject({ allowed: true, projectId: "default" });
+    // Naming a project still needs access to it.
+    expect((await call(builder, "GET", "/api/model-allowlist/check?providerId=echo&model=small&projectId=default")).statusCode).toBe(403);
   });
 });
 
@@ -903,5 +955,90 @@ describe("the allowlist snapshot", () => {
     // The run's model call read nothing from the store (the 2 s background re-read may land once meanwhile).
     expect(counted.mock.calls.length - readsAfterEdit).toBeLessThanOrEqual(1);
     counted.mockRestore();
+  });
+});
+
+describe("with gateway Guard and gateway budgets", () => {
+  /** One token costs one dollar for these echo models, so any charged call shows a cost. */
+  const PRICING = JSON.stringify({ echo: { "sampler-model": { inputUsdPer1M: 1_000_000, outputUsdPer1M: 1_000_000 }, priced: { inputUsdPer1M: 1_000_000, outputUsdPer1M: 1_000_000 } } });
+
+  it("a refused gateway sampling call is audited and recorded with its toolset, and its cost is not charged", async () => {
+    const context = await createTestContext({ LLM_PRICING_OVERRIDES_JSON: PRICING });
+    const call = caller(context);
+    const admin = await login(context, "admin");
+    const serverId = await registerSamplingServer(context, admin);
+    const toolset = (await call(admin, "POST", "/api/mcp/toolsets", { name: "Gateway tools", projectId: "p1", members: [{ kind: "server", serverId }] })).json<{ toolset: McpToolset }>().toolset;
+    const { client, token } = (await call(admin, "POST", "/api/mcp/clients", { name: "IDE agent", toolsetIds: [toolset.id], role: "builder" })).json<{ client: McpClient; token: string }>();
+    const budget = await call(admin, "POST", "/api/budgets", { name: "IDE dollars", scopeType: "mcp_client", scopeId: client.id, limitType: "usd", limitValue: 1_000_000, action: "warn", period: "month", warnThresholdPct: 0.8 });
+    expect(budget.statusCode, budget.body).toBe(200);
+    const clientSpend = async () =>
+      (await call(admin, "GET", `/api/mcp/clients/${client.id}/budgets`)).json<{ budgets: Array<{ name: string; current?: number }> }>().budgets.find((entry) => entry.name === "IDE dollars")!.current ?? 0;
+    const rpc = (body: unknown, headers: Record<string, string> = {}) =>
+      context.app.inject({
+        method: "POST",
+        url: `/mcp/${toolset.slug}`,
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...headers },
+        payload: JSON.stringify(body)
+      });
+    const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "allowlist-test", version: "1" } } });
+    const sessionId = init.headers["mcp-session-id"] as string;
+    const listed = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" }, { "mcp-session-id": sessionId });
+    const name = listed.json<{ result: { tools: Array<{ name: string }> } }>().result.tools.map((tool) => tool.name).find((tool) => tool.endsWith("__summarize_with_model"))!;
+    const summarize = async (id: number) =>
+      (await rpc({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: { text: "hello world" } } }, { "mcp-session-id": sessionId })).json<{ result: { isError?: boolean } }>().result;
+    const rows = async () =>
+      (await context.store.listMcpToolCallsForClient(client.id, new Date(Date.now() - 60_000).toISOString())).filter((row) => row.toolName === "summarize_with_model");
+
+    // Allowed: the sampling is priced and charged to the client's budget.
+    expect((await summarize(3)).isError).not.toBe(true);
+    const [allowedRow] = await rows();
+    expect(allowedRow!.estimatedCostUsd).toBeGreaterThan(0);
+    const spentBefore = await clientSpend();
+    expect(spentBefore).toBeCloseTo(allowedRow!.estimatedCostUsd!, 6);
+
+    // Refused by the toolset project's list: a tool error, nothing priced, nothing more charged.
+    await addEntry(context, admin, { scope: "project", projectId: "p1", providerId: "echo", modelGlob: "nothing" });
+    expect((await summarize(4)).isError).toBe(true);
+    const refusedRow = (await rows()).find((row) => row.id !== allowedRow!.id)!;
+    expect(refusedRow).toMatchObject({ source: "gateway", clientId: client.id, toolsetId: toolset.id, estimatedCostUsd: null });
+    expect((refusedRow.samplingInputTokens ?? 0) + (refusedRow.samplingOutputTokens ?? 0)).toBe(0);
+    expect(await clientSpend()).toBeCloseTo(spentBefore, 6);
+    const [denied] = await deniedEvents(context.store);
+    expect(denied!.metadata).toMatchObject({ source: "gateway_sampling", clientId: client.id, toolsetId: toolset.id, refusedBy: "project" });
+  });
+
+  it("a run's refused model call adds no tokens or cost to its usage", async () => {
+    const context = await createTestContext({ LLM_PRICING_OVERRIDES_JSON: PRICING });
+    const admin = await login(context, "admin");
+    await context.store.upsertWorkflow(llmWorkflow("wf-priced", "p1", "priced"));
+    const sql = testSql(context.store);
+    const usageOf = async (executionId: string) =>
+      (await sql.all<{ total_tokens: number | string; cost_usd: number | string; llm_call_count: number | string }>("SELECT total_tokens, cost_usd, llm_call_count FROM usage_events WHERE execution_id = ?", executionId)).map((row) => ({
+        tokens: Number(row.total_tokens),
+        cost: Number(row.cost_usd),
+        calls: Number(row.llm_call_count)
+      }));
+    const allowed = await run(context, admin, "wf-priced");
+    expect(allowed.status).toBe("success");
+    const [allowedUsage] = await usageOf(allowed.executionId);
+    expect(allowedUsage!.cost).toBeGreaterThan(0);
+
+    await addEntry(context, admin, { scope: "deployment", providerId: "echo", modelGlob: "other" });
+    const refused = await run(context, admin, "wf-priced");
+    expect(refused.nodeResults.find((entry) => entry.nodeId === "llm")).toMatchObject({ status: "error", errorCategory: "model_not_allowed" });
+    for (const usage of await usageOf(refused.executionId)) expect(usage).toEqual({ tokens: 0, cost: 0, calls: 0 });
+  });
+
+  it("closing the app stops both the allowlist and the budget re-read timers", async () => {
+    const context = await createTestContext();
+    const allowlistReads = vi.spyOn(context.store, "listModelAllowlistEntries");
+    const budgetReads = vi.spyOn(context.store, "listBudgets");
+    await context.app.close();
+    const after = { allowlist: allowlistReads.mock.calls.length, budgets: budgetReads.mock.calls.length };
+    // Both copies are re-read every 2 s while the app runs.
+    await new Promise((resolve) => setTimeout(resolve, 2_600));
+    expect({ allowlist: allowlistReads.mock.calls.length, budgets: budgetReads.mock.calls.length }).toEqual(after);
+    allowlistReads.mockRestore();
+    budgetReads.mockRestore();
   });
 });

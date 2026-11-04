@@ -172,3 +172,52 @@ export function evaluateModelAllowlist(entries: ReadonlyArray<ModelAllowlistEntr
   }
   return { allowed: true, reason: "allowed", ...counts };
 }
+
+/**
+ * 12.6 — the vendor each built-in embedder sends text to (its allowlist provider id) and the model it uses when the
+ * node names none. The token embedder is local and is not listed: it makes no model call.
+ */
+export const EMBEDDER_MODEL_TARGETS: Readonly<Record<string, { providerId: string; defaultModel: string }>> = {
+  "openai-embedder": { providerId: "openai", defaultModel: "text-embedding-3-small" },
+  "azure-openai-embedder": { providerId: "azure_openai", defaultModel: "text-embedding-3-small" },
+  "cohere-embedder": { providerId: "cohere", defaultModel: "embed-english-v3.0" },
+  "mistral-embedder": { providerId: "mistral", defaultModel: "mistral-embed" },
+  "google-vertex-embedder": { providerId: "gemini", defaultModel: "text-embedding-004" },
+  "huggingface-embedder": { providerId: "huggingface", defaultModel: "sentence-transformers/all-MiniLM-L6-v2" }
+};
+
+function configRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+/**
+ * 12.6 — the provider and model a node's embedding calls are checked as, from its saved config: a RAG Retrieve node's
+ * embedder (an unset embedder is the local token embedder) and the Azure OpenAI embeddings node's deployment. Null
+ * for any other node, a local embedder, an incomplete config or a value chosen by an expression (`{{...}}`).
+ */
+export function nodeEmbeddingModelTarget(node: { type: string; config?: unknown }): { providerId: string; model: string } | null {
+  const config = configRecord(node.config);
+  let target: { providerId: string; model: string } | null = null;
+  if (node.type === "embeddings_azure_openai") {
+    const deployment = nonEmptyString(config.deployment);
+    target = deployment ? { providerId: "azure_openai", model: deployment.trim() } : null;
+  } else if (node.type === "rag_retrieve") {
+    const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
+    const known = EMBEDDER_MODEL_TARGETS[embedderId];
+    if (known) {
+      const extra = configRecord(config.vectorStoreConfig);
+      // Azure sends its deployment name (else the model field); the others send their model field.
+      const model =
+        embedderId === "azure-openai-embedder"
+          ? (nonEmptyString(extra.deployment)?.trim() ?? (typeof extra.model === "string" ? extra.model.trim() : null) ?? known.defaultModel)
+          : (nonEmptyString(extra.model) ?? known.defaultModel);
+      target = model ? { providerId: known.providerId, model } : null;
+    }
+  }
+  if (!target || target.model.includes("{{")) return null;
+  return target;
+}

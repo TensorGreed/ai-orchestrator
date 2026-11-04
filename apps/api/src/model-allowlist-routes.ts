@@ -4,7 +4,7 @@
  *   GET    /api/model-allowlist           entries (deployment and every project) and the providers to pick from
  *   POST   /api/model-allowlist           add an entry (admin), audited `model_allowlist.entry_added`
  *   DELETE /api/model-allowlist/:id       remove an entry (admin), audited `model_allowlist.entry_removed`
- *   GET    /api/model-allowlist/check     is `providerId` + `model` allowed in `projectId`? (the builder's warning)
+ *   GET    /api/model-allowlist/check     is `providerId` + `model` allowed in `projectId` (default: `default`)? (the builder's warning)
  *
  * Reads (the list and the check) need builder or above. A non-admin sees the deployment list and the lists of the
  * projects they can read, without notes or who added an entry, and checks only those projects. Only admins change the
@@ -13,7 +13,7 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { MODEL_ALLOWLIST_ANY_PROVIDER, effectiveModelName, modelAllowlistEntryCreateSchema, type ProviderDefinition } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, MODEL_ALLOWLIST_ANY_PROVIDER, effectiveModelName, modelAllowlistEntryCreateSchema, type ProviderDefinition } from "@ai-orchestrator/shared";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { ModelAllowlistError, type ModelAllowlistService } from "./services/model-allowlist-service.js";
@@ -134,8 +134,12 @@ export function registerModelAllowlistRoutes(deps: ModelAllowlistRoutesDeps): vo
       reply.code(400);
       return { error: "Invalid check", details: parsed.error.issues };
     }
-    const { providerId, projectId } = parsed.data;
-    if (projectId && user.role !== "admin" && !(await deps.canReadProject(user, projectId))) {
+    const { providerId } = parsed.data;
+    // A workflow with no project runs under the default project's list, so a check without a project answers for it
+    // (as runs, gateway toolsets and the provider test do). Only a project named in the request needs read access:
+    // the implicit default is what a project-less workflow's own runs would apply anyway.
+    const projectId = parsed.data.projectId ?? DEFAULT_PROJECT_ID;
+    if (parsed.data.projectId && user.role !== "admin" && !(await deps.canReadProject(user, projectId))) {
       reply.code(403);
       return { error: "You have no access to this project" };
     }
@@ -144,7 +148,7 @@ export function registerModelAllowlistRoutes(deps: ModelAllowlistRoutesDeps): vo
       model: parsed.data.model,
       ...(parsed.data.deployment ? { extra: { deployment: parsed.data.deployment } } : {})
     });
-    const decision = await service.evaluate({ providerId, model, projectId: projectId ?? null });
-    return { providerId, model, projectId: projectId ?? null, ...decision };
+    const decision = await service.evaluate({ providerId, model, projectId });
+    return { providerId, model, projectId, ...decision };
   });
 }

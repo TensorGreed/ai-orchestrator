@@ -1,4 +1,4 @@
-import { effectiveModelName, type Workflow } from "@ai-orchestrator/shared";
+import { effectiveModelName, nodeEmbeddingModelTarget, type Workflow } from "@ai-orchestrator/shared";
 import { buildProviderFromModelNode, isChatModelNodeType } from "./executor";
 
 /** 12.6 — one model a node of a workflow is configured to call. */
@@ -17,13 +17,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * The models a workflow's nodes name in their saved config: each chat model
  * node (LLM Call and the provider-specific chat model nodes, attached to an
- * agent or not) and each node with a `provider` config. A model chosen by an
- * expression (`{{...}}`) is only known at run time and is left out, as is a
- * node whose provider config is incomplete.
+ * agent or not), each node with a `provider` config, and each embedding node
+ * (a RAG Retrieve node's vendor embedder, the Azure OpenAI embeddings node). A
+ * model chosen by an expression (`{{...}}`) is only known at run time and is
+ * left out, as is a node whose provider config is incomplete.
  */
 export function workflowModelReferences(workflow: Pick<Workflow, "nodes">): WorkflowModelReference[] {
   const references: WorkflowModelReference[] = [];
   for (const node of workflow.nodes ?? []) {
+    const embedding = nodeEmbeddingModelTarget(node);
+    if (embedding) {
+      references.push({ nodeId: node.id, nodeName: node.name?.trim() || node.type, ...embedding });
+      continue;
+    }
     const config = isRecord(node.config) ? node.config : {};
     let provider = isChatModelNodeType(node.type) ? buildProviderFromModelNode(node) : undefined;
     if (!provider && isRecord(config.provider) && typeof config.provider.providerId === "string" && typeof config.provider.model === "string") {

@@ -4,6 +4,7 @@ import {
   evaluateModelAllowlist,
   modelAllowlistEntryCreateSchema,
   modelGlobMatches,
+  nodeEmbeddingModelTarget,
   type ModelAllowlistEntry
 } from "./model-allowlist";
 import { ErrorCategory, remediationForCategory } from "./errors";
@@ -111,5 +112,21 @@ describe("provider id and pattern case", () => {
 describe("the model_not_allowed error category", () => {
   it("has its own remediation", () => {
     expect(remediationForCategory(ErrorCategory.MODEL_NOT_ALLOWED)).toContain("Security → Models");
+  });
+});
+
+describe("nodeEmbeddingModelTarget", () => {
+  it("names a RAG embedder's vendor and model, Azure's deployment, and skips local, unknown and expression models", () => {
+    expect(nodeEmbeddingModelTarget({ type: "rag_retrieve", config: { embedderId: "cohere-embedder" } })).toEqual({ providerId: "cohere", model: "embed-english-v3.0" });
+    expect(nodeEmbeddingModelTarget({ type: "rag_retrieve", config: { embedderId: "openai-embedder", vectorStoreConfig: { model: "text-embedding-3-large" } } })).toEqual({ providerId: "openai", model: "text-embedding-3-large" });
+    expect(nodeEmbeddingModelTarget({ type: "rag_retrieve", config: { embedderId: "azure-openai-embedder", vectorStoreConfig: { deployment: " kb ", model: "ignored" } } })).toEqual({ providerId: "azure_openai", model: "kb" });
+    expect(nodeEmbeddingModelTarget({ type: "rag_retrieve", config: { embedderId: "azure-openai-embedder", vectorStoreConfig: { model: "embed-model" } } })).toEqual({ providerId: "azure_openai", model: "embed-model" });
+    expect(nodeEmbeddingModelTarget({ type: "embeddings_azure_openai", config: { deployment: "prod-embed" } })).toEqual({ providerId: "azure_openai", model: "prod-embed" });
+    expect(nodeEmbeddingModelTarget({ type: "embeddings_azure_openai", config: {} })).toBeNull();
+    expect(nodeEmbeddingModelTarget({ type: "rag_retrieve", config: {} })).toBeNull();
+    expect(nodeEmbeddingModelTarget({ type: "rag_retrieve", config: { embedderId: "token-embedder" } })).toBeNull();
+    expect(nodeEmbeddingModelTarget({ type: "rag_retrieve", config: { embedderId: "custom-embedder" } })).toBeNull();
+    expect(nodeEmbeddingModelTarget({ type: "rag_retrieve", config: { embedderId: "openai-embedder", vectorStoreConfig: { model: "{{vars.model}}" } } })).toBeNull();
+    expect(nodeEmbeddingModelTarget({ type: "llm_call", config: { embedderId: "openai-embedder" } })).toBeNull();
   });
 });

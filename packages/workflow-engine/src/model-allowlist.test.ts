@@ -3,7 +3,7 @@ import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import { createDefaultProviderRegistry, createGatedProviderRegistry, ModelNotAllowedError, type GatedModelCall } from "@ai-orchestrator/provider-sdk";
-import { ErrorCategory, type Workflow } from "@ai-orchestrator/shared";
+import { ErrorCategory, nodeEmbeddingModelTarget, type Workflow } from "@ai-orchestrator/shared";
 import { executeWorkflow } from "./executor";
 import { workflowModelReferences } from "./model-references";
 
@@ -18,14 +18,23 @@ describe("workflowModelReferences", () => {
         { id: "azure", type: "azure_openai_chat_model", name: "", position, config: { endpoint: "https://x.openai.azure.com", deployment: "prod-4o" } },
         { id: "anthropic", type: "anthropic_chat_model", name: "Claude", position, config: { model: "claude-sonnet-5-5" } },
         { id: "parser", type: "output_parser", name: "Parser", position, config: { provider: { providerId: "ollama", model: "llama3.1" } } },
-        { id: "text", type: "text_input", name: "Text", position, config: { text: "x" } }
+        { id: "text", type: "text_input", name: "Text", position, config: { text: "x" } },
+        { id: "rag", type: "rag_retrieve", name: "Retrieve", position, config: { embedderId: "openai-embedder", vectorStoreConfig: { model: "text-embedding-3-large" } } },
+        { id: "rag_azure", type: "rag_retrieve", name: "Azure retrieve", position, config: { embedderId: "azure-openai-embedder", vectorStoreConfig: { deployment: "kb-embed" } } },
+        { id: "rag_local", type: "rag_retrieve", name: "Local", position, config: { embedderId: "token-embedder" } },
+        { id: "rag_unset", type: "rag_retrieve", name: "Unset", position, config: {} },
+        { id: "embed", type: "embeddings_azure_openai", name: "Embed", position, config: { endpoint: "https://x.openai.azure.com", deployment: "prod-embed" } }
       ]
     });
     expect(references).toEqual([
       { nodeId: "llm", nodeName: "Ask", providerId: "openai", model: "gpt-4o" },
       { nodeId: "azure", nodeName: "azure_openai_chat_model", providerId: "azure_openai", model: "prod-4o" },
       { nodeId: "anthropic", nodeName: "Claude", providerId: "anthropic", model: "claude-sonnet-5-5" },
-      { nodeId: "parser", nodeName: "Parser", providerId: "ollama", model: "llama3.1" }
+      { nodeId: "parser", nodeName: "Parser", providerId: "ollama", model: "llama3.1" },
+      // 12.6 N1 — embedders are model calls too; the local token embedder (also the default) is not.
+      { nodeId: "rag", nodeName: "Retrieve", providerId: "openai", model: "text-embedding-3-large" },
+      { nodeId: "rag_azure", nodeName: "Azure retrieve", providerId: "azure_openai", model: "kb-embed" },
+      { nodeId: "embed", nodeName: "Embed", providerId: "azure_openai", model: "prod-embed" }
     ]);
   });
 });
@@ -139,6 +148,8 @@ describe("embedding calls and the model allowlist", () => {
         }));
         expect(refused.nodeResults.find((entry) => entry.nodeId === "rag")).toMatchObject({ status: "error", errorCategory: ErrorCategory.MODEL_NOT_ALLOWED, retryable: false });
         expect(seen[0]).toEqual({ ...target, nodeId: "rag" });
+        // The builder warning's view of the saved config names the same vendor and model the run checks.
+        expect(nodeEmbeddingModelTarget(workflow.nodes.find((entry) => entry.id === "rag")!)).toEqual(target);
         expect(fetchSpy).not.toHaveBeenCalled();
 
         const allowed = await executeWorkflow({ workflow }, deps(async () => undefined));

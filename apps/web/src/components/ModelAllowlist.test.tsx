@@ -161,11 +161,15 @@ describe("Security → Models", () => {
 });
 
 function llmNode(model: string): Parameters<typeof NodeInspector>[0] {
+  return inspectorProps({ label: "Ask", nodeType: "llm_call", config: { provider: { providerId: "openai", model } } });
+}
+
+function inspectorProps(data: EditorNodeData): Parameters<typeof NodeInspector>[0] {
   const node: Node<EditorNodeData> = {
     id: "n1",
     type: "workflowNode",
     position: { x: 0, y: 0 },
-    data: { label: "Ask", nodeType: "llm_call", config: { provider: { providerId: "openai", model } } }
+    data
   };
   return {
     node,
@@ -205,6 +209,34 @@ describe("the node's model warning", () => {
 
   it("does not check a model chosen by an expression", async () => {
     render(<NodeInspector {...llmNode("{{vars.model}}")} />);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(api.checkModelAllowlist).not.toHaveBeenCalled();
+  });
+
+  it("warns for a RAG node's embedder and the Azure OpenAI embeddings deployment (N1)", async () => {
+    vi.mocked(api.checkModelAllowlist).mockImplementation(async ({ providerId, model, projectId }) => ({
+      allowed: false,
+      reason: "deployment",
+      message: `Model "${model}" on provider "${providerId}" is not on this deployment's model allowlist.`,
+      deploymentEntries: 1,
+      projectEntries: 0,
+      providerId,
+      model,
+      projectId: projectId ?? null
+    }));
+    const { unmount } = render(
+      <NodeInspector {...inspectorProps({ label: "Retrieve", nodeType: "rag_retrieve", config: { embedderId: "openai-embedder", vectorStoreId: "in-memory-vector-store" } })} />
+    );
+    expect(await screen.findByTestId("model-allowlist-warning")).toHaveTextContent('Model "text-embedding-3-small" on provider "openai"');
+    expect(api.checkModelAllowlist).toHaveBeenCalledWith({ providerId: "openai", model: "text-embedding-3-small", projectId: "p1" });
+    unmount();
+
+    render(<NodeInspector {...inspectorProps({ label: "Embed", nodeType: "embeddings_azure_openai", config: { endpoint: "https://x.openai.azure.com", deployment: "prod-embed" } })} />);
+    expect(await screen.findByTestId("model-allowlist-warning")).toHaveTextContent('Model "prod-embed" on provider "azure_openai"');
+  });
+
+  it("does not check the local token embedder", async () => {
+    render(<NodeInspector {...inspectorProps({ label: "Retrieve", nodeType: "rag_retrieve", config: { embedderId: "token-embedder" } })} />);
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(api.checkModelAllowlist).not.toHaveBeenCalled();
   });
