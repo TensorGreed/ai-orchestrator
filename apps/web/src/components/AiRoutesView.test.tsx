@@ -23,6 +23,7 @@ vi.mock("../lib/api", async () => {
     updateAiGatewayRouteSetGuard: vi.fn(),
     fetchAiGatewayUsage: vi.fn(),
     fetchMcpClients: vi.fn(),
+    fetchMcpToolsets: vi.fn(),
     fetchProjects: vi.fn(),
     fetchSecrets: vi.fn(),
     fetchGuardProfiles: vi.fn(),
@@ -74,6 +75,7 @@ const usage: AiGatewayUsageSummary = {
 beforeEach(() => {
   mocked.fetchAiGatewayRouteSets.mockResolvedValue({ routeSets: [set], providers: { chat: ["openai", "anthropic"], embedding: ["openai"] } });
   mocked.fetchAiGatewayUsage.mockResolvedValue(usage);
+  mocked.fetchMcpToolsets.mockResolvedValue({ toolsets: [], gatewayBaseUrl: "https://gateway.example.com/", protocolVersions: [] });
   mocked.fetchMcpClients.mockResolvedValue({ usageWindow: "7d", clients: [{ id: "mcc_1", name: "Checkout app" } as api.McpClientView] });
   mocked.fetchProjects.mockResolvedValue({ projects: [{ id: "default", name: "Default" } as never] });
   mocked.fetchSecrets.mockResolvedValue([{ id: "sec_1", name: "OpenAI key", provider: "openai", createdAt: "2026-11-01T00:00:00.000Z", projectId: "default" }]);
@@ -102,7 +104,7 @@ describe("AiRoutesView", () => {
     const usagePanel = screen.getByTestId("ai-gateway-usage");
     expect(await within(usagePanel).findByText(/12 requests/)).toBeInTheDocument();
     expect(within(usagePanel).getByText(/1 blocked by Guard/)).toBeInTheDocument();
-    expect(screen.getByTestId("ai-gateway-endpoint").textContent).toMatch(/\/v1$/);
+    await waitFor(() => expect(screen.getByTestId("ai-gateway-endpoint").textContent).toBe("https://gateway.example.com/v1"));
   });
 
   it("lets admins create a route set and add a route with a stored secret", async () => {

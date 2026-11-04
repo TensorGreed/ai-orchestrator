@@ -21,6 +21,7 @@ import {
   fetchAiGatewayRouteSets,
   fetchAiGatewayUsage,
   fetchMcpClients,
+  fetchMcpToolsets,
   fetchProjects,
   fetchSecrets,
   updateAiGatewayRoute,
@@ -56,6 +57,7 @@ export function AiRoutesView({ isAdmin, activeProjectId }: AiRoutesViewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [gatewayBaseUrl, setGatewayBaseUrl] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -78,6 +80,10 @@ export function AiRoutesView({ isAdmin, activeProjectId }: AiRoutesViewProps) {
     fetchMcpClients()
       .then((result) => setClients(result.clients))
       .catch(() => undefined);
+    // The deployment's public gateway URL (MCP_GATEWAY_PUBLIC_URL) when set; this page's origin otherwise.
+    fetchMcpToolsets()
+      .then((result) => setGatewayBaseUrl(result.gatewayBaseUrl))
+      .catch(() => undefined);
     if (isAdmin) {
       fetchSecrets()
         .then((list) => setSecrets(list))
@@ -85,7 +91,7 @@ export function AiRoutesView({ isAdmin, activeProjectId }: AiRoutesViewProps) {
     }
   }, [refresh, isAdmin]);
 
-  const endpoint = `${pageOrigin()}/v1`;
+  const endpoint = `${(gatewayBaseUrl ?? "").replace(/\/+$/, "") || pageOrigin()}/v1`;
   const projectName = (id: string | null) => (id ? projects.find((project) => project.id === id)?.name ?? id : "No project");
   const clientName = (id: string) => clients.find((client) => client.id === id)?.name ?? id;
 
