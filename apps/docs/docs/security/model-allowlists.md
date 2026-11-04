@@ -111,7 +111,10 @@ it handles, with the failed run's id as `sourceExecutionId`.
 The node editor checks the model as you type it. When the workflow's project or
 the deployment refuses it, a warning appears under the model fields. It is a
 warning, not an error: the workflow still saves, and its runs fail at that node
-until the model is changed or allowed. Workflow validation
+until the model is changed or allowed. Embedding nodes get the same warning: a
+RAG Retrieve node's embedder (its vendor and model, as listed above) and the
+Azure OpenAI embeddings node's deployment. A workflow with no project is checked
+against the default project's list, as its runs are. Workflow validation
 (`POST /api/workflows/:id/validate`, which the import report's **Validate** uses)
 lists the same warnings, with code `model_not_allowed` and severity `warning`.
 
@@ -154,4 +157,4 @@ that never managed to read the lists refuses model calls until it can.
 | `GET` | `/api/model-allowlist` | builder | entries (a builder: the deployment's and their projects'), providers to choose from, `canEdit` |
 | `POST` | `/api/model-allowlist` | admin | `{ scope: "deployment" \| "project", projectId?, providerId, modelGlob, note? }` |
 | `DELETE` | `/api/model-allowlist/:id` | admin | removes one entry |
-| `GET` | `/api/model-allowlist/check?providerId=&model=&projectId=` | builder (with access to the project) | `{ allowed, reason, message? }` for that model in that project |
+| `GET` | `/api/model-allowlist/check?providerId=&model=&projectId=` | builder (with access to the project, when one is named) | `{ allowed, reason, message? }` for that model in that project; without `projectId`, the default project |
