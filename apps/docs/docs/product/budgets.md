@@ -39,7 +39,7 @@ Runs dispatched to queue workers are checked on the instance that takes the requ
 
 ### Refused schedules and app triggers
 
-Each trigger (a schedule or app trigger node of a workflow) records **one** failed run per budget and period. Later fires the same budget refuses in that period do not add runs: they count on that run (`refusedFires` and `lastRefusedAt` in its output), and only the first is logged. Two instances firing the same schedule second record it once.
+Each trigger (a schedule or app trigger node of a workflow) records **one** failed run per budget and period. Later fires the same budget refuses in that period do not add runs: they count on that run (`refusedFires` and `lastRefusedAt` in its output), and only the first is logged. To keep a fast schedule or poller from writing on every fire, an instance updates that run at most once a minute, so `refusedFires` is approximate (it counts those updates, not every refused fire). Each update also moves the run's start time to the latest refusal, so it stays near the top of the history and is not pruned by retention while the budget period is current. Two instances firing the same schedule second record it once.
 
 RSS and file triggers do not mark what a refused fire carried as seen: the same feed items or file changes fire again on a later poll, once the budget is raised or its period ends (if the feed still lists them). Events of an SSE stream arrive once; a refused one is not delivered again.
 
