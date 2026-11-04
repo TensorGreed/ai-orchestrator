@@ -47,7 +47,7 @@ Answers are trimmed (at most 20 results, long text cut). A response is read as i
 
 ## One name per tool
 
-Each tool an agent sees must have its own name. Two Wikipedia nodes on one agent (two languages, or one with another endpoint) would give the model `l2m-tools__wikipedia_search` twice, so the agent node fails with an error naming the duplicates, and validation reports `duplicate_agent_tool_name`. Use one node per provider on an agent, or split the work across two agents. The same holds for any two MCP servers on one adapter that serve a tool with the same name.
+Each tool an agent sees must have its own name. Two Wikipedia nodes on one agent (two languages, or one with another endpoint) would give the model `l2m-tools__wikipedia_search` twice, so the agent node fails with an error naming the duplicates, and validation reports `duplicate_agent_tool_name`. Use one node per provider on an agent, or split the work across two agents. Other MCP servers that serve one tool name are renamed instead; see [Tool names the model sees](./agent-loop.md#tool-names-the-model-sees).
 
 ## Think tool
 

@@ -66,7 +66,7 @@ import {
   type MaskPart,
   type MaskReport
 } from "@ai-orchestrator/guard-sdk";
-import { canonicalJson as cassetteCanonical, hashCassetteArgs } from "@ai-orchestrator/mcp-sdk";
+import { canonicalJson as cassetteCanonical, hashCassetteArgs, isExposedNameOf } from "@ai-orchestrator/mcp-sdk";
 import { RUNTIME_INTERNAL_TOOL_NAMES } from "@ai-orchestrator/agent-runtime";
 import { workerDelegateToolName } from "@ai-orchestrator/workflow-engine";
 import { canonicalTapeJson, hashModelRequest } from "@ai-orchestrator/provider-sdk";
@@ -86,13 +86,14 @@ type TapeContent = { request: TapeEntry["request"]; response?: unknown; error?: 
 
 /**
  * The names the agent gives the tools an MCP server listed in this run's
- * cassette (a recorded `tools/list` answer): `<adapterId>__<tool>`. At replay
- * the agent builds these definitions from the cassette's masked copy, so the
- * tape's copy is masked as content with the same surrogates. A server whose
- * adapter is not recorded matches any `<adapter>__<tool>`.
+ * cassette (a recorded `tools/list` answer): `<adapterId>__<tool>`, or
+ * `<adapterId>_<hash>__<tool>` when two servers on the agent serve one name.
+ * At replay the agent builds these definitions from the cassette's masked
+ * copy, so the tape's copy is masked as content with the same surrogates. A
+ * server whose adapter is not recorded matches any adapter.
  */
 function mcpListedToolNames(cassette: McpCassette | null): { has: (name: string) => boolean } {
-  const exact = new Set<string>();
+  const byAdapter = new Map<string, Set<string>>();
   const anyAdapter = new Set<string>();
   for (const entry of cassette?.entries ?? []) {
     if (entry.method !== "tools/list" || !Array.isArray(entry.result)) continue;
@@ -100,15 +101,22 @@ function mcpListedToolNames(cassette: McpCassette | null): { has: (name: string)
     for (const tool of entry.result as unknown[]) {
       const name = isRecord(tool) ? tool.name : undefined;
       if (typeof name !== "string" || !name) continue;
-      if (adapterId) exact.add(`${adapterId}__${name}`);
+      if (adapterId) byAdapter.set(adapterId, (byAdapter.get(adapterId) ?? new Set()).add(name));
       else anyAdapter.add(name);
     }
   }
+  const matches = (name: string, adapterId: string, tools: Iterable<string>) => {
+    for (const tool of tools) if (isExposedNameOf(name, adapterId, tool)) return true;
+    return false;
+  };
   return {
     has: (name) => {
-      if (exact.has(name)) return true;
-      const split = name.indexOf("__");
-      return split > 0 && anyAdapter.has(name.slice(split + 2));
+      for (const [adapterId, tools] of byAdapter) if (matches(name, adapterId, tools)) return true;
+      if (anyAdapter.size === 0) return false;
+      const plain = name.indexOf("__");
+      if (plain > 0 && matches(name, name.slice(0, plain), anyAdapter)) return true;
+      const hashed = /_[0-9a-f]{6}__/.exec(name);
+      return Boolean(hashed && hashed.index > 0 && matches(name, name.slice(0, hashed.index), anyAdapter));
     }
   };
 }
@@ -165,7 +173,8 @@ export function configuredMcpServerIds(workflow: unknown, cassette: McpCassette 
 
 /** True when the name is how the agent exposes a tool of one of these servers. */
 function isMcpExposedName(name: string, serverIds: ReadonlySet<string>): boolean {
-  for (const id of serverIds) if (name.startsWith(`${id}__`)) return true;
+  // Plain `<id>__<tool>`, or `<id>_<hash>__<tool>` when two servers on the agent serve one tool name.
+  for (const id of serverIds) if (name.startsWith(`${id}__`) || (name.startsWith(`${id}_`) && /^[0-9a-f]{6}__/.test(name.slice(id.length + 1)))) return true;
   return false;
 }
 

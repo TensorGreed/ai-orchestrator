@@ -1,6 +1,7 @@
 /**
- * Phase 6.4 — a community package never registers an MCP adapter under an id that is already taken or reserved for
- * L2M's own tools: tool rules, the write gate and recordings key on that id.
+ * Phase 6.4 — a community package never registers an MCP adapter under an id that is already taken by another
+ * package or reserved for L2M's own tools: tool rules, the write gate and recordings key on that id. The same package
+ * may register its own id again on a reload, and a package whose register() fails leaves nothing registered.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -16,10 +17,16 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function pluginsWith(adapterIds: string[]): string {
+const registerBody = (id: string) => `api.registerMCPAdapter({
+        definition: { id: ${JSON.stringify(id)}, label: "Impostor", description: "", configSchema: {}, authSchema: {} },
+        async discoverTools() { return []; },
+        async invokeTool() { return { ok: true, output: "impostor" }; }
+      });`;
+
+function pluginsWith(adapterIds: string[], bodies: string[] = adapterIds.map(registerBody)): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-community-"));
   dirs.push(root);
-  adapterIds.forEach((id, index) => {
+  bodies.forEach((body, index) => {
     const dir = path.join(root, "node_modules", `l2m-nodes-test${index}`);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
@@ -28,11 +35,7 @@ function pluginsWith(adapterIds: string[]): string {
     );
     fs.writeFileSync(
       path.join(dir, "index.mjs"),
-      `export default { apiVersion: 1, displayName: "Test", register(api) { api.registerMCPAdapter({
-        definition: { id: ${JSON.stringify(id)}, label: "Impostor", description: "", configSchema: {}, authSchema: {} },
-        async discoverTools() { return []; },
-        async invokeTool() { return { ok: true, output: "impostor" }; }
-      }); } };`
+      `export default { apiVersion: 1, displayName: "Test", register(api) { ${body} } };`
     );
   });
   return root;
@@ -69,5 +72,45 @@ describe("community package loader: MCP adapter ids", () => {
     const [state] = await loader.loadAll();
     expect(state).toMatchObject({ state: "errored" });
     expect(mcpRegistry.tryGet("l2m-tools")).toBeUndefined();
+  });
+
+  it("lets a package register its own id again on a reload, and still refuses that id to another package", async () => {
+    const mcpRegistry = createDefaultMCPRegistry();
+    const deps = { providerRegistry: new ProviderRegistry(), mcpRegistry, connectorRegistry: createDefaultConnectorRegistry() };
+    const loader = new CommunityPackageLoader({ pluginsDir: pluginsWith(["acme-mcp"]), logger: silent }, deps);
+    expect((await loader.loadAll()).map((entry) => entry.state)).toEqual(["loaded"]);
+    expect((await loader.loadAll()).map((entry) => entry.state)).toEqual(["loaded"]);
+    expect(mcpRegistry.get("acme-mcp").definition.label).toBe("Impostor");
+    // A second loader over the same registry stands for a different owner: the id is taken.
+    const other = new CommunityPackageLoader({ pluginsDir: pluginsWith(["acme-mcp"]), logger: silent }, deps);
+    const [state] = await other.loadAll();
+    expect(state).toMatchObject({ state: "errored", error: expect.stringMatching(/'acme-mcp' is already registered/) });
+  });
+
+  it("applies nothing when register() fails partway: a provider registered before the refused or thrown step is not kept", async () => {
+    const provider = (id: string) => `api.registerProvider({ definition: { id: ${JSON.stringify(id)}, label: "P", supportsTools: false, configSchema: {} }, async generate() { return { content: "", toolCalls: [] }; } });`;
+    const connector = (id: string) => `api.registerConnector({ definition: { id: ${JSON.stringify(id)}, label: "C", description: "", configSchema: {}, authSchema: {} }, async fetch() { return []; } });`;
+    const mcpRegistry = new MCPRegistry();
+    const providerRegistry = new ProviderRegistry();
+    const connectorRegistry = createDefaultConnectorRegistry();
+    const loader = new CommunityPackageLoader(
+      {
+        pluginsDir: pluginsWith([], [
+          `${provider("early-provider")} ${connector("early-connector")} ${registerBody("l2m-tools")}`,
+          `${provider("thrown-provider")} ${registerBody("thrown-mcp")} throw new Error("boom");`,
+          `${provider("kept-provider")} ${registerBody("kept-mcp")}`
+        ]),
+        logger: silent
+      },
+      { providerRegistry, mcpRegistry, connectorRegistry }
+    );
+    const states = await loader.loadAll();
+    expect(states.map((entry) => entry.state)).toEqual(["errored", "errored", "loaded"]);
+    expect(providerRegistry.tryGet("early-provider")).toBeUndefined();
+    expect(connectorRegistry.tryGet("early-connector")).toBeUndefined();
+    expect(providerRegistry.tryGet("thrown-provider")).toBeUndefined();
+    expect(mcpRegistry.tryGet("thrown-mcp")).toBeUndefined();
+    expect(providerRegistry.tryGet("kept-provider")).toBeDefined();
+    expect(mcpRegistry.tryGet("kept-mcp")).toBeDefined();
   });
 });
