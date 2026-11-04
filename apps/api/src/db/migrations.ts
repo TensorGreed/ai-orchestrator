@@ -2495,6 +2495,84 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_guard_benchmarks_profile;
       DROP TABLE IF EXISTS guard_benchmarks;
     `
+  },
+  {
+    version: 60,
+    description: "12.6b — the /v1 AI gateway: route sets, routes, client grants and per-request usage",
+    // ai_gateway_routes.alias is unique across the deployment: a public model name means one route.
+    // ai_gateway_requests: metadata of each /v1 request that reached Guard or the provider (never prompts or answers);
+    // budgets count it for the global, project (through the route set) and client scopes.
+    up: `
+      CREATE TABLE IF NOT EXISTS ai_gateway_route_sets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        project_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        rate_limit_json TEXT,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS ai_gateway_routes (
+        id TEXT PRIMARY KEY,
+        route_set_id TEXT NOT NULL,
+        alias TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        base_url TEXT,
+        secret_id TEXT,
+        extra_json TEXT NOT NULL DEFAULT '{}',
+        defaults_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ai_gateway_routes_set ON ai_gateway_routes(route_set_id);
+      CREATE TABLE IF NOT EXISTS ai_gateway_client_grants (
+        client_id TEXT NOT NULL,
+        route_set_id TEXT NOT NULL,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (client_id, route_set_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_ai_gateway_grants_set ON ai_gateway_client_grants(route_set_id);
+      CREATE TABLE IF NOT EXISTS ai_gateway_requests (
+        id TEXT PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL,
+        client_id TEXT NOT NULL,
+        route_set_id TEXT NOT NULL,
+        route_id TEXT NOT NULL,
+        project_id TEXT,
+        alias TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        stream INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        http_status INTEGER NOT NULL,
+        finish_reason TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        guard_outcome TEXT NOT NULL DEFAULT 'none',
+        error_code TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_ai_gateway_requests_created ON ai_gateway_requests(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ai_gateway_requests_client_created ON ai_gateway_requests(client_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ai_gateway_requests_set_created ON ai_gateway_requests(route_set_id, created_at DESC);
+    `,
+    down: `
+      DROP TABLE IF EXISTS ai_gateway_requests;
+      DROP TABLE IF EXISTS ai_gateway_client_grants;
+      DROP TABLE IF EXISTS ai_gateway_routes;
+      DROP TABLE IF EXISTS ai_gateway_route_sets;
+    `
   }
 ];
 

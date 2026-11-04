@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
+import { ensureAiGatewaySchema, sqliteAiGatewayStore } from "./ai-gateway-sqlite.js";
+import type { AiGatewayStore } from "./ai-gateway-store.js";
 import type {
   ApprovalRequestKind,
   ApprovalRequestSpec,
@@ -1377,8 +1379,11 @@ function mapMcpToolSnapshot(row: McpToolSnapshotRow): McpToolSnapshotRecord {
 }
 
 // Phase 12.1 — Guard store records.
-/** 12.6 — `toolset` and `mcp_client`: a gateway toolset's or client's Guard profile (no new table shape). */
-export type GuardBindingScope = "project" | "workflow" | "toolset" | "mcp_client";
+/**
+ * 12.6 — `toolset` and `mcp_client`: a gateway toolset's or client's Guard profile (no new table shape). 12.6b —
+ * `ai_route_set`: an AI gateway route set's (it stands where a toolset stands for /v1 calls).
+ */
+export type GuardBindingScope = "project" | "workflow" | "toolset" | "mcp_client" | "ai_route_set";
 
 export interface GuardProfileRecord {
   id: string;
@@ -4178,6 +4183,8 @@ export class SqliteStore implements Store {
       CREATE INDEX IF NOT EXISTS idx_guard_benchmarks_profile ON guard_benchmarks(profile_id, created_at DESC);
     `);
     this.ensureColumn("guard_events", "run_source", "TEXT");
+    // 12.6b (v60) — the /v1 AI gateway: route sets, routes, client grants and per-request usage.
+    ensureAiGatewaySchema(this.db);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -10916,6 +10923,30 @@ export class SqliteStore implements Store {
     this.persist();
   }
 
+  // 12.6b — the /v1 AI gateway tables (ai-gateway-sqlite.ts).
+  private aiGatewayStore?: AiGatewayStore;
+  private get aiGateway(): AiGatewayStore {
+    return (this.aiGatewayStore ??= sqliteAiGatewayStore(this.db));
+  }
+  listAiGatewayRouteSets(...args: Parameters<AiGatewayStore["listAiGatewayRouteSets"]>) { return this.aiGateway.listAiGatewayRouteSets(...args); }
+  getAiGatewayRouteSet(...args: Parameters<AiGatewayStore["getAiGatewayRouteSet"]>) { return this.aiGateway.getAiGatewayRouteSet(...args); }
+  createAiGatewayRouteSet(...args: Parameters<AiGatewayStore["createAiGatewayRouteSet"]>) { return this.aiGateway.createAiGatewayRouteSet(...args); }
+  updateAiGatewayRouteSet(...args: Parameters<AiGatewayStore["updateAiGatewayRouteSet"]>) { return this.aiGateway.updateAiGatewayRouteSet(...args); }
+  deleteAiGatewayRouteSet(...args: Parameters<AiGatewayStore["deleteAiGatewayRouteSet"]>) { return this.aiGateway.deleteAiGatewayRouteSet(...args); }
+  listAiGatewayRoutes(...args: Parameters<AiGatewayStore["listAiGatewayRoutes"]>) { return this.aiGateway.listAiGatewayRoutes(...args); }
+  getAiGatewayRoute(...args: Parameters<AiGatewayStore["getAiGatewayRoute"]>) { return this.aiGateway.getAiGatewayRoute(...args); }
+  createAiGatewayRoute(...args: Parameters<AiGatewayStore["createAiGatewayRoute"]>) { return this.aiGateway.createAiGatewayRoute(...args); }
+  updateAiGatewayRoute(...args: Parameters<AiGatewayStore["updateAiGatewayRoute"]>) { return this.aiGateway.updateAiGatewayRoute(...args); }
+  deleteAiGatewayRoute(...args: Parameters<AiGatewayStore["deleteAiGatewayRoute"]>) { return this.aiGateway.deleteAiGatewayRoute(...args); }
+  listAiGatewayClientGrants(...args: Parameters<AiGatewayStore["listAiGatewayClientGrants"]>) { return this.aiGateway.listAiGatewayClientGrants(...args); }
+  setAiGatewayClientGrants(...args: Parameters<AiGatewayStore["setAiGatewayClientGrants"]>) { return this.aiGateway.setAiGatewayClientGrants(...args); }
+  listAllAiGatewayClientGrants(...args: Parameters<AiGatewayStore["listAllAiGatewayClientGrants"]>) { return this.aiGateway.listAllAiGatewayClientGrants(...args); }
+  resolveAiGatewayRoute(...args: Parameters<AiGatewayStore["resolveAiGatewayRoute"]>) { return this.aiGateway.resolveAiGatewayRoute(...args); }
+  listAiGatewayRoutesForClient(...args: Parameters<AiGatewayStore["listAiGatewayRoutesForClient"]>) { return this.aiGateway.listAiGatewayRoutesForClient(...args); }
+  insertAiGatewayRequest(...args: Parameters<AiGatewayStore["insertAiGatewayRequest"]>) { return this.aiGateway.insertAiGatewayRequest(...args); }
+  listAiGatewayRequests(...args: Parameters<AiGatewayStore["listAiGatewayRequests"]>) { return this.aiGateway.listAiGatewayRequests(...args); }
+  summarizeAiGatewayUsage(...args: Parameters<AiGatewayStore["summarizeAiGatewayUsage"]>) { return this.aiGateway.summarizeAiGatewayUsage(...args); }
+
   async queryBudgetUsage(input: Parameters<Store["queryBudgetUsage"]>[0]): Promise<{ costUsd: number; totalTokens: number }> {
     const runFilters: string[] = ["created_at >= ?", "created_at < ?"];
     const runParams: Array<string | number> = [input.from, input.to];
@@ -10953,6 +10984,17 @@ export class SqliteStore implements Store {
       );
       costUsd += Number(calls?.cost ?? 0);
       totalTokens += toNumber(calls?.tt ?? 0);
+      // 12.6b — /v1 AI gateway requests: the client's, and a project's through its route sets (their current project).
+      const aiFilters: string[] = ["created_at >= ?", "created_at < ?"];
+      const aiParams: Array<string | number> = [input.from, input.to];
+      if (input.projectId) { aiFilters.push("route_set_id IN (SELECT id FROM ai_gateway_route_sets WHERE project_id = ?)"); aiParams.push(input.projectId); }
+      if (input.clientId) { aiFilters.push("client_id = ?"); aiParams.push(input.clientId); }
+      const ai = this.queryOne<{ cost: number | null; tt: number | null }>(
+        `SELECT SUM(COALESCE(cost_usd, 0)) AS cost, SUM(total_tokens) AS tt FROM ai_gateway_requests WHERE ${aiFilters.join(" AND ")}`,
+        aiParams
+      );
+      costUsd += Number(ai?.cost ?? 0);
+      totalTokens += toNumber(ai?.tt ?? 0);
     }
     return { costUsd, totalTokens };
   }
@@ -13721,12 +13763,16 @@ export class SqliteStore implements Store {
     return row ? mapGuardBindingRow(row) : null;
   }
 
-  async getGatewayGuardBindings(toolsetId: string, clientId: string): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }> {
+  async getGatewayGuardBindings(
+    toolsetId: string,
+    clientId: string,
+    setScope: "toolset" | "ai_route_set" = "toolset"
+  ): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }> {
     const rows = this.queryAll<GuardBindingRow>(
-      `SELECT * FROM guard_bindings WHERE (scope = 'toolset' AND scope_id = ?) OR (scope = 'mcp_client' AND scope_id = ?)`,
-      [toolsetId, clientId]
+      `SELECT * FROM guard_bindings WHERE (scope = ? AND scope_id = ?) OR (scope = 'mcp_client' AND scope_id = ?)`,
+      [setScope, toolsetId, clientId]
     ).map(mapGuardBindingRow);
-    return { toolset: rows.find((row) => row.scope === "toolset") ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
+    return { toolset: rows.find((row) => row.scope === setScope) ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
   }
 
   async listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]> {

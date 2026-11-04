@@ -44,7 +44,20 @@ export const DEFAULT_PRICING: PricingTable = {
     "gpt-3.5-turbo": { inputUsdPer1M: 0.5, outputUsdPer1M: 1.5 },
     "o1": { inputUsdPer1M: 15, outputUsdPer1M: 60 },
     "o1-mini": { inputUsdPer1M: 3, outputUsdPer1M: 12 },
-    "o3-mini": { inputUsdPer1M: 1.1, outputUsdPer1M: 4.4 }
+    "o3-mini": { inputUsdPer1M: 1.1, outputUsdPer1M: 4.4 },
+    // 12.6b — embedding models (input only).
+    "text-embedding-3-small": { inputUsdPer1M: 0.02, outputUsdPer1M: 0 },
+    "text-embedding-3-large": { inputUsdPer1M: 0.13, outputUsdPer1M: 0 },
+    "text-embedding-ada-002": { inputUsdPer1M: 0.1, outputUsdPer1M: 0 }
+  },
+  // 12.6b — Azure OpenAI, keyed by the model a route or node names (an Azure deployment named after its model is
+  // priced; any other deployment name is unpriced unless LLM_PRICING_OVERRIDES_JSON adds it). Global list prices.
+  azure_openai: {
+    "gpt-4o": { inputUsdPer1M: 2.5, outputUsdPer1M: 10, cachedInputUsdPer1M: 1.25 },
+    "gpt-4o-mini": { inputUsdPer1M: 0.15, outputUsdPer1M: 0.6, cachedInputUsdPer1M: 0.075 },
+    "text-embedding-3-small": { inputUsdPer1M: 0.02, outputUsdPer1M: 0 },
+    "text-embedding-3-large": { inputUsdPer1M: 0.13, outputUsdPer1M: 0 },
+    "text-embedding-ada-002": { inputUsdPer1M: 0.1, outputUsdPer1M: 0 }
   },
   anthropic: {
     // Current Claude models (first-party API list prices). A cache-read rate is

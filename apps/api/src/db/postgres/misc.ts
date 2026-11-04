@@ -519,6 +519,20 @@ export async function queryBudgetUsage(ctx: PgContext, input: Parameters<Store["
     );
     costUsd += Number(calls?.cost ?? 0);
     totalTokens += toNum(calls?.tt ?? 0);
+    // 12.6b — /v1 AI gateway requests: the client's, and a project's through its route sets (their current project).
+    const aiParams: Array<string | number> = [input.from, input.to];
+    const aiFilters: string[] = ["created_at >= $1::timestamptz", "created_at < $2::timestamptz"];
+    if (input.projectId) {
+      aiParams.push(input.projectId);
+      aiFilters.push(`route_set_id IN (SELECT id FROM ai_gateway_route_sets WHERE project_id = $${aiParams.length})`);
+    }
+    if (input.clientId) { aiParams.push(input.clientId); aiFilters.push(`client_id = $${aiParams.length}`); }
+    const ai = await ctx.queryOne<{ cost: unknown; tt: unknown }>(
+      `SELECT SUM(COALESCE(cost_usd, 0)) AS cost, SUM(total_tokens) AS tt FROM ai_gateway_requests WHERE ${aiFilters.join(" AND ")}`,
+      aiParams
+    );
+    costUsd += Number(ai?.cost ?? 0);
+    totalTokens += toNum(ai?.tt ?? 0);
   }
   return { costUsd, totalTokens };
 }

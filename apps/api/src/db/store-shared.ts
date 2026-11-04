@@ -322,7 +322,7 @@ export function mapMcpPolicySuggestion(row: Record<string, unknown>): McpPolicyS
 }
 
 /** 12.6 — a stored binding's scope; anything unknown reads as a project binding, as before. */
-export function guardBindingScopeOf(value: unknown): "project" | "workflow" | "toolset" | "mcp_client" {
+export function guardBindingScopeOf(value: unknown): "project" | "workflow" | "toolset" | "mcp_client" | "ai_route_set" {
   const scope = String(value);
-  return scope === "workflow" || scope === "toolset" || scope === "mcp_client" ? scope : "project";
+  return scope === "workflow" || scope === "toolset" || scope === "mcp_client" || scope === "ai_route_set" ? scope : "project";
 }

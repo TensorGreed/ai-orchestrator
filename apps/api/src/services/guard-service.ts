@@ -437,7 +437,7 @@ export class GuardService {
       throw new GuardValidationError("Invalid binding", [{ path: "mode", message: "Only a project can enforce a rule set" }]);
     }
     // 12.6 — the deployment's destination rules already apply wherever a gateway profile applies; never bound by name.
-    if ((scope === "toolset" || scope === "mcp_client") && input.profileId === GUARD_DESTINATION_RULES_PROFILE_ID) {
+    if ((scope === "toolset" || scope === "mcp_client" || scope === "ai_route_set") && input.profileId === GUARD_DESTINATION_RULES_PROFILE_ID) {
       throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: "The deployment's destination rules apply on their own; pick another rule set" }]);
     }
     const profileId = input.mode === "inherit" ? null : input.profileId ?? null;
@@ -451,7 +451,7 @@ export class GuardService {
    * 12.6 — a deleted toolset or a revoked client no longer has a Guard binding: an override is set back to inherit.
    * Returns the binding it replaced, or null when there was none.
    */
-  async clearGatewayBinding(scope: "toolset" | "mcp_client", scopeId: string, actorId: string | null): Promise<{ mode: GuardBindingMode; profileId: string | null } | null> {
+  async clearGatewayBinding(scope: "toolset" | "mcp_client" | "ai_route_set", scopeId: string, actorId: string | null): Promise<{ mode: GuardBindingMode; profileId: string | null } | null> {
     const current = await this.store.getGuardBinding(scope, scopeId);
     if (!current || current.mode === "inherit") return null;
     await this.store.setGuardBinding({ scope, scopeId, mode: "inherit", profileId: null, updatedBy: actorId });
@@ -461,6 +461,7 @@ export class GuardService {
   /** 12.6 — a gateway binding of a deleted toolset or a revoked client applies to nothing (and blocks no profile delete). */
   private async bindingInForce(binding: GuardBindingRecord): Promise<boolean> {
     if (binding.scope === "toolset") return Boolean(await this.store.getMcpToolset(binding.scopeId));
+    if (binding.scope === "ai_route_set") return Boolean(await this.store.getAiGatewayRouteSet(binding.scopeId));
     if (binding.scope === "mcp_client") {
       const client = await this.store.getMcpClient(binding.scopeId);
       return Boolean(client && !client.revokedAt);
@@ -689,9 +690,15 @@ export class GuardService {
    * all, exactly as before (a project's enforced profile or GUARD_AUTO_APPLY alone never start checking gateway
    * calls). `refs`: the profiles a workflow tool's run carries (pinned; the deployment's rules apply to runs anyway).
    */
-  async resolveGateway(context: { toolsetId: string; clientId: string; projectId?: string | null }): Promise<{ resolution: GuardRunResolution; refs: GatewayGuardProfileRef[] }> {
+  async resolveGateway(context: {
+    toolsetId: string;
+    clientId: string;
+    projectId?: string | null;
+    /** 12.6b — `ai_route_set`: `toolsetId` is an AI gateway route set, whose binding stands where a toolset's does. */
+    setScope?: "toolset" | "ai_route_set";
+  }): Promise<{ resolution: GuardRunResolution; refs: GatewayGuardProfileRef[] }> {
     // One read for both bindings: a deployment with no gateway binding pays one indexed lookup per call, no more.
-    const bindings = await this.store.getGatewayGuardBindings(context.toolsetId, context.clientId);
+    const bindings = await this.store.getGatewayGuardBindings(context.toolsetId, context.clientId, context.setScope ?? "toolset");
     const asBinding = (record: GuardBindingRecord | null) =>
       record ? { mode: record.mode as GuardBindingMode, profileId: record.profileId } : { mode: "inherit" as GuardBindingMode, profileId: null };
     const toolset = asBinding(bindings.toolset);

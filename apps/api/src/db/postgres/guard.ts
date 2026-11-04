@@ -282,12 +282,13 @@ export async function getGuardBinding(ctx: PgContext, scope: GuardBindingScope, 
 export async function getGatewayGuardBindings(
   ctx: PgContext,
   toolsetId: string,
-  clientId: string
+  clientId: string,
+  setScope: "toolset" | "ai_route_set" = "toolset"
 ): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }> {
   const rows = (
-    await ctx.query<Row>(`SELECT * FROM guard_bindings WHERE (scope = 'toolset' AND scope_id = $1) OR (scope = 'mcp_client' AND scope_id = $2)`, [toolsetId, clientId])
+    await ctx.query<Row>(`SELECT * FROM guard_bindings WHERE (scope = $1 AND scope_id = $2) OR (scope = 'mcp_client' AND scope_id = $3)`, [setScope, toolsetId, clientId])
   ).map(mapGuardBindingRow);
-  return { toolset: rows.find((row) => row.scope === "toolset") ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
+  return { toolset: rows.find((row) => row.scope === setScope) ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
 }
 
 export async function listGuardBindingsForProfile(ctx: PgContext, profileId: string): Promise<GuardBindingRecord[]> {
