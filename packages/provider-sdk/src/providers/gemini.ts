@@ -1,5 +1,5 @@
-import type { LLMCallResponse, LLMProviderConfig, LLMUsage, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
-import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext, ProviderTestResult } from "../types";
+import type { LLMCallResponse, LLMFinishReason, LLMProviderConfig, LLMUsage, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
+import type { LLMProviderAdapter, ProviderCallOptions, ProviderCallRequest, ProviderExecutionContext, ProviderTestResult } from "../types";
 import { PROVIDER_DEFAULT_BASE_URLS } from "../default-base-urls";
 import { providerHttpError, readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
 
@@ -24,6 +24,7 @@ interface GeminiContent {
 
 interface GeminiResponse {
   candidates?: Array<{
+    finishReason?: string;
     content?: {
       parts?: GeminiPart[];
     };
@@ -65,6 +66,45 @@ function sanitizeSchemaForGemini(schema: unknown): unknown {
   }
 
   return result;
+}
+
+/** 12.6b — Gemini's finish reason in the OpenAI vocabulary (a call that asked for tools says `tool_calls`). */
+function geminiFinishReason(value: string | undefined, toolCalls: ToolCall[]): LLMFinishReason {
+  if (toolCalls.length > 0) return "tool_calls";
+  if (value === "MAX_TOKENS") return "length";
+  if (value === "SAFETY" || value === "RECITATION" || value === "BLOCKLIST" || value === "PROHIBITED_CONTENT" || value === "SPII" || value === "IMAGE_SAFETY") {
+    return "content_filter";
+  }
+  return "stop";
+}
+
+/** 12.6b — the generation config: the adapter's defaults (temperature 0.2, 1024 tokens) unless `providerDefaults`. */
+function geminiGenerationConfig(provider: LLMProviderConfig, options: ProviderCallOptions | undefined): Record<string, unknown> {
+  const config: Record<string, unknown> = {};
+  if (typeof provider.temperature === "number") config.temperature = provider.temperature;
+  else if (!options?.providerDefaults) config.temperature = 0.2;
+  if (provider.maxTokens) config.maxOutputTokens = provider.maxTokens;
+  else if (!options?.providerDefaults) config.maxOutputTokens = 1024;
+  if (!options) return config;
+  if (typeof options.topP === "number") config.topP = options.topP;
+  if (options.stop?.length) config.stopSequences = options.stop;
+  if (typeof options.seed === "number") config.seed = options.seed;
+  if (typeof options.presencePenalty === "number") config.presencePenalty = options.presencePenalty;
+  if (typeof options.frequencyPenalty === "number") config.frequencyPenalty = options.frequencyPenalty;
+  const format = options.responseFormat;
+  if (format && format.type !== "text") {
+    config.responseMimeType = "application/json";
+    if (format.type === "json_schema" && format.jsonSchema.schema) config.responseSchema = sanitizeSchemaForGemini(format.jsonSchema.schema);
+  }
+  return config;
+}
+
+/** 12.6b — `toolConfig` for a tool choice other than the default `auto`. */
+function geminiToolConfig(choice: ProviderCallOptions["toolChoice"]): Record<string, unknown> | undefined {
+  if (!choice || choice === "auto") return undefined;
+  if (choice === "none") return { functionCallingConfig: { mode: "NONE" } };
+  if (choice === "required") return { functionCallingConfig: { mode: "ANY" } };
+  return { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [choice.name] } };
 }
 
 export class GeminiProviderAdapter implements LLMProviderAdapter {
@@ -164,14 +204,13 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       }];
     }
 
+    const toolConfig = toolsObj ? geminiToolConfig(request.options?.toolChoice) : undefined;
     const requestBody = {
       systemInstruction,
       contents,
       tools: toolsObj,
-      generationConfig: {
-        temperature: request.provider.temperature ?? 0.2,
-        maxOutputTokens: request.provider.maxTokens ?? 1024
-      }
+      ...(toolConfig ? { toolConfig } : {}),
+      generationConfig: geminiGenerationConfig(request.provider, request.options)
     };
 
     console.warn(`[Gemini] POST models/${model}:generateContent | messages=${contents.length} tools=${request.tools?.length ?? 0}`);
@@ -237,6 +276,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       content,
       toolCalls,
       raw: json,
+      finishReason: geminiFinishReason(json.candidates?.[0]?.finishReason, toolCalls),
       usage,
       latencyMs: Date.now() - startedAt
     };

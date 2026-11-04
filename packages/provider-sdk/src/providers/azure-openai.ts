@@ -1,147 +1,20 @@
-import type { ProviderDefinition, LLMUsage } from "@ai-orchestrator/shared";
-import type { ChatMessage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
+import type { ProviderDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { providerHttpError, readResponseJson, readResponseText, readStreamChunk, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
-import { parseToolArguments } from "../tool-arg-parser";
-
-interface AzureOpenAIResponse {
-  choices?: Array<{
-    message?: {
-      content?: string | null;
-      tool_calls?: Array<{
-        id?: string;
-        function?: {
-          name?: string;
-          arguments?: string;
-        };
-      }>;
-    };
-  }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-    prompt_tokens_details?: { cached_tokens?: number };
-  };
-}
-
-interface AzureOpenAIStreamResponse {
-  choices?: Array<{
-    delta?: {
-      content?: string;
-      tool_calls?: Array<{
-        id?: string;
-        function?: {
-          name?: string;
-          arguments?: string;
-        };
-      }>;
-    };
-  }>;
-}
-
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-}
+import { providerHttpError, readResponseJson, readResponseText, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
+import {
+  applyOpenAIParameters,
+  extractOpenAIUsage,
+  normalizeBaseUrl,
+  parseOpenAIToolCalls,
+  readOpenAIStream,
+  responseFinishReason,
+  toOpenAIMessages,
+  toOpenAITools,
+  type OpenAIWireResponse
+} from "./openai-wire";
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function toOpenAIMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
-  return messages.map((message) => {
-    const payload: Record<string, unknown> = {
-      role: message.role,
-      content: message.content
-    };
-
-    if (message.role === "tool") {
-      payload.tool_call_id = message.toolCallId;
-      if (message.name) {
-        payload.name = message.name;
-      }
-    }
-
-    if (message.role === "assistant" && message.toolCalls?.length) {
-      payload.tool_calls = message.toolCalls.map((toolCall) => ({
-        id: toolCall.id,
-        type: "function",
-        function: {
-          name: toolCall.name,
-          arguments: JSON.stringify(toolCall.arguments)
-        }
-      }));
-    }
-
-    return payload;
-  });
-}
-
-function toOpenAITools(tools: ToolDefinition[] | undefined): Array<Record<string, unknown>> | undefined {
-  if (!tools?.length) {
-    return undefined;
-  }
-  return tools.map((tool) => ({
-    type: "function",
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.inputSchema
-    }
-  }));
-}
-
-function parseToolCalls(input: AzureOpenAIResponse): ToolCall[] {
-  const rawCalls = input.choices?.[0]?.message?.tool_calls ?? [];
-  return rawCalls
-    .map((toolCall, index) => {
-      const id = toolCall.id ?? `toolcall_${index}`;
-      const name = toolCall.function?.name;
-      if (!name) {
-        return undefined;
-      }
-
-      const args = parseToolArguments(toolCall.function?.arguments ?? "{}");
-
-      return {
-        id,
-        name,
-        arguments: args
-      } satisfies ToolCall;
-    })
-    .filter((entry): entry is ToolCall => Boolean(entry));
-}
-
-function parseSSEEventPayload(rawEvent: string): string | null {
-  const lines = rawEvent.split(/\r?\n/);
-  const dataLines: string[] = [];
-  for (const line of lines) {
-    if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
-    }
-  }
-  if (!dataLines.length) {
-    return null;
-  }
-  return dataLines.join("\n");
-}
-
-function findSSEBoundary(buffer: string): { index: number; separatorLength: number } | null {
-  const unixBoundary = buffer.indexOf("\n\n");
-  const windowsBoundary = buffer.indexOf("\r\n\r\n");
-
-  if (unixBoundary < 0 && windowsBoundary < 0) {
-    return null;
-  }
-  if (unixBoundary < 0) {
-    return { index: windowsBoundary, separatorLength: 4 };
-  }
-  if (windowsBoundary < 0) {
-    return { index: unixBoundary, separatorLength: 2 };
-  }
-  return unixBoundary < windowsBoundary
-    ? { index: unixBoundary, separatorLength: 2 }
-    : { index: windowsBoundary, separatorLength: 4 };
 }
 
 function normalizeApiKey(secretValue: string | undefined): string | undefined {
@@ -173,8 +46,9 @@ function normalizeApiKey(secretValue: string | undefined): string | undefined {
   }
 }
 
-async function resolveConnection(
-  request: ProviderCallRequest,
+/** The endpoint, deployment, api-version and auth header of an Azure OpenAI call (chat and embeddings). */
+export async function resolveAzureOpenAIConnection(
+  provider: ProviderCallRequest["provider"],
   context: ProviderExecutionContext
 ): Promise<{
   endpoint: string;
@@ -183,7 +57,6 @@ async function resolveConnection(
   authHeaderName: "api-key" | "authorization";
   authHeaderValue: string;
 }> {
-  const provider = request.provider;
   const extra = toRecord(provider.extra);
   const endpoint = normalizeBaseUrl(
     (typeof provider.baseUrl === "string" && provider.baseUrl.trim()) ||
@@ -262,21 +135,11 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
 
   async generate(request: ProviderCallRequest, context: ProviderExecutionContext) {
     const provider = request.provider;
-    const connection = await resolveConnection(request, context);
+    const connection = await resolveAzureOpenAIConnection(provider, context);
     const payload: Record<string, unknown> = {
-      messages: toOpenAIMessages(request.messages),
-      temperature: provider.temperature ?? 0.2
+      messages: toOpenAIMessages(request.messages)
     };
-
-    if (provider.maxTokens) {
-      payload.max_tokens = provider.maxTokens;
-    }
-
-    const tools = toOpenAITools(request.tools);
-    if (tools?.length) {
-      payload.tools = tools;
-      payload.tool_choice = "auto";
-    }
+    applyOpenAIParameters(payload, provider, toOpenAITools(request.tools), request.options);
 
     const timeoutMs = typeof provider.extra?.timeoutMs === "number" ? provider.extra.timeoutMs : 60_000;
     const maxRetries = typeof provider.extra?.maxRetries === "number" ? provider.extra.maxRetries : 3;
@@ -301,43 +164,28 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
       throw providerHttpError("azure_openai", response.status, `Provider azure_openai request failed (${response.status}): ${body}`);
     }
 
-    const json = await readResponseJson<AzureOpenAIResponse>(response, bodyRead);
+    const json = await readResponseJson<OpenAIWireResponse>(response, bodyRead);
     const content = json.choices?.[0]?.message?.content ?? "";
-    let usage: LLMUsage | undefined;
-    if (json.usage) {
-      usage = {};
-      if (typeof json.usage.prompt_tokens === "number") usage.inputTokens = json.usage.prompt_tokens;
-      if (typeof json.usage.completion_tokens === "number") usage.outputTokens = json.usage.completion_tokens;
-      if (typeof json.usage.total_tokens === "number") usage.totalTokens = json.usage.total_tokens;
-      if (typeof json.usage.prompt_tokens_details?.cached_tokens === "number") usage.cachedInputTokens = json.usage.prompt_tokens_details.cached_tokens;
-      if (Object.keys(usage).length === 0) usage = undefined;
-    }
+    const toolCalls = parseOpenAIToolCalls(json);
     return {
       content,
-      toolCalls: parseToolCalls(json),
+      toolCalls,
       raw: json,
-      usage,
+      finishReason: responseFinishReason(json, toolCalls),
+      usage: extractOpenAIUsage(json.usage),
       latencyMs: Date.now() - startedAt
     };
   }
 
   async *generateStream(request: ProviderCallRequest, context: ProviderExecutionContext): AsyncGenerator<LLMStreamChunk> {
     const provider = request.provider;
-    const connection = await resolveConnection(request, context);
+    const connection = await resolveAzureOpenAIConnection(provider, context);
     const payload: Record<string, unknown> = {
-      messages: toOpenAIMessages(request.messages),
-      temperature: provider.temperature ?? 0.2,
-      stream: true
+      messages: toOpenAIMessages(request.messages)
     };
-
-    if (provider.maxTokens) {
-      payload.max_tokens = provider.maxTokens;
-    }
-    const tools = toOpenAITools(request.tools);
-    if (tools?.length) {
-      payload.tools = tools;
-      payload.tool_choice = "auto";
-    }
+    applyOpenAIParameters(payload, provider, toOpenAITools(request.tools), request.options);
+    payload.stream = true;
+    if (request.options?.streamUsage) payload.stream_options = { include_usage: true };
 
     const timeoutMs = typeof provider.extra?.timeoutMs === "number" ? provider.extra.timeoutMs : 120_000;
     const maxRetries = typeof provider.extra?.maxRetries === "number" ? provider.extra.maxRetries : 3;
@@ -363,77 +211,12 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
       throw new Error("Provider azure_openai stream response did not include a body.");
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let buffer = "";
-
     const idleTimeoutMs = streamIdleTimeoutMs(provider.extra, timeoutMs);
-    let finished = false;
-    try {
-      while (true) {
-        const { done, value } = await readStreamChunk(reader, {
-          timeoutMs: idleTimeoutMs,
-          signal: context.signal,
-          provider: "azure_openai",
-          timeoutMessage: `Provider azure_openai stream sent no data for ${idleTimeoutMs}ms; the connection looks stalled. Raise extra.streamIdleTimeoutMs on the model if it needs longer between chunks.`
-        });
-        if (done) {
-          finished = true;
-          break;
-        }
-        buffer += decoder.decode(value, { stream: true });
-
-        while (true) {
-          const boundary = findSSEBoundary(buffer);
-          if (!boundary) {
-            break;
-          }
-          const rawEvent = buffer.slice(0, boundary.index);
-          buffer = buffer.slice(boundary.index + boundary.separatorLength);
-          const payloadChunk = parseSSEEventPayload(rawEvent);
-          if (!payloadChunk || payloadChunk === "[DONE]") {
-            continue;
-          }
-  
-          let parsed: AzureOpenAIStreamResponse;
-          try {
-            parsed = JSON.parse(payloadChunk) as AzureOpenAIStreamResponse;
-          } catch {
-            continue;
-          }
-  
-          const delta = parsed.choices?.[0]?.delta;
-          if (!delta) {
-            continue;
-          }
-  
-          if (typeof delta.content === "string" && delta.content.length > 0) {
-            yield {
-              type: "text_delta",
-              textDelta: delta.content
-            };
-          }
-  
-          if (Array.isArray(delta.tool_calls)) {
-            for (const toolCall of delta.tool_calls) {
-              if (!toolCall.id && !toolCall.function?.name && !toolCall.function?.arguments) {
-                continue;
-              }
-              yield {
-                type: "tool_call_delta",
-                toolCallId: toolCall.id,
-                name: toolCall.function?.name,
-                argumentsDelta: toolCall.function?.arguments
-              };
-            }
-          }
-        }
-      }
-    } finally {
-      if (!finished) {
-        // The consumer stopped early (run canceled) or the read failed: free the connection.
-        void reader.cancel().catch(() => undefined);
-      }
-    }
+    yield* readOpenAIStream(response.body, {
+      idleTimeoutMs,
+      signal: context.signal,
+      provider: "azure_openai",
+      timeoutMessage: `Provider azure_openai stream sent no data for ${idleTimeoutMs}ms; the connection looks stalled. Raise extra.streamIdleTimeoutMs on the model if it needs longer between chunks.`
+    });
   }
 }

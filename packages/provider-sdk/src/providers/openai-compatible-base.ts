@@ -1,140 +1,17 @@
-import type { ChatMessage, LLMCallResponse, LLMProviderConfig, LLMUsage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
+import type { LLMCallResponse, LLMProviderConfig } from "@ai-orchestrator/shared";
 import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { providerHttpError, readResponseJson, readResponseText, readStreamChunk, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
-import { parseToolArguments } from "../tool-arg-parser";
-
-interface OpenAICompatibleResponse {
-  choices?: Array<{
-    message?: {
-      content?: string | null;
-      tool_calls?: Array<{
-        id?: string;
-        type?: string;
-        function?: {
-          name?: string;
-          arguments?: string;
-        };
-      }>;
-    };
-  }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-    prompt_tokens_details?: { cached_tokens?: number };
-  };
-}
-
-function extractOpenAIUsage(json: OpenAICompatibleResponse): LLMUsage | undefined {
-  const u = json.usage;
-  if (!u) return undefined;
-  const usage: LLMUsage = {};
-  if (typeof u.prompt_tokens === "number") usage.inputTokens = u.prompt_tokens;
-  if (typeof u.completion_tokens === "number") usage.outputTokens = u.completion_tokens;
-  if (typeof u.total_tokens === "number") usage.totalTokens = u.total_tokens;
-  if (typeof u.prompt_tokens_details?.cached_tokens === "number") usage.cachedInputTokens = u.prompt_tokens_details.cached_tokens;
-  return Object.keys(usage).length ? usage : undefined;
-}
-
-interface OpenAICompatibleStreamResponse {
-  choices?: Array<{
-    delta?: {
-      content?: string;
-      tool_calls?: Array<{
-        index?: number;
-        id?: string;
-        function?: {
-          name?: string;
-          arguments?: string;
-        };
-      }>;
-    };
-  }>;
-}
-
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-}
-
-function toOpenAIMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
-  return messages.map((message) => {
-    const payload: Record<string, unknown> = {
-      role: message.role
-    };
-
-    // Support multipart content with images (OpenAI vision format)
-    const validImages = (message.images ?? []).filter(img => img.data && img.mimeType && img.mimeType.startsWith("image/"));
-    if (validImages.length > 0 && message.role === "user") {
-      const parts: Array<Record<string, unknown>> = [
-        { type: "text", text: message.content }
-      ];
-      for (const img of validImages) {
-        parts.push({
-          type: "image_url",
-          image_url: { url: `data:${img.mimeType};base64,${img.data}` }
-        });
-      }
-      payload.content = parts;
-    } else {
-      payload.content = message.content;
-    }
-
-    if (message.role === "tool") {
-      payload.tool_call_id = message.toolCallId;
-      if (message.name) {
-        payload.name = message.name;
-      }
-    }
-
-    if (message.role === "assistant" && message.toolCalls?.length) {
-      payload.tool_calls = message.toolCalls.map((toolCall) => ({
-        id: toolCall.id,
-        type: "function",
-        function: {
-          name: toolCall.name,
-          arguments: JSON.stringify(toolCall.arguments)
-        }
-      }));
-    }
-
-    return payload;
-  });
-}
-
-function toOpenAITools(tools: ToolDefinition[] | undefined): Array<Record<string, unknown>> | undefined {
-  if (!tools?.length) {
-    return undefined;
-  }
-  return tools.map((tool) => ({
-    type: "function",
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.inputSchema
-    }
-  }));
-}
-
-function parseToolCalls(input: OpenAICompatibleResponse): ToolCall[] {
-  const rawCalls = input.choices?.[0]?.message?.tool_calls ?? [];
-  return rawCalls
-    .map((toolCall, index) => {
-      const id = toolCall.id ?? `toolcall_${index}`;
-      const name = toolCall.function?.name;
-      if (!name) {
-        return undefined;
-      }
-
-      const args = parseToolArguments(toolCall.function?.arguments ?? "{}");
-
-      return {
-        id,
-        name,
-        arguments: args
-      } satisfies ToolCall;
-    })
-    .filter((call): call is ToolCall => Boolean(call));
-}
+import { providerHttpError, readResponseJson, readResponseText, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
+import {
+  applyOpenAIParameters,
+  extractOpenAIUsage,
+  normalizeBaseUrl,
+  parseOpenAIToolCalls,
+  readOpenAIStream,
+  responseFinishReason,
+  toOpenAIMessages,
+  toOpenAITools,
+  type OpenAIWireResponse
+} from "./openai-wire";
 
 function buildAuthHeaders(apiKey?: string): Record<string, string> {
   const headers: Record<string, string> = {
@@ -157,17 +34,12 @@ export interface OpenAICompatibleAdapterOptions {
   supportsTools: boolean;
 }
 
-async function resolveProviderConnection(
-  request: ProviderCallRequest,
+/** The base URL and auth headers of an OpenAI-family endpoint (shared by chat and embeddings). */
+export async function resolveOpenAICompatibleEndpoint(
+  provider: LLMProviderConfig,
   context: ProviderExecutionContext,
-  options: OpenAICompatibleAdapterOptions
-): Promise<{
-  baseUrl: string;
-  apiKey: string | undefined;
-  payload: Record<string, unknown>;
-  headers: Record<string, string>;
-}> {
-  const provider: LLMProviderConfig = request.provider;
+  options: Omit<OpenAICompatibleAdapterOptions, "supportsTools" | "label">
+): Promise<{ baseUrl: string; apiKey: string | undefined; headers: Record<string, string> }> {
   const baseUrl = normalizeBaseUrl(provider.baseUrl ?? options.defaultBaseUrl ?? "");
   if (!baseUrl) {
     throw new Error(`Provider ${options.id} requires baseUrl`);
@@ -182,66 +54,32 @@ async function resolveProviderConnection(
   if (options.requiresApiKey && !apiKey) {
     throw new Error(`Provider ${options.id} requires an API key via secretRef or ${options.defaultApiKeyEnv}`);
   }
+  return { baseUrl, apiKey, headers: buildAuthHeaders(apiKey) };
+}
+
+async function resolveProviderConnection(
+  request: ProviderCallRequest,
+  context: ProviderExecutionContext,
+  options: OpenAICompatibleAdapterOptions
+): Promise<{
+  baseUrl: string;
+  apiKey: string | undefined;
+  payload: Record<string, unknown>;
+  headers: Record<string, string>;
+}> {
+  const provider: LLMProviderConfig = request.provider;
+  const endpoint = await resolveOpenAICompatibleEndpoint(provider, context, options);
 
   const payload: Record<string, unknown> = {
     model: provider.model,
-    messages: toOpenAIMessages(request.messages),
-    temperature: provider.temperature ?? 0.2
+    messages: toOpenAIMessages(request.messages)
   };
-
-  if (provider.maxTokens) {
-    payload.max_tokens = provider.maxTokens;
-  }
-
-  const tools = toOpenAITools(request.tools);
-  if (options.supportsTools && tools?.length) {
-    payload.tools = tools;
-    payload.tool_choice = "auto";
-  }
+  applyOpenAIParameters(payload, provider, options.supportsTools ? toOpenAITools(request.tools) : undefined, request.options);
 
   return {
-    baseUrl,
-    apiKey,
-    payload,
-    headers: buildAuthHeaders(apiKey)
+    ...endpoint,
+    payload
   };
-}
-
-function parseSSEEventPayload(rawEvent: string): string | null {
-  const lines = rawEvent.split(/\r?\n/);
-  const dataLines: string[] = [];
-  for (const line of lines) {
-    if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
-    }
-  }
-  if (!dataLines.length) {
-    return null;
-  }
-  return dataLines.join("\n");
-}
-
-function findSSEBoundary(buffer: string): { index: number; separatorLength: number } | null {
-  const unixBoundary = buffer.indexOf("\n\n");
-  const windowsBoundary = buffer.indexOf("\r\n\r\n");
-
-  if (unixBoundary < 0 && windowsBoundary < 0) {
-    return null;
-  }
-
-  if (unixBoundary < 0) {
-    return { index: windowsBoundary, separatorLength: 4 };
-  }
-
-  if (windowsBoundary < 0) {
-    return { index: unixBoundary, separatorLength: 2 };
-  }
-
-  if (unixBoundary < windowsBoundary) {
-    return { index: unixBoundary, separatorLength: 2 };
-  }
-
-  return { index: windowsBoundary, separatorLength: 4 };
 }
 
 export async function callOpenAICompatible(
@@ -270,14 +108,16 @@ export async function callOpenAICompatible(
     throw providerHttpError(options.id, response.status, `Provider ${options.id} request failed (${response.status}): ${body}`);
   }
 
-  const json = await readResponseJson<OpenAICompatibleResponse>(response, bodyRead);
+  const json = await readResponseJson<OpenAIWireResponse>(response, bodyRead);
   const content = json.choices?.[0]?.message?.content ?? "";
+  const toolCalls = options.supportsTools ? parseOpenAIToolCalls(json) : [];
 
   return {
     content,
-    toolCalls: options.supportsTools ? parseToolCalls(json) : [],
+    toolCalls,
     raw: json,
-    usage: extractOpenAIUsage(json),
+    finishReason: responseFinishReason(json, toolCalls),
+    usage: extractOpenAIUsage(json.usage),
     latencyMs: Date.now() - startedAt
   };
 }
@@ -297,7 +137,8 @@ export async function* callOpenAICompatibleStream(
       headers: connection.headers,
       body: JSON.stringify({
         ...connection.payload,
-        stream: true
+        stream: true,
+        ...(request.options?.streamUsage ? { stream_options: { include_usage: true } } : {})
       }),
       signal: context.signal
     },
@@ -313,100 +154,11 @@ export async function* callOpenAICompatibleStream(
     throw new Error(`Provider ${options.id} stream response did not include a body.`);
   }
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-
-  const processEventPayload = async function* (payload: string): AsyncGenerator<LLMStreamChunk> {
-    if (payload === "[DONE]") {
-      return;
-    }
-
-    let parsed: OpenAICompatibleStreamResponse;
-    try {
-      parsed = JSON.parse(payload) as OpenAICompatibleStreamResponse;
-    } catch {
-      return;
-    }
-
-    const delta = parsed.choices?.[0]?.delta;
-    if (!delta) {
-      return;
-    }
-
-    if (typeof delta.content === "string" && delta.content.length > 0) {
-      yield {
-        type: "text_delta",
-        textDelta: delta.content
-      };
-    }
-
-    if (Array.isArray(delta.tool_calls)) {
-      for (const toolCall of delta.tool_calls) {
-        const hasData =
-          typeof toolCall.id === "string" ||
-          typeof toolCall.function?.name === "string" ||
-          typeof toolCall.function?.arguments === "string";
-        if (!hasData) {
-          continue;
-        }
-        yield {
-          type: "tool_call_delta",
-          toolCallId: toolCall.id,
-          name: toolCall.function?.name,
-          argumentsDelta: toolCall.function?.arguments
-        };
-      }
-    }
-  };
-
   const idleTimeoutMs = streamIdleTimeoutMs(request.provider.extra, timeoutMs);
-  let finished = false;
-  try {
-    while (true) {
-      const { done, value } = await readStreamChunk(reader, {
-        timeoutMs: idleTimeoutMs,
-        signal: context.signal,
-        provider: options.id,
-        timeoutMessage: `Provider ${options.id} stream sent no data for ${idleTimeoutMs}ms; the connection looks stalled. Raise extra.streamIdleTimeoutMs on the model if it needs longer between chunks.`
-      });
-      if (done) {
-        finished = true;
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      while (true) {
-        const boundary = findSSEBoundary(buffer);
-        if (!boundary) {
-          break;
-        }
-
-        const rawEvent = buffer.slice(0, boundary.index);
-        buffer = buffer.slice(boundary.index + boundary.separatorLength);
-        const payload = parseSSEEventPayload(rawEvent);
-        if (!payload) {
-          continue;
-        }
-
-        for await (const chunk of processEventPayload(payload)) {
-          yield chunk;
-        }
-      }
-    }
-  } finally {
-    if (!finished) {
-      // The consumer stopped early (run canceled) or the read failed: free the connection.
-      void reader.cancel().catch(() => undefined);
-    }
-  }
-
-  if (buffer.trim().length > 0) {
-    const trailingPayload = parseSSEEventPayload(buffer);
-    if (trailingPayload) {
-      for await (const chunk of processEventPayload(trailingPayload)) {
-        yield chunk;
-      }
-    }
-  }
+  yield* readOpenAIStream(response.body, {
+    idleTimeoutMs,
+    signal: context.signal,
+    provider: options.id,
+    timeoutMessage: `Provider ${options.id} stream sent no data for ${idleTimeoutMs}ms; the connection looks stalled. Raise extra.streamIdleTimeoutMs on the model if it needs longer between chunks.`
+  });
 }
