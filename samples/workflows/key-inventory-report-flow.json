@@ -92,7 +92,7 @@
           "argsTemplate": "{\"limit\":1000}",
           "connection": {
             "transport": "http_streamable",
-            "endpoint": "http://ciphertrust-mcp.internal/mcp"
+            "endpoint": "http://key-manager-mcp.internal/mcp"
           }
         }
       },

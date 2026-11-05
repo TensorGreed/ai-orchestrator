@@ -259,7 +259,7 @@ export interface WorkflowExecutionDependencies {
    */
   loadMcpToolPolicy?: () => McpToolPolicySnapshot | Promise<McpToolPolicySnapshot>;
   /**
-   * Phase 12.1 — L2M Guard: stored profiles, the run's bindings, the token
+   * Phase 12.1 — content rules: stored rule sets, the run's bindings, the token
    * vault and where verdicts are recorded. Without it guard nodes evaluate
    * the built-in default profile and agents run unguarded.
    */

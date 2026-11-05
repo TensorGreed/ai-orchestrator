@@ -3,7 +3,7 @@ import { secretReferenceSchema } from "./schemas";
 import { PROVENANCE_LABELS, GATEWAY_GUARD_CUSTOM_DATA_KEY } from "./data-labels";
 
 /**
- * Phase 12.1 — the workflow contract for L2M Guard: the `guard` DAG node,
+ * Phase 12.1 — the workflow contract for content rules: the `guard` DAG node,
  * the `guard_protection` provider node, the `guard` and `protection`
  * attachment ports, profile bindings and the shapes the API returns for
  * stored profiles and guard events. The profile document itself is
