@@ -63,6 +63,24 @@ describe("guard profile override", () => {
     expect(same.enforced).toBeUndefined();
   });
 
+  it("12.7: an eval run's rule set is added after the run's own rule sets and before the destination rules, never replacing one", async () => {
+    const { guard } = await setup();
+    const added = await guard.resolveRun({ workflowId: "wf", profileAddition: { profileId: "candidate", version: 1 } });
+    expect(added.source).toBe("workflow");
+    expect(added.stack.map((entry) => [entry.profileId, entry.version])).toEqual([["bound", 1], ["candidate", 1]]);
+    expect(added.chain.at(-1)).toMatchObject({ level: "candidate", profileId: "candidate", version: 1 });
+    // The same rule set the run applies anyway is not added twice.
+    expect((await guard.resolveRun({ workflowId: "wf", profileAddition: { profileId: "bound" } })).stack.map((entry) => entry.profileId)).toEqual(["bound"]);
+    // The enforced floor and the auto-applied default rule set stay too.
+    await guard.setBinding("workflow", "wf", { mode: "inherit" }, null);
+    expect((await guard.resolveRun({ workflowId: "wf", profileAddition: { profileId: "candidate" } })).stack.map((entry) => entry.profileId)).toEqual(["default", "candidate"]);
+    await guard.setBinding("project", "default", { mode: "enforced", profileId: "bound" }, null);
+    expect((await guard.resolveRun({ workflowId: "wf", projectId: "default", profileAddition: { profileId: "candidate" } })).stack.map((entry) => entry.profileId)).toEqual(["bound", "candidate"]);
+    // Content rules ports naming the added rule set keep loading its latest version.
+    expect((await guard.runtimeFor({ workflowId: "wf", profileAddition: { profileId: "candidate", version: 1 } }).loadProfile("candidate"))?.version).toBe(2);
+    await expect(guard.resolveRun({ workflowId: "wf", profileAddition: { profileId: "nope" } })).rejects.toThrow(GuardNotFoundError);
+  });
+
   it("refuses a profile or version that does not exist", async () => {
     const { guard } = await setup();
     expect(await guard.profileOverrideProblem({ profileId: "candidate", version: 2 })).toBeNull();

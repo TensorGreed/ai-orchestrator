@@ -51,6 +51,8 @@ export type DispatchedRunInput = Omit<
   | "replay"
   | "providerRegistry"
   | "guardProfileOverride"
+  | "guardProfileAddition"
+  | "guardRunSource"
   | "guardSimulation"
   | "resumeState"
   | "approvalDecision"

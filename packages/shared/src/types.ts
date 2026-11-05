@@ -542,6 +542,11 @@ export interface WorkflowExecutionState {
    */
   gatewayUsage?: GatewayRunUsage;
   /**
+   * 12.7 — `eval`: the run is an eval run or a replay job, so a resumed run keeps recording its Content rules verdicts as
+   * eval traffic. Written and read only by the API; absent for every other run.
+   */
+  guardRunSource?: "eval";
+  /**
    * Phase 16 — the run's data labels, beside `nodeOutputs`: the input's
    * labels, every completed node's labels, and whether labels are tracked
    * (stored and scanned). A resumed run carries on with them.

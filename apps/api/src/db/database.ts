@@ -1445,6 +1445,8 @@ export interface GuardEventInsert {
   budgetExceeded: boolean;
   skippedDetectors: string[];
   createdAt: string;
+  /** 12.7 (v59) — `eval` for verdicts eval runs and replay jobs recorded; absent (null) for every other run. */
+  runSource?: string | null;
 }
 
 export type GuardEventRecord = GuardEventInsert;
@@ -1462,6 +1464,8 @@ export interface GuardEventFilters {
   onlyFindings?: boolean;
   /** 12.6 — `gateway`: only MCP gateway server tool calls; `run`: only workflow runs. */
   placement?: "gateway" | "run";
+  /** 12.7 — leave out verdicts eval runs and replay jobs recorded (`run_source = 'eval'`). */
+  excludeEvalRuns?: boolean;
 }
 
 export interface GuardEventStats {
@@ -1495,6 +1499,51 @@ export interface GuardSimulationRecord {
   createdBy: string | null;
   createdByUserId: string | null;
   finishedAt: string | null;
+}
+
+/** 12.7 — a stored content rules benchmark of a saved rule set version (`guard_benchmarks`, v59). */
+export interface GuardBenchmarkStoredRecord {
+  id: string;
+  profileId: string;
+  profileVersion: number;
+  profileHash: string;
+  corpusHash: string;
+  suites: string[];
+  detectionRate: number;
+  falsePositiveRate: number;
+  /** The `GuardBenchmarkReport` (ids, counts and detector names only). */
+  report: Record<string, unknown>;
+  createdBy: string | null;
+  createdByUserId: string | null;
+  createdAt: string;
+}
+
+export function mapGuardBenchmarkRow(row: Record<string, unknown>): GuardBenchmarkStoredRecord {
+  const parse = (value: unknown): unknown => {
+    if (typeof value !== "string" || !value) return null;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  };
+  const suites = parse(row.suites_json);
+  const report = parse(row.report_json);
+  const optional = (value: unknown) => (value === null || value === undefined ? null : String(value));
+  return {
+    id: String(row.id),
+    profileId: String(row.profile_id),
+    profileVersion: Number(row.profile_version),
+    profileHash: String(row.profile_hash),
+    corpusHash: String(row.corpus_hash),
+    suites: Array.isArray(suites) ? suites.map(String) : [],
+    detectionRate: Number(row.detection_rate),
+    falsePositiveRate: Number(row.false_positive_rate),
+    report: report && typeof report === "object" && !Array.isArray(report) ? (report as Record<string, unknown>) : {},
+    createdBy: optional(row.created_by),
+    createdByUserId: optional(row.created_by_user_id),
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at)
+  };
 }
 
 export interface ReplayRecordingRecord extends ReplayRecordingSummary {
@@ -1882,7 +1931,8 @@ function mapGuardEventRow(row: GuardEventRow): GuardEventRecord {
     latencyMs: Number(row.latency_ms ?? 0),
     budgetExceeded: Number(row.budget_exceeded) === 1,
     skippedDetectors: parseJsonList<string>(row.skipped_detectors_json),
-    createdAt: String(row.created_at)
+    createdAt: String(row.created_at),
+    ...(row.run_source !== null && row.run_source !== undefined ? { runSource: String(row.run_source) } : {})
   };
 }
 
@@ -4108,6 +4158,26 @@ export class SqliteStore implements Store {
     this.ensureColumn("mcp_clients", "allowed_ips_json", "TEXT NOT NULL", "'[]'");
     this.ensureColumn("mcp_clients", "cert_fingerprints_json", "TEXT NOT NULL", "'[]'");
     this.ensureColumn("mcp_clients", "cert_subject", "TEXT");
+
+    // 12.7 (v59) — content rules benchmarks per rule set version, and eval-run content rules events kept out of Security stats.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS guard_benchmarks (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        profile_version INTEGER NOT NULL,
+        profile_hash TEXT NOT NULL,
+        corpus_hash TEXT NOT NULL,
+        suites_json TEXT NOT NULL DEFAULT '[]',
+        detection_rate REAL NOT NULL,
+        false_positive_rate REAL NOT NULL,
+        report_json TEXT NOT NULL,
+        created_by TEXT,
+        created_by_user_id TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_benchmarks_profile ON guard_benchmarks(profile_id, created_at DESC);
+    `);
+    this.ensureColumn("guard_events", "run_source", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -13635,6 +13705,7 @@ export class SqliteStore implements Store {
 
   async deleteGuardProfile(id: string): Promise<boolean> {
     if (!this.getGuardProfileSync(id)) return false;
+    this.exec(`DELETE FROM guard_benchmarks WHERE profile_id = ?`, [id]);
     this.exec(`DELETE FROM guard_profile_versions WHERE profile_id = ?`, [id]);
     this.exec(`DELETE FROM guard_profiles WHERE id = ?`, [id]);
     this.persist();
@@ -13679,8 +13750,8 @@ export class SqliteStore implements Store {
         `INSERT INTO guard_events (
            id, verdict_id, execution_id, workflow_id, project_id, node_id, placement, iteration, tool_name, channel,
            detector_id, category, data_class, score, requested_action, effective_action, verdict_action, shadow,
-           evidence_json, profile_id, profile_version, profile_hash, latency_ms, budget_exceeded, skipped_detectors_json, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           evidence_json, profile_id, profile_version, profile_hash, latency_ms, budget_exceeded, skipped_detectors_json, created_at, run_source
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           row.id,
           row.verdictId,
@@ -13707,7 +13778,8 @@ export class SqliteStore implements Store {
           row.latencyMs,
           row.budgetExceeded ? 1 : 0,
           JSON.stringify(row.skippedDetectors),
-          row.createdAt
+          row.createdAt,
+          row.runSource ?? null
         ]
       );
     }
@@ -13738,6 +13810,7 @@ export class SqliteStore implements Store {
     if (filters.onlyFindings) clauses.push("detector_id IS NOT NULL");
     if (filters.placement === "gateway") clauses.push("placement = 'gateway'");
     if (filters.placement === "run") clauses.push("placement <> 'gateway'");
+    if (filters.excludeEvalRuns) clauses.push("(run_source IS NULL OR run_source <> 'eval')");
     return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
 
@@ -14408,6 +14481,47 @@ export class SqliteStore implements Store {
   private getGuardSimulationSync(id: string): GuardSimulationRecord | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM guard_simulations WHERE id = ?`, [id]);
     return row ? mapGuardSimulationRow(row) : null;
+  }
+
+  // ---- 12.7 Content rules benchmarks
+
+  async insertGuardBenchmark(record: GuardBenchmarkStoredRecord, options: { keep: number }): Promise<void> {
+    this.exec(
+      `INSERT INTO guard_benchmarks (id, profile_id, profile_version, profile_hash, corpus_hash, suites_json, detection_rate, false_positive_rate, report_json, created_by, created_by_user_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        record.id,
+        record.profileId,
+        record.profileVersion,
+        record.profileHash,
+        record.corpusHash,
+        JSON.stringify(record.suites),
+        record.detectionRate,
+        record.falsePositiveRate,
+        JSON.stringify(record.report),
+        record.createdBy,
+        record.createdByUserId,
+        record.createdAt
+      ]
+    );
+    // Keep the rule set's newest `keep` benchmarks.
+    this.exec(
+      `DELETE FROM guard_benchmarks WHERE profile_id = ? AND id NOT IN (
+         SELECT id FROM guard_benchmarks WHERE profile_id = ? ORDER BY created_at DESC, id DESC LIMIT ?
+       )`,
+      [record.profileId, record.profileId, Math.max(1, options.keep)]
+    );
+    this.persist();
+  }
+
+  async listGuardBenchmarks(options: { profileId: string; limit?: number }): Promise<GuardBenchmarkStoredRecord[]> {
+    const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
+    return this.queryAll<Record<string, unknown>>(`SELECT * FROM guard_benchmarks WHERE profile_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, [options.profileId, limit]).map(mapGuardBenchmarkRow);
+  }
+
+  async getGuardBenchmark(id: string): Promise<GuardBenchmarkStoredRecord | null> {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM guard_benchmarks WHERE id = ?`, [id]);
+    return row ? mapGuardBenchmarkRow(row) : null;
   }
 
   async listGuardSimulations(options: { profileId: string; limit?: number; offset?: number }): Promise<GuardSimulationRecord[]> {

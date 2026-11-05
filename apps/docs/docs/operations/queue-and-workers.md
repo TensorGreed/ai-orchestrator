@@ -11,6 +11,10 @@ the defaults below are the behaviour of earlier releases.
 Everything on this page beyond the defaults is opt-in. Leases, the reaper, pools and cross-instance cancel apply only
 in **cluster mode**: `DB_TYPE=postgres` and `HA_ENABLED=true` (see [Postgres](./postgres#running-more-than-one-instance)).
 
+The body's optional `triggerType` is a label for the run. Names the API sets itself (`eval`, `eval_judge`, `replay`,
+`replay_live`, `mcp_replay`, `approval_resume`, `error`) are refused with `400`, so a queued run is always metered and
+shown on the Security page as the traffic it is.
+
 Fleet layouts, sizing, the connection budget and the load-test harness are in [Scaling](./scaling.md).
 
 ## Roles

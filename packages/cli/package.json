@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The l2m command line: MCP checks for CI, snapshot mock servers, snapshot export and offline audit bundle verification.",
+  "description": "The l2m command line: MCP checks for CI, snapshot mock servers, snapshot export, offline audit bundle verification and content rules benchmarks.",
   "main": "src/main.ts",
   "bin": {
     "l2m": "bin/l2m.mjs"
@@ -13,8 +13,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ai-orchestrator/guard-sdk": "workspace:*",
     "@ai-orchestrator/mcp-sdk": "workspace:*",
     "@ai-orchestrator/shared": "workspace:*",
+    "@ai-orchestrator/workflow-engine": "workspace:*",
     "tsx": "^4.20.5"
   }
 }

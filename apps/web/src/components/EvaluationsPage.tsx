@@ -163,6 +163,8 @@ function describeScorer(scorer: EvalScorerSpec): string {
       return scorer.mode ? `tool_sequence · ${scorer.mode}` : "tool_sequence";
     case "llm_judge":
       return `llm_judge · ${scorer.mode ?? "absolute"}`;
+    case "guard_outcome":
+      return `guard_outcome · ${scorer.expect}${scorer.channel ? ` on ${scorer.channel}` : ""}${scorer.detector ? ` by ${scorer.detector}` : ""}`;
     default:
       return scorer.type;
   }

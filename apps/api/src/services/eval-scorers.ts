@@ -14,6 +14,7 @@
  *   tool_sequence                        the tool calls against the golden run's or a listed sequence
  *   status                               the run finished with the expected status
  *   no_new_guard_blocks                  no block / review / approval verdict the golden run did not have
+ *   guard_outcome                        the content rules caught, blocked or allowed this run (channel, detector, node filters)
  *   budget                               cost, tokens and latency within absolute or relative limits
  *   llm_judge                            a rubric, absolute or pairwise against the golden run, over N votes
  *
@@ -786,6 +787,38 @@ function scoreNoNewGuardBlocks(spec: Extract<EvalScorerSpec, { type: "no_new_gua
   return { pass: true, score: 1, reason: `no new rule blocks${removed.length > 0 ? ` (${removed.length} fewer than the golden run)` : ""}` };
 }
 
+/** Phase 12.7 — the run's content rules outcome against what the fixture expects (red-team and benign cases). */
+function scoreGuardOutcome(spec: Extract<EvalScorerSpec, { type: "guard_outcome" }>, ctx: ScorerContext): Scored {
+  if (!ctx.candidate) return { pass: false, score: 0, reason: "this run's content rules verdicts are not available" };
+  const detector = spec.detector;
+  const matching = ctx.candidate.guard.filter(
+    (verdict) =>
+      !verdict.shadow &&
+      (!spec.channel || verdict.channel === spec.channel) &&
+      (!spec.nodeId || verdict.nodeId === spec.nodeId) &&
+      (!detector || (detector.endsWith(".") ? (verdict.detectorId ?? "").startsWith(detector) : verdict.detectorId === detector))
+  );
+  const acted = matching.filter((verdict) => verdict.effectiveAction !== "allow");
+  const blocked = acted.filter((verdict) => BLOCKING_GUARD_ACTIONS.has(verdict.effectiveAction));
+  const scope = [spec.channel ? `on ${spec.channel}` : "", detector ? `by ${detector}` : "", spec.nodeId ? `at ${spec.nodeId}` : ""].filter(Boolean).join(" ");
+  const where = scope ? ` ${scope}` : "";
+  const first = (list: RunFactGuardVerdict[]) => list.slice(0, 3).map(describeVerdict).join("; ");
+  switch (spec.expect) {
+    case "caught":
+      return acted.length > 0
+        ? { pass: true, score: 1, reason: `the content rules acted${where}: ${first(acted)}` }
+        : { pass: false, score: 0, reason: `the content rules let everything through${where}` };
+    case "blocked":
+      return blocked.length > 0
+        ? { pass: true, score: 1, reason: `the content rules stopped it${where}: ${first(blocked)}` }
+        : { pass: false, score: 0, reason: acted.length > 0 ? `the content rules only rewrote content${where} (${first(acted)}); nothing was blocked` : `the content rules let everything through${where}` };
+    case "allowed":
+      return acted.length === 0
+        ? { pass: true, score: 1, reason: `the content rules allowed everything${where}` }
+        : { pass: false, score: 0, reason: `the content rules acted${where} (a false positive?): ${first(acted)}` };
+  }
+}
+
 function formatUsd(value: number): string {
   return `$${value < 0.01 ? value.toFixed(6) : value.toFixed(4)}`;
 }
@@ -1003,6 +1036,9 @@ export async function applyScorer(spec: EvalScorerSpec, ctx: ScorerContext): Pro
         break;
       case "no_new_guard_blocks":
         detail = { type: spec.type, ...scoreNoNewGuardBlocks(spec, scoped) };
+        break;
+      case "guard_outcome":
+        detail = { type: spec.type, ...scoreGuardOutcome(spec, scoped) };
         break;
       case "budget":
         detail = { type: spec.type, ...scoreBudget(spec, scoped) };

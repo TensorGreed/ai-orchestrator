@@ -2465,6 +2465,36 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE mcp_clients DROP COLUMN IF EXISTS cert_fingerprints_json;
       ALTER TABLE mcp_clients DROP COLUMN IF EXISTS allowed_ips_json;
     `
+  },
+  {
+    version: 59,
+    description: "12.7 — content rules benchmarks (red-team corpus results per rule set version), and eval-run content rules events kept out of Security stats",
+    // `guard_benchmarks`: one row per stored benchmark of a saved rule set version (drafts are never stored); the report
+    // holds ids, counts and detector names, never corpus content. `guard_events.run_source`: 'eval' on verdicts recorded
+    // by eval runs and replay jobs, which the Security page leaves out by default (null on every other row and on older rows).
+    up: `
+      CREATE TABLE IF NOT EXISTS guard_benchmarks (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        profile_version INTEGER NOT NULL,
+        profile_hash TEXT NOT NULL,
+        corpus_hash TEXT NOT NULL,
+        suites_json TEXT NOT NULL DEFAULT '[]',
+        detection_rate DOUBLE PRECISION NOT NULL,
+        false_positive_rate DOUBLE PRECISION NOT NULL,
+        report_json TEXT NOT NULL,
+        created_by TEXT,
+        created_by_user_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_benchmarks_profile ON guard_benchmarks(profile_id, created_at DESC);
+      ALTER TABLE guard_events ADD COLUMN IF NOT EXISTS run_source TEXT;
+    `,
+    down: `
+      ALTER TABLE guard_events DROP COLUMN IF EXISTS run_source;
+      DROP INDEX IF EXISTS idx_guard_benchmarks_profile;
+      DROP TABLE IF EXISTS guard_benchmarks;
+    `
   }
 ];
 

@@ -134,6 +134,7 @@ Every scorer returns pass or fail, a score from 0 to 1 and a reason you can read
 | `no_new_guard_blocks` | No block, review or approval verdict the golden run did not have (shadow verdicts do not count) | `failOnRemoved`: also fail when a block the golden run had went away (a looser policy) |
 | `budget` | Cost, tokens and latency within limits | `maxCostUsd`, `maxTokens`, `maxLatencyMs`, and `maxCostIncreasePct`, `maxTokensIncreasePct`, `maxLatencyIncreasePct` against the golden run. A cost that cannot be priced fails a cost limit |
 | `llm_judge` | A model grades the output against a rubric | `rubric`, `mode: absolute \| pairwise`, `votes` (1–5), `threshold`, `path`, `providerId`, `model`, `secretRef` |
+| `guard_outcome` | The content rules caught, blocked or allowed the case, as expected | `expect: caught \| blocked \| allowed`, `channel`, `detector` (an id, or a prefix ending in `.`), `nodeId`. See [Content rules benchmark](./content-rules-benchmark.md#benchmarking-a-workflow-with-evals) |
 
 The scorers from earlier releases (`exact_match`, `contains`, `regex`, `context_precision`, `context_recall`, `faithfulness`, `answer_relevance`) work in replay jobs too.
 
@@ -157,7 +158,7 @@ The check is conservative but not complete: a repeated alternation whose branche
 
 Eval runs (`POST /api/eval/runs`) now run in the background on the same runner: the API answers `202 { run, runId }` and the run reports progress like a replay job. The old blocking answer (`200 { ok, runId, summary }`) is still available with `?wait=true` for one release; it carries a `Deprecation: true` header.
 
-An eval run runs every hand-written case of a dataset live against the workflow as saved now. It does not stub anything; for that, use a replay job. A golden run in the dataset is **skipped** by an eval run (golden runs run as replay jobs, without side effects), a golden set that holds only golden runs is refused with 400, and a golden set can only be run against its own workflow. An eval run stops at `EVAL_RUN_MAX_COST_USD` (see [Budgets](#budgets)). Replaying MCP answers from a cassette or a past eval run needs read access to the workflow that recorded them (404 otherwise, also for an eval run that does not exist), and they must be recorded for the same workflow (409 otherwise).
+An eval run runs every hand-written case of a dataset live against the workflow as saved now. `guardProfile: { profileId, version? }` adds a rule set to every case's run, after every rule set the run applies anyway (the project's enforced rule set, the workflow or project binding, the auto-applied default rule set) and before the deployment's destination rules. It never replaces one, so it can only tighten what applies. It does not stub anything; for that, use a replay job. A golden run in the dataset is **skipped** by an eval run (golden runs run as replay jobs, without side effects), a golden set that holds only golden runs is refused with 400, and a golden set can only be run against its own workflow. An eval run stops at `EVAL_RUN_MAX_COST_USD` (see [Budgets](#budgets)). Replaying MCP answers from a cassette or a past eval run needs read access to the workflow that recorded them (404 otherwise, also for an eval run that does not exist), and they must be recorded for the same workflow (409 otherwise).
 
 ## Access
 

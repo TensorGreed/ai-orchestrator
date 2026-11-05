@@ -141,6 +141,12 @@ export interface EvalRunRequest {
    * for each fixture.
    */
   replayMcp?: EvalMcpReplay;
+  /**
+   * Phase 12.7 — run every case under this rule set instead of the
+   * workflow's bindings (resolved and pinned by the route, like a replay
+   * job's override; enforced rule sets still apply).
+   */
+  guardProfile?: { profileId: string; version: number; hash: string };
 }
 
 export interface EvalMcpReplay {
@@ -167,6 +173,8 @@ export interface EvalWorkflowExecutor {
     triggeredBy: string;
     triggeredByUserId: string;
     mcp?: { record?: boolean; replay?: EvalMcpReplay };
+    /** Phase 12.7 — the eval run's rule set override. */
+    guardProfileOverride?: { profileId: string; version: number };
   }): Promise<{
     executionId?: string;
     output: unknown;
@@ -192,6 +200,14 @@ export interface EvalReplayCandidate {
   name?: string;
   /** The guard profile override as it will run (version pinned when the job is created). */
   guardProfile?: { profileId: string; version: number; hash: string } | null;
+}
+
+/** Phase 12.7 — the rule set override stored in an eval run's options. */
+function evalGuardProfileOf(options: unknown): { profileId: string; version: number; hash: string } | null {
+  const value = options && typeof options === "object" ? (options as Record<string, unknown>).guardProfile : undefined;
+  if (!value || typeof value !== "object") return null;
+  const { profileId, version, hash } = value as Record<string, unknown>;
+  return typeof profileId === "string" && typeof version === "number" && typeof hash === "string" ? { profileId, version, hash } : null;
 }
 
 /** Phase 15.3 — the default of REPLAY_JOB_MAX_EXECUTIONS. */
@@ -658,6 +674,7 @@ export class EvalService {
       triggeredBy: request.triggeredBy,
       triggeredByUserId: request.triggeredByUserId,
       scorers: request.scorers as Array<Record<string, unknown>> | undefined,
+      ...(request.guardProfile ? { options: { guardProfile: request.guardProfile } } : {}),
       progress: progress as unknown as Record<string, unknown>
     });
     const cases = fixtures.map((fixture) => this.caseSpec(fixture, request.scorers));
@@ -1627,7 +1644,8 @@ export class EvalService {
       triggeredByUserId: request.triggeredByUserId,
       ...(request.recordMcp || request.replayMcp
         ? { mcp: { ...(request.recordMcp ? { record: true } : {}), ...(request.replayMcp ? { replay: request.replayMcp } : {}) } }
-        : {})
+        : {}),
+      ...(request.guardProfile ? { guardProfileOverride: { profileId: request.guardProfile.profileId, version: request.guardProfile.version } } : {})
     });
     const modelCost = exec.facts?.totals.costUsd ?? null;
     const modelCostUnknown = modelCostIsUnknown(exec.facts);
@@ -2026,8 +2044,10 @@ export class EvalService {
       summary: (run.summary as unknown as EvalRunSummary | null) ?? null,
       progress: (run.progress as unknown as EvalRunProgress | null) ?? null,
       candidate: (run.candidate as unknown as ReplayJobCandidate | null) ?? null,
-      options: (run.options as unknown as ReplayJobOptions | null) ?? null,
-      error: run.error
+      // Phase 12.7 — an eval run's options hold only its rule set override.
+      options: run.kind === "eval" ? null : ((run.options as unknown as ReplayJobOptions | null) ?? null),
+      error: run.error,
+      ...(run.kind === "eval" && evalGuardProfileOf(run.options) ? { guardProfile: evalGuardProfileOf(run.options)! } : {})
     };
   }
 

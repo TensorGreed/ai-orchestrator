@@ -49,6 +49,11 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # The red-team corpus through the default rule set, offline (a few seconds):
+      # fails when any category drops below its measured floor.
+      - name: Content rules benchmark (default rule set)
+        run: node packages/cli/bin/l2m.mjs guard benchmark --builtin
+
       - name: Build
         run: pnpm build
 
