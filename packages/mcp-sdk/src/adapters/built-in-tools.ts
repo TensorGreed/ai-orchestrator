@@ -18,7 +18,7 @@ import { markL2mOwnToolAdapter } from "./own-adapters";
  * and Wolfram Alpha as MCP tools, served in this process.
  *
  * Every request goes through the injected `fetch`; the API hands it the
- * outbound URL guard (OUTBOUND_DENY_PRIVATE, OUTBOUND_ALLOWLIST, DNS
+ * outbound URL checks (OUTBOUND_DENY_PRIVATE, OUTBOUND_ALLOWLIST, DNS
  * pinning, redirect re-checks), so a SearXNG instance on a private host is
  * refused when private destinations are denied. Keys come from the node's
  * secret and are added to the request here, after the run's egress checks

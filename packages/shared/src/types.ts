@@ -971,7 +971,7 @@ export interface AgentRunRequest {
   toolOutputLimits?: AgentToolOutputLimits;
   bypassToolFiltering?: boolean;
   images?: ChatMessageImage[];
-  /** Phase 6.4 — offer the internal `think` tool (a scratchpad step; no policy, Guard or labels). Off unless set. */
+  /** Phase 6.4 — offer the internal `think` tool (a scratchpad step; no policy, content rules or labels). Off unless set. */
   thinkTool?: boolean;
 }
 

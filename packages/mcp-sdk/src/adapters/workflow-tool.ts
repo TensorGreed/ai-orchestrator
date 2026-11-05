@@ -20,7 +20,7 @@ import { markL2mOwnToolAdapter } from "./own-adapters";
  * child workflow in `connection`. Calls go to `context.runWorkflowTool`,
  * which runs the child in-process. Going through the MCP layer is what gives
  * a workflow tool tool policy (rules name `workflow:<id>` as their server),
- * the write gate, Guard checkpoints, telemetry and cassette record/replay:
+ * the write gate, content rule checkpoints, telemetry and cassette record/replay:
  * a replay answers the call from the recording and never runs the child.
  */
 

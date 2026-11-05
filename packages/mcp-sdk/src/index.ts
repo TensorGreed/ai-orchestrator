@@ -50,7 +50,7 @@ export interface DefaultMCPRegistryOptions {
   runtimeGuard?: McpRuntimeGuard;
   /**
    * Phase 6.4 — the built-in tools (Wikipedia, SearXNG, SerpAPI, Wolfram
-   * Alpha). The API passes its outbound-guarded fetch here; without one the
+   * Alpha). The API passes its fetch with the outbound URL checks here; without one the
    * runtime's fetch is used with no outbound policy.
    */
   builtInTools?: BuiltInToolsAdapterOptions;

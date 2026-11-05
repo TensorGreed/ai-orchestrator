@@ -4,7 +4,7 @@
  * Built-in tools (Wikipedia, SearXNG, SerpAPI, Wolfram Alpha) are served by
  * the in-process `l2m-tools` MCP adapter, so an MCP Tool node on an agent's
  * `tool` port uses them like any other MCP server: tool policy, the write
- * gate, Guard, data labels, runtime limits, telemetry and cassette replay all
+ * gate, content rules, data labels, runtime limits, telemetry and cassette replay all
  * apply. One node serves one provider; its `connection.provider` says which.
  *
  * Workflow tools (`workflow_tool` nodes) let an agent call another workflow.

@@ -5135,7 +5135,7 @@ async function executeNodeHandler(
       const embedder = checkedEmbedder(
         new AzureOpenAIEmbeddingAdapter({
           endpoint,
-          // The endpoint is node config, so it goes through the outbound guard (pinned).
+          // The endpoint is node config, so it goes through the outbound URL checks (pinned).
           fetcher: guardedRagFetch(dependencies),
           deployment,
           apiVersion:
@@ -5169,7 +5169,7 @@ async function executeNodeHandler(
       const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
       const vectorStoreId = typeof config.vectorStoreId === "string" ? config.vectorStoreId : "in-memory-vector-store";
       const vectorStoreConfig = toRecord(config.vectorStoreConfig);
-      // An endpoint or baseUrl set on the node (not a deployment env fallback) goes through the outbound guard.
+      // An endpoint or baseUrl set on the node (not a deployment env fallback) goes through the outbound URL checks.
       const nodeFetch = (key: "endpoint" | "baseUrl") =>
         typeof vectorStoreConfig[key] === "string" && String(vectorStoreConfig[key]).trim() ? guardedRagFetch(dependencies) : undefined;
       // The deployment's env key only ever goes to the deployment's own endpoint. When the node names its own
@@ -5584,7 +5584,7 @@ async function executeNodeHandler(
         config: themeConfig,
         // Phase 15.1 — a replay never lets a chart load data from a URL or file.
         offline: Boolean(dependencies.replayNodeHook),
-        // Live charts run every data/image URL through the outbound guard, and fetch over a pinned connection.
+        // Live charts run every data/image URL through the outbound URL checks, and fetch over a pinned connection.
         // Phase 16 — under destination rules each URL (and each redirect) is judged as egress before it is loaded.
         urlGuard: async (url: string) => {
           await assertOutboundUrlAllowed(url, dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver);

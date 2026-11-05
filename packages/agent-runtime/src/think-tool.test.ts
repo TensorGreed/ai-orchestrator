@@ -78,7 +78,7 @@ describe("Think tool", () => {
     expect(off.provider.requests[0]!.messages[0]!.content).not.toContain("`think` tool");
   });
 
-  it("records the thought in the trace as a thought, not a tool call, and skips the policy check and the guard", async () => {
+  it("records the thought in the trace as a thought, not a tool call, and skips the policy check and the content rules", async () => {
     const { state, events, invoked, checked, guarded } = await run(thinkThenRead, true);
     expect(state.stopReason).toBe("final_answer");
     expect(invoked).toEqual(["files__read"]);

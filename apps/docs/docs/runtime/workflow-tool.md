@@ -6,7 +6,7 @@ description: "Let an L2M agent call another workflow as one tool with the Workfl
 
 The **Workflow Tool** node turns another workflow into one tool an agent can call. Attach it to an Agent or Supervisor `Tool` port and pick the workflow. The child runs in the same run, in this process, with the agent's call as its input; its output is the tool result.
 
-Use it when a step is already a workflow (a lookup with retrieval and a guard, a ticket triage flow) and you want an agent to decide when to run it.
+Use it when a step is already a workflow (a lookup with retrieval and a content rule, a ticket triage flow) and you want an agent to decide when to run it.
 
 ## What the agent sees
 
@@ -36,14 +36,14 @@ A workflow tool is governed as the MCP server `workflow:<workflowId>`:
 - **Tool rules** naming server `workflow:<id>` deny it, ask for approval, or allow it, like any MCP tool. A denied workflow tool is hidden from the model.
 - **Write-tool approval.** A workflow tool counts as a write unless the child declares itself read-only: **Read-only workflow** on its Sub-Workflow Trigger or Expose as MCP Tool trigger, set by the child's own editors. A caller cannot mark it. So a workflow with write-tool approval on asks before each call to a child that has not declared it.
 - **Write controls reach the child.** The calling workflow's write-tool approval and its **No write tools** switch also apply inside the child's run, on top of the child's own settings; they only ever add checks. They also reach every workflow further down: a Workflow Tool inside the child, and an Execute Workflow node in the child or below it. A child declared read-only that still calls a write tool, at any depth, therefore meets the caller's approval there, and the call fails with a message saying it needs one.
-- **Guard** checks the call's arguments and result like any tool call, under the parent run's profiles; the child runs under them too.
+- **Content rules** check the call's arguments and result like any tool call, under the parent run's rule sets; the child runs under them too.
 - **Labels.** The labels of the agent's context at the call go to the child as its input labels, and the child's output labels come back on the result (on a failed run, the labels of what its failed step read, since the error can quote it). Untrusted content in the call therefore reaches the child's own tool rules.
 - **Telemetry and replay.** Each call writes an MCP tool call row (adapter `l2m-workflow`). A recorded run's cassette holds the call, so a replay answers it from the recording and never runs the child.
 - **Spend.** The child's model calls count in the run's usage and budget alerts, each priced by its own model.
 
 ## Across instances
 
-To call a workflow on another L2M instance, or to give it its own execution, budget and Guard stack, expose it through a toolset on the MCP gateway and add that endpoint as an HTTP MCP server. See [Expose a Workflow as an MCP Tool](./workflow-as-mcp-tool.md).
+To call a workflow on another L2M instance, or to give it its own execution, budget and applied rule sets, expose it through a toolset on the MCP gateway and add that endpoint as an HTTP MCP server. See [Expose a Workflow as an MCP Tool](./workflow-as-mcp-tool.md).
 
 ## Related
 

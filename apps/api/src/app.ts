@@ -1708,7 +1708,7 @@ export async function createApp(
     oauth: mcpOAuthService,
     sandbox: mcpSandboxLauncher,
     runtimeGuard: mcpRuntimeGuard,
-    // Phase 6.4 — built-in tools reach the outside only through the outbound URL guard.
+    // Phase 6.4 — built-in tools reach the outside only through the outbound URL checks.
     builtInTools: { fetch: (url, init) => guardedFetch(url, init, { config: outboundGuard, resolver: nodeDnsResolver }) },
     // Phase 10.8 — snapshot mock servers read accepted snapshots and cassettes from the store.
     snapshots: {

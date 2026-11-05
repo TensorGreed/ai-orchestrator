@@ -412,8 +412,8 @@ function createClarifyTool(): RuntimeInternalTool {
  * Phase 6.4 — the Think tool. Calling it changes nothing outside the run: the
  * note stays in the model's context and the trace. Like clarify it is
  * special-cased in the loop by name; `invoke` only answers a mis-routed call.
- * It skips tool policy, Guard and labels (the note is model output already
- * in context, and the final answer is guarded), the session tool cache and
+ * It skips tool policy, content rules and labels (the note is model output already
+ * in context, and the final answer is checked), the session tool cache and
  * MCP telemetry.
  */
 function createThinkTool(): RuntimeInternalTool {
@@ -891,7 +891,7 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
 
     // 12.2 — a message the model sees marked (spotlighted) maps to the text it was marked from. Memory saves that
     // text, so marks never reach storage and never nest when the next turn marks the same message again.
-    // Guard checks judge the unmarked text; a rewrite is marked again the same way.
+    // content rule checks judge the unmarked text; a rewrite is marked again the same way.
     const unmarkedContent = new WeakMap<ChatMessage, { raw: string; mark: (raw: string) => string }>();
     const markedCopy = (message: ChatMessage, raw: string, mark: (raw: string) => string): ChatMessage => {
       const marked = mark(raw);

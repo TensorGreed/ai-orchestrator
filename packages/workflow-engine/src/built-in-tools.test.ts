@@ -1,6 +1,6 @@
 /**
  * Phase 6.4 — built-in tools (the `l2m-tools` adapter) on an agent's tool port: calls go through the outbound URL
- * guard, results carry the untrusted_external label, and a taint rule asks for approval before a write that follows a
+ * checks, results carry the untrusted_external label, and a taint rule asks for approval before a write that follows a
  * search.
  */
 import { describe, expect, it } from "vitest";
@@ -121,7 +121,7 @@ const agentOutput = (result: Awaited<ReturnType<typeof executeWorkflow>>) =>
   result.nodeResults.filter((entry) => entry.nodeId === "agent").at(-1)?.output as AgentOutput | undefined;
 
 describe("built-in tools on an agent", () => {
-  it("searches Wikipedia through the outbound guard and attributes the call to the built-in adapter", async () => {
+  it("searches Wikipedia through the outbound URL checks and attributes the call to the built-in adapter", async () => {
     const fetched: string[] = [];
     const result = await executeWorkflow(
       { workflow: agentWorkflow({ provider: "wikipedia" }), webhookPayload: { user_prompt: "What is Rust?" } },

@@ -6083,7 +6083,7 @@ export function NodeInspector({
           <>
             <div className="cfg-tip">
               Attach this node to an Agent or Supervisor <code>Tool</code> port. The agent can then run the workflow below as
-              one tool, in this run, under the same tool rules, Guard and approvals as an MCP tool. Tool rules name it as server{" "}
+              one tool, in this run, under the same tool rules, content rules and approvals as an MCP tool. Tool rules name it as server{" "}
               <code>{workflowToolChildId ? `workflow:${workflowToolChildId}` : "workflow:<id>"}</code>.
             </div>
             <SelectField

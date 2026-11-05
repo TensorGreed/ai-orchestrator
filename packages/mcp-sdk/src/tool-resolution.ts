@@ -22,7 +22,7 @@ export interface ResolvedToolSet {
   invokeByExposedName: (toolName: string, args: Record<string, unknown>, call?: McpToolAccessCallContext) => Promise<unknown>;
   /**
    * Phase 6.4 — the one entry an exposed name stands for: the entry the call
-   * runs, so policy, the write gate, labels and Guard judge the same tool.
+   * runs, so policy, the write gate, labels and content rules judge the same tool.
    */
   lookup: (exposedName: string) => ResolvedMCPTool | undefined;
 }
