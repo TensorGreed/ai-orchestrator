@@ -347,8 +347,10 @@ describe("MCP tool policy routes", () => {
     expect((await post({ effect: "deny", workflowIds: ["wf-missing"] })).json().error).toMatch(/Workflow 'wf-missing' does not exist/);
     expect((await post({ effect: "deny", clientIds: ["mcpc_missing"] })).json().error).toMatch(/client 'mcpc_missing' does not exist/);
 
+    // Two updates can land in the same millisecond, so find this one by its hashes rather than by position.
     const audit = (await context.store.listAuditLogs({ eventType: "mcp_policy.updated", pageSize: 10 })).items;
-    expect(audit[0]!.metadata).toMatchObject({ hash: narrowed.hash, previousHash: rule.hash, mode: "enforce" });
+    const narrowedAudit = audit.find((entry) => (entry.metadata as { hash?: string }).hash === narrowed.hash);
+    expect(narrowedAudit?.metadata).toMatchObject({ hash: narrowed.hash, previousHash: rule.hash, mode: "enforce" });
   });
 
   it("audits an update that widens a rule's scope by emptying a principal list", async () => {
