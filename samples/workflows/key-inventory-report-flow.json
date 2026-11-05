@@ -3,8 +3,8 @@
   "workflowVersion": 1,
   "workflow": {
     "id": "wf-ciphertrust-key-inventory-report-flow",
-    "name": "CipherTrust — Key Inventory Report (PDF, branded)",
-    "description": "End-to-end report pipeline that demonstrates the full Phase 9-11 stack composed together. Layout (left to right): manual_trigger fans out two parallel branches. (A) Branding: text_input → web_browse (headless Chromium fetches a brand site) → prompt_template + llm_call + output_parser distill the page into a JSON brand kit (primary color, accent color, logo URL, font, tagline). (B) Keys: mcp_tool calls CipherTrust Manager `list_keys` → code_node (Python, stdlib-only) buckets the response by cloud / algorithm / age (<30d / 30-90d / 90-180d / 180-365d / >365d). The two branches merge into three chart nodes (Vega-Lite, server-side SVG) for keys-by-cloud (bar), keys-by-algorithm (donut), and key-aging (bar). A final prompt_template stitches the branding tokens + chart SVGs into one HTML body; pdf_output renders it via Chromium. Two things to wire before this works for real: (1) replace the `mcp_tool` connection block with your CipherTrust MCP server endpoint + secretRef, (2) set the `text_input` to your brand URL (defaults to https://thalesgroup.com). The token-efficient companion workflow (\"generate the same report as a Python script, no L2M\") can re-use the same `session_id` — the agent's session_tool_cache holds the CipherTrust `list_keys` response from this run so a follow-up prompt reads from cache instead of re-fetching.",
+    "name": "Key manager — Key Inventory Report (PDF, branded)",
+    "description": "End-to-end report pipeline that demonstrates the full Phase 9-11 stack composed together. Layout (left to right): manual_trigger fans out two parallel branches. (A) Branding: text_input → web_browse (headless Chromium fetches a brand site) → prompt_template + llm_call + output_parser distill the page into a JSON brand kit (primary color, accent color, logo URL, font, tagline). (B) Keys: mcp_tool calls the external key manager's `list_keys` → code_node (Python, stdlib-only) buckets the response by cloud / algorithm / age (<30d / 30-90d / 90-180d / 180-365d / >365d). The two branches merge into three chart nodes (Vega-Lite, server-side SVG) for keys-by-cloud (bar), keys-by-algorithm (donut), and key-aging (bar). A final prompt_template stitches the branding tokens + chart SVGs into one HTML body; pdf_output renders it via Chromium. Two things to wire before this works for real: (1) replace the `mcp_tool` connection block with your key manager's MCP server endpoint + secretRef, (2) set the `text_input` to your brand URL (defaults to https://example.com). The token-efficient companion workflow (\"generate the same report as a Python script, no L2M\") can re-use the same `session_id` — the agent's session_tool_cache holds the key manager's `list_keys` response from this run so a follow-up prompt reads from cache instead of re-fetching.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [
@@ -22,7 +22,7 @@
         "name": "Brand URL",
         "position": { "x": 360, "y": 120 },
         "config": {
-          "text": "https://thalesgroup.com"
+          "text": "https://example.com"
         }
       },
       {
@@ -84,7 +84,7 @@
       {
         "id": "mcp_list_keys",
         "type": "mcp_tool",
-        "name": "CipherTrust list_keys",
+        "name": "Key manager list_keys",
         "position": { "x": 360, "y": 520 },
         "config": {
           "serverId": "ciphertrust",
@@ -174,7 +174,7 @@
         "name": "Compose Branded HTML",
         "position": { "x": 1290, "y": 700 },
         "config": {
-          "template": "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<title>{{parsed.brand}} — Key Inventory Report</title>\n<style>\n  body { font-family: {{parsed.fontFamily}}, system-ui, sans-serif; margin: 32px; color: #0f172a; }\n  header { display: flex; align-items: center; gap: 16px; border-bottom: 3px solid {{parsed.primaryColor}}; padding-bottom: 12px; }\n  header img { height: 48px; }\n  h1 { color: {{parsed.primaryColor}}; margin: 0; font-size: 28px; }\n  h1 small { color: #64748b; font-weight: 400; font-size: 14px; display: block; margin-top: 4px; }\n  .tagline { color: #64748b; font-style: italic; margin: 4px 0 0; }\n  .summary { background: #f8fafc; border-left: 4px solid {{parsed.primaryColor}}; padding: 16px; margin: 24px 0; }\n  .summary .num { font-size: 32px; font-weight: 700; color: {{parsed.primaryColor}}; }\n  h2 { color: {{parsed.primaryColor}}; margin-top: 32px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }\n  .chart { padding: 12px 0; }\n  footer { margin-top: 48px; padding-top: 12px; border-top: 1px solid #e2e8f0; color: #94a3b8; font-size: 11px; }\n</style></head>\n<body>\n<header>\n  <img src=\"{{parsed.primaryLogoUrl}}\" alt=\"{{parsed.brand}}\">\n  <div>\n    <h1>Key Inventory Report<small>{{parsed.brand}} · CipherTrust Manager</small></h1>\n    <p class=\"tagline\">{{parsed.tagline}}</p>\n  </div>\n</header>\n\n<div class=\"summary\">\n  <div class=\"num\">{{totalKeys}}</div>\n  <div>keys under management as of {{generatedAt}}</div>\n</div>\n\n<h2>Keys by Cloud Provider</h2>\n<div class=\"chart\">{{cloudChart.svg}}</div>\n\n<h2>Keys by Algorithm</h2>\n<div class=\"chart\">{{algoChart.svg}}</div>\n\n<h2>Key Aging Distribution</h2>\n<div class=\"chart\">{{ageChart.svg}}</div>\n\n<footer>Generated by L2M from live CipherTrust Manager data. Source: CipherTrust list_keys MCP call. Branding extracted from {{user_prompt}}.</footer>\n</body></html>",
+          "template": "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<title>{{parsed.brand}} — Key Inventory Report</title>\n<style>\n  body { font-family: {{parsed.fontFamily}}, system-ui, sans-serif; margin: 32px; color: #0f172a; }\n  header { display: flex; align-items: center; gap: 16px; border-bottom: 3px solid {{parsed.primaryColor}}; padding-bottom: 12px; }\n  header img { height: 48px; }\n  h1 { color: {{parsed.primaryColor}}; margin: 0; font-size: 28px; }\n  h1 small { color: #64748b; font-weight: 400; font-size: 14px; display: block; margin-top: 4px; }\n  .tagline { color: #64748b; font-style: italic; margin: 4px 0 0; }\n  .summary { background: #f8fafc; border-left: 4px solid {{parsed.primaryColor}}; padding: 16px; margin: 24px 0; }\n  .summary .num { font-size: 32px; font-weight: 700; color: {{parsed.primaryColor}}; }\n  h2 { color: {{parsed.primaryColor}}; margin-top: 32px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }\n  .chart { padding: 12px 0; }\n  footer { margin-top: 48px; padding-top: 12px; border-top: 1px solid #e2e8f0; color: #94a3b8; font-size: 11px; }\n</style></head>\n<body>\n<header>\n  <img src=\"{{parsed.primaryLogoUrl}}\" alt=\"{{parsed.brand}}\">\n  <div>\n    <h1>Key Inventory Report<small>{{parsed.brand}} · Key manager</small></h1>\n    <p class=\"tagline\">{{parsed.tagline}}</p>\n  </div>\n</header>\n\n<div class=\"summary\">\n  <div class=\"num\">{{totalKeys}}</div>\n  <div>keys under management as of {{generatedAt}}</div>\n</div>\n\n<h2>Keys by Cloud Provider</h2>\n<div class=\"chart\">{{cloudChart.svg}}</div>\n\n<h2>Keys by Algorithm</h2>\n<div class=\"chart\">{{algoChart.svg}}</div>\n\n<h2>Key Aging Distribution</h2>\n<div class=\"chart\">{{ageChart.svg}}</div>\n\n<footer>Generated by L2M from live key manager data. Source: key manager list_keys MCP call. Branding extracted from {{user_prompt}}.</footer>\n</body></html>",
           "outputKey": "html"
         }
       },

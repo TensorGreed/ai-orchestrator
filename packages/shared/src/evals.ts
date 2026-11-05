@@ -292,7 +292,7 @@ export interface ReplayJobCandidate {
 }
 
 /** Phase 15.6 — why a guard policy simulation's replay job is never release proof. */
-export const GUARD_SIMULATION_RELEASE_REASON = "A guard policy simulation: it replays recent recordings under a guard profile that is not the workflow's, so it is never release proof.";
+export const GUARD_SIMULATION_RELEASE_REASON = "A rule set simulation: it replays recent recordings under a rule set that is not the workflow's, so it is never release proof.";
 
 /** Phase 15.6 — the dataset id a simulation's replay jobs carry (they replay recordings, not a golden set). */
 export function guardSimulationJobDatasetId(simulationId: string): string {
@@ -315,7 +315,7 @@ export function replayJobReleaseIneligibleReasons(
   if (candidate.kind === "inline") reasons.push("The candidate is a workflow file, not the draft or a saved version.");
   const overrides = candidate.overrides ?? null;
   if (overrides?.models && overrides.models.length > 0) reasons.push("Model overrides change the workflow under test.");
-  if (overrides?.guardProfile) reasons.push("A guard profile override replaced the workflow's guard bindings.");
+  if (overrides?.guardProfile) reasons.push("A rule set override replaced the workflow's rule set bindings.");
   if (overrides?.mcpServers && Object.keys(overrides.mcpServers).length > 0) reasons.push("Per-server MCP modes changed how MCP calls were answered.");
   if (overrides?.liveReadNodes && overrides.liveReadNodes.length > 0) reasons.push("Some nodes read live data instead of the recording.");
   if ((options.models ?? "live") !== "live") reasons.push('Model calls were answered from the model tape (models "replay"), so the models were not exercised.');

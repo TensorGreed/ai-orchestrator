@@ -1149,7 +1149,7 @@ export const FIND_SUBJECT_COVERED = [
   "Golden runs and captured runs (replay_recordings): input, node outputs, run facts, MCP cassette, model tape, memory seed, workflow snapshot, notes",
   "Golden-set cases (eval_fixtures): input and expected output, including hand-written cases and copied inputs",
   "Replay, replay-job, gate and eval results (eval_results): output, error and diff",
-  `Runs made from golden runs and cases (execution_history with trigger ${SUBJECT_EXECUTION_TRIGGERS.join(", ")}): input, output, node results, custom data, error; deleting one also deletes its tool-call, guard-event and usage rows`,
+  `Runs made from golden runs and cases (execution_history with trigger ${SUBJECT_EXECUTION_TRIGGERS.join(", ")}): input, output, node results, custom data, error; deleting one also deletes its tool-call, rule-event and usage rows`,
   `MCP cassettes recorded by those runs (mcp_cassettes with source ${SUBJECT_CASSETTE_SOURCES.join(", ")})`
 ];
 
@@ -1160,6 +1160,6 @@ export const FIND_SUBJECT_NOT_COVERED = [
   "Session memory, tool data and session artifacts (their own retention)",
   "Logs, metrics and log-streaming destinations (outside the database)",
   "Audit log (AUDIT_LOG_RETENTION_DAYS; it holds ids and counts, not values)",
-  "Guard events of production runs (masked evidence only) and the guard token vault",
+  "Rule events of production runs (masked evidence only) and the token vault",
   "Usage events of production runs, and eval run summaries (counts and costs)"
 ];

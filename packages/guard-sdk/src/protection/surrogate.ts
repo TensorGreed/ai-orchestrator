@@ -264,7 +264,7 @@ export interface SurrogateProviderOptions {
 export function createSurrogateProvider(options: SurrogateProviderOptions): ProtectionProvider {
   return {
     id: SURROGATE_PROVIDER_ID,
-    description: "Keyed, format-preserving surrogate that the DLP scan still detects as the same class (pseudonymisation).",
+    description: "Keyed, format-preserving surrogate that the data scan still detects as the same class (pseudonymisation).",
     deterministic: true,
     reversible: false,
     dataClasses: "*",

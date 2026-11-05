@@ -115,7 +115,7 @@ describe("judgeReleaseGate", () => {
     expect(text).toMatch(/Required scorer json_equal did not pass on 3 cases/);
     expect(text).toMatch(/Cost rose 66.7%/);
     expect(text).toMatch(/p95 latency rose 200%/);
-    expect(text).toMatch(/1 guard block/);
+    expect(text).toMatch(/1 rule block/);
   });
 
   it("needs a baseline rerun when a golden run is older than the gate allows (decision 3)", () => {
@@ -185,7 +185,7 @@ describe("gate settings", () => {
       "more regressions",
       "errors",
       "cost limit",
-      "guard blocks",
+      "rule blocks",
       "minimum number",
       "older golden runs",
       "strictly",

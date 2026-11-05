@@ -440,6 +440,6 @@ export function playwrightWebSocketGuard(
     const asHttp = url.replace(/^ws(s?):/i, "http$1:");
     const check = /^wss?:/i.test(url) ? await checkOutboundUrl(asHttp, config, resolver) : { ok: false };
     if (check.ok) ws.connectToServer();
-    else await ws.close({ code: 1008, reason: "Blocked by the outbound URL guard" });
+    else await ws.close({ code: 1008, reason: "Blocked by the outbound URL checks" });
   };
 }

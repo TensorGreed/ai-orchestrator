@@ -58,7 +58,7 @@ export const guardSimulationRequestSchema = z
   })
   .strict()
   .refine((value) => (value.document === undefined) !== (value.version === undefined), {
-    message: "Send either the profile document to simulate or a saved version, not both"
+    message: "Send either the rule set document to simulate or a saved version, not both"
   });
 export type GuardSimulationRequest = z.infer<typeof guardSimulationRequestSchema>;
 
@@ -226,7 +226,7 @@ export function guardSimulationSentence(summary: Omit<GuardSimulationSummary, "s
     .slice(0, 3)
     .map((entry) => `${entry.newlyBlocked} newly blocked going to ${entry.label}`);
   if (going.length > 0) extra.push(going.join(", "));
-  if (summary.diverged > 0) extra.push(`${plural(summary.diverged, "run", "runs")} diverged after the guard change`);
+  if (summary.diverged > 0) extra.push(`${plural(summary.diverged, "run", "runs")} diverged after the rule set change`);
   if (summary.notSimulated > 0) extra.push(`${plural(summary.notSimulated, "run", "runs")} could not be simulated`);
   return extra.length > 0 ? `${head} ${extra.join("; ")}.` : head;
 }

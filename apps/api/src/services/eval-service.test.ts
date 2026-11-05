@@ -703,12 +703,12 @@ describe("Phase 15.6: guard policy simulation jobs", () => {
 
     // The starter lost the right to simulate (demoted, or the profile became enforced): nothing replays.
     sides.length = 0;
-    denial = "This guard profile is enforced on a project";
+    denial = "This rule set is enforced on a project";
     const refused = await svc.enqueueSimulationJob({ ...base, simulationId: "gsim_2" }, actor);
     await svc.wait(refused.id);
     expect(sides).toHaveLength(0);
     const refusedResult = (await svc.getRun(refused.id))!.results[0]!;
     expect(refusedResult).toMatchObject({ status: "error", verdict: "not_simulated" });
-    expect(refusedResult.error).toMatch(/may no longer simulate this profile: This guard profile is enforced/);
+    expect(refusedResult.error).toMatch(/may no longer simulate this rule set: This rule set is enforced/);
   });
 });

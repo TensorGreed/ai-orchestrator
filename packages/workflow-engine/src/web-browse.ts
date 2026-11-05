@@ -6,7 +6,7 @@
  * extract structured page data the rest of the workflow can reason over:
  * rendered HTML, page text, screenshot, title, meta tags, links, and
  * images. The use case that motivated it (Phase 11+ scenario review) was
- * "extract the branding from thalesgroup.com" — but the same node covers
+ * "extract the branding from example.com" — but the same node covers
  * any "scrape X from a real-world site" prompt that plain `http_request`
  * can't handle because the page is a single-page app or hides content
  * behind client-side rendering.

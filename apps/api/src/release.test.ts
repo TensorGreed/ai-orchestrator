@@ -1357,7 +1357,7 @@ describe("a real replay job proves a release (M8)", () => {
     expect(refused.statusCode, refused.body).toBe(409);
     const reasons = refused.json<{ reasons: string[] }>().reasons.join(" ");
     expect(reasons).toMatch(/not eligible to prove a release/);
-    expect(reasons).toMatch(/A guard profile override replaced the workflow's guard bindings/);
+    expect(reasons).toMatch(/A rule set override replaced the workflow's rule set bindings/);
     expect(reasons).toMatch(/candidate overrides \(guardProfile\)/);
 
     // An eligible job (no override) that loosens the comparison: still refused, by the gate's own check.
@@ -1725,7 +1725,7 @@ describe("repeats and old jobs (M1, L2, L3)", () => {
     const slow = await reasons(await seed([100, 300, 100], [0, 0, 0]));
     expect(slow).toMatch(/p95 latency rose 200%/);
     expect(slow).not.toMatch(/repeats 1/);
-    expect(await reasons(await seed([100, 100, 100], [0, 0, 1]))).toMatch(/added 3 guard blocks/); // one attempt of each of the three cases
+    expect(await reasons(await seed([100, 100, 100], [0, 0, 1]))).toMatch(/added 3 rule blocks/); // one attempt of each of the three cases
     expect(await reasons(await seed([100, 120, 140], [0, 0, 0]))).toBe("");
   });
 

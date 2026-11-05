@@ -289,11 +289,11 @@ describe("replay repeats record latency and guard blocks per attempt", () => {
       expect(judgement.reasons.join()).toMatch(
         policy.maxP95LatencyIncreasePct !== undefined
           ? /checks latency limits per run, .* recorded latency for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove that limit/
-          : /checks guard limits per run, .* recorded guard verdicts for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove that limit/
+          : /checks content rule limits per run, .* recorded rule verdicts for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove that limit/
       );
     }
     const both = await judge(job, { maxP95LatencyIncreasePct: 50, noNewGuardBlocks: true }, legacy);
-    expect(both.judgement.reasons.join()).toMatch(/checks latency and guard limits per run, .* recorded them for only one repeat .*: run the gate again, or remove those limits/);
+    expect(both.judgement.reasons.join()).toMatch(/checks latency and content rule limits per run, .* recorded them for only one repeat .*: run the gate again, or remove those limits/);
     // A cost-only gate never needed them.
     expect((await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false }, legacy)).judgement.verdict).toBe("passed");
   });

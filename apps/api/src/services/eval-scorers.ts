@@ -752,7 +752,7 @@ function guardBlockKey(verdict: RunFactGuardVerdict): string {
 }
 
 function describeVerdict(verdict: RunFactGuardVerdict): string {
-  return `${verdict.effectiveAction} by ${verdict.detectorId ?? "guard"} on ${verdict.channel}${verdict.nodeId ? ` at ${verdict.nodeId}` : ""}`;
+  return `${verdict.effectiveAction} by ${verdict.detectorId ?? "content rules"} on ${verdict.channel}${verdict.nodeId ? ` at ${verdict.nodeId}` : ""}`;
 }
 
 /** Blocks in `from` beyond those in `against`, counted per key. */
@@ -770,7 +770,7 @@ function extraBlocks(from: RunFactGuardVerdict[], against: RunFactGuardVerdict[]
 }
 
 function scoreNoNewGuardBlocks(spec: Extract<EvalScorerSpec, { type: "no_new_guard_blocks" }>, ctx: ScorerContext): Scored {
-  if (!ctx.candidate) return { pass: false, score: 0, reason: "this run's guard verdicts are not available" };
+  if (!ctx.candidate) return { pass: false, score: 0, reason: "this run's rule verdicts are not available" };
   const blocks = (verdicts: RunFactGuardVerdict[]) => verdicts.filter((verdict) => !verdict.shadow && BLOCKING_GUARD_ACTIONS.has(verdict.effectiveAction));
   const after = blocks(ctx.candidate.guard);
   const before = ctx.baseline ? blocks(ctx.baseline.guard) : [];
@@ -778,12 +778,12 @@ function scoreNoNewGuardBlocks(spec: Extract<EvalScorerSpec, { type: "no_new_gua
   const removed = extraBlocks(before, after);
   const baselineNote = ctx.baseline ? "" : " (no golden run, so every block counts as new)";
   if (added.length > 0) {
-    return { pass: false, score: 0, reason: `${plural(added.length, "new guard block")}: ${added.slice(0, 3).map(describeVerdict).join("; ")}${added.length > 3 ? "; …" : ""}${baselineNote}` };
+    return { pass: false, score: 0, reason: `${plural(added.length, "new rule block")}: ${added.slice(0, 3).map(describeVerdict).join("; ")}${added.length > 3 ? "; …" : ""}${baselineNote}` };
   }
   if (spec.failOnRemoved && removed.length > 0) {
-    return { pass: false, score: 0, reason: `${plural(removed.length, "guard block")} the golden run had did not happen (a looser policy?): ${removed.slice(0, 3).map(describeVerdict).join("; ")}` };
+    return { pass: false, score: 0, reason: `${plural(removed.length, "rule block")} the golden run had did not happen (a looser policy?): ${removed.slice(0, 3).map(describeVerdict).join("; ")}` };
   }
-  return { pass: true, score: 1, reason: `no new guard blocks${removed.length > 0 ? ` (${removed.length} fewer than the golden run)` : ""}` };
+  return { pass: true, score: 1, reason: `no new rule blocks${removed.length > 0 ? ` (${removed.length} fewer than the golden run)` : ""}` };
 }
 
 function formatUsd(value: number): string {

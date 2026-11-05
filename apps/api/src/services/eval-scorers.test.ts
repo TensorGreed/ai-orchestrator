@@ -163,7 +163,7 @@ describe("no_new_guard_blocks", () => {
     expect((await run({ type: "no_new_guard_blocks" }, ctx({ baseline, candidate: facts({ guard: [block("pii"), block("x", "block", true), block("y", "allow")] }) }))).pass).toBe(true);
     const added = await run({ type: "no_new_guard_blocks" }, ctx({ baseline, candidate: facts({ guard: [block("pii"), block("injection", "review")] }) }));
     expect(added).toMatchObject({ pass: false, score: 0 });
-    expect(added.reason).toBe("1 new guard block: review by injection on prompt at agent");
+    expect(added.reason).toBe("1 new rule block: review by injection on prompt at agent");
   });
 
   it("optionally fails when a block went away", async () => {

@@ -4,7 +4,7 @@
   "workflow": {
     "id": "wf-report-with-charts-flow",
     "name": "Report with Charts (PDF)",
-    "description": "Set Node (sample data) -> 3x Chart nodes (Vega-Lite) -> Prompt Template (HTML report) -> PDF Output. Demonstrates the chart node — Vega-Lite specs render to SVG server-side, embed cleanly into HTML, and chain into pdf_output for a branded report. Drop-in pattern for the CipherTrust / keys-aging scenario: replace the inline data with an upstream MCP tool result.",
+    "description": "Set Node (sample data) -> 3x Chart nodes (Vega-Lite) -> Prompt Template (HTML report) -> PDF Output. Demonstrates the chart node — Vega-Lite specs render to SVG server-side, embed cleanly into HTML, and chain into pdf_output for a branded report. Drop-in pattern for the key inventory / keys-aging scenario: replace the inline data with an upstream MCP tool result.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [

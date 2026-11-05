@@ -81,7 +81,7 @@ const PLAIN_PATH = /^[A-Za-z][A-Za-z0-9_-]{0,31}(\.[A-Za-z][A-Za-z0-9_-]{0,31}){
  * records structured kinds only for runtime limits (`rejection`), so the rest is told apart by its text.
  */
 const NOT_SENT_ERROR =
-  /blocked by the guard|was blocked by policy|is blocked by policy|needs approval by policy|is missing required arguments|has been disabled due to repeated failures|does not exist\. Available tools|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|UND_ERR_CONNECT_TIMEOUT|Connect Timeout Error|getaddrinfo/i;
+  /blocked by (?:the guard|content rules)|was blocked by policy|is blocked by policy|needs approval by policy|is missing required arguments|has been disabled due to repeated failures|does not exist\. Available tools|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|UND_ERR_CONNECT_TIMEOUT|Connect Timeout Error|getaddrinfo/i;
 
 export class McpPolicySuggestionError extends Error {
   constructor(

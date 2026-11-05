@@ -13610,7 +13610,7 @@ export class SqliteStore implements Store {
     createdBy: string | null;
   }, options: { unlessLatestHash?: boolean } = {}): Promise<GuardProfileVersionRecord> {
     const current = this.getGuardProfileSync(input.profileId);
-    if (!current) throw new Error(`Guard profile '${input.profileId}' not found`);
+    if (!current) throw new Error(`Rule set '${input.profileId}' not found`);
     if (options.unlessLatestHash) {
       const latest = this.getGuardProfileVersionSync(input.profileId, current.latestVersion);
       if (latest && latest.hash === input.hash) return latest;

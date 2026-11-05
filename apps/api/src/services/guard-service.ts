@@ -20,6 +20,7 @@
 import { randomUUID } from "node:crypto";
 import {
   createDefaultGuardProfile,
+  guardProfileDisplayName,
   diffGuardProfiles,
   guardProfileSchema,
   hashGuardProfile,
@@ -219,12 +220,12 @@ export class GuardService {
     if (!existing) {
       await this.store.insertGuardProfile({
         id: GUARD_BUILTIN_PROFILE_ID,
-        name: shipped.name,
+        name: guardProfileDisplayName(GUARD_BUILTIN_PROFILE_ID, shipped.name),
         description: shipped.description ?? null,
         builtIn: true,
         document,
         hash,
-        note: "Built-in default profile",
+        note: "Built-in default rule set",
         createdBy: null
       }, { ifAbsent: true });
       return;
@@ -232,11 +233,11 @@ export class GuardService {
     if (existing.latestHash !== hash) {
       await this.store.addGuardProfileVersion({
         profileId: GUARD_BUILTIN_PROFILE_ID,
-        name: shipped.name,
+        name: guardProfileDisplayName(GUARD_BUILTIN_PROFILE_ID, shipped.name),
         description: shipped.description ?? null,
         document,
         hash,
-        note: "Built-in default profile updated",
+        note: "Built-in default rule set updated",
         createdBy: null
       }, { unlessLatestHash: true });
     }
@@ -251,7 +252,7 @@ export class GuardService {
     const result = guardProfileSchema.safeParse(candidate);
     if (!result.success) {
       throw new GuardValidationError(
-        "Invalid guard profile",
+        "Invalid rule set",
         result.error.issues.map((issue) => ({ path: issue.path.map(String).join(".") || "(root)", message: issue.message }))
       );
     }
@@ -264,7 +265,7 @@ export class GuardService {
         if (RAW_KEY_OPTION.test(option)) {
           issues.push({
             path: `protection.dataClasses.${dataClass}.options.${option}`,
-            message: "Keys cannot be written into a profile; store the key as a secret and set keyId to its id"
+            message: "Keys cannot be written into a rule set; store the key as a secret and set keyId to its id"
           });
         }
         if (option === "keyId") {
@@ -289,7 +290,7 @@ export class GuardService {
         }
       }
     }
-    if (issues.length > 0) throw new GuardValidationError("Invalid guard profile", issues);
+    if (issues.length > 0) throw new GuardValidationError("Invalid rule set", issues);
     return result.data;
   }
 
@@ -316,16 +317,16 @@ export class GuardService {
   async createProfile(input: { id?: string; document: Record<string, unknown>; note?: string }, actorId: string | null, options: { reserved?: boolean } = {}): Promise<GuardProfileSummary> {
     const id = input.id ?? (typeof input.document.id === "string" ? input.document.id : undefined);
     if (!id || !/^[a-z0-9][a-z0-9_-]{1,62}$/.test(id)) {
-      throw new GuardValidationError("Invalid guard profile", [{ path: "id", message: "Use 2–63 lowercase letters, digits, dashes or underscores" }]);
+      throw new GuardValidationError("Invalid rule set", [{ path: "id", message: "Use 2–63 lowercase letters, digits, dashes or underscores" }]);
     }
     // Phase 16 — reserved ids: the deployment's destination rules (made on the Security page) and the Preview impact pseudo profile.
     if (!options.reserved && RESERVED_GUARD_PROFILE_IDS.has(id)) {
-      throw new GuardValidationError("Invalid guard profile", [
+      throw new GuardValidationError("Invalid rule set", [
         { path: "id", message: `'${id}' is reserved for the deployment's destination rules; set those up under Security → Data destinations` }
       ]);
     }
     if (id === GUARD_BUILTIN_PROFILE_ID || await this.store.getGuardProfile(id)) {
-      throw new GuardConflictError(`A guard profile with id '${id}' already exists`);
+      throw new GuardConflictError(`A rule set with id '${id}' already exists`);
     }
     const profile = await this.validateDocument(input.document, id);
     const record = await this.store.insertGuardProfile({
@@ -343,7 +344,7 @@ export class GuardService {
   /** Appends a version. An unchanged document (same hash) returns the latest version without adding one. */
   async updateProfile(id: string, input: { document: Record<string, unknown>; note?: string }, actorId: string | null): Promise<{ version: GuardProfileVersionView; changed: boolean }> {
     const record = await this.requireProfile(id);
-    if (record.builtIn) throw new GuardConflictError("The built-in profile is read-only; duplicate it to change it");
+    if (record.builtIn) throw new GuardConflictError("The built-in rule set is read-only; duplicate it to change it");
     const profile = await this.validateDocument(input.document, id);
     const hash = hashGuardProfile(profile);
     if (hash === record.latestHash) {
@@ -363,14 +364,14 @@ export class GuardService {
 
   async deleteProfile(id: string): Promise<void> {
     const record = await this.requireProfile(id);
-    if (record.builtIn) throw new GuardConflictError("The built-in profile cannot be deleted");
+    if (record.builtIn) throw new GuardConflictError("The built-in rule set cannot be deleted");
     const bindings = await filterAsync(
       (await this.store.listGuardBindingsForProfile(id)).filter((binding) => binding.mode !== "inherit"),
       async (binding) => await this.bindingInForce(binding)
     );
     if (bindings.length > 0) {
       const where = bindings.map((binding) => `${binding.scope} '${binding.scopeId}'`).join(", ");
-      throw new GuardConflictError(`The profile is bound to ${where}; change those bindings first`);
+      throw new GuardConflictError(`The rule set is bound to ${where}; change those bindings first`);
     }
     await this.store.deleteGuardProfile(id);
   }
@@ -386,15 +387,15 @@ export class GuardService {
   async exportProfile(id: string, version?: number): Promise<{ fileName: string; body: string; version: number; hash: string } | null> {
     const record = await this.store.getGuardProfileVersion(id, version);
     if (!record) return null;
-    const profile = guardProfileSchema.parse(record.document);
-    return { fileName: `guard-profile-${id}-v${record.version}.json`, body: serializeGuardProfile(profile), version: record.version, hash: record.hash };
+    const profile = guardProfileSchema.parse(displayedDocument(record.profileId, record.document));
+    return { fileName: `rule-set-${id}-v${record.version}.json`, body: serializeGuardProfile(profile), version: record.version, hash: record.hash };
   }
 
   /** Creates the profile, or appends a version when it exists. The document's `id` names the profile. */
   async importProfile(input: { document: Record<string, unknown>; note?: string }, actorId: string | null): Promise<{ profile: GuardProfileSummary; created: boolean; changed: boolean }> {
     const id = typeof input.document.id === "string" ? input.document.id : "";
     if (RESERVED_GUARD_PROFILE_IDS.has(id)) {
-      throw new GuardValidationError("Invalid guard profile", [
+      throw new GuardValidationError("Invalid rule set", [
         { path: "id", message: `'${id}' is reserved for the deployment's destination rules; set those up under Security → Data destinations` }
       ]);
     }
@@ -420,15 +421,15 @@ export class GuardService {
 
   async setBinding(scope: GuardBindingScope, scopeId: string, input: { mode: GuardBindingMode; profileId?: string | null }, actorId: string | null): Promise<GuardBindingRecord> {
     if (scope !== "project" && input.mode === "enforced") {
-      throw new GuardValidationError("Invalid binding", [{ path: "mode", message: "Only a project can enforce a profile" }]);
+      throw new GuardValidationError("Invalid binding", [{ path: "mode", message: "Only a project can enforce a rule set" }]);
     }
     // 12.6 — the deployment's destination rules already apply wherever a gateway profile applies; never bound by name.
     if ((scope === "toolset" || scope === "mcp_client") && input.profileId === GUARD_DESTINATION_RULES_PROFILE_ID) {
-      throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: "The deployment's destination rules apply on their own; pick another profile" }]);
+      throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: "The deployment's destination rules apply on their own; pick another rule set" }]);
     }
     const profileId = input.mode === "inherit" ? null : input.profileId ?? null;
     if (profileId && !await this.store.getGuardProfile(profileId)) {
-      throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: `Guard profile '${profileId}' does not exist` }]);
+      throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: `Rule set '${profileId}' does not exist` }]);
     }
     return await this.store.setGuardBinding({ scope, scopeId, mode: input.mode, profileId, updatedBy: actorId });
   }
@@ -488,7 +489,7 @@ export class GuardService {
       if (this.parsedProfiles.size >= PARSED_PROFILE_CACHE_SIZE) this.parsedProfiles.delete(this.parsedProfiles.keys().next().value!);
       this.parsedProfiles.set(cacheKey, profile);
     }
-    return { profileId, version: record.version, hash: record.hash, name: profileRecord.name, profile };
+    return { profileId, version: record.version, hash: record.hash, name: guardProfileDisplayName(profileId, profileRecord.name), profile };
   }
 
   /**
@@ -521,11 +522,11 @@ export class GuardService {
   /** Phase 15.3 — why a guard profile override cannot run, or null when it can. */
   async profileOverrideProblem(override: { profileId: string; version?: number }): Promise<string | null> {
     const record = await this.store.getGuardProfile(override.profileId);
-    if (!record) return `Guard profile ${override.profileId} was not found.`;
+    if (!record) return `Rule set ${override.profileId} was not found.`;
     if (!await this.loadProfile(override.profileId, override.version)) {
       return override.version !== undefined
-        ? `Version ${override.version} of guard profile ${override.profileId} was not found.`
-        : `Guard profile ${override.profileId} has no usable version.`;
+        ? `Version ${override.version} of rule set ${override.profileId} was not found.`
+        : `Rule set ${override.profileId} has no usable version.`;
     }
     return null;
   }
@@ -548,7 +549,7 @@ export class GuardService {
       return {
         ok: false,
         forbidden: true,
-        problem: "The deployment's destination rules always apply to replays and release-gate cases; only an admin can choose them as the guard profile under test."
+        problem: "The deployment's destination rules always apply to replays and release-gate cases; only an admin can choose them as the rule set under test."
       };
     }
     const problem = await this.profileOverrideProblem(override);
@@ -566,7 +567,7 @@ export class GuardService {
         const where = bound.map((entry) => `the ${entry!.level} binding (${entry!.mode})`).join(" and ");
         return {
           ok: false,
-          problem: `Guard profile ${resolved.profileId} version ${resolved.version} is older than version ${current.version}, which ${where} applies to this workflow now. Only an admin can replay under an older version of a bound profile.`
+          problem: `Rule set ${resolved.profileId} version ${resolved.version} is older than version ${current.version}, which ${where} applies to this workflow now. Only an admin can replay under an older version of a bound rule set.`
         };
       }
     }
@@ -626,7 +627,7 @@ export class GuardService {
       const profile = await this.loadProfile(ref.profileId, ref.version);
       if (!profile) {
         throw new GuardNotFoundError(
-          `Guard profile '${ref.profileId}' version ${ref.version}, which the MCP gateway applied to this run, no longer exists; the run cannot be checked without it.`
+          `Rule set '${ref.profileId}' version ${ref.version}, which the MCP gateway applied to this run, no longer exists; the run cannot be checked without it.`
         );
       }
       loaded.push(profile);
@@ -732,7 +733,7 @@ export class GuardService {
   /** The resolution for a candidate profile: the project's enforced floor (unless it is the same profile), then the candidate. */
   private async resolveOverride(override: NonNullable<GuardRunContext["profileOverride"]>, projectId: string): Promise<GuardRunResolution> {
     const candidate = await this.loadProfile(override.profileId, override.version);
-    if (!candidate) throw new GuardNotFoundError(await this.profileOverrideProblem(override) ?? `Guard profile '${override.profileId}' not found`);
+    if (!candidate) throw new GuardNotFoundError(await this.profileOverrideProblem(override) ?? `Rule set '${override.profileId}' not found`);
     const project = await this.getBinding("project", projectId);
     const enforcedRaw = project.mode === "enforced" && project.profileId ? await this.loadProfile(project.profileId) : undefined;
     const enforced = enforcedRaw && enforcedRaw.profileId !== candidate.profileId ? enforcedRaw : undefined;
@@ -779,7 +780,7 @@ export class GuardService {
   }
 
   private static substituteProfile(substitute: GuardProfileSubstitute): ResolvedGuardProfile {
-    return { profileId: substitute.profileId, version: substitute.version, hash: substitute.hash, name: substitute.name, profile: substitute.profile };
+    return { profileId: substitute.profileId, version: substitute.version, hash: substitute.hash, name: guardProfileDisplayName(substitute.profileId, substitute.name), profile: substitute.profile };
   }
 
   /**
@@ -792,11 +793,11 @@ export class GuardService {
     await this.requireProfile(profileId);
     if ("document" in source) {
       const profile = await this.validateDocument(source.document, profileId);
-      return { profileId, version: 0, hash: hashGuardProfile(profile), name: profile.name, profile, inline: true };
+      return { profileId, version: 0, hash: hashGuardProfile(profile), name: guardProfileDisplayName(profileId, profile.name), profile, inline: true };
     }
     const loaded = await this.loadProfile(profileId, source.version);
-    if (!loaded) throw new GuardNotFoundError(`Version ${source.version} of guard profile '${profileId}' was not found`);
-    return { profileId, version: loaded.version, hash: loaded.hash, name: loaded.profile.name, profile: loaded.profile, inline: false };
+    if (!loaded) throw new GuardNotFoundError(`Version ${source.version} of rule set '${profileId}' was not found`);
+    return { profileId, version: loaded.version, hash: loaded.hash, name: guardProfileDisplayName(profileId, loaded.profile.name), profile: loaded.profile, inline: false };
   }
 
   resolutionView(resolution: GuardRunResolution): GuardResolutionView {
@@ -1009,7 +1010,7 @@ export class GuardService {
 
   private async requireProfile(id: string): Promise<GuardProfileRecord> {
     const record = await this.store.getGuardProfile(id);
-    if (!record) throw new GuardNotFoundError(`Guard profile '${id}' not found`);
+    if (!record) throw new GuardNotFoundError(`Rule set '${id}' not found`);
     return record;
   }
 
@@ -1020,7 +1021,7 @@ export class GuardService {
   private async summaryOf(record: GuardProfileRecord): Promise<GuardProfileSummary> {
     return {
       id: record.id,
-      name: record.name,
+      name: guardProfileDisplayName(record.id, record.name),
       ...(record.description ? { description: record.description } : {}),
       builtIn: record.builtIn,
       ...((await this.store.listGuardBindingsForProfile(record.id)).some((binding) => binding.scope === "project" && binding.mode === "enforced") ? { enforced: true } : {}),
@@ -1037,12 +1038,23 @@ export class GuardService {
       profileId: record.profileId,
       version: record.version,
       hash: record.hash,
-      document: record.document,
+      document: displayedDocument(record.profileId, record.document),
       author: record.createdBy,
       note: record.note,
       createdAt: record.createdAt
     };
   }
+}
+
+/**
+ * The document as users see it. The built-in's stored name is part of its
+ * pinned hash, so only the copy handed out (version views, diffs, exports)
+ * carries the display name; the stored version and its hash are unchanged.
+ */
+function displayedDocument(profileId: string, document: Record<string, unknown>): Record<string, unknown> {
+  if (typeof document.name !== "string") return document;
+  const name = guardProfileDisplayName(profileId, document.name);
+  return name === document.name ? document : { ...document, name };
 }
 
 export class GuardNotFoundError extends Error {

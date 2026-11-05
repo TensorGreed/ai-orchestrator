@@ -103,7 +103,7 @@ export type GuardBindingMode = z.output<typeof guardBindingModeSchema>;
 
 const requireProfileForMode = (value: { mode: string; profileId?: string | null }, ctx: z.RefinementCtx) => {
   if (value.mode !== "inherit" && !value.profileId) {
-    ctx.addIssue({ code: "custom", path: ["profileId"], message: `Mode '${value.mode}' needs a profile` });
+    ctx.addIssue({ code: "custom", path: ["profileId"], message: `Mode '${value.mode}' needs a rule set` });
   }
 };
 

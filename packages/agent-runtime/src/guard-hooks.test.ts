@@ -86,7 +86,7 @@ describe("agent guard hooks", () => {
     const state = await run();
     expect(invoked).toHaveLength(0);
     expect(state.stopReason).toBe("final_answer");
-    expect(state.steps[0]!.toolResults[0]!.error).toMatch(/blocked by the guard: path traversal/);
+    expect(state.steps[0]!.toolResults[0]!.error).toMatch(/blocked by content rules: path traversal/);
     const toolMessage = provider.calls[1]!.find((message) => message.role === "tool");
     expect(JSON.parse(toolMessage!.content)).toMatchObject({ ok: false });
     expect(toolMessage!.content).toContain("path traversal");
@@ -100,7 +100,7 @@ describe("agent guard hooks", () => {
     const state = await run({ text: injected });
     const toolMessage = provider.calls[1]!.find((message) => message.role === "tool")!;
     expect(toolMessage.content).not.toContain("ignore your previous instructions");
-    expect(toolMessage.content).toContain("withheld by the guard");
+    expect(toolMessage.content).toContain("withheld by content rules");
     expect(JSON.stringify(state.steps)).not.toContain("ignore your previous instructions");
   });
 
@@ -206,7 +206,7 @@ describe("agent guard hooks on failed tool calls", () => {
     expect(String(resultCheck.content)).toContain("IGNORE PREVIOUS INSTRUCTIONS");
     const toolMessage = provider.calls[1]!.find((message) => message.role === "tool")!.content;
     expect(toolMessage).not.toContain("IGNORE PREVIOUS INSTRUCTIONS");
-    expect(toolMessage).toContain("withheld by the guard");
+    expect(toolMessage).toContain("withheld by content rules");
     expect(toolMessage.startsWith("<<<DATA>>>")).toBe(true);
     // The session cache keeps the rewritten arguments, never the raw ones, and the guarded error.
     expect(saved[0]!.args).toEqual({ path: "[REDACTED]" });
@@ -223,6 +223,6 @@ describe("agent guard hooks on failed tool calls", () => {
     const { provider, invoked, run } = failing((check) => (check.channel === "tool_arguments" ? { outcome: "rewrite", content: "[REDACTED]" } : { outcome: "allow" }));
     await run();
     expect(invoked).toEqual([]);
-    expect(provider.calls[1]!.find((message) => message.role === "tool")!.content).toContain("was blocked by the guard");
+    expect(provider.calls[1]!.find((message) => message.role === "tool")!.content).toContain("was blocked by content rules");
   });
 });

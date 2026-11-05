@@ -232,6 +232,28 @@ describe("guard profiles", () => {
     expect((await call(context, "DELETE", "/api/guard/profiles/by-admin", builder.cookie)).statusCode).toBe(200);
   });
 
+  it("shows the built-in as \"Default rule set\" while its hashed document keeps its stored name", async () => {
+    const context = await createTestContext();
+    const viewer = await login(context, "viewer");
+    // A database seeded by an older build holds the stored document name on the profile row too.
+    await testSql(context.store).run("UPDATE guard_profiles SET name = ? WHERE id = ?", "Default guard profile", "default");
+    const listed = (await call(context, "GET", "/api/guard/profiles", viewer.cookie)).json<{ profiles: GuardProfileSummary[] }>().profiles;
+    expect(listed.find((profile) => profile.id === "default")?.name).toBe("Default rule set");
+    const detail = (await call(context, "GET", "/api/guard/profiles/default", viewer.cookie)).json<{ profile: GuardProfileSummary; latest: { document: { name: string } } }>();
+    expect(detail.profile.name).toBe("Default rule set");
+    const effective = (await call(context, "GET", "/api/guard/effective?projectId=default", viewer.cookie)).json<{ effective: GuardResolutionView }>().effective;
+    expect(effective.stack.find((entry) => entry.profileId === "default")?.name).toBe("Default rule set");
+    expect(detail.latest.document.name).toBe("Default rule set");
+    const versions = (await call(context, "GET", "/api/guard/profiles/default/versions", viewer.cookie)).json<{ versions: Array<{ document: { name: string } }> }>().versions;
+    expect(versions.every((version) => version.document.name === "Default rule set")).toBe(true);
+    // The export shows the display name too; the hash header still names the stored, pinned version.
+    const exported = await call(context, "GET", "/api/guard/profiles/default/export", viewer.cookie);
+    expect(exported.headers["content-disposition"]).toContain("rule-set-default-v1.json");
+    expect(JSON.parse(exported.body).name).toBe("Default rule set");
+    expect(exported.body).not.toContain("guard profile");
+    expect(exported.headers["x-guard-profile-hash"]).toBe(listed.find((profile) => profile.id === "default")?.hash);
+  });
+
   it("returns field-level errors from the guard-sdk schema and refuses inline keys", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
@@ -280,7 +302,7 @@ describe("guard profiles", () => {
     expect(diff.changes).toEqual(expect.arrayContaining([expect.objectContaining({ path: "channels.prompt.actions.email.action", kind: "changed" }), expect.objectContaining({ path: "name" })]));
 
     const exported = await call(context, "GET", "/api/guard/profiles/support/export?version=1", builder.cookie);
-    expect(exported.headers["content-disposition"]).toContain("guard-profile-support-v1.json");
+    expect(exported.headers["content-disposition"]).toContain("rule-set-support-v1.json");
     expect(exported.headers["x-guard-profile-hash"]).toBe(versions[1]!.hash);
     const imported = await call(context, "POST", "/api/guard/profiles/import", builder.cookie, { text: exported.body });
     expect(imported.statusCode).toBe(200);

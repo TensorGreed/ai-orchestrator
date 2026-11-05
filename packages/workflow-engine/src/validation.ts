@@ -1132,13 +1132,13 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (sourceNode.type !== "guard") {
         issues.push({
           code: "invalid_protection_source",
-          message: "The protection port is only valid on a Guard node.",
+          message: "The protection port is only valid on a Content Rules node.",
           edgeId: edge.id
         });
       } else if (targetNode.type !== "guard_protection") {
         issues.push({
           code: "invalid_protection_attachment",
-          message: "Guard protection attachment must target a Protection Provider node.",
+          message: "A protection attachment must target a Protection Provider node.",
           edgeId: edge.id
         });
       }
@@ -1193,7 +1193,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     if (edge.sourceHandle === "guard" && targetNode.type !== "guard") {
       issues.push({
         code: "invalid_guard_attachment",
-        message: "Agent guard attachment must target a Guard node.",
+        message: "An agent's content rules attachment must target a Content Rules node.",
         edgeId: edge.id
       });
     }
@@ -1260,7 +1260,7 @@ function validateGuardPlacement(workflow: Workflow): WorkflowValidationIssue[] {
   }
   for (const [agentId, targets] of guardPortTargets) {
     if (targets.length > 1) {
-      issues.push({ code: "multiple_guard_attachments", message: "An agent takes at most one Guard node on its guard port.", nodeId: agentId });
+      issues.push({ code: "multiple_guard_attachments", message: "An agent takes at most one Content Rules node on its content rules port.", nodeId: agentId });
     }
   }
   const portGuards = new Set([...guardPortTargets.values()].flat());
@@ -1269,7 +1269,7 @@ function validateGuardPlacement(workflow: Workflow): WorkflowValidationIssue[] {
       const parsed = guardNodeConfigSchema.safeParse(node.config ?? {});
       if (!parsed.success) {
         for (const issue of parsed.error.issues) {
-          issues.push({ code: "invalid_guard_config", message: `Guard ${issue.path.join(".") || "config"}: ${issue.message}`, nodeId: node.id });
+          issues.push({ code: "invalid_guard_config", message: `Content Rules ${issue.path.join(".") || "config"}: ${issue.message}`, nodeId: node.id });
         }
       } else if (parsed.data.profileOverride) {
         try {
@@ -1285,7 +1285,7 @@ function validateGuardPlacement(workflow: Workflow): WorkflowValidationIssue[] {
         if (onDag) {
           issues.push({
             code: "guard_port_on_dag",
-            message: "A Guard node on an agent's guard port cannot also sit on DAG edges. Use a second Guard node for the DAG.",
+            message: "A Content Rules node on an agent's content rules port cannot also sit on DAG edges. Use a second Content Rules node for the DAG.",
             nodeId: node.id
           });
         }

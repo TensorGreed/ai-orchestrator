@@ -5,6 +5,7 @@ import {
   applyProtectionBindings,
   canaryInstruction,
   createDefaultGuardProfile,
+  guardProfileDisplayName,
   createDefaultGuardRegistry,
   createDefaultProtectionRegistry,
   createSurrogateProvider,
@@ -281,7 +282,7 @@ export function resolveGuardRun(guard: GuardRuntimeDependencies): Promise<GuardR
 
 export function builtInGuardProfile(): ResolvedGuardProfile {
   const profile = createDefaultGuardProfile();
-  return { profileId: GUARD_BUILTIN_PROFILE_ID, version: 1, hash: hashGuardProfile(profile), name: profile.name, profile };
+  return { profileId: GUARD_BUILTIN_PROFILE_ID, version: 1, hash: hashGuardProfile(profile), name: guardProfileDisplayName(GUARD_BUILTIN_PROFILE_ID, profile.name), profile };
 }
 
 export function guardProfileRef(resolved: ResolvedGuardProfile): GuardProfileRef {
@@ -302,7 +303,7 @@ async function loadProfileOrThrow(guard: GuardRuntimeDependencies, profileId: st
     return (await guard.loadProfile(profileId)) ?? builtInGuardProfile();
   }
   const loaded = await guard.loadProfile(profileId);
-  if (!loaded) throw new Error(`Guard profile '${profileId}' does not exist. Pick a stored profile on the Guard node.`);
+  if (!loaded) throw new Error(`Rule set '${profileId}' does not exist. Pick a stored rule set on the Content Rules node.`);
   return loaded;
 }
 
@@ -333,7 +334,7 @@ export function protectionBindingsFromNodes(nodes: WorkflowNode[]): ProtectionBi
 export function parseGuardNodeConfig(node: WorkflowNode): GuardNodeConfig {
   const parsed = guardNodeConfigSchema.safeParse(node.config ?? {});
   if (!parsed.success) {
-    throw new Error(`Guard '${node.name}' is misconfigured: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
+    throw new Error(`Content Rules node '${node.name}' is misconfigured: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
   }
   return parsed.data;
 }
@@ -592,7 +593,7 @@ export async function createAgentGuardSession(input: {
     if (needsApproval(result.action)) {
       const key = guardApprovalKey(scope.nodeId, channel, result, tool?.toolName);
       if (!approvals.has(key)) {
-        const message = `Guard ${result.action === "review" ? "review" : "approval"} needed on ${channel.replace("_", " ")}${tool ? ` (${tool.toolName})` : ""}: ${describeGuardVerdict(result)}`;
+        const message = `Content rules ${result.action === "review" ? "review" : "approval"} needed on ${channel.replace("_", " ")}${tool ? ` (${tool.toolName})` : ""}: ${describeGuardVerdict(result)}`;
         pendingApproval = {
           message,
           timeoutMinutes: handoffTimeoutMinutes,

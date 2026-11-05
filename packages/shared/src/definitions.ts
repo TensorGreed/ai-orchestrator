@@ -1310,10 +1310,10 @@ const baseNodeDefinitions: NodeDefinition[] = [
   },
   {
     type: "guard",
-    label: "Guard",
+    label: "Content Rules",
     category: "Utility",
     description:
-      "Checks content with a guard profile and routes it to pass, blocked or review instead of failing the run. Attached to an agent's guard port, it guards the agent loop.",
+      "Checks content against a rule set and routes it to pass, blocked or review instead of failing the run. Attached to an agent's content rules port, it checks the agent loop.",
     configSchema: {
       type: "object",
       properties: {
@@ -1339,7 +1339,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     label: "Protection Provider",
     category: "Utility",
     description:
-      "Tokenises, encrypts, hashes or masks sensitive data for a guard. Attach it to a guard node's protection port; keys come from the secret store.",
+      "Tokenises, encrypts, hashes or masks sensitive data for a Content Rules node. Attach it to a Content Rules node's protection port; keys come from the secret store.",
     configSchema: {
       type: "object",
       properties: {

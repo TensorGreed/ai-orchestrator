@@ -192,7 +192,7 @@ function blockingProblem(replay: SimulatedReplay): string | null {
   return null;
 }
 
-export const GUARD_SIMULATION_STALE_REASON = "Not simulated: the recording is stale (replayed under the current profiles, it no longer follows its recorded answers: the workflow changed, the profiles in force now rewrite its content, or a protect token is not deterministic)";
+export const GUARD_SIMULATION_STALE_REASON = "Not simulated: the recording is stale (replayed under the current rule sets, it no longer follows its recorded answers: the workflow changed, the rule sets in force now rewrite its content, or a protect token is not deterministic)";
 
 /**
  * One case of a simulation, from its two replays.
@@ -242,7 +242,7 @@ export async function simulateCase(input: {
   if (divergedAt) {
     if (guardChanged || input.profileChanged !== false) return { ...base, outcome: "diverged", divergedAt: { ...divergedAt, message: await scrub(divergedAt.message) }, counts, checkpoints };
     return await notSimulated(
-      "Not simulated: the replay needed an answer this recording does not have, but the simulated profile is the current one and no guard checkpoint changed, so the difference is not the guard's."
+      "Not simulated: the replay needed an answer this recording does not have, but the simulated rule set is the current one and no rule checkpoint changed, so the content rules did not cause the difference."
     );
   }
   const problem = blockingProblem(input.candidate.replay);

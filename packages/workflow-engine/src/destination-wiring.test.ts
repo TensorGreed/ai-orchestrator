@@ -231,7 +231,7 @@ describe("zero config", () => {
     const result = await executeWorkflow({ workflow: httpWorkflow(`${base}/plain`), executionId: "z3", webhookPayload: { user_prompt: `card ${CARD}` } }, deps({ guard: harness.guard }));
     expect(result.status).toBe("error");
     expect(received.length).toBe(before);
-    expect(resultOf(result, "http")?.error ?? "").toContain("was blocked by the guard");
+    expect(resultOf(result, "http")?.error ?? "").toContain("was blocked by content rules");
     expect(harness.calls.resolveRun).toBeGreaterThan(0);
   });
 });
@@ -244,7 +244,7 @@ describe("egress checkpoint", () => {
     expect(result.status).toBe("error");
     expect(received.length).toBe(before);
     const error = resultOf(result, "http")?.error ?? "";
-    expect(error).toContain("was blocked by the guard");
+    expect(error).toContain("was blocked by content rules");
     expect(error).toContain("Data of class card_number may go no further than private network");
     expect(error).toContain("Test server (public)");
     expect(error).not.toContain("4111");
@@ -332,7 +332,7 @@ describe("egress checkpoint", () => {
 
   it("in a replay the check runs before the stub: nothing is sent, nothing pauses", async () => {
     const stubHook = (target: { type: string }) => (target.type === "http_request" ? { kind: "output" as const, output: { status: 200, body: "recorded" } } : null);
-    for (const [profile, words] of [["block", "was blocked by the guard"], ["approval", "would wait for approval"]] as const) {
+    for (const [profile, words] of [["block", "was blocked by content rules"], ["approval", "would wait for approval"]] as const) {
       const harness = guardDeps([profile], { rows: PUBLIC_LOCALHOST });
       const before = received.length;
       const result = await executeWorkflow(
@@ -512,7 +512,7 @@ describe("RAG senders", () => {
         deps({ guard: harness.guard })
       );
       expect(result.status, embedder).toBe("error");
-      expect(resultOf(result, "rag")?.error, embedder).toContain("was blocked by the guard");
+      expect(resultOf(result, "rag")?.error, embedder).toContain("was blocked by content rules");
       expect(received.length).toBe(before);
       expect(harness.events.find((event) => event.channel === "egress")?.verdict.destination?.kind).toBe("connector");
     }
@@ -552,7 +552,7 @@ describe("RAG senders", () => {
       deps({ guard: embed.guard })
     );
     expect(embedded.status).toBe("error");
-    expect(resultOf(embedded, "rag")?.error).toContain("was blocked by the guard");
+    expect(resultOf(embedded, "rag")?.error).toContain("was blocked by content rules");
     expect(received.length).toBe(before);
 
     const rerank = guardDeps(["block"]);
@@ -602,7 +602,7 @@ describe("what leaves, as it reads", () => {
     );
     const result = await executeWorkflow({ workflow: wf, executionId: "res-1", webhookPayload: { user_prompt: CARD } }, deps({ guard: harness.guard }));
     expect(result.status).toBe("error");
-    expect(resultOf(result, "tool")?.error).toContain("was blocked by the guard");
+    expect(resultOf(result, "tool")?.error).toContain("was blocked by content rules");
   });
 });
 

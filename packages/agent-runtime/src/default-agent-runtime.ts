@@ -1551,7 +1551,7 @@ ${effectiveSystemPrompt}`;
                   decision.outcome === "rewrite" && (!decision.content || typeof decision.content !== "object" || Array.isArray(decision.content));
                 if (decision.outcome === "block" || unusableRewrite) {
                   const reason = decision.outcome === "block" ? decision.message : "the rewritten arguments are not an object";
-                  const errorMsg = `Tool call '${call.name}' was blocked by the guard: ${reason}. Do not retry it with the same arguments.`;
+                  const errorMsg = `Tool call '${call.name}' was blocked by content rules: ${reason}. Do not retry it with the same arguments.`;
                   reportToolEnd("blocked", errorMsg);
                   toolResults.push({ toolCallId: call.id, toolName: call.name, output: null, error: errorMsg });
                   messages.push({ role: "tool", content: serializeToolMessage(false, errorMsg, toolOutputLimits), toolCallId: call.id, name: call.name });
@@ -1596,7 +1596,7 @@ ${effectiveSystemPrompt}`;
                 });
                 if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_result", iteration, decision.message);
                 if (decision.outcome === "block") {
-                  guardNotice = `The result of '${call.name}' was withheld by the guard: ${decision.message}. Continue without it.`;
+                  guardNotice = `The result of '${call.name}' was withheld by content rules: ${decision.message}. Continue without it.`;
                   output = null;
                 } else if (decision.outcome === "rewrite") {
                   output = decision.content;
@@ -1675,7 +1675,7 @@ ${effectiveSystemPrompt}`;
                   tool: guardedTool
                 });
                 if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_result", iteration, decision.message);
-                if (decision.outcome === "block") guardedError = `The error from '${call.name}' was withheld by the guard: ${decision.message}.`;
+                if (decision.outcome === "block") guardedError = `The error from '${call.name}' was withheld by content rules: ${decision.message}.`;
                 else if (decision.outcome === "rewrite") guardedError = typeof decision.content === "string" ? decision.content : JSON.stringify(decision.content);
               }
               const toolError = createToolErrorResult(call, guardedError);

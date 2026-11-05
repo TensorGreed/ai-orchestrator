@@ -145,7 +145,7 @@ export async function executeGuardNodeStep(input: {
     const approvedSummary = summarize(result, "pass", config, resolution.source);
     const rejectedSummary = summarize(result, "blocked", config, resolution.source);
     throw new ApprovalHandoffSignal({
-      message: config.approvalMessage?.trim() || `Guard '${input.node.name}' needs approval: ${describeGuardVerdict(result)}`,
+      message: config.approvalMessage?.trim() || `Content Rules node '${input.node.name}' needs approval: ${describeGuardVerdict(result)}`,
       timeoutMinutes: config.timeoutMinutes,
       handoff: {
         kind: "route",

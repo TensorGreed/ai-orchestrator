@@ -119,7 +119,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const enforcedBy = (await store.listGuardBindingsForProfile(profileId)).filter((binding) => binding.scope === "project" && binding.mode === "enforced");
     if (enforcedBy.length === 0) return null;
     reply.code(403);
-    return { error: "This guard profile is enforced on a project; only an admin can change it" };
+    return { error: "This rule set is enforced on a project; only an admin can change it" };
   };
 
   const forbidden = (reply: FastifyReply) => {
@@ -146,7 +146,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const parsed = guardProfileCreateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
-      return { error: "Invalid guard profile", issues: zodIssues(parsed.error.issues) };
+      return { error: "Invalid rule set", issues: zodIssues(parsed.error.issues) };
     }
     const createId = parsed.data.id ?? (typeof parsed.data.document.id === "string" ? parsed.data.document.id : "");
     const refusedCreate = createId ? await refuseEnforcedEdit(user, reply, createId) : null;
@@ -171,12 +171,12 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
         document = JSON.parse(body.text);
       } catch {
         reply.code(400);
-        return { error: "Invalid guard profile", issues: [{ path: "text", message: "Not valid JSON" }] };
+        return { error: "Invalid rule set", issues: [{ path: "text", message: "Not valid JSON" }] };
       }
     }
     if (!document || typeof document !== "object" || Array.isArray(document)) {
       reply.code(400);
-      return { error: "Invalid guard profile", issues: [{ path: "document", message: "Expected a profile document object" }] };
+      return { error: "Invalid rule set", issues: [{ path: "document", message: "Expected a rule set document object" }] };
     }
     const importId = typeof (document as Record<string, unknown>).id === "string" ? ((document as Record<string, unknown>).id as string) : "";
     const refused = importId ? await refuseEnforcedEdit(user, reply, importId) : null;
@@ -204,7 +204,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const found = await guard.getProfile(request.params.id);
     if (!found) {
       reply.code(404);
-      return { error: "Guard profile not found" };
+      return { error: "Rule set not found" };
     }
     const bindings = await filterAsync(await store.listGuardBindingsForProfile(request.params.id), async (binding) => {
       if (binding.mode === "inherit") return false;
@@ -221,7 +221,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const parsed = guardProfileUpdateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
-      return { error: "Invalid guard profile", issues: zodIssues(parsed.error.issues) };
+      return { error: "Invalid rule set", issues: zodIssues(parsed.error.issues) };
     }
     const refused = await refuseEnforcedEdit(user, reply, request.params.id);
     if (refused) return refused;
@@ -347,7 +347,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     if (!user) return;
     if (!await store.getGuardProfile(request.params.id)) {
       reply.code(404);
-      return { error: "Guard profile not found" };
+      return { error: "Rule set not found" };
     }
     return { versions: await guard.listVersions(request.params.id) };
   });
@@ -358,7 +358,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const version = await guard.getVersion(request.params.id, Number(request.params.version));
     if (!version) {
       reply.code(404);
-      return { error: "Guard profile version not found" };
+      return { error: "Rule set version not found" };
     }
     return { version };
   });
@@ -375,7 +375,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const diff = await guard.diff(request.params.id, from, to);
     if (!diff) {
       reply.code(404);
-      return { error: "Guard profile version not found" };
+      return { error: "Rule set version not found" };
     }
     return diff;
   });
@@ -387,7 +387,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const exported = await guard.exportProfile(request.params.id, Number.isInteger(version) ? version : undefined);
     if (!exported) {
       reply.code(404);
-      return { error: "Guard profile not found" };
+      return { error: "Rule set not found" };
     }
     reply.header("content-type", "application/json; charset=utf-8");
     reply.header("content-disposition", `attachment; filename="${exported.fileName}"`);
@@ -455,8 +455,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       return {
         error:
           current.mode === "enforced"
-            ? "This project's guard profile is enforced by an admin; only an admin can change it"
-            : "Only an admin can enforce a guard profile"
+            ? "This project's rule set is enforced by an admin; only an admin can change it"
+            : "Only an admin can enforce a rule set"
       };
     }
     try {
@@ -513,7 +513,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const body = request.body && typeof request.body === "object" ? (request.body as Record<string, unknown>) : {};
     if (body.mode === "enforced") {
       reply.code(400);
-      return { error: "Invalid binding", issues: [{ path: "mode", message: "Only a project can enforce a profile; set it on the project" }] };
+      return { error: "Invalid binding", issues: [{ path: "mode", message: "Only a project can enforce a rule set; set it on the project" }] };
     }
     const parsed = guardWorkflowBindingInputSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -566,7 +566,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
     if (record.mode === "enforced") {
       reply.code(400);
-      return { error: { error: "Invalid binding", issues: [{ path: "mode", message: "Only a project can enforce a profile; a toolset or client overrides" }] } };
+      return { error: { error: "Invalid binding", issues: [{ path: "mode", message: "Only a project can enforce a rule set; a toolset or client overrides" }] } };
     }
     const parsed = guardGatewayBindingInputSchema.safeParse(body);
     if (!parsed.success) {

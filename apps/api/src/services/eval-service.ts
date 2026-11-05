@@ -1691,7 +1691,7 @@ export class EvalService {
     const actor = await replay.actorFor(job.actorUserId, job.actorEmail, workflowId, "workflow:read");
     if (!actor) return await skip(`The user who started this simulation (${job.actorEmail}) can no longer read this workflow.`);
     const denied = await simulation.canRun(actor);
-    if (denied) return await skip(`The user who started this simulation (${job.actorEmail}) may no longer simulate this profile: ${denied}`);
+    if (denied) return await skip(`The user who started this simulation (${job.actorEmail}) may no longer simulate this rule set: ${denied}`);
 
     const candidate = { workflow: job.candidate.workflow, kind: job.candidate.kind, version: job.candidate.version };
     const request = { mcpMode: "strict" as const };

@@ -637,7 +637,7 @@ describe("replay candidates: review fixes", () => {
     expect(guarded.candidate!.overrides!.guardProfile).toEqual({ profileId: "default", version: latest!.version });
     expect(guarded.candidate!.guardProfile).toEqual({ profileId: "default", version: latest!.version, hash: latest!.hash });
     expect(guarded.candidate!.releaseEligible).toBe(false);
-    expect(guarded.candidate!.releaseIneligibleReasons!.join(" ")).toMatch(/guard profile/);
+    expect(guarded.candidate!.releaseIneligibleReasons!.join(" ")).toMatch(/rule set override/);
     // Stored on the job, not only in the response.
     const stored = (await context.store.getEvalRun(guarded.id))!.candidate as { releaseEligible?: boolean; guardProfile?: { version: number } };
     expect(stored).toMatchObject({ releaseEligible: false, guardProfile: { version: latest!.version } });
