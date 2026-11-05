@@ -67,7 +67,7 @@ export class GuardSimulationBusyError extends Error {
     super(
       simulationId === "starting"
         ? "Another simulation is starting. Wait a moment, then start yours."
-        : `A guard policy simulation is already running (${simulationId}). Wait for it to finish, then start yours.`
+        : `A rule set simulation is already running (${simulationId}). Wait for it to finish, then start yours.`
     );
     this.name = "GuardSimulationBusyError";
   }
@@ -124,12 +124,12 @@ export class GuardSimulationService {
       return { status: 403, error: "The deployment's destination rules apply to every workflow; only an admin can simulate changes to them" };
     }
     const profile = await store.getGuardProfile(profileId);
-    if (!profile) return { status: 404, error: "Guard profile not found" };
+    if (!profile) return { status: 404, error: "Rule set not found" };
     if (user.role === "admin") return null;
-    if (user.role !== "builder") return { status: 403, error: "Only admins and builders can simulate guard profile changes" };
-    if (profile.builtIn) return { status: 403, error: "The built-in profile is read-only; only an admin can simulate changes to it. Duplicate it to simulate your own." };
+    if (user.role !== "builder") return { status: 403, error: "Only admins and builders can simulate rule set changes" };
+    if (profile.builtIn) return { status: 403, error: "The built-in rule set is read-only; only an admin can simulate changes to it. Duplicate it to simulate your own." };
     const enforced = (await store.listGuardBindingsForProfile(profileId)).some((binding) => binding.scope === "project" && binding.mode === "enforced");
-    if (enforced) return { status: 403, error: "This guard profile is enforced on a project; only an admin can change or simulate it" };
+    if (enforced) return { status: 403, error: "This rule set is enforced on a project; only an admin can change or simulate it" };
     return null;
   }
 
@@ -157,9 +157,9 @@ export class GuardSimulationService {
       const recordings = [...byWorkflow.values()].reduce((sum, ids) => sum + ids.length, 0);
       const emptyReason =
         scope.length === 0
-          ? "No workflow you can read uses this profile yet: bind it to a project or workflow, or name it on a guard node."
+          ? "No workflow you can read uses this rule set yet: bind it to a project or workflow, or name it on a Content Rules node."
           : recordings === 0
-            ? "None of the workflows that use this profile has a recorded run yet. Save runs as golden runs (or capture production runs) to simulate on them."
+            ? "None of the workflows that use this rule set has a recorded run yet. Save runs as golden runs (or capture production runs) to simulate on them."
             : null;
 
       await this.insertSimulation({
@@ -238,7 +238,7 @@ export class GuardSimulationService {
       const recordings = [...byWorkflow.values()].reduce((sum, ids) => sum + ids.length, 0);
       const emptyReason =
         scope.length === 0
-          ? "No workflow has destination rules yet: add the starter rule on the Security page, or add rules to a guard profile."
+          ? "No workflow has destination rules yet: add the starter rule on the Security page, or add rules to a rule set."
           : recordings === 0
             ? "None of the workflows with destination rules has a recorded run yet. Save runs as golden runs (or capture production runs) to preview on them."
             : null;
@@ -482,7 +482,7 @@ export class GuardSimulationService {
     const done = Promise.all(jobIds.map((jobId) => this.options.evals.wait(jobId)))
       .then(async () => await this.finalize(id))
       .catch(async (error) => {
-        this.options.logger?.warn("Guard simulation could not finish", { id, error: error instanceof Error ? error.message : String(error) });
+        this.options.logger?.warn("Rule set simulation could not finish", { id, error: error instanceof Error ? error.message : String(error) });
         await this.options.store.updateGuardSimulation({ id, status: "failed", error: "The simulation stopped on an internal error.", finishedAt: this.now(), onlyFrom: ["running"] });
       })
       .finally(() => this.pending.delete(id));

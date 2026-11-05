@@ -143,7 +143,7 @@ a workflow can make it:
 
 - run any OS command as the API user;
 - open network connections to anything the host can reach. The
-  [outbound URL guard](./outbound-url-guard.md) does not apply to it;
+  [outbound URL checks](./outbound-url-checks.md) do not apply to it;
 - read any file the API user can read, including the SQLite database and a
   `.env` file;
 - **read the API's own environment on Linux** through

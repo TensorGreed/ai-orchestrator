@@ -53,7 +53,7 @@ that project call Anthropic: the deployment list still refuses the call.
 - For **OpenAI compatible** the model name is the node's model field, whatever
   endpoint the node points at. To limit which endpoints model traffic may
   reach, use [data destinations](../product/data-labels-and-destinations.md) and
-  the [outbound URL guard](./outbound-url-guard.md) as well.
+  the [outbound URL checks](./outbound-url-checks.md) as well.
 
 ## What is covered
 

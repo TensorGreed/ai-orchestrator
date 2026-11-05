@@ -32,7 +32,7 @@ does not block the site: it deploys without `/demo/` and the run shows a warning
   storage blocked the demo still works for the page's lifetime. **Reset demo** in the banner restores
   the fixtures.
 - **Runs** replay the recorded event stream (node activity, run tape, tool calls, tokens, cost,
-  guard verdicts) at a readable pace, but only for the recorded run's own input and graph:
+  rule verdicts) at a readable pace, but only for the recorded run's own input and graph:
   - the run input (the `user_prompt` of an editor, chat or webhook run) must equal the recorded one
     after trimming and collapsing whitespace, and so must the `system_prompt` (the studio's default
     one, which the recorder sends as the studio does);
@@ -52,7 +52,7 @@ does not block the site: it deploys without `/demo/` and the run shows a warning
 - **Recorded writes** (the replay diff of the gated workflow's draft against a golden run, the
   blocked publish of its v4) are kept with the request and the graph they were made against, and
   answer only that request on that graph; anything else gets the typed refusal.
-- **Governance pages** show recorded data: Runs, Security (guard verdicts, data destinations),
+- **Governance pages** show recorded data: Runs, Security (rule verdicts, data destinations),
   Approvals (approve and reject work on demo data and persist; the demo says that on a real
   deployment the paused run would now resume), Evaluations (golden sets, replay jobs, release
   gates), the release gate and golden-run replay diff on "FAQ answerer (release gated)", and the
@@ -60,7 +60,7 @@ does not block the site: it deploys without `/demo/` and the run shows a warning
   tools" server (calls, failures, p50/p95 latency, tokens and cost per tool) in every telemetry
   window the pages offer (24h, 7d, 30d). A window with no recording gets the typed error, never
   another window's numbers.
-- Links that point straight at the API (audit, cassette and guard-profile exports) show "Not
+- Links that point straight at the API (audit, cassette and rule set exports) show "Not
   available in the demo" instead of the static host's 404.
 - Recorded timestamps are moved forward to the visit, so approvals are not expired and the
   last-14-days views have data.
@@ -80,11 +80,11 @@ no model is called, no MCP server is reached, no code runs.
 
 1. starts "Demo tools", a small streamable-HTTP MCP server on 127.0.0.1 (knowledge-base lookup and
    calculator, with fixed per-call delays), registers and probes it through the HTTP MCP adapter,
-   and seeds the sample workflows that run without cloud accounts, their templates, a guard
-   profile and four data destinations;
+   and seeds the sample workflows that run without cloud accounts, their templates, a rule
+   set and four data destinations;
 2. runs, over the real streaming endpoint, the basic flow and MCP quickstart (built-in echo
    provider and the mock MCP adapter), an MCP agent with tools and memory, a supervisor with two
-   workers, a guard block and three approval pauses (started by a second user so the demo user may
+   workers, a content rule block and three approval pauses (started by a second user so the demo user may
    decide them), with a scripted OpenAI-style model on 127.0.0.1, so no key is needed. The agents'
    MCP Tool nodes pick the registered "Demo tools" server, so their calls land in its telemetry:
    the support agent's first calculator expression is refused and retried, and the second

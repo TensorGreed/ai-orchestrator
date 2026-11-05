@@ -292,7 +292,7 @@ describe("guard policy simulation", () => {
     expect(model.calls).toHaveLength(2);
     expect(masked.summary).toMatchObject({ runs: 2, diverged: 2, runsNowMasked: 2 });
     expect(masked.summary!.sentence).toContain("2 now masked");
-    expect(masked.summary!.sentence).toContain("2 runs diverged after the guard change");
+    expect(masked.summary!.sentence).toContain("2 runs diverged after the rule set change");
     const entry = masked.workflows![0]!.cases[0]!;
     expect(entry.outcome).toBe("diverged");
     expect(entry.divergedAt).toMatchObject({ step: 1, kind: "model" });
@@ -314,7 +314,7 @@ describe("guard policy simulation", () => {
       guardProfile: { profileId: "sim-guard", version: 0 },
       simulation: { id: simulation.id, profileId: "sim-guard", version: 0, inline: true }
     });
-    expect(job.candidate!.releaseIneligibleReasons![0]).toMatch(/guard policy simulation/);
+    expect(job.candidate!.releaseIneligibleReasons![0]).toMatch(/rule set simulation/);
     expect(job.options).toMatchObject({ models: "replay", mcpMode: "strict", compare: "recording", repeats: 1 });
     const listed = (await call(context, "GET", "/api/replay/runs?workflowId=wf-guarded", builder.cookie)).json<{ runs: EvalRunView[] }>().runs;
     expect(listed.map((run) => run.id)).not.toContain(jobId);
@@ -342,7 +342,7 @@ describe("guard policy simulation", () => {
     expect(await context.store.listReplayRunIdsForHash("wf-guarded", preview.workflowHash)).not.toContain(jobId);
     const publish = await call(context, "POST", "/api/workflows/wf-guarded/publish", builder.cookie, { version, replayRunId: jobId });
     expect(publish.statusCode, publish.body).toBe(409);
-    expect(publish.json<{ reasons: string[] }>().reasons.join(" ")).toMatch(/guard policy simulation/);
+    expect(publish.json<{ reasons: string[] }>().reasons.join(" ")).toMatch(/rule set simulation/);
   }, 60_000);
 
   it("on an enforced gate with admitted cases, a simulation job is never gate evidence: no admission block, refused on publish, never the fallback", async () => {
@@ -365,7 +365,7 @@ describe("guard policy simulation", () => {
     expect(fallback.replayRunId ?? null).not.toBe(jobId);
     const named = (await call(context, "GET", `/api/workflows/wf-guarded/publish-preview?version=${version}&replayRunId=${jobId}`, builder.cookie)).json<{ preview: { verdict: string; reasons: string[] } }>().preview;
     expect(named.verdict).toBe("blocked");
-    expect(named.reasons.join(" ")).toMatch(/guard policy simulation/);
+    expect(named.reasons.join(" ")).toMatch(/rule set simulation/);
     const publish = await call(context, "POST", "/api/workflows/wf-guarded/publish", builder.cookie, { version, replayRunId: jobId });
     expect(publish.statusCode, publish.body).toBe(409);
   }, 60_000);
@@ -460,7 +460,7 @@ describe("guard policy simulation", () => {
     expect(empty.emptyReason).toMatch(/recorded run/);
     expect((await call(context, "POST", "/api/guard/profiles", builder.cookie, { document: emailProfile("allow", "unused") })).statusCode).toBe(201);
     const unused = await simulate(context, builder.cookie, "unused", { document: emailProfile("block", "unused") });
-    expect(unused.emptyReason).toMatch(/No workflow you can read uses this profile/);
+    expect(unused.emptyReason).toMatch(/No workflow you can read uses this rule set/);
   }, 60_000);
 
   it("is for profile editors only, and only replays and shows workflows the user can read", async () => {

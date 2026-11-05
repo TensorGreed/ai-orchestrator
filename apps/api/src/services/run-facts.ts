@@ -63,7 +63,7 @@ export function classifyToolOutcome(error: unknown, ok: boolean): RunManifestToo
   if (rejection === "concurrency_limited") return "concurrency_limited";
   if (rejection === "circuit_open") return "breaker_rejected";
   const text = typeof error === "string" ? error : "";
-  if (/was blocked by the guard/i.test(text)) return "guard_blocked";
+  if (/was blocked by (?:the guard|content rules)/i.test(text)) return "guard_blocked";
   if (/is blocked by policy|counts as a write tool|no-write|not allowed by (the )?(tool )?policy/i.test(text)) return "policy_blocked";
   return "error";
 }

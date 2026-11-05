@@ -238,7 +238,7 @@ export async function addGuardProfileVersion(
 ): Promise<GuardProfileVersionRecord> {
   return ctx.withTransaction(async (client) => {
     const current = await oneRow(client, `SELECT latest_version FROM guard_profiles WHERE id = $1 FOR UPDATE`, [input.profileId]);
-    if (!current) throw new Error(`Guard profile '${input.profileId}' not found`);
+    if (!current) throw new Error(`Rule set '${input.profileId}' not found`);
     if (options.unlessLatestHash) {
       const latest = await readProfileVersion((sql, params) => oneRow(client, sql, params), input.profileId, Number(current.latest_version));
       if (latest && latest.hash === input.hash) return latest;

@@ -107,9 +107,9 @@ The inbox also shows the other pauses that wait for a person:
 | Approval Gate | As configured on the gate | As configured (required by default) |
 | Agent write tool (below) | As configured on the workflow | Required |
 | Human Approval node | Operators, builders and admins with execute access, the requester included | Optional |
-| Guard `require_approval` | Same as Human Approval | Optional |
+| Content rules `require_approval` | Same as Human Approval | Optional |
 
-Human Approval nodes and guard hand-offs keep their earlier behaviour (the person who started the run may decide) so existing single-user setups do not stop at a request nobody else can answer. Use an Approval Gate when you need separation of duties.
+Human Approval nodes and content rules hand-offs keep their earlier behaviour (the person who started the run may decide) so existing single-user setups do not stop at a request nobody else can answer. Use an Approval Gate when you need separation of duties.
 
 ## Timeouts
 
@@ -123,11 +123,11 @@ Each request expires at the time it paused plus its timeout. The instance holdin
 | Approval Gate | The gate's setting (default 1440 minutes, one day) |
 | Agent write tool | `writeToolApproval.timeoutMinutes` (default 1440) |
 | Human Approval node | The node's `timeoutMinutes` |
-| Guard node (route hand-off) and an agent's guard port | The guard node's `timeoutMinutes` (default now 1440, was 60) |
-| Automatic guard profiles on an agent (no guard node) | 1440 minutes |
+| Content Rules node (route hand-off) and an agent's rules port | The Content Rules node's `timeoutMinutes` (default now 1440, was 60) |
+| Automatic rule sets on an agent (no Content Rules node) | 1440 minutes |
 
 ::: warning Behaviour change on upgrade
-Before this release, Human Approval and guard hand-off timeouts were stored but never enforced. They are now. A run that was already waiting when you upgrade is **not** rejected at once: it gets one full timeout counted from the upgrade (the first start of the API with migration 32), and the API logs the ids of those runs once. Guard hand-offs without their own timeout now wait one day instead of an hour.
+Before this release, Human Approval and content rules hand-off timeouts were stored but never enforced. They are now. A run that was already waiting when you upgrade is **not** rejected at once: it gets one full timeout counted from the upgrade (the first start of the API with migration 32), and the API logs the ids of those runs once. Content rules hand-offs without their own timeout now wait one day instead of an hour.
 :::
 
 ## Sub-workflows

@@ -124,13 +124,13 @@ export async function checkOutbound(input: OutboundCheckInput): Promise<Outbound
     { ...(input.channel === "egress" || input.channel === "tool_arguments" ? { toolName: input.approvalTag } : {}), onlyFindings: true }
   );
   const reason = describeGuardVerdict(result);
-  if (result.action === "block") throw new GuardBlockedError(`${input.what} was blocked by the guard: ${reason}`, result.verdicts);
+  if (result.action === "block") throw new GuardBlockedError(`${input.what} was blocked by content rules: ${reason}`, result.verdicts);
   if (needsApproval(result.action)) {
     const key = guardApprovalKey(input.scope.nodeId, input.channel, result, input.approvalTag);
     if (!input.approvals?.has(key)) {
       if (input.replay) throw new GuardBlockedError(`${input.what} would wait for approval: ${reason}`, result.verdicts);
       throw new ApprovalHandoffSignal({
-        message: `Guard approval needed before ${input.what}: ${reason}`,
+        message: `Content rules approval needed before ${input.what}: ${reason}`,
         timeoutMinutes: input.timeoutMinutes ?? APPROVAL_DEFAULT_TIMEOUT_MINUTES,
         handoff: { kind: "rerun", source: "egress_guard", approvalKey: key },
         details: { channel: input.channel, verdicts: result.verdicts }
@@ -606,7 +606,7 @@ export async function checkEgressRequest(
   const override = request.apply(outcome.content);
   if (!override) {
     throw new GuardBlockedError(
-      `${request.what} was blocked by the guard: the guard asked to rewrite this request, which cannot be done safely here, so it was not sent (${describeGuardVerdict(outcome.result)})`,
+      `${request.what} was blocked by content rules: the rules asked to rewrite this request, which cannot be done safely here, so it was not sent (${describeGuardVerdict(outcome.result)})`,
       outcome.result.verdicts
     );
   }

@@ -197,10 +197,10 @@ export function parseGuardProfile(document: unknown): GuardProfile {
   const result = guardProfileSchema.safeParse(document);
   if (!result.success) {
     const issues = result.error.issues.map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`);
-    throw new GuardProfileError(`Invalid guard profile: ${issues.join("; ")}`);
+    throw new GuardProfileError(`Invalid rule set: ${issues.join("; ")}`);
   }
   if (result.data.protection.fallback === "protect") {
-    throw new GuardProfileError("Invalid guard profile: protection.fallback cannot be 'protect'");
+    throw new GuardProfileError("Invalid rule set: protection.fallback cannot be 'protect'");
   }
   return result.data;
 }
@@ -221,7 +221,7 @@ export function parseSerializedGuardProfile(text: string): GuardProfile {
   try {
     document = JSON.parse(text);
   } catch (error) {
-    throw new GuardProfileError(`Invalid guard profile: not JSON (${(error as Error).message})`);
+    throw new GuardProfileError(`Invalid rule set: not JSON (${(error as Error).message})`);
   }
   return parseGuardProfile(document);
 }

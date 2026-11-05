@@ -1594,7 +1594,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, tool: tool.name },
         "MCP gateway could not read the Guard bindings for a call; the call was refused"
       );
-      return rpcResult(request.id, toolError("Guard could not be checked for this call, so it was not sent. Try again."));
+      return rpcResult(request.id, toolError("Content rules could not be checked for this call, so it was not sent. Try again."));
     }
     // A workflow tool's run id, and the call's synthetic id: a server tool call's telemetry row and the gateway's Guard
     // events share the synthetic one (kept apart from a workflow tool's run, whose replays compare its own events).
@@ -1610,7 +1610,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
               { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, tool: tool.name },
               "MCP gateway Guard could not check the arguments of a call; the call was refused"
             );
-            return { blocked: toolError("Guard could not check this call, so it was not sent.") };
+            return { blocked: toolError("Content rules could not check this call, so it was not sent.") };
           }
         }
       : undefined;

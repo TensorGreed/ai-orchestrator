@@ -44,7 +44,7 @@ describe("describeActivity", () => {
     expect(describeActivity(ev(1, { kind: "tool_call", phase: "start", toolName: "search_docs" }))).toBe("Calling search_docs");
     expect(describeActivity(ev(1, { kind: "tool_call", phase: "end", toolName: "search_docs", durationMs: 820, outcome: "ok" }))).toBe("search_docs done in 820ms");
     expect(describeActivity(ev(1, { kind: "tool_call", phase: "end", toolName: "search_docs", outcome: "error", error: "timeout" }))).toBe("search_docs failed: timeout");
-    expect(describeActivity(ev(1, { kind: "tool_call", phase: "end", toolName: "search_docs", outcome: "blocked" }))).toBe("search_docs blocked by the guard");
+    expect(describeActivity(ev(1, { kind: "tool_call", phase: "end", toolName: "search_docs", outcome: "blocked" }))).toBe("search_docs blocked by content rules");
   });
 
   it("prefixes worker entries", () => {

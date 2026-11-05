@@ -86,7 +86,7 @@ pnpm l2m release publish "$WORKFLOW_ID" --version 12 --run "$(jq -r .id job.json
 
 ## How it works
 
-- **What runs live.** Logic and guard nodes run. MCP calls are answered from the golden run's cassette. Code nodes and external writes (Slack, email, HTTP, database writes) are answered from the recording and never run. Model nodes call the model, or the recorded tape with `--models replay`.
+- **What runs live.** Logic and Content Rules nodes run. MCP calls are answered from the golden run's cassette. Code nodes and external writes (Slack, email, HTTP, database writes) are answered from the recording and never run. Model nodes call the model, or the recorded tape with `--models replay`.
 - **What is compared.** Status, output (whitespace, timing and id fields aside), tool calls side by side, and token, cost and model-call totals.
 - **Inconclusive is not a pass.** An unanswered MCP call, a node the golden run never saw, a changed code node or a cut recording makes the case inconclusive, and the CLI exits 4.
 

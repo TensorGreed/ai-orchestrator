@@ -214,7 +214,7 @@ describe("MCP server prompts: the arguments are judged against the server before
     const provider = new RecordingProvider();
     const result = await executeWorkflow({ workflow: llmFlow("{{card}}"), executionId: "n2-llm", webhookPayload: { card: CARD } }, deps({ guard: harness.guard, adapter: promptAdapter(seen), provider }));
     expect(result.status).toBe("error");
-    expect(result.error).toContain("blocked by the guard");
+    expect(result.error).toContain("blocked by content rules");
     expect(seen).toEqual([]);
     expect(provider.calls).toEqual([]);
     expect(harness.events[0]).toMatchObject({ channel: "tool_arguments", verdict: { destination: { kind: "mcp_server", tier: "public" } } });
@@ -292,7 +292,7 @@ describe("secret values do not hide what is around them", () => {
       deps({ guard: harness.guard, secrets: { short: "1111" } })
     );
     expect(result.status).toBe("error");
-    expect(result.error).toContain("blocked by the guard");
+    expect(result.error).toContain("blocked by content rules");
     expect(received.slice(before)).toEqual([]);
     expect(JSON.stringify(harness.events)).not.toContain('"1111"');
   });
@@ -363,7 +363,7 @@ describe("Azure Storage: an address that comes from the secret", () => {
     const before = received.length;
     const result = await executeWorkflow({ workflow: wf, executionId: "ld-secret", webhookPayload: {} }, deps({ guard: harness.guard, secrets: { az: secret } }));
     expect(result.status).toBe("error");
-    expect(result.error).toContain("blocked by the guard");
+    expect(result.error).toContain("blocked by content rules");
     expect(harness.events[0]).toMatchObject({ verdict: { destination: { kind: "connector", host: "127.0.0.1", tier: "public" } } });
     expect(received.slice(before)).toEqual([]);
   });

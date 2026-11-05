@@ -13,6 +13,21 @@ import { parseGuardProfile, type GuardProfile, type GuardProfileInput } from "./
 export const DEFAULT_GUARD_PROFILE_ID = "default";
 
 /**
+ * The name the built-in profile is shown under. The document keeps its
+ * original `name` because the name is part of the profile hash that runs,
+ * replays and release gates pin; only what users see changes.
+ */
+export const DEFAULT_GUARD_PROFILE_DISPLAY_NAME = "Default rule set";
+const DEFAULT_GUARD_PROFILE_STORED_NAME = "Default guard profile";
+
+/** The name to show for a profile: the built-in's stored name reads as its display name; every other name is unchanged. */
+export function guardProfileDisplayName(profileId: string, name: string): string;
+export function guardProfileDisplayName(profileId: string, name: string | undefined): string | undefined;
+export function guardProfileDisplayName(profileId: string, name: string | undefined): string | undefined {
+  return profileId === DEFAULT_GUARD_PROFILE_ID && name === DEFAULT_GUARD_PROFILE_STORED_NAME ? DEFAULT_GUARD_PROFILE_DISPLAY_NAME : name;
+}
+
+/**
  * The built-in profile. It blocks injection, tool-argument attacks and
  * schema violations, strips hidden characters, redacts credentials and
  * masks card numbers in what the model and the user see, and leaves

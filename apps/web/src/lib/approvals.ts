@@ -12,7 +12,7 @@ const KIND_LABELS: Record<ApprovalInboxItem["kind"], string> = {
   remove_cases: "Gate cases",
   approval_gate: "Approval gate",
   human_approval: "Human approval",
-  guard: "Guard",
+  guard: "Content rules",
   agent_tool: "Write tool"
 };
 

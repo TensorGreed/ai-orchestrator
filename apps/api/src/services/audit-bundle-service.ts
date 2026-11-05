@@ -834,7 +834,7 @@ function readmeText(view: RunManifestView): string {
     "                       JSON hashes to manifest.workflow.hash.",
     "execution/run.json     The execution record as stored (redacted input, output, status).",
     "execution/nodes/       Each node's input and output as stored in execution history (redacted).",
-    "execution/trace.json   Node timings, MCP tool-call telemetry and guard events (masked evidence).",
+    "execution/trace.json   Node timings, MCP tool-call telemetry and rule events (masked evidence).",
     "execution/logs.jsonl   Node activity, errors, warnings and the run's audit-log entries",
     "                       (actor user id and role; actor emails only in bundles exported by an admin).",
     "outputs/               Files the run produced (PDFs, charts, documents), when there are any.",

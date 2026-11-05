@@ -323,7 +323,7 @@ describe("resolveCodeSandboxPlan", () => {
     const { warning } = await resolveCodeSandboxPlan({ ...base, pythonInProcess: "allow" }, { locator: locator([]) });
     expect(warning).toMatch(/NOT sandboxed/);
     expect(warning).toMatch(/any OS command/);
-    expect(warning).toMatch(/bypass the outbound URL guard/);
+    expect(warning).toMatch(/bypass the outbound URL checks/);
     expect(warning).toMatch(/\/proc\/<pid>\/environ/);
     expect(warning).toMatch(/SECRET_MASTER_KEY_BASE64/);
   });

@@ -106,7 +106,7 @@ describe("DataDestinationsView", () => {
     vi.mocked(api.fetchUnclassifiedDestinations).mockResolvedValue({ destinations: [pending] });
     render(<DataDestinationsView />);
     expect(await screen.findByText("No destinations classified yet.")).toBeTruthy();
-    expect(screen.getByText(/destinations do nothing until a guard profile has destination rules/)).toBeTruthy();
+    expect(screen.getByText(/destinations do nothing until a rule set has destination rules/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Add destination" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Classify/ })).toBeNull();
     expect(screen.getByText(/Ask an admin to classify them/)).toBeTruthy();

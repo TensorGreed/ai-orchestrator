@@ -15,7 +15,7 @@ function renderGuard(data: Partial<EditorNodeData>) {
     xPos: 0,
     yPos: 0,
     dragging: false,
-    data: { label: "Guard", nodeType: "guard", config: { profileId: "effective", channel: "prompt" }, ...data } as EditorNodeData
+    data: { label: "Content Rules", nodeType: "guard", config: { profileId: "effective", channel: "prompt" }, ...data } as EditorNodeData
   } as NodeProps<EditorNodeData>;
   return render(
     <ReactFlowProvider>
@@ -24,7 +24,7 @@ function renderGuard(data: Partial<EditorNodeData>) {
   );
 }
 
-describe("Guard node on the canvas", () => {
+describe("Content Rules node on the canvas", () => {
   it("has pass, blocked and review outputs and an empty protection slot", async () => {
     const onOpen = vi.fn();
     const { container } = renderGuard({ onOpenAgentAttachmentDrawer: onOpen });

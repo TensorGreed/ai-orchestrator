@@ -677,7 +677,7 @@ export function judgeReleaseGate(
     const both = refusedLimits.length > 1;
     add(
       "repeats_unchecked",
-      `This gate checks ${refusedLimits.join(" and ")} limits per run, but replay job ${job.id} repeated its cases and recorded ${both ? "them" : refusedLimits[0] === "latency" ? "latency" : "guard verdicts"} for only one repeat (it ran before replays recorded every repeat): run the gate again, or remove ${both ? "those limits" : "that limit"}.`
+      `This gate checks ${refusedLimits.map((limit) => (limit === "guard" ? "content rule" : limit)).join(" and ")} limits per run, but replay job ${job.id} repeated its cases and recorded ${both ? "them" : refusedLimits[0] === "latency" ? "latency" : "rule verdicts"} for only one repeat (it ran before replays recorded every repeat): run the gate again, or remove ${both ? "those limits" : "that limit"}.`
     );
   }
   if (job.scorerMismatch) add(options.expected.scorersKey ? `scorer_mismatch:${options.expected.scorersKey}` : "scorer_mismatch", `Replay job ${job.id} ${job.scorerMismatch}: the gate judges with its own scorers.`);
@@ -724,7 +724,7 @@ export function judgeReleaseGate(
     add("latency", `p95 latency rose ${formatPct(stats.p95LatencyIncreasePct)}${selectionPhrase(stats.repeatSelection?.latency, "latency", job.compare ?? "recording")}; the gate allows ${policy.maxP95LatencyIncreasePct}%.`, stats.p95LatencyIncreasePct - policy.maxP95LatencyIncreasePct);
   }
   if (policy.noNewGuardBlocks && stats.newGuardBlocks > 0) {
-    add("guard_blocks", `The candidate added ${stats.newGuardBlocks} guard block${stats.newGuardBlocks === 1 ? "" : "s"} or review${stats.newGuardBlocks === 1 ? "" : "s"}.`, stats.newGuardBlocks);
+    add("guard_blocks", `The candidate added ${stats.newGuardBlocks} rule block${stats.newGuardBlocks === 1 ? "" : "s"} or review${stats.newGuardBlocks === 1 ? "" : "s"}.`, stats.newGuardBlocks);
   }
   const compare = job.compare ?? "recording";
   if (stats.oldestRecordingDays !== null && stats.oldestRecordingDays > policy.maxRecordingAgeDays && compare !== "baseline_rerun") {
@@ -1003,7 +1003,7 @@ export function releaseGateLoosening(
   const looserLimit = (left: number | undefined, right: number | undefined) => left !== undefined && (right === undefined || right > left);
   if (looserLimit(a.maxCostIncreasePct, b.maxCostIncreasePct)) reasons.push("raises or removes the cost limit");
   if (looserLimit(a.maxP95LatencyIncreasePct, b.maxP95LatencyIncreasePct)) reasons.push("raises or removes the latency limit");
-  if (a.noNewGuardBlocks && !b.noNewGuardBlocks) reasons.push("allows new guard blocks");
+  if (a.noNewGuardBlocks && !b.noNewGuardBlocks) reasons.push("allows new rule blocks");
   if (b.minCases < a.minCases) reasons.push("lowers the minimum number of cases");
   if (b.maxRecordingAgeDays > a.maxRecordingAgeDays) reasons.push("accepts older golden runs");
   const beforeMode = before.candidateOptions.mcpMode ?? "strict";

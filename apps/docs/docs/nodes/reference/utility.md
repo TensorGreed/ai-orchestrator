@@ -406,9 +406,9 @@ Evaluates conditions against context data and routes to pass or filtered branche
 
 ---
 
-### `guard` — Guard
+### `guard` — Content Rules
 
-Checks content with a guard profile and routes it to pass, blocked or review instead of failing the run. Attached to an agent's guard port, it guards the agent loop.
+Checks content against a rule set and routes it to pass, blocked or review instead of failing the run. Attached to an agent's content rules port, it checks the agent loop.
 
 **Config fields**
 
@@ -437,7 +437,7 @@ Checks content with a guard profile and routes it to pass, blocked or review ins
 
 ### `guard_protection` — Protection Provider
 
-Tokenises, encrypts, hashes or masks sensitive data for a guard. Attach it to a guard node's protection port; keys come from the secret store.
+Tokenises, encrypts, hashes or masks sensitive data for a Content Rules node. Attach it to a Content Rules node's protection port; keys come from the secret store.
 
 **Config fields**
 

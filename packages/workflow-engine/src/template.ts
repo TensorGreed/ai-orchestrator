@@ -156,7 +156,7 @@ export function renderCheckedTemplate(template: string, values: Record<string, u
   const checked = renderings.get(template);
   if (checked !== undefined) return checked;
   if (template.includes("{{")) {
-    throw new Error("A templated setting was not checked by the guard before sending, so the request was not sent.");
+    throw new Error("A templated setting was not checked by the content rules before sending, so the request was not sent.");
   }
   return template;
 }

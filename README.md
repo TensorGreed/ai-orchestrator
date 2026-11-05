@@ -411,7 +411,7 @@ General trigger nodes:
 - `imap_email_trigger`
 - `error_trigger`
 
-Message queue trigger nodes are registered for Kafka, RabbitMQ, and MQTT with optional-dependency detection. Their long-lived consumers are intentionally guarded until the corresponding client dependency and deployment path are configured.
+Message queue trigger nodes are registered for Kafka, RabbitMQ, and MQTT with optional-dependency detection. Their long-lived consumers are intentionally held back until the corresponding client dependency and deployment path are configured.
 
 ## Chat model nodes (implemented)
 

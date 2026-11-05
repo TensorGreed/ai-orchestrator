@@ -180,7 +180,7 @@ function setup() {
   }));
   vi.mocked(api.fetchMcpClients).mockResolvedValue({ usageWindow: "7d", clients: [activeClient] });
   vi.mocked(api.fetchGuardProfiles).mockResolvedValue({
-    profiles: [guardProfile("default", "Default guard profile"), guardProfile("strict", "Strict gateway"), guardProfile("destination-rules", "Destination rules")],
+    profiles: [guardProfile("default", "Default rule set"), guardProfile("strict", "Strict gateway"), guardProfile("destination-rules", "Destination rules")],
     autoApply: true,
     builtInId: "default"
   });
@@ -367,16 +367,16 @@ describe("MCP gateway views", () => {
     expect(within(within(list).getByRole("list", { name: "Open sessions" })).getAllByRole("listitem")).toHaveLength(1);
   });
 
-  it("picks a Guard profile for a toolset (none by default), never the destination rules profile", async () => {
+  it("picks a rule set for a toolset (none by default), never the destination rules set", async () => {
     const user = userEvent.setup();
     vi.mocked(api.updateGuardToolsetBinding).mockResolvedValue({
       binding: binding("toolset", "mts_1", "strict"),
       effective: { source: "toolset", stack: [{ profileId: "strict", version: 1, hash: "h", name: "Strict gateway" }], chain: [] }
     });
     render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
-    const picker = await screen.findByLabelText("Guard profile for this toolset");
+    const picker = await screen.findByLabelText("Rule set for this toolset");
     expect(picker).toHaveValue("");
-    expect(picker).toHaveAccessibleDescription(/what clients send to this toolset's tools and what comes back, and the Guard nodes and agents of its workflow tools/);
+    expect(picker).toHaveAccessibleDescription(/what clients send to this toolset's tools and what comes back, and the Content Rules nodes and agents of its workflow tools/);
     expect(within(picker).queryByRole("option", { name: "Destination rules" })).not.toBeInTheDocument();
     const section = screen.getByTestId("gateway-guard-toolset");
     expect(within(section).getByRole("button", { name: "Save" })).toBeDisabled();
@@ -409,7 +409,7 @@ describe("MCP gateway views", () => {
       bindings: []
     }));
     render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
-    const picker = await screen.findByLabelText("Guard profile for this toolset");
+    const picker = await screen.findByLabelText("Rule set for this toolset");
     const section = screen.getByTestId("gateway-guard-toolset");
     expect(within(section).queryByTestId("gateway-guard-toolset-held")).not.toBeInTheDocument();
     await user.selectOptions(picker, "strict");
@@ -431,7 +431,7 @@ describe("MCP gateway views", () => {
     expect(gatewayHeldActions({ shadow: { review: true }, channels: { tool_result: { actions: { email: { action: "require_approval" } } } } })).toBe(true);
   });
 
-  it("shows builders the toolset's Guard profile read-only", async () => {
+  it("shows builders the toolset's rule set read-only", async () => {
     vi.mocked(api.fetchGuardToolsetBinding).mockResolvedValue({
       binding: binding("toolset", "mts_1", "strict"),
       effective: { source: "toolset", stack: [{ profileId: "strict", version: 1, hash: "h", name: "Strict gateway" }], chain: [] }
@@ -444,7 +444,7 @@ describe("MCP gateway views", () => {
     expect(api.fetchGuardProfiles).not.toHaveBeenCalled();
   });
 
-  it("opens a client's Governance section with its Guard profile, and lists what else applies", async () => {
+  it("opens a client's Governance section with its rule set, and lists what else applies", async () => {
     const user = userEvent.setup();
     vi.mocked(api.fetchGuardClientBinding).mockResolvedValue({
       binding: binding("mcp_client", "mcc_1", "strict"),
@@ -454,7 +454,7 @@ describe("MCP gateway views", () => {
           effective: {
             source: "mcp_client",
             stack: [
-              { profileId: "default", version: 1, hash: "a", name: "Default guard profile" },
+              { profileId: "default", version: 1, hash: "a", name: "Default rule set" },
               { profileId: "strict", version: 1, hash: "b", name: "Strict gateway" }
             ],
             chain: []
@@ -467,16 +467,16 @@ describe("MCP gateway views", () => {
     const list = await screen.findByRole("list", { name: "MCP clients" });
     await user.click(within(list).getByRole("button", { name: "Governance" }));
     const governance = await within(list).findByRole("region", { name: "Client governance" });
-    const picker = await within(governance).findByLabelText("Guard profile for this client");
+    const picker = await within(governance).findByLabelText("Rule set for this client");
     expect(picker).toHaveValue("strict");
-    expect(picker).toHaveAccessibleDescription(/on top of the toolset's own profile/);
-    expect(within(governance).getByTestId("gateway-guard-client-stack")).toHaveTextContent("Also applied: Default guard profile.");
+    expect(picker).toHaveAccessibleDescription(/on top of the toolset's own rule set/);
+    expect(within(governance).getByTestId("gateway-guard-client-stack")).toHaveTextContent("Also applied: Default rule set.");
     await user.selectOptions(picker, "");
     await user.click(within(within(governance).getByTestId("gateway-guard-client")).getByRole("button", { name: "Save" }));
     expect(api.updateGuardClientBinding).toHaveBeenCalledWith("mcc_1", { mode: "inherit" });
   });
 
-  it("shows a session's Guard blocks", async () => {
+  it("shows a session's content rule blocks", async () => {
     const user = userEvent.setup();
     vi.mocked(api.fetchMcpClientSessions).mockResolvedValue({
       clientId: "mcc_1",
@@ -492,7 +492,7 @@ describe("MCP gateway views", () => {
           tracked: false,
           labels: null,
           raisedAt: null,
-          guard: { blocks: 2, lastBlock: { tool: "demo_tools__lookup_kb", channel: "tool_arguments", reason: "Blocked by Guard: indirect injection", at: "2026-10-20T10:04:00.000Z" } }
+          guard: { blocks: 2, lastBlock: { tool: "demo_tools__lookup_kb", channel: "tool_arguments", reason: "Blocked by content rules: indirect injection", at: "2026-10-20T10:04:00.000Z" } }
         },
         {
           idPrefix: "e5f6a7b8",
@@ -514,8 +514,8 @@ describe("MCP gateway views", () => {
     await user.click(within(list).getByRole("button", { name: "Sessions" }));
     const sessions = await within(list).findByRole("list", { name: "Open sessions" });
     const rows = within(sessions).getAllByRole("listitem");
-    expect(within(rows[0]!).getByTestId("session-guard-blocks")).toHaveTextContent("Guard blocked 2");
-    expect(within(rows[0]!).getByTestId("session-guard-blocks")).toHaveAttribute("title", "Last: demo_tools__lookup_kb, Blocked by Guard: indirect injection");
+    expect(within(rows[0]!).getByTestId("session-guard-blocks")).toHaveTextContent("Rules blocked 2");
+    expect(within(rows[0]!).getByTestId("session-guard-blocks")).toHaveAttribute("title", "Last: demo_tools__lookup_kb, Blocked by content rules: indirect injection");
     expect(within(rows[1]!).queryByTestId("session-guard-blocks")).not.toBeInTheDocument();
   });
 

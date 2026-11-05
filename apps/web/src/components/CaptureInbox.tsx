@@ -314,7 +314,7 @@ function WorkflowCapture({ workflowId, activeProjectId, canEdit, isAdmin, onOpen
               Mask personal data with surrogates
             </label>
             <div className="capture-help">
-              Emails, card numbers, IBANs, SSNs, phone numbers and your guard profile's dictionary terms are replaced by stable stand-ins before the run is stored. This is
+              Emails, card numbers, IBANs, SSNs, phone numbers and your rule set's dictionary terms are replaced by stable stand-ins before the run is stored. This is
               pseudonymisation, not anonymisation. {isAdmin ? "Turning it off needs a reason and is audited." : "Only an admin can turn it off."}
             </div>
             {!form.dlp && view.dlp && (

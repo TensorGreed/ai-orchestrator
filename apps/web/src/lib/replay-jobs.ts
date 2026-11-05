@@ -242,10 +242,10 @@ export function overridesFromForm(form: ReplayJobForm): { ok: true; overrides: R
     const secretId = row.secretId?.trim() ?? "";
     models.push({ ...(nodeId ? { nodeId } : {}), ...(provider ? { provider } : {}), model, ...(secretId ? { secretRef: { secretId } } : {}) });
   }
-  const version = optionalNumber(form.guardProfileVersion, "Guard profile version", { min: 1, integer: true });
+  const version = optionalNumber(form.guardProfileVersion, "Rule set version", { min: 1, integer: true });
   if (!version.ok) return version;
   const guardId = form.guardProfileId.trim();
-  if (!guardId && version.value !== undefined) return { ok: false, error: "Pick a guard profile for the version." };
+  if (!guardId && version.value !== undefined) return { ok: false, error: "Pick a rule set for the version." };
   const mcpServers = Object.fromEntries(Object.entries(form.mcpServers).filter(([id, mode]) => id && mode));
   const overrides: ReplayCandidateOverrides = {
     ...(models.length > 0 ? { models } : {}),
@@ -323,7 +323,7 @@ export function overrideLines(candidate: ReplayJobCandidate | null): string[] {
   for (const entry of overrides.models ?? []) {
     lines.push(`Model ${entry.nodeId ? `on ${entry.nodeId}` : `for every ${entry.provider} node`}: ${entry.provider && entry.nodeId ? `${entry.provider}/` : ""}${entry.model}`);
   }
-  if (overrides.guardProfile) lines.push(`Guard profile ${overrides.guardProfile.profileId}${overrides.guardProfile.version ? ` v${overrides.guardProfile.version}` : " (latest)"}`);
+  if (overrides.guardProfile) lines.push(`Rule set ${overrides.guardProfile.profileId}${overrides.guardProfile.version ? ` v${overrides.guardProfile.version}` : " (latest)"}`);
   for (const [server, mode] of Object.entries(overrides.mcpServers ?? {})) lines.push(`MCP ${server}: ${SERVER_MODE_LABELS[mode]}`);
   if (overrides.liveReadNodes && overrides.liveReadNodes.length > 0) lines.push(`Live reads: ${overrides.liveReadNodes.join(", ")}`);
   return lines;
@@ -374,7 +374,7 @@ export function attemptLatencyLabel(latencyMs: number, baselineLatencyMs?: numbe
 
 /** One repeat's new guard blocks (added or escalated blocks and reviews), for the case's repeat list. */
 export function guardBlocksLabel(count: number): string {
-  return count === 0 ? "no new guard blocks" : `${count} new guard block${count === 1 ? "" : "s"}`;
+  return count === 0 ? "no new content rule blocks" : `${count} new content rule block${count === 1 ? "" : "s"}`;
 }
 
 /** The `.status-pill` tone for a run or case status. */

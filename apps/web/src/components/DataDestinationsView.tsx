@@ -83,7 +83,7 @@ export function DataDestinationsView() {
   return (
     <div className="guard-destinations">
       <p className="page-hint">
-        Say how far each place your workflows send data is from home. A guard profile&apos;s destination rules can then keep sensitive data in-house. Destinations do nothing until a profile has destination rules.
+        Say how far each place your workflows send data is from home. A rule set&apos;s destination rules can then keep sensitive data in-house. Destinations do nothing until a rule set has destination rules.
       </p>
       {error && <div className="settings-error">{error}</div>}
       {loaded && <DestinationRulesCard canEdit={canEdit} />}
@@ -139,7 +139,7 @@ export function DataDestinationsView() {
           <div className="page-empty compact guard-dest-empty">
             <p>No destinations classified yet.</p>
             <p className="kb-subtle">
-              That is fine: destinations do nothing until a guard profile has destination rules, so every workflow runs exactly as before. The built-in rows below already cover this machine, private networks and the main model providers.
+              That is fine: destinations do nothing until a rule set has destination rules, so every workflow runs exactly as before. The built-in rows below already cover this machine, private networks and the main model providers.
             </p>
           </div>
         ) : (

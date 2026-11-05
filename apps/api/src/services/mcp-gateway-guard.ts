@@ -60,7 +60,7 @@ export function gatewayBlockReason(result: GuardCheckResult): { reason: string; 
   const list = [...categories];
   const named = list.slice(0, MAX_REASONS).join(", ") || "policy";
   const review = needsApproval(result.action) ? " (needs a review, which gateway calls cannot wait for)" : "";
-  return { reason: `Blocked by Guard: ${named}${review}`, categories: list };
+  return { reason: `Blocked by content rules: ${named}${review}`, categories: list };
 }
 
 /**
@@ -125,7 +125,7 @@ export async function checkGatewayCall(input: {
   if (result.action === "block" || needsApproval(result.action)) return blockOutcome();
   if (!result.transformed) return { action: "allow" };
   if (input.channel === "tool_arguments" && (!result.content || typeof result.content !== "object" || Array.isArray(result.content))) {
-    return { action: "block", reason: "Blocked by Guard: the rewritten arguments are not an object", categories: [], profiles: blockOutcome().profiles };
+    return { action: "block", reason: "Blocked by content rules: the rewritten arguments are not an object", categories: [], profiles: blockOutcome().profiles };
   }
   return { action: "rewrite", content: result.content };
 }

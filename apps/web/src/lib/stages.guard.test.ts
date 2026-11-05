@@ -65,7 +65,7 @@ describe("guard and protection ports on the canvas", () => {
   });
 
   it("summarises guard and protection nodes", () => {
-    expect(summarizeNode({ type: "guard", config: { profileId: "effective", channel: "tool_result" } })).toBe("effective profile · tool_result");
+    expect(summarizeNode({ type: "guard", config: { profileId: "effective", channel: "tool_result" } })).toBe("effective rule set · tool_result");
     expect(summarizeNode({ type: "guard_protection", config: { providerId: "token_vault", dataClasses: ["email", "phone"] } })).toBe("token_vault · email, phone");
     expect(summarizeNode({ type: "guard_protection", config: { providerId: "mask", dataClasses: "*" } })).toBe("mask · all classes");
   });

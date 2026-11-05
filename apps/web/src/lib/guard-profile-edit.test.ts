@@ -25,7 +25,7 @@ const doc = () => ({
   }
 });
 
-describe("guard profile edits", () => {
+describe("rule set edits", () => {
   it("never mutates the original document", () => {
     const original = doc();
     const next = setDetector(original, "prompt", "guard.injection.direct", true, 0.7);

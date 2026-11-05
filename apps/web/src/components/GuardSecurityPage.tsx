@@ -18,7 +18,7 @@ import { GuardProfilesView } from "./GuardProfilesView";
 import { ModelAllowlistView } from "./ModelAllowlistView";
 
 type Tab = "overview" | "profiles" | "destinations" | "models";
-const TAB_LABEL: Record<Tab, string> = { overview: "Overview", profiles: "Profiles & bindings", destinations: "Data destinations", models: "Models" };
+const TAB_LABEL: Record<Tab, string> = { overview: "Overview", profiles: "Rule sets & bindings", destinations: "Data destinations", models: "Models" };
 const DAY_WINDOWS = [7, 14, 30] as const;
 
 function formatError(err: unknown): string {
@@ -47,7 +47,7 @@ export function GuardSecurityPage({ projects, workflows, activeProjectId, role, 
       <header className="page-head">
         <div className="page-head-copy">
           <h2 className="page-title">Security</h2>
-          <p className="page-sub">Guard verdicts on prompts, tool calls, tool results and answers, and the profiles that decide them.</p>
+          <p className="page-sub">Content rule verdicts on prompts, tool calls, tool results and answers, and the rule sets that decide them.</p>
         </div>
         <div className="finops-range guard-tabs" role="tablist" aria-label="Security views">
           {(["overview", "profiles", "destinations", "models"] as Tab[]).map((entry) => (
@@ -155,9 +155,9 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
           </select>
         </label>
         <label>
-          <span>Profile</span>
+          <span>Rule set</span>
           <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
-            <option value="">All profiles</option>
+            <option value="">All rule sets</option>
             {profiles.map((profile) => (
               <option key={profile.id} value={profile.id}>
                 {profile.name}
@@ -239,7 +239,7 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
           </label>
         </div>
         {events.length === 0 ? (
-          <p className="kb-subtle">No guard events in this window.</p>
+          <p className="kb-subtle">No rule events in this window.</p>
         ) : (
           <div className="mcp-table-scroll">
             <table className="kb-table guard-events-table">

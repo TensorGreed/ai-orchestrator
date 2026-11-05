@@ -79,7 +79,7 @@ You don't need to write those rules by hand. All of these are optional, and with
 
 The switch's rule and the presets' rules are **additive** (the rule list marks them). They only add an approval or a deny. They never set another rule aside, so a deny you add later still wins over them: a write under `deny not_read_only` stays denied, untrusted content or not. The flag is stored with the rule and the rule editor cannot change it.
 
-A rule with a `sensitive` or data class condition turns on label tracking while it is enabled, for runs of the workflows it covers (all of them, or its listed workflows) that have an agent, MCP Tool or Execute Workflow node. Node outputs are then scanned for data classes, so the condition can match. The classes found also feed destination checks, the same as when a guard profile tracks labels. Rules on `untrusted_external`, `user` or `trusted` need no scan.
+A rule with a `sensitive` or data class condition turns on label tracking while it is enabled, for runs of the workflows it covers (all of them, or its listed workflows) that have an agent, MCP Tool or Execute Workflow node. Node outputs are then scanned for data classes, so the condition can match. The classes found also feed destination checks, the same as when a rule set tracks labels. Rules on `untrusted_external`, `user` or `trusted` need no scan.
 
 ### Which tools are open world
 

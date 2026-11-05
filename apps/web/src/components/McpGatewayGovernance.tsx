@@ -39,8 +39,8 @@ function formatError(err: unknown): string {
 type Scope = "toolset" | "client";
 
 const HELP: Record<Scope, string> = {
-  toolset: "Checks what clients send to this toolset's tools and what comes back, and the Guard nodes and agents of its workflow tools.",
-  client: "Checks this client's tool calls on every toolset, on top of the toolset's own profile."
+  toolset: "Checks what clients send to this toolset's tools and what comes back, and the Content Rules nodes and agents of its workflow tools.",
+  client: "Checks this client's tool calls on every toolset, on top of the toolset's own rule set."
 };
 
 const HELD_ACTIONS = new Set(["review", "require_approval"]);
@@ -139,7 +139,7 @@ export function GatewayGuardPicker({ scope, id, isAdmin, disabled = false }: { s
     };
   }, [scope, id, isAdmin]);
 
-  const label = scope === "toolset" ? "Guard profile for this toolset" : "Guard profile for this client";
+  const label = scope === "toolset" ? "Rule set for this toolset" : "Rule set for this client";
   const helpId = `gateway-guard-help-${scope}-${id}`;
   const apply = async () => {
     setBusy(true);
@@ -203,7 +203,7 @@ export function GatewayGuardPicker({ scope, id, isAdmin, disabled = false }: { s
       </small>
       {heldActions && (
         <small className="mcp-gw-guard-warning" role="note" data-testid={`gateway-guard-${scope}-held`}>
-          {" "}This profile asks for reviews or approvals. On the gateway these block the call.
+          {" "}This rule set asks for reviews or approvals. On the gateway these block the call.
         </small>
       )}
       {current && current.profileId && others.length > 0 && (
@@ -448,7 +448,7 @@ export function ClientGovernance({
 }) {
   return (
     <section className="mcp-client-usage mcp-governance" aria-label="Client governance">
-      <GovernanceRow title="Guard">
+      <GovernanceRow title="Content rules">
         <GatewayGuardPicker scope="client" id={clientId} isAdmin={isAdmin && active} />
       </GovernanceRow>
       <GovernanceRow title="Rate limit">

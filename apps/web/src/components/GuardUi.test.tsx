@@ -31,7 +31,7 @@ vi.mock("../lib/api", async () => {
 
 const now = new Date().toISOString();
 const profiles: GuardProfileSummary[] = [
-  { id: "default", name: "Default guard profile", builtIn: true, latestVersion: 1, hash: "aaaaaaaaaaaaaaaa", createdAt: now, updatedAt: now },
+  { id: "default", name: "Default rule set", builtIn: true, latestVersion: 1, hash: "aaaaaaaaaaaaaaaa", createdAt: now, updatedAt: now },
   { id: "strict", name: "Strict", builtIn: false, latestVersion: 2, hash: "bbbbbbbbbbbbbbbb", createdAt: now, updatedAt: now }
 ];
 const strictDoc = {
@@ -136,7 +136,7 @@ describe("GuardTracePanel", () => {
         ]}
       />
     );
-    const panel = await screen.findByRole("region", { name: "Guard verdicts" });
+    const panel = await screen.findByRole("region", { name: "Rule verdicts" });
     expect(within(panel).getByText("j***@e***.com")).toBeInTheDocument();
     expect(within(panel).getByText(/shadow: would blocked/i)).toBeInTheDocument();
     expect(within(panel).getByText("workflow binding")).toBeInTheDocument();
@@ -297,7 +297,7 @@ describe("Profile editor and bindings", () => {
   it("edits a channel and saves a new version, showing field errors from the API", async () => {
     vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
     vi.mocked(api.updateGuardProfile).mockRejectedValueOnce(
-      new api.ApiError("Invalid guard profile", 400, { issues: [{ path: "channels.prompt.detectors.0.threshold", message: "Number must be less than or equal to 1" }] })
+      new api.ApiError("Invalid rule set", 400, { issues: [{ path: "channels.prompt.detectors.0.threshold", message: "Number must be less than or equal to 1" }] })
     );
     render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
     const detector = await screen.findByRole("checkbox", { name: "guard.injection.direct" });
@@ -369,7 +369,7 @@ describe("Simulate on recent traffic", () => {
     expect(api.updateGuardProfile).not.toHaveBeenCalled();
     expect(await screen.findByText(/0 of 2 runs replayed/)).toBeInTheDocument();
     expect(await screen.findByTestId("guard-sim-sentence", {}, { timeout: 3000 })).toHaveTextContent("Across 2 recent runs in 1 workflow: 1 newly blocked, 1 now masked, 0 no longer blocked.");
-    expect(screen.getByText(/compared with the current profile \(version 2\)/)).toBeInTheDocument();
+    expect(screen.getByText(/compared with the current rule set \(version 2\)/)).toBeInTheDocument();
     expect(screen.getByText(/nothing called a model/)).toBeInTheDocument();
     await userEvent.click(screen.getByText("Details"));
     expect(screen.getByText("Refund question")).toBeInTheDocument();
@@ -406,12 +406,12 @@ describe("Simulate on recent traffic", () => {
   it("can simulate a saved version from Advanced, and explains an empty result", async () => {
     vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
     vi.mocked(api.simulateGuardProfile).mockResolvedValue({
-      simulation: { ...done, source: { kind: "version", version: 1, hash: "c" }, jobIds: [], workflows: [], summary: { ...done.summary!, runs: 0, workflows: 0, sentence: "No recent recorded runs to simulate." }, emptyReason: "No workflow you can read uses this profile." }
+      simulation: { ...done, source: { kind: "version", version: 1, hash: "c" }, jobIds: [], workflows: [], summary: { ...done.summary!, runs: 0, workflows: 0, sentence: "No recent recorded runs to simulate." }, emptyReason: "No workflow you can read uses this rule set." }
     });
     render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
     await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
     expect(await screen.findByText("No recent runs to simulate on yet.")).toBeInTheDocument();
-    expect(screen.getByText("No workflow you can read uses this profile.")).toBeInTheDocument();
+    expect(screen.getByText("No workflow you can read uses this rule set.")).toBeInTheDocument();
     await userEvent.click(screen.getByText("Advanced"));
     await userEvent.selectOptions(screen.getByLabelText("Version to simulate"), "1");
     await userEvent.click(screen.getByRole("button", { name: "Simulate version" }));
@@ -420,7 +420,7 @@ describe("Simulate on recent traffic", () => {
 
   it("shows field issues for an invalid document", async () => {
     vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
-    vi.mocked(api.simulateGuardProfile).mockRejectedValue(new api.ApiError("Invalid guard profile", 400, { issues: [{ path: "channels.prompt.defaultAction.action", message: "Invalid enum value" }] }));
+    vi.mocked(api.simulateGuardProfile).mockRejectedValue(new api.ApiError("Invalid rule set", 400, { issues: [{ path: "channels.prompt.defaultAction.action", message: "Invalid enum value" }] }));
     render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
     await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
     expect(await screen.findByText("channels.prompt.defaultAction.action")).toBeInTheDocument();
@@ -445,8 +445,8 @@ describe("Simulate on recent traffic", () => {
     render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
     const enforced = await screen.findByRole("button", { name: "Simulate on recent traffic" });
     expect(enforced).toBeDisabled();
-    expect(enforced).toHaveAttribute("title", expect.stringMatching(/A project enforces this profile/));
-    expect(screen.getByText(/A project enforces this profile/)).toBeInTheDocument();
+    expect(enforced).toHaveAttribute("title", expect.stringMatching(/A project enforces this rule set/));
+    expect(screen.getByText(/A project enforces this rule set/)).toBeInTheDocument();
     await userEvent.click(enforced);
     expect(api.simulateGuardProfile).not.toHaveBeenCalled();
   });

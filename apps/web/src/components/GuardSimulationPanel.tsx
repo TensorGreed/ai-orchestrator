@@ -231,7 +231,7 @@ export function GuardSimulationCard({
               Simulate version
             </button>
           </div>
-          <p className="kb-subtle">The version you pick is compared with the current profile on the same recorded runs, so you can see what moving to (or back to) it would change.</p>
+          <p className="kb-subtle">The version you pick is compared with the current rule set on the same recorded runs, so you can see what moving to (or back to) it would change.</p>
         </details>
       )}
     </section>
@@ -268,12 +268,12 @@ export function SimulationResult({ simulation, compared, emptyText }: { simulati
     return (
       <div className="guard-sim-card guard-sim-empty">
         <p className="guard-sim-sentence">No recent runs to simulate on yet.</p>
-        <p className="kb-subtle">{simulation.emptyReason ?? emptyText ?? "None of the workflows that use this profile has a recorded run."}</p>
+        <p className="kb-subtle">{simulation.emptyReason ?? emptyText ?? "None of the workflows that use this rule set has a recorded run."}</p>
       </div>
     );
   }
   const label = simulation.source.kind === "inline" ? "Your unsaved changes" : `Version ${simulation.source.version}`;
-  const current = simulation.baseVersion !== null ? `the current profile (version ${simulation.baseVersion})` : "the current profile";
+  const current = simulation.baseVersion !== null ? `the current rule set (version ${simulation.baseVersion})` : "the current rule set";
   const rows = simulationWorkflowRows(simulation.workflows ?? []);
   const detectors = topTallies(summary.byDetector);
   const dataClasses = topTallies(summary.byDataClass);

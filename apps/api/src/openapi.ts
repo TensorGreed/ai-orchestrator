@@ -24,7 +24,7 @@ export const openApiSpec = {
     { name: "Variables", description: "Project-scoped variable management" },
     { name: "Providers", description: "LLM provider testing and model discovery" },
     { name: "MCP", description: "MCP tool discovery" },
-    { name: "Guard", description: "Guard profiles, bindings, verdict events and Security page counts" },
+    { name: "Content rules", description: "Rule sets, rule set bindings, rule events and Security page counts" },
     { name: "Audit bundles", description: "Signed run manifests, audit bundle export and the deployment signing keys" },
     { name: "Evals", description: "Eval datasets, golden sets, eval runs, replay jobs and their per-case scores and diffs" },
     { name: "Git", description: "Git source control sync" },
@@ -1600,57 +1600,57 @@ export const openApiSpec = {
     },
     "/api/guard/profiles": {
       get: {
-        tags: ["Guard"],
-        summary: "Guard profiles with their latest version and hash (viewers)",
+        tags: ["Content rules"],
+        summary: "Rule sets with their latest version and hash (viewers)",
         responses: { "200": { description: "{ profiles, autoApply, builtInId }" } }
       },
       post: {
-        tags: ["Guard"],
-        summary: "Create a profile from a guard profile document; version 1 (builders)",
+        tags: ["Content rules"],
+        summary: "Create a rule set from a rule set document; version 1 (builders)",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["document"], properties: { id: { type: "string" }, document: { type: "object" }, note: { type: "string" } } } } } },
         responses: { "201": { description: "{ profile }" }, "400": { description: "{ error, issues: [{ path, message }] }" }, "409": { description: "Id already in use" } }
       }
     },
     "/api/guard/profiles/import": {
       post: {
-        tags: ["Guard"],
-        summary: "Import an exported profile document: creates it, or adds a version when the id exists (builders)",
+        tags: ["Content rules"],
+        summary: "Import an exported rule set document: creates it, or adds a version when the id exists (builders)",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { document: { type: "object" }, text: { type: "string" }, note: { type: "string" } } } } } },
         responses: { "200": { description: "{ profile, created: false, changed }" }, "201": { description: "{ profile, created: true }" }, "400": { description: "{ error, issues }" } }
       }
     },
     "/api/guard/profiles/{id}": {
       get: {
-        tags: ["Guard"],
-        summary: "A profile, its latest version and the bindings that use it (viewers)",
+        tags: ["Content rules"],
+        summary: "A rule set, its latest version and the bindings that use it (viewers)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "{ profile, latest, bindings }" }, "404": { description: "Not found" } }
       },
       put: {
-        tags: ["Guard"],
+        tags: ["Content rules"],
         summary: "Save an edit as a new immutable version; an unchanged document adds none (builders; built-in is read-only)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["document"], properties: { document: { type: "object" }, note: { type: "string" } } } } } },
-        responses: { "200": { description: "{ version, changed }" }, "400": { description: "{ error, issues }" }, "409": { description: "Built-in profile" } }
+        responses: { "200": { description: "{ version, changed }" }, "400": { description: "{ error, issues }" }, "409": { description: "Built-in rule set" } }
       },
       delete: {
-        tags: ["Guard"],
-        summary: "Delete a profile and its versions; refused while bound (builders; built-in cannot be deleted)",
+        tags: ["Content rules"],
+        summary: "Delete a rule set and its versions; refused while bound (builders; built-in cannot be deleted)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Deleted" }, "409": { description: "Built-in or still bound" } }
       }
     },
     "/api/guard/profiles/{id}/versions": {
       get: {
-        tags: ["Guard"],
-        summary: "Every version of a profile, newest first (viewers)",
+        tags: ["Content rules"],
+        summary: "Every version of a rule set, newest first (viewers)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "{ versions }" } }
       }
     },
     "/api/guard/profiles/{id}/versions/{version}": {
       get: {
-        tags: ["Guard"],
+        tags: ["Content rules"],
         summary: "One version's document, hash, author and note (viewers)",
         parameters: [
           { name: "id", in: "path", required: true, schema: { type: "string" } },
@@ -1661,7 +1661,7 @@ export const openApiSpec = {
     },
     "/api/guard/profiles/{id}/diff": {
       get: {
-        tags: ["Guard"],
+        tags: ["Content rules"],
         summary: "Changes between two versions as { path, kind, before, after } entries (viewers)",
         parameters: [
           { name: "id", in: "path", required: true, schema: { type: "string" } },
@@ -1673,27 +1673,27 @@ export const openApiSpec = {
     },
     "/api/guard/profiles/{id}/export": {
       get: {
-        tags: ["Guard"],
+        tags: ["Content rules"],
         summary: "Stable JSON of a version (latest by default) for policy-as-code (viewers)",
         parameters: [
           { name: "id", in: "path", required: true, schema: { type: "string" } },
           { name: "version", in: "query", required: false, schema: { type: "integer" } }
         ],
-        responses: { "200": { description: "Profile document; x-guard-profile-version and x-guard-profile-hash headers" } }
+        responses: { "200": { description: "Rule set document; x-guard-profile-version and x-guard-profile-hash headers" } }
       }
     },
     "/api/guard/detectors": {
-      get: { tags: ["Guard"], summary: "Detector catalogue with the channels each one checks (viewers)", responses: { "200": { description: "{ channels, detectors }" } } }
+      get: { tags: ["Content rules"], summary: "Detector catalogue with the channels each one checks (viewers)", responses: { "200": { description: "{ channels, detectors }" } } }
     },
     "/api/guard/bindings/projects/{projectId}": {
       get: {
-        tags: ["Guard"],
-        summary: "A project's binding and the profiles that apply (viewers)",
+        tags: ["Content rules"],
+        summary: "A project's binding and the rule sets that apply (viewers)",
         parameters: [{ name: "projectId", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "{ binding, effective }" } }
       },
       put: {
-        tags: ["Guard"],
+        tags: ["Content rules"],
         summary: "Set inherit, override or enforced; enforced, and any change to an enforced binding, is admin-only",
         parameters: [{ name: "projectId", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["mode"], properties: { mode: { type: "string", enum: ["inherit", "override", "enforced"] }, profileId: { type: "string" } } } } } },
@@ -1702,14 +1702,14 @@ export const openApiSpec = {
     },
     "/api/guard/bindings/workflows/{workflowId}": {
       get: {
-        tags: ["Guard"],
-        summary: "A workflow's binding, its project's binding and the effective profiles (viewers with workflow read)",
+        tags: ["Content rules"],
+        summary: "A workflow's binding, its project's binding and the effective rule sets (viewers with workflow read)",
         parameters: [{ name: "workflowId", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "{ binding, project, effective }" } }
       },
       put: {
-        tags: ["Guard"],
-        summary: "Set inherit or override; an enforced project profile still runs first (builders with workflow write)",
+        tags: ["Content rules"],
+        summary: "Set inherit or override; an enforced project rule set still runs first (builders with workflow write)",
         parameters: [{ name: "workflowId", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["mode"], properties: { mode: { type: "string", enum: ["inherit", "override"] }, profileId: { type: "string" } } } } } },
         responses: { "200": { description: "{ binding, project, effective }" }, "400": { description: "{ error, issues }" } }
@@ -1717,7 +1717,7 @@ export const openApiSpec = {
     },
     "/api/guard/effective": {
       get: {
-        tags: ["Guard"],
+        tags: ["Content rules"],
         summary: "Profiles applied to agent traffic, in evaluation order, with the binding chain (viewers)",
         parameters: [
           { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
@@ -1769,16 +1769,16 @@ export const openApiSpec = {
     },
     "/api/executions/{id}/guard-events": {
       get: {
-        tags: ["Guard"],
-        summary: "Guard events of one run, in order; masked evidence only (viewers)",
+        tags: ["Content rules"],
+        summary: "Rule events of one run, in order; masked evidence only (viewers)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "{ events }" }, "404": { description: "Execution not found" } }
       }
     },
     "/api/guard/events": {
       get: {
-        tags: ["Guard"],
-        summary: "Latest guard events across runs, newest first (viewers)",
+        tags: ["Content rules"],
+        summary: "Latest rule events across runs, newest first (viewers)",
         parameters: [
           { name: "projectId", in: "query", required: false, schema: { type: "string" } },
           { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
@@ -1795,7 +1795,7 @@ export const openApiSpec = {
     },
     "/api/guard/stats": {
       get: {
-        tags: ["Guard"],
+        tags: ["Content rules"],
         summary: "Counts by verdict, action, category, channel and day, top detectors and shadow-mode would-have-blocked counts (viewers)",
         parameters: [
           { name: "projectId", in: "query", required: false, schema: { type: "string" } },

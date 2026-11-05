@@ -1,8 +1,8 @@
 ---
-description: "The L2M outbound URL guard checks every URL that HTTP Request, Web Browse, Chart, PDF, RAG and feed nodes fetch, blocking server-side request forgery and local file reads."
+description: "L2M outbound URL checks cover every URL that HTTP Request, Web Browse, Chart, PDF, RAG and feed nodes fetch, blocking request forgery and local file reads."
 ---
 
-# Outbound URL guard
+# Outbound URL checks
 
 Nodes that fetch a URL the workflow author or upstream data supplies —
 **HTTP Request**, **Web Browse**, the **Chart** node's `data.url`, the
@@ -10,7 +10,7 @@ Nodes that fetch a URL the workflow author or upstream data supplies —
 the page opens), and **RAG** endpoints set on a node (a vector store's
 `endpoint`, an embedder's `baseUrl`, the Azure OpenAI embeddings node's
 `endpoint`), plus the **RSS** trigger's feed URL and the **SSE** trigger's
-stream URL — run that URL through a shared guard before any request leaves
+stream URL — run that URL through a shared check before any request leaves
 the host. This
 blocks server-side request forgery (SSRF) and local-file reads through those
 nodes.
@@ -50,7 +50,7 @@ sent there. The deployment's environment keys (`OPENAI_API_KEY`,
 so a workflow author cannot point a node at their own server to collect them.
 
 **DNS rebinding.** For HTTP Request, the Chart node, node-configured RAG
-endpoints and the RSS and SSE triggers, the connection is pinned. The socket's own DNS lookup goes through the guard: the name is
+endpoints and the RSS and SSE triggers, the connection is pinned. The socket's own DNS lookup goes through the check: the name is
 resolved once at connect time, every address is checked, and the socket can
 only connect to an address that passed. A name that answers a public address
 to the first check and a metadata or private address a moment later is
@@ -61,7 +61,7 @@ the `Host` header are unchanged.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OUTBOUND_DENY_PRIVATE` | `false` | Also block private ranges and localhost for the guarded nodes. |
+| `OUTBOUND_DENY_PRIVATE` | `false` | Also block private ranges and localhost for the checked nodes. |
 | `OUTBOUND_ALLOWLIST` | empty | Comma-separated hosts or CIDRs allowed through under `OUTBOUND_DENY_PRIVATE`, e.g. `10.0.0.0/8,*.internal,db.corp:5432`. |
 
 ## What is not covered
@@ -78,10 +78,10 @@ the `Host` header are unchanged.
   elsewhere. Under `OUTBOUND_DENY_PRIVATE` that is a gap for private ranges;
   the metadata block is affected the same way.
 - **Python code nodes on the host** open their own sockets and never go
-  through this guard. See
+  through these checks. See
   [Code execution](./code-execution.md#python-on-the-host).
 - **Other browser channels.** WebRTC, and requests a service worker makes,
-  are not routed through the guard.
+  are not routed through the checks.
 - **Deployment-level endpoints** are infrastructure settings and are not
   checked: LLM provider base URLs, connector SDK endpoints, and RAG endpoints
   that come from environment variables (`QDRANT_ENDPOINT`, `CHROMA_ENDPOINT`

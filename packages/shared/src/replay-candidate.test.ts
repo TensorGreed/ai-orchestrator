@@ -131,7 +131,7 @@ describe("replayJobReleaseIneligibleReasons", () => {
     const cases: Array<[Parameters<typeof replayJobReleaseIneligibleReasons>[0], Parameters<typeof replayJobReleaseIneligibleReasons>[1], RegExp]> = [
       [{ kind: "inline", overrides: null }, { mcpMode: "strict", models: "live" }, /workflow file/],
       [{ kind: "draft", overrides: { models: [{ nodeId: "a", model: "x" }] } }, { mcpMode: "strict", models: "live" }, /Model overrides/],
-      [{ kind: "draft", overrides: { guardProfile: { profileId: "p", version: 3 } } }, { mcpMode: "strict", models: "live" }, /guard profile/],
+      [{ kind: "draft", overrides: { guardProfile: { profileId: "p", version: 3 } } }, { mcpMode: "strict", models: "live" }, /rule set override/],
       [{ kind: "draft", overrides: { mcpServers: { s: "strict" } } }, { mcpMode: "strict", models: "live" }, /MCP modes/],
       [{ kind: "draft", overrides: { liveReadNodes: ["sheet"] } }, { mcpMode: "strict", models: "live" }, /live data/],
       [{ kind: "draft", overrides: null }, { mcpMode: "strict", models: "replay" }, /model tape/],

@@ -457,7 +457,7 @@ describe("a toolset binding", () => {
     const tool = toolCaller(fixture);
     const blocked = await tool("lookup_kb", { topic: INJECTION });
     expect(blocked.outcome).toBe("tool_error");
-    expect(blocked.text).toBe("Blocked by Guard: indirect injection");
+    expect(blocked.text).toBe("Blocked by content rules: indirect injection");
     expect(blocked.text).not.toContain("previous instructions");
     expect(invoke).not.toHaveBeenCalled();
     // An args block writes no telemetry row, as a policy deny does.
@@ -504,7 +504,7 @@ describe("a toolset binding", () => {
     const tool = toolCaller(fixture);
     const planted = await tool("lookup_kb", { topic: "planted" });
     expect(planted.outcome).toBe("tool_error");
-    expect(planted.text).toBe("Blocked by Guard: indirect injection");
+    expect(planted.text).toBe("Blocked by content rules: indirect injection");
     const contact = await tool("lookup_kb", { topic: "contact" });
     expect(contact.outcome).toBe("ok");
     expect(contact.text).not.toContain(EMAIL);
@@ -946,13 +946,13 @@ describe("the gateway's own checks on workflow tools", () => {
     const runsBefore = (await fixture.context.store.listExecutionHistory({ workflowId: "wf-plain", pageSize: 10 })).items.length;
     const blockedArgs = await tool("plain_wfplain", { text: INJECTION });
     expect(blockedArgs.outcome).toBe("tool_error");
-    expect(blockedArgs.text).toBe("Blocked by Guard: indirect injection");
+    expect(blockedArgs.text).toBe("Blocked by content rules: indirect injection");
     // The run never started.
     expect((await fixture.context.store.listExecutionHistory({ workflowId: "wf-plain", pageSize: 10 })).items.length).toBe(runsBefore);
 
     const blockedResult = await tool("plain_wfplain", { text: "hello" });
     expect(blockedResult.outcome).toBe("tool_error");
-    expect(blockedResult.text).toBe("Blocked by Guard: indirect injection");
+    expect(blockedResult.text).toBe("Blocked by content rules: indirect injection");
     expect(blockedResult.text).not.toContain("evil.example");
     const redacted = await tool("plain_wfcontact", { text: "hello" });
     expect(redacted.outcome).toBe("ok");
@@ -983,7 +983,7 @@ describe("a Guard-blocked call held for approval", () => {
     await bind(fixture, "toolsets", fixture.toolset.id, "gw-strict");
     const blocked = await toolCaller(fixture)("lookup_kb", { topic: INJECTION });
     expect(blocked.outcome).toBe("tool_error");
-    expect(blocked.text).toBe("Blocked by Guard: indirect injection");
+    expect(blocked.text).toBe("Blocked by content rules: indirect injection");
     expect(await pending()).toEqual([]);
 
     // Unbound: the same call asks for an approval, and an admin approves it.
@@ -997,7 +997,7 @@ describe("a Guard-blocked call held for approval", () => {
     // Bound again: Guard blocks the approved call, and the approval is not used up.
     await bind(fixture, "toolsets", fixture.toolset.id, "gw-strict");
     const invoke = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool");
-    expect((await toolCaller(fixture)("lookup_kb", { topic: INJECTION })).text).toBe("Blocked by Guard: indirect injection");
+    expect((await toolCaller(fixture)("lookup_kb", { topic: INJECTION })).text).toBe("Blocked by content rules: indirect injection");
     expect(invoke).not.toHaveBeenCalled();
     expect(await auditEvents(fixture.context.store, "mcp_gateway.approval_used")).toEqual([]);
     await bind(fixture, "toolsets", fixture.toolset.id, null);
@@ -1022,7 +1022,7 @@ describe("Guard binding reads on a gateway call", () => {
     const invoke = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool");
     const refused = await tool("get_current_time", { tz: "UTC" });
     expect(refused.outcome).toBe("tool_error");
-    expect(refused.text).toBe("Guard could not be checked for this call, so it was not sent. Try again.");
+    expect(refused.text).toBe("Content rules could not be checked for this call, so it was not sent. Try again.");
     expect(invoke).not.toHaveBeenCalled();
   });
 });
@@ -1103,10 +1103,10 @@ describe("a Guard error while checking arguments", () => {
     try {
       const server = await tool("get_current_time", { tz: "UTC" });
       expect(server.outcome).toBe("tool_error");
-      expect(server.text).toBe("Guard could not check this call, so it was not sent.");
+      expect(server.text).toBe("Content rules could not check this call, so it was not sent.");
       const workflow = await tool("screened_lookup", { text: "hello" });
       expect(workflow.outcome).toBe("tool_error");
-      expect(workflow.text).toBe("Guard could not check this call, so it was not sent.");
+      expect(workflow.text).toBe("Content rules could not check this call, so it was not sent.");
     } finally {
       resolve.mockRestore();
     }

@@ -22,16 +22,16 @@ The manifest is a versioned JSON document (`format: "l2m.run-manifest"`, `manife
 | `mcpServers` | The registered servers the run used: adapter, transport, URL without credentials or query, catalog entry and pinned package, snapshot id and hash |
 | `prompts` | System and user prompt templates and their rendered text |
 | `citations` | Retrieved and cited chunks: marker, source, knowledge base, similarity score, retrieval mode and a digest of the chunk text |
-| `approvals` | Approval decisions (Human Approval nodes, guard hand-offs and Approval Gates): who decided, the decision, the reason and when |
+| `approvals` | Approval decisions (Human Approval nodes, content rules hand-offs and Approval Gates): who decided, the decision, the reason and when |
 | `totals` | Tokens, estimated cost, model calls and tool calls for the whole run |
-| `extensions.guard` | Guard verdicts: profile id and version, detector, action, outcome and node, plus counts. No matched content and no evidence |
+| `extensions.guard` | Rule verdicts: rule set id and version, detector, action, outcome and node, plus counts. No matched content and no evidence |
 | `extensions.approvals` | Every approval request of the run: request id, node, kind, outcome (including `timed_out` and `canceled`), who decided and when, the reason, the keys of edited fields and a digest of the edits, and the sub-workflow path. See [Approval gates](../product/approvals.md) |
 
 ### What is left out
 
 - **Secret values.** Configs keep `secretRef.secretId` only. Literal values under keys that look like credentials (`apiKey`, `token`, `password`, `authorization` and similar) become `[REDACTED]`, and credentials and query strings are removed from URLs. See [What is scrubbed](#what-is-scrubbed) for the second line of defence.
 - **Payloads.** The manifest holds digests of node inputs and outputs, tool arguments and results, and citation text. The payloads themselves are in the bundle's `execution/nodes/` files, which follow the same redaction as execution history.
-- **Guard evidence.** Guard verdicts are summarised without matched content.
+- **Content rules evidence.** Rule verdicts are summarised without matched content.
 
 ### What is scrubbed
 
@@ -98,7 +98,7 @@ README.txt                 what is in the bundle and how to verify it
 workflow.json              the workflow as it ran; its canonical JSON hashes to manifest.workflow.hash
 execution/run.json         the execution record (redacted input, output, status)
 execution/nodes/NNN-<id>.json   each node's input and output, in run order
-execution/trace.json       node timings, MCP tool-call telemetry, guard events (masked evidence)
+execution/trace.json       node timings, MCP tool-call telemetry, rule events (masked evidence)
 execution/logs.jsonl       node activity, errors and warnings, and the audit-log entries about this run
 outputs/<node>/NN-<name>.<ext>  files the run produced (PDFs, images, documents, CSV and similar)
 redactions.json            files in which secret values were replaced, and outputs left out

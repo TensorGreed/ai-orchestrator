@@ -185,7 +185,7 @@ button{font:inherit;cursor:pointer}
   <button data-v="orbit" aria-pressed="false">B · Orbit</button>
   <button data-v="loom" aria-pressed="false">C · Loom</button>
   <span class="sep"></span>
-  <button data-w="cipher" aria-pressed="true">CipherTrust report</button>
+  <button data-w="cipher" aria-pressed="true">Key manager report</button>
   <button data-w="swarm" aria-pressed="false">Supervisor swarm</button>
 </nav>
 
@@ -193,16 +193,16 @@ button{font:inherit;cursor:pointer}
 // ---------- real data from samples/workflows (trimmed to what the UI shows) ----------
 const WORKFLOWS = {
   cipher: {
-    name: "CipherTrust — Key Inventory Report",
+    name: "Key manager — Key Inventory Report",
     desc: "Fans out two branches from one trigger: a branding branch that browses the brand site and distills a brand kit, and a key-inventory branch that lists keys over MCP and aggregates them. Both meet at three charts, a branded HTML template, and a rendered PDF.",
     nodes: [
       n("trigger_1","manual_trigger","Run report","manual",{}),
-      n("brand_url","text_input","Brand URL","text = https://thalesgroup.com",{Text:"https://thalesgroup.com"}),
+      n("brand_url","text_input","Brand URL","text = https://example.com",{Text:"https://example.com"}),
       n("web_browse_1","web_browse","Fetch Brand Site","networkidle · 45s · 1440×900 · screenshot",{"URL template":"{{user_prompt}}","Wait until":"networkidle","Timeout":"45000 ms","Viewport":"1440 × 900","Screenshot":"true"}),
       n("brand_prompt","prompt_template","Extract Branding Prompt","“You are a brand-asset extractor…”",{Template:"You are a brand-asset extractor. Examine the page below and produce a JSON object…"}),
       n("brand_llm","llm_call","Distill Branding","openai · gpt-4o-mini · t=0 → branding_raw",{Provider:"OpenAI",Model:"gpt-4o-mini","Base URL":"https://api.openai.com/v1","API key secret":"None / environment variable",Temperature:"0","Max tokens":"1024","Prompt key":"brand_extraction_prompt","System prompt key":"system_prompt","Output key":"branding_raw"}),
       n("brand_parse","output_parser","Parse Brand JSON","json_schema · lenient ← branding_raw",{Mode:"json_schema","Input key":"branding_raw",Parsing:"lenient",Schema:"{ brand, primaryColor, accentColor, logoUrl, font, tagline }"}),
-      n("mcp_list_keys","mcp_tool","CipherTrust list_keys","ciphertrust / list_keys · http_streamable",{Server:"ciphertrust",Tool:"list_keys",Transport:"http_streamable",Args:"{\"limit\":1000}"}),
+      n("mcp_list_keys","mcp_tool","Key manager list_keys","key-manager / list_keys · http_streamable",{Server:"key-manager",Tool:"list_keys",Transport:"http_streamable",Args:"{\"limit\":1000}"}),
       n("aggregate_keys","code_node","Aggregate Keys","python · 5s timeout",{Language:"python",Timeout:"5000 ms",Code:"from datetime import datetime, timezone …"}),
       n("chart_cloud","chart","Keys by Cloud","vega-lite · bar",{Mark:"bar",X:"category (nominal)",Y:"count (quantitative)"}),
       n("chart_algo","chart","Keys by Algorithm","vega-lite · donut",{Mark:"arc · innerRadius 50",Theta:"count",Color:"algorithm"}),
@@ -218,7 +218,7 @@ const WORKFLOWS = {
       ["brand_parse","report_html"],["aggregate_keys","report_html"],["brand_url","report_html"],["report_html","pdf_1"],["pdf_1","output_1"]
     ],
     selected: "brand_llm",
-    run: [["Run report",0,1],["Brand URL",1,2],["CipherTrust list_keys",1,9],["Fetch Brand Site",2,21],["Aggregate Keys",9,11],["Extract Branding Prompt",21,22],["Distill Branding",22,31,"hot"],["Parse Brand JSON",31,32],["Keys by Cloud",32,34],["Keys by Algorithm",32,34],["Key Aging",32,34],["Compose Branded HTML",34,35],["Render PDF",35,41],["PDF Report",41,42]]
+    run: [["Run report",0,1],["Brand URL",1,2],["Key manager list_keys",1,9],["Fetch Brand Site",2,21],["Aggregate Keys",9,11],["Extract Branding Prompt",21,22],["Distill Branding",22,31,"hot"],["Parse Brand JSON",31,32],["Keys by Cloud",32,34],["Keys by Algorithm",32,34],["Key Aging",32,34],["Compose Branded HTML",34,35],["Render PDF",35,41],["PDF Report",41,42]]
   },
   swarm: {
     name: "Supervisor + Worker Swarm",

@@ -217,7 +217,7 @@ describe("divergenceOf and simulateCase", () => {
     expect((await simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: allow }, candidate: { replay: tapeMiss, checks: allow }, profileChanged: true })).outcome).toBe("diverged");
     const same = await simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: allow }, candidate: { replay: tapeMiss, checks: allow }, profileChanged: false });
     expect(same.outcome).toBe("not_simulated");
-    expect(same.reason).toMatch(/not the guard's/);
+    expect(same.reason).toMatch(/content rules did not cause the difference/);
   });
 
   it("calls a recording the baseline cannot follow stale, never an impact", async () => {
@@ -258,7 +258,7 @@ describe("summariseGuardSimulation", () => {
     expect(summary).toMatchObject({ runs: 3, workflows: 2, compared: 2, diverged: 1, runsNewlyBlocked: 1, runsNowMasked: 1, runsNoLongerBlocked: 0, runsChanged: 2, runsUnchanged: 1 });
     expect(summary.byDataClass).toEqual({ email: { newlyBlocked: 1, noLongerBlocked: 0, actionChanged: 0 } });
     expect(summary.byDetector).toEqual({ dlp: { newlyBlocked: 1, noLongerBlocked: 0, actionChanged: 0 } });
-    expect(summary.sentence).toBe("Across 3 recent runs in 2 workflows: 1 newly blocked, 1 now masked, 0 no longer blocked. 1 run diverged after the guard change.");
+    expect(summary.sentence).toBe("Across 3 recent runs in 2 workflows: 1 newly blocked, 1 now masked, 0 no longer blocked. 1 run diverged after the rule set change.");
     expect(summariseGuardSimulation([]).sentence).toBe("No recent recorded runs to simulate.");
   });
 });

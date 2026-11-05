@@ -259,7 +259,7 @@ export interface WorkflowExecutionDependencies {
    */
   loadMcpToolPolicy?: () => McpToolPolicySnapshot | Promise<McpToolPolicySnapshot>;
   /**
-   * Phase 12.1 — L2M Guard: stored profiles, the run's bindings, the token
+   * Phase 12.1 — content rules: stored rule sets, the run's bindings, the token
    * vault and where verdicts are recorded. Without it guard nodes evaluate
    * the built-in default profile and agents run unguarded.
    */
@@ -3286,7 +3286,7 @@ async function guardModelPrompt(
   if (!outcome.transformed) return prompts;
   const rewritten = toRecord(outcome.content);
   if (typeof rewritten.system_prompt !== "string" || typeof rewritten.user_prompt !== "string") {
-    throw new GuardBlockedError(`${node.name || node.type} was blocked by the guard: the rewritten prompt could not be used`, outcome.result.verdicts);
+    throw new GuardBlockedError(`${node.name || node.type} was blocked by content rules: the rewritten prompt could not be used`, outcome.result.verdicts);
   }
   context.labelScope?.declassify(outcome.declassified);
   return { systemPrompt: rewritten.system_prompt, userPrompt: rewritten.user_prompt };
@@ -3322,7 +3322,7 @@ function samplingGuardFor(
     if (!outcome.transformed) return messages;
     const rewritten = Array.isArray(outcome.content) ? outcome.content : null;
     if (!rewritten || rewritten.length !== messages.length) {
-      throw new GuardBlockedError("The sampling request was blocked by the guard: the rewritten messages could not be used", outcome.result.verdicts);
+      throw new GuardBlockedError("The sampling request was blocked by content rules: the rewritten messages could not be used", outcome.result.verdicts);
     }
     return messages.map((message, index) => ({ ...message, content: String(rewritten[index] ?? "") }));
   };
@@ -3715,7 +3715,7 @@ async function outboundPreCheck(
           // A hop that needs an approval cannot wait: the first request was already sent, so it is stopped instead.
           const hop = await checkOutbound({ ...common, replay: true, channel: "egress", content: first.content, ...(first.ignoredValues ? { ignoredValues: first.ignoredValues } : {}), refs: chain, what: `${first.what}, redirected to ${chain[chain.length - 1]!.host || "an unknown host"}`, approvalTag: chain.map((ref) => ref.host ?? "").join(">") });
           if (hop.transformed) {
-            throw new GuardBlockedError(`${first.what} was redirected somewhere the guard would rewrite the request for; it was stopped instead`, hop.result.verdicts);
+            throw new GuardBlockedError(`${first.what} was redirected somewhere the content rules would rewrite the request for; it was stopped instead`, hop.result.verdicts);
           }
         }
       : undefined;
@@ -3749,7 +3749,7 @@ function egressUrlJudge(
       approvalTag: refs.map((ref) => ref.host ?? "").join(">")
     });
     if (outcome.transformed) {
-      throw new GuardBlockedError(`${what} was stopped from loading ${parts.host || "an unknown host"}: the guard would rewrite that address, which cannot be done for a page load`, outcome.result.verdicts);
+      throw new GuardBlockedError(`${what} was stopped from loading ${parts.host || "an unknown host"}: the content rules would rewrite that address, which cannot be done for a page load`, outcome.result.verdicts);
     }
   };
 }
@@ -6571,7 +6571,7 @@ async function executeNodeHandler(
               if (request) throw new ApprovalHandoffSignal(request);
             }
             throw new GuardBlockedError(
-              `Guard blocked the agent's ${error.channel.replace("_", " ")}: ${error.message}`,
+              `Content rules blocked the agent's ${error.channel.replace("_", " ")}: ${error.message}`,
               guardSession?.trace().verdicts.at(-1)?.verdicts ?? []
             );
           }
@@ -6862,7 +6862,7 @@ async function executeNodeHandler(
 
     case "guard_protection": {
       // Only meaningful on a guard node's protection port, where it is consumed, not executed.
-      return { ...mergeParentOutputs(context.parentOutputs), note: "Protection Provider nodes take effect only on a Guard node's protection port." };
+      return { ...mergeParentOutputs(context.parentOutputs), note: "Protection Provider nodes take effect only on a Content Rules node's protection port." };
     }
 
     case "output_guardrail": {

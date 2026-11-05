@@ -4,7 +4,7 @@
   "workflow": {
     "id": "wf-branding-extract-flow",
     "name": "Brand Extraction (Web Browse)",
-    "description": "Text Input -> Web Browse -> Prompt Template -> LLM (extract brand colors / logo URL / fonts as JSON) -> Output Parser -> Output. Fetches a website with a real headless browser so JS-rendered pages work, then asks the LLM to extract structured branding data. Drop-in pattern for the CipherTrust scenario step where the user said 'use the branding from thalesgroup.com' — the LLM sees the real page (HTML + screenshot + meta tags) and pulls colors / logo / typography. Replace the inline url with a parameter for full automation.",
+    "description": "Text Input -> Web Browse -> Prompt Template -> LLM (extract brand colors / logo URL / fonts as JSON) -> Output Parser -> Output. Fetches a website with a real headless browser so JS-rendered pages work, then asks the LLM to extract structured branding data. Drop-in pattern for the key-inventory report step where the user said 'use the branding from example.com' — the LLM sees the real page (HTML + screenshot + meta tags) and pulls colors / logo / typography. Replace the inline url with a parameter for full automation.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [

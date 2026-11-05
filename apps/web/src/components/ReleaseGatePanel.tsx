@@ -208,7 +208,7 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
           </div>
           <label className="guard-check">
             <input type="checkbox" checked={form.noNewGuardBlocks} disabled={locked && gate.policy.noNewGuardBlocks} onChange={(event) => update({ noNewGuardBlocks: event.target.checked })} />
-            <span>Block a version that adds guard blocks</span>
+            <span>Block a version that adds content rule blocks</span>
           </label>
           <label className="guard-check">
             <input type="checkbox" checked={form.errorsCountAsFailures} disabled={locked && gate.policy.errorsCountAsFailures} onChange={(event) => update({ errorsCountAsFailures: event.target.checked })} />

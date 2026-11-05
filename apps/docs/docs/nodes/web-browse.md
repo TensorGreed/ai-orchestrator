@@ -76,7 +76,7 @@ Browser binaries must be installed once: `pnpm exec playwright install chromium`
 
 ## Examples
 
-### Brand-asset extraction (the CipherTrust scenario)
+### Brand-asset extraction
 
 ```json
 {

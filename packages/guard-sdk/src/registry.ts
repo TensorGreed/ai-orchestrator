@@ -5,7 +5,7 @@ export class GuardRegistry {
 
   register(detector: GuardDetector): this {
     if (this.detectors.has(detector.id)) {
-      throw new Error(`Guard detector '${detector.id}' is already registered`);
+      throw new Error(`Rule detector '${detector.id}' is already registered`);
     }
     this.detectors.set(detector.id, detector);
     return this;

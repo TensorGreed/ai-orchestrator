@@ -266,7 +266,7 @@ export class ReplayService {
     if (problems.length > 0) throw new ReplayRunError(problems.join(" "), "invalid");
     let guardProfile: ResolvedJobCandidate["guardProfile"] = null;
     if (overrides?.guardProfile) {
-      if (!this.options.resolveGuardProfile) throw new ReplayRunError("Guard profile overrides are not available on this server.", "invalid");
+      if (!this.options.resolveGuardProfile) throw new ReplayRunError("Rule set overrides are not available on this server.", "invalid");
       const resolved = await this.options.resolveGuardProfile(overrides.guardProfile, { workflowId, projectId: workflow.projectId ?? null, actor: context.actor ?? null });
       if (!resolved.ok) throw new ReplayRunError(resolved.problem, resolved.forbidden ? "forbidden" : "invalid");
       guardProfile = resolved.profile;

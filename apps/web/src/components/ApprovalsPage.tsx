@@ -130,7 +130,7 @@ export function ApprovalsPage({ focusRequestId, focusExecutionId, onOpenRun, onP
       <header className="page-head">
         <div className="page-head-copy">
           <h2 className="page-title">Approvals</h2>
-          <p className="page-sub">Runs paused on a person: approval gates, human approvals, guard reviews and write tools an agent wants to call, and versions waiting to be published.</p>
+          <p className="page-sub">Runs paused on a person: approval gates, human approvals, content rule reviews and write tools an agent wants to call, and versions waiting to be published.</p>
         </div>
         <div className="approvals-head-actions">
           <div className="finops-range" role="tablist" aria-label="Approval views">

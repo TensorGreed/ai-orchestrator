@@ -15,7 +15,7 @@ coverage
 *.tsbuildinfo
 .vscode
 scripts
-N8N_PARITY_ROADMAP.md
+ROADMAP.md
 VSCODE_L2M_AGENT_IMPLEMENTATION_PLAN.md
 SprintPlan.md
 PRODUCTION_BEGINNER_ROADMAP.md

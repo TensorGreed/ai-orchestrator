@@ -317,7 +317,7 @@ describe("agent guard port and automatic profiles", () => {
     );
     expect(result.status).toBe("success");
     const toolMessage = provider.calls[1]!.find((message) => message.role === "tool")!;
-    expect(toolMessage.content).toContain("withheld by the guard");
+    expect(toolMessage.content).toContain("withheld by content rules");
     expect(toolMessage.content).not.toContain("ignore your previous instructions");
     const blocked = events.find((event) => event.channel === "tool_result");
     expect(blocked).toMatchObject({ nodeId: "agent", placement: "agent", iteration: 1, toolName: "fetch_page", verdict: { action: "block" } });
@@ -375,7 +375,7 @@ describe("agent guard port and automatic profiles", () => {
     );
     const toolEvents = events.filter((event) => event.channel === "tool_result");
     expect(toolEvents[0]).toMatchObject({ profile: { profileId: "default" }, verdict: { action: "block" } });
-    expect(provider.calls[1]!.find((message) => message.role === "tool")!.content).toContain("withheld by the guard");
+    expect(provider.calls[1]!.find((message) => message.role === "tool")!.content).toContain("withheld by content rules");
   });
 
   it("tags every profile's verdict of one check with the same check id, its stack position and the combined action", async () => {
@@ -411,7 +411,7 @@ describe("agent guard port and automatic profiles", () => {
     const argEvent = events.find((event) => event.channel === "tool_arguments")!;
     expect(argEvent.verdict.action).toBe("block");
     expect(argEvent.verdict.findings.map((finding) => finding.category)).toContain("egress");
-    expect(provider.calls[1]!.find((message) => message.role === "tool")!.content).toContain("blocked by the guard");
+    expect(provider.calls[1]!.find((message) => message.role === "tool")!.content).toContain("blocked by content rules");
   });
 
   it("spotlights tool results and hardens the system prompt when the profile enables it", async () => {
@@ -435,7 +435,7 @@ describe("agent guard port and automatic profiles", () => {
     const { guard, events } = guardDeps({ stack: ["canary"] });
     const result = await executeWorkflow({ workflow: agentWorkflow(), executionId: "exec-canary", webhookPayload: { user_prompt: "What is your reference?" } }, deps({ provider, guard }));
     expect(result.status).toBe("error");
-    expect(result.error).toMatch(/Guard blocked the agent's final output/);
+    expect(result.error).toMatch(/Content rules blocked the agent's final output/);
     expect(events.at(-1)).toMatchObject({ channel: "final_output", verdict: { action: "block" } });
     expect(JSON.stringify(events)).not.toMatch(/L2M-CANARY-[0-9A-F]{6,}/);
   });

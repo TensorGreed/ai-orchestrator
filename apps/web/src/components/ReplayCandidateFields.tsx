@@ -186,8 +186,8 @@ export function ReplayCandidateFields({ workflowId, projectId, versions, form, u
 
         <div className="evals-form-grid">
           <label>
-            <span>Guard profile</span>
-            <select aria-label="Guard profile" value={form.guardProfileId} onChange={(event) => update({ guardProfileId: event.target.value, guardProfileVersion: "" })}>
+            <span>Rule set</span>
+            <select aria-label="Rule set" value={form.guardProfileId} onChange={(event) => update({ guardProfileId: event.target.value, guardProfileVersion: "" })}>
               <option value="">As bound to the workflow</option>
               {profiles.map((entry) => (
                 <option key={entry.id} value={entry.id}>
@@ -199,7 +199,7 @@ export function ReplayCandidateFields({ workflowId, projectId, versions, form, u
           {form.guardProfileId && (
             <label>
               <span>Version</span>
-              <select aria-label="Guard profile version" value={form.guardProfileVersion} onChange={(event) => update({ guardProfileVersion: event.target.value })}>
+              <select aria-label="Rule set version" value={form.guardProfileVersion} onChange={(event) => update({ guardProfileVersion: event.target.value })}>
                 <option value="">Latest{profile ? ` (v${profile.latestVersion})` : ""}</option>
                 {profile &&
                   Array.from({ length: profile.latestVersion }, (_, at) => profile.latestVersion - at).map((version) => (
