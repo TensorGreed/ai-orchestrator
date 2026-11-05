@@ -67,7 +67,7 @@ Rule sets live on the **Security** page, under **Rule sets & bindings**. Admins 
 
 - **Versions.** Every save is a new immutable version with its hash, author, time and an optional note. Saving a document whose hash has not changed does not add a version. Runs record the rule set id, version and hash they used.
 - **Diff.** Pick two versions to see every changed setting by path.
-- **Export and import.** Export downloads a version as JSON (headers `x-guard-profile-version` and `x-guard-profile-hash`); import accepts the same JSON as a new rule set or as a new version of an existing one.
+- **Export and import.** Export downloads a version as JSON (headers `x-guard-profile-version` and `x-guard-profile-hash`); import accepts the same JSON as a new rule set or as a new version of an existing one. The built-in rule set's documents, versions and exports carry its display name, Default rule set; its hash header still names the stored version runs pin.
 - **Validation.** Errors come back per field (`channels.prompt.detectors.0.threshold: …`) and are shown next to the editor. Rule sets may not hold key material: provider options name a stored secret (`keyId`), and the fallback cannot be `protect`. Custom dictionary patterns are limited to 256 characters, and patterns with nested quantifiers such as `(a+)+` are refused (and skipped if an older rule set already holds one).
 - **Built-in default.** The shipped default rule set is seeded read-only. Duplicate it to change it. When an upgrade ships a changed default, a new version is added.
 - **Deleting** a rule set is refused while a project or workflow is bound to it.
