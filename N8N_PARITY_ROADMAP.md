@@ -466,7 +466,7 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 ### 10.7 Runtime safety
 - [x] Sandboxed stdio servers: optional container runner (docker or podman) with CPU and memory limits, read-only root, an allowlist of mounted roots and networking off by default
 - [x] Per-server and per-tool rate limits, concurrency caps and a circuit breaker that opens on repeated failures and shows on the registry page
-- [x] Tool output guard: secret and PII redaction plus prompt-injection heuristics on tool results before they reach the model, with findings in the trace (delivered by Phase 12, L2M Guard)
+- [x] Tool output checks: secret and PII redaction plus prompt-injection heuristics on tool results before they reach the model, with findings in the trace (delivered by Phase 12, content rules)
 - [x] Delegated credentials: a tool call can use the triggering user's own token for a server instead of a shared service secret
 
 ### 10.8 Testing and reliability
@@ -486,18 +486,18 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 - [x] Approvals inbox page and notifications through the existing notification channels; approve/reject from the Runs page with a reason that lands in the manifest — decisions are audited as `approval.*`; the Runs page links a waiting run to the inbox
 - [x] Agent-level gate: require approval before any tool classified as a write tool is called (configurable per workflow) — the approval covers one call (node, server, tool, arguments); direct MCP Tool nodes are not gated by the setting
 
-## Phase 12: L2M Guard — security proxy for AI traffic
+## Phase 12: Content rules for AI traffic
 
 **Why:** agents now read untrusted content (web pages, emails, tickets, tool results) and hold
-write access to real systems. A guard that sits on every trust boundary, understands where data
+write access to real systems. A rule layer that sits on every trust boundary, understands where data
 came from and enforces policy on what an agent may do turns L2M from a builder into the safe way
 to run agents.
 
 **Design principles**
-- One guard engine, four enforcement points: an explicit `guard` node on DAG edges; a `guard`
+- One content rules engine, four enforcement points: an explicit `guard` node on DAG edges; a `guard`
   attachment port on agents whose hooks run inside the agent loop (before each model call, before
   each tool call, after each tool result, before the final answer), which is how agent ↔ MCP
-  traffic is covered without breaking attachment-port semantics; automatic guard profiles bound to
+  traffic is covered without breaking attachment-port semantics; automatic rule sets bound to
   projects and workflows; and traffic entering through the MCP gateway (10.4) and the AI gateway (12.6).
 - Detect, then act: allow, block, redact, transform, require approval or route to review, with a
   shadow mode for every action so policies can be observed before they are enforced.
@@ -505,31 +505,31 @@ to run agents.
   against injection phrasings no detector has seen.
 - Self-hosted: rules, parsers and local models (ONNX runtime or Ollama) run in the deployment; an
   LLM judge uses a model the workflow already has configured; no third-party scanning service.
-- Measured: every verdict is recorded and every profile is benchmarked against an attack corpus.
+- Measured: every verdict is recorded and every rule set is benchmarked against an attack corpus.
 
-### 12.1 Guard engine and placement
+### 12.1 Content rules engine and placement
 - [ ] `packages/guard-sdk`: detector interface (content, channel — prompt, model output, tool arguments, tool result, final output —, provenance labels and run subject in; findings with score, span and evidence out) and `createDefaultGuardRegistry()`; community detectors through the node SDK — *partial:* detector interface, channels, provenance labels, run subject, findings with score, spans and masked evidence, and `createDefaultGuardRegistry()` are delivered; community detectors through the node SDK remain
-- [ ] Guard profiles: named, versioned bundles of detectors, thresholds and actions per channel, stored as policy-as-code and synced through git — *partial:* the zod-validated profile document, stable serialisation and hash, stored profiles with immutable versions, diff, JSON export and import, a read-only built-in default and field-level validation are delivered; git sync remains (export / import JSON in the meantime)
+- [ ] Rule sets: named, versioned bundles of detectors, thresholds and actions per channel, stored as policy-as-code and synced through git — *partial:* the zod-validated rule set document, stable serialisation and hash, stored rule sets with immutable versions, diff, JSON export and import, a read-only built-in default and field-level validation are delivered; git sync remains (export / import JSON in the meantime)
 - [x] `guard` node for DAG edges with `pass`, `blocked` and `review` outputs, so flagged items can be routed instead of failing the run; an unconnected `review` output falls back to `blocked`
 - [x] `guard` attachment port on Agent and Supervisor nodes: hooks before each model call, before each tool call, after each tool result and before the final answer, also applied to worker delegation
-- [x] Automatic boundary profiles per project and per workflow (inherit, override, or enforced by an admin so builders cannot remove them); unbound projects use the built-in default unless `GUARD_AUTO_APPLY=false`
+- [x] Automatic boundary rule sets per project and per workflow (inherit, override, or enforced by an admin so builders cannot remove them); unbound projects use the built-in default unless `GUARD_AUTO_APPLY=false`
 - [x] Actions: allow, block, redact or mask, tokenise or encrypt through an attached protection provider (12.5), transform, require approval (11.2), route to review; per-action shadow mode
-- [ ] Latency tiers: rules and parsers inline, local classifiers next, LLM judge only for uncertain scores; per-profile latency budget with an explicit fail-open or fail-closed choice — *partial:* tiers, cheapest-first evaluation, the per-profile budget and fail-open / fail-closed are delivered; local classifier models and the LLM judge remain (interfaces only)
+- [ ] Latency tiers: rules and parsers inline, local classifiers next, LLM judge only for uncertain scores; per-rule-set latency budget with an explicit fail-open or fail-closed choice — *partial:* tiers, cheapest-first evaluation, the per-rule-set budget and fail-open / fail-closed are delivered; local classifier models and the LLM judge remain (interfaces only)
 
 ### 12.2 Prompt-injection and jailbreak defence
 - [ ] Direct injection and jailbreak detection on user input: rule pack plus a local classifier model, with scores and highlighted spans — *partial:* rule pack with scores and spans, leetspeak and base64 decoding delivered; the local classifier model remains (interface with a rule-based stand-in)
-- [ ] Indirect injection scanning of tool results, retrieved documents, web pages, emails and webhook payloads before the model sees them — *partial:* MCP and worker tool results are scanned in the agent loop before the model sees them, and a guard node scans any payload on a DAG edge; scanning retrieval results and webhook payloads without a guard node remains
-- [x] Spotlighting: untrusted content wrapped with delimiters or datamarking, with matching system-prompt hardening applied automatically — set per profile; applied to tool results and the agent system prompt
+- [ ] Indirect injection scanning of tool results, retrieved documents, web pages, emails and webhook payloads before the model sees them — *partial:* MCP and worker tool results are scanned in the agent loop before the model sees them, and a Content Rules node scans any payload on a DAG edge; scanning retrieval results and webhook payloads without a Content Rules node remains
+- [x] Spotlighting: untrusted content wrapped with delimiters or datamarking, with matching system-prompt hardening applied automatically — set per rule set; applied to tool results and the agent system prompt
 - [x] Provenance (taint) tracking: values carry labels (trusted, user, untrusted external, sensitive) through templates, nodes and the agent context; policies such as "once untrusted content is in context, write tools need approval" and "sensitive data may not flow to open-world tools" — labels propagate node to node and through the agent context (16.1); the two policies are safety presets over the MCP tool rules, created in shadow mode, plus a per-workflow "approve writes only after untrusted content" switch; authenticated webhooks give `user` provenance, admins may set trust per trigger, and only a human approval clears `untrusted_external`; secrets flagged "sensitive output" and detected data classes mark data sensitive; open world comes from the server's destination tier with a per-tool override; MCP gateway toolsets can keep a per-session high-water mark (#124–#126). A quarantined-reader node (a tool-less model extracts typed fields) comes later as its own item
-- [x] Exfiltration channels blocked: markdown images and links that encode data in URLs, unexpected outbound URLs in tool arguments, hidden-unicode and ASCII-smuggling payloads — library in `packages/guard-sdk`, wired into the guard node and the agent `guard` port (12.1)
-- [x] Canary tokens in system prompts to detect prompt leakage in outputs — library in `packages/guard-sdk`; profiles with `canaries` plant one in the agent system prompt and block it in tool arguments and the final answer
+- [x] Exfiltration channels blocked: markdown images and links that encode data in URLs, unexpected outbound URLs in tool arguments, hidden-unicode and ASCII-smuggling payloads — library in `packages/guard-sdk`, wired into the Content Rules node and the agent `guard` port (12.1)
+- [x] Canary tokens in system prompts to detect prompt leakage in outputs — library in `packages/guard-sdk`; rule sets with `canaries` plant one in the agent system prompt and block it in tool arguments and the final answer
 
 ### 12.3 Tool-argument security
-- [x] SQL guard: statements parsed to an AST per dialect; read, write and DDL classified; stacked queries, tautologies and comment tricks blocked; table and column allowlists; mutations require WHERE and a row cap; applied to SQL connector nodes and SQL-shaped MCP arguments — library in `packages/guard-sdk` (postgres, mysql, mariadb, sqlite, mssql); applied to MCP tool arguments through the agent `guard` port and to any payload through a guard node; SQL connector nodes are not checked automatically (place a guard node before them)
-- [x] Command guard: shell metacharacter and argument-injection checks for tools that run commands; static checks on code-node source — library in `packages/guard-sdk`, wired into the guard node and the agent `guard` port (12.1)
-- [x] Path guard: path arguments resolved against allowed roots; traversal and symlink escapes blocked — library in `packages/guard-sdk`, wired into the guard node and the agent `guard` port (12.1)
-- [x] Egress guard: URL arguments and HTTP nodes checked against an allowlist after DNS resolution; private ranges, link-local and cloud metadata addresses blocked — library in `packages/guard-sdk` with an injectable resolver; tool calls are checked through the agent `guard` port with the system resolver; HTTP Request nodes are not checked automatically (place a guard node before them)
-- [x] Strict argument validation against the tool's input schema with size and depth limits before every call — library in `packages/guard-sdk`; checked before every agent tool call when the profile lists `tool.arguments`
+- [x] SQL check: statements parsed to an AST per dialect; read, write and DDL classified; stacked queries, tautologies and comment tricks blocked; table and column allowlists; mutations require WHERE and a row cap; applied to SQL connector nodes and SQL-shaped MCP arguments — library in `packages/guard-sdk` (postgres, mysql, mariadb, sqlite, mssql); applied to MCP tool arguments through the agent `guard` port and to any payload through a Content Rules node; SQL connector nodes are not checked automatically (place a Content Rules node before them)
+- [x] Command check: shell metacharacter and argument-injection checks for tools that run commands; static checks on code-node source — library in `packages/guard-sdk`, wired into the Content Rules node and the agent `guard` port (12.1)
+- [x] Path check: path arguments resolved against allowed roots; traversal and symlink escapes blocked — library in `packages/guard-sdk`, wired into the Content Rules node and the agent `guard` port (12.1)
+- [x] Egress check: URL arguments and HTTP nodes checked against an allowlist after DNS resolution; private ranges, link-local and cloud metadata addresses blocked — library in `packages/guard-sdk` with an injectable resolver; tool calls are checked through the agent `guard` port with the system resolver; HTTP Request nodes are not checked automatically (place a Content Rules node before them)
+- [x] Strict argument validation against the tool's input schema with size and depth limits before every call — library in `packages/guard-sdk`; checked before every agent tool call when the rule set lists `tool.arguments`
 
 ### 12.4 Fine-grained access control for agents
 - [ ] Attribute-based policies on tool calls written in Cedar (embedded, open source): principal is the run subject (10.2) or gateway client, action is the server and tool, resource and context come from the arguments and data labels — e.g. "operators may create issues only in org X's repositories", "refunds above 500 need a manager's approval" — *decided:* extend MCP tool rules (12.4) instead of embedding Cedar; the rules already match arguments and data labels, name roles, workflows and gateway clients, and can require approval (#117)
@@ -538,27 +538,27 @@ to run agents.
 - [x] Policy simulation: replay recent runs against a draft policy and show what would have been blocked before enforcing it — a draft rule or edited rule set is evaluated on the workflow and gateway calls of the last 7 or 30 days; calls a summary cannot decide stay undetermined (#118, #121)
 
 ### 12.5 Data protection and output safety
-- [ ] DLP detectors: PII, PHI and card data (patterns with checksums plus a local NER model), credentials and keys, custom dictionaries and patterns — *partial:* pattern detectors with checksums, credentials and keys, custom dictionaries and patterns delivered; the local NER model remains
-- [x] Pluggable protection providers: a provider interface (`protect` / `reveal`) in `packages/guard-sdk` with `createDefaultProtectionRegistry()`; providers attach to a guard node or profile through a `protection` port (0..N), so an external tokeniser or encrypter can be plugged in without changing the guard
+- [ ] Data rule detectors: PII, PHI and card data (patterns with checksums plus a local NER model), credentials and keys, custom dictionaries and patterns — *partial:* pattern detectors with checksums, credentials and keys, custom dictionaries and patterns delivered; the local NER model remains
+- [x] Pluggable protection providers: a provider interface (`protect` / `reveal`) in `packages/guard-sdk` with `createDefaultProtectionRegistry()`; providers attach to a Content Rules node or rule set through a `protection` port (0..N), so an external tokeniser or encrypter can be plugged in without changing the content rules engine
 - [ ] Built-in providers: local token vault (random or deterministic, format-preserving tokens), format-preserving encryption and AES-GCM encryption with keys held by `SecretService` or a customer KMS (13.3), keyed hashing for irreversible pseudonyms, and masking — *partial:* token vault (random, deterministic, format-preserving tokens), AES-GCM, keyed hashing and masking delivered; keys come from `SecretService` through `keySecretRef` and the token vault is stored encrypted in the database; format-preserving encryption and customer KMS keys remain
 - [ ] External providers: a generic HTTP adapter for an organisation's own tokenisation or encryption service (auth through `secretRef`), plus adapters for vault transform/transit engines and cloud de-identification APIs; community providers through the node SDK
-- [x] Per data-class mapping in the profile: each detected class (card number, email, national id, credential, custom class) maps to a provider and a mode (reversible token, encryption, pseudonym, mask); deterministic modes keep joins and lookups working across runs — library in `packages/guard-sdk`; the `protection` port fills the mapping at run time
-- [ ] Applied on every channel where data can leak: MCP tool responses (after each tool result, before the model sees them), workflow and node outputs, webhook and chat responses, and both gateways — *partial:* MCP and worker tool results and the final answer of agents, any payload a guard node sits on, and MCP gateway tool arguments and results when the toolset or client has a profile (12.6) are covered; webhook and chat responses without a guard node and the AI gateway remain
+- [x] Per data-class mapping in the rule set: each detected class (card number, email, national id, credential, custom class) maps to a provider and a mode (reversible token, encryption, pseudonym, mask); deterministic modes keep joins and lookups working across runs — library in `packages/guard-sdk`; the `protection` port fills the mapping at run time
+- [ ] Applied on every channel where data can leak: MCP tool responses (after each tool result, before the model sees them), workflow and node outputs, webhook and chat responses, and both gateways — *partial:* MCP and worker tool results and the final answer of agents, any payload a Content Rules node sits on, and MCP gateway tool arguments and results when the toolset or client has a rule set (12.6) are covered; webhook and chat responses without a Content Rules node and the AI gateway remain
 - [ ] Controlled reveal: a `reveal` step (node or output-side action) restores original values only for destinations and subjects a policy allows; every reveal is audited — *partial:* providers implement `reveal`; the reveal step, destination policy and audit remain
-- [x] Fallback policy: when sensitive data is found and no provider covers its class, or the provider is unavailable or errors, the profile's fallback applies, which defaults to deny (block the response or fail the step); prompt-injection findings are never tokenised and always follow their own block or review action — library in `packages/guard-sdk`, wired into the guard node and the agent `guard` port (12.1); a profile cannot set the fallback to `protect`
+- [x] Fallback policy: when sensitive data is found and no provider covers its class, or the provider is unavailable or errors, the rule set's fallback applies, which defaults to deny (block the response or fail the step); prompt-injection findings are never tokenised and always follow their own block or review action — library in `packages/guard-sdk`, wired into the Content Rules node and the agent `guard` port (12.1); a rule set cannot set the fallback to `protect`
 - [ ] Output checks: content-safety classifier, topic restrictions, schema conformance (extends `output_guardrail`), grounding check against retrieved citations
-- [ ] Guarded data also redacted in execution history, logs, traces and telemetry — *partial:* guard verdicts, `guard_events`, traces and logs hold masked evidence only, and outputs after a guard carry the rewritten content; outputs of nodes upstream of a guard keep what they produced
+- [ ] Checked data also redacted in execution history, logs, traces and telemetry — *partial:* rule verdicts, `guard_events`, traces and logs hold masked evidence only, and outputs after content rules carry the rewritten content; outputs of nodes upstream of content rules keep what they produced
 
 ### 12.6 AI gateway for applications outside L2M
-- [ ] OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings` endpoints that apply a guard profile and route through the provider registry, so other applications send model traffic through the same guard, budgets and audit
-- [x] Guard profiles applied per toolset and per client on the MCP gateway (10.4) — tool arguments and results checked, stacked tighten-only over the toolset project's enforced profile, also inside workflow tool runs (#133)
+- [ ] OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings` endpoints that apply a rule set and route through the provider registry, so other applications send model traffic through the same content rules, budgets and audit
+- [x] Rule sets applied per toolset and per client on the MCP gateway (10.4) — tool arguments and results checked, stacked tighten-only over the toolset project's enforced rule set, also inside workflow tool runs (#133)
 - [x] Per-client and per-project token budgets, rate limits and model allowlists — per-client budgets and rate limits (#134); deployment and project model allowlists (#135)
 
 ### 12.7 Visibility and assurance
-- [x] Every verdict stored (`guard_events`: channel, detector, score, action, masked evidence spans, profile version) and shown in the Trace tab, run tape and a Security page with trends
-- [ ] Guard events streamed to SIEM destinations through log streaming and included in signed run manifests (11.1) — *partial:* signed run manifests carry a guard verdict summary (`extensions.guard`: profile and version, detector, action, outcome, node; no matched content) and bundles include the run's guard events with masked evidence; streaming to SIEM destinations remains
-- [ ] Red-team corpus and benchmark: attack suites (direct and indirect injection, SQL injection, exfiltration, jailbreaks) run through the eval framework, reporting detection and false-positive rates per profile; CI gate on regressions — *partial:* a labelled corpus, a vitest gate on detection and false-positive rates for the default profile, and an end-to-end test that runs a corpus indirect-injection sample through an agent tool result are delivered; running suites through the eval framework per profile and the CI report remain
-- [ ] Framework mapping in the docs: OWASP Top 10 for LLM applications and for agentic applications, MITRE ATLAS, NIST AI RMF — *partial:* the OWASP Top 10 for LLM applications table is in the guard engine docs; agentic applications, MITRE ATLAS and NIST AI RMF remain
+- [x] Every verdict stored (`guard_events`: channel, detector, score, action, masked evidence spans, rule set version) and shown in the Trace tab, run tape and a Security page with trends
+- [ ] Rule events streamed to SIEM destinations through log streaming and included in signed run manifests (11.1) — *partial:* signed run manifests carry a rule verdict summary (`extensions.guard`: rule set and version, detector, action, outcome, node; no matched content) and bundles include the run's rule events with masked evidence; streaming to SIEM destinations remains
+- [ ] Red-team corpus and benchmark: attack suites (direct and indirect injection, SQL injection, exfiltration, jailbreaks) run through the eval framework, reporting detection and false-positive rates per rule set; CI gate on regressions — *partial:* a labelled corpus, a vitest gate on detection and false-positive rates for the default rule set, and an end-to-end test that runs a corpus indirect-injection sample through an agent tool result are delivered; running suites through the eval framework per rule set and the CI report remain
+- [ ] Framework mapping in the docs: OWASP Top 10 for LLM applications and for agentic applications, MITRE ATLAS, NIST AI RMF — *partial:* the OWASP Top 10 for LLM applications table is in the content rules engine docs; agentic applications, MITRE ATLAS and NIST AI RMF remain
 
 ## Phase 13: Enterprise readiness
 
@@ -584,7 +584,7 @@ by what blocks adoption first. All of it stays self-hosted.
 
 ### 13.3 Data protection and tenancy
 - [ ] Envelope encryption with customer-managed keys (cloud KMS services and Vault Transit); master-key rotation without downtime
-- [ ] Retention per project for executions, logs and guard events; legal hold; data-subject export and deletion
+- [ ] Retention per project for executions, logs and rule events; legal hold; data-subject export and deletion
 - [ ] Field-level encryption of execution inputs and outputs at rest
 - [ ] Organisations above projects: isolated tenants in one deployment with their own admins, SSO, keys and quotas
 
@@ -596,7 +596,7 @@ by what blocks adoption first. All of it stays self-hosted.
 
 ### 13.5 Supply chain and deployment
 - [x] SBOM (CycloneDX) per release, signed container images and build provenance; vulnerability policy with a disclosure SLA in SECURITY.md
-- [ ] Air-gapped installation: offline image bundle, no outbound calls, bundled local guard models, documented ports and egress
+- [ ] Air-gapped installation: offline image bundle, no outbound calls, bundled local detector models, documented ports and egress
 - [ ] FIPS 140-3 mode and hardened images (non-root, read-only filesystem, minimal base)
 - [ ] Kubernetes reference architecture (autoscaling, disruption budgets, network policies, external Postgres) and Terraform examples per cloud
 - [ ] Long-term-support release line with security backports and a published upgrade policy
@@ -621,9 +621,9 @@ Ideas from the positioning discussion, kept for later; each must remain self-hos
 
 ## Phase 15: Replay and Release Gate — CI for agents
 
-**Why:** a team that changes a model, a prompt, an MCP server version, a guard profile or a workflow has no way
+**Why:** a team that changes a model, a prompt, an MCP server version, a rule set or a workflow has no way
 to know what the change does to real traffic before it ships. Recording real runs, replaying them against a
-candidate, diffing outputs, tool calls, cost and guard decisions, scoring the result and blocking promotion on
+candidate, diffing outputs, tool calls, cost and content rules decisions, scoring the result and blocking promotion on
 regression makes L2M the place where agent changes are tested. The golden sets a deployment accumulates are its
 own regression suite. Everything runs inside the deployment; replay and scoring use the deployment's own
 providers and secrets.
@@ -646,29 +646,29 @@ providers and secrets.
 - [x] Replay sandbox: `replay` trigger type, isolated memory, tool cache, artifacts and knowledge-base writes; no
   error workflows, notifications, elicitation prompts or SLO impact
 - [x] Run diff: status, structural output diff with ignore paths and tolerance, tool-call alignment with argument
-  diffs, path, model, token, cost and latency deltas, guard verdict changes, replay-health warnings
+  diffs, path, model, token, cost and latency deltas, rule verdict changes, replay-health warnings
 - [x] "Save as golden run" and a replay diff drawer on the Runs page; `l2m replay run --recording` with exit codes
 
 ### 15.2 Golden sets, replay jobs and scorers
 - [x] Golden sets as eval datasets tied to a workflow; replay jobs as background eval runs (concurrency cap, cancel,
   progress, interrupted-on-restart), migration v31; plain eval runs move to the same runner
-- [x] Scorers: structural JSON equality, JSON Schema, text similarity, tool sequence, status, no new guard blocks,
+- [x] Scorers: structural JSON equality, JSON Schema, text similarity, tool sequence, status, no new rule blocks,
   cost / token / latency budgets, LLM judge (rubric, pairwise, votes, provider credentials through `SecretService`)
 - [x] Evaluations page replaces the placeholder: golden sets, replay jobs, per-case scores and diffs
 
 ### 15.3 Candidates and fair comparison
-- [x] Candidate = saved version, draft or a workflow file, plus overrides: model per node or provider, guard profile
+- [x] Candidate = saved version, draft or a workflow file, plus overrides: model per node or provider, rule set
   version, MCP live or stub per server
 - [x] Model tape in `packages/provider-sdk` (record and replay model calls; misses fall back to live) and memory seed
-  capture, so guard-only and MCP-only candidates replay without model calls
+  capture, so rule-set-only and MCP-only candidates replay without model calls
 - [x] Compare against the recording or a baseline rerun in the same job; repeats with an aggregation rule for flaky
   cases; cost estimate before a run and a per-job budget
-- [x] Guard profile override per run, delivering the engine for 12.4 policy simulation
+- [x] Rule set override per run, delivering the engine for 12.4 policy simulation
 
 ### 15.4 Release gate and publish
 - [x] Published version per workflow (migration v32); production entry points (webhooks, schedules, app triggers,
   MCP gateway, chat, enqueue, sub-workflow calls) run the published version, the editor and test webhooks run the draft
-- [x] Gate policy per workflow (pass rate, regressions, required scorers, cost and latency budgets, no new guard
+- [x] Gate policy per workflow (pass rate, regressions, required scorers, cost and latency budgets, no new content rules
   blocks, minimum cases, recording age); publish requires a passing replay job for the exact workflow hash
 - [x] Admin override with a reason, audited and recorded on the release; rollback to an earlier published version;
   published versions exempt from version retention; `needs_approval` verdict ready for 11.2
@@ -683,8 +683,8 @@ providers and secrets.
 
 ### 15.6 Production capture
 - [x] Sampled capture of cassettes and model tapes on production runs into a triage inbox; promote to a golden set in
-  one click; short retention for unpromoted captures; optional DLP masking on record
-- [x] Guard policy simulation over recent captured runs, shown on the Security page (12.4)
+  one click; short retention for unpromoted captures; optional data rules masking on record
+- [x] Rule set simulation over recent captured runs, shown on the Security page (12.4)
 
 ### Decided 2026-10-22
 - The draft and published split is opt-in per workflow; the gate applies on publish, never on save
@@ -694,28 +694,28 @@ providers and secrets.
 - Live write calls are never allowed in gate runs
 - Only admins can override a failed gate, with a reason, until approval gates (11.2) land
 
-## Phase 16: DLP labels and data destinations
+## Phase 16: Data labels and data destinations
 
-**Why:** a guard check that only reads the text in front of it can't tell where data came from or where it is going.
+**Why:** a rule check that only reads the text in front of it can't tell where data came from or where it is going.
 Labels that follow data through a run, and an admin list of where outgoing data lands, let a deployment say
 "card numbers and credentials stay in-house" and have every model call, MCP call and outbound request held to it.
-Everything is optional: with no guard profile, or the built-in default profile, a workflow runs exactly as before,
-with the same verdicts, profile hashes and latency.
+Everything is optional: with no rule set, or the built-in default rule set, a workflow runs exactly as before,
+with the same verdicts, rule set hashes and latency.
 
 ### 16.1 Data labels
 - [x] Provenance and data-class labels propagate node to node beside outputs (direct parents, `{{ }}` reads, code
-  nodes, branches, loops, sub-workflows, agents and supervisor-to-worker calls); only guard redact, mask or protect
+  nodes, branches, loops, sub-workflows, agents and supervisor-to-worker calls); only content rules redact, mask or protect
   removes a data class, and provenance is never removed
 - [x] Labels kept across approval pause and resume, in execution history and recordings, and on session memory, the
   tool cache and session artifacts (migration v37); run-view label chips per node
-- [x] Opt-in per profile (`labels: "propagated"`, "Track where data came from"); a DB revision counter keeps cached
-  profiles fresh across instances
+- [x] Opt-in per rule set (`labels: "propagated"`, "Track where data came from"); a DB revision counter keeps cached
+  rule sets fresh across instances
 
 ### 16.2 Data destinations and destination rules
 - [x] `data_destinations` (migration v38): model providers, MCP servers, connectors and HTTP hosts classed local,
   private, vendor or public, with region and approved data classes; built-in rows for loopback, private ranges and
   the default vendor endpoints; anything unmatched counts as public
-- [x] Optional profile destination rules (block, redact, mask, protect, require approval, review, shadow) checked
+- [x] Optional rule set destination rules (block, redact, mask, protect, require approval, review, shadow) checked
   at model prompts, MCP tool arguments and a new `egress` checkpoint for HTTP, connectors and senders, including
   replays before their write stubs
 - [x] Runtime surrogates as a one-way protection provider; a one-click "Keep sensitive data in-house" starter rule
@@ -723,7 +723,7 @@ with the same verdicts, profile hashes and latency.
 - [x] Security page Destinations tab with a "Not classified yet" list; docs page "Data labels and destinations"
 
 ### Later
-- [ ] DLP depth: exact-data match, file and OCR content, a local NER model through the classifier interface, an
+- [ ] Data rules depth: exact-data match, file and OCR content, a local NER model through the classifier interface, an
   encoded-exfiltration decoder, false-positive review and audit reports
 - [x] Postgres for labels, destinations and destination rules (13.1)
 
