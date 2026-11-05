@@ -91,7 +91,7 @@ l2m replay run --set "$GOLDEN_SET_ID" --file workflows/support-bot.json \
 | `--model <nodeId>=<model>` | Use another model for one node (repeatable) |
 | `--provider-model <provider>=<model>` | Use another model for every node of a provider (repeatable) |
 | `--model-secret <nodeId or provider>=<secretId>` | The secret a model override uses (repeatable); the server requires one when an override changes the provider of a node that has a secret. You need permission to use it in the workflow's project |
-| `--guard-profile <id>[@<version>]` | Run with a guard profile, optionally a specific version |
+| `--guard-profile <id>[@<version>]` | Run with a rule set, optionally a specific version |
 | `--mcp-server <id>=strict\|lenient\|live_read_only` | How one MCP server is answered (repeatable) |
 | `--live-read <nodeId>` | Let a read-class node call its system live (repeatable) |
 | `--models live\|replay` | Call models live (default) or serve them from the recording's model tape |
@@ -132,9 +132,9 @@ l2m replay run --set "$GOLDEN_SET_ID" --version 12 --json > job.json || exit $?
 l2m release publish "$WORKFLOW_ID" --version 12 --run "$(jq -r .id job.json)"
 ```
 
-A job on a workflow file or with overrides, models served from the tape or lenient MCP is never accepted by a release gate; the job's `releaseEligible` says so. The gate also checks the job's comparison settings (ignored paths, scorers, repeats and the rest) against its own candidate options. A job with repeats records cost, latency and new guard blocks for every repeat, and the gate judges guard blocks at the repeat that added the most, and cost and p95 latency at the worst of each case's deciding repeat, each repeat of the suite, and each case's largest increase over its own baseline (absolute and relative), so it is never more lenient than the deciding repeats alone.
+A job on a workflow file or with overrides, models served from the tape or lenient MCP is never accepted by a release gate; the job's `releaseEligible` says so. The gate also checks the job's comparison settings (ignored paths, scorers, repeats and the rest) against its own candidate options. A job with repeats records cost, latency and new rule blocks for every repeat, and the gate judges rule blocks at the repeat that added the most, and cost and p95 latency at the worst of each case's deciding repeat, each repeat of the suite, and each case's largest increase over its own baseline (absolute and relative), so it is never more lenient than the deciding repeats alone.
 
-Outputs are compared as described in [Reading the result](./golden-runs.md#reading-the-result): whitespace and timing and id fields aside, a changed string is a change. Guard-masked text is compared as a mask only when masking is expected (a masked production capture, or a run whose guard masked, redacted or protected content), and only in the exact shapes the guard writes; see [Guard-masked text](./golden-runs.md#guard-masked-text). A workflow without a guard, replayed against hand-saved golden runs, is compared exactly as before.
+Outputs are compared as described in [Reading the result](./golden-runs.md#reading-the-result): whitespace and timing and id fields aside, a changed string is a change. Masked text is compared as a mask only when masking is expected (a masked production capture, or a run whose rules masked, redacted or protected content), and only in the exact shapes content rules write; see [Masked text](./golden-runs.md#masked-text). A workflow without content rules, replayed against hand-saved golden runs, is compared exactly as before.
 
 | Server answer | Exit code | Output |
 | --- | --- | --- |

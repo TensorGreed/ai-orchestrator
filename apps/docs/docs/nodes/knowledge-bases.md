@@ -343,7 +343,7 @@ EVAL_JUDGE_MAX_TOKENS=512
 
 `faithfulness` and `answer_relevance` authenticate with the server's provider environment keys (such as `OPENAI_API_KEY`), which the operator must allow with `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true`. An `llm_judge` scorer can use a `secretRef` from the secret store instead.
 
-Golden sets, replay jobs and the newer scorers (JSON, schema, tool sequence, guard, budget, rubric and pairwise judges with a `secretRef`) are described in [Golden sets, replay jobs and scorers](../product/golden-sets.md).
+Golden sets, replay jobs and the newer scorers (JSON, schema, tool sequence, content rules, budget, rubric and pairwise judges with a `secretRef`) are described in [Golden sets, replay jobs and scorers](../product/golden-sets.md).
 
 ### Workflow output shape
 

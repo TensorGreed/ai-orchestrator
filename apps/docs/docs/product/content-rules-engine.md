@@ -1,18 +1,18 @@
 ---
-description: "The L2M Guard engine inspects content flowing between users, models and tools on five channels, decides what to do with it and records why. A standalone library."
+description: "The content rules engine inspects content flowing between users, models and tools on five channels, decides what to do with it and records why."
 ---
 
-# Guard engine
+# Content rules engine
 
-L2M Guard is a security proxy for AI traffic. It inspects what flows between users, models and tools, decides what to do with it, and records why. The engine lives in `@ai-orchestrator/guard-sdk` as a standalone library: it knows nothing about workflows, nodes or HTTP, and it never makes a network call of its own.
+The content rules engine checks AI traffic. It inspects what flows between users, models and tools, decides what to do with it, and records why. The engine lives in `@ai-orchestrator/guard-sdk` as a standalone library: it knows nothing about workflows, nodes or HTTP, and it never makes a network call of its own.
 
-This page describes the engine. [Guard in workflows](./guard.md) covers the Guard node, the agent guard port, stored profiles and bindings, the protection port and guard events. What is still to come is listed under [Not yet available](#not-yet-available).
+This page describes the engine. [Content rules in workflows](./content-rules.md) covers the Content Rules node, the agent rules port, stored rule sets and bindings, the protection port and rule events. What is still to come is listed under [Not yet available](#not-yet-available).
 
 ## Concepts
 
 ### Channels
 
-Every piece of content is inspected on one of five channels. Profiles configure each channel separately because the same text means different things in different places: a phrase that is a harmless question in a prompt is an attack inside a tool result.
+Every piece of content is inspected on one of five channels. Rule sets configure each channel separately because the same text means different things in different places: a phrase that is a harmless question in a prompt is an attack inside a tool result.
 
 | Channel | What it carries | Typical concerns |
 |---|---|---|
@@ -28,7 +28,7 @@ A detector receives the content (text, or a JSON value inspected through its can
 
 ### Findings
 
-A finding names the detector, a category, a score from 0 to 1, the character spans it refers to, masked evidence and, for data-loss prevention, a data class such as `card_number` or `credential`. Evidence is always masked: a card number appears as `•••• •••• •••• 1111`, an email as `a••@e••••••.org`. Raw values never appear in a finding, a trace or a log line.
+A finding names the detector, a category, a score from 0 to 1, the character spans it refers to, masked evidence and, for data rules, a data class such as `card_number` or `credential`. Evidence is always masked: a card number appears as `•••• •••• •••• 1111`, an email as `a••@e••••••.org`. Raw values never appear in a finding, a trace or a log line.
 
 ### Detectors and tiers
 
@@ -36,18 +36,18 @@ Each detector belongs to a latency tier. Evaluation runs tiers in order, cheapes
 
 | Tier | Cost | Built in |
 |---|---|---|
-| `rule` | microseconds | injection rule packs, hidden characters, exfiltration URLs, canaries, DLP patterns, command and path guards, egress guard, schema validation |
-| `parser` | milliseconds | SQL guard (parses to an AST per dialect) |
+| `rule` | microseconds | injection rule packs, hidden characters, exfiltration URLs, canaries, data rule patterns, command and path checks, egress check, schema validation |
+| `parser` | milliseconds | SQL check (parses to an AST per dialect) |
 | `classifier` | local model | interface only; a rule-based stand-in runs when no model is registered |
 | `judge` | an LLM call | interface only; nothing is registered by default |
 
 `createDefaultGuardRegistry()` returns every built-in detector. Deployments add their own with `registry.register(detector)` or swap a built-in one with `replace`.
 
-### Profiles
+### Rule sets
 
-A profile is a named, versioned JSON document. Per channel it lists the detectors that run, their thresholds and the action for each finding category or data class. A data-class entry wins over its category; findings with neither fall back to the channel's `defaultAction`, which defaults to `block`.
+A rule set is a named, versioned JSON document. Per channel it lists the detectors that run, their thresholds and the action for each finding category or data class. A data-class entry wins over its category; findings with neither fall back to the channel's `defaultAction`, which defaults to `block`.
 
-Profiles are validated with zod and serialised with a stable key order and a SHA-256 hash, so they can be stored as policy-as-code and compared across environments. Every verdict carries the profile id, version and hash it was produced with.
+Rule sets are validated with zod and serialised with a stable key order and a SHA-256 hash, so they can be stored as policy-as-code and compared across environments. Every verdict carries the rule set id, version and hash it was produced with.
 
 ### Actions
 
@@ -62,20 +62,20 @@ Profiles are validated with zod and serialised with a stable key order and a SHA
 | `require_approval` | The content passes to the approval flow. |
 | `review` | The content is routed to review instead of continuing. |
 
-Injection findings (`prompt_injection`, `indirect_injection`, `canary_leak`) are never redacted, masked, protected or transformed. A profile that asks for one of those gets `block` instead, and the verdict says why.
+Injection findings (`prompt_injection`, `indirect_injection`, `canary_leak`) are never redacted, masked, protected or transformed. A rule set that asks for one of those gets `block` instead, and the verdict says why.
 
 ### Shadow mode
 
-Any action can run in shadow mode, per action for the whole profile (`shadow: { block: true }`) or per rule (`actions: { prompt_injection: { action: "block", shadow: true } }`). A shadow action is recorded in the verdict as if it had applied, but the content passes unchanged and evaluation continues. Use it to observe a new profile on real traffic before enforcing it.
+Any action can run in shadow mode, per action for the whole rule set (`shadow: { block: true }`) or per rule (`actions: { prompt_injection: { action: "block", shadow: true } }`). A shadow action is recorded in the verdict as if it had applied, but the content passes unchanged and evaluation continues. Use it to observe a new rule set on real traffic before enforcing it.
 
 ### Latency budget: fail open or fail closed
 
-A profile sets a latency budget in milliseconds and what happens when it runs out. The budget is checked before each detector, and each detector is raced against the time left.
+A rule set sets a latency budget in milliseconds and what happens when it runs out. The budget is checked before each detector, and each detector is raced against the time left.
 
 - `fail_closed` (the default): over budget, the content is blocked.
 - `fail_open`: over budget, the content passes with whatever was found so far.
 
-A detector that throws, or a detector named by the profile that is not registered, is treated the same way as an exceeded budget.
+A detector that throws, or a detector named by the rule set that is not registered, is treated the same way as an exceeded budget.
 
 ### Protection providers
 
@@ -92,7 +92,7 @@ Key material arrives through an injected key resolver. The library never reads e
 
 ### Fallback
 
-The profile's `protection.dataClasses` maps each data class to a provider. When a finding should be protected but no provider is mapped for its class, the provider does not cover the class, or the provider fails, the profile's `protection.fallback` applies. It defaults to `block` and may be `redact` or `mask`; it may not be `protect`.
+The rule set's `protection.dataClasses` maps each data class to a provider. When a finding should be protected but no provider is mapped for its class, the provider does not cover the class, or the provider fails, the rule set's `protection.fallback` applies. It defaults to `block` and may be `redact` or `mask`; it may not be `protect`.
 
 ## Detectors
 
@@ -115,16 +115,16 @@ The profile's `protection.dataClasses` maps each data class to a provider. When 
 ### Limits
 
 - The rule packs are pattern based. They catch the phrasings in the corpus and their encoded variants; a paraphrase the patterns do not cover needs the classifier tier, which this release leaves as an interface.
-- The egress guard judges addresses, not traffic. A host that resolves to a public address at check time and to a private one a moment later (DNS rebinding) is only caught when the caller resolves once and connects to the resolved address.
-- The SQL guard parses whole statements. A fragment pasted into a template is reported as unparseable, which blocks, but the guard cannot tell what the surrounding template does.
-- The DLP detectors are patterns with checksums. Names, addresses and free-text health information need the NER model planned for a later release.
+- The egress check judges addresses, not traffic. A host that resolves to a public address at check time and to a private one a moment later (DNS rebinding) is only caught when the caller resolves once and connects to the resolved address.
+- The SQL check parses whole statements. A fragment pasted into a template is reported as unparseable, which blocks, but the check cannot tell what the surrounding template does.
+- The data rule detectors are patterns with checksums. Names, addresses and free-text health information need the NER model planned for a later release.
 - Spans refer to the canonical text. For JSON content that is the serialisation with sorted keys; the transformed content is parsed back to JSON when it still parses.
 
 ## Spotlighting helpers
 
 `wrapWithDelimiters(content)` wraps untrusted content between random boundary lines and returns the matching system-prompt text; `datamark(content)` replaces whitespace with a marker character and does the same. `PROMPT_HARDENING_TEXT` is a system-prompt paragraph that tells the model what counts as data. `generateCanaryToken()` and `canaryInstruction(token)` plant a canary that `leak.canary` detects in output.
 
-## Sample profile
+## Sample rule set
 
 ```json
 {
@@ -214,7 +214,7 @@ The profile's `protection.dataClasses` maps each data class to a provider. When 
 }
 ```
 
-`createDefaultGuardProfile()` returns the built-in profile, which blocks injection and tool-argument attacks, strips hidden characters, redacts credentials and masks card numbers in output, and leaves ordinary personal data alone.
+`createDefaultGuardProfile()` returns the built-in rule set, which blocks injection and tool-argument attacks, strips hidden characters, redacts credentials and masks card numbers in output, and leaves ordinary personal data alone.
 
 ## Using the library
 
@@ -244,7 +244,7 @@ A verdict carries the overall action, the findings at or above threshold, the su
 
 ## Benchmark
 
-`packages/guard-sdk/corpus/` holds a labelled corpus of direct injection, indirect injection, SQL injection and exfiltration attacks with benign look-alikes. `pnpm --filter @ai-orchestrator/guard-sdk test` runs it through the default profile and fails when detection drops below 90% (85% for indirect injection, 95% for SQL) or false positives exceed 5% in any category. The thresholds and the item format are in `corpus/README.md`.
+The red-team benchmark of content rules lives in `packages/guard-sdk/corpus/`: a labelled corpus of direct injection, indirect injection, SQL injection and exfiltration attacks with benign look-alikes. `pnpm --filter @ai-orchestrator/guard-sdk test` runs it through the default rule set and fails when detection drops below 90% (85% for indirect injection, 95% for SQL) or false positives exceed 5% in any category. The thresholds and the item format are in `corpus/README.md`.
 
 ## OWASP Top 10 for LLM applications
 
@@ -253,21 +253,21 @@ What this release of the engine covers, as a library:
 | Risk | Coverage |
 |---|---|
 | LLM01 Prompt injection | direct and indirect rule packs, hidden-character detection and stripping, spotlighting helpers, canary tokens, classifier tier interface |
-| LLM02 Sensitive information disclosure | DLP detectors with checksums, credential and key detection, masking, redaction, protection providers, canary leak detection |
+| LLM02 Sensitive information disclosure | data rule detectors with checksums, credential and key detection, masking, redaction, protection providers, canary leak detection |
 | LLM03 Supply chain | not covered by the engine |
 | LLM04 Data and model poisoning | not covered by the engine |
 | LLM05 Improper output handling | exfiltration URL detection in output, hidden-character stripping, schema validation of tool arguments |
-| LLM06 Excessive agency | SQL, command, path and egress guards on tool arguments; the `require_approval` and `review` actions |
+| LLM06 Excessive agency | SQL, command, path and egress checks on tool arguments; the `require_approval` and `review` actions |
 | LLM07 System prompt leakage | prompt-extraction patterns, canary tokens |
 | LLM08 Vector and embedding weaknesses | not covered by the engine |
 | LLM09 Misinformation | not covered; a grounding check is planned |
-| LLM10 Unbounded consumption | argument size and depth limits; the row cap in the SQL guard |
+| LLM10 Unbounded consumption | argument size and depth limits; the row cap in the SQL check |
 
 ## Not yet available
 
-The engine is wired into the Guard node, the agent guard port, automatic profiles, the protection port and guard events; see [Guard in workflows](./guard.md). Still to come:
+The engine is wired into the Content Rules node, the agent rules port, automatic rule sets, the protection port and rule events; see [Content rules in workflows](./content-rules.md). Still to come:
 
-- git sync for profiles (export and import JSON in the meantime);
+- git sync for rule sets (export and import JSON in the meantime);
 - local classifier models and the LLM judge;
 - the provenance tracking that carries labels through templates and the agent context;
 - automatic checks on HTTP Request and SQL connector nodes, and on the MCP and AI gateways.

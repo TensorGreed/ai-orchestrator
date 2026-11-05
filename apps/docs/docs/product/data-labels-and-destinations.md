@@ -5,8 +5,8 @@ description: "Track where each step's data came from and what it contains, sort 
 # Data labels and destinations
 
 You don't need any of this for simple workflows. Nothing here is on by
-default: a workflow with no guard profile, or with the built-in default
-profile, runs, checks and stores exactly as before.
+default: a workflow with no rule set, or with the built-in default
+rule set, runs, checks and stores exactly as before.
 
 ## Data labels
 
@@ -18,23 +18,23 @@ handled email addresses or card numbers.
 
 ### Turning it on
 
-In **Security → Profiles & bindings**, open a guard profile you can edit and
-switch on **Track where data came from**. The profile document gets
+In **Security → Rule sets & bindings**, open a rule set you can edit and
+switch on **Track where data came from**. The rule set document gets
 `"labels": "propagated"`; switching it off removes the field again, so a
-profile that never used it keeps its hash.
+rule set that never used it keeps its hash.
 
-Labels are tracked for a run when any profile in the run's guard stack (the
-enforced profile, the project or workflow binding, a Guard node's own
-profile, or a Guard node's profile override) has the switch on. Runs that
+Labels are tracked for a run when any of the run's applied rule sets (the
+enforced rule set, the project or workflow binding, a Content Rules node's own
+rule set, or a Content Rules node's rule set override) has the switch on. Runs that
 don't track labels store none, scan nothing and read no stored labels; the
-only cost is one cached check per run of whether any profile uses the switch.
+only cost is one cached check per run of whether any rule set uses the switch.
 
 ### What a label holds
 
 | Part | Values | Meaning |
 |---|---|---|
 | Provenance | `trusted`, `user`, `untrusted_external`, `sensitive` | Where the content came from: your own scheduler, a user or an authenticated caller, or outside (a webhook, the web, a tool). |
-| Data classes | `email`, `card_number`, `iban`, your dictionary classes… | What the content contains, found by the same patterns and dictionaries the guard uses. |
+| Data classes | `email`, `card_number`, `iban`, your dictionary classes… | What the content contains, found by the same patterns and dictionaries the content rules use. |
 
 On the run view each node shows them in plain words, for example
 **from outside · contains email**. The other origins read **from a user**,
@@ -72,7 +72,7 @@ On the run view each node shows them in plain words, for example
 - **Sensitive output.** A node with **Sensitive output** switched on (in its
   settings), and any node whose settings use a secret flagged
   **Sensitive output** on the Secrets page, is `sensitive` on every run,
-  without a profile and without scanning. An attached MCP tool flagged this
+  without a rule set and without scanning. An attached MCP tool flagged this
   way makes the results of that tool sensitive, and so does an MCP Tool node
   on a registered server whose secret is flagged. Anyone who may change a
   secret can flag it; only an admin can clear the flag or delete a flagged
@@ -85,7 +85,7 @@ On the run view each node shows them in plain words, for example
   Destination rules count only the classes the destination is not approved
   for. Neither is stored as the content's provenance, and the reason shown
   for such a match is the labels, even when the class was found in this
-  call. A `provenance: ["sensitive"]` destination rule in an existing profile
+  call. A `provenance: ["sensitive"]` destination rule in an existing rule set
   can therefore start to match content with a detected class.
 - **Nodes that fetch.** HTTP Request, Web Browse, MCP tools, connectors and
   RAG add `untrusted_external` to what they output. Pinned data on such a
@@ -116,7 +116,7 @@ carries the input's labels.
   every node that ran. So does an expression with a comment or a regular
   expression in it.
 - Settings that name a field or path (an input key, a chart's data path, a
-  Guard node's input field) are reads too.
+  Content Rules node's input field) are reads too.
 - **Code nodes** count as reading everything they could see.
 - **IF, Switch and Merge** take only the parents that actually ran.
 - **Loops** label each pass on its own; the loop's output carries the union
@@ -138,8 +138,8 @@ carries the input's labels.
   fetch after the approval, or a branch the approver never saw) keeps its
   label. The step's trace records who approved and when, shown as
   **cleared** in the run view and on the canvas (**approved** when it
-  cleared nothing). A rejection, a timeout, a guard scan or a replay never
-  clears anything. Approving a guard's review clears nothing either: the
+  cleared nothing). A rejection, a timeout, a rules scan or a replay never
+  clears anything. Approving a rule review clears nothing either: the
   request shows the verdict, not the content. Approving an agent's tool call
   clears only the steps whose text its arguments showed in full, never the
   agent's own context; the tool's result is new outside content and stays
@@ -149,19 +149,19 @@ carries the input's labels.
   each result. A supervisor's worker starts with the supervisor's labels, and
   the worker's result labels join the supervisor's.
 
-Provenance is never removed. Data classes are removed only when a guard
-redacts, masks or protects them in the content, and only from that content:
+Provenance is never removed. Data classes are removed only when content rules
+redact, mask or protect them in the content, and only from that content:
 redacting an email in an agent's prompt does not clear it from a system
 prompt or memory that still holds one.
 
 ### Checks with labels
 
-Without the switch, guard checks keep their fixed labels: a prompt is `user`
+Without the switch, rule checks keep their fixed labels: a prompt is `user`
 input and a tool result is `untrusted_external`. With it, checks add the
 propagated labels to the fixed ones, so a prompt built from a web page is
 checked as outside content (the indirect-injection detector runs on it). A
 check never sees fewer labels than with the switch off. An explicit **Trust
-labels** setting on a Guard node always wins.
+labels** setting on a Content Rules node always wins.
 
 ### Where labels are stored
 
@@ -193,7 +193,7 @@ A data destination is a place your workflows send data: a model provider, an MCP
 | **Approved vendor** | A provider you have a contract with. The default hosts of OpenAI, Anthropic, Google Gemini and Azure OpenAI (`*.openai.azure.com`) are vendors out of the box |
 | **Public** | Everything else, including every destination nobody has classified |
 
-Destinations do nothing on their own. They only matter once there are **destination rules** ("card numbers, IBANs and national ids may go no further than the private network"), either the deployment's own (the starter rule below) or in a guard profile. Until then, classifying destinations changes no verdict and no run.
+Destinations do nothing on their own. They only matter once there are **destination rules** ("card numbers, IBANs and national ids may go no further than the private network"), either the deployment's own (the starter rule below) or in a rule set. Until then, classifying destinations changes no verdict and no run.
 
 ### The Data destinations tab
 
@@ -229,9 +229,9 @@ Under **Advanced** in the form:
 - **Region**: a tag such as `eu-west-1`. Tags are lower-cased and joined with dashes (`EU West 1` becomes `eu-west-1`). A rule that allows region `eu` covers `eu-west-1` and `eu-central-1`, but not `europe`. A destination with no region is `unknown`, which a region rule never allows unless it lists `unknown`. Regions apply only to vendor and public destinations: this machine and your private network always pass a region check.
 - **Approved data classes**: classes this destination may hold whatever its tier, for example `email` for your CRM vendor. A destination rule never fires for a class the destination is approved to hold.
 
-### Destination rules in a profile
+### Destination rules in a rule set
 
-Destination rules live in the profile document under `destinations.rules`. Each rule says which data it covers (`when`: data classes and/or provenance labels; any match counts), where that data may go (`allow`: the furthest tier, and optionally regions) and what happens otherwise (`action`: block, redact, mask, protect, require approval or review; `shadow: true` only records it):
+Destination rules live in the rule set document under `destinations.rules`. Each rule says which data it covers (`when`: data classes and/or provenance labels; any match counts), where that data may go (`allow`: the furthest tier, and optionally regions) and what happens otherwise (`action`: block, redact, mask, protect, require approval or review; `shadow: true` only records it):
 
 ```json
 {
@@ -249,9 +249,9 @@ Destination rules live in the profile document under `destinations.rules`. Each 
 }
 ```
 
-A profile without `destinations` keeps its hash and behaves exactly as before. The profile editor shows a profile's destination rules as plain sentences; change them with **Edit as JSON**. A profile with destination rules (or an `egress` channel) tracks labels on the runs it applies to, so rules also see the classes the data's labels carry.
+A rule set without `destinations` keeps its hash and behaves exactly as before. The rule set editor shows a rule set's destination rules as plain sentences; change them with **Edit as JSON**. A rule set with destination rules (or an `egress` channel) tracks labels on the runs it applies to, so rules also see the classes the data's labels carry.
 
-The data classes a rule sees are the ones found in the outgoing content plus the ones the data's labels carry. When a class is carried only by the labels (it came from somewhere sensitive but is not in the text), there is nothing to redact, mask or protect, so those actions fall back to the profile's **No protection provider** setting when that is block or require approval, and to block otherwise (a rule written to keep data in never lets it out). The verdict says it was "matched by where the data came from, not found in the text".
+The data classes a rule sees are the ones found in the outgoing content plus the ones the data's labels carry. When a class is carried only by the labels (it came from somewhere sensitive but is not in the text), there is nothing to redact, mask or protect, so those actions fall back to the rule set's **No protection provider** setting when that is block or require approval, and to block otherwise (a rule written to keep data in never lets it out). The verdict says it was "matched by where the data came from, not found in the text".
 
 ### The starter rule
 
@@ -259,7 +259,7 @@ Most deployments want one rule for everything. At the top of **Security → Data
 
 It starts by **observing**: every call it would have stopped is recorded (as a shadow verdict) and goes through as before. The card says how many: "Observing: 3 requests would have been blocked this week". When the number looks right, click **Turn on enforcement**; **Back to observing** undoes it.
 
-The deployment's rules live in one stored profile, `destination-rules`, which every run applies after its own profiles (a project's enforced profile, a workflow or project override, or the built-in default). It never replaces any of them. Replays, release-gate cases and simulations apply its latest version too, whatever profile they test; only an admin can choose it as the profile under test (anyone else gets 403), and no profile can be created or imported under its id (or the preview's). Clean calls write no verdict, so the Security numbers of a workflow without findings stay as they were. The observing count leaves out replays, release-gate cases and eval runs. Under **Advanced** the full rule editor lists every rule (name, data classes, provenance, the furthest tier allowed, regions, what happens otherwise and "Observe only"; **Protect** is not offered there, since these rules have no protection provider of their own); **Save rules** validates them like a profile and saves a new version. Only admins add, change or turn on these rules, through this card or the profile routes, and every change is audited (`guard.destination_rules.*`). With no rules nothing is applied, as if the profile did not exist.
+The deployment's rules live in one stored rule set, `destination-rules`, which every run applies after its own rule sets (a project's enforced rule set, a workflow or project override, or the built-in default). It never replaces any of them. Replays, release-gate cases and simulations apply its latest version too, whatever rule set they test; only an admin can choose it as the rule set under test (anyone else gets 403), and no rule set can be created or imported under its id (or the preview's). Clean calls write no verdict, so the Security numbers of a workflow without findings stay as they were. The observing count leaves out replays, release-gate cases and eval runs. Under **Advanced** the full rule editor lists every rule (name, data classes, provenance, the furthest tier allowed, regions, what happens otherwise and "Observe only"; **Protect** is not offered there, since these rules have no protection provider of their own); **Save rules** validates them like a rule set and saves a new version. Only admins add, change or turn on these rules, through this card or the rule set routes, and every change is audited (`guard.destination_rules.*`). With no rules nothing is applied, as if the rule set did not exist.
 
 ### Where rules are checked
 
@@ -281,7 +281,7 @@ A server started as a local process (stdio MCP) is judged as local: L2M checks w
 
 The classes a rule sees are the ones found in what is sent plus the ones the data's labels carry. **require_approval** pauses the run and puts the call in the approval inbox; once approved the call goes ahead. **redact** and **mask** rewrite what is sent; when a rewrite cannot be applied safely (a redirect, a connector setting that would need rendering again) the call is blocked instead.
 
-A profile can also check everything that leaves with its own detectors: give it an `egress` channel (the same shape as the other channels). The engine checks it at the same places; a Guard node never evaluates it.
+A rule set can also check everything that leaves with its own detectors: give it an `egress` channel (the same shape as the other channels). The engine checks it at the same places; a Content Rules node never evaluates it.
 
 When a verdict stops something, the Security overview shows one plain line saying why: the rule, the limit, where the data was going and, when the class was only in the labels, "matched by where the data came from, not found in the text". A rule with no data classes or provenance covers any outgoing data and never claims something was found in the text.
 
@@ -291,7 +291,7 @@ Replays and release gates never send anything. The check still runs, just before
 
 ### Surrogates at run time
 
-The **Surrogate** protection provider (one-way) can be used at run time, on a Guard node's protection port or as a profile's protection provider for `protect`. It uses the deployment's own key, the same one capture masking uses, so a data-subject lookup finds a value whether it was replaced at run time or in a captured run.
+The **Surrogate** protection provider (one-way) can be used at run time, on a Content Rules node's protection port or as a rule set's protection provider for `protect`. It uses the deployment's own key, the same one capture masking uses, so a data-subject lookup finds a value whether it was replaced at run time or in a captured run.
 
 - **One-way.** A surrogate cannot be turned back into the value: asking to reveal one answers 400 "Surrogates are one-way; use the token vault if you need the original back".
 - **Issued surrogates are known for the rest of the run.** Each run keeps the surrogates it issued in memory (never stored). Destination rules and the egress check ignore them, and the class they replaced leaves the data's labels, so a surrogate card number can go where the real one may not. Capture masking leaves them as they are.
@@ -301,7 +301,7 @@ The **Surrogate** protection provider (one-way) can be used at run time, on a Gu
 
 Before saving a destination, an admin can see what it would change. In the **Add destination** or **Edit destination** form, **Preview impact** replays the most recent recorded runs of the workflows that have destination rules twice, from their recordings (no model or MCP server is called, nothing is sent): once with the saved destinations and once with the form's unsaved row. It shows one plain sentence first, naming where newly blocked content was going ("Across 12 recent runs in 3 workflows: 3 newly blocked, 0 now masked, 0 no longer blocked. 3 newly blocked going to api.example.com (public)."), with counts per destination under **Details**. The row is validated like a save and never stored.
 
-Profile simulations ("Simulate on recent traffic" in the profile editor) count destination rules too, with the same per-destination counts. Previews are admin-only, run one at a time (they share the simulation slot) and are kept for 30 days.
+Rule set simulations ("Simulate on recent traffic" in the rule set editor) count destination rules too, with the same per-destination counts. Previews are admin-only, run one at a time (they share the simulation slot) and are kept for 30 days.
 
 ### Limits
 

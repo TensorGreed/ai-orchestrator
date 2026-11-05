@@ -17,7 +17,7 @@ Saving copies, into separate storage:
 - the workflow as it ran (captured when the run finished; for older runs, the workflow as it is saved now);
 - the trigger input;
 - every node's result (for a node in a loop, the result of each iteration, in order);
-- the run facts used for comparison: status, output, path, tool calls, model calls, tokens, cost and guard verdicts;
+- the run facts used for comparison: status, output, path, tool calls, model calls, tokens, cost and rule verdicts;
 - the run's MCP cassette, if the run was recorded with **Record MCP calls**;
 - with that cassette, the run's **model tape** (every model call it made, and its answer) and **memory seed** (what session memory held for each session the run read, before the run changed it).
 
@@ -54,7 +54,7 @@ The candidate runs on the golden run's input. Each node is classified by type:
 | Logic | Set, If, Switch, Merge, Sort, Output, Webhook Response | Runs, including the expressions in its fields (sandboxed; see below) |
 | Chart | Chart | Runs from inline data; a chart that needs a data URL or file is not loaded, and the replay is inconclusive |
 | Model | LLM Call, Agent Orchestrator, Supervisor, Output Parser (it can ask the model to repair its output) | Runs live; in a replay job with model calls from the tape, answered from the golden run's model tape |
-| Guard | Guard nodes and agent guard bindings | Runs |
+| Content rules | Content Rules nodes and agent rule set bindings | Runs |
 | MCP | MCP Tool, agent tools | Answered from the copied cassette only |
 | Code | Code node (JavaScript and Python) | Answered from the recording; never runs |
 | External write | Slack, email, HTTP Request, database and queue writes, connectors that write, vector-store upserts, Execute Workflow | Answered from the recording; never runs |
@@ -91,11 +91,11 @@ The replay result shows:
 - **Tool calls**: the two runs' tool calls side by side, aligned in order: same, arguments changed, outcome changed, new or missing.
 - **Totals**: token, cost, model call and path changes.
 
-### Guard-masked text
+### Masked text
 
-When masking is expected in a comparison, two texts that differ only in what a guard mask hid compare as equal. That is the case when the golden run is a masked [production capture](./production-capture.md) made on this server, or when the guard masked, redacted or protected content in either run (a shadow-only verdict does not count). A golden run imported from a file never turns it on: a masked flag or guard verdicts in the file are not this server's word, so its own text is compared exactly (the live run's verdicts still count). In every other comparison, strings are compared as they are, with only whitespace differences ignored.
+When masking is expected in a comparison, two texts that differ only in what a mask hid compare as equal. That is the case when the golden run is a masked [production capture](./production-capture.md) made on this server, or when the rules masked, redacted or protected content in either run (a shadow-only verdict does not count). A golden run imported from a file never turns it on: a masked flag or rule verdicts in the file are not this server's word, so its own text is compared exactly (the live run's verdicts still count). In every other comparison, strings are compared as they are, with only whitespace differences ignored.
 
-Only the exact shapes the guard `mask` action writes count as masks, and only as whole words:
+Only the exact shapes the `mask` action of content rules writes count as masks, and only as whole words:
 
 | Class | Mask | Compares equal to |
 | --- | --- | --- |

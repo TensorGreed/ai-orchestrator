@@ -112,7 +112,7 @@ on top of the global role:
 | Delete a workflow | `workflow:delete` |
 | Execute, stream, enqueue, manual trigger, retry, MCP replay, cancel, eval run | `workflow:execute` |
 | Approve or reject a paused run | `workflow:execute` |
-| Read executions, manifests, audit bundles, guard events, eval runs, golden runs | `workflow:read` |
+| Read executions, manifests, audit bundles, rule events, eval runs, golden runs | `workflow:read` |
 | Save or delete a golden run / replay one | `workflow:write` / `workflow:execute` |
 | Read or search a knowledge base / ingest into one | `workflow:read` / `workflow:write` in the KB's project |
 | Read MCP cassettes (list, detail, export) | `workflow:read` on the recorded workflow |

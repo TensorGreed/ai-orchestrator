@@ -147,7 +147,7 @@ A `require_approval` rule lets the call go ahead only after a person approves it
 - **Who decides.** An admin wrote the rule, so **admins** decide a policy approval, whatever approvers the workflow's write-tool settings name, and nobody approves their own run. The approval is bound to the rule (its id and hash): an approval the write-tool switch alone asked for never stands in for a policy approval, while a policy approval does cover the write-tool switch for the same call.
 - **Gateway calls.** The client gets an "approval pending" error and retries after an admin approves. See [Gateway: approval by retry](#gateway-approval-by-retry).
 
-The policy is checked **before** the guard: a call a rule denies or holds for approval never reaches the guard's argument checks. The **Ask before write tools** switch on its own keeps its place **after** the guard, so a call the guard blocks is never put to a person, and the person approves the arguments the guard let through. When the guard rewrites the arguments of a call a policy approval already covers, that approval still covers the rewritten call: one request.
+The policy is checked **before** the content rules: a call a rule denies or holds for approval never reaches the rules' argument checks. The **Ask before write tools** switch on its own keeps its place **after** the content rules, so a call the rules block is never put to a person, and the person approves the arguments the content rules let through. When the content rules rewrite the arguments of a call a policy approval already covers, that approval still covers the rewritten call: one request.
 
 ### Gateway: approval by retry
 

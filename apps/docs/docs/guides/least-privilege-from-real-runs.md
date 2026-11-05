@@ -47,7 +47,7 @@ Usable calls are calls that reached the server, made by anyone but an admin. A c
 
 - admins' own calls;
 - playground calls;
-- calls refused by a rule, the guard or a runtime limit;
+- calls refused by a rule, the content rules or a runtime limit;
 - calls that failed before they were sent, or before they could connect (connection refused, unknown host, connect timeout);
 - the gateway's own rows for workflow tools.
 
