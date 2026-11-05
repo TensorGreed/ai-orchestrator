@@ -164,6 +164,8 @@ import {
   replaceSecretRefs
 } from "./lib/external-import";
 import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
+import { withAgentToolPresets } from "./lib/agent-tool-presets";
+import { paletteKey } from "./components/NodePalette";
 
 interface DefinitionNode {
   type: string;
@@ -351,8 +353,8 @@ function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: A
 
   return {
     title: "Tools",
-    description: "Choose a tool node to attach to this AI Agent.",
-    allowedTypes: ["mcp_tool"],
+    description: "Choose a tool node to attach to this AI Agent: an MCP server, a built-in tool, or another workflow.",
+    allowedTypes: ["mcp_tool", "workflow_tool"],
     sourceNodeId,
     sourceHandle
   };
@@ -1324,7 +1326,8 @@ function StudioApp() {
 
   const groupedDefinitions = useMemo(() => {
     const grouped = new Map<string, DefinitionNode[]>();
-    for (const definition of definitions) {
+    // Phase 6.4 — the built-in tools are MCP Tool presets in the palette.
+    for (const definition of withAgentToolPresets(definitions)) {
       const list = grouped.get(definition.category) ?? [];
       list.push(definition);
       grouped.set(definition.category, list);
@@ -4291,7 +4294,7 @@ function StudioApp() {
       const expectedTargetType: Record<string, EditorNodeData["nodeType"] | EditorNodeData["nodeType"][]> = {
         chat_model: chatModelNodeTypes,
         memory: "local_memory",
-        tool: "mcp_tool",
+        tool: ["mcp_tool", "workflow_tool"],
         worker: ["agent_orchestrator", "supervisor_node"],
         guard: "guard",
         protection: "guard_protection"
@@ -4306,7 +4309,8 @@ function StudioApp() {
         azure_openai_chat_model: "chat_model",
         google_gemini_chat_model: "chat_model",
         local_memory: "memory",
-        mcp_tool: "tool"
+        mcp_tool: "tool",
+        workflow_tool: "tool"
       };
 
       let sourceHandle = connection.sourceHandle ?? "";
@@ -4426,7 +4430,7 @@ function StudioApp() {
         return;
       }
 
-      const definition = definitions.find((item) => item.type === nodeType);
+      const definition = withAgentToolPresets(definitions).find((item) => paletteKey(item) === nodeType);
       if (!definition) {
         return;
       }

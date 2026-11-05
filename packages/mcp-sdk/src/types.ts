@@ -69,7 +69,24 @@ export interface MCPExecutionContext {
    * concurrency caps and is not counted by the circuit breaker.
    */
   bypassRuntimeLimits?: boolean;
+  /**
+   * Phase 6.4 — runs a workflow tool's workflow. The engine sets it on an
+   * agent's context; the `l2m-workflow` adapter calls it. Without it (a
+   * probe, the gateway, a direct MCP Tool node) workflow tools fail.
+   */
+  runWorkflowTool?: WorkflowToolRunner;
 }
+
+/** Phase 6.4 — one call of a workflow tool, as the `l2m-workflow` adapter hands it to the engine. */
+export interface WorkflowToolCall {
+  workflowId: string;
+  /** The Workflow Tool node the call came through. */
+  nodeId?: string;
+  toolName: string;
+  args: Record<string, unknown>;
+}
+
+export type WorkflowToolRunner = (call: WorkflowToolCall) => Promise<MCPToolResult>;
 
 /** Options for `readResource`. */
 export interface McpReadResourceOptions {

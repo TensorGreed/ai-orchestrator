@@ -508,6 +508,36 @@ describe("MCP tool telemetry: extraction", () => {
     expect([0, 1, 2].map((index) => splitEvenly(100, 3, index))).toEqual([34, 33, 33]);
   });
 
+  it("writes no row for the agent's Think calls (6.4)", () => {
+    const rows = extractMcpToolCalls({
+      executionId: "e-think",
+      workflow,
+      priceTurn,
+      nodeResults: [
+        {
+          nodeId: "agent",
+          status: "success",
+          startedAt: "2026-10-01T00:00:00.000Z",
+          output: {
+            _telemetry: { providerId: "openai", model: "gpt-4o" },
+            _mcpTools: { "mock-mcp__calculator": { adapterId: "mock-mcp", toolName: "calculator" } },
+            steps: [
+              {
+                iteration: 1,
+                requestedTools: [{ id: "t" }, { id: "a" }],
+                toolResults: [
+                  { toolCallId: "t", toolName: "think", output: { recorded: true }, thought: "Plan first." },
+                  { toolCallId: "a", toolName: "mock-mcp__calculator", output: 2 }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    });
+    expect(rows.map((row) => row.toolName)).toEqual(["calculator"]);
+  });
+
   it("leaves cost null for an unpriced model and tokens null when the turn reported none", () => {
     const unpriced = extractMcpToolCalls({
       executionId: "e2",
@@ -702,5 +732,24 @@ describe("MCP tool telemetry: storage and endpoints", () => {
     );
     expect(rollup.tools.map((tool) => `${tool.adapterId}/${tool.toolName}`).sort()).toEqual(["a/t", "b/t"]);
     expect(rollup.totals).toMatchObject({ calls: 2, errors: 1, errorRate: 0.5 });
+  });
+});
+
+describe("Workflow tools are never registered servers (6.4)", () => {
+  it("leaves the workflow-tool adapter out of the register list and refuses a server on it", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const list = await context.app.inject({ method: "GET", url: "/api/mcp/servers", headers: { cookie: admin } });
+    const adapters = list.json<{ adapters: Array<{ id: string }> }>().adapters.map((adapter) => adapter.id);
+    expect(adapters).toContain("l2m-tools");
+    expect(adapters).not.toContain("l2m-workflow");
+    const refused = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/servers",
+      headers: { cookie: admin },
+      payload: { name: "Sneaky", adapterId: "l2m-workflow", probeEnabled: false, connection: { workflowId: "wf-x" } }
+    });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json<{ error: string }>().error).toMatch(/Workflow Tool node/);
   });
 });

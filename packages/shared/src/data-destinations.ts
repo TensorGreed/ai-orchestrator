@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { dataClassNameSchema } from "./data-labels";
+import { BUILT_IN_TOOLS_ADAPTER_ID, WORKFLOW_TOOL_ADAPTER_ID, builtInToolsDestinationConnection } from "./agent-tools";
 
 /**
  * Phase 16 — data destinations: where outgoing data goes and how far that is
@@ -944,8 +945,8 @@ export function connectorDestinationRef(nodeType: string, config: Record<string,
 /** MCP adapters that talk to a local process over stdio (no network endpoint). */
 export const MCP_STDIO_ADAPTERS: ReadonlySet<string> = new Set(["stdio_mcp"]);
 
-/** MCP adapters that send nothing over the network. */
-export const MCP_ADAPTERS_WITHOUT_NETWORK: ReadonlySet<string> = new Set(["mock-mcp"]);
+/** MCP adapters that send nothing over the network (6.4: workflow tools run in this process). */
+export const MCP_ADAPTERS_WITHOUT_NETWORK: ReadonlySet<string> = new Set(["mock-mcp", WORKFLOW_TOOL_ADAPTER_ID]);
 
 /**
  * Where an MCP server's calls go: null for an adapter with no network (the
@@ -958,7 +959,9 @@ export function mcpServerDestinationRef(server: { serverId?: string; adapterId?:
   // A stdio server is a local process with no network endpoint: what L2M sends it stays on this machine
   // (the built-in loopback row makes it local). Its own outbound traffic is outside L2M's view.
   if (MCP_STDIO_ADAPTERS.has(adapter)) return networkDestinationRef("mcp_server", server.registryServerId, "localhost");
-  return networkDestinationRef("mcp_server", server.registryServerId, destinationHostOfSetting(plainRecord(server.connection)?.endpoint));
+  // 6.4 — a built-in tools node that leaves the endpoint to the provider's default still goes there.
+  const connection = adapter === BUILT_IN_TOOLS_ADAPTER_ID ? builtInToolsDestinationConnection(server.connection) : plainRecord(server.connection);
+  return networkDestinationRef("mcp_server", server.registryServerId, destinationHostOfSetting(connection?.endpoint));
 }
 
 /** A destination as a verdict carries it: never a path, query or credential. */

@@ -338,6 +338,7 @@ Turn this workflow into an MCP tool that other agents (including other L2M agent
 | `inputSchema` | `object` | no | — |
 | `authMode` | `string` | no | `public` \| `bearer` |
 | `secretRef` | `object` | no | — |
+| `readOnly` | `boolean` | no | — |
 
 **Example config**
 
@@ -614,6 +615,7 @@ Entry point for workflows invoked as sub-workflows via Execute Workflow node.
 |---|---|---|---|
 | `description` | `string` | no | — |
 | `inputSchema` | `object` | no | — |
+| `readOnly` | `boolean` | no | — |
 
 **Example config**
 

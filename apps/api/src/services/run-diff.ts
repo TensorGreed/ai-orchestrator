@@ -22,8 +22,11 @@ import type {
   RunFacts
 } from "@ai-orchestrator/shared";
 
-/** Fields that differ on every run (timings, ids) and are never compared unless asked. */
-export const DEFAULT_REPLAY_IGNORE_PATHS = ["**._telemetry", "**.durationMs", "**.latencyMs", "**.startedAt", "**.completedAt", "**.executionId", "**.execution_id"];
+/**
+ * Fields that differ on every run (timings, ids) and are never compared unless asked. Phase 6.4 — a workflow tool's
+ * child usage (`_childTelemetry`) exists only when the child really ran, never in a replay answered from the cassette.
+ */
+export const DEFAULT_REPLAY_IGNORE_PATHS = ["**._telemetry", "**._childTelemetry", "**.durationMs", "**.latencyMs", "**.startedAt", "**.completedAt", "**.executionId", "**.execution_id"];
 
 const MAX_VALUE_CHANGES = 200;
 const MAX_DEPTH = 64;

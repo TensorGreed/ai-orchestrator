@@ -51,6 +51,12 @@ export function NodeActivityList({ activity, startedAt }: { activity?: NodeActiv
           <div className="activity-body">
             <span className="activity-line">{describeActivity(entry)}</span>
             {entry.kind === "resolved_input" && <ResolvedFieldsTable fields={entry.fields} />}
+            {entry.kind === "thought" && entry.text.length > 120 && (
+              <details className="activity-details">
+                <summary>Full thought</summary>
+                <pre className="result-block">{entry.text}</pre>
+              </details>
+            )}
             {entry.kind === "tool_call" && entry.phase === "start" && entry.argsPreview && (
               <details className="activity-details">
                 <summary>Arguments</summary>

@@ -23,6 +23,7 @@ import {
 } from "@ai-orchestrator/community-sdk";
 import type { ConnectorAdapter, ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import type { MCPRegistry, MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
+import { BUILT_IN_TOOLS_ADAPTER_ID, WORKFLOW_TOOL_ADAPTER_ID } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 
 export interface CommunityLoaderLogger {
@@ -50,8 +51,13 @@ export interface CommunityLoaderDependencies {
   connectorRegistry: ConnectorRegistry;
 }
 
+/** Phase 6.4 — the ids of L2M's own in-process tool adapters; no package may register under them. */
+export const RESERVED_MCP_ADAPTER_IDS: ReadonlySet<string> = new Set([BUILT_IN_TOOLS_ADAPTER_ID, WORKFLOW_TOOL_ADAPTER_ID]);
+
 export class CommunityPackageLoader {
   private readonly state = new Map<string, LoadedCommunityPackage>();
+  /** Phase 6.4 — MCP adapter id → the package that registered it; only that package may register it again (reload, reinstall). */
+  private readonly mcpAdapterOwners = new Map<string, string>();
 
   constructor(
     private readonly config: CommunityLoaderConfig,
@@ -222,35 +228,52 @@ export class CommunityPackageLoader {
     }
 
     const counts = { providers: 0, mcpAdapters: 0, connectors: 0 };
+    // Phase 6.4 — registrations are collected and applied only once register() completes, so a package that throws
+    // partway leaves nothing behind.
+    const pending: Array<() => void> = [];
+    const pendingMcpIds = new Set<string>();
     const api: RegistrationApi = {
       registerProvider: (adapter: LLMProviderAdapter) => {
-        if (this.deps.providerRegistry.tryGet(adapter.definition.id)) {
-          this.config.logger.warn(
-            `${packageName} overrides built-in provider '${adapter.definition.id}'`,
-            { packageName, providerId: adapter.definition.id }
-          );
-        }
-        this.deps.providerRegistry.register(adapter);
+        pending.push(() => {
+          if (this.deps.providerRegistry.tryGet(adapter.definition.id)) {
+            this.config.logger.warn(
+              `${packageName} overrides built-in provider '${adapter.definition.id}'`,
+              { packageName, providerId: adapter.definition.id }
+            );
+          }
+          this.deps.providerRegistry.register(adapter);
+        });
         counts.providers += 1;
       },
       registerMCPAdapter: (adapter: MCPServerAdapter) => {
-        if (this.deps.mcpRegistry.tryGet(adapter.definition.id)) {
-          this.config.logger.warn(
-            `${packageName} overrides built-in MCP adapter '${adapter.definition.id}'`,
-            { packageName, mcpServerId: adapter.definition.id }
-          );
+        // Phase 6.4 — an MCP adapter id is never taken over: tool rules, the write gate and recordings key on it,
+        // and L2M's own tool adapters are reserved even when this registry does not hold them.
+        const id = adapter.definition.id;
+        if (RESERVED_MCP_ADAPTER_IDS.has(id)) {
+          throw new Error(`${packageName}: the MCP adapter id '${id}' is reserved for L2M's own tools. Register the adapter under another id.`);
         }
-        this.deps.mcpRegistry.register(adapter);
+        const owner = this.mcpAdapterOwners.get(id);
+        const taken = owner !== undefined ? owner !== packageName : Boolean(this.deps.mcpRegistry.tryGet(id));
+        if (taken || pendingMcpIds.has(id)) {
+          throw new Error(`${packageName}: an MCP adapter with the id '${id}' is already registered. Register the adapter under another id.`);
+        }
+        pendingMcpIds.add(id);
+        pending.push(() => {
+          this.deps.mcpRegistry.register(adapter);
+          this.mcpAdapterOwners.set(id, packageName);
+        });
         counts.mcpAdapters += 1;
       },
       registerConnector: (adapter: ConnectorAdapter) => {
-        if (this.deps.connectorRegistry.tryGet(adapter.definition.id)) {
-          this.config.logger.warn(
-            `${packageName} overrides built-in connector '${adapter.definition.id}'`,
-            { packageName, connectorId: adapter.definition.id }
-          );
-        }
-        this.deps.connectorRegistry.register(adapter);
+        pending.push(() => {
+          if (this.deps.connectorRegistry.tryGet(adapter.definition.id)) {
+            this.config.logger.warn(
+              `${packageName} overrides built-in connector '${adapter.definition.id}'`,
+              { packageName, connectorId: adapter.definition.id }
+            );
+          }
+          this.deps.connectorRegistry.register(adapter);
+        });
         counts.connectors += 1;
       },
       log: {
@@ -260,6 +283,7 @@ export class CommunityPackageLoader {
       }
     };
     await contribution.register(api);
+    for (const apply of pending) apply();
 
     const loaded: LoadedCommunityPackage = {
       packageName,

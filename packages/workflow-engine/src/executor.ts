@@ -9,6 +9,8 @@ import {
   policyDecisionRecord,
   policyNeedsAnnotations,
   policyNeedsArguments,
+  assertUniqueToolNames,
+  isL2mOwnToolAdapter,
   resolveMCPTools,
   openWorldRequestFields,
   policyReadsOpenWorld,
@@ -20,6 +22,7 @@ import {
   type McpToolAccessSubjectTool,
   type MCPExecutionContext,
   type MCPRegistry,
+  type WorkflowToolRunner,
   isDelegatedCredentialError,
   parseMcpRuntimeRejection,
   withDelegatedUser
@@ -45,6 +48,10 @@ import {
   workflowMayCallMcpTools,
   recordedCallLabels,
   parseStoredDataLabels,
+  BUILT_IN_TOOLS_ADAPTER_ID,
+  WORKFLOW_TOOL_ADAPTER_ID,
+  deriveWorkflowToolDescriptor,
+  workflowToolServerKey,
   type DataDestinationRow,
   type DestinationRef,
   type McpToolOpenWorldOverride
@@ -116,6 +123,7 @@ import {
   DEFAULT_CITATION_INSTRUCTIONS
 } from "./citations";
 import { renderChart } from "./chart";
+import { workerDelegateToolName } from "./agent-tool-names";
 import { browseUrl, type WebBrowseOptions } from "./web-browse";
 import {
   DEFAULT_OUTBOUND_GUARD,
@@ -149,7 +157,7 @@ import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPyt
 import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
-import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
+import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
 import {
@@ -204,11 +212,115 @@ import {
 } from "./data-labels";
 
 const MAX_SUB_WORKFLOW_DEPTH = 10;
+
+/**
+ * Phase 6.4 — the server config of a Workflow Tool node: the `l2m-workflow`
+ * adapter, filed under `workflow:<id>` (what tool rules, approvals, telemetry
+ * and cassettes key on), with the tool derived from the child workflow. A
+ * replay cannot load workflows: the node's own name and description are used
+ * and the cassette answers discovery and calls.
+ */
+async function workflowToolServerConfig(
+  attached: WorkflowNode,
+  dependencies: Pick<WorkflowExecutionDependencies, "loadWorkflow">
+): Promise<MCPServerConfig> {
+  const attachedConfig = toRecord(attached.config);
+  const workflowId = typeof attachedConfig.workflowId === "string" ? attachedConfig.workflowId.trim() : "";
+  if (!workflowId) throw WorkflowError.nodeConfig(`Workflow Tool '${attached.name || attached.id}' needs the workflow it runs.`);
+  let child: Workflow | undefined;
+  if (dependencies.loadWorkflow) {
+    try {
+      child = await dependencies.loadWorkflow(workflowId);
+    } catch (error) {
+      throw WorkflowError.nodeConfig(`Workflow Tool '${attached.name || attached.id}': ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!child) throw WorkflowError.nodeConfig(`Workflow Tool '${attached.name || attached.id}': workflow '${workflowId}' was not found.`);
+  }
+  const descriptor = deriveWorkflowToolDescriptor(child ?? { id: workflowId, name: attached.name }, {
+    toolName: attachedConfig.toolName,
+    toolDescription: attachedConfig.toolDescription
+  });
+  const key = workflowToolServerKey(workflowId);
+  return {
+    serverId: WORKFLOW_TOOL_ADAPTER_ID,
+    registryServerId: key,
+    label: child?.name ?? attached.name ?? key,
+    connection: {
+      workflowId,
+      nodeId: attached.id,
+      toolName: descriptor.toolName,
+      description: descriptor.description,
+      inputSchema: descriptor.inputSchema,
+      // Only the child's own trigger makes it read-only; without the child (a replay) it is not.
+      readOnly: descriptor.readOnly
+    }
+    // No allowedTools: the adapter lists exactly this one tool, and a replay (which cannot derive the name) lists the recorded one.
+  };
+}
+
+/**
+ * Phase 6.4 — the classification the write-tool gate reads. The gate trusts
+ * only an admin's read-only setting, except for tools whose behaviour L2M
+ * knows: the built-in tools only read, and a workflow tool is read-only when
+ * the child workflow's own trigger declares it. An admin's own setting still
+ * wins. The exception holds only for L2M's own adapter instances in the
+ * registry, never for another adapter registered under one of their ids.
+ */
+function writeGateClassification(
+  entry: { serverId: string; connection?: unknown },
+  classification: ReturnType<typeof classifyMcpTool>,
+  registry: MCPRegistry
+): ReturnType<typeof classifyMcpTool> {
+  if (classification.source === "manual") return classification;
+  if (entry.serverId !== BUILT_IN_TOOLS_ADAPTER_ID && entry.serverId !== WORKFLOW_TOOL_ADAPTER_ID) return classification;
+  if (!isL2mOwnToolAdapter(registry.tryGet(entry.serverId))) return classification;
+  if (entry.serverId === BUILT_IN_TOOLS_ADAPTER_ID) return { readOnly: true, source: "manual" };
+  if (toRecord(entry.connection).readOnly === true) return { readOnly: true, source: "manual" };
+  return classification;
+}
+
+/**
+ * Phase 6.4 — the parent's write controls reach a workflow tool's child run, tighten-only: the parent's write-tool
+ * gate when the child has none of its own, and the parent's "no write tools" switch.
+ */
+function withCallerWriteControls(child: Workflow, caller: Workflow["settings"]): Workflow {
+  const callerGate = caller?.writeToolApproval?.enabled === true ? caller.writeToolApproval : undefined;
+  const callerNoWrite = caller?.noWriteTools === true;
+  if (!callerGate && !callerNoWrite) return child;
+  const own = child.settings ?? {};
+  return {
+    ...child,
+    settings: {
+      ...own,
+      ...(callerNoWrite ? { noWriteTools: true } : {}),
+      ...(callerGate && own.writeToolApproval?.enabled !== true ? { writeToolApproval: callerGate } : {})
+    }
+  };
+}
+
+/** Phase 6.4 — the model-usage blobs of a finished run, its own children's included, to count in the caller's usage. */
+function runTelemetryBlobs(result: WorkflowExecutionResult): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const entry of result.nodeResults ?? []) {
+    const output = toRecord(entry.output);
+    const telemetry = toRecord(output._telemetry);
+    if (Object.keys(telemetry).length > 0) out.push(telemetry);
+    if (Array.isArray(output._childTelemetry)) {
+      for (const nested of output._childTelemetry) if (nested && typeof nested === "object") out.push(nested as Record<string, unknown>);
+    }
+  }
+  return out;
+}
 /** Phase 16 — label segments of an agent node: its user prompt's reads, and reads made while its loop runs. */
 const AGENT_USER_PROMPT_SEGMENT = "user_prompt";
 const AGENT_RUN_SEGMENT = "agent_run";
 
 export interface WorkflowExecutionDependencies {
+  /**
+   * Phase 6.4 — set for a Workflow Tool's child run: the calling run's write controls (its settings), which every
+   * Execute Workflow node in the child's subtree applies to its own child too, tighten-only.
+   */
+  callerWriteControls?: Workflow["settings"];
   providerRegistry: ProviderRegistry;
   mcpRegistry: MCPRegistry;
   connectorRegistry: ConnectorRegistry;
@@ -885,10 +997,7 @@ function resolveWebhookPrompt(globals: Record<string, unknown>): string | undefi
   return undefined;
 }
 
-/** The name of the synthetic tool a Supervisor gets for an attached worker node. */
-export function workerDelegateToolName(workerName: string): string {
-  return `delegate_to_${workerName.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
-}
+export { workerDelegateToolName };
 
 function getAttachmentHandle(sourceHandle: string | undefined): AgentAttachmentHandle | undefined {
   if (!sourceHandle || !AGENT_ATTACHMENT_HANDLES.has(sourceHandle as AgentAttachmentHandle)) {
@@ -1233,7 +1342,7 @@ export async function workflowDeclaresSensitiveSource(
     if (await declaresSensitiveSource(node, dependencies)) return true;
   }
   for (const node of nodes) {
-    if (node.type !== "execute_workflow") continue;
+    if (node.type !== "execute_workflow" && node.type !== "workflow_tool") continue;
     const workflowId = typeof toRecord(node.config).workflowId === "string" ? String(toRecord(node.config).workflowId).trim() : "";
     if (!workflowId || visited.has(workflowId)) continue;
     if (depth >= MAX_SUB_WORKFLOW_DEPTH || !dependencies.loadWorkflow) return true;
@@ -1727,6 +1836,10 @@ function mergeMCPServerConfigs(base: MCPServerConfig[], additional: MCPServerCon
         allowedTools: entry.allowedTools ? new Set(entry.allowedTools) : undefined
       });
       continue;
+    }
+
+    if (entry.label && current.server.label && !current.server.label.split(" + ").includes(entry.label)) {
+      current.server.label = `${current.server.label} + ${entry.label}`;
     }
 
     if (!current.allowedTools || !entry.allowedTools) {
@@ -4376,6 +4489,9 @@ async function executeNodeHandler(
       return output;
     }
 
+    case "workflow_tool":
+      throw WorkflowError.nodeConfig("A Workflow Tool runs only as an agent's tool: attach it to an Agent or Supervisor tool port.");
+
     case "execute_workflow": {
       const workflowId = typeof config.workflowId === "string" ? config.workflowId.trim() : "";
       if (!workflowId) {
@@ -4398,10 +4514,12 @@ async function executeNodeHandler(
         );
       }
 
-      const targetWorkflow = await dependencies.loadWorkflow(workflowId);
-      if (!targetWorkflow) {
+      const loadedTarget = await dependencies.loadWorkflow(workflowId);
+      if (!loadedTarget) {
         throw new Error(`Sub-workflow '${workflowId}' was not found.`);
       }
+      // Phase 6.4 — inside a Workflow Tool's child, the calling agent's write controls reach this workflow too (tighten-only).
+      const targetWorkflow = dependencies.callerWriteControls ? withCallerWriteControls(loadedTarget, dependencies.callerWriteControls) : loadedTarget;
 
       const childDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
         ? { ...dependencies, ...dependencies.scopeSubWorkflow(targetWorkflow) }
@@ -5017,7 +5135,7 @@ async function executeNodeHandler(
       const embedder = checkedEmbedder(
         new AzureOpenAIEmbeddingAdapter({
           endpoint,
-          // The endpoint is node config, so it goes through the outbound guard (pinned).
+          // The endpoint is node config, so it goes through the outbound URL checks (pinned).
           fetcher: guardedRagFetch(dependencies),
           deployment,
           apiVersion:
@@ -5051,7 +5169,7 @@ async function executeNodeHandler(
       const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
       const vectorStoreId = typeof config.vectorStoreId === "string" ? config.vectorStoreId : "in-memory-vector-store";
       const vectorStoreConfig = toRecord(config.vectorStoreConfig);
-      // An endpoint or baseUrl set on the node (not a deployment env fallback) goes through the outbound guard.
+      // An endpoint or baseUrl set on the node (not a deployment env fallback) goes through the outbound URL checks.
       const nodeFetch = (key: "endpoint" | "baseUrl") =>
         typeof vectorStoreConfig[key] === "string" && String(vectorStoreConfig[key]).trim() ? guardedRagFetch(dependencies) : undefined;
       // The deployment's env key only ever goes to the deployment's own endpoint. When the node names its own
@@ -5466,7 +5584,7 @@ async function executeNodeHandler(
         config: themeConfig,
         // Phase 15.1 — a replay never lets a chart load data from a URL or file.
         offline: Boolean(dependencies.replayNodeHook),
-        // Live charts run every data/image URL through the outbound guard, and fetch over a pinned connection.
+        // Live charts run every data/image URL through the outbound URL checks, and fetch over a pinned connection.
         // Phase 16 — under destination rules each URL (and each redirect) is judged as egress before it is loaded.
         urlGuard: async (url: string) => {
           await assertOutboundUrlAllowed(url, dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver);
@@ -6071,6 +6189,8 @@ async function executeNodeHandler(
         attachedToolServerConfigs.push({
           serverId,
           registryServerId,
+          // Phase 6.4 — errors and renamed tools name the node; a registered server's own name replaces it.
+          label: attached.name || attached.id,
           connection: toRecord(attachedConfig.connection),
           secretRef: attachedConfig.secretRef as SecretReference | undefined,
           allowedTools: allowedTools.size ? [...allowedTools] : undefined
@@ -6080,16 +6200,27 @@ async function executeNodeHandler(
         }
       }
 
+      // Phase 6.4 — Workflow Tool nodes: another workflow as one tool, served by the in-process l2m-workflow adapter.
+      const attachedWorkflowToolNodes = getAttachedNodes("tool").filter((entry) => entry.type === "workflow_tool" && entry.disabled !== true);
+      const workflowToolConfigs = await Promise.all(attachedWorkflowToolNodes.map((attached) => workflowToolServerConfig(attached, dependencies)));
+      const workflowToolTimeouts = new Map<string, number>();
+      for (const attached of attachedWorkflowToolNodes) {
+        const timeoutMs = toRecord(attached.config).timeoutMs;
+        if (typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0) workflowToolTimeouts.set(attached.id, Math.floor(timeoutMs));
+      }
+
       const resolvedAttachedConfigs = await Promise.all(
         attachedToolServerConfigs.map((entry) => applyRegisteredMcpServer(entry, dependencies, context.toolPolicySubject))
       );
       const resolvedInlineConfigs = await Promise.all(
         inlineServerConfigs.map((entry) => applyRegisteredMcpServer(entry, dependencies, context.toolPolicySubject))
       );
-      const serverConfigs =
-        resolvedAttachedConfigs.length > 0
+      const serverConfigs = [
+        ...(resolvedAttachedConfigs.length > 0
           ? mergeMCPServerConfigs([], resolvedAttachedConfigs)
-          : mergeMCPServerConfigs(resolvedInlineConfigs, resolvedAttachedConfigs);
+          : mergeMCPServerConfigs(resolvedInlineConfigs, resolvedAttachedConfigs)),
+        ...workflowToolConfigs
+      ];
       // Phase 10.2 — tools denied by policy or by the workflow's "no write
       // tools" switch are dropped here, before the model sees the tool set.
       // Workers run through executeNode and apply the same policy to their own tools.
@@ -6109,6 +6240,103 @@ async function executeNodeHandler(
         checkSampling: samplingGuardFor(node, context, dependencies)
       });
       const mcpExecutionContext = agentMcp.context;
+      /**
+       * Phase 6.4 — the call the agent is making now, for a workflow tool's run: its labels become the child's input
+       * labels and the child's output labels its result's. The runtime makes one tool call at a time.
+       */
+      let activeToolCall: { toolName: string; toolCallId?: string; labels?: DataLabels } | undefined;
+      const workflowToolResultLabels = new Map<string, DataLabels>();
+      const workflowToolResultKey = (toolName: string, toolCallId: string | undefined) => `${toolName}\u0000${toolCallId ?? ""}`;
+      // Phase 6.4 — the children's model usage, counted in this node's usage (and so in the run's spend and budgets).
+      const childTelemetry: Record<string, unknown>[] = [];
+      if (workflowToolConfigs.length > 0) {
+        const runWorkflowTool: WorkflowToolRunner = async (call) => {
+          const failure = (error: string) => ({ ok: false, output: null, error, errorKind: "tool" as const });
+          if (!dependencies.loadWorkflow) return failure("Workflow tools cannot run other workflows in this runtime.");
+          if (context.callStack.length >= MAX_SUB_WORKFLOW_DEPTH) {
+            return failure(`Maximum sub-workflow depth of ${MAX_SUB_WORKFLOW_DEPTH} exceeded. Call stack: ${context.callStack.join(" -> ")}`);
+          }
+          if (call.workflowId === context.workflow.id || context.callStack.includes(call.workflowId)) {
+            return failure(`Circular sub-workflow reference detected: ${[...context.callStack, call.workflowId].join(" -> ")}`);
+          }
+          let child: Workflow | undefined;
+          try {
+            child = await dependencies.loadWorkflow(call.workflowId);
+          } catch (error) {
+            return failure(error instanceof Error ? error.message : String(error));
+          }
+          if (!child) return failure(`Workflow '${call.workflowId}' was not found.`);
+          // A per-call limit from the node; without one the call is bounded by the run's own timeout.
+          const timeoutMs = call.nodeId ? workflowToolTimeouts.get(call.nodeId) : undefined;
+          const callAbort = new AbortController();
+          const abortFromRun = () => callAbort.abort(dependencies.abortSignal?.reason);
+          if (dependencies.abortSignal?.aborted) abortFromRun();
+          else dependencies.abortSignal?.addEventListener("abort", abortFromRun, { once: true });
+          const childDependencies: WorkflowExecutionDependencies = {
+            ...(dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies),
+            abortSignal: callAbort.signal,
+            ...(context.workflow.settings ? { callerWriteControls: context.workflow.settings } : {}),
+            // v1: a child that stops for an approval is not kept; the call fails and says why.
+            persistPausedExecution: async () => undefined
+          };
+          const active = activeToolCall;
+          const inputLabels = active?.labels ?? context.labelScope?.inputLabels();
+          const input: Record<string, unknown> = { ...call.args, arguments: call.args };
+          // The fallback schema's free text (or a user_prompt argument) is the child's {{user_prompt}}.
+          const childPrompt = typeof call.args.user_prompt === "string" ? call.args.user_prompt : typeof call.args.input === "string" ? call.args.input : undefined;
+          const childRun = executeWorkflow(
+            {
+              // The parent's write-tool gate and "no write tools" switch apply inside the child too (tighten-only).
+              workflow: withCallerWriteControls(child, context.workflow.settings),
+              input,
+              ...(inputLabels ? { inputLabels } : {}),
+              ...(childPrompt !== undefined ? { userPrompt: childPrompt } : {}),
+              triggerType: "sub_workflow",
+              triggeredBy: context.workflow.id,
+              toolPolicySubject: context.toolPolicySubject,
+              callStack: [...context.callStack]
+            },
+            childDependencies
+          );
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          // The call returns at its limit; the child is told to stop and does so at its next step.
+          const limit =
+            timeoutMs !== undefined
+              ? new Promise<"timed_out">((resolve) => {
+                  timer = setTimeout(() => {
+                    callAbort.abort(new Error(`The workflow tool call timed out after ${timeoutMs} ms.`));
+                    resolve("timed_out");
+                  }, timeoutMs);
+                })
+              : undefined;
+          let childResult: WorkflowExecutionResult;
+          try {
+            const settled = limit ? await Promise.race([childRun, limit]) : await childRun;
+            if (settled === "timed_out") {
+              childRun.catch(() => undefined);
+              return failure(`The workflow '${child.name}' did not finish within this tool's ${timeoutMs} ms limit.`);
+            }
+            childResult = settled;
+          } finally {
+            if (timer) clearTimeout(timer);
+            dependencies.abortSignal?.removeEventListener("abort", abortFromRun);
+          }
+          childTelemetry.push(...runTelemetryBlobs(childResult));
+          // The child's output labels, or on failure what its failed node read: its error text can quote that.
+          const outputLabels = runOutputLabels.get(childResult);
+          if (outputLabels && active) workflowToolResultLabels.set(workflowToolResultKey(active.toolName, active.toolCallId), outputLabels);
+          if (childResult.status === "waiting_approval") {
+            return failure(
+              `The workflow '${child.name}' stopped to wait for an approval, and an agent's tool call cannot wait for one. Run that workflow on its own, or move the approval out of it.`
+            );
+          }
+          if (childResult.status !== "success") return failure(childResult.error ?? `The workflow '${child.name}' did not finish (${childResult.status}).`);
+          const output = childResult.output ?? null;
+          const structured = output && typeof output === "object" && !Array.isArray(output) ? (output as Record<string, unknown>) : undefined;
+          return { ok: true, output, ...(structured ? { structured } : {}) };
+        };
+        mcpExecutionContext.runWorkflowTool = runWorkflowTool;
+      }
       // Stdio MCP servers spawned for this node live in this context only.
       // Close them once the node is done, however it ends: success, error,
       // clarification pause, or cancellation/timeout through the abort signal.
@@ -6218,6 +6446,13 @@ async function executeNodeHandler(
           };
         });
 
+        // Phase 6.4 — every name the model sees stands for one tool: MCP tools, workers and the runtime's own tools.
+        assertUniqueToolNames([
+          ...resolvedTools.resolved.map((entry) => ({ name: entry.exposedName, source: entry.registryServerId ?? entry.serverId })),
+          ...workerTools.map((worker) => ({ name: worker.name, source: `worker ${worker.serverId.slice("worker-".length)}` })),
+          ...RUNTIME_INTERNAL_TOOL_NAMES.map((name) => ({ name, source: "agent runtime" }))
+        ], "Rename one of the worker nodes, or remove one of the clashing tools.");
+
         const allToolsForModel = [
           ...resolvedTools.resolved.map((entry) => ({
             serverId: entry.serverId,
@@ -6245,7 +6480,7 @@ async function executeNodeHandler(
                 // Phase 16 — where the agent's calls go, for destination rules.
                 modelDestination: providerDestinationRef(provider),
                 toolDestination: (exposedName) => {
-                  const resolved = resolvedTools.resolved.find((entry) => entry.exposedName === exposedName);
+                  const resolved = resolvedTools.lookup(exposedName);
                   if (!resolved) return null;
                   const server = serverConfigs.find(
                     (entry) => entry.serverId === resolved.serverId && (entry.registryServerId ?? "") === (resolved.registryServerId ?? "")
@@ -6253,7 +6488,7 @@ async function executeNodeHandler(
                   return mcpServerDestinationRef(server ?? { serverId: resolved.serverId, ...(resolved.registryServerId ? { registryServerId: resolved.registryServerId } : {}) });
                 },
                 describeTool: (exposedName) => {
-                  const resolved = resolvedTools.resolved.find((entry) => entry.exposedName === exposedName);
+                  const resolved = resolvedTools.lookup(exposedName);
                   if (resolved) {
                     return {
                       serverId: resolved.registryServerId ?? resolved.serverId,
@@ -6309,7 +6544,7 @@ async function executeNodeHandler(
             };
           }
           if (dependencies.replayNodeHook) return { kind: "allow", ...(decision ? { decision, policyTool } : {}) };
-          const classification = decision ? decision.classification : classifyMcpTool({ annotations: resolvedEntry.annotations });
+          const classification = writeGateClassification(resolvedEntry, decision ? decision.classification : classifyMcpTool({ annotations: resolvedEntry.annotations }), dependencies.mcpRegistry);
           const gateAsks = writeGate?.enabled === true && !writeToolGateSkips(classification);
           if (!gateAsks && !decision?.approval) return { kind: "allow", ...(decision ? { decision, policyTool } : {}) };
           const serverKey = resolvedEntry.registryServerId ?? resolvedEntry.serverId;
@@ -6401,8 +6636,10 @@ async function executeNodeHandler(
             toolOutputLimits: hasCustomToolOutputLimits ? toolOutputLimits : undefined,
             sessionId,
             memory,
-            bypassToolFiltering: attachedToolServerConfigs.length > 0,
-            images: images.length > 0 ? images : undefined
+            bypassToolFiltering: attachedToolServerConfigs.length + workflowToolConfigs.length > 0,
+            images: images.length > 0 ? images : undefined,
+            // Phase 6.4 — the agent's Think toggle (off unless set).
+            ...(config.thinkTool === true ? { thinkTool: true } : {})
           },
           {
             tools: [
@@ -6414,8 +6651,11 @@ async function executeNodeHandler(
             // (12.2: and sensitive when its MCP Tool node declares sensitive output).
             resultLabels: (toolName, toolCallId) => {
               const worker = workerResultLabels.get(workerResultKey(toolName, toolCallId));
+              // Phase 6.4 — a workflow tool's result carries the labels of the child's output.
+              const childLabels = workflowToolResultLabels.get(workflowToolResultKey(toolName, toolCallId));
+              if (childLabels) return childLabels;
               if (worker || sensitiveToolSources.length === 0) return worker;
-              const entry = resolvedTools.resolved.find((candidate) => candidate.exposedName === toolName);
+              const entry = resolvedTools.lookup(toolName);
               const sensitive =
                 entry &&
                 sensitiveToolSources.some(
@@ -6460,7 +6700,7 @@ async function executeNodeHandler(
                     throw error;
                   }
                }
-               const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
+               const resolvedEntry = resolvedTools.lookup(toolName);
                // Phase 12.4 — the plan the tool-call check made for this call; planned again when the guard rewrote the arguments.
                const argsKey = canonicalPolicyJson(args);
                const checked =
@@ -6509,6 +6749,7 @@ async function executeNodeHandler(
                // Phase 10.5 — each tool call gets a fresh sampling budget.
                const originalName = resolvedEntry?.originalName ?? toolName;
                agentMcp.samplingHandler.beginCall(originalName);
+               activeToolCall = { toolName, ...(toolCallId ? { toolCallId } : {}), ...(invocation?.labels ? { labels: invocation.labels } : {}) };
                const toolResult = await resolvedTools.invokeByExposedName(toolName, args, {
                  ...(invocation?.labels ? { dataLabels: policyLabels(invocation.labels) } : {}),
                  ...(toolCallId ? { toolCallId } : {})
@@ -6520,7 +6761,7 @@ async function executeNodeHandler(
             // the model sees, a call that needs approval pauses the agent (unless it was approved or already ran).
             checkToolCall: (toolName, args, call) => {
               checkedCall = undefined;
-              const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
+              const resolvedEntry = resolvedTools.lookup(toolName);
               if (!resolvedEntry) return { outcome: "allow" };
               const plan = planToolCall(resolvedEntry, args, call.labels);
               // 12.2 — a call stopped here records the labels it was decided with too, so simulation can read them.
@@ -6663,6 +6904,8 @@ async function executeNodeHandler(
             llmCallCount: (agentState.llmCallCount ?? 0) + samplingRequests || agentState.llmCallCount,
             ...(samplingRequests > 0 ? { samplingUsage, samplingRequests } : {})
           },
+          // Phase 6.4 — what the workflows this agent called as tools spent on models, each priced by its own model.
+          ...(childTelemetry.length > 0 ? { _childTelemetry: childTelemetry } : {}),
           // Phase: agent_clarify — when the agent paused to ask the user a
           // question, surface the clarification details on the node output
           // so workflow consumers (chat UI, /executions response, downstream
@@ -9443,7 +9686,7 @@ async function executeWorkflowRun(
           });
         }
 
-        return {
+        const failedResult: WorkflowExecutionResult = {
           workflowId: workflow.id,
           status: "error",
           startedAt,
@@ -9455,6 +9698,9 @@ async function executeWorkflowRun(
           errorCategory: errorCategoryName,
           errorRemediation
         };
+        // Phase 6.4 — the error can quote what the failed node read: a caller (a Workflow Tool) keeps those labels.
+        runOutputLabels.set(failedResult, labelScope.pendingLabels());
+        return failedResult;
       }
     }
   }

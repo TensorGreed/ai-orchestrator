@@ -1188,6 +1188,7 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   loop_node: "loop",
   merge_node: "merge",
   execute_workflow: "execute_workflow",
+  workflow_tool: "execute_workflow",
   wait_node: "wait",
   human_approval: "human",
   approval_gate: "human",

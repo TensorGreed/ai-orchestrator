@@ -41,7 +41,7 @@ export function ruleLabelValues(conditions: McpToolPolicyConditions | null | und
 export const MCP_TOOL_CALLING_NODE_TYPES: readonly string[] = ["agent_orchestrator", "supervisor_node", "mcp_tool"];
 
 /** Node types that run another workflow, which may call MCP tools: counted as calling them, conservatively. */
-export const SUB_WORKFLOW_NODE_TYPES: readonly string[] = ["execute_workflow"];
+export const SUB_WORKFLOW_NODE_TYPES: readonly string[] = ["execute_workflow", "workflow_tool"];
 
 /** True when an enabled node of the workflow may call an MCP tool, itself or through a sub-workflow. */
 export function workflowMayCallMcpTools(workflow: Pick<Workflow, "nodes">): boolean {

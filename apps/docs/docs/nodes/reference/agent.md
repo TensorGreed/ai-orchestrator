@@ -1,5 +1,5 @@
 ---
-description: "Reference for the 2 nodes in the L2M Agent category, with every config field and default. Tool-calling agent runtimes and the multi-turn memory + artifact stores that back them."
+description: "Reference for the 3 nodes in the L2M Agent category, with every config field and default. Tool-calling agent runtimes and the multi-turn memory + artifact stores that back them."
 ---
 
 <!--
@@ -12,7 +12,7 @@ description: "Reference for the 2 nodes in the L2M Agent category, with every co
 
 Tool-calling agent runtimes and the multi-turn memory + artifact stores that back them.
 
-2 nodes.
+3 nodes.
 
 ---
 ### `agent_orchestrator` — Agent Orchestrator
@@ -30,6 +30,7 @@ Runs iterative tool-aware agent loop.
 | `sessionIdTemplate` | `string` | no | — |
 | `maxIterations` | `number` | yes | — |
 | `toolCallingEnabled` | `boolean` | no | — |
+| `thinkTool` | `boolean` | no | — |
 | `toolMessageMaxChars` | `number` | no | — |
 | `toolPayloadMaxDepth` | `number` | no | — |
 | `toolPayloadMaxObjectKeys` | `number` | no | — |
@@ -69,6 +70,7 @@ Swarm Supervisor that coordinates attached Worker nodes.
 | `userPromptTemplate` | `string` | no | — |
 | `sessionIdTemplate` | `string` | no | — |
 | `maxIterations` | `number` | yes | — |
+| `thinkTool` | `boolean` | no | — |
 | `toolMessageMaxChars` | `number` | no | — |
 | `toolPayloadMaxDepth` | `number` | no | — |
 | `toolPayloadMaxObjectKeys` | `number` | no | — |
@@ -88,5 +90,28 @@ Swarm Supervisor that coordinates attached Worker nodes.
   "toolPayloadMaxObjectKeys": 32,
   "toolPayloadMaxArrayItems": 8,
   "toolPayloadMaxStringChars": 400
+}
+```
+
+---
+
+### `workflow_tool` — Workflow Tool
+
+Lets an agent call another workflow as a tool. Attach it to an Agent or Supervisor tool port. The tool's name, description and input schema come from the workflow's Expose as MCP Tool or Sub-Workflow Trigger node.
+
+**Config fields**
+
+| Field | Type | Required | Values |
+|---|---|---|---|
+| `workflowId` | `string` | yes | — |
+| `toolName` | `string` | no | — |
+| `toolDescription` | `string` | no | — |
+| `timeoutMs` | `number` | no | — |
+
+**Example config**
+
+```json
+{
+  "workflowId": ""
 }
 ```

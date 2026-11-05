@@ -2,6 +2,8 @@ import { MockMCPServerAdapter } from "./adapters/mock-mcp";
 import { SnapshotMockMCPServerAdapter, type McpSnapshotSource } from "./snapshot-mock";
 import { HttpMCPServerAdapter } from "./adapters/http-mcp";
 import { StdioMCPServerAdapter } from "./adapters/stdio-mcp";
+import { BuiltInToolsMCPServerAdapter, type BuiltInToolsAdapterOptions } from "./adapters/built-in-tools";
+import { WorkflowToolMCPServerAdapter } from "./adapters/workflow-tool";
 import { MCPRegistry } from "./registry";
 import { withSecretBundle } from "./secret-bundle";
 import { withRuntimeLimits, type McpRuntimeGuard } from "./runtime-limits";
@@ -31,6 +33,9 @@ export * from "./mock-stdio-server";
 export * from "./adapters/mock-mcp";
 export * from "./adapters/http-mcp";
 export * from "./adapters/stdio-mcp";
+export * from "./adapters/built-in-tools";
+export * from "./adapters/workflow-tool";
+export { isL2mOwnToolAdapter } from "./adapters/own-adapters";
 
 export interface DefaultMCPRegistryOptions {
   oauth?: McpOAuthTokenProvider;
@@ -43,6 +48,12 @@ export interface DefaultMCPRegistryOptions {
   sandbox?: McpSandboxPolicy | StdioLauncher;
   /** Phase 10.7 — rate limits, concurrency caps and the circuit breaker shared by every caller of this registry. */
   runtimeGuard?: McpRuntimeGuard;
+  /**
+   * Phase 6.4 — the built-in tools (Wikipedia, SearXNG, SerpAPI, Wolfram
+   * Alpha). The API passes its fetch with the outbound URL checks here; without one the
+   * runtime's fetch is used with no outbound policy.
+   */
+  builtInTools?: BuiltInToolsAdapterOptions;
 }
 
 function isLauncher(value: McpSandboxPolicy | StdioLauncher): value is StdioLauncher {
@@ -58,6 +69,10 @@ export function createDefaultMCPRegistry(options?: DefaultMCPRegistryOptions): M
   registry.register(limited(withSecretBundle(new HttpMCPServerAdapter(options?.oauth ? { oauth: options.oauth } : undefined))));
   registry.register(limited(withSecretBundle(new StdioMCPServerAdapter(launcher ? { launcher } : undefined))));
   registry.register(limited(new MockMCPServerAdapter()));
+  // Phase 6.4 — built-in tools, under the same rate limits and breaker as any other server.
+  registry.register(limited(new BuiltInToolsMCPServerAdapter(options?.builtInTools)));
+  // Phase 6.4 — workflow tools run in this process; the child's own calls meet the limits of their servers.
+  registry.register(new WorkflowToolMCPServerAdapter());
   // Phase 10.8 — offline stubs generated from a server's accepted snapshot.
   registry.register(new SnapshotMockMCPServerAdapter(options?.snapshots));
   return registry;

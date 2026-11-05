@@ -324,11 +324,11 @@
 - [x] Guardrails node enhancement (validate AI outputs against schemas) — `packages/workflow-engine/src/executor.ts` `matches_schema` check
 
 ### 6.4 AI Tools Expansion
-- [ ] Wikipedia tool
-- [ ] Web search tool (SerpAPI / SearXNG)
-- [ ] Wolfram Alpha tool
-- [ ] Think tool (agent reasoning step)
-- [ ] Workflow-as-tool (call another workflow as an agent tool)
+- [x] Wikipedia tool — built-in `l2m-tools` MCP adapter (`packages/mcp-sdk/src/adapters/built-in-tools.ts`), palette preset
+- [x] Web search tool (SerpAPI / SearXNG) — same adapter, providers `serpapi` and `searxng`
+- [x] Wolfram Alpha tool — same adapter, provider `wolfram` (LLM API, AppID secret)
+- [x] Think tool (agent reasoning step) — `thinkTool` toggle on Agent / Supervisor, internal `think` tool, "thought" trace entries
+- [x] Workflow-as-tool (call another workflow as an agent tool) — `workflow_tool` node on the `tool` port, governed as `workflow:<id>`
 - [x] Agent-as-tool (call another agent as a tool) — `supervisor_node` in `packages/shared/src/definitions.ts` (workers as synthetic tools)
 
 ---

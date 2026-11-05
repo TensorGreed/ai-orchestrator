@@ -203,6 +203,8 @@ function describeActivityBody(event: NodeActivityEvent): string {
       if (event.outcome === "error") return `${event.toolName} failed${event.error ? `: ${clip(event.error)}` : ""}`;
       return typeof event.durationMs === "number" ? `${event.toolName} done in ${formatSeconds(event.durationMs)}` : `${event.toolName} done`;
     }
+    case "thought":
+      return event.text ? `Thought: ${clip(event.text)}` : "Thought";
   }
 }
 

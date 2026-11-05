@@ -237,6 +237,31 @@ describe("maskCapturedRun", () => {
     expect((maskCapturedRun(plain, { key, dictionaries: [], keepLiteralsFrom: workflow }).modelTape!.entries[0]!.request as unknown as { tools: unknown[] }).tools).toEqual([kept]);
   });
 
+  // Phase 6.4: two servers serving one tool name are exposed as `<adapter>_<hash>__<tool>`; those names are MCP content like the plain form.
+  it("never holds back a disambiguated `<serverId>_<hash>__…` tool name, listed or configured, even when a worker's delegate tool has it", () => {
+    const OTHER = "bob.smith@corp-example.com";
+    const tool = { name: "delegate_to_a_0f1e2d__b", description: `[delegate_to_a: Lookup] owner ${OTHER}`, inputSchema: { type: "object" } };
+    const workflow = withWorkers("a_0f1e2d__b");
+    const capture = (cassette: Partial<McpCassette>, keepLiteralsFrom: unknown) => {
+      const base = run();
+      base.cassette = { ...base.cassette!, truncated: true, servers: [], entries: [], ...cassette } as unknown as McpCassette;
+      const request = { messages: [{ role: "user", content: "Who owns it?" }], tools: [tool], params: { model: "m" } };
+      base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request }] } as unknown as ModelTape;
+      return maskCapturedRun(base, { key, dictionaries: [], keepLiteralsFrom });
+    };
+    const surrogate = surrogateFor(OTHER, "email", key);
+    const mcpNode = { id: "m", type: "mcp_tool", name: "Lookup", config: { serverId: "delegate_to_a" } };
+    const listedServer = { key: "inline:x", adapterId: "delegate_to_a" };
+    const cases = [
+      capture({ servers: [listedServer], entries: [{ seq: 1, server: "inline:x", method: "tools/list", result: [{ name: "b", description: "d", inputSchema: {} }], at: 0 }] } as unknown as Partial<McpCassette>, workflow),
+      capture({}, { ...workflow, nodes: [...workflow.nodes, mcpNode] })
+    ];
+    for (const masked of cases) {
+      expect(JSON.stringify(masked)).not.toContain(OTHER);
+      expect((masked.modelTape!.entries[0]!.request as unknown as { tools: Array<typeof tool> }).tools[0]!.description).toBe(`[delegate_to_a: Lookup] owner ${surrogate}`);
+    }
+  });
+
   // Re-review round 2 N2: every scalar in a held-back definition is checked, numbers as their decimal text.
   it("drops the capture when a held-back schema holds a collected value as a number (default, enum, examples, const at any depth)", () => {
     const CARD = "4111111111111111";

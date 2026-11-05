@@ -33,7 +33,7 @@ In the editor, open the **⋯** menu, choose **Ask before write tools…** and t
 
 ## 2. Decide which tools count as write tools
 
-For this setting, a tool is read-only **only** when an admin marked it read-only on the server's Tools table in the [MCP server registry](../product/mcp-server-registry.md). The server's own `readOnlyHint` is not trusted here, because any server can label a delete tool read-only. Every other tool, including one without annotations, pauses the run.
+For this setting, a tool is read-only **only** when an admin marked it read-only on the server's Tools table in the [MCP server registry](../product/mcp-server-registry.md). The server's own `readOnlyHint` is not trusted here, because any server can label a delete tool read-only. Every other tool, including one without annotations, pauses the run. Two exceptions are L2M's own: the [built-in agent tools](../runtime/built-in-agent-tools.md), which only read, and a [Workflow Tool](../runtime/workflow-tool.md) whose child workflow declares itself read-only on its trigger. An admin's own setting still wins over both.
 
 So mark the genuinely read-only tools (search, get, list) as **read-only** once, and every call to anything else asks first. [Govern MCP tools](./govern-mcp-tools.md) covers classification and the rules that hide tools altogether.
 

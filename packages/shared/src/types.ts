@@ -52,6 +52,7 @@ export type WorkflowNodeType =
   | "chat_intent_router"
   | "helper_chat_response"
   | "mcp_tool"
+  | "workflow_tool"
   | "rag_retrieve"
   | "rerank"
   | "extract_citations"
@@ -421,6 +422,14 @@ export type NodeActivity =
       durationMs?: number;
       outcome?: "ok" | "error" | "blocked";
       error?: string;
+    }
+  | {
+      /** Phase 6.4 — the agent used its Think tool: a reasoning note, not a tool call. */
+      kind: "thought";
+      iteration?: number;
+      toolCallId?: string;
+      /** The note, truncated for the activity feed. */
+      text: string;
     };
 
 export type NodeActivityEvent = NodeActivity & {
@@ -962,6 +971,8 @@ export interface AgentRunRequest {
   toolOutputLimits?: AgentToolOutputLimits;
   bypassToolFiltering?: boolean;
   images?: ChatMessageImage[];
+  /** Phase 6.4 — offer the internal `think` tool (a scratchpad step; no policy, content rules or labels). Off unless set. */
+  thinkTool?: boolean;
 }
 
 export interface AgentRunStepToolResult {
@@ -973,6 +984,8 @@ export interface AgentRunStepToolResult {
   startedAt?: string;
   /** Phase 10.1 — wall-clock time spent executing this tool call, in ms. */
   durationMs?: number;
+  /** Phase 6.4 — set on a call of the Think tool: the note the model wrote. Not a tool call of any server. */
+  thought?: string;
 }
 
 export interface AgentRunStep {

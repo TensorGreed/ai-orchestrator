@@ -1,5 +1,5 @@
 ---
-description: "Reference for all 139 L2M node types across 8 categories, generated from the node definitions: every config field and default value."
+description: "Reference for all 140 L2M node types across 8 categories, generated from the node definitions: every config field and default value."
 ---
 
 <!--
@@ -14,13 +14,13 @@ Auto-generated from the canonical `nodeDefinitions` registry in
 config field, every default value — kept in lock-step with the running
 code by the docs build.
 
-139 node types across 8 categories.
+140 node types across 8 categories.
 
 ## Categories
 
 - [Input](/nodes/reference/input) — Workflow entry points: triggers (cron, webhook, manual, form, chat, MCP-server) and static-input helpers. (27 nodes)
 - [LLM](/nodes/reference/llm) — Chat-completion model adapters and prompt-template helpers. (15 nodes)
-- [Agent](/nodes/reference/agent) — Tool-calling agent runtimes and the multi-turn memory + artifact stores that back them. (2 nodes)
+- [Agent](/nodes/reference/agent) — Tool-calling agent runtimes and the multi-turn memory + artifact stores that back them. (3 nodes)
 - [MCP](/nodes/reference/mcp) — Model Context Protocol clients and the workflow-as-MCP-tool exposure node. (1 node)
 - [RAG](/nodes/reference/rag) — Retrieval-Augmented Generation: embedders, vector stores, document loaders, retrievers. (5 nodes)
 - [Connector](/nodes/reference/connector) — External system integrations — HTTP, SQL, NoSQL, cloud SDKs, SaaS APIs. (41 nodes)

@@ -39,7 +39,7 @@ export type AgentToolCallCheck = { outcome: "allow" } | { outcome: "block"; mess
 
 /** What the loop reports while it runs: model calls, retries, steps and tool calls. */
 export type AgentRuntimeEvent =
-  | Extract<NodeActivity, { kind: "llm_call" | "agent_step" | "tool_call" }>
+  | Extract<NodeActivity, { kind: "llm_call" | "agent_step" | "tool_call" | "thought" }>
   | (Extract<NodeActivity, { kind: "retry" }> & { scope: "agent_llm" });
 
 export interface AgentRuntimeContext {
@@ -170,6 +170,8 @@ export interface InternalToolResult {
   error?: string;
   startedAt?: string;
   durationMs?: number;
+  /** Phase 6.4 — set on a call of the Think tool: what the model wrote down. */
+  thought?: string;
 }
 
 export interface AgentSessionMemoryStore {

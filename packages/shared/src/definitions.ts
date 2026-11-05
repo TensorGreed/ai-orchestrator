@@ -540,6 +540,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         sessionIdTemplate: { type: "string" },
         maxIterations: { type: "number" },
         toolCallingEnabled: { type: "boolean" },
+        /** Phase 6.4 — offer the agent the internal Think tool (off by default). */
+        thinkTool: { type: "boolean" },
         toolMessageMaxChars: { type: "number" },
         toolPayloadMaxDepth: { type: "number" },
         toolPayloadMaxObjectKeys: { type: "number" },
@@ -584,6 +586,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
         maxIterations: { type: "number" },
+        /** Phase 6.4 — offer the supervisor the internal Think tool (off by default). */
+        thinkTool: { type: "boolean" },
         toolMessageMaxChars: { type: "number" },
         toolPayloadMaxDepth: { type: "number" },
         toolPayloadMaxObjectKeys: { type: "number" },
@@ -785,6 +789,29 @@ const baseNodeDefinitions: NodeDefinition[] = [
         timeoutMs: 120000,
         authType: "none"
       }
+    }
+  },
+  {
+    type: "workflow_tool",
+    label: "Workflow Tool",
+    category: "Agent",
+    description:
+      "Lets an agent call another workflow as a tool. Attach it to an Agent or Supervisor tool port. The tool's name, description and input schema come from the workflow's Expose as MCP Tool or Sub-Workflow Trigger node.",
+    configSchema: {
+      type: "object",
+      properties: {
+        workflowId: { type: "string" },
+        /** Overrides the derived tool name (letters, digits, _ and -). */
+        toolName: { type: "string" },
+        /** Overrides the derived description the model reads. */
+        toolDescription: { type: "string" },
+        /** Longest one call may run, in milliseconds. Unset: the run's own timeout bounds it. */
+        timeoutMs: { type: "number" }
+      },
+      required: ["workflowId"]
+    },
+    sampleConfig: {
+      workflowId: ""
     }
   },
   {
@@ -1594,7 +1621,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
       type: "object",
       properties: {
         description: { type: "string" },
-        inputSchema: { type: "object" }
+        inputSchema: { type: "object" },
+        /** Phase 6.4 — this workflow changes nothing outside its run: as an agent's Workflow Tool, the caller's write-tool gate skips it. Off unless set. */
+        readOnly: { type: "boolean" }
       }
     },
     sampleConfig: {
@@ -2662,7 +2691,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
         toolDescription: { type: "string" },
         inputSchema: { type: "object" },
         authMode: { type: "string", enum: ["public", "bearer"] },
-        secretRef: { type: "object" }
+        secretRef: { type: "object" },
+        /** Phase 6.4 — this workflow changes nothing outside its run: as an agent's Workflow Tool, the caller's write-tool gate skips it. Off unless set. */
+        readOnly: { type: "boolean" }
       },
       required: ["path", "toolName"]
     },

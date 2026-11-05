@@ -9,7 +9,7 @@ description: "How the L2M agent loop runs: messages, tool discovery, model calls
 Agent orchestration is iterative, not one-shot.
 
 1. Collect messages (`system_prompt`, `user_prompt`, optional memory context)
-2. Collect attached tool metadata from `mcp_tool` nodes
+2. Collect attached tool metadata from `mcp_tool` and `workflow_tool` nodes
 3. Call model with tool definitions
 4. If model returns tool calls:
    - execute tool(s)
@@ -22,10 +22,21 @@ Agent orchestration is iterative, not one-shot.
 - `chat_model`: attach model node
   - supported: `openai_chat_model`, `anthropic_chat_model`, `ollama_chat_model`, `openai_compatible_chat_model`, `ai_gateway_chat_model`, `azure_openai_chat_model`, `google_gemini_chat_model`, `llm_call`
 - `memory`: attach `local_memory`
-- `tool`: attach one or more `mcp_tool`
+- `tool`: attach one or more `mcp_tool` (any MCP server, or a [built-in tool](./built-in-agent-tools.md)) or `workflow_tool` (another workflow as one tool, see [Workflow Tool](./workflow-tool.md))
 - `worker`: attach worker agents (supervisor use cases)
 
 In the visual editor, use the `+` button below an Agent port to open a filtered drawer for compatible Language Model, Memory, or Tool nodes. Clicking an item creates and attaches it automatically.
+
+An optional **Think Tool** toggle on the agent adds a `think` scratchpad tool; see [Built-in agent tools](./built-in-agent-tools.md#think-tool).
+
+## Tool names the model sees
+
+An MCP server's tool reaches the model as `<adapter>__<tool>`, for example `http_mcp__search`. When two or more MCP servers on one agent serve a tool with the same name (two registered servers that both offer `search`, or two MCP Tool nodes with different endpoints in all-tools mode), every one of them is renamed `<adapter>_<hash>__<tool>`, for example `http_mcp_3f9a1c__search`. The six-character hash comes from the server: its registry id, or the secret and connection of an inline node. So the name stays the same between runs and in replays. The description starts with the server's name (`[http_mcp: Docs search] ...`), so the model can tell the copies apart. Names stay within 64 characters: a longer tool part is cut and ends in a hash of the full tool name.
+
+- Each call runs on its own server. Tool rules, the write-tool gate, data labels and content rules judge that server and the original tool name, so a rule on server B's `search` still applies after the rename.
+- A name only one server serves keeps its plain form. Adding a third server that also serves `search` renames the first two once; after that their names stay the same.
+- A copy that a tool rule or **No write tools** hides does not count, so the visible copy keeps its plain name.
+- Names you choose still have to be unique, and the agent node fails while they repeat: two [Workflow Tools](./workflow-tool.md) with the same tool name, two [built-in tool](./built-in-agent-tools.md#one-name-per-tool) nodes of one provider, or two workers with the same name. The error names the nodes, and validation reports `duplicate_agent_tool_name` when the workflow shows the clash.
 
 ## Common failure causes
 

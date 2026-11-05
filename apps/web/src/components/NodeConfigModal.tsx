@@ -6,9 +6,21 @@ import type {
   McpSamplingTraceEntry,
   NodeActivityEvent,
   McpToolPolicyTrace,
+  Workflow,
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
-import { getNodeDefinition, nodeEmbeddingModelTarget, parseIpAllowlist, triggerTrustState } from "@ai-orchestrator/shared";
+import {
+  BUILT_IN_TOOL_PROVIDERS,
+  BUILT_IN_TOOL_PROVIDER_INFO,
+  BUILT_IN_TOOLS_ADAPTER_ID,
+  WORKFLOW_TOOL_ADAPTER_ID,
+  builtInToolProviderOf,
+  deriveWorkflowToolDescriptor,
+  getNodeDefinition,
+  nodeEmbeddingModelTarget,
+  parseIpAllowlist,
+  triggerTrustState
+} from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
@@ -38,6 +50,7 @@ import {
   fetchMcpServers,
   fetchMcpServerTools,
   fetchProviderModels,
+  fetchWorkflow,
   fetchWorkflows,
   previewExpression,
   testCodeNode,
@@ -591,6 +604,10 @@ function OptionalNumberField({
     </label>
   );
 }
+
+/** Phase 6.4 — read-only is the workflow's own claim, made on its trigger, never by a caller. */
+const WORKFLOW_READ_ONLY_HELP =
+  "Turn on only when this workflow changes nothing outside its run. When an agent calls it as a Workflow Tool, the caller's write-tool approval then skips the call. A caller's write controls still apply to this workflow's own tools. Off by default.";
 
 const ANTHROPIC_TEMPERATURE_HELP =
   "Optional. Leave blank to use the model's default. Newer Claude models ignore or reject temperature, so it is only sent to models that accept it.";
@@ -1291,6 +1308,26 @@ export function NodeInspector({
   const [providerTestMessage, setProviderTestMessage] = useState<string | null>(null);
   const [workflowOptions, setWorkflowOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [workflowOptionsError, setWorkflowOptionsError] = useState<string | null>(null);
+  // Phase 6.4 — the workflow a Workflow Tool node calls, to show the tool the agent will see.
+  const [workflowToolChild, setWorkflowToolChild] = useState<{ id: string; workflow: Workflow | null; error?: string } | null>(null);
+  const workflowToolChildId = node.data.nodeType === "workflow_tool" ? toStringValue(config.workflowId).trim() : "";
+  useEffect(() => {
+    if (!workflowToolChildId) {
+      setWorkflowToolChild(null);
+      return;
+    }
+    let cancelled = false;
+    fetchWorkflow(workflowToolChildId)
+      .then((workflow) => {
+        if (!cancelled) setWorkflowToolChild({ id: workflowToolChildId, workflow });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setWorkflowToolChild({ id: workflowToolChildId, workflow: null, error: error instanceof Error ? error.message : "Could not load the workflow" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workflowToolChildId]);
   const [inlineCreatedSecrets, setInlineCreatedSecrets] = useState<SecretListItem[]>([]);
   const [llmModels, setLlmModels] = useState<ModelOption[] | null>(null);
   const [llmModelsLoading, setLlmModelsLoading] = useState(false);
@@ -1503,7 +1540,7 @@ export function NodeInspector({
 
   useEffect(() => {
     let cancelled = false;
-    if (node.data.nodeType !== "execute_workflow") {
+    if (node.data.nodeType !== "execute_workflow" && node.data.nodeType !== "workflow_tool") {
       return () => {
         cancelled = true;
       };
@@ -1536,7 +1573,8 @@ export function NodeInspector({
     [discoveredTools]
   );
   const mcpServerIdOptions = useMemo(() => {
-    const base = mcpServerDefinitions.map((server) => ({
+    // Phase 6.4 — workflow tools have their own node; the adapter is not offered here.
+    const base = mcpServerDefinitions.filter((server) => server.id !== WORKFLOW_TOOL_ADAPTER_ID).map((server) => ({
       value: server.id,
       label: `${server.label} (${server.id})`
     }));
@@ -2845,6 +2883,18 @@ export function NodeInspector({
               </>
             }
           />
+          <ToggleField
+            label="Think Tool"
+            checked={toBooleanValue(config.thinkTool, false)}
+            onChange={(next) => setConfig((current) => ({ ...current, thinkTool: next }))}
+            help={
+              <>
+                Gives the agent a <code>think</code> tool: a scratchpad step to plan
+                and to check tool results before acting. It fetches and changes
+                nothing; each note shows in the run trace as a thought. Off by default.
+              </>
+            }
+          />
         </div>
 
         <div className="cfg-group">
@@ -2966,6 +3016,61 @@ export function NodeInspector({
         />
         <div className="cfg-tip" data-testid="memory-origin-note">
           When a rule set tracks where data came from, this memory keeps that origin for later runs. Older memory has no origin recorded.
+        </div>
+      </>
+    );
+  };
+
+  /** Phase 6.4 — the provider, its endpoint and (for Wikipedia) the language edition of a built-in tools node. */
+  const renderBuiltInToolFields = (connection: Record<string, unknown>) => {
+    const provider = builtInToolProviderOf(connection) ?? "wikipedia";
+    const info = BUILT_IN_TOOL_PROVIDER_INFO[provider];
+    const setConnection = (patch: Record<string, unknown>) =>
+      setConfig((current) => ({ ...current, connection: { ...asRecord(current.connection), ...patch } }));
+    return (
+      <>
+        <SelectField
+          label="Built-in tool"
+          value={provider}
+          onChange={(next) => {
+            setConfig((current) => ({ ...current, toolName: "__all__", allowedTools: undefined, connection: { provider: next } }));
+            setDiscoveredTools([]);
+          }}
+          options={BUILT_IN_TOOL_PROVIDERS.map((entry) => ({ value: entry, label: BUILT_IN_TOOL_PROVIDER_INFO[entry].label }))}
+          help={<>{info.description} Tools: {info.toolNames.map((name, index) => <span key={name}>{index > 0 ? ", " : ""}<code>{name}</code></span>)}.</>}
+        />
+        {provider === "wikipedia" && (
+          <TextField
+            label="Language edition"
+            value={toStringValue(connection.language)}
+            onChange={(next) => setConnection({ language: next.trim() || undefined })}
+            placeholder="en"
+            help={<>The Wikipedia language code, for example <code>de</code> or <code>ja</code>. Default <code>en</code>.</>}
+          />
+        )}
+        <TextField
+          label={info.defaultEndpoint ? "Endpoint (optional)" : "Instance URL"}
+          value={toStringValue(connection.endpoint)}
+          onChange={(next) => setConnection({ endpoint: next.trim() || undefined })}
+          placeholder={info.defaultEndpoint ?? "https://search.example.org"}
+          help={
+            info.defaultEndpoint ? (
+              <>Leave empty to use <code>{info.defaultEndpoint}</code>.</>
+            ) : (
+              <>
+                The base URL of your SearXNG instance; its JSON output format must be enabled. When the API denies private
+                destinations (<code>OUTBOUND_DENY_PRIVATE</code>), an instance on a private address needs an allowlist entry.
+              </>
+            )
+          }
+        />
+        <div className="cfg-tip">
+          {info.secret === "required"
+            ? `Pick the key below as the Auth Secret: ${info.secretHint ?? "this provider needs a key."} It is added to each request by the server and never shown to the model.`
+            : info.secret === "optional"
+              ? info.secretHint
+              : "No key needed."}{" "}
+          Results count as outside content (untrusted) for data labels and tool rules.
         </div>
       </>
     );
@@ -3318,6 +3423,8 @@ export function NodeInspector({
                 The configured Auth Secret (below) is injected into the child process under this env var name. Many MCP servers read credentials from the environment (e.g. <code>GITHUB_TOKEN</code>, <code>OPENAI_API_KEY</code>).
               </div>
             </>
+          ) : selectedServerId === BUILT_IN_TOOLS_ADAPTER_ID ? (
+            renderBuiltInToolFields(connection)
           ) : selectedServerId === "mock-mcp" ? (
             <NumberField
               label="Request Timeout (ms)"
@@ -5962,6 +6069,76 @@ export function NodeInspector({
             )}
           </>
         );
+      case "workflow_tool": {
+        const child = workflowToolChild && workflowToolChild.id === workflowToolChildId ? workflowToolChild : null;
+        const derived = child?.workflow
+          ? deriveWorkflowToolDescriptor(child.workflow, { toolName: config.toolName, toolDescription: config.toolDescription })
+          : null;
+        const sourceText = {
+          mcp_server_trigger: "its Expose as MCP Tool trigger",
+          sub_workflow_trigger: "its Sub-Workflow Trigger",
+          default: "the default: one free-text input (the child's user prompt)"
+        } as const;
+        return (
+          <>
+            <div className="cfg-tip">
+              Attach this node to an Agent or Supervisor <code>Tool</code> port. The agent can then run the workflow below as
+              one tool, in this run, under the same tool rules, content rules and approvals as an MCP tool. Tool rules name it as server{" "}
+              <code>{workflowToolChildId ? `workflow:${workflowToolChildId}` : "workflow:<id>"}</code>.
+            </div>
+            <SelectField
+              label="Workflow"
+              value={toStringValue(config.workflowId)}
+              onChange={(next) => setConfig((current) => ({ ...current, workflowId: next }))}
+              options={[
+                { value: "", label: workflowOptions.length ? "Select workflow" : "No workflows available" },
+                ...workflowOptions.map((workflow) => ({ value: workflow.id, label: `${workflow.name} (${workflow.id})` }))
+              ]}
+            />
+            {workflowOptionsError ? <div className="cfg-tip">Failed to load workflows: {workflowOptionsError}</div> : null}
+            <TextField
+              label="Tool name (optional)"
+              value={toStringValue(config.toolName)}
+              onChange={(next) => setConfig((current) => ({ ...current, toolName: next || undefined }))}
+              placeholder={derived?.toolName ?? "derived from the workflow"}
+            />
+            <TextAreaField
+              label="Description for the model (optional)"
+              value={toStringValue(config.toolDescription)}
+              onChange={(next) => setConfig((current) => ({ ...current, toolDescription: next || undefined }))}
+              rows={3}
+            />
+            <OptionalNumberField
+              label="Timeout per call, ms (optional)"
+              value={readOptionalNumber(config.timeoutMs)}
+              min={1}
+              step={1000}
+              placeholder="The run's own timeout"
+              help="Longest one call may run. The call then fails with a message the agent can act on, and the workflow is told to stop."
+              onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
+            />
+            {child?.error ? <div className="cfg-tip" data-testid="workflow-tool-error">Could not load the workflow: {child.error}</div> : null}
+            {derived ? (
+              <div className="cfg-group" data-testid="workflow-tool-preview">
+                <h4>What the agent sees</h4>
+                <div className="cfg-tip">
+                  Tool <code>{derived.toolName}</code>, from {sourceText[derived.source]}. {derived.description}
+                </div>
+                <pre className="result-block">{JSON.stringify(derived.inputSchema, null, 2)}</pre>
+                <div className="cfg-tip" data-testid="workflow-tool-read-only">
+                  {derived.readOnly
+                    ? "The workflow declares itself read-only on its trigger, so this workflow's write-tool approval skips the call. Its own write tools still meet this workflow's write controls."
+                    : "The workflow does not declare itself read-only, so each call counts as a write. Its editors can mark it read-only on its trigger."}
+                </div>
+                <div className="cfg-tip">
+                  The workflow runs with the agent's call as its input. If it stops for an approval, the call fails with a
+                  message the agent can act on; give the approval step its own run instead.
+                </div>
+              </div>
+            ) : null}
+          </>
+        );
+      }
       case "execute_workflow":
         return (
           <>
@@ -6865,11 +7042,19 @@ export function NodeInspector({
         );
       case "sub_workflow_trigger":
         return (
-          <div className="cfg-tip">
-            This node receives input from a parent workflow's <code>execute_workflow</code> call. Place it as the
-            entry point of a child workflow; the input mapping defined on the parent flows directly into this
-            node's output context.
-          </div>
+          <>
+            <div className="cfg-tip">
+              This node receives input from a parent workflow's <code>execute_workflow</code> call. Place it as the
+              entry point of a child workflow; the input mapping defined on the parent flows directly into this
+              node's output context.
+            </div>
+            <ToggleField
+              label="Read-only workflow"
+              checked={toBooleanValue(config.readOnly, false)}
+              onChange={(next) => setConfig((current) => ({ ...current, readOnly: next || undefined }))}
+              help={WORKFLOW_READ_ONLY_HELP}
+            />
+          </>
         );
       case "error_trigger":
         return (
@@ -8883,6 +9068,12 @@ export function NodeInspector({
             <div className="cfg-tip">
               Invoke at <code>/api/mcp-server/&lt;path&gt;/invoke</code>; manifest at <code>/api/mcp-server/&lt;path&gt;/manifest</code>.
             </div>
+            <ToggleField
+              label="Read-only workflow"
+              checked={toBooleanValue(config.readOnly, false)}
+              onChange={(next) => setConfig((current) => ({ ...current, readOnly: next || undefined }))}
+              help={WORKFLOW_READ_ONLY_HELP}
+            />
           </>
         );
       case "kafka_trigger":

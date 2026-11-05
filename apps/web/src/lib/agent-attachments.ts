@@ -37,7 +37,7 @@ export const AGENT_ATTACHMENT_STYLES: Record<AgentAttachmentHandle, AttachmentSt
     label: "Tool",
     bg: "var(--port-tool-soft)",
     border: "var(--port-tool)",
-    description: "MCP Tool node — its discovered tools become callable by the agent loop."
+    description: "MCP Tool node (its discovered tools, built-in ones included) or Workflow Tool node (another workflow as one tool), callable by the agent loop."
   },
   worker: {
     stroke: "var(--port-worker)",
