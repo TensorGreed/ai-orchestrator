@@ -2,7 +2,7 @@
   "schemaVersion": "1.0.0",
   "workflowVersion": 1,
   "workflow": {
-    "id": "wf-ciphertrust-key-inventory-report-flow",
+    "id": "wf-key-inventory-report-flow",
     "name": "Key manager — Key Inventory Report (PDF, branded)",
     "description": "End-to-end report pipeline that demonstrates the full Phase 9-11 stack composed together. Layout (left to right): manual_trigger fans out two parallel branches. (A) Branding: text_input → web_browse (headless Chromium fetches a brand site) → prompt_template + llm_call + output_parser distill the page into a JSON brand kit (primary color, accent color, logo URL, font, tagline). (B) Keys: mcp_tool calls the external key manager's `list_keys` → code_node (Python, stdlib-only) buckets the response by cloud / algorithm / age (<30d / 30-90d / 90-180d / 180-365d / >365d). The two branches merge into three chart nodes (Vega-Lite, server-side SVG) for keys-by-cloud (bar), keys-by-algorithm (donut), and key-aging (bar). A final prompt_template stitches the branding tokens + chart SVGs into one HTML body; pdf_output renders it via Chromium. Two things to wire before this works for real: (1) replace the `mcp_tool` connection block with your key manager's MCP server endpoint + secretRef, (2) set the `text_input` to your brand URL (defaults to https://example.com). The token-efficient companion workflow (\"generate the same report as a Python script, no L2M\") can re-use the same `session_id` — the agent's session_tool_cache holds the key manager's `list_keys` response from this run so a follow-up prompt reads from cache instead of re-fetching.",
     "schemaVersion": "1.0.0",
@@ -87,7 +87,7 @@
         "name": "Key manager list_keys",
         "position": { "x": 360, "y": 520 },
         "config": {
-          "serverId": "ciphertrust",
+          "serverId": "key-manager",
           "toolName": "list_keys",
           "argsTemplate": "{\"limit\":1000}",
           "connection": {

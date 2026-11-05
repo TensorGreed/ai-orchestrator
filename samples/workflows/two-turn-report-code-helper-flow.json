@@ -84,7 +84,7 @@
         "name": "MCP Tools",
         "position": { "x": 810, "y": 430 },
         "config": {
-          "serverId": "ciphertrust-manager",
+          "serverId": "key-manager",
           "toolName": "__all__",
           "argsTemplate": "{}",
           "connection": {
