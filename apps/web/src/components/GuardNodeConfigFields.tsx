@@ -65,15 +65,15 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
     <>
       {attachedAsPort && (
         <div className="cfg-tip">
-          Attached to an agent&apos;s guard port: this profile checks the agent&apos;s prompt, tool arguments, tool results, model output and final answer (and its workers&apos;). Channel and input field apply only when the node runs as a workflow step.
+          Attached to an agent&apos;s content rules port: this rule set checks the agent&apos;s prompt, tool arguments, tool results, model output and final answer (and its workers&apos;). Channel and input field apply only when the node runs as a workflow step.
         </div>
       )}
       <div className="cfg-field">
         <label className="cfg-label" htmlFor="guard-profile-select">
-          Profile
+          Rule set
         </label>
         <select id="guard-profile-select" className="cfg-input" value={profileId} onChange={(event) => setConfig((current) => ({ ...current, profileId: event.target.value }))}>
-          <option value="effective">Effective profile (workflow / project binding)</option>
+          <option value="effective">Effective rule set (workflow / project binding)</option>
           {profiles.map((profile) => (
             <option key={profile.id} value={profile.id}>
               {profile.name} · v{profile.latestVersion}
@@ -85,7 +85,7 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
           <div className="cfg-help guard-effective" data-testid="guard-effective">
             Effective here:{" "}
             {effective.stack.length === 0
-              ? "no automatic profile"
+              ? "no automatic rule set"
               : effective.stack.map((ref) => `${ref.name ?? ref.profileId} v${ref.version}`).join(" then ")}
             {effective.enforced ? " (first one enforced by an admin; it always runs)" : ""}
           </div>
@@ -148,7 +148,7 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
           className="cfg-input"
           rows={2}
           value={str(config.approvalMessage)}
-          placeholder="A guard rule needs approval before this content is used."
+          placeholder="A content rule needs approval before this content is used."
           onChange={(event) => setConfig((current) => ({ ...current, approvalMessage: event.target.value }))}
         />
         <div className="cfg-help">Used when a rule asks for approval. The approver sees masked evidence only.</div>
@@ -168,7 +168,7 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
       </div>
       <div className="cfg-field">
         <label className="cfg-label" htmlFor="guard-override">
-          Profile override (JSON, optional)
+          Rule set override (JSON, optional)
         </label>
         <textarea
           id="guard-override"
@@ -198,7 +198,7 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
             }
           }}
         />
-        {overrideError ? <div className="cfg-error">{overrideError}</div> : <div className="cfg-help">Merged over the chosen profile for this node only. An enforced project profile still runs first.</div>}
+        {overrideError ? <div className="cfg-error">{overrideError}</div> : <div className="cfg-help">Merged over the chosen rule set for this node only. An enforced project rule set still runs first.</div>}
       </div>
     </>
   );
@@ -279,7 +279,7 @@ export function GuardProtectionFields({ config, setConfig, secrets }: { config: 
               </option>
             ))}
           </select>
-          <div className="cfg-help">{keySecretId ? "The key is read from the secret store at run time and never stored in the workflow." : "Without a key this provider is unavailable and the profile's fallback applies (block by default)."}</div>
+          <div className="cfg-help">{keySecretId ? "The key is read from the secret store at run time and never stored in the workflow." : "Without a key this provider is unavailable and the rule set's fallback applies (block by default)."}</div>
         </div>
       )}
       {providerId === "token_vault" && (

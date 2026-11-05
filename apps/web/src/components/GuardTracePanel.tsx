@@ -47,9 +47,9 @@ export function GuardTracePanel({ executionId, nodeResults }: { executionId: str
 
   const verdictCount = nodes.reduce((acc, node) => acc + node.verdicts.length, 0);
   return (
-    <section className="guard-trace" aria-label="Guard verdicts">
+    <section className="guard-trace" aria-label="Rule verdicts">
       <header className="guard-trace-head">
-        <span className="pg-eyebrow">Guard</span>
+        <span className="pg-eyebrow">Content rules</span>
         <span className="guard-trace-count">
           {verdictCount} verdict{verdictCount === 1 ? "" : "s"} · {nodes.length} node{nodes.length === 1 ? "" : "s"}
         </span>
@@ -64,7 +64,7 @@ export function GuardTracePanel({ executionId, nodeResults }: { executionId: str
 function sourceLabel(source: string | undefined): string | null {
   switch (source) {
     case "port":
-      return "guard port";
+      return "content rules port";
     case "enforced":
       return "enforced by project";
     case "workflow":
@@ -76,7 +76,7 @@ function sourceLabel(source: string | undefined): string | null {
     case "candidate":
       return "replay candidate";
     case "none":
-      return "no profile";
+      return "no rule set";
     default:
       return source ?? null;
   }
@@ -88,7 +88,7 @@ function GuardTraceNodeCard({ node }: { node: GuardTraceNode }) {
     <div className="guard-trace-node">
       <div className="guard-trace-node-head">
         <span className="mono-cell">{node.nodeId}</span>
-        <span className="guard-chip guard-chip-muted">{node.placement === "agent" ? "agent" : "guard node"}</span>
+        <span className="guard-chip guard-chip-muted">{node.placement === "agent" ? "agent" : "Content Rules node"}</span>
         {source && <span className="guard-chip guard-chip-muted">{source}</span>}
         {node.profiles.map((profile) => (
           <span

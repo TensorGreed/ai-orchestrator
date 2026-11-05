@@ -309,8 +309,8 @@ function ToolsetDetail({
         </p>
       </section>
 
-      <section className="kb-section" aria-label="Toolset Guard">
-        <h4>Guard</h4>
+      <section className="kb-section" aria-label="Toolset content rules">
+        <h4>Content rules</h4>
         <GatewayGuardPicker scope="toolset" id={toolset.id} isAdmin={isAdmin} />
       </section>
 

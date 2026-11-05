@@ -433,7 +433,7 @@ test.describe("golden journeys", () => {
     await expect(lookup.getByRole("button", { name: /Delete selected \([1-9]/ })).toBeEnabled();
   });
 
-  test("simulates a guard profile change on recent recorded runs before saving it", async ({ page }) => {
+  test("simulates a rule set change on recent recorded runs before saving it", async ({ page }) => {
     await openStudio(page);
     const stamp = Date.now();
     const profileId = `e2e-sim-${stamp}`;
@@ -473,8 +473,8 @@ test.describe("golden journeys", () => {
 
     // Security → Profiles: change email to block, simulate before saving.
     await sidebarItem(page, "Security").click();
-    await page.getByRole("tab", { name: "Profiles & bindings" }).click();
-    await page.getByRole("complementary", { name: "Guard profiles" }).getByRole("button", { name: new RegExp(profile.name) }).click();
+    await page.getByRole("tab", { name: "Rule sets & bindings" }).click();
+    await page.getByRole("complementary", { name: "Rule sets" }).getByRole("button", { name: new RegExp(profile.name) }).click();
     await page.getByLabel("Action for email").selectOption("block");
     await page.getByRole("button", { name: "Simulate on recent traffic" }).click();
     await expect(page.getByTestId("guard-sim-sentence")).toHaveText("Across 1 recent run in 1 workflow: 1 newly blocked, 0 now masked, 0 no longer blocked.", { timeout: 60_000 });
@@ -522,8 +522,8 @@ test.describe("golden journeys", () => {
 
     // Security → Profiles: one switch, off by default.
     await sidebarItem(page, "Security").click();
-    await page.getByRole("tab", { name: "Profiles & bindings" }).click();
-    await page.getByRole("complementary", { name: "Guard profiles" }).getByRole("button", { name: new RegExp(profile.name) }).click();
+    await page.getByRole("tab", { name: "Rule sets & bindings" }).click();
+    await page.getByRole("complementary", { name: "Rule sets" }).getByRole("button", { name: new RegExp(profile.name) }).click();
     const tracking = page.getByRole("switch", { name: "Track where data came from" });
     await expect(tracking).not.toBeChecked();
     await tracking.check();
@@ -653,7 +653,7 @@ test.describe("golden journeys", () => {
       await sidebarItem(page, "Security").click();
       await page.getByRole("tab", { name: "Data destinations" }).click();
       // Destinations change nothing until a profile has destination rules.
-      await expect(page.getByText(/Destinations do nothing until a profile has destination rules/)).toBeVisible();
+      await expect(page.getByText(/Destinations do nothing until a rule set has destination rules/)).toBeVisible();
       const builtIns = page.getByRole("table", { name: "Built-in destinations" });
       await expect(builtIns.getByText("api.openai.com", { exact: false })).toBeVisible();
 

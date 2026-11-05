@@ -105,9 +105,9 @@ export function GuardProfilesView({ projects, workflows, activeProjectId, role }
       {error && <div className="settings-error">{error}</div>}
       <GuardBindingsPanel projects={projects} workflows={workflows} activeProjectId={activeProjectId} role={role} profiles={profiles} autoApply={autoApply} />
       <div className="guard-profiles-layout">
-        <aside className="kb-section guard-profile-list" aria-label="Guard profiles">
+        <aside className="kb-section guard-profile-list" aria-label="Rule sets">
           <div className="mcp-section-head">
-            <h4>Profiles</h4>
+            <h4>Rule sets</h4>
             {canEdit && (
               <button type="button" className="kb-link-btn" onClick={() => setImportOpen((value) => !value)}>
                 {importOpen ? "Close import" : "Import JSON"}
@@ -144,7 +144,7 @@ export function GuardProfilesView({ projects, workflows, activeProjectId, role }
             }}
           />
         ) : (
-          <div className="page-empty">Select a profile.</div>
+          <div className="page-empty">Select a rule set.</div>
         )}
       </div>
     </div>
@@ -157,7 +157,7 @@ function ImportBox({ onImported }: { onImported: (id: string) => void }) {
   const [error, setError] = useState<string | null>(null);
   return (
     <div className="guard-import">
-      <textarea aria-label="Profile JSON" rows={6} value={text} placeholder='{ "id": "my-profile", "name": "…", "version": "1", "channels": { … } }' onChange={(event) => setText(event.target.value)} />
+      <textarea aria-label="Rule set JSON" rows={6} value={text} placeholder='{ "id": "my-rules", "name": "…", "version": "1", "channels": { … } }' onChange={(event) => setText(event.target.value)} />
       <IssueList issues={issues} error={error} />
       <button
         type="button"
@@ -277,7 +277,7 @@ function GuardProfileEditor({
         next = JSON.parse(jsonText) as GuardDocument;
       } catch {
         setIssues([{ path: "(json)", message: "Not valid JSON" }]);
-        setError("Invalid guard profile");
+        setError("Invalid rule set");
         return;
       }
     }
@@ -305,7 +305,7 @@ function GuardProfileEditor({
         next = JSON.parse(jsonText) as GuardDocument;
       } catch {
         setIssues([{ path: "(json)", message: "Not valid JSON" }]);
-        setError("Invalid guard profile");
+        setError("Invalid rule set");
         return;
       }
     }
@@ -349,7 +349,7 @@ function GuardProfileEditor({
                 type="button"
                 className="pg-btn small ghost danger"
                 onClick={async () => {
-                  if (!window.confirm(`Delete guard profile '${summary.name}' and all its versions?`)) return;
+                  if (!window.confirm(`Delete rule set '${summary.name}' and all its versions?`)) return;
                   try {
                     await deleteGuardProfile(profileId);
                     onDeleted();
@@ -363,7 +363,7 @@ function GuardProfileEditor({
             )}
           </div>
         </div>
-        {summary.builtIn && <p className="kb-subtle">The built-in profile ships with L2M and cannot be edited. Duplicate it to make a profile you can change.</p>}
+        {summary.builtIn && <p className="kb-subtle">The built-in rule set ships with L2M and cannot be edited. Duplicate it to make a rule set you can change.</p>}
 
         <div className="guard-settings-grid">
           <label>
@@ -518,7 +518,7 @@ function GuardProfileEditor({
           <input type="checkbox" checked={jsonMode} onChange={(event) => setJsonMode(event.target.checked)} />
           <span>Edit as JSON</span>
         </label>
-        {jsonMode && <textarea className="guard-json" aria-label="Profile document" rows={16} value={jsonText} readOnly={readOnly} onChange={(event) => setJsonText(event.target.value)} />}
+        {jsonMode && <textarea className="guard-json" aria-label="Rule set document" rows={16} value={jsonText} readOnly={readOnly} onChange={(event) => setJsonText(event.target.value)} />}
         <IssueList issues={issues} error={error} />
         {message && <p className="guard-saved" role="status">{message}</p>}
         {canEdit && (!readOnly || summary.builtIn) && (
@@ -531,7 +531,7 @@ function GuardProfileEditor({
               aria-disabled={simulateBlocked !== null}
               title={
                 simulateBlocked ??
-                "Replay recent recorded runs of the workflows that use this profile under the current profile and with these settings; nothing is saved and no model is called"
+                "Replay recent recorded runs of the workflows that use this rule set under the current rule set and with these settings; nothing is saved and no model is called"
               }
               onClick={simulate}
             >
@@ -763,7 +763,7 @@ function ResolutionChain({ effective }: { effective: GuardResolutionView }) {
     <div className="guard-resolution">
       <span className="kb-subtle">Agents run with</span>
       {effective.stack.length === 0 ? (
-        <span className="guard-chip guard-chip-muted">no automatic profile</span>
+        <span className="guard-chip guard-chip-muted">no automatic rule set</span>
       ) : (
         effective.stack.map((ref, index) => (
           <span key={`${ref.profileId}-${index}`} className={index === 0 && effective.enforced ? "guard-chip guard-chip-lock" : "guard-chip guard-chip-profile"}>
@@ -862,7 +862,7 @@ function GuardBindingsPanel({
     <section className="kb-section guard-bindings" aria-label="Bindings">
       <div className="mcp-section-head">
         <h4>Bindings</h4>
-        <span className="kb-subtle">{autoApply ? "Unbound projects use the built-in default profile." : "Automatic profiles are off (GUARD_AUTO_APPLY=false)."}</span>
+        <span className="kb-subtle">{autoApply ? "Unbound projects use the built-in default rule set." : "Automatic rule sets are off (GUARD_AUTO_APPLY=false)."}</span>
       </div>
       <div className="guard-binding-grid">
         <div className={`guard-binding${locked ? " guard-binding-locked" : ""}`}>
@@ -898,7 +898,7 @@ function GuardBindingsPanel({
               </label>
               {project.binding.mode !== "inherit" && (
                 <label>
-                  <span>Profile</span>
+                  <span>Rule set</span>
                   <select value={project.binding.profileId ?? ""} disabled={projectReadOnly} onChange={(event) => void saveProject(project.binding.mode, event.target.value)}>
                     {profileOptions}
                   </select>
@@ -906,7 +906,7 @@ function GuardBindingsPanel({
               )}
               {locked && (
                 <p className="guard-lock-note" role="note">
-                  <span aria-hidden="true">🔒</span> Enforced by an admin. It runs first for every agent in this project; workflows and guard ports can add stricter checks but cannot remove it.
+                  <span aria-hidden="true">🔒</span> Enforced by an admin. It runs first for every agent in this project; workflows and Content Rules nodes can add stricter checks but cannot remove it.
                 </p>
               )}
               <ResolutionChain effective={project.effective} />
@@ -943,7 +943,7 @@ function GuardBindingsPanel({
               </label>
               {workflow.binding.mode === "override" && (
                 <label>
-                  <span>Profile</span>
+                  <span>Rule set</span>
                   <select value={workflow.binding.profileId ?? ""} disabled={!canEdit} onChange={(event) => void saveWorkflow("override", event.target.value)}>
                     {profileOptions}
                   </select>

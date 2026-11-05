@@ -241,16 +241,28 @@ function verdictFromSummaries(input: {
   };
 }
 
+/**
+ * Runs recorded before the built-in rule set was renamed carry its stored
+ * name; show the current one.
+ */
+export function displayRuleSetName(profileId: string, name: string | undefined): string | undefined {
+  return profileId === "default" && name === "Default guard profile" ? "Default rule set" : name;
+}
+
 function profileList(value: unknown): GuardTraceProfile[] {
   return arr(value)
     .map(rec)
     .filter((p): p is Rec => Boolean(p))
-    .map((p) => ({
-      profileId: text(p.profileId) ?? "?",
-      version: num(p.version, 1),
-      ...(text(p.hash) ? { hash: text(p.hash) } : {}),
-      ...(text(p.name) ? { name: text(p.name) } : {})
-    }));
+    .map((p) => {
+      const profileId = text(p.profileId) ?? "?";
+      const name = displayRuleSetName(profileId, text(p.name));
+      return {
+        profileId,
+        version: num(p.version, 1),
+        ...(text(p.hash) ? { hash: text(p.hash) } : {}),
+        ...(name ? { name } : {})
+      };
+    });
 }
 
 /** Guard nodes (`output.guard`) and agents (`output._guard`) in a run's node results. */
@@ -378,8 +390,8 @@ export interface GuardMarker {
 
 /** The run tape marker for a node: the most severe guard outcome it recorded. */
 export function guardMarkerFor(result: { output?: unknown; error?: string; status?: string }): GuardMarker | null {
-  if (typeof result.error === "string" && /^Guard blocked/.test(result.error)) {
-    return { kind: "blocked", label: "Guard blocked", title: result.error };
+  if (typeof result.error === "string" && /^(Guard blocked|Blocked by content rules|Content rules blocked)/i.test(result.error)) {
+    return { kind: "blocked", label: "Rules blocked", title: result.error };
   }
   const traces = extractGuardTrace([{ nodeId: "_", output: result.output }]);
   const verdicts = traces.flatMap((trace) => trace.verdicts);
@@ -389,13 +401,13 @@ export function guardMarkerFor(result: { output?: unknown; error?: string; statu
   const blocked = verdicts.filter((verdict) => verdict.action === "block").length;
   const review = verdicts.filter((verdict) => (verdict.action === "review" || verdict.action === "require_approval") && !verdict.approved).length;
   if (route === "blocked" || blocked > 0) {
-    return { kind: "blocked", label: "Guard blocked", title: `${blocked || 1} guard verdict${blocked === 1 ? "" : "s"} blocked content` };
+    return { kind: "blocked", label: "Rules blocked", title: `${blocked || 1} rule verdict${blocked === 1 ? "" : "s"} blocked content` };
   }
   if (pending || route === "review" || review > 0) {
-    return { kind: pending ? "approval" : "review", label: pending ? "Guard approval" : "Guard review", title: "A guard verdict needs a person to look at it" };
+    return { kind: pending ? "approval" : "review", label: pending ? "Rules approval" : "Rules review", title: "A rule verdict needs a person to look at it" };
   }
   if (verdicts.some((verdict) => ["redact", "mask", "protect", "transform"].includes(verdict.action))) {
-    return { kind: "rewritten", label: "Guard rewrote", title: "Sensitive content was redacted, masked or protected" };
+    return { kind: "rewritten", label: "Rules rewrote", title: "Sensitive content was redacted, masked or protected" };
   }
   return null;
 }

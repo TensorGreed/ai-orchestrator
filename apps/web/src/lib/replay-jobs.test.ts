@@ -125,13 +125,13 @@ describe("labels", () => {
     expect(parseIgnorePaths("a\r\n b \n")).toEqual(["a", "b"]);
   });
 
-  it("labels a repeat's latency, with its own baseline when it reran one, and its new guard blocks", () => {
+  it("labels a repeat's latency, with its own baseline when it reran one, and its new content rule blocks", () => {
     expect(attemptLatencyLabel(2400)).toBe("latency 2.4 s");
     expect(attemptLatencyLabel(2400, null)).toBe("latency 2.4 s");
     expect(attemptLatencyLabel(120, 110)).toBe("latency 120 ms (baseline 110 ms)");
-    expect(guardBlocksLabel(0)).toBe("no new guard blocks");
-    expect(guardBlocksLabel(1)).toBe("1 new guard block");
-    expect(guardBlocksLabel(2)).toBe("2 new guard blocks");
+    expect(guardBlocksLabel(0)).toBe("no new content rule blocks");
+    expect(guardBlocksLabel(1)).toBe("1 new content rule block");
+    expect(guardBlocksLabel(2)).toBe("2 new content rule blocks");
   });
 
   it("counts from the summary once finished, else from progress", () => {
@@ -230,7 +230,7 @@ describe("replay candidates (Phase 15.3)", () => {
     expect(error((draft) => void (draft.modelOverrides = [{ nodeId: "", provider: "", model: "x" }]))).toMatch(/node or a provider/);
     expect(error((draft) => void (draft.repeats = "6"))).toMatch(/at most 5/);
     expect(error((draft) => void (draft.repeats = "1.5"))).toMatch(/whole number/);
-    expect(error((draft) => void (draft.guardProfileVersion = "2"))).toMatch(/Pick a guard profile/);
+    expect(error((draft) => void (draft.guardProfileVersion = "2"))).toMatch(/Pick a rule set/);
     expect(error((draft) => void (draft.candidate = "file"))).toMatch(/Choose a workflow file/);
   });
 
@@ -258,7 +258,7 @@ describe("replay candidates (Phase 15.3)", () => {
         workflowHash: "h",
         overrides: { models: [{ provider: "openai", model: "gpt-5" }, { nodeId: "n", provider: "anthropic", model: "c" }], guardProfile: { profileId: "p" }, mcpServers: { s: "live_read_only" }, liveReadNodes: ["a", "b"] }
       })
-    ).toEqual(["Model for every openai node: gpt-5", "Model on n: anthropic/c", "Guard profile p (latest)", "MCP s: live reads only", "Live reads: a, b"]);
+    ).toEqual(["Model for every openai node: gpt-5", "Model on n: anthropic/c", "Rule set p (latest)", "MCP s: live reads only", "Live reads: a, b"]);
     expect(overrideLines({ kind: "draft", version: null, workflowHash: "h" })).toEqual([]);
     expect(comparisonLabel({ mcpMode: "strict", maxCostUsd: 5 })).toBe("live models · vs recording");
   });

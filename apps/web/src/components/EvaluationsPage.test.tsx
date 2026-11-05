@@ -377,7 +377,7 @@ describe("EvaluationsPage — golden sets", () => {
     expect(screen.getByRole("tab", { name: "Replay jobs" })).toHaveAttribute("aria-selected", "true");
   });
 
-  it("replays a model swap with a guard profile, MCP and read overrides, a baseline rerun and repeats, after the estimate", async () => {
+  it("replays a model swap with a rule set, MCP and read overrides, a baseline rerun and repeats, after the estimate", async () => {
     vi.mocked(api.startReplayJob).mockResolvedValue({ run: job({ id: "job_new", status: "queued", summary: null }) });
     vi.mocked(api.fetchReplayJob).mockResolvedValue({ run: { ...job({ id: "job_new", status: "queued", summary: null }), results: [] } });
     vi.mocked(api.estimateReplayJob).mockResolvedValue({
@@ -398,8 +398,8 @@ describe("EvaluationsPage — golden sets", () => {
     expect(within(dialog).getByRole("combobox", { name: "Model override 1 node" })).toHaveValue("agent_1");
     await user.type(within(dialog).getByRole("textbox", { name: "Model override 1 model" }), "gpt-5-mini");
     await within(dialog).findByRole("option", { name: "Strict support" });
-    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Guard profile" }), "strict");
-    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Guard profile version" }), "1");
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Rule set" }), "strict");
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Rule set version" }), "1");
     await user.selectOptions(await within(dialog).findByRole("combobox", { name: "MCP mode for Docs" }), "live_read_only");
     // Only read nodes can run live.
     expect(within(dialog).queryByRole("checkbox", { name: "Notify" })).not.toBeInTheDocument();
@@ -533,11 +533,11 @@ describe("EvaluationsPage — replay jobs", () => {
     expect(screen.getByText("models from tape · vs baseline rerun · 3× (majority)")).toBeInTheDocument();
     const overrides = screen.getByRole("region", { name: "Candidate overrides" });
     expect(within(overrides).getByText("Model on agent_1: gpt-5-mini")).toBeInTheDocument();
-    expect(within(overrides).getByText("Guard profile strict v2")).toBeInTheDocument();
+    expect(within(overrides).getByText("Rule set strict v2")).toBeInTheDocument();
     const proof = screen.getByRole("region", { name: "Release proof" });
     expect(proof).toHaveTextContent("Not release proof.");
     expect(proof).toHaveTextContent("workflow file");
-    expect(proof).toHaveTextContent("Guard profile strict v2");
+    expect(proof).toHaveTextContent("Rule set strict v2");
     expect(screen.getByRole("region", { name: "Progress" })).toHaveTextContent("6 model calls from the tape (recorded cost $0.012, not spent)");
     const row = await screen.findByRole("button", { name: /Open case Refund baseline/ });
     expect(within(row).getByText("2 of 3 repeats passed · flaky")).toBeInTheDocument();
@@ -550,8 +550,8 @@ describe("EvaluationsPage — replay jobs", () => {
     expect(within(drawer).getByText("latency 120 ms (baseline 110 ms)")).toBeInTheDocument();
     expect(within(drawer).getByText("latency 2.4 s (baseline 2.3 s)")).toBeInTheDocument();
     // A repeat that added guard blocks stands out; the others do not.
-    expect(within(drawer).getByText("2 new guard blocks")).toHaveClass("is-danger");
-    const clean = within(drawer).getAllByText("no new guard blocks");
+    expect(within(drawer).getByText("2 new content rule blocks")).toHaveClass("is-danger");
+    const clean = within(drawer).getAllByText("no new content rule blocks");
     expect(clean).toHaveLength(2);
     for (const label of clean) expect(label).not.toHaveClass("is-danger");
   });
@@ -567,7 +567,7 @@ describe("EvaluationsPage — replay jobs", () => {
     await user.click(await screen.findByRole("button", { name: /Open case Refund baseline/ }));
     const drawer = await screen.findByRole("dialog", { name: "Refund baseline" });
     expect(await within(drawer).findByText("ex-old1")).toBeInTheDocument();
-    expect(within(drawer).queryByText(/guard block/)).not.toBeInTheDocument();
+    expect(within(drawer).queryByText(/content rule block/)).not.toBeInTheDocument();
   });
 
   it("explains a case without a replay diff", async () => {

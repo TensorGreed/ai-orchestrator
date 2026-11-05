@@ -30,7 +30,7 @@ const SLOT_LABEL: Record<AgentAttachmentHandle, string> = {
   memory: "+ memory",
   tool: "+ tool",
   worker: "+ worker",
-  guard: "+ guard",
+  guard: "+ rules",
   protection: "+ protect"
 };
 

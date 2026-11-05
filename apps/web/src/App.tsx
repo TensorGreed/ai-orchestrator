@@ -321,8 +321,8 @@ function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: A
 
   if (sourceHandle === "guard") {
     return {
-      title: "Guard",
-      description: "Attach a Guard node to check this agent's prompts, tool calls, tool results and final answer.",
+      title: "Content rules",
+      description: "Attach a Content Rules node to check this agent's prompts, tool calls, tool results and final answer.",
       allowedTypes: ["guard"],
       sourceNodeId,
       sourceHandle
@@ -332,7 +332,7 @@ function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: A
   if (sourceHandle === "protection") {
     return {
       title: "Protection",
-      description: "Attach a protection provider for the sensitive data this guard finds.",
+      description: "Attach a protection provider for the sensitive data these content rules find.",
       allowedTypes: ["guard_protection"],
       sourceNodeId,
       sourceHandle
@@ -4344,7 +4344,7 @@ function StudioApp() {
         if (!carrierOk) {
           setError(
             sourceHandle === "protection"
-              ? "The protection handle can only be used from a Guard node."
+              ? "The protection handle can only be used from a Content Rules node."
               : "chat_model/memory/tool/worker/guard handles can only be used from an Agent Orchestrator or Supervisor node."
           );
           return;
@@ -5683,7 +5683,7 @@ function StudioApp() {
                     />
                     <span>
                       Sensitive output
-                      <small className="kb-subtle"> Nodes that use this secret produce sensitive data (for guard policies). Only an admin can clear it later.</small>
+                      <small className="kb-subtle"> Nodes that use this secret produce sensitive data (for content rules). Only an admin can clear it later.</small>
                     </span>
                   </label>
                   <div className="page-actions">

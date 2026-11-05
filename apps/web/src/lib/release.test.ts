@@ -61,7 +61,7 @@ describe("release helpers", () => {
       "1 regression",
       "cost -10%",
       "p95 latency +25%",
-      "2 new guard blocks"
+      "2 new content rule blocks"
     ]);
     // With repeated cases: which repeats each figure was taken at; nothing at the deciding repeats.
     const repeated = { cases: 2, pass: 2, fail: 0, error: 0, skipped: 0, passRate: 1, regressions: 0, costIncreasePct: 12.4, p95LatencyIncreasePct: 8, newGuardBlocks: 0, oldestRecordingDays: null };

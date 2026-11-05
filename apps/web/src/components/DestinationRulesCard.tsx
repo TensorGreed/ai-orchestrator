@@ -28,7 +28,7 @@ const RULE_ACTIONS: Array<{ value: DestinationRuleView["action"]; label: string 
   { value: "review", label: "Hold for review" },
   { value: "redact", label: "Redact" },
   { value: "mask", label: "Mask" },
-  { value: "protect", label: "Protect (profile's provider)" }
+  { value: "protect", label: "Protect (rule set's provider)" }
 ];
 /** The deployment's rules have no protection provider of their own, so "Protect" is not offered here (it would only block). */
 const EDITABLE_RULE_ACTIONS = RULE_ACTIONS.filter((entry) => entry.value !== "protect");
@@ -234,7 +234,7 @@ function RuleEditor({ rules, onSave }: { rules: DestinationRuleView[]; onSave: (
         }
       }}
     >
-      <p className="kb-subtle">Rules apply to every workflow, after its own guard profiles. A rule with no data classes or provenance applies to any outgoing data (block, review or wait for approval only).</p>
+      <p className="kb-subtle">Rules apply to every workflow, after its own rule sets. A rule with no data classes or provenance applies to any outgoing data (block, review or wait for approval only).</p>
       {forms.length === 0 && <p className="kb-subtle">No rules. Every workflow runs as before.</p>}
       {forms.map((form, index) => (
         <fieldset key={index} className="guard-dest-rule" aria-label={`Rule ${index + 1}`}>

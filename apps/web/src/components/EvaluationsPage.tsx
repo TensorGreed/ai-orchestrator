@@ -877,7 +877,7 @@ export function RunReplayDialog({ set, workflowId, caseCount, onClose, onStarted
             </ScorerToggle>
             <ScorerToggle
               label="no_new_guard_blocks"
-              hint="Guard blocks nothing the golden run let through"
+              hint="Content rules block nothing the golden run let through"
               checked={scorers.noNewGuardBlocks}
               onChange={(noNewGuardBlocks) => updateScorers({ noNewGuardBlocks })}
             />
@@ -1271,7 +1271,7 @@ function ReplayJobDetailView({ jobId, workflowNames, setNames, canEdit, onBack }
           {job.candidate?.guardProfile && (
             <p className="golden-meta">
               <span>
-                Guard profile {job.candidate.guardProfile.profileId} v{job.candidate.guardProfile.version}
+                Rule set {job.candidate.guardProfile.profileId} v{job.candidate.guardProfile.version}
               </span>
               <span className="mono-cell">{shortHash(job.candidate.guardProfile.hash, 12)}</span>
             </p>
@@ -1465,7 +1465,7 @@ export function CaseDrawer({ runId, resultId, onClose }: { runId: string; result
                             </span>
                           )}
                           {typeof attempt.newGuardBlocks === "number" && (
-                            <span className={attempt.newGuardBlocks > 0 ? "mono-cell is-danger" : "mono-cell"} title="Guard verdicts that block or hold for review which this repeat added">
+                            <span className={attempt.newGuardBlocks > 0 ? "mono-cell is-danger" : "mono-cell"} title="Rule verdicts that block or hold for review which this repeat added">
                               {guardBlocksLabel(attempt.newGuardBlocks)}
                             </span>
                           )}

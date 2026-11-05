@@ -619,7 +619,7 @@ export function summarizeNode(node: { type: string; config?: unknown }): string 
       return join([Array.isArray(c.checks) ? c.checks.map(String).join(", ") : null, str(c.onFail) ? `on fail ${String(c.onFail)}` : null]);
     case "guard":
       return join([
-        !c.profileId || c.profileId === "effective" ? "effective profile" : `profile ${String(c.profileId)}`,
+        !c.profileId || c.profileId === "effective" ? "effective rule set" : `rule set ${String(c.profileId)}`,
         str(c.channel) ?? "prompt",
         c.inputField && c.inputField !== "user_prompt" ? `field ${String(c.inputField)}` : null
       ]);

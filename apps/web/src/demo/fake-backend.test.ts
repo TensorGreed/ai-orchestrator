@@ -293,9 +293,9 @@ describe("runs", () => {
 
   it("replays a copy with the same graph, such as a duplicate", async () => {
     backend();
-    const copy = await api.duplicateWorkflow("wf-demo-guarded-intake", { name: "Guarded intake copy" });
+    const copy = await api.duplicateWorkflow("wf-demo-guarded-intake", { name: "Screened intake copy" });
     const result = await api.executeWorkflowStream(copy.id, askedBody("wf-demo-guarded-intake") as never);
-    expect(result.output).toEqual({ result: "Blocked by the prompt guard." });
+    expect(result.output).toEqual({ result: "Blocked by content rules." });
   });
 
   it("follows a recorded replay job's event stream to done", async () => {

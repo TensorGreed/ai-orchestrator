@@ -199,7 +199,7 @@ function describeActivityBody(event: NodeActivityEvent): string {
     }
     case "tool_call": {
       if (event.phase === "start") return `Calling ${event.toolName}`;
-      if (event.outcome === "blocked") return `${event.toolName} blocked by the guard`;
+      if (event.outcome === "blocked") return `${event.toolName} blocked by content rules`;
       if (event.outcome === "error") return `${event.toolName} failed${event.error ? `: ${clip(event.error)}` : ""}`;
       return typeof event.durationMs === "number" ? `${event.toolName} done in ${formatSeconds(event.durationMs)}` : `${event.toolName} done`;
     }

@@ -86,7 +86,7 @@ export function gateStatsLines(stats: ReleaseGateStats | null): string[] {
   if (stats.p95LatencyIncreasePct !== null) {
     lines.push(`p95 latency ${stats.p95LatencyIncreasePct >= 0 ? "+" : ""}${Math.round(stats.p95LatencyIncreasePct)}%${repeatSelectionSuffix(stats.repeatSelection?.latency, "latency")}`);
   }
-  if (stats.newGuardBlocks > 0) lines.push(`${stats.newGuardBlocks} new guard block${stats.newGuardBlocks === 1 ? "" : "s"}`);
+  if (stats.newGuardBlocks > 0) lines.push(`${stats.newGuardBlocks} new content rule block${stats.newGuardBlocks === 1 ? "" : "s"}`);
   const admission = stats.admission;
   if (admission && admission.pending > 0) lines.push(`${admission.pending} case${admission.pending === 1 ? "" : "s"} pending admission (run, not counted)`);
   if (admission && admission.required > 0) lines.push(`${admission.required} required case${admission.required === 1 ? "" : "s"}${admission.requiredFailures.length > 0 ? `, ${admission.requiredFailures.length} not passing` : ""}`);

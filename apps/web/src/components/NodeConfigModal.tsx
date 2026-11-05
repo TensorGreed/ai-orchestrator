@@ -147,7 +147,7 @@ const SLOT_DEFINITIONS: Array<{ handle: InspectorAttachmentHandle; label: string
   { handle: "memory", label: "Memory" },
   { handle: "tool", label: "Tools" },
   { handle: "worker", label: "Workers" },
-  { handle: "guard", label: "Guard" }
+  { handle: "guard", label: "Content rules" }
 ];
 
 function readStoredInspectorWidth(): number | null {
@@ -2965,7 +2965,7 @@ export function NodeInspector({
           onChange={(next) => setConfig((current) => ({ ...current, persistToolMessages: next }))}
         />
         <div className="cfg-tip" data-testid="memory-origin-note">
-          When a guard profile tracks where data came from, this memory keeps that origin for later runs. Older memory has no origin recorded.
+          When a rule set tracks where data came from, this memory keeps that origin for later runs. Older memory has no origin recorded.
         </div>
       </>
     );
@@ -4168,7 +4168,7 @@ export function NodeInspector({
       <div className="cfg-field" data-testid="trigger-trust-field">
         <FieldLabel
           label="Input counts as"
-          help="Where the run's input came from, for guard policies. Only verified callers count as a user's by default. Only an admin can change this."
+          help="Where the run's input came from, for content rules. Only verified callers count as a user's by default. Only an admin can change this."
         />
         <select
           aria-label="Input counts as"
@@ -9186,7 +9186,7 @@ export function NodeInspector({
             label="Sensitive output"
             checked={config.sensitiveOutput === true}
             onChange={(next) => setConfig((current) => withSensitiveOutput(current, next))}
-            help="Mark this node's output sensitive on every run (HR records, payroll, customer data). Guard policies can then keep it from leaving, without scanning the content."
+            help="Mark this node's output sensitive on every run (HR records, payroll, customer data). Content rules can then keep it from leaving, without scanning the content."
           />
         </div>
       </>

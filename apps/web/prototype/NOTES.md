@@ -1,6 +1,6 @@
 # PROTOTYPE — UI revamp directions (throwaway)
 
-Question: what should L2M Studio look like so it stops reading as an n8n clone?
+Question: what should L2M Studio look like so it stops reading as a clone of another workflow tool?
 
 Open `prototype/ui-revamp.html` directly in a browser (no build). Bottom bar switches
 between three directions and two real sample workflows.

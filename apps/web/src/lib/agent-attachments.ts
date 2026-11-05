@@ -48,18 +48,18 @@ export const AGENT_ATTACHMENT_STYLES: Record<AgentAttachmentHandle, AttachmentSt
   },
   guard: {
     stroke: "var(--port-guard)",
-    label: "Guard",
+    label: "Content rules",
     bg: "var(--port-guard-soft)",
     border: "var(--port-guard)",
     description:
-      "Guard node checking this agent's prompts, tool arguments, tool results and final answer. Without one, the project's effective guard profile applies."
+      "Content Rules node checking this agent's prompts, tool arguments, tool results and final answer. Without one, the project's effective rule set applies."
   },
   protection: {
     stroke: "var(--port-protect)",
     label: "Protection",
     bg: "var(--port-protect-soft)",
     border: "var(--port-protect)",
-    description: "Protection provider (token vault, encryption, keyed hash or masking) a Guard node uses for sensitive data. Keys come from secrets."
+    description: "Protection provider (token vault, encryption, keyed hash or masking) a Content Rules node uses for sensitive data. Keys come from secrets."
   }
 };
 

@@ -537,7 +537,7 @@ export function ClientSessions({ clientId }: { clientId: string }) {
                   data-testid="session-guard-blocks"
                   title={session.guard?.lastBlock ? `Last: ${session.guard.lastBlock.tool}, ${session.guard.lastBlock.reason}` : undefined}
                 >
-                  Guard blocked {session.guard?.blocks}
+                  Rules blocked {session.guard?.blocks}
                 </span>
               )}
             </li>

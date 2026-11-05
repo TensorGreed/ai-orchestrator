@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GuardEventView } from "@ai-orchestrator/shared";
-import { dailySeries, extractGuardTrace, guardMarkerFor, mostSevere, traceFromEvents } from "./guard-trace";
+import { dailySeries, displayRuleSetName, extractGuardTrace, guardMarkerFor, mostSevere, traceFromEvents } from "./guard-trace";
 
 const summary = (overrides: Record<string, unknown> = {}) => ({
   action: "allow",
@@ -199,7 +199,7 @@ describe("guard trace", () => {
   });
 
   it("marks run tape lanes by the most severe outcome", () => {
-    expect(guardMarkerFor({ error: "Guard blocked the final answer", status: "error" })?.kind).toBe("blocked");
+    expect(guardMarkerFor({ error: "Content rules blocked the final answer", status: "error" })?.kind).toBe("blocked");
     const review = { guard: { action: "review", route: "review", channel: "prompt", verdicts: [{ profile: { profileId: "p", version: 1 }, summary: summary({ action: "review" }) }] } };
     expect(guardMarkerFor({ output: review, status: "success" })?.kind).toBe("review");
     expect(guardMarkerFor({ output: review, status: "waiting_approval" })?.kind).toBe("approval");
@@ -242,5 +242,13 @@ describe("verdictReasonLine (Phase 16)", () => {
     expect(verdictReasonLine({ ...base, effectiveAction: "require_approval", detectorId: "dlp.patterns" })).toBe("Held for approval: card number found in the outbound (egress).");
     expect(verdictReasonLine({ ...base, effectiveAction: "redact", detectorId: "dlp.patterns" })).toBeNull();
     expect(verdictReasonLine({ ...base, effectiveAction: "block", detectorId: null })).toBeNull();
+  });
+});
+
+describe("displayRuleSetName", () => {
+  it("shows runs recorded under the built-in's stored name with its current name", () => {
+    expect(displayRuleSetName("default", "Default guard profile")).toBe("Default rule set");
+    expect(displayRuleSetName("custom", "Default guard profile")).toBe("Default guard profile");
+    expect(displayRuleSetName("default", undefined)).toBeUndefined();
   });
 });

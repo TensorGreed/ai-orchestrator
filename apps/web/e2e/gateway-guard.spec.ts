@@ -1,7 +1,7 @@
 import { expect, test, type APIRequestContext, type Browser, type BrowserContext, type Page } from "@playwright/test";
 
 /**
- * 12.6 — Guard on the MCP gateway: an admin picks a Guard profile in a toolset's detail, a client's call with an
+ * 12.6 — content rules on the MCP gateway: an admin picks a rule set in a toolset's detail, a client's call with an
  * injection in its arguments is blocked, the client's Sessions panel counts the block, the client's Governance
  * section shows its own picker, and the Security page lists the gateway event. The suite signs in once and shares the
  * browser context across its tests.
@@ -112,12 +112,12 @@ test.afterAll(async () => {
   await context.close();
 });
 
-test("picks a Guard profile in the toolset's detail", async () => {
+test("picks a rule set in the toolset's detail", async () => {
   await page.reload();
   await sidebarItem("Toolsets").click();
   await page.getByRole("button", { name: made.toolsetName! }).click();
   const section = page.getByTestId("gateway-guard-toolset");
-  const picker = section.getByLabel("Guard profile for this toolset");
+  const picker = section.getByLabel("Rule set for this toolset");
   await expect(picker).toHaveValue("");
   await expect(section.getByText(/what clients send to this toolset's tools/)).toBeVisible();
   await picker.selectOption(profileId);
@@ -136,24 +136,24 @@ test("blocks an injection in a client's arguments and counts it in the Sessions 
   const kbTool = names.find((name) => name.endsWith("lookup_kb"))!;
   const blocked = await gatewayCall(request, 3, "tools/call", { name: kbTool, arguments: { topic: INJECTION } });
   expect(blocked.result?.isError).toBe(true);
-  expect(blocked.result?.content?.[0]?.text).toBe("Blocked by Guard: indirect injection");
+  expect(blocked.result?.content?.[0]?.text).toBe("Blocked by content rules: indirect injection");
   const clean = await gatewayCall(request, 4, "tools/call", { name: kbTool, arguments: { topic: "mcp" } });
-  expect(clean.result?.content?.[0]?.text).not.toContain("Blocked by Guard");
+  expect(clean.result?.content?.[0]?.text).not.toContain("Blocked by content rules");
 
   await page.reload();
   await sidebarItem("Clients").click();
   const row = page.getByRole("list", { name: "MCP clients" }).getByRole("listitem").filter({ hasText: made.clientName! });
   await row.getByRole("button", { name: "Sessions" }).click();
   const entry = row.getByRole("list", { name: "Open sessions" }).getByRole("listitem").filter({ hasText: made.sessionId!.slice(0, 8) });
-  await expect(entry.getByTestId("session-guard-blocks")).toHaveText("Guard blocked 1");
+  await expect(entry.getByTestId("session-guard-blocks")).toHaveText("Rules blocked 1");
   await entry.scrollIntoViewIfNeeded();
   await shot("02-session-guard-blocks");
 
   await row.getByRole("button", { name: "Governance" }).click();
   const governance = row.getByRole("region", { name: "Client governance" });
-  const picker = governance.getByLabel("Guard profile for this client");
+  const picker = governance.getByLabel("Rule set for this client");
   await expect(picker).toHaveValue("");
-  await expect(governance.getByText(/on top of the toolset's own profile/)).toBeVisible();
+  await expect(governance.getByText(/on top of the toolset's own rule set/)).toBeVisible();
   await governance.scrollIntoViewIfNeeded();
   await shot("03-client-governance");
 });

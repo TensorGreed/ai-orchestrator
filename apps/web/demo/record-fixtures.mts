@@ -372,16 +372,16 @@ const GUARD_PROFILE = {
 function guardedWorkflow(): Json {
   return {
     id: "wf-demo-guarded-intake",
-    name: "Guarded intake",
-    description: "A prompt guard in front of the intake step: prompts with an email address are blocked before any model sees them.",
+    name: "Screened intake",
+    description: "Content rules in front of the intake step: prompts with an email address are blocked before any model sees them.",
     schemaVersion: "1.0.0",
     workflowVersion: 1,
     projectId: "default",
     nodes: [
       node("trigger", "manual_trigger", "New request", 0, 120, { label: "New request" }),
-      node("guard", "guard", "Prompt guard", 260, 120, { profileId: GUARD_PROFILE.id }),
+      node("guard", "guard", "Prompt rules", 260, 120, { profileId: GUARD_PROFILE.id }),
       node("pass", "output", "Accepted", 520, 40, { responseTemplate: "Accepted: {{results.guard.user_prompt}}" }),
-      node("blocked", "output", "Blocked", 520, 220, { responseTemplate: "Blocked by the prompt guard." })
+      node("blocked", "output", "Blocked", 520, 220, { responseTemplate: "Blocked by content rules." })
     ],
     edges: [
       { id: "e1", source: "trigger", target: "guard" },

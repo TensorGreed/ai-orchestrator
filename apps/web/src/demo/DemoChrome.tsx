@@ -26,8 +26,8 @@ export const TOUR_STEPS: TourStep[] = [
     action: { label: "Run the recorded question", workflowId: "wf-demo-support-agent", mode: "editor", runRecorded: true }
   },
   {
-    title: "See the guard",
-    body: "A prompt guard blocked an email address before any model saw it. Security lists every guard verdict with masked evidence.",
+    title: "See the content rules",
+    body: "A content rule blocked an email address before any model saw it. Security lists every rule verdict with masked evidence.",
     action: { label: "Open Security", mode: "security" }
   },
   {
