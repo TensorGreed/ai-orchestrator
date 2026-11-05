@@ -53,6 +53,7 @@ import { z } from "zod";
 import {
   DEFAULT_PROJECT_ID,
   EVAL_RUN_FINISHED_STATUSES,
+  evalGuardProfileOverrideSchema,
   evalScorerListSchema,
   goldenSetAddRecordingSchema,
   goldenSetCreateSchema,
@@ -76,6 +77,15 @@ import type { Store } from "./db/store.js";
 type DatasetPermission = "workflow:read" | "workflow:write";
 
 export interface EvalRoutesDeps {
+  /**
+   * Phase 12.7 — resolve and pin an eval run's rule set override, with
+   * the replay job rules (admins only for the destination rules or an older
+   * version of a bound rule set).
+   */
+  resolveGuardProfile?: (
+    override: { profileId: string; version?: number },
+    context: { workflowId: string; projectId?: string | null; isAdmin: boolean }
+  ) => Promise<{ ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string; forbidden?: boolean }>;
   app: FastifyInstance;
   store: Store;
   evals: EvalService;
@@ -430,7 +440,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
 
   app.post<{
     Querystring: { wait?: string };
-    Body: { datasetId?: string; workflowId?: string; scorers?: unknown; record?: boolean; replay?: unknown };
+    Body: { datasetId?: string; workflowId?: string; scorers?: unknown; record?: boolean; replay?: unknown; guardProfile?: unknown };
   }>("/api/eval/runs", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
@@ -454,8 +464,27 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       reply.code(400);
       return { error: "An eval run can record MCP calls or replay them, not both." };
     }
+    const guardOverride = evalGuardProfileOverrideSchema.optional().safeParse(request.body?.guardProfile);
+    if (!guardOverride.success) {
+      reply.code(400);
+      return { error: "Invalid rule set override", details: guardOverride.error.issues };
+    }
     const workflowAccess = await runAccess.workflow(user, workflowId, "workflow:execute");
     if (!workflowAccess.ok) return denyRunAccess(reply, workflowAccess);
+    // Phase 12.7 — pin the chosen rule set now; the run adds it on top of every rule set it applies anyway.
+    let guardProfile: { profileId: string; version: number; hash: string } | undefined;
+    if (guardOverride.data) {
+      if (!deps.resolveGuardProfile) {
+        reply.code(400);
+        return { error: "This deployment cannot run eval runs under another rule set." };
+      }
+      const resolved = await deps.resolveGuardProfile(guardOverride.data, { workflowId, projectId: workflowAccess.workflow.projectId ?? null, isAdmin: user.role === "admin" });
+      if (!resolved.ok) {
+        reply.code(resolved.forbidden ? 403 : 400);
+        return { error: resolved.problem };
+      }
+      guardProfile = resolved.profile;
+    }
     // Another project's dataset reads as missing: its cases never run through your workflow.
     const datasetResult = await datasetAccess(user, await evals.getDataset(datasetId), "workflow:read");
     if (!datasetResult.ok) return denyRunAccess(reply, datasetResult);
@@ -496,7 +525,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       triggeredBy: user.email,
       triggeredByUserId: user.id,
       ...(mcpOptions.data.record ? { recordMcp: true } : {}),
-      ...(mcpOptions.data.replay ? { replayMcp: mcpOptions.data.replay } : {})
+      ...(mcpOptions.data.replay ? { replayMcp: mcpOptions.data.replay } : {}),
+      ...(guardProfile ? { guardProfile } : {})
     };
     if (request.query.wait === "true" || request.query.wait === "1") {
       try {

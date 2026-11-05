@@ -106,7 +106,8 @@ function mapGuardEventRow(row: Row): GuardEventRecord {
     latencyMs: Number(row.latency_ms ?? 0),
     budgetExceeded: Number(row.budget_exceeded) === 1,
     skippedDetectors: parseJsonList<string>(row.skipped_detectors_json),
-    createdAt: String(row.created_at)
+    createdAt: String(row.created_at),
+    ...(row.run_source !== null && row.run_source !== undefined ? { runSource: String(row.run_source) } : {})
   };
 }
 
@@ -266,6 +267,7 @@ export async function deleteGuardProfile(ctx: PgContext, id: string): Promise<bo
   return ctx.withTransaction(async (client) => {
     const existing = await oneRow(client, `SELECT id FROM guard_profiles WHERE id = $1 FOR UPDATE`, [id]);
     if (!existing) return false;
+    await client.query(`DELETE FROM guard_benchmarks WHERE profile_id = $1`, [id]);
     await client.query(`DELETE FROM guard_profile_versions WHERE profile_id = $1`, [id]);
     await client.query(`DELETE FROM guard_profiles WHERE id = $1`, [id]);
     return true;
@@ -307,9 +309,10 @@ export async function setGuardBinding(ctx: PgContext, input: Parameters<Store["s
 const GUARD_EVENT_COLUMNS = [
   "id", "verdict_id", "execution_id", "workflow_id", "project_id", "node_id", "placement", "iteration", "tool_name", "channel",
   "detector_id", "category", "data_class", "score", "requested_action", "effective_action", "verdict_action", "shadow",
-  "evidence_json", "profile_id", "profile_version", "profile_hash", "latency_ms", "budget_exceeded", "skipped_detectors_json", "created_at"
+  "evidence_json", "profile_id", "profile_version", "profile_hash", "latency_ms", "budget_exceeded", "skipped_detectors_json", "created_at",
+  "run_source"
 ] as const;
-/** Rows per INSERT statement (26 parameters each, well under Postgres' 65535). */
+/** Rows per INSERT statement (27 parameters each, well under Postgres' 65535). */
 const GUARD_EVENT_CHUNK = 200;
 
 function guardEventValues(row: GuardEventInsert): unknown[] {
@@ -339,7 +342,8 @@ function guardEventValues(row: GuardEventInsert): unknown[] {
     row.latencyMs,
     row.budgetExceeded ? 1 : 0,
     JSON.stringify(row.skippedDetectors),
-    row.createdAt
+    row.createdAt,
+    row.runSource ?? null
   ];
 }
 
@@ -387,6 +391,7 @@ function guardEventWhere(filters: GuardEventFilters): { where: string; params: u
   if (filters.onlyFindings) clauses.push("detector_id IS NOT NULL");
   if (filters.placement === "gateway") clauses.push("placement = 'gateway'");
   if (filters.placement === "run") clauses.push("placement <> 'gateway'");
+  if (filters.excludeEvalRuns) clauses.push("(run_source IS NULL OR run_source <> 'eval')");
   return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
 }
 

@@ -250,7 +250,8 @@ describe("Security page", () => {
           latencyMs: 4,
           budgetExceeded: false,
           skippedDetectors: [],
-          createdAt: now
+          createdAt: now,
+          runSource: "eval"
         }
       ]
     } as Awaited<ReturnType<typeof api.fetchGuardEvents>>);
@@ -266,6 +267,13 @@ describe("Security page", () => {
 
     await userEvent.selectOptions(screen.getByLabelText("Workflow"), "wf-1");
     await waitFor(() => expect(api.fetchGuardStats).toHaveBeenLastCalledWith(expect.objectContaining({ workflowId: "wf-1" })));
+
+    // 12.7 — eval and replay runs are left out until included; their events carry an "eval" chip.
+    expect(screen.getByTitle("Recorded by an eval run or a replay job")).toHaveTextContent("eval");
+    expect(api.fetchGuardStats).toHaveBeenLastCalledWith(expect.not.objectContaining({ includeEval: true }));
+    await userEvent.click(screen.getByLabelText("Include eval and replay runs"));
+    await waitFor(() => expect(api.fetchGuardStats).toHaveBeenLastCalledWith(expect.objectContaining({ includeEval: true })));
+    expect(api.fetchGuardEvents).toHaveBeenLastCalledWith(expect.objectContaining({ includeEval: true }));
   });
 });
 

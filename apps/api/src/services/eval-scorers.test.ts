@@ -173,6 +173,34 @@ describe("no_new_guard_blocks", () => {
   });
 });
 
+describe("guard_outcome", () => {
+  const verdict = (detectorId: string, action: string, channel = "prompt", shadow = false): RunFactGuardVerdict => ({ ...block(detectorId, action, shadow), channel });
+
+  it("passes caught and blocked on an attack the content rules stopped, and fails allowed", async () => {
+    const candidate = facts({ guard: [verdict("injection.indirect", "block", "tool_result"), verdict("dlp.patterns", "allow", "final_output")] });
+    expect(await run({ type: "guard_outcome", expect: "caught" }, ctx({ candidate }))).toMatchObject({ pass: true, score: 1 });
+    expect((await run({ type: "guard_outcome", expect: "blocked", channel: "tool_result", detector: "injection." }, ctx({ candidate }))).reason).toBe(
+      "the content rules stopped it on tool_result by injection.: block by injection.indirect on tool_result at agent"
+    );
+    const allowed = await run({ type: "guard_outcome", expect: "allowed" }, ctx({ candidate }));
+    expect(allowed).toMatchObject({ pass: false, score: 0 });
+    expect(allowed.reason).toContain("a false positive?");
+    // Filters narrow the verdicts: nothing acted on the prompt channel, or by another detector.
+    expect((await run({ type: "guard_outcome", expect: "caught", channel: "prompt" }, ctx({ candidate }))).pass).toBe(false);
+    expect((await run({ type: "guard_outcome", expect: "caught", detector: "injection.direct" }, ctx({ candidate }))).pass).toBe(false);
+    expect((await run({ type: "guard_outcome", expect: "caught", nodeId: "other" }, ctx({ candidate }))).pass).toBe(false);
+  });
+
+  it("counts a rewrite as caught but not blocked, and ignores shadow verdicts", async () => {
+    const rewritten = facts({ guard: [verdict("hidden.unicode", "transform")] });
+    expect((await run({ type: "guard_outcome", expect: "caught" }, ctx({ candidate: rewritten }))).pass).toBe(true);
+    expect((await run({ type: "guard_outcome", expect: "blocked" }, ctx({ candidate: rewritten }))).reason).toContain("only rewrote content");
+    const shadow = facts({ guard: [verdict("injection.direct", "block", "prompt", true)] });
+    expect((await run({ type: "guard_outcome", expect: "allowed" }, ctx({ candidate: shadow }))).pass).toBe(true);
+    expect((await run({ type: "guard_outcome", expect: "allowed" }, ctx({ candidate: null }))).pass).toBe(false);
+  });
+});
+
 describe("budget", () => {
   it("checks absolute limits", async () => {
     expect(await run({ type: "budget", maxCostUsd: 0.02, maxTokens: 100, maxLatencyMs: 2000 }, ctx())).toMatchObject({ pass: true, score: 1 });

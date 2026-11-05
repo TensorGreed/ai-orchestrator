@@ -192,6 +192,8 @@ import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
+import { registerGuardBenchmarkRoutes } from "./guard-benchmark-routes.js";
+import { GuardBenchmarkService } from "./services/guard-benchmark-service.js";
 import { registerMcpPolicyLearningRoutes } from "./mcp-policy-learning-routes.js";
 import { loadMcpOpenWorldContext, resolveOpenWorldFor } from "./services/mcp-open-world.js";
 import { registerMcpSafetyPresetRoutes } from "./mcp-safety-preset-routes.js";
@@ -325,6 +327,19 @@ const REPLAY_TRIGGER_TYPE = "replay";
  * calls models live, so it is checked like a run.
  */
 const BUDGET_EXEMPT_TRIGGER_TYPES: ReadonlySet<string> = new Set([REPLAY_TRIGGER_TYPE]);
+/**
+ * Phase 12.7 — trigger names the API sets itself and that change how a run is metered or reported (budgets, metrics,
+ * replay input). A caller cannot label a queued run with one of them.
+ */
+const RESERVED_TRIGGER_TYPES: ReadonlySet<string> = new Set([
+  "eval",
+  "eval_judge",
+  REPLAY_TRIGGER_TYPE,
+  "replay_live",
+  "mcp_replay",
+  "approval_resume",
+  "error"
+]);
 /** Phase 15.6 — how often stale production-capture tickets are given back. */
 const CAPTURE_SWEEP_INTERVAL_MS = 60_000;
 
@@ -2289,6 +2304,9 @@ export async function createApp(
             workflowId: mergedWorkflow.id,
             projectId: mergedWorkflow.projectId ?? "default",
             ...(input.guardProfileOverride ? { profileOverride: input.guardProfileOverride } : {}),
+            ...(input.guardProfileAddition ? { profileAddition: input.guardProfileAddition } : {}),
+            // 12.7 — eval runs and replay jobs stay out of the Security page's numbers by default.
+            ...(input.guardRunSource === "eval" ? { runSource: "eval" as const } : {}),
             // 12.6 — a gateway-triggered run: the toolset's and client's profiles, after the run's own.
             ...(input.gatewayGuard ? { gatewayStack: input.gatewayGuard.profiles } : {}),
             ...(input.guardSimulation?.substitute ? { profileSubstitute: input.guardSimulation.substitute } : {}),
@@ -2348,7 +2366,9 @@ export async function createApp(
                 ...(channel === "production" ? { releaseChannel: "production" as const, releaseVersion } : {}),
                 ...(input.gatewayGuard ? { gatewayGuard: input.gatewayGuard } : {}),
                 // 12.6 — and its client and toolset, so the resumed part's usage is charged to them.
-                ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {})
+                ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {}),
+                // 12.7 — an eval run's resumed part still records its Content rules verdicts as eval traffic.
+                ...(input.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {})
               })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
@@ -4252,7 +4272,11 @@ export async function createApp(
         policyActor,
         // Phase 16 — a case a builder typed is a user's input (whoever starts the eval).
         inputLabels: EVAL_CASE_INPUT_LABELS,
-        mcpPlan
+        mcpPlan,
+        // Phase 12.7 — the eval run's chosen rule set, added on top of every rule set the run applies anyway.
+        ...(input.guardProfileOverride ? { guardProfileAddition: input.guardProfileOverride } : {}),
+        // Its Content rules verdicts are tagged as eval traffic; set here, never derived from a trigger name.
+        guardRunSource: "eval"
       });
       const result = await finishMcpCassettePlan(mcpPlan, executed, {
         executionId,
@@ -5004,6 +5028,7 @@ export async function createApp(
           ...(hooks ? { hooks } : {}),
           ...(gatewayGuard ? { gatewayGuard } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
+          ...(state.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
@@ -7132,7 +7157,8 @@ export async function createApp(
     strictIsolation: config.PROJECT_ISOLATION === "strict",
     goldenSetChangeDenial: async (user, datasetId, change, target) => await releaseService.goldenSetChangeDenial(user, datasetId, change, target),
     releaseGateAdmission: async (run) => await releaseService.jobGateAdmission(run),
-    gateCasesRemoval: async (user, workflowId, target) => await releaseService.gateCasesRemoval(user, workflowId, target)
+    gateCasesRemoval: async (user, workflowId, target) => await releaseService.gateCasesRemoval(user, workflowId, target),
+    resolveGuardProfile: async (override, context) => await guardService.resolveProfileOverride(override, context)
   });
 
   app.get("/widget.js", async (_request, reply) => {
@@ -13337,6 +13363,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         usePinnedData: false,
         mcpPlan: replay.mcpPlan,
         replay: { hook: replay.plan.hook, sandbox: createReplaySandbox(replay.memorySeed) },
+        // Phase 12.7 — a replay's Content rules verdicts are tagged as eval traffic, set here and never from a trigger name.
+        guardRunSource: "eval",
         // Phase 15.3 — model calls from the golden run's tape, and the candidate's guard profile.
         ...(replay.modelPlan ? { providerRegistry: replay.modelPlan.registry } : {}),
         ...(replay.guardProfileOverride ? { guardProfileOverride: replay.guardProfileOverride } : {}),
@@ -13538,6 +13566,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     maxCasesPerJob: config.REPLAY_JOB_MAX_CASES,
     scrub: async (text) => String(secretService.redact((await replayRecordingService.scrubber()).text(text))),
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+  });
+  // 12.7 — red-team benchmarks of rule sets (in-process; nothing reaches guard_events).
+  registerGuardBenchmarkRoutes({
+    app,
+    store,
+    benchmarks: new GuardBenchmarkService(store, guardService),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event)
   });
   registerGuardSimulationRoutes({
     app,
@@ -13878,6 +13914,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         } else {
           const configured = workflow.settings?.executionPool;
           if (typeof configured === "string" && QUEUE_POOL_PATTERN.test(configured)) pool = configured;
+        }
+        if (typeof body.triggerType === "string" && RESERVED_TRIGGER_TYPES.has(body.triggerType.trim().toLowerCase())) {
+          reply.code(400);
+          return { error: `triggerType "${body.triggerType.trim()}" is reserved for runs the API starts itself` };
         }
         // 12.6 (D8) — a used-up block budget refuses the queued run now (402), not on the worker.
         // The trigger name in the body is the caller's label: it never exempts a run from its budgets.

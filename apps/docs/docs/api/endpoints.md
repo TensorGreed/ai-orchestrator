@@ -227,6 +227,14 @@ Events (masked evidence only):
 - `GET /api/guard/events?projectId=&workflowId=&profileId=&channel=&action=&days=&since=&findings=true&placement=&limit=&offset=` (viewer; `{ events, total }`, newest first; `placement=gateway` for MCP gateway calls only, `run` for runs only)
 - `GET /api/guard/stats?projectId=&workflowId=&profileId=&placement=&days=` (viewer; counts by verdict, action, category, channel and detector, shadow would-block, budget overruns and per-day counts; 14 days by default)
 
+Verdicts from eval runs and replay jobs are left out of `/api/guard/events` and `/api/guard/stats` unless `includeEval=true`; a run's own `/api/executions/:id/guard-events` lists them. Their events carry `runSource: "eval"`, also after an approval resume.
+
+Red-team benchmarks of content rules (see [Content rules benchmark](../product/content-rules-benchmark.md)):
+
+- `POST /api/guard/profiles/:id/benchmark` (builder; `{}` for the latest saved version, `{ version }` or `{ document }` for an unsaved draft, plus optional `suites`, `splits`, `categories`; `{ report, comparison, baseline, stored, draft, partial }`; a full run of a saved version is stored, a draft's or a run narrowed by `splits` or `categories` is not; 429 with `Retry-After` when a builder stores a second run of the same version within 10 minutes (admins exempt); a draft follows the rule set editor's rule (403); 409 while another benchmark runs on the instance; audited as `guard.benchmark.run`)
+- `GET /api/guard/profiles/:id/benchmarks?limit=` (viewer; `{ benchmarks }`, newest first, rates per split)
+- `GET /api/guard/benchmarks/:id` (viewer; `{ benchmark, report }`)
+
 Rule set writes and binding changes are audited as `guard.profile.created`, `guard.profile.updated`, `guard.profile.deleted`, `guard.profile.imported` and `guard.binding.updated`.
 
 ## Audit bundles

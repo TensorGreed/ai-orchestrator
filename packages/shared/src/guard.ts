@@ -279,4 +279,6 @@ export interface GuardEventView {
   budgetExceeded: boolean;
   skippedDetectors: string[];
   createdAt: string;
+  /** 12.7 — `eval`: recorded by an eval run or a replay job (left out of the Security page unless asked for). */
+  runSource?: "eval";
 }

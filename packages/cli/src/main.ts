@@ -59,6 +59,7 @@ import { apiRequest, apiTarget, isObject, readJsonFile, RequestError, write, typ
 import { runGoldenExport, runGoldenImport, runGoldenVerify } from "./golden";
 import { JOB_ONLY_BOOLEANS, JOB_ONLY_FLAGS, replayFlags, runReplayJob, runReplayStatus } from "./replay-job";
 import { runReleasePublish } from "./release";
+import { GUARD_BENCHMARK_FLAGS, runGuardBenchmarkCommand } from "./guard-benchmark";
 import { formatAuditVerifyResult, parsePublicKeyInput, PublicKeyInputError, verifyAuditBundle } from "./audit-verify";
 
 export type { CliIo } from "./api";
@@ -107,6 +108,10 @@ const USAGE = `Usage:
   l2m golden import <file> --workflow <id> [--project <id>] [--name <name>] [--public-key <file|base64>]
                     [--allow-other-workflow] [--json]
   l2m golden verify <file> [--public-key <file|base64>] [--trust-embedded-key] [--json]
+  l2m guard benchmark (--builtin | --profile <file>) [--suite profile|workflow]...
+                      [--split main|heldout]... [--category <name>]...
+                      [--baseline <report.json>] [--tolerance <0-1>]
+                      [--out <report.json>] [--junit <file>] [--json]
 
 The API URL and key come from L2M_API_URL and L2M_API_KEY. Prefer the
 environment for the key: --api-key works but shows in the process list and
@@ -132,6 +137,11 @@ when a request fails (unreachable, no answer, 401, 403, 404, 5xx): that is
 long-standing behaviour, kept so existing pipelines keep their meaning.
 release publish: 0 published, 1 blocked by the gate or failed, 4 needs approval.
 golden export, import and verify: request failures exit 1.
+guard benchmark runs offline (no server, network or model): 0 the gate
+passed, 1 below the default rule set's floors (--builtin) or a regression
+against --baseline (detection down, false positives or workflow attack
+success up by more than --tolerance, default 0); without --builtin or
+--baseline it only reports.
 `;
 
 function loadSnapshot(file: string): McpSnapshotFile {
@@ -494,7 +504,8 @@ const COMMANDS: Record<string, CommandFlags> = {
   "release publish": { values: [...API, "version", "hash", "run", "override-reason", "request-approval"], booleans: ["json"] },
   "golden export": { values: [...API, "out"], booleans: ["sign"] },
   "golden import": { values: [...API, "workflow", "project", "name", "public-key"], booleans: ["allow-other-workflow", "json"] },
-  "golden verify": { values: ["public-key"], booleans: ["trust-embedded-key", "json"] }
+  "golden verify": { values: ["public-key"], booleans: ["trust-embedded-key", "json"] },
+  "guard benchmark": GUARD_BENCHMARK_FLAGS
 };
 
 const BOOLEAN_FLAGS = [...new Set(["help", ...Object.values(COMMANDS).flatMap((flags) => flags.booleans)])];
@@ -507,7 +518,7 @@ function commandOf(positionals: string[]): string | null {
   const name = `${group} ${command}`;
   if (!(name in COMMANDS) || name === "mcp snapshot") return null;
   // These take no further positional word.
-  if (sub !== undefined && (name === "mcp check" || name === "mcp mock" || name === "replay run")) return null;
+  if (sub !== undefined && (name === "mcp check" || name === "mcp mock" || name === "replay run" || name === "guard benchmark")) return null;
   return name;
 }
 
@@ -537,6 +548,7 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
     if (command === "golden export") return await runGoldenExport(args, io);
     if (command === "golden import") return await runGoldenImport(args, io);
     if (command === "golden verify") return runGoldenVerify(args, io);
+    if (command === "guard benchmark") return await runGuardBenchmarkCommand(args, io);
     throw new UsageError(`Unknown command: ${args.positionals.join(" ")}`);
   } catch (error) {
     if (error instanceof UsageError) {

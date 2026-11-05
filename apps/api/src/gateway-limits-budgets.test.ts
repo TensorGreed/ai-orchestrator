@@ -1226,14 +1226,18 @@ describe("review M5: paths the first round left untested", () => {
     const { store } = fixture.context;
     await store.upsertWorkflow(triggerWorkflow("wf-queued", "webhook_input"));
     await overGlobal(fixture);
-    for (const body of [{}, { triggerType: "replay" }, { triggerType: "eval" }]) {
+    for (const body of [{}, { triggerType: "nightly" }]) {
       const response = await caller(fixture.context)(fixture.admin, "POST", "/api/workflows/wf-queued/enqueue", body);
       expect(response.statusCode, response.body).toBe(402);
       expect(response.json()).toMatchObject({ error: "budget_exceeded" });
     }
+    // 12.7 — an exempt or internal trigger name is refused outright, before the budget check.
+    for (const triggerType of ["replay", "eval"]) {
+      expect((await caller(fixture.context)(fixture.admin, "POST", "/api/workflows/wf-queued/enqueue", { triggerType })).statusCode).toBe(400);
+    }
     expect((await runs(store)).filter((entry) => entry.workflowId === "wf-queued")).toHaveLength(0);
     await deleteBudgets(fixture);
-    expect((await caller(fixture.context)(fixture.admin, "POST", "/api/workflows/wf-queued/enqueue", { triggerType: "replay" })).statusCode).toBeLessThan(300);
+    expect((await caller(fixture.context)(fixture.admin, "POST", "/api/workflows/wf-queued/enqueue", { triggerType: "nightly" })).statusCode).toBeLessThan(300);
   });
 
   it("does not use up a webhook's idempotency key on a refusal, and audits the refusal once per period (L7)", async () => {

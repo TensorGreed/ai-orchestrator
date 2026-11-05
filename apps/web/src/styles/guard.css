@@ -992,3 +992,64 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+/* ---- 12.7 Security > Benchmark --------------------------------------- */
+.guard-bench-intro,
+.guard-bench-meta {
+  margin: 0;
+  max-width: 72ch;
+}
+.guard-bench-compare {
+  margin: 0;
+  color: var(--fg);
+}
+.guard-bench-regressed {
+  color: var(--err);
+  font-weight: 600;
+}
+.guard-bench-failures {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--err);
+  font-size: var(--fs-sm);
+}
+.guard-bench-table tbody th[scope="row"] {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--fg);
+  text-align: left;
+}
+.guard-filters label.guard-inline-check {
+  display: inline-flex;
+  align-self: center;
+  min-height: 32px;
+}
+.guard-bench-rate {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.guard-bench-track {
+  position: relative;
+  display: inline-block;
+  width: 96px;
+  max-width: 30vw;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--line);
+  overflow: hidden;
+}
+.guard-bench-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+}
+.guard-bench-fill-ok {
+  background: var(--ok);
+}
+.guard-bench-fill-warn {
+  background: var(--warn);
+}

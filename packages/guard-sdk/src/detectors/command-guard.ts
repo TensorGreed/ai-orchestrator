@@ -22,7 +22,7 @@ const META: Array<{ pattern: RegExp; code: CommandIssue["code"]; score: number; 
   { pattern: /\$\([^)]*\)|`[^`]*`/g, code: "command_substitution", score: 0.95, message: "Command substitution" },
   { pattern: /\$\{[^}]*\}/g, code: "command_substitution", score: 0.6, message: "Shell parameter expansion" },
   { pattern: /(?<![&|])(?:&&|\|\||;|\|)(?![&|])/g, code: "shell_metacharacter", score: 0.85, message: "Command chaining or pipe" },
-  { pattern: /(?:^|\s)(?:\d?>>?|<<?|>&|&>)\s*\S/g, code: "redirection", score: 0.8, message: "Shell redirection" },
+  { pattern: /(?:^|\s)(?:\d?>>?|<<?|>&|&>)\s*\S|(?<=[\w/.~])(?:>>?|<)(?=[\w/.~$])/g, code: "redirection", score: 0.8, message: "Shell redirection" },
   { pattern: /(?:^|\s)&\s*$/g, code: "shell_metacharacter", score: 0.5, message: "Background execution" },
   { pattern: /\n/g, code: "shell_metacharacter", score: 0.7, message: "Newline inside a command string" }
 ];
@@ -30,17 +30,45 @@ const META: Array<{ pattern: RegExp; code: CommandIssue["code"]; score: number; 
 const DANGEROUS_COMMANDS =
   /(?:^|[\s;&|(`])(?:rm\s+(?:-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\b[^;&|]*(?:\s\/(?:\s|$)|\s~|\s\*|\s\$HOME)|mkfs(?:\.\w+)?\b|dd\s+if=|:\(\)\s*\{\s*:\|:&\s*\};:|chmod\s+(?:-R\s+)?[0-7]*777\s+\/|curl\b[^|]*\|\s*(?:ba|z|da)?sh\b|wget\b[^|]*\|\s*(?:ba|z|da)?sh\b|shutdown\b|reboot\b|nc\s+(?:-[a-z]*e|-[a-z]*l[a-z]*p)\b|\/dev\/tcp\/)/gi;
 
-/** Scan a command line for metacharacters, substitutions, redirections and dangerous commands. */
+/** How deep payloads handed to another shell are re-scanned; deeper nesting is scanned with quotes ignored. */
+const MAX_REPARSE_DEPTH = 4;
+
+/** Shell names, matched by pattern so variants count too (`sh`, `bash`, `ksh93`, `tcsh`, `rbash`, `yash`, `pwsh`, …). */
+const SHELL_NAME = /^(?:(?:ba|da|z|k|mk|a|c|tc|r|rba|y|le|po)?sh\d*|fish|busybox|pwsh|powershell|cmd)(?:\.exe)?$/i;
+/** Commands that hand an argument to a shell again whatever their options. */
+const REPARSERS = new Set(["eval", "ssh", "watch", "su", "sudo", "runuser", "script", "flock", "parallel", "tmux", "screen", "xargs", "env", "nsenter", "chroot", "unshare"]);
+/** Option words that, on any program, usually mean "run this string as a command line". */
+const COMMAND_FLAG = /^(?:-[A-Za-z]*c[A-Za-z]*|--command(?:=.*)?|-Command|\/c|-S|--split-string(?:=.*)?)$/;
+
+/**
+ * Scan a command line for metacharacters, substitutions, redirections and dangerous commands.
+ * Single quotes (and `$'…'`) make metacharacters literal, double quotes do not. A match is only skipped when two
+ * readings of the quotes agree it is single-quoted: a POSIX reading (escapes honoured) and a plain one that ignores
+ * escapes inside quotes, so a quote desync cannot hide a metacharacter. When any word may hand a string to another
+ * shell (a shell name, `eval`, `ssh`, `su`, `sudo`, `script`, `flock`, `env -S`, a `-c`-style flag, a command named
+ * through a variable such as `$SHELL`), every word is re-scanned as the command line that shell would receive.
+ */
 export function scanCommand(command: string): CommandIssue[] {
+  const issues = scanCommandAt(command, 0);
+  const seen = new Set<string>();
+  return issues.filter((issue) => {
+    const key = `${issue.code}:${issue.span.start}:${issue.span.end}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function scanCommandAt(command: string, depth: number): CommandIssue[] {
   const issues: CommandIssue[] = [];
-  const ranges = quotedRanges(command);
-  const inSingleQuotes = (index: number) => ranges.some((r) => r.quote === "'" && index > r.start && index < r.end);
+  const { singleQuoted, words } = tokenize(command);
+  const plainSingleQuoted = plainSingleQuoteMask(command);
+  const ignoreQuotes = depth > MAX_REPARSE_DEPTH;
   for (const rule of META) {
     rule.pattern.lastIndex = 0;
     for (const match of command.matchAll(rule.pattern)) {
       const start = match.index ?? 0;
-      // Single quotes neutralise metacharacters in POSIX shells; double quotes do not neutralise `$(` or backticks.
-      if (inSingleQuotes(start)) continue;
+      if (!ignoreQuotes && singleQuoted[start] === 1 && plainSingleQuoted[start] === 1) continue;
       issues.push({ code: rule.code, score: rule.score, message: rule.message, span: { start, end: start + match[0].length } });
     }
   }
@@ -49,11 +77,118 @@ export function scanCommand(command: string): CommandIssue[] {
     const start = match.index ?? 0;
     issues.push({ code: "dangerous_command", score: 0.95, message: "Destructive or remote-execution command", span: { start, end: start + match[0].length } });
   }
+  if (!ignoreQuotes && reparses(words)) {
+    for (const word of words) {
+      if (word.content === command) continue;
+      for (const inner of scanCommandAt(word.content, depth + 1)) {
+        const start = word.offsets[inner.span.start] ?? word.offsets[word.offsets.length - 1]!;
+        const end = word.offsets[inner.span.end] ?? word.offsets[word.offsets.length - 1]!;
+        issues.push({ ...inner, span: { start, end: Math.max(end, start + 1) } });
+      }
+    }
+  }
   return issues;
 }
 
-function quotedRanges(command: string): Array<{ quote: string; start: number; end: number }> {
-  const ranges: Array<{ quote: string; start: number; end: number }> = [];
+/** True when a word of the command may run another shell on its arguments. */
+function reparses(words: readonly Word[]): boolean {
+  return words.some(({ content }) => {
+    if (content.startsWith("$") || COMMAND_FLAG.test(content)) return true;
+    const name = content.slice(content.lastIndexOf("/") + 1);
+    return SHELL_NAME.test(name) || REPARSERS.has(name);
+  });
+}
+
+interface Word {
+  /** The text the program receives as this argument, quotes removed and escapes resolved. */
+  content: string;
+  /** For each index of `content`, and one past its end, the index in the command. */
+  offsets: number[];
+}
+
+const ANSI_ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", v: "\v" };
+
+/**
+ * The words of a command line and a mask of the indexes inside single (or `$'…'`) quotes, read the way a POSIX
+ * shell reads them in one pass: a backslash escapes the next character outside quotes, single quotes take no
+ * escapes, double quotes honour `\"`, `\\`, `\$` and `\``, and `$'…'` honours every backslash escape.
+ */
+function tokenize(command: string): { singleQuoted: Uint8Array; words: Word[] } {
+  const singleQuoted = new Uint8Array(command.length);
+  const words: Word[] = [];
+  let content = "";
+  let offsets: number[] = [];
+  let inWord = false;
+  const add = (text: string, index: number) => {
+    content += text;
+    offsets.push(index);
+    inWord = true;
+  };
+  const endWord = (end: number) => {
+    if (inWord) {
+      offsets.push(end);
+      words.push({ content, offsets });
+    }
+    content = "";
+    offsets = [];
+    inWord = false;
+  };
+  let i = 0;
+  while (i < command.length) {
+    const c = command[i]!;
+    if (c === "\\") {
+      if (i + 1 < command.length && command[i + 1] !== "\n") add(command[i + 1]!, i + 1);
+      i += 2;
+      continue;
+    }
+    const ansi = c === "$" && command[i + 1] === "'";
+    if (c === "'" || c === '"' || ansi) {
+      const open = ansi ? i + 1 : i;
+      const quote = ansi ? "'" : c;
+      inWord = true;
+      let j = open + 1;
+      while (j < command.length && command[j] !== quote) {
+        const d = command[j]!;
+        if (quote === "'") singleQuoted[j] = 1;
+        if (d === "\\" && quote === '"' && j + 1 < command.length) {
+          const next = command[j + 1]!;
+          if (next === '"' || next === "\\" || next === "$" || next === "`") {
+            add(next, j);
+            j += 2;
+            continue;
+          }
+          if (next === "\n") {
+            j += 2;
+            continue;
+          }
+        }
+        if (d === "\\" && ansi && j + 1 < command.length) {
+          singleQuoted[j + 1] = 1;
+          add(ANSI_ESCAPES[command[j + 1]!] ?? command[j + 1]!, j);
+          j += 2;
+          continue;
+        }
+        add(d, j);
+        j += 1;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (/\s/.test(c) || ";|&()<>".includes(c)) {
+      endWord(i);
+      i += 1;
+      continue;
+    }
+    add(c, i);
+    i += 1;
+  }
+  endWord(command.length);
+  return { singleQuoted, words };
+}
+
+/** Indexes inside single quotes when quotes are read without escapes inside them (the reading used before 12.7). */
+function plainSingleQuoteMask(command: string): Uint8Array {
+  const mask = new Uint8Array(command.length);
   let i = 0;
   while (i < command.length) {
     const c = command[i]!;
@@ -64,13 +199,13 @@ function quotedRanges(command: string): Array<{ quote: string; start: number; en
     if (c === "'" || c === '"') {
       const end = command.indexOf(c, i + 1);
       if (end < 0) break;
-      ranges.push({ quote: c, start: i, end });
+      if (c === "'") mask.fill(1, i + 1, end);
       i = end + 1;
       continue;
     }
     i += 1;
   }
-  return ranges;
+  return mask;
 }
 
 /**

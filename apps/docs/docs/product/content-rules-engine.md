@@ -244,7 +244,7 @@ A verdict carries the overall action, the findings at or above threshold, the su
 
 ## Benchmark
 
-The red-team benchmark of content rules lives in `packages/guard-sdk/corpus/`: a labelled corpus of direct injection, indirect injection, SQL injection and exfiltration attacks with benign look-alikes. `pnpm --filter @ai-orchestrator/guard-sdk test` runs it through the default rule set and fails when detection drops below 90% (85% for indirect injection, 95% for SQL) or false positives exceed 5% in any category. The thresholds and the item format are in `corpus/README.md`.
+`packages/guard-sdk/corpus/` holds a labelled red-team corpus of content-rule attacks and benign look-alikes in eleven categories, with a main split and a held-out split. `runGuardBenchmark(ruleSet)` runs it through any rule set. `pnpm --filter @ai-orchestrator/guard-sdk test` and the repository's CI fail when the default rule set drops below its measured results in any category. See [Content rules benchmark](./content-rules-benchmark.md) for the categories, the OWASP mapping, the measured rates, the Security page, the API and `l2m guard benchmark`. The item format is in `corpus/README.md`.
 
 ## OWASP Top 10 for LLM applications
 

@@ -8,11 +8,12 @@
  * builders then cannot change) and a workflow's override, with the profiles
  * that apply to agent traffic in evaluation order.
  * Phase 15.6: profile editors can simulate the editor's changes (or a saved
- * version) on recent recorded runs before saving.
+ * version) on recent recorded runs before saving. 12.7: and benchmark the
+ * editor's draft on the red-team corpus ("Benchmark this draft").
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { GuardBindingMode, GuardProfileSummary, GuardProfileVersionView, GuardResolutionView, Project, WorkflowListItem } from "@ai-orchestrator/shared";
+import type { GuardBenchmarkResponse, GuardBindingMode, GuardProfileSummary, GuardProfileVersionView, GuardResolutionView, Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import {
   ApiError,
   createGuardProfile,
@@ -26,6 +27,7 @@ import {
   fetchGuardWorkflowBinding,
   guardProfileExportUrl,
   importGuardProfile,
+  runGuardBenchmark,
   updateGuardProfile,
   updateGuardProjectBinding,
   updateGuardWorkflowBinding,
@@ -58,6 +60,8 @@ import {
 import { actionLabel, channelLabel } from "../lib/guard-trace";
 import { GuardSimulationCard, useGuardSimulation } from "./GuardSimulationPanel";
 import { simulateDenial } from "../lib/guard-simulation";
+import { benchmarkDraftDenial } from "../lib/guard-benchmark";
+import { GuardBenchmarkResultCard } from "./GuardBenchmarkView";
 
 type Role = "admin" | "builder" | "operator" | "viewer";
 
@@ -229,6 +233,14 @@ function GuardProfileEditor({
   const [jsonText, setJsonText] = useState("");
   const [busy, setBusy] = useState(false);
   const simulation = useGuardSimulation(profileId);
+  // 12.7 — "Benchmark this draft": the corpus through the editor's document; returned, never stored.
+  const [benchmark, setBenchmark] = useState<GuardBenchmarkResponse | null>(null);
+  const [benchmarkError, setBenchmarkError] = useState<string | null>(null);
+  const [benchmarking, setBenchmarking] = useState(false);
+  useEffect(() => {
+    setBenchmark(null);
+    setBenchmarkError(null);
+  }, [profileId]);
 
   const load = useCallback(async () => {
     try {
@@ -255,6 +267,7 @@ function GuardProfileEditor({
   const readOnly = !canEdit || summary.builtIn;
   // Phase 15.6 — who may simulate: the same rule as saving (admins also on the built-in profile, through a saved version).
   const simulateBlocked = simulateDenial(role, summary);
+  const benchmarkBlocked = benchmarkDraftDenial(role, summary);
   const dirty = JSON.stringify(document) !== saved;
   const update = (next: GuardDocument) => {
     setDocument(next);
@@ -310,6 +323,31 @@ function GuardProfileEditor({
       }
     }
     void simulation.start({ document: next as Record<string, unknown> });
+  };
+
+  const benchmarkDraft = async () => {
+    let next = document;
+    if (jsonMode) {
+      try {
+        next = JSON.parse(jsonText) as GuardDocument;
+      } catch {
+        setIssues([{ path: "(json)", message: "Not valid JSON" }]);
+        setError("Invalid rule set");
+        return;
+      }
+    }
+    setBenchmarking(true);
+    setBenchmarkError(null);
+    try {
+      setBenchmark(await runGuardBenchmark(profileId, { document: next as Record<string, unknown> }));
+      setIssues([]);
+    } catch (err) {
+      setBenchmark(null);
+      setIssues(issuesOf(err));
+      setBenchmarkError(errorText(err));
+    } finally {
+      setBenchmarking(false);
+    }
   };
 
   const duplicate = async () => {
@@ -537,6 +575,17 @@ function GuardProfileEditor({
             >
               {simulation.busy ? "Simulating…" : "Simulate on recent traffic"}
             </button>
+            {benchmarkBlocked === null && (
+              <button
+                type="button"
+                className="pg-btn"
+                disabled={benchmarking}
+                title="Run the red-team corpus through the rule set with these settings and compare it with the latest stored benchmark; nothing is saved and no model is called"
+                onClick={() => void benchmarkDraft()}
+              >
+                {benchmarking ? "Benchmarking…" : "Benchmark this draft"}
+              </button>
+            )}
             {!readOnly && (
               <button type="button" className="pg-btn primary" disabled={busy || (!dirty && !jsonMode)} onClick={() => void save()}>
                 {dirty || jsonMode ? "Save new version" : "Saved"}
@@ -545,6 +594,7 @@ function GuardProfileEditor({
           </div>
         )}
         {canEdit && simulateBlocked && (!readOnly || summary.builtIn) && <p className="kb-subtle guard-sim-denied">{simulateBlocked}</p>}
+        {canEdit && benchmarkBlocked === null && <GuardBenchmarkResultCard result={benchmark} error={benchmarkError} busy={benchmarking} />}
         {canEdit && !simulateBlocked && (
           <GuardSimulationCard
             simulation={simulation.simulation}

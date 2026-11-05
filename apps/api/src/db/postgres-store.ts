@@ -17,6 +17,7 @@ import * as executions from "./postgres/executions.js";
 import * as flow_state from "./postgres/flow-state.js";
 import * as guard from "./postgres/guard.js";
 import * as guard_simulation from "./postgres/guard-simulation.js";
+import * as guard_benchmark from "./postgres/guard-benchmark.js";
 import * as knowledge from "./postgres/knowledge.js";
 import * as mcp from "./postgres/mcp.js";
 import * as misc from "./postgres/misc.js";
@@ -673,6 +674,15 @@ export class PostgresStore implements Store {
   }
   async markEvalRunsReleaseIneligible(...args: Parameters<Store["markEvalRunsReleaseIneligible"]>): ReturnType<Store["markEvalRunsReleaseIneligible"]> {
     return release.markEvalRunsReleaseIneligible(this.ctx, ...args);
+  }
+  async insertGuardBenchmark(...args: Parameters<Store["insertGuardBenchmark"]>): ReturnType<Store["insertGuardBenchmark"]> {
+    return guard_benchmark.insertGuardBenchmark(this.ctx, ...args);
+  }
+  async listGuardBenchmarks(...args: Parameters<Store["listGuardBenchmarks"]>): ReturnType<Store["listGuardBenchmarks"]> {
+    return guard_benchmark.listGuardBenchmarks(this.ctx, ...args);
+  }
+  async getGuardBenchmark(...args: Parameters<Store["getGuardBenchmark"]>): ReturnType<Store["getGuardBenchmark"]> {
+    return guard_benchmark.getGuardBenchmark(this.ctx, ...args);
   }
   async insertGuardSimulation(...args: Parameters<Store["insertGuardSimulation"]>): ReturnType<Store["insertGuardSimulation"]> {
     return guard_simulation.insertGuardSimulation(this.ctx, ...args);

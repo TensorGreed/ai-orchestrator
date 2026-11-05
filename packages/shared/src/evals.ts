@@ -65,6 +65,16 @@ export const EVAL_SCORERS_MAX = 20;
 /** Largest JSON Schema a json_schema scorer may carry, as JSON text. */
 export const JSON_SCHEMA_SCORER_MAX_BYTES = 65_536;
 
+/**
+ * Phase 12.7 — what a `guard_outcome` scorer expects of the run's non-shadow
+ * verdicts that match its filters: `caught` (some verdict did anything but
+ * allow: block, review, approval, redact, mask, transform), `blocked` (some
+ * verdict blocked, sent to review or asked for approval) or `allowed` (none
+ * did anything but allow).
+ */
+export const GUARD_OUTCOME_EXPECTATIONS = ["caught", "blocked", "allowed"] as const;
+export const GUARD_OUTCOME_CHANNELS = ["prompt", "model_output", "tool_arguments", "tool_result", "final_output", "egress"] as const;
+
 export const evalScorerSpecSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("exact_match"), path: pathSchema.optional(), ignoreCase: z.boolean().optional() }),
   z.object({ type: z.literal("contains"), path: pathSchema.optional(), needle: z.string().max(2000).optional(), ignoreCase: z.boolean().optional() }),
@@ -138,6 +148,15 @@ export const evalScorerSpecSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("status"), expect: z.string().trim().min(1).max(40).optional() }),
   z.object({ type: z.literal("no_new_guard_blocks"), failOnRemoved: z.boolean().optional() }),
+  // Phase 12.7 — the content rules's outcome on this run, for red-team fixtures (expect caught or blocked) and benign ones (expect allowed).
+  z.object({
+    type: z.literal("guard_outcome"),
+    expect: z.enum(GUARD_OUTCOME_EXPECTATIONS),
+    channel: z.enum(GUARD_OUTCOME_CHANNELS).optional(),
+    /** A detector id, or a prefix ending in "." (`injection.` covers injection.direct and injection.indirect). */
+    detector: z.string().trim().min(1).max(120).optional(),
+    nodeId: z.string().trim().min(1).max(200).optional()
+  }),
   z
     .object({
       type: z.literal("budget"),
@@ -166,6 +185,15 @@ export type EvalScorerSpec = z.infer<typeof evalScorerSpecSchema>;
 export type EvalScorerType = EvalScorerSpec["type"];
 
 export const evalScorerListSchema = z.array(evalScorerSpecSchema).max(EVAL_SCORERS_MAX);
+
+/**
+ * Phase 12.7 — `POST /api/eval/runs` `guardProfile`: run every case under
+ * this rule set (the latest version when none is given) instead of the
+ * workflow's bindings, as a replay job's override does.
+ */
+export const evalGuardProfileOverrideSchema = z
+  .object({ profileId: z.string().trim().min(1).max(200), version: z.number().int().positive().optional() })
+  .strict();
 
 export interface EvalScoreDetail {
   type: string;
@@ -413,6 +441,12 @@ export interface EvalRunView {
   candidate: ReplayJobCandidate | null;
   options: ReplayJobOptions | null;
   error: string | null;
+  /**
+   * Phase 12.7 — an eval run's rule set override (pinned when the run
+   * was created): the rule set its cases ran under instead of the workflow's
+   * bindings; enforced rule sets still apply. Absent when none was given.
+   */
+  guardProfile?: { profileId: string; version: number; hash: string };
   /**
    * Replay jobs over a golden set of an enforced release gate: the gate's
    * admitted and required cases, so a client reports them as the gate counts

@@ -18,6 +18,10 @@ import type {
   ReplayFindSubjectResult,
   ApprovalRequestView,
   GuardSimulationView,
+  GuardBenchmarkListEntry,
+  GuardBenchmarkReport,
+  GuardBenchmarkRequest,
+  GuardBenchmarkResponse,
   GateCaseRequestView,
   ReleaseApprovalRequestView,
   ReleaseGateCasesView,
@@ -3914,6 +3918,8 @@ export interface GuardEventFilter {
   findings?: boolean;
   /** 12.6 — `gateway`: MCP gateway server tool calls only; `run`: workflow runs only. */
   placement?: "gateway" | "run";
+  /** 12.7 — include verdicts eval runs and replay jobs recorded (left out by default). */
+  includeEval?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -3992,6 +3998,24 @@ export async function cancelGuardSimulation(simulationId: string) {
 
 export async function fetchGuardSimulations(profileId: string) {
   return apiRequest<{ simulations: GuardSimulationView[] }>(`/api/guard/profiles/${encodeURIComponent(profileId)}/simulations`);
+}
+
+/** 12.7 — the red-team corpus through a saved version (stored) or the editor's unsaved document (returned only). */
+export async function runGuardBenchmark(id: string, payload: GuardBenchmarkRequest) {
+  return apiRequest<GuardBenchmarkResponse>(`/api/guard/profiles/${encodeURIComponent(id)}/benchmark`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchGuardBenchmarks(profileId: string) {
+  return apiRequest<{ benchmarks: GuardBenchmarkListEntry[] }>(`/api/guard/profiles/${encodeURIComponent(profileId)}/benchmarks`);
+}
+
+export async function fetchGuardBenchmark(benchmarkId: string) {
+  return apiRequest<{ benchmark: Omit<GuardBenchmarkListEntry, "splits" | "attackSuccessRate">; report: GuardBenchmarkReport | null }>(
+    `/api/guard/benchmarks/${encodeURIComponent(benchmarkId)}`
+  );
 }
 
 export async function fetchGuardDetectors() {

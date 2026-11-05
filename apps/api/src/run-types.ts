@@ -102,6 +102,8 @@ export interface RunWorkflowExecutionInput {
   providerRegistry?: ProviderRegistry;
   /** Phase 15.3 — a replay candidate's guard profile, evaluated in place of the bindings. */
   guardProfileOverride?: { profileId: string; version?: number };
+  /** 12.7 — an eval run's rule set, added after everything the run applies anyway (never replacing a rule set). */
+  guardProfileAddition?: { profileId: string; version?: number };
   /** Phase 15.6 — a guard policy simulation's execution: the profile it swaps in, and where its verdicts and tokens go. */
   guardSimulation?: GuardSimulationRun;
   /**
@@ -151,4 +153,10 @@ export interface RunWorkflowExecutionInput {
    * toolset project's budgets. Crosses the queue with the spec. Not carried by retries or replays.
    */
   gatewayUsage?: GatewayRunUsage;
+  /**
+   * 12.7 — the run's Content rules verdicts are recorded as eval traffic (`run_source = 'eval'`). Set only by the eval executor
+   * and replays, and by an approval resume of their paused part (carried in the paused state); never from a trigger
+   * name or a request body.
+   */
+  guardRunSource?: "eval";
 }

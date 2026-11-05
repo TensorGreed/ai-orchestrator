@@ -76,6 +76,7 @@ import type {
   GuardProfileRecord,
   GuardProfileVersionRecord,
   GuardSimulationRecord,
+  GuardBenchmarkStoredRecord,
   GuardVaultRow,
   KnowledgeBaseChunkRecord,
   KnowledgeBaseRecord,
@@ -434,6 +435,14 @@ export interface Store {
   listRunningGuardSimulations(): Promise<GuardSimulationRecord[]>;
   /** Deletes simulations created before `before`, with their replay jobs and case results. Returns how many simulations were deleted. */
   pruneGuardSimulations(input: { before: string }): Promise<number>;
+
+  // ---- 12.7 Content rules benchmarks
+
+  /** Stores a benchmark and keeps only the rule set's newest `keep` (older ones are deleted). */
+  insertGuardBenchmark(record: GuardBenchmarkStoredRecord, options: { keep: number }): Promise<void>;
+  /** The rule set's benchmarks, newest first. */
+  listGuardBenchmarks(options: { profileId: string; limit?: number }): Promise<GuardBenchmarkStoredRecord[]>;
+  getGuardBenchmark(id: string): Promise<GuardBenchmarkStoredRecord | null>;
 
   // ---- MCP cassettes
 

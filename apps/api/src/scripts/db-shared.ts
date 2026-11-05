@@ -147,6 +147,7 @@ export const EXPORTED_TABLES = [
   "guard_bindings",
   "guard_events",
   "guard_simulations",
+  "guard_benchmarks",
   "guard_token_vault",
   "data_destinations",
   "model_allowlist_entries",

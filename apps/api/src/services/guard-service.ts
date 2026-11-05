@@ -124,6 +124,19 @@ export interface GuardRunContext {
    */
   profileOverride?: { profileId: string; version?: number };
   /**
+   * 12.7 — an eval run's rule set: added after everything the run would
+   * apply anyway (enforced, workflow and project bindings, the auto-applied
+   * default rule set) and before the deployment's destination rules. It
+   * never replaces a rule set, so a looser choice cannot weaken the run.
+   */
+  profileAddition?: { profileId: string; version?: number };
+  /**
+   * 12.7 — `eval`: the run is an eval run or a replay job, so its verdicts are
+   * stored with `run_source = 'eval'` and the Security page leaves them out
+   * by default (the run's own trace still shows them).
+   */
+  runSource?: "eval";
+  /**
    * Phase 15.6 — a guard policy simulation: wherever this run would apply
    * the substitute's profile (a binding, the enforced floor, a guard port
    * naming it), the substitute is applied instead. Every other profile the
@@ -578,6 +591,7 @@ export class GuardService {
     workflowId: string;
     projectId?: string | null;
     profileOverride?: GuardRunContext["profileOverride"];
+    profileAddition?: GuardRunContext["profileAddition"];
     profileSubstitute?: GuardProfileSubstitute;
     gatewayStack?: GatewayGuardProfileRef[];
   }): Promise<GuardRunResolution> {
@@ -590,10 +604,20 @@ export class GuardService {
     return context.profileSubstitute ? GuardService.substitute(withGateway, context.profileSubstitute) : withGateway;
   }
 
-  private async resolveRunOwn(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"]; profileSubstitute?: GuardProfileSubstitute }): Promise<GuardRunResolution> {
+  private async resolveRunOwn(context: {
+    workflowId: string;
+    projectId?: string | null;
+    profileOverride?: GuardRunContext["profileOverride"];
+    profileAddition?: GuardRunContext["profileAddition"];
+    profileSubstitute?: GuardProfileSubstitute;
+  }): Promise<GuardRunResolution> {
     if (context.profileSubstitute) {
       const { profileSubstitute, ...rest } = context;
       return GuardService.substitute(await this.resolveRun(rest), profileSubstitute);
+    }
+    if (context.profileAddition) {
+      const { profileAddition, ...rest } = context;
+      return await this.withAddition(await this.resolveRunOwn(rest), profileAddition);
     }
     if (context.profileOverride) return await this.resolveOverride(context.profileOverride, context.projectId ?? "default");
     const projectId = context.projectId ?? "default";
@@ -728,6 +752,26 @@ export class GuardService {
     const stack = resolution.stack.some((entry) => entry.hash === deployment.hash) ? resolution.stack : [...resolution.stack, deployment];
     const chain: GuardBindingLevel[] = [...resolution.chain, { level: "destinations", mode: "enforced", profileId: deployment.profileId, version: deployment.version }];
     return { ...resolution, stack, chain, deployment };
+  }
+
+  /**
+   * 12.7 — an eval run's chosen rule set after the run's own rule sets and before the deployment's destination rules
+   * (a rule set already in the stack, same hash, is not added twice). Stacked rule sets only tighten: the most severe
+   * action wins.
+   */
+  private async withAddition(resolution: GuardRunResolution, addition: NonNullable<GuardRunContext["profileAddition"]>): Promise<GuardRunResolution> {
+    const candidate = await this.loadProfile(addition.profileId, addition.version);
+    if (!candidate) throw new GuardNotFoundError(await this.profileOverrideProblem(addition) ?? `Rule set '${addition.profileId}' not found`);
+    const deployment = resolution.deployment;
+    const last = resolution.stack[resolution.stack.length - 1];
+    const tail = deployment && last === deployment ? [deployment] : [];
+    const head = tail.length > 0 ? resolution.stack.slice(0, -1) : resolution.stack;
+    const present = resolution.stack.some((entry) => entry.hash === candidate.hash);
+    const stack = present ? resolution.stack : [...head, candidate, ...tail];
+    const level: GuardBindingLevel = { level: "candidate", mode: "override", profileId: candidate.profileId, version: candidate.version };
+    const at = resolution.chain.findIndex((entry) => entry.level === "destinations");
+    const chain = at < 0 ? [...resolution.chain, level] : [...resolution.chain.slice(0, at), level, ...resolution.chain.slice(at)];
+    return { ...resolution, source: resolution.source === "none" ? "candidate" : resolution.source, stack, chain };
   }
 
   /** The resolution for a candidate profile: the project's enforced floor (unless it is the same profile), then the candidate. */
@@ -952,7 +996,8 @@ export class GuardService {
       latencyMs: summary.timings.totalMs,
       budgetExceeded: summary.budget.exceeded,
       skippedDetectors: summary.budget.skippedDetectors,
-      createdAt
+      createdAt,
+      ...(context.runSource ? { runSource: context.runSource } : {})
     };
     const rows: GuardEventInsert[] =
       summary.actions.length === 0
@@ -1099,6 +1144,7 @@ function toEventView(record: GuardEventRecord): GuardEventView {
     latencyMs: record.latencyMs,
     budgetExceeded: record.budgetExceeded,
     skippedDetectors: record.skippedDetectors,
-    createdAt: record.createdAt
+    createdAt: record.createdAt,
+    ...(record.runSource === "eval" ? { runSource: "eval" as const } : {})
   };
 }

@@ -26,3 +26,4 @@ export { configureExpressionSandbox, expressionSandboxLimits, EXPRESSION_SANDBOX
 export { runWithSandboxOwner } from "./quickjs-sandbox";
 export * from "./outbound-url-guard";
 export * from "./model-references";
+export * from "./redteam-suite";

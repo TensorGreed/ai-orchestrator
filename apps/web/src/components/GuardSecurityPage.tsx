@@ -6,7 +6,10 @@
  * the latest events (masked evidence only) with links to their runs. Filter
  * by project, workflow and profile. Profiles: the profile editor and the
  * project / workflow bindings with the enforced lock. Data destinations
- * (Phase 16): how far each place data goes is from home.
+ * (Phase 16): how far each place data goes is from home. Benchmark (12.7):
+ * the red-team corpus through a rule set, per category and split, with a
+ * trend per version. Eval runs and replay jobs are left out of the
+ * Overview's numbers (the API's default).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -14,11 +17,12 @@ import type { GuardEventView, GuardProfileSummary, Project, WorkflowListItem } f
 import { ApiError, fetchGuardEvents, fetchGuardProfiles, fetchGuardStats, type GuardStats } from "../lib/api";
 import { actionLabel, channelLabel, dailySeries, verdictReasonLine } from "../lib/guard-trace";
 import { DataDestinationsView } from "./DataDestinationsView";
+import { GuardBenchmarkView } from "./GuardBenchmarkView";
 import { GuardProfilesView } from "./GuardProfilesView";
 import { ModelAllowlistView } from "./ModelAllowlistView";
 
-type Tab = "overview" | "profiles" | "destinations" | "models";
-const TAB_LABEL: Record<Tab, string> = { overview: "Overview", profiles: "Rule sets & bindings", destinations: "Data destinations", models: "Models" };
+type Tab = "overview" | "profiles" | "destinations" | "models" | "benchmark";
+const TAB_LABEL: Record<Tab, string> = { overview: "Overview", profiles: "Rule sets & bindings", destinations: "Data destinations", models: "Models", benchmark: "Benchmark" };
 const DAY_WINDOWS = [7, 14, 30] as const;
 
 function formatError(err: unknown): string {
@@ -50,7 +54,7 @@ export function GuardSecurityPage({ projects, workflows, activeProjectId, role, 
           <p className="page-sub">Content rule verdicts on prompts, tool calls, tool results and answers, and the rule sets that decide them.</p>
         </div>
         <div className="finops-range guard-tabs" role="tablist" aria-label="Security views">
-          {(["overview", "profiles", "destinations", "models"] as Tab[]).map((entry) => (
+          {(["overview", "profiles", "destinations", "models", "benchmark"] as Tab[]).map((entry) => (
             <button
               key={entry}
               type="button"
@@ -68,6 +72,7 @@ export function GuardSecurityPage({ projects, workflows, activeProjectId, role, 
       {tab === "profiles" && <GuardProfilesView projects={projects} workflows={workflows} activeProjectId={activeProjectId ?? "default"} role={role} />}
       {tab === "destinations" && <DataDestinationsView />}
       {tab === "models" && <ModelAllowlistView projects={projects} {...(activeProjectId ? { activeProjectId } : {})} />}
+      {tab === "benchmark" && <GuardBenchmarkView role={role} />}
     </section>
   );
 }
@@ -79,6 +84,8 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
   const [profileId, setProfileId] = useState("");
   // 12.6 — "gateway": MCP gateway server tool calls; "run": workflow runs.
   const [placement, setPlacement] = useState<"" | "gateway" | "run">("");
+  // 12.7 — eval runs and replay jobs (red-team suites among them) are left out unless asked for.
+  const [includeEval, setIncludeEval] = useState(false);
   const [profiles, setProfiles] = useState<GuardProfileSummary[]>([]);
   const [stats, setStats] = useState<GuardStats | null>(null);
   const [events, setEvents] = useState<Array<GuardEventView & { workflowName?: string }>>([]);
@@ -99,9 +106,10 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
       ...(projectId ? { projectId } : {}),
       ...(workflowId ? { workflowId } : {}),
       ...(profileId ? { profileId } : {}),
-      ...(placement ? { placement } : {})
+      ...(placement ? { placement } : {}),
+      ...(includeEval ? { includeEval: true } : {})
     }),
-    [days, placement, profileId, projectId, workflowId]
+    [days, includeEval, placement, profileId, projectId, workflowId]
   );
 
   const refresh = useCallback(async () => {
@@ -172,6 +180,9 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
             <option value="run">Workflow runs</option>
             <option value="gateway">MCP gateway calls</option>
           </select>
+        </label>
+        <label className="guard-inline-check" title="Eval runs and replay jobs run live or sandboxed tests; their verdicts are left out of these numbers unless included.">
+          <input type="checkbox" checked={includeEval} onChange={(event) => setIncludeEval(event.target.checked)} /> Include eval and replay runs
         </label>
         <div className="finops-range" role="group" aria-label="Window">
           {DAY_WINDOWS.map((entry) => (
@@ -259,7 +270,14 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                   <tr key={event.id}>
                     <td className="muted-cell">{formatWhen(event.createdAt)}</td>
                     <td>
-                      <span>{event.placement === "gateway" ? "MCP gateway" : event.workflowName ?? event.workflowId ?? "—"}</span>
+                      <span>
+                        {event.placement === "gateway" ? "MCP gateway" : event.workflowName ?? event.workflowId ?? "—"}
+                        {event.runSource === "eval" && (
+                          <span className="guard-chip" title="Recorded by an eval run or a replay job">
+                            eval
+                          </span>
+                        )}
+                      </span>
                       <span className="mono-cell guard-cell-sub">
                         {event.nodeId}
                         {typeof event.iteration === "number" ? ` · step ${event.iteration}` : ""}

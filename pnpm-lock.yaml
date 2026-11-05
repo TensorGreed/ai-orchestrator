@@ -197,12 +197,18 @@ importers:
 
   packages/cli:
     dependencies:
+      '@ai-orchestrator/guard-sdk':
+        specifier: workspace:*
+        version: link:../guard-sdk
       '@ai-orchestrator/mcp-sdk':
         specifier: workspace:*
         version: link:../mcp-sdk
       '@ai-orchestrator/shared':
         specifier: workspace:*
         version: link:../shared
+      '@ai-orchestrator/workflow-engine':
+        specifier: workspace:*
+        version: link:../workflow-engine
       tsx:
         specifier: ^4.20.5
         version: 4.21.0
