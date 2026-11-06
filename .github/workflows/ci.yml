@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
       # invokes `pnpm` to compute the cache key, so pnpm has to already be
@@ -23,7 +23,7 @@ jobs:
         run: corepack enable
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: "pnpm"
@@ -82,7 +82,7 @@ jobs:
       REQUIRE_TEST_POSTGRES: "true"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
       # invokes `pnpm` to compute the cache key, so pnpm has to already be
@@ -92,7 +92,7 @@ jobs:
         run: corepack enable
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: "pnpm"
@@ -123,7 +123,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
       # invokes `pnpm` to compute the cache key, so pnpm has to already be
@@ -133,7 +133,7 @@ jobs:
         run: corepack enable
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: "pnpm"
@@ -182,7 +182,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
       # invokes `pnpm` to compute the cache key, so pnpm has to already be
@@ -192,7 +192,7 @@ jobs:
         run: corepack enable
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: "pnpm"
