@@ -238,6 +238,11 @@ async function newClient(fixture: Fixture, name: string, routeSetIds: string[]) 
   return { client: created.body.client, token: created.body.token };
 }
 
+async function setClientRateLimit(fixture: Fixture, clientId: string, rateLimit: Record<string, unknown>) {
+  const updated = await api(fixture, "PATCH", `/api/mcp/clients/${clientId}`, { rateLimit });
+  expect(updated.status, updated.raw).toBe(200);
+}
+
 function v1(fixture: Fixture, token: string | null, pathName: string, body?: unknown, init: RequestInit = {}) {
   return fetch(`${fixture.base}${pathName}`, {
     method: body === undefined ? "GET" : "POST",
@@ -605,6 +610,37 @@ describe("grants, rate limits and budgets", () => {
     expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
     expect(((await limited.json()) as { error: { code: string } }).error.code).toBe("rate_limit_exceeded");
     expect(fixture.upstream.requests).toHaveLength(1);
+  });
+
+  it("applies the route set's limit as well as the client's own, whichever is tighter", async () => {
+    const chat = { model: "gpt-test", messages: [{ role: "user", content: "hi" }] };
+
+    const tightSet = await setup();
+    const generousClient = await gateway(tightSet, { rateLimit: { requestsPerMinute: 1 } });
+    await setClientRateLimit(tightSet, generousClient.client.id, { requestsPerMinute: 100 });
+    expect((await v1(tightSet, generousClient.token, "/v1/chat/completions", chat)).status).toBe(200);
+    expect((await v1(tightSet, generousClient.token, "/v1/chat/completions", chat)).status).toBe(429);
+
+    const tightClient = await setup();
+    const generousSet = await gateway(tightClient, { rateLimit: { requestsPerMinute: 100 } });
+    await setClientRateLimit(tightClient, generousSet.client.id, { requestsPerMinute: 1 });
+    expect((await v1(tightClient, generousSet.token, "/v1/chat/completions", chat)).status).toBe(200);
+    expect((await v1(tightClient, generousSet.token, "/v1/chat/completions", chat)).status).toBe(429);
+  });
+
+  it("gives back the client's concurrency slot when the route set's limit refuses", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture, { rateLimit: { requestsPerMinute: 1 } });
+    await setClientRateLimit(fixture, gw.client.id, { maxConcurrent: 1 });
+    const chat = { model: "gpt-test", messages: [{ role: "user", content: "hi" }] };
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", chat)).status).toBe(200);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const refused = await v1(fixture, gw.token, "/v1/chat/completions", chat);
+      expect(refused.status).toBe(429);
+    }
+    const cleared = await api(fixture, "PUT", `/api/ai-gateway/route-sets/${gw.set.id}`, { rateLimit: null });
+    expect(cleared.status, cleared.raw).toBe(200);
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", chat)).status).toBe(200);
   });
 
   it("counts usage toward the client's budget and refuses with 429 insufficient_quota once it is used up", async () => {

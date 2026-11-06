@@ -126,7 +126,7 @@ A budget is checked when a request starts and the spend lands when it ends, so r
 
 [Budgets](./budgets) count these rows for the client (`mcp_client` scope), the route set's project and the deployment. When a block budget is used up, requests answer `429` with code `insufficient_quota` and a `Retry-After` until the budget's period resets.
 
-Rate limits are the client's own, or else the route set's default for each client. Over the limit, requests answer `429` with code `rate_limit_exceeded` and `Retry-After`. In cluster mode the per-minute counts are shared across replicas.
+A client's own rate limit and its route set's limit both apply: the route set's limit counts each client separately, and a request must pass both. Over either limit, requests answer `429` with code `rate_limit_exceeded` and `Retry-After`. In cluster mode the per-minute counts are shared across replicas.
 
 Usage by model name and client is shown under **MCP → AI routes**.
 

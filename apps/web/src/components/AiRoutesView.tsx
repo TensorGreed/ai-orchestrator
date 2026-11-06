@@ -3,7 +3,7 @@
  *
  * A route set belongs to a project (its budgets and rule set floor apply) and holds routes: a public model name (the
  * alias a caller sends as `model`) mapped to a provider, an upstream model and a stored secret. Admins create and
- * change sets and routes, pick a set's rule set and default rate limit, and grant sets to clients (on the
+ * change sets and routes, pick a set's rule set and rate limit, and grant sets to clients (on the
  * client's Governance). Builders read the sets and routes; usage is spend, so it is admin-only, as on the Usage pages.
  * Nothing is served until a set is granted.
  */
@@ -305,7 +305,7 @@ function RouteSetCard({
           <dd>{clientNames.length === 0 ? "none (grant it on a client's Governance)" : clientNames.join(", ")}</dd>
         </div>
         <div>
-          <dt>Default rate limit</dt>
+          <dt>Rate limit per client</dt>
           <dd>{describeRateLimit(set.rateLimit)}</dd>
         </div>
       </dl>

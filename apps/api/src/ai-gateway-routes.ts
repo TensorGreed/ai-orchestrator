@@ -323,17 +323,26 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       );
     }
 
-    // Rate limit: the client's own limit (one allowance across the MCP gateway and /v1), else the set's default.
-    let release = () => undefined as void;
-    const effective = effectiveGatewayRateLimit(client, { id: `ai:${routeSet.id}`, rateLimit: routeSet.rateLimit });
-    if (effective) {
+    // Rate limits: the client's own (one allowance across the MCP gateway and /v1) and the set's, per client. Both apply.
+    const held: Array<() => void> = [];
+    const release = () => {
+      for (const releaseSlot of held) releaseSlot();
+    };
+    const setLimitId = `ai:${routeSet.id}`;
+    const limits = [
+      effectiveGatewayRateLimit(client, { id: setLimitId, rateLimit: null }),
+      effectiveGatewayRateLimit({ id: client.id, rateLimit: null }, { id: setLimitId, rateLimit: routeSet.rateLimit })
+    ];
+    for (const effective of limits) {
+      if (!effective) continue;
       const key = effective.source === "client" ? effective.key : `client:${client.id}:aiset:${routeSet.id}`;
       const decision = await limiter.acquire(key, effective.limit);
       if (!decision.ok) {
+        release();
         await auditRefusal(client, routeSet, "ai_gateway.rate_limited", { alias: route.alias, reason: decision.reason, source: effective.source });
         throw aiGatewayErrors.rateLimited(decision.message, Math.max(1, Math.ceil(decision.retryAfterMs / 1000)));
       }
-      release = decision.release;
+      held.push(decision.release);
     }
     try {
       if (deps.budgets) {
