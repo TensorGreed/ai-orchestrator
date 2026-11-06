@@ -1,5 +1,5 @@
 /**
- * 12.6b — SqliteStore's AI gateway tables (v57). Each function matches the Store method of the same name; SqliteStore
+ * 12.6b — SqliteStore's AI gateway tables (v60). Each function matches the Store method of the same name; SqliteStore
  * delegates to them. The tables are created in SqliteStore.migrate (ensureAiGatewaySchema).
  */
 import type { Database as BetterSqlite3Database } from "better-sqlite3";

@@ -1,5 +1,5 @@
 /**
- * 12.6b — PostgresStore: the /v1 AI gateway tables (v57). Each function matches the SqliteStore method of the same
+ * 12.6b — PostgresStore: the /v1 AI gateway tables (v60). Each function matches the SqliteStore method of the same
  * name; text ordering uses the "C" collation, which compares like SQLite's BINARY.
  */
 import type { AiGatewayRequestRecord } from "@ai-orchestrator/shared";
