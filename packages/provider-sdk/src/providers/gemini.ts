@@ -164,7 +164,9 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
            });
          }
       } else if (msg.role === "tool") {
-         const functionName = msg.name || (msg.toolCallId ? callNames.get(msg.toolCallId) : undefined) || "tool";
+         // /v1 only (`providerDefaults` is its marker): a result takes the name of the call it answers. Runs keep "tool".
+         const answered = request.options?.providerDefaults && msg.toolCallId ? callNames.get(msg.toolCallId) : undefined;
+         const functionName = msg.name || answered || "tool";
          contents.push({
            role: "user",
            parts: [{

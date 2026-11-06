@@ -706,9 +706,9 @@ describe("everything that reaches the provider is counted", () => {
   const onlyRow = async (fixture: Fixture) => until(async () => (await requestsOf(fixture))[0], "the usage row");
 
   /** Reads until the whole answer has arrived, then hangs up before the upstream says anything more. */
-  async function readThenClose(fixture: Fixture, token: string, text: string) {
+  async function readThenClose(fixture: Fixture, token: string, text: string, body: Record<string, unknown> = streamed) {
     const abort = new AbortController();
-    const response = await v1(fixture, token, "/v1/chat/completions", streamed, { signal: abort.signal });
+    const response = await v1(fixture, token, "/v1/chat/completions", body, { signal: abort.signal });
     expect(response.status).toBe(200);
     const reader = response.body!.getReader();
     let seen = "";
@@ -925,6 +925,70 @@ describe("everything that reaches the provider is counted", () => {
     await guardProfile(fixture, { id: "aigw-none", name: "None", version: "1", channels: { prompt: dlpChannel("block") } }, gw.set.id);
     await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: EMAIL }] });
     expect((await requestsOf(fixture))[0]).toMatchObject({ status: "blocked_prompt", totalTokens: 0, usageEstimated: false });
+  });
+
+  it("charges large tool arguments in full whatever key they sit under, so `images` is no way to shrink the estimate", async () => {
+    const big = "q ".repeat(30_000);
+    const withArguments = (key: string) => ({
+      ...streamed,
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "lookup", arguments: JSON.stringify({ [key]: [big] }) } }] },
+        { role: "tool", tool_call_id: "c1", content: "done" }
+      ]
+    });
+    const charged: Record<string, number> = {};
+    for (const key of ["notes", "images"]) {
+      const fixture = await setup();
+      const gw = await gateway(fixture);
+      expect((await budgetOf(fixture, 10_000)).status).toBe(200);
+      fixture.upstream.chat.push({ sse: [chunk({ content: ANSWER })], hang: true });
+      await readThenClose(fixture, gw.token, ANSWER, withArguments(key));
+      const row = await onlyRow(fixture);
+      expect(row).toMatchObject({ status: "client_closed", usageEstimated: true });
+      charged[key] = row.inputTokens;
+      // The walk past the budget is closed: the next request is refused, as with any other key.
+      const refused = await v1(fixture, gw.token, "/v1/chat/completions", streamed);
+      expect(refused.status).toBe(429);
+      expect(fixture.upstream.requests).toHaveLength(1);
+    }
+    expect(charged.images).toBeGreaterThanOrEqual(Math.floor(big.length / 3));
+    expect(Math.abs(charged.images! - charged.notes!)).toBeLessThan(20);
+  });
+
+  it("never records a request as free when the provider reports a split and a zero total", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ json: { ...completion("Hello"), usage: { prompt_tokens: 500, completion_tokens: 500, total_tokens: 0 } } });
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", chat)).status).toBe(200);
+    const row = await onlyRow(fixture);
+    expect(row).toMatchObject({ status: "ok", totalTokens: 1000, usageEstimated: false });
+    expect(row.costUsd).toBeGreaterThan(0);
+  });
+
+  it("reports a boundary check that could not run as an error, not as a provider failure", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-bthrow", name: "BThrow", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
+    const real = GuardService.prototype.gatewayRuntime;
+    let calls = 0;
+    const spy = vi.spyOn(GuardService.prototype, "gatewayRuntime").mockImplementation(function (this: GuardService, ...args: Parameters<GuardService["gatewayRuntime"]>) {
+      calls += 1;
+      if (calls >= 2) throw new Error("the rule store went away");
+      return real.apply(this, args);
+    });
+    try {
+      const sentence = "This sentence is harmless and long enough to be checked. ";
+      fixture.upstream.chat.push({ sse: [chunk({ content: sentence.repeat(10) }), chunk({ content: "tail" }), chunk({}, "stop")] });
+      const response = await v1(fixture, gw.token, "/v1/chat/completions", streamed);
+      expect(response.status).toBe(500);
+      expect(await response.text()).not.toContain("harmless");
+      const row = await onlyRow(fixture);
+      expect(row).toMatchObject({ status: "error", httpStatus: 500, errorCode: "internal_error" });
+      expect(row.totalTokens).toBeGreaterThan(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it.each([

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "@ai-orchestrator/shared";
-import type { LLMStreamChunk } from "./types";
+import type { LLMStreamChunk, ProviderCallOptions } from "./types";
 import { OpenAICloudProviderAdapter } from "./providers/openai";
 import { OpenAICompatibleProviderAdapter } from "./providers/openai-compatible";
 import { AzureOpenAIProviderAdapter } from "./providers/azure-openai";
@@ -227,7 +227,9 @@ describe("failures inside a stream", () => {
   it.each([
     ["an error frame", [frame("a"), JSON.stringify({ error: { message: "secret host" } })]],
     ["an error object frame", [frame("a"), JSON.stringify({ object: "error", message: "secret host" })]],
-    ["a bare end", [frame("a")]]
+    ["a bare end", [frame("a")]],
+    ["a finish reason of error", [frame("a"), JSON.stringify({ choices: [{ delta: {}, finish_reason: "error" }] })]],
+    ["a finish reason of abort, then [DONE]", [frame("a"), JSON.stringify({ choices: [{ delta: {}, finish_reason: "abort" }] }), "[DONE]"]]
   ])("with strictStream throws on %s, with no upstream text", async (_name, events) => {
     stubFetch(sseResponse(events));
     const chunks: LLMStreamChunk[] = [];
@@ -322,24 +324,32 @@ describe("max_completion_tokens", () => {
 });
 
 describe("Gemini tool results", () => {
-  it("names a tool result after the assistant call it answers", async () => {
+  const messages: ChatMessage[] = [
+    { role: "user", content: "weather?" },
+    { role: "assistant", content: "", toolCalls: [{ id: "call_1", name: "get_weather", arguments: { city: "Oslo" } }] },
+    { role: "tool", content: "rain", toolCallId: "call_1" },
+    { role: "tool", content: "?", toolCallId: "unknown" },
+    { role: "tool", content: "named", toolCallId: "call_1", name: "explicit" }
+  ];
+  const names = (calls: Array<{ body: Record<string, unknown> }>) => {
+    const contents = calls[0]!.body.contents as Array<{ parts: Array<{ functionResponse?: { name: string } }> }>;
+    return contents.slice(2).map((entry) => entry.parts[0]!.functionResponse!.name);
+  };
+  const run = async (options?: ProviderCallOptions) => {
     const calls = stubFetch(jsonResponse(200, { candidates: [{ finishReason: "STOP", content: { parts: [{ text: "ok" }] } }] }));
     await new GeminiProviderAdapter().generate(
-      {
-        provider: { providerId: "gemini", model: "gemini-2.0-flash" },
-        messages: [
-          { role: "user", content: "weather?" },
-          { role: "assistant", content: "", toolCalls: [{ id: "call_1", name: "get_weather", arguments: { city: "Oslo" } }] },
-          { role: "tool", content: "rain", toolCallId: "call_1" },
-          { role: "tool", content: "?", toolCallId: "unknown" },
-          { role: "tool", content: "named", toolCallId: "call_1", name: "explicit" }
-        ],
-        tools: [tool]
-      },
+      { provider: { providerId: "gemini", model: "gemini-2.0-flash" }, messages, tools: [tool], ...(options ? { options } : {}) },
       ctx
     );
-    const contents = calls[0]!.body.contents as Array<{ parts: Array<{ functionResponse?: { name: string } }> }>;
-    expect(contents.slice(2).map((entry) => entry.parts[0]!.functionResponse!.name)).toEqual(["get_weather", "tool", "explicit"]);
+    return calls;
+  };
+
+  it("names a tool result after the assistant call it answers, on /v1", async () => {
+    expect(names(await run({ providerDefaults: true }))).toEqual(["get_weather", "tool", "explicit"]);
+  });
+
+  it("keeps the name 'tool' for a result with no name when no options are set (workflow runs, as on main)", async () => {
+    expect(names(await run())).toEqual(["tool", "tool", "explicit"]);
   });
 });
 

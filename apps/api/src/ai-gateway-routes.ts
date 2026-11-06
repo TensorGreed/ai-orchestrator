@@ -716,6 +716,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     };
 
     let upstreamError: unknown = null;
+    let checkFailure: unknown = null;
     try {
       const stream = input.adapter.generateStream!(input.callRequest, input.context);
       for await (const chunk of stream) {
@@ -731,7 +732,15 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
           pendingText += chunk.textDelta;
           uncheckedChars += chunk.textDelta.length;
           if (streamCheckDue(pendingText.slice(-uncheckedChars), deps.streamCheck)) {
-            if (!(await passes())) break;
+            let passed: boolean;
+            try {
+              passed = await passes();
+            } catch (error) {
+              // The check failed, not the provider: kept apart from `upstreamError`, which blames the provider.
+              checkFailure = error;
+              break;
+            }
+            if (!passed) break;
             uncheckedChars = 0;
             // All of it passed, but its end may be the start of a match: that part waits for the text after it.
             sendText(streamReleaseLength(pendingText, deps.streamCheck?.holdChars));
@@ -764,6 +773,15 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     const providerFinished = finishReason !== null;
     if (admitted.abort.signal.aborted || (writer.isStarted && writer.closed)) {
       await record(admitted, { kind: "chat", stream: true, status: "client_closed", httpStatus: 499, finishReason, ...(usage ? { usage } : {}), estimate: spend(!providerFinished), guardOutcome });
+      return reply;
+    }
+    if (checkFailure) {
+      // A boundary check that could not run: the provider was paid for and was still producing. What was held stays unsent.
+      await record(admitted, { kind: "chat", stream: true, status: "error", httpStatus: writer.isStarted ? 200 : 500, finishReason, ...(usage ? { usage } : {}), estimate: spend(!providerFinished), guardOutcome, errorCode: "internal_error" });
+      if (!writer.isStarted) throw checkFailure;
+      app.log.error({ err: deps.redact(checkFailure instanceof Error ? checkFailure.message : String(checkFailure)), requestId: admitted.requestId }, "AI gateway could not check a streamed answer");
+      writer.data(aiGatewayErrors.internal().body());
+      writer.end();
       return reply;
     }
     if (upstreamError) {

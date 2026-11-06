@@ -234,6 +234,8 @@ function orderlyEndIn(rawEvent: string, payload: string, provider: string): bool
   }
   if (parsed?.error || parsed?.object === "error") throw streamFailure(provider, "sent an error frame inside the stream");
   const reason = parsed?.choices?.[0]?.finish_reason;
+  // Some servers end a failed stream with a finish reason that names the failure, and then send [DONE].
+  if (reason === "error" || reason === "abort") throw streamFailure(provider, "ended the stream with a failure");
   return (typeof reason === "string" && reason.length > 0) || Boolean(parsed?.usage);
 }
 

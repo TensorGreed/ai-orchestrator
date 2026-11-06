@@ -33,6 +33,34 @@ describe("estimateRequestTokens", () => {
   });
 });
 
+describe("estimateRequestTokens, images by path", () => {
+  const provider = { providerId: "openai", model: "m" };
+  const big = "q ".repeat(30_000);
+
+  it("charges an `images` key in tool arguments, a tool schema or a response format by its bytes", () => {
+    const plain = (key: string) =>
+      estimateRequestTokens({
+        provider,
+        messages: [{ role: "assistant", content: "", toolCalls: [{ id: "c", name: "t", arguments: JSON.stringify({ [key]: [big] }) }] }],
+        tools: [{ name: "t", description: "d", inputSchema: { properties: { [key]: [big] } } }],
+        options: { responseFormat: { schema: { [key]: [big] } } }
+      });
+    expect(plain("images")).toBeGreaterThan(59_000);
+    expect(Math.abs(plain("images") - plain("notes"))).toBeLessThan(20);
+  });
+
+  it("still takes message images at the flat rate beside such a key", () => {
+    const image = { data: "A".repeat(90_000), mimeType: "image/png" };
+    const tokens = estimateRequestTokens({ provider, messages: [{ role: "user", content: "hi", images: [image] }, { role: "user", content: "x", images: [] }] });
+    expect(tokens).toBeGreaterThanOrEqual(1600);
+    expect(tokens).toBeLessThan(1700);
+  });
+
+  it("reads a request with no messages (embeddings)", () => {
+    expect(estimateRequestTokens({ provider, input: ["abc", "abc"] })).toBeGreaterThan(0);
+  });
+});
+
 describe("estimateAnswerTokens", () => {
   it("adds tool call names and arguments to the text", () => {
     expect(estimateAnswerTokens("abc", [{ name: "abc", arguments: "abcabc" }])).toBe(1 + 3);
@@ -48,6 +76,14 @@ describe("unseenOutputTokens", () => {
   it("never passes what max_tokens leaves", () => {
     expect(unseenOutputTokens({ quietMs: 30_000, seenTokens: 90, maxTokens: 100 })).toBe(10);
     expect(unseenOutputTokens({ quietMs: 0, seenTokens: 200, maxTokens: 100 })).toBe(0);
+  });
+});
+
+describe("chargedUsage, a split with a zero total", () => {
+  it("raises the total to the sum of the parts", () => {
+    const { usage, estimated } = chargedUsage({ inputTokens: 500, outputTokens: 500, totalTokens: 0 }, never);
+    expect(usage.totalTokens).toBe(1000);
+    expect(estimated).toBe(false);
   });
 });
 

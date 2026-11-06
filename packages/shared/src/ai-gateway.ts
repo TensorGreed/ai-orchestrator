@@ -81,7 +81,7 @@ export interface AiGatewayRouteSet {
   id: string;
   name: string;
   description: string;
-  /** The project that owns the set: its budgets, model allowlist and rule set floor apply. Null = deployment only. */
+  /** The project that owns the set: its budgets and model allowlist apply, and its enforced rule set on top of a bound one. Null = deployment only. */
   projectId: string | null;
   enabled: boolean;
   /** The default rate limit for each client of the set (a client's own limit replaces it). */

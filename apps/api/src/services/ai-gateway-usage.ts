@@ -32,16 +32,20 @@ export function estimateTextTokens(text: string): number {
   return Math.ceil(Buffer.byteLength(text, "utf8") / BYTES_PER_TOKEN);
 }
 
-/** A provider request's input tokens: everything in it but the route's own settings, images at a flat rate. */
-export function estimateRequestTokens<T extends { provider: unknown }>(request: T): number {
-  const { provider: _provider, ...sent } = request;
+/**
+ * A provider request's input tokens: everything in it but the route's own settings, images at a flat rate. Images are
+ * found by path (`messages[].images`) and nothing else: a key called `images` in tool arguments or a schema is caller
+ * text, sent to the provider as it is, and is charged by its bytes.
+ */
+export function estimateRequestTokens<T extends { provider: unknown; messages?: ReadonlyArray<object> }>(request: T): number {
+  const { provider: _provider, messages, ...rest } = request;
   let images = 0;
-  const text = JSON.stringify(sent, (key, value: unknown) => {
-    if (key !== "images" || !Array.isArray(value)) return value;
-    images += value.length;
-    return undefined;
+  const bare = (messages ?? []).map((message) => {
+    const { images: attached, ...text } = message as { images?: unknown };
+    if (Array.isArray(attached)) images += attached.length;
+    return text;
   });
-  return estimateTextTokens(text) + images * TOKENS_PER_IMAGE;
+  return estimateTextTokens(JSON.stringify(messages ? { ...rest, messages: bare } : rest)) + images * TOKENS_PER_IMAGE;
 }
 
 /** The output tokens of an answer the gateway received. */
@@ -68,7 +72,10 @@ export function chargedUsage(reported: LLMUsage | undefined, estimate: () => Usa
   const input = positive(reported?.inputTokens);
   const output = positive(reported?.outputTokens);
   const total = positive(reported?.totalTokens);
-  if (input !== undefined && output !== undefined) return { usage: reported!, estimated: false };
+  if (input !== undefined && output !== undefined) {
+    // A real split with a zero or short total: the total is at least the parts, or the request would count as free.
+    return { usage: { ...reported, inputTokens: input, outputTokens: output, totalTokens: Math.max(total ?? 0, input + output) }, estimated: false };
+  }
   const guess = estimate();
   if (total !== undefined && input === undefined && output === undefined) {
     // A real total with no split: keep the total, and split it as well as can be done for the price.

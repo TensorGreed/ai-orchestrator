@@ -88,12 +88,13 @@ A provider without streaming answers in one piece, sent as a stream of the same 
 
 ## Content rules
 
-A route set's rule set (and the client's, and the project's enforced rule set) checks each request:
+A route set's rule set (and the client's, and the project's enforced rule set) checks each request. Rule sets run only when one is bound to the route set or to the client: a project's enforced rule set applies on top of a bound one, and does not apply on its own. Destination rules need the same binding.
+
 
 - **Prompt.** The request before it goes to the provider, as described below. Tool results the caller sends back (`tool` messages) are checked as outside content. The deployment's destination rules apply to the route's provider. A blocked prompt answers `400` with code `content_filter`, and the provider is never called.
 - **Answer.** The answer's text and the arguments of any tool calls. A blocked answer has `finish_reason: "content_filter"`.
 
-On the way in, rule sets read everything the request sends to the provider: message text, tool results (labelled as outside content), the arguments of earlier tool calls, tool names, descriptions and schemas, `response_format`, `stop` and `user`, and for embeddings the inputs and `user`. A rewrite is applied in place. Restricted text in a name or key the rest of the request depends on, such as a tool name or a schema property, blocks the request instead. Images are not read: a rule set does not see what an image contains.
+On the way in, rule sets read the text the request sends to the provider: message text, tool results (labelled as outside content), the arguments of earlier tool calls, tool names, descriptions and schemas, `response_format`, `stop` and `user`, and for embeddings the inputs and `user`. A rewrite is applied in place. Restricted text in a name or key the rest of the request depends on, such as a tool name or a schema property, blocks the request instead. Images are not read: a rule set does not see what an image contains. Numeric fields (`seed`, `max_tokens` and the like) are not read either.
 
 When streaming, the text so far is checked at sentence boundaries and every few hundred characters. Text that passed is released except for its last 256 characters, and further back when that point falls inside an unbroken value such as an address, a key or a URL, so a match still arriving is not sent in part. The tail goes out after the last check of the whole answer, which adds about a second before the first text of a long answer; a short answer arrives in one piece. A block cuts the stream: the last chunk has `finish_reason: "content_filter"`, an error event with code `content_filter` follows, then `[DONE]`. A rule set that redacts, masks or transforms answers makes the stream buffered: the whole answer is generated and checked first, then streamed. Review and approval actions block, because nobody waits on an API call.
 
@@ -129,7 +130,7 @@ Rate limits are the client's own, or else the route set's default for each clien
 
 Usage by model name and client is shown under **MCP → AI routes**.
 
-Costs come from the same pricing table as workflow runs, including `LLM_PRICING_OVERRIDES_JSON`. `/v1` traffic is also priced for `azure_openai` models and for embedding models, which workflow runs are not: an Azure route priced this way counts toward USD budgets, while an Azure workflow run stays unpriced.
+Costs come from the same pricing table as workflow runs, including `LLM_PRICING_OVERRIDES_JSON`. `/v1` traffic is also priced for `azure_openai` models and for embedding models, which workflow runs are not: an Azure route priced this way counts toward USD budgets, while an Azure workflow run stays unpriced. A model with no price adds nothing to a USD budget, so set a price override for an `openai_compatible` route that needs one.
 
 ## Model allowlists
 
