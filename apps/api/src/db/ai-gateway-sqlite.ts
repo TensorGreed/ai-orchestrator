@@ -79,6 +79,7 @@ export function ensureAiGatewaySchema(db: BetterSqlite3Database): void {
       output_tokens INTEGER NOT NULL DEFAULT 0,
       cached_input_tokens INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0,
+      usage_estimated INTEGER NOT NULL DEFAULT 0,
       cost_usd REAL,
       latency_ms INTEGER NOT NULL DEFAULT 0,
       guard_outcome TEXT NOT NULL DEFAULT 'none',

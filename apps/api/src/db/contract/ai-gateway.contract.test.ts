@@ -33,6 +33,7 @@ function request(id: string, overrides: Partial<AiGatewayRequestRecord> = {}): A
     cachedInputTokens: 2,
     totalTokens: 15,
     costUsd: 0.5,
+    usageEstimated: false,
     latencyMs: 120,
     guardOutcome: "none",
     errorCode: null,
@@ -124,11 +125,12 @@ describeStoreContract("store contract: AI gateway", (ctx) => {
     const store = ctx.store();
     await store.insertAiGatewayRequest(request("q1"));
     await store.insertAiGatewayRequest(request("q2", { createdAt: iso(1000), clientId: "cli-2", alias: "big", model: "gpt-4o", status: "upstream_error", httpStatus: 502, costUsd: null, totalTokens: 0, inputTokens: 0, outputTokens: 0 }));
-    await store.insertAiGatewayRequest(request("q3", { createdAt: iso(2000), status: "blocked_output", guardOutcome: "block", stream: true, finishReason: "content_filter" }));
+    await store.insertAiGatewayRequest(request("q3", { createdAt: iso(2000), status: "blocked_output", guardOutcome: "block", stream: true, finishReason: "content_filter", usageEstimated: true }));
     await store.insertAiGatewayRequest(request("q0", { createdAt: iso(-86_400_000) }));
     const rows = await store.listAiGatewayRequests({ from: iso(-1), limit: 10 });
     expect(rows.map((row) => row.id)).toEqual(["q3", "q2", "q1"]);
-    expect(rows[0]).toMatchObject({ stream: true, status: "blocked_output", guardOutcome: "block", finishReason: "content_filter", cachedInputTokens: 2, createdAt: iso(2000) });
+    expect(rows[0]).toMatchObject({ stream: true, status: "blocked_output", guardOutcome: "block", finishReason: "content_filter", cachedInputTokens: 2, usageEstimated: true, createdAt: iso(2000) });
+    expect(rows[1]).toMatchObject({ usageEstimated: false });
     expect(rows[1]!.costUsd).toBeNull();
     expect((await store.listAiGatewayRequests({ from: iso(-1), clientId: "cli-2", limit: 10 })).map((row) => row.id)).toEqual(["q2"]);
     expect((await store.listAiGatewayRequests({ from: iso(-1), limit: 1 })).map((row) => row.id)).toEqual(["q3"]);

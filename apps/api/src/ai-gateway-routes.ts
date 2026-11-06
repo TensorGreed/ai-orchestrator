@@ -9,7 +9,8 @@
  * 401/404 until an admin creates a route set and grants it to a client (A12): no route set means no route to find.
  *
  * Only metadata is recorded per request (A5): tokens, cost, latency, model, finish reason and the rule outcome, in
- * ai_gateway_requests, written before the response ends (A10) so budget checks on any replica see it.
+ * ai_gateway_requests, written before the response ends (A10) so budget checks on any replica see it. Every request
+ * that reached the provider is charged: when it gave no usage, the row carries an estimate and says so.
  */
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -61,6 +62,7 @@ import {
   type AiGatewayGuardScope,
   type AiGatewayOutputMode
 } from "./services/ai-gateway-guard.js";
+import { chargedUsage, estimateAnswerTokens, estimateRequestTokens, unseenOutputTokens, type UsageEstimate } from "./services/ai-gateway-usage.js";
 import {
   AiGatewayHttpError,
   aiGatewayErrors,
@@ -433,6 +435,13 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     return aiGatewayErrors.upstream(error instanceof LLMProviderError ? error.statusCode : undefined);
   };
 
+  /**
+   * The charge of a failed provider call: its input, since the request may have been billed and the gateway cannot
+   * tell. The one exception is the provider registry's own refusal, when nothing was sent.
+   */
+  const failedCallCharge = (error: unknown, inputTokens: () => number): { estimate?: () => UsageEstimate } =>
+    isModelNotAllowedError(error) ? {} : { estimate: () => ({ input: inputTokens(), output: 0 }) };
+
   const record = async (
     admitted: Admitted,
     input: {
@@ -442,11 +451,14 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       httpStatus: number;
       finishReason?: string | null;
       usage?: LLMUsage;
+      /** Set on every request that reached the provider: what to charge for what `usage` does not say. */
+      estimate?: () => UsageEstimate;
       guardOutcome: RecordedGuardOutcome;
       errorCode?: string | null;
     }
   ) => {
-    const tokens = usageTokens(input.usage);
+    const charged = input.estimate ? chargedUsage(input.usage, input.estimate) : { usage: input.usage, estimated: false };
+    const tokens = usageTokens(charged.usage);
     const costUsd = deps.priceRequest ? deps.priceRequest(admitted.route.providerId, admitted.route.model, tokens.input, tokens.output, tokens.cached) : null;
     const row: AiGatewayRequestRecord = {
       id: admitted.requestId,
@@ -467,6 +479,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       outputTokens: tokens.output,
       cachedInputTokens: tokens.cached,
       totalTokens: tokens.total,
+      usageEstimated: charged.estimated,
       costUsd: tokens.total > 0 ? costUsd : costUsd === null ? null : 0,
       latencyMs: Date.now() - admitted.startedAt,
       guardOutcome: input.guardOutcome,
@@ -557,6 +570,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       const context = executionContext(admitted);
       const base = { id: `chatcmpl-${admitted.requestId.slice(5)}`, created: Math.floor(admitted.startedAt / 1000), model: admitted.route.alias };
       const streamsForReal = wantsStream && support.streaming && typeof adapter.generateStream === "function" && admitted.outputMode !== "buffered";
+      const inputTokens = () => estimateRequestTokens(callRequest);
 
       if (!streamsForReal) {
         // One answer: a non-stream request, a provider without streaming, or set of rule sets that may rewrite the answer.
@@ -565,20 +579,31 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
           answer = await adapter.generate(callRequest, context);
         } catch (error) {
           if (admitted.abort.signal.aborted) {
-            await record(admitted, { kind: "chat", stream: wantsStream, status: "client_closed", httpStatus: 499, guardOutcome: promptOutcome });
+            // Nothing of the answer was read, however much of it the provider produced before the call stopped.
+            const estimate = () => ({ input: inputTokens(), output: unseenOutputTokens({ quietMs: Date.now() - admitted.startedAt, seenTokens: 0, maxTokens: callRequest.provider.maxTokens }) });
+            await record(admitted, { kind: "chat", stream: wantsStream, status: "client_closed", httpStatus: 499, estimate, guardOutcome: promptOutcome });
             return reply;
           }
           const failure = upstreamFailure(admitted, error);
-          await record(admitted, { kind: "chat", stream: wantsStream, status: "upstream_error", httpStatus: failure.status, guardOutcome: promptOutcome, errorCode: failure.code });
+          await record(admitted, { kind: "chat", stream: wantsStream, status: "upstream_error", httpStatus: failure.status, ...failedCallCharge(error, inputTokens), guardOutcome: promptOutcome, errorCode: failure.code });
           throw failure;
         }
         let content = answer.content ?? "";
         let toolCalls = (answer.toolCalls ?? []).map((call) => ({ id: call.id, name: call.name, arguments: argumentsText(call.arguments) }));
+        const received = { content, toolCalls };
+        const estimate = () => ({ input: inputTokens(), output: estimateAnswerTokens(received.content, received.toolCalls) });
         let finishReason: LLMFinishReason = answer.finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop");
         let guardOutcome: RecordedGuardOutcome = promptOutcome;
         let status: AiGatewayRequestStatus = "ok";
         if (admitted.guard && admitted.outputMode !== "none") {
-          const verdict = await checkAiGatewayAnswer(admitted.guard, { content, toolCalls });
+          let verdict;
+          try {
+            verdict = await checkAiGatewayAnswer(admitted.guard, { content, toolCalls });
+          } catch (error) {
+            // The provider was paid for: the row is written, and the answer stays unsent.
+            await record(admitted, { kind: "chat", stream: wantsStream, status: "error", httpStatus: 500, ...(answer.usage ? { usage: answer.usage } : {}), estimate, guardOutcome, errorCode: "internal_error" });
+            throw error;
+          }
           if (verdict.action === "block") {
             await auditGuardBlock(admitted, "final_output", verdict);
             content = "";
@@ -593,7 +618,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
             guardOutcome = "allow";
           }
         }
-        await record(admitted, { kind: "chat", stream: wantsStream, status, httpStatus: 200, finishReason, ...(answer.usage ? { usage: answer.usage } : {}), guardOutcome });
+        await record(admitted, { kind: "chat", stream: wantsStream, status, httpStatus: 200, finishReason, ...(answer.usage ? { usage: answer.usage } : {}), estimate, guardOutcome });
         if (!wantsStream) {
           return reply.code(200).send(chatCompletionBody({ ...base, content, toolCalls, finishReason, usage: answer.usage }));
         }
@@ -610,7 +635,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
         return reply;
       }
 
-      return await streamChat(request, reply, admitted, { adapter, callRequest, context, base, includeUsage, promptOutcome });
+      return await streamChat(request, reply, admitted, { adapter, callRequest, context, base, includeUsage, promptOutcome, inputTokens });
     } finally {
       admitted.release();
     }
@@ -631,6 +656,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       base: { id: string; created: number; model: string };
       includeUsage: boolean;
       promptOutcome: RecordedGuardOutcome;
+      inputTokens: () => number;
     }
   ) => {
     const { base } = input;
@@ -666,11 +692,21 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       return false;
     };
 
+    /** When output last arrived: how long the provider may have been producing what the gateway never read. */
+    let lastOutputAt = admitted.startedAt;
+    /** What to charge if usage is missing. `stoppedEarly`: the gateway stopped reading before the provider finished. */
+    const spend = (stoppedEarly: boolean) => (): UsageEstimate => {
+      const seenTokens = estimateAnswerTokens(sentText + pendingText, collector.calls);
+      const unseen = stoppedEarly ? unseenOutputTokens({ quietMs: Date.now() - lastOutputAt, seenTokens, maxTokens: input.callRequest.provider.maxTokens }) : 0;
+      return { input: input.inputTokens(), output: seenTokens + unseen };
+    };
+
     let upstreamError: unknown = null;
     try {
       const stream = input.adapter.generateStream!(input.callRequest, input.context);
       for await (const chunk of stream) {
         if (writer.closed) break;
+        if (chunk.type === "text_delta" || chunk.type === "tool_call_delta") lastOutputAt = Date.now();
         if (chunk.type === "text_delta") {
           if (!guarded) {
             opening();
@@ -711,13 +747,16 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       upstreamError = error;
     }
 
+    const providerFinished = finishReason !== null;
     if (admitted.abort.signal.aborted || (writer.isStarted && writer.closed)) {
-      await record(admitted, { kind: "chat", stream: true, status: "client_closed", httpStatus: 499, finishReason, ...(usage ? { usage } : {}), guardOutcome });
+      await record(admitted, { kind: "chat", stream: true, status: "client_closed", httpStatus: 499, finishReason, ...(usage ? { usage } : {}), estimate: spend(!providerFinished), guardOutcome });
       return reply;
     }
     if (upstreamError) {
       const failure = upstreamFailure(admitted, upstreamError);
-      await record(admitted, { kind: "chat", stream: true, status: "upstream_error", httpStatus: writer.isStarted ? 200 : failure.status, finishReason, ...(usage ? { usage } : {}), guardOutcome, errorCode: failure.code });
+      // What arrived is known; a stream the provider ended itself left nothing in flight.
+      const charge = isModelNotAllowedError(upstreamError) ? {} : { estimate: spend(false) };
+      await record(admitted, { kind: "chat", stream: true, status: "upstream_error", httpStatus: writer.isStarted ? 200 : failure.status, finishReason, ...(usage ? { usage } : {}), ...charge, guardOutcome, errorCode: failure.code });
       if (!writer.isStarted) throw failure;
       // Mid-stream: an OpenAI-style error event, then the end of the stream.
       writer.data(aiGatewayErrors.upstreamInterrupted().body());
@@ -726,9 +765,22 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     }
 
     const toolCalls = collector.complete();
+    // A cut breaks out of the read: the provider was still producing.
+    const estimate = spend(cut !== null && !providerFinished);
     if (guarded) {
       // The audit check: the whole answer (also after a cut), recorded.
-      const verdict = await checkAiGatewayAnswer(admitted.guard!, { content: sentText + pendingText, toolCalls });
+      let verdict;
+      try {
+        verdict = await checkAiGatewayAnswer(admitted.guard!, { content: sentText + pendingText, toolCalls });
+      } catch (error) {
+        // The provider was paid for: the row is written, and what was held back stays unsent.
+        await record(admitted, { kind: "chat", stream: true, status: "error", httpStatus: writer.isStarted ? 200 : 500, finishReason, ...(usage ? { usage } : {}), estimate, guardOutcome, errorCode: "internal_error" });
+        if (!writer.isStarted) throw error;
+        app.log.error({ err: deps.redact(error instanceof Error ? error.message : String(error)), requestId: admitted.requestId }, "AI gateway could not finish checking a streamed answer");
+        writer.data(aiGatewayErrors.internal().body());
+        writer.end();
+        return reply;
+      }
       if (!cut && verdict.action !== "allow") {
         cut = verdict.action === "block" ? verdict : { reason: "Blocked by content rules: the answer would have been rewritten", categories: [], profiles: [] };
       }
@@ -749,7 +801,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       status = "blocked_output";
     }
     const finish: LLMFinishReason = finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop");
-    await record(admitted, { kind: "chat", stream: true, status, httpStatus: 200, finishReason: finish, ...(usage ? { usage } : {}), guardOutcome });
+    await record(admitted, { kind: "chat", stream: true, status, httpStatus: 200, finishReason: finish, ...(usage ? { usage } : {}), estimate, guardOutcome });
     opening();
     writer.data(chatChunk(base, {}, finish));
     if (input.includeUsage) writer.data(usageChunk(base, usage));
@@ -786,16 +838,18 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
         ...(body.dimensions !== undefined ? { dimensions: body.dimensions } : {}),
         ...(body.user ? { user: body.user } : {})
       });
+      const inputTokens = () => estimateRequestTokens(embedRequest);
+      const estimate = () => ({ input: inputTokens(), output: 0 });
       let answer;
       try {
         answer = await adapter.embed(embedRequest, executionContext(admitted));
       } catch (error) {
         if (admitted.abort.signal.aborted) {
-          await record(admitted, { kind: "embedding", stream: false, status: "client_closed", httpStatus: 499, guardOutcome });
+          await record(admitted, { kind: "embedding", stream: false, status: "client_closed", httpStatus: 499, estimate, guardOutcome });
           return reply;
         }
         const failure = upstreamFailure(admitted, error);
-        await record(admitted, { kind: "embedding", stream: false, status: "upstream_error", httpStatus: failure.status, guardOutcome, errorCode: failure.code });
+        await record(admitted, { kind: "embedding", stream: false, status: "upstream_error", httpStatus: failure.status, ...failedCallCharge(error, inputTokens), guardOutcome, errorCode: failure.code });
         throw failure;
       }
       const usage: LLMUsage = {
@@ -803,7 +857,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
         outputTokens: 0,
         totalTokens: answer.usage?.totalTokens ?? answer.usage?.inputTokens ?? 0
       };
-      await record(admitted, { kind: "embedding", stream: false, status: "ok", httpStatus: 200, usage, guardOutcome });
+      await record(admitted, { kind: "embedding", stream: false, status: "ok", httpStatus: 200, usage, estimate, guardOutcome });
       const base64 = body.encoding_format === "base64";
       return reply.code(200).send({
         object: "list",
@@ -837,7 +891,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       }
       if (error instanceof AiGatewayHttpError) return sendError(reply, error);
       app.log.error({ err: deps.redact(error instanceof Error ? error.message : String(error)), requestId: request.id }, "AI gateway request failed");
-      return sendError(reply, new AiGatewayHttpError(500, "The gateway could not complete the request.", "server_error", "internal_error"));
+      return sendError(reply, aiGatewayErrors.internal());
     }
   };
 

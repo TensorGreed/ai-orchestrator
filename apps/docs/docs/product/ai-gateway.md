@@ -82,6 +82,8 @@ const vectors = await client.embeddings.create({ model: "embed-small", input: ["
 
 `"stream": true` streams for real: chunks are `chat.completion.chunk` objects in `data:` frames, comment heartbeats keep idle connections open, and the stream ends with `data: [DONE]`. With `"stream_options": {"include_usage": true}` the last chunk before `[DONE]` carries the token usage. If the caller disconnects, the provider call is cancelled.
 
+If the provider fails during a stream, by sending an error or by ending with no finish reason, `[DONE]` or usage frame, the stream ends with an error event with code `upstream_error`, then `[DONE]`, and no `finish_reason`, so a caller can tell a cut-off answer from a complete one. The usage row says `upstream_error`. A server that ends a stream with none of those three signs looks the same as a dropped connection, so it is reported as a failure too.
+
 A provider without streaming answers in one piece, sent as a stream of the same shape.
 
 ## Content rules
@@ -107,7 +109,15 @@ Verdicts are recorded on the Security page with placement `gateway`, the request
 
 ## Budgets and rate limits
 
-Every request that reaches the provider writes a usage row (tokens, estimated cost, latency, model, finish reason, rule outcome), before the response ends. [Budgets](./budgets) count these rows for the client (`mcp_client` scope), the route set's project and the deployment. When a block budget is used up, requests answer `429` with code `insufficient_quota` and a `Retry-After` until the budget's period resets.
+Every request that reaches the provider writes a usage row (tokens, estimated cost, latency, model, finish reason, rule outcome), before the response ends. When the provider gives no token counts, the row carries an estimate instead, marked `usageEstimated`, so a request is never counted as free:
+
+- A caller that disconnects, or a stream cut by a content rule, is charged the request, the output received so far, and an allowance for output the provider may have produced but the gateway never read.
+- A server that sends no usage is charged the request and the output received. This is every stream on a route with `extra.streamUsage: false`, and any compatible server that ignores `stream_options`, so set that option only for a server that refuses it, and expect those numbers to be estimates.
+- A failed provider call is charged the request's input, because the gateway cannot tell whether it was billed. A provider that refuses a request therefore still counts toward budgets, a little.
+
+Estimates lean high: about three bytes of text a token, and a flat amount for each image. They are not provider billing figures.
+
+[Budgets](./budgets) count these rows for the client (`mcp_client` scope), the route set's project and the deployment. When a block budget is used up, requests answer `429` with code `insufficient_quota` and a `Retry-After` until the budget's period resets.
 
 Rate limits are the client's own, or else the route set's default for each client. Over the limit, requests answer `429` with code `rate_limit_exceeded` and `Retry-After`. In cluster mode the per-minute counts are shared across replicas.
 

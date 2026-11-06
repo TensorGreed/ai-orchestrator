@@ -159,6 +159,8 @@ export interface AiGatewayRequestRecord {
   outputTokens: number;
   cachedInputTokens: number;
   totalTokens: number;
+  /** The provider gave no usage (or only part of it): the tokens and cost are the gateway's estimate, leaning high. */
+  usageEstimated: boolean;
   /** Null when the model has no price in the pricing table. */
   costUsd: number | null;
   latencyMs: number;

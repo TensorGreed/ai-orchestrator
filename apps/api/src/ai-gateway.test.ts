@@ -21,6 +21,7 @@ import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
 import { AuthService } from "./services/auth-service.js";
+import { GuardService } from "./services/guard-service.js";
 import { SecretService } from "./services/secret-service.js";
 
 const UPSTREAM_KEY = "sk-upstream-test-key-7f3a";
@@ -50,6 +51,8 @@ interface Upstream {
   requests: UpstreamRequest[];
   /** The next chat answers (first in, first out); the default answers "Hello from upstream." */
   chat: UpstreamAnswer[];
+  /** False: embedding answers carry no usage. */
+  embeddingUsage: boolean;
   /** Resolves when the upstream sees a streaming request's connection close before it finished. */
   closedEarly: Promise<void>;
   close: () => Promise<void>;
@@ -75,6 +78,7 @@ async function startUpstream(): Promise<Upstream> {
   const chat: UpstreamAnswer[] = [];
   let markClosed: () => void = () => undefined;
   const closedEarly = new Promise<void>((resolve) => (markClosed = resolve));
+  const upstream: Upstream = { baseUrl: "", requests, chat, embeddingUsage: true, closedEarly, close: async () => undefined };
   const server = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (part) => (raw += String(part)));
@@ -92,7 +96,7 @@ async function startUpstream(): Promise<Upstream> {
             object: "list",
             data: inputs.map((text, index) => ({ object: "embedding", index, embedding: [text.length, 0.5, -1] })),
             model: "up-embed",
-            usage: { prompt_tokens: inputs.length * 2, total_tokens: inputs.length * 2 }
+            ...(upstream.embeddingUsage ? { usage: { prompt_tokens: inputs.length * 2, total_tokens: inputs.length * 2 } } : {})
           })
         );
         return;
@@ -125,17 +129,13 @@ async function startUpstream(): Promise<Upstream> {
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return {
-    baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
-    requests,
-    chat,
-    closedEarly,
-    close: () =>
-      new Promise((resolve) => {
-        server.closeAllConnections();
-        server.close(() => resolve());
-      })
-  };
+  upstream.baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
+  upstream.close = () =>
+    new Promise((resolve) => {
+      server.closeAllConnections();
+      server.close(() => resolve());
+    });
+  return upstream;
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +366,7 @@ describe("/v1/chat/completions", () => {
     expect(usage.choices).toEqual([]);
     expect(usage.usage).toMatchObject({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
     expect(fixture.upstream.requests[0]!.body).toMatchObject({ stream: true, stream_options: { include_usage: true } });
-    expect((await requestsOf(fixture))[0]).toMatchObject({ stream: true, status: "ok", totalTokens: 7, finishReason: "stop" });
+    expect((await requestsOf(fixture))[0]).toMatchObject({ stream: true, status: "ok", totalTokens: 7, finishReason: "stop", usageEstimated: false });
   });
 
   it("stops the upstream call when the caller goes away mid-stream", async () => {
@@ -629,6 +629,247 @@ describe("grants, rate limits and budgets", () => {
     expect((await v1(fixture, gw.token, "/v1/embeddings", { model: "embed-test", input: ["abc", "def", "ghi"] })).status).toBe(200);
     expect((await v1(fixture, gw.token, "/v1/embeddings", { model: "embed-test", input: "abc" })).status).toBe(200);
     expect((await v1(fixture, gw.token, "/v1/embeddings", { model: "embed-test", input: "abc" })).status).toBe(429);
+  });
+});
+
+describe("everything that reaches the provider is counted", () => {
+  const ANSWER = "word ".repeat(200);
+  const BYTES = ANSWER.length;
+  /** 3 bytes a token: what the answer alone must at least be charged. */
+  const ANSWER_TOKENS = Math.ceil(BYTES / 3);
+  const chat = { model: "gpt-test", messages: [{ role: "user", content: "hi" }] };
+  const streamed = { ...chat, stream: true };
+  const budgetOf = (fixture: Fixture, limitValue: number) => api(fixture, "POST", "/api/budgets", { name: "All", scopeType: "global", period: "day", limitType: "tokens", limitValue, action: "block" });
+  const onlyRow = async (fixture: Fixture) => until(async () => (await requestsOf(fixture))[0], "the usage row");
+
+  /** Reads until the whole answer has arrived, then hangs up before the upstream says anything more. */
+  async function readThenClose(fixture: Fixture, token: string, text: string) {
+    const abort = new AbortController();
+    const response = await v1(fixture, token, "/v1/chat/completions", streamed, { signal: abort.signal });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    let seen = "";
+    while (!seen.includes(text.slice(-20))) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      seen += new TextDecoder().decode(value);
+    }
+    abort.abort();
+  }
+
+  it("stops a caller who hangs up before the usage frame from walking past a block budget", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    expect((await budgetOf(fixture, 100)).status).toBe(200);
+    fixture.upstream.chat.push({ sse: [chunk({ content: ANSWER })], hang: true });
+    await readThenClose(fixture, gw.token, ANSWER);
+    const row = await onlyRow(fixture);
+    expect(row).toMatchObject({ status: "client_closed", usageEstimated: true });
+    expect(row.outputTokens).toBeGreaterThanOrEqual(ANSWER_TOKENS);
+    expect(row.inputTokens).toBeGreaterThan(0);
+    expect(row.totalTokens).toBe(row.inputTokens + row.outputTokens);
+    expect(row.costUsd).toBe(row.totalTokens);
+    const refused = await v1(fixture, gw.token, "/v1/chat/completions", streamed);
+    expect(refused.status).toBe(429);
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("insufficient_quota");
+    expect(fixture.upstream.requests).toHaveLength(1);
+  });
+
+  it("allows for output still on its way when the caller hangs up mid-answer", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ sse: [chunk({ content: ANSWER })], hang: true });
+    await readThenClose(fixture, gw.token, ANSWER);
+    expect((await onlyRow(fixture)).outputTokens).toBeGreaterThanOrEqual(ANSWER_TOKENS + 256);
+  });
+
+  it("adds nothing for output in flight once the upstream has said it finished", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ sse: [chunk({ content: ANSWER }), chunk({}, "stop")], gapMs: 5, hang: true });
+    const abort = new AbortController();
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", streamed, { signal: abort.signal });
+    const reader = response.body!.getReader();
+    await reader.read();
+    await until(() => fixture.upstream.requests.length > 0, "the upstream call");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    abort.abort();
+    const row = await onlyRow(fixture);
+    expect(row.status).toBe("client_closed");
+    expect(row.outputTokens).toBe(ANSWER_TOKENS);
+  });
+
+  it("uses the upstream's own numbers when its usage frame came before the caller hung up", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({
+      sse: [chunk({ content: ANSWER }), chunk({}, "stop"), { id: "up-1", object: "chat.completion.chunk", created: 1, model: "up-model", choices: [], usage: { prompt_tokens: 9, completion_tokens: 900, total_tokens: 909 } }],
+      gapMs: 5,
+      hang: true
+    });
+    const abort = new AbortController();
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", streamed, { signal: abort.signal });
+    await response.body!.getReader().read();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    abort.abort();
+    expect(await onlyRow(fixture)).toMatchObject({ status: "client_closed", totalTokens: 909, usageEstimated: false });
+  });
+
+  it("estimates a stream on a route that asks for no usage, and warns nobody off the budget", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    const route = await api<AiGatewayRoute>(fixture, "POST", `/api/ai-gateway/route-sets/${gw.set.id}/routes`, {
+      alias: "no-usage",
+      providerId: "openai_compatible",
+      model: "up-model",
+      baseUrl: fixture.upstream.baseUrl,
+      secretRef: { secretId: fixture.secretId },
+      extra: { streamUsage: false }
+    });
+    expect(route.status, route.raw).toBe(201);
+    expect((await budgetOf(fixture, 100)).status).toBe(200);
+    fixture.upstream.chat.push({ sse: [chunk({ content: ANSWER }), chunk({}, "stop")] });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { ...streamed, model: "no-usage" });
+    expect(streamedText(frames(await response.text()))).toBe(ANSWER);
+    expect(fixture.upstream.requests[0]!.body.stream_options).toBeUndefined();
+    const row = await onlyRow(fixture);
+    expect(row).toMatchObject({ status: "ok", usageEstimated: true, outputTokens: ANSWER_TOKENS });
+    expect(row.costUsd).toBeGreaterThan(0);
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", { ...streamed, model: "no-usage" })).status).toBe(429);
+  });
+
+  it("estimates a stream whose server ignored stream_options, or sent zeros", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    const zeros = { id: "up-1", object: "chat.completion.chunk", created: 1, model: "up-model", choices: [], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
+    fixture.upstream.chat.push({ sse: [chunk({ content: ANSWER }), chunk({}, "stop")] }, { sse: [chunk({ content: ANSWER }), chunk({}, "stop"), zeros] });
+    await (await v1(fixture, gw.token, "/v1/chat/completions", streamed)).text();
+    await (await v1(fixture, gw.token, "/v1/chat/completions", streamed)).text();
+    const rows = await requestsOf(fixture);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row).toMatchObject({ status: "ok", usageEstimated: true, outputTokens: ANSWER_TOKENS });
+  });
+
+  it("counts tool call arguments streamed with no usage", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    const args = JSON.stringify({ q: "x".repeat(600) });
+    fixture.upstream.chat.push({ sse: [chunk({ tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "lookup", arguments: args } }] }), chunk({}, "tool_calls")] });
+    await (await v1(fixture, gw.token, "/v1/chat/completions", streamed)).text();
+    expect((await onlyRow(fixture)).outputTokens).toBeGreaterThanOrEqual(200);
+  });
+
+  it("charges a stream a content rule cut, including what the upstream was still producing", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-cut", name: "Cut", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
+    const opening = `${ANSWER}mail ${EMAIL} now. `;
+    fixture.upstream.chat.push({ sse: [chunk({ content: opening }), chunk({ content: "more" }), chunk({}, "stop")], gapMs: 5 });
+    await (await v1(fixture, gw.token, "/v1/chat/completions", streamed)).text();
+    const row = await onlyRow(fixture);
+    expect(row).toMatchObject({ status: "blocked_output", usageEstimated: true });
+    expect(row.outputTokens).toBeGreaterThanOrEqual(Math.ceil(opening.length / 3) + 256);
+  });
+
+  it("charges what arrived when the upstream fails midway", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ sse: [chunk({ content: ANSWER })], gapMs: 20, drop: true });
+    await (await v1(fixture, gw.token, "/v1/chat/completions", streamed)).text();
+    expect(await onlyRow(fixture)).toMatchObject({ status: "upstream_error", usageEstimated: true, outputTokens: ANSWER_TOKENS });
+  });
+
+  it("charges the input of a request the provider failed", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ json: { error: { message: "bad" } }, status: 400 });
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", chat)).status).toBe(502);
+    const row = await onlyRow(fixture);
+    expect(row).toMatchObject({ status: "upstream_error", usageEstimated: true, outputTokens: 0 });
+    expect(row.inputTokens).toBeGreaterThan(0);
+  });
+
+  it("charges a non-streaming request whose caller hung up, with an allowance for the unseen answer", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ sse: [], hang: true });
+    const abort = new AbortController();
+    const call = v1(fixture, gw.token, "/v1/chat/completions", chat, { signal: abort.signal }).catch(() => null);
+    await until(() => fixture.upstream.requests.length > 0, "the upstream call");
+    abort.abort();
+    await call;
+    const row = await onlyRow(fixture);
+    expect(row).toMatchObject({ status: "client_closed", usageEstimated: true });
+    expect(row.inputTokens).toBeGreaterThan(0);
+    expect(row.outputTokens).toBeGreaterThanOrEqual(256);
+  });
+
+  it("caps that allowance at the request's max_tokens", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ sse: [], hang: true });
+    const abort = new AbortController();
+    const call = v1(fixture, gw.token, "/v1/chat/completions", { ...chat, max_tokens: 10 }, { signal: abort.signal }).catch(() => null);
+    await until(() => fixture.upstream.requests.length > 0, "the upstream call");
+    abort.abort();
+    await call;
+    expect((await onlyRow(fixture)).outputTokens).toBe(10);
+  });
+
+  it("estimates a non-streaming answer with no usage", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    const { usage: _usage, ...bare } = completion(ANSWER);
+    fixture.upstream.chat.push({ json: bare });
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", chat)).status).toBe(200);
+    expect(await onlyRow(fixture)).toMatchObject({ status: "ok", usageEstimated: true, outputTokens: ANSWER_TOKENS });
+  });
+
+  it("estimates embeddings with no usage", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.embeddingUsage = false;
+    expect((await v1(fixture, gw.token, "/v1/embeddings", { model: "embed-test", input: ANSWER })).status).toBe(200);
+    const row = await onlyRow(fixture);
+    expect(row).toMatchObject({ status: "ok", usageEstimated: true, outputTokens: 0 });
+    expect(row.inputTokens).toBeGreaterThanOrEqual(ANSWER_TOKENS);
+  });
+
+  it("charges nothing for a prompt that never left, and marks reported usage as exact", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await v1(fixture, gw.token, "/v1/chat/completions", chat);
+    expect(await onlyRow(fixture)).toMatchObject({ status: "ok", totalTokens: 7, usageEstimated: false });
+    await guardProfile(fixture, { id: "aigw-none", name: "None", version: "1", channels: { prompt: dlpChannel("block") } }, gw.set.id);
+    await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: EMAIL }] });
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "blocked_prompt", totalTokens: 0, usageEstimated: false });
+  });
+
+  it.each([
+    ["a non-streaming answer", chat, { json: completion("Hello") }],
+    ["a stream", streamed, { sse: [chunk({ content: "Hello" }), chunk({}, "stop")] }]
+  ])("writes the usage row when the output check itself fails on %s", async (_case, body, answer) => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-throw", name: "Throw", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
+    const real = GuardService.prototype.gatewayRuntime;
+    let calls = 0;
+    const spy = vi.spyOn(GuardService.prototype, "gatewayRuntime").mockImplementation(function (this: GuardService, ...args: Parameters<GuardService["gatewayRuntime"]>) {
+      calls += 1;
+      if (calls >= 2) throw new Error("the rule store went away");
+      return real.apply(this, args);
+    });
+    try {
+      fixture.upstream.chat.push(answer as UpstreamAnswer);
+      const response = await v1(fixture, gw.token, "/v1/chat/completions", body);
+      expect(response.status).toBe(500);
+      expect(await response.text()).not.toContain("Hello");
+      const row = await onlyRow(fixture);
+      expect(row).toMatchObject({ status: "error", httpStatus: 500 });
+      expect(row.totalTokens).toBeGreaterThan(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

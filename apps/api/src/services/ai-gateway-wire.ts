@@ -61,6 +61,7 @@ export const aiGatewayErrors = {
     ),
   /** The provider failed after part of the answer was sent. */
   upstreamInterrupted: () => new AiGatewayHttpError(502, "The model provider failed before finishing this answer.", "server_error", "upstream_error"),
+  internal: () => new AiGatewayHttpError(500, "The gateway could not complete the request.", "server_error", "internal_error"),
   upstreamRateLimited: (retryAfterSeconds: number) =>
     new AiGatewayHttpError(429, "The model provider is rate limiting this route. Try again shortly.", "requests", "upstream_rate_limited", null, retryAfterSeconds),
   unavailable: (message: string) => new AiGatewayHttpError(503, message, "server_error", "service_unavailable", null, 5),
