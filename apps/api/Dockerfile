@@ -32,7 +32,7 @@
 # builds use the same release), keeping release builds reproducible;
 # Dependabot (.github/dependabot.yml) proposes digest updates weekly.
 
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS toolchain
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS toolchain
 WORKDIR /app
 RUN corepack enable \
     && apk add --no-cache python3 make g++ libc6-compat
@@ -63,7 +63,7 @@ FROM toolchain AS prod-deps
 RUN pnpm install --prod --frozen-lockfile --filter "@ai-orchestrator/api..."
 
 # ---------- runtime stage ----------
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS runtime
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 RUN apk add --no-cache wget tini \
