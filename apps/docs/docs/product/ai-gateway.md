@@ -33,7 +33,7 @@ A **route** maps a public model name to a provider. Callers send that name as `m
 
 Routes are grouped in **route sets**. A route set belongs to a project: the project's budgets count its requests, its routes may use the project's secrets, and its project-enforced rule set applies. A route set can also carry a rule set and a default rate limit of its own.
 
-Admins manage route sets under **MCP → AI routes**. Builders see them, read only, with their usage.
+Admins manage route sets under **MCP → AI routes**, and see their usage there. Builders see the route sets and routes, read only; usage is spend across every project, so it stays with admins, as on the Usage pages.
 
 ## Clients
 

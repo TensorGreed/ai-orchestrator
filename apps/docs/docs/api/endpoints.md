@@ -184,8 +184,8 @@ Admin API (builders read, admins change; every change is audited):
 - `PUT /api/ai-gateway/routes/:id`, `DELETE /api/ai-gateway/routes/:id` (admin)
 - `GET /api/ai-gateway/route-sets/:id/guard` (builder), `PUT /api/ai-gateway/route-sets/:id/guard` (admin; `{ mode: "inherit" }` or `{ mode: "override", profileId }`)
 - `GET /api/ai-gateway/clients/:clientId/grants` (builder), `PUT /api/ai-gateway/clients/:clientId/grants` (admin; `{ routeSetIds }` replaces the client's grants)
-- `GET /api/ai-gateway/usage?window=24h|7d|30d&clientId=&routeSetId=` (builder; totals, per model name and per client)
-- `GET /api/ai-gateway/requests?window=&clientId=&routeSetId=&limit=` (builder; recent request rows, metadata only)
+- `GET /api/ai-gateway/usage?window=24h|7d|30d&clientId=&routeSetId=` (admin; totals, per model name and per client)
+- `GET /api/ai-gateway/requests?window=&clientId=&routeSetId=&limit=` (admin; recent request rows, metadata only)
 
 ## MCP onboarding
 

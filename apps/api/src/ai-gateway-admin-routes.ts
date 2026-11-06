@@ -1,7 +1,8 @@
 /**
  * 12.6b — the admin API of the /v1 AI gateway: route sets (project-owned), their routes, which clients may call
- * which sets, a set's rule set binding, and usage. Builders read; admins change. Every change is audited. A route names
- * its provider key only as a stored secret's id (secretRef); the value is never read here or returned.
+ * which sets, a set's rule set binding, and usage. Builders read; admins change. Usage is spend across every project,
+ * so it is admin-only, like /api/usage/*. Every change is audited. A route names its provider key only as a stored
+ * secret's id (secretRef); the value is never read here or returned.
  */
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -469,7 +470,7 @@ export function registerAiGatewayAdminRoutes(deps: AiGatewayAdminDeps): void {
   };
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/ai-gateway/usage", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const parsed = usageFilter(reply, request.query);
     if ("error" in parsed) return parsed.error;
@@ -477,7 +478,7 @@ export function registerAiGatewayAdminRoutes(deps: AiGatewayAdminDeps): void {
   });
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/ai-gateway/requests", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const parsed = usageFilter(reply, request.query);
     if ("error" in parsed) return parsed.error;

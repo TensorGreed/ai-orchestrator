@@ -92,7 +92,7 @@ afterEach(() => {
 });
 
 describe("AiRoutesView", () => {
-  it("shows route sets, routes, clients and usage read-only for builders", async () => {
+  it("shows route sets, routes and clients read-only for builders, and no usage: spend is admin-only", async () => {
     render(<AiRoutesView isAdmin={false} />);
     const card = await screen.findByRole("article", { name: "Route set Product apps" });
     expect(within(card).getByText("fast-chat")).toBeInTheDocument();
@@ -101,10 +101,16 @@ describe("AiRoutesView", () => {
     expect(screen.queryByRole("button", { name: "+ New route set" })).not.toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "+ Add route" })).not.toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
-    const usagePanel = screen.getByTestId("ai-gateway-usage");
+    await waitFor(() => expect(screen.getByTestId("ai-gateway-endpoint").textContent).toBe("https://gateway.example.com/v1"));
+    expect(screen.queryByTestId("ai-gateway-usage")).not.toBeInTheDocument();
+    expect(mocked.fetchAiGatewayUsage).not.toHaveBeenCalled();
+  });
+
+  it("shows admins the usage", async () => {
+    render(<AiRoutesView isAdmin />);
+    const usagePanel = await screen.findByTestId("ai-gateway-usage");
     expect(await within(usagePanel).findByText(/12 requests/)).toBeInTheDocument();
     expect(within(usagePanel).getByText(/1 blocked by content rules/)).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByTestId("ai-gateway-endpoint").textContent).toBe("https://gateway.example.com/v1"));
   });
 
   it("lets admins create a route set and add a route with a stored secret", async () => {

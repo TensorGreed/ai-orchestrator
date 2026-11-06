@@ -714,9 +714,13 @@ describe("admin API", () => {
     expect((await route({ extra: { apiKey: "inline" } })).status).toBe(400);
     expect((await api(fixture, "POST", "/api/ai-gateway/route-sets", { name: "x", projectId: "no-such-project" })).status).toBe(400);
 
-    const usage = await api<{ totals: { requests: number } }>(fixture, "GET", "/api/ai-gateway/usage?window=24h", undefined, builder);
+    // Spend is admin-only, like /api/usage/*: a builder reads the routes, not what any project spent.
+    expect((await api(fixture, "GET", "/api/ai-gateway/usage?window=24h", undefined, builder)).status).toBe(403);
+    expect((await api(fixture, "GET", "/api/ai-gateway/requests?window=24h", undefined, builder)).status).toBe(403);
+    const usage = await api<{ totals: { requests: number } }>(fixture, "GET", "/api/ai-gateway/usage?window=24h");
     expect(usage.status).toBe(200);
     expect(usage.body.totals.requests).toBe(0);
+    expect((await api(fixture, "GET", "/api/ai-gateway/requests?window=24h")).status).toBe(200);
 
     expect((await api(fixture, "DELETE", `/api/ai-gateway/route-sets/${gw.set.id}`)).status).toBe(204);
     expect(await fixture.store.listAiGatewayClientGrants(gw.client.id)).toEqual([]);
