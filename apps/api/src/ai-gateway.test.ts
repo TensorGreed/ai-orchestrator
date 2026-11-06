@@ -715,7 +715,7 @@ describe("everything that reaches the provider is counted", () => {
     expect(await onlyRow(fixture)).toMatchObject({ status: "client_closed", totalTokens: 909, usageEstimated: false });
   });
 
-  it("estimates a stream on a route that asks for no usage, and warns nobody off the budget", async () => {
+  it("estimates a stream on a route that asks for no usage, and counts it toward the budget", async () => {
     const fixture = await setup();
     const gw = await gateway(fixture);
     const route = await api<AiGatewayRoute>(fixture, "POST", `/api/ai-gateway/route-sets/${gw.set.id}/routes`, {
