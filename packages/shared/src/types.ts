@@ -763,7 +763,7 @@ export interface LLMUsage {
 
 /**
  * 12.6b — why a model stopped: the OpenAI vocabulary. `stop` (natural end or a stop sequence), `length` (the token
- * cap), `tool_calls` (it asked for tools), `content_filter` (the provider or Guard withheld the rest).
+ * cap), `tool_calls` (it asked for tools), `content_filter` (the provider or content rules withheld the rest).
  */
 export type LLMFinishReason = "stop" | "length" | "tool_calls" | "content_filter";
 

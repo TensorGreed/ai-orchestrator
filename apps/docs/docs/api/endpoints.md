@@ -179,7 +179,7 @@ Admin API (builders read, admins change; every change is audited):
 - `POST /api/ai-gateway/route-sets` (admin; `{ name, description?, projectId?, enabled?, rateLimit? }`)
 - `GET /api/ai-gateway/route-sets/:id` (builder)
 - `PUT /api/ai-gateway/route-sets/:id` (admin; a new `projectId` must be able to use every route's secret)
-- `DELETE /api/ai-gateway/route-sets/:id` (admin; removes its routes, grants and Guard binding)
+- `DELETE /api/ai-gateway/route-sets/:id` (admin; removes its routes, grants and rule set binding)
 - `POST /api/ai-gateway/route-sets/:id/routes` (admin; `{ alias, kind?, providerId, model, baseUrl?, secretRef?, extra?, defaults?, enabled? }`; `409` when the alias is taken)
 - `PUT /api/ai-gateway/routes/:id`, `DELETE /api/ai-gateway/routes/:id` (admin)
 - `GET /api/ai-gateway/route-sets/:id/guard` (builder), `PUT /api/ai-gateway/route-sets/:id/guard` (admin; `{ mode: "inherit" }` or `{ mode: "override", profileId }`)

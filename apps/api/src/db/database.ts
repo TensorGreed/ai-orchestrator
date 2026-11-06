@@ -1380,7 +1380,7 @@ function mapMcpToolSnapshot(row: McpToolSnapshotRow): McpToolSnapshotRecord {
 
 // Phase 12.1 — Guard store records.
 /**
- * 12.6 — `toolset` and `mcp_client`: a gateway toolset's or client's Guard profile (no new table shape). 12.6b —
+ * 12.6 — `toolset` and `mcp_client`: a gateway toolset's or client's rule set (no new table shape). 12.6b —
  * `ai_route_set`: an AI gateway route set's (it stands where a toolset stands for /v1 calls).
  */
 export type GuardBindingScope = "project" | "workflow" | "toolset" | "mcp_client" | "ai_route_set";

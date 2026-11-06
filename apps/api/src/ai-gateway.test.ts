@@ -2,8 +2,8 @@
  * 12.6b — the OpenAI-compatible /v1 AI gateway, called the way an OpenAI SDK calls it (fetch, Bearer token, JSON or
  * SSE) against an in-process OpenAI-compatible upstream on 127.0.0.1 (no outside network).
  *
- * Covers the admission order (token, grant, rate limit, budget, allowlist, Guard), streaming (chunks, usage, [DONE],
- * caller abort cancelling the upstream), tools passed through, embeddings, the OpenAI error envelope, Guard on the
+ * Covers the admission order (token, grant, rate limit, budget, allowlist, content rules), streaming (chunks, usage, [DONE],
+ * caller abort cancelling the upstream), tools passed through, embeddings, the OpenAI error envelope, Content rules on the
  * prompt and the answer (a mid-stream cut, and buffered mode for a rewriting profile), usage rows counted by budgets,
  * and that with no route set /v1 does nothing.
  */
@@ -575,7 +575,7 @@ describe("grants, rate limits and budgets", () => {
   });
 });
 
-describe("Guard on /v1", () => {
+describe("Content rules on /v1", () => {
   it("blocks a prompt with 400 content_filter and never calls the provider", async () => {
     const fixture = await setup();
     const gw = await gateway(fixture);
@@ -612,7 +612,7 @@ describe("Guard on /v1", () => {
     const events = await until(async () => {
       const list = await fixture.store.listGuardEventsForExecution(row.id);
       return list.length > 0 ? list : null;
-    }, "the Guard events");
+    }, "the rule events");
     expect(events.filter((event) => event.channel === "final_output")).toHaveLength(1);
     expect(events.every((event) => event.placement === "gateway" && event.nodeId === "gpt-test")).toBe(true);
   });

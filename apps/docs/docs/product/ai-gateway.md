@@ -1,17 +1,17 @@
 ---
-description: "The /v1 AI gateway: an OpenAI-compatible endpoint for apps outside L2M, with per-client tokens, Guard, budgets, rate limits and streaming."
+description: "The /v1 AI gateway: an OpenAI-compatible endpoint for apps outside L2M, with per-client tokens, content rules, budgets, rate limits and streaming."
 ---
 
 # /v1 AI gateway
 
-L2M serves an OpenAI-compatible API at `/v1`, so applications outside L2M can send their model traffic through the same Guard profiles, budgets, rate limits and audit as workflows and the [MCP gateway](./mcp-gateway). Any OpenAI SDK or HTTP client works: point its base URL at `https://<your-l2m>/v1` and use an L2M client token as the API key.
+L2M serves an OpenAI-compatible API at `/v1`, so applications outside L2M can send their model traffic through the same rule sets, budgets, rate limits and audit as workflows and the [MCP gateway](./mcp-gateway). Any OpenAI SDK or HTTP client works: point its base URL at `https://<your-l2m>/v1` and use an L2M client token as the API key.
 
 ```text
 app ──Bearer client token──▶ POST /v1/chat/completions  { model: "fast-chat", ... }
                                ├─ token, grant, rate limit, budgets, model allowlist
-                               ├─ Guard on the prompt
+                               ├─ Content rules on the prompt
                                ├─ provider (the route's provider, model and stored key)
-                               ├─ Guard on the answer
+                               ├─ Content rules on the answer
                                └─ usage row (tokens, cost, latency; never prompts or answers)
 ```
 
@@ -31,7 +31,7 @@ A **route** maps a public model name to a provider. Callers send that name as `m
 | API key | A stored secret, by reference. The key is never shown or returned; without one the provider's environment key applies. |
 | Defaults | Optional temperature, max tokens and top_p, used when a request leaves them out. |
 
-Routes are grouped in **route sets**. A route set belongs to a project: the project's budgets count its requests, its routes may use the project's secrets, and its project-enforced Guard profile applies. A route set can also carry a Guard profile and a default rate limit of its own.
+Routes are grouped in **route sets**. A route set belongs to a project: the project's budgets count its requests, its routes may use the project's secrets, and its project-enforced rule set applies. A route set can also carry a rule set and a default rate limit of its own.
 
 Admins manage route sets under **MCP → AI routes**. Builders see them, read only, with their usage.
 
@@ -39,7 +39,7 @@ Admins manage route sets under **MCP → AI routes**. Builders see them, read on
 
 Callers authenticate with the same client tokens as the MCP gateway. Create a client under **MCP → Clients** (it needs no toolset if it only calls `/v1`), then open its **Governance** and tick the route sets it may call under **AI routes**. A client sees only the models of the route sets granted to it; any other model name answers `404 model_not_found`, the same as an unknown one.
 
-A client's Guard profile, rate limit and budgets apply to its `/v1` calls as well as to its MCP calls. Its own rate limit is one allowance for both.
+A client's rule set, rate limit and budgets apply to its `/v1` calls as well as to its MCP calls. Its own rate limit is one allowance for both.
 
 ## Calling the gateway
 
@@ -84,9 +84,9 @@ const vectors = await client.embeddings.create({ model: "embed-small", input: ["
 
 A provider without streaming answers in one piece, sent as a stream of the same shape.
 
-## Guard
+## Content rules
 
-A route set's Guard profile (and the client's, and the project's enforced profile) checks each request:
+A route set's rule set (and the client's, and the project's enforced profile) checks each request:
 
 - **Prompt.** The messages' text before it goes to the provider. Tool results the caller sends back (`tool` messages) are checked as outside content. The deployment's destination rules apply to the route's provider. A blocked prompt answers `400` with code `content_filter`, and the provider is never called.
 - **Answer.** The answer's text and the arguments of any tool calls. A blocked answer has `finish_reason: "content_filter"`.
@@ -97,7 +97,7 @@ Verdicts are recorded on the Security page with placement `gateway`, the request
 
 ## Budgets and rate limits
 
-Every request that reaches the provider writes a usage row (tokens, estimated cost, latency, model, finish reason, Guard outcome), before the response ends. [Budgets](./budgets) count these rows for the client (`mcp_client` scope), the route set's project and the deployment. When a block budget is used up, requests answer `429` with code `insufficient_quota` and a `Retry-After` until the budget's period resets.
+Every request that reaches the provider writes a usage row (tokens, estimated cost, latency, model, finish reason, rule outcome), before the response ends. [Budgets](./budgets) count these rows for the client (`mcp_client` scope), the route set's project and the deployment. When a block budget is used up, requests answer `429` with code `insufficient_quota` and a `Retry-After` until the budget's period resets.
 
 Rate limits are the client's own, or else the route set's default for each client. Over the limit, requests answer `429` with code `rate_limit_exceeded` and `Retry-After`. In cluster mode the per-minute counts are shared across replicas.
 
@@ -119,7 +119,7 @@ Errors use the OpenAI shape: `{"error": {"message", "type", "code", "param"}}`.
 
 | Status | Code | When |
 | --- | --- | --- |
-| 400 | `content_filter` | Guard blocked the prompt. |
+| 400 | `content_filter` | Content rules blocked the prompt. |
 | 400 | `unsupported_parameter` and others | The request is malformed or asks for something the route cannot do. |
 | 401 | `invalid_api_key` | No token, or an unknown, revoked or expired one, or the client's pinned certificate was not presented. |
 | 403 | `access_denied` | The caller's address is not allowed. The body never names the list or the address. |
@@ -128,6 +128,6 @@ Errors use the OpenAI shape: `{"error": {"message", "type", "code", "param"}}`.
 | 429 | `rate_limit_exceeded` | Over the client's rate limit. |
 | 429 | `insufficient_quota` | A block budget is used up. |
 | 502 | `upstream_error` | The provider failed. Its error text is never passed on. |
-| 503 | `service_unavailable` | Budgets, Guard or the allowlist could not be checked; the request was not sent. |
+| 503 | `service_unavailable` | Budgets, content rules or the allowlist could not be checked; the request was not sent. |
 
 See the [API endpoints](../api/endpoints#v1-ai-gateway) for the admin API.

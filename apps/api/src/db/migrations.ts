@@ -2500,7 +2500,7 @@ export const MIGRATIONS: Migration[] = [
     version: 60,
     description: "12.6b — the /v1 AI gateway: route sets, routes, client grants and per-request usage",
     // ai_gateway_routes.alias is unique across the deployment: a public model name means one route.
-    // ai_gateway_requests: metadata of each /v1 request that reached Guard or the provider (never prompts or answers);
+    // ai_gateway_requests: metadata of each /v1 request that reached content rules or the provider (never prompts or answers);
     // budgets count it for the global, project (through the route set) and client scopes.
     up: `
       CREATE TABLE IF NOT EXISTS ai_gateway_route_sets (

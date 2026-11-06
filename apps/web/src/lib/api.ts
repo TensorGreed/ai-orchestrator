@@ -4478,7 +4478,7 @@ export async function acceptInviteAndSignIn(token: string, password: string): Pr
 }
 
 // ---------------------------------------------------------------------------
-// 12.6b — the /v1 AI gateway's admin API: route sets, routes, client grants, a set's Guard binding and usage.
+// 12.6b — the /v1 AI gateway's admin API: route sets, routes, client grants, a set's rule set binding and usage.
 // ---------------------------------------------------------------------------
 
 export interface AiGatewayRouteSetView extends AiGatewayRouteSet {

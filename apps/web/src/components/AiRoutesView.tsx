@@ -1,9 +1,9 @@
 /**
  * 12.6b — AI routes: the models L2M serves on its OpenAI-compatible /v1 endpoint.
  *
- * A route set belongs to a project (its budgets and Guard floor apply) and holds routes: a public model name (the
+ * A route set belongs to a project (its budgets and rule set floor apply) and holds routes: a public model name (the
  * alias a caller sends as `model`) mapped to a provider, an upstream model and a stored secret. Admins create and
- * change sets and routes, pick a set's Guard profile and default rate limit, and grant sets to clients (on the
+ * change sets and routes, pick a set's rule set and default rate limit, and grant sets to clients (on the
  * client's Governance). Builders read everything here, including usage. Nothing is served until a set is granted.
  */
 
@@ -110,7 +110,7 @@ export function AiRoutesView({ isAdmin, activeProjectId }: AiRoutesViewProps) {
         <p className="kb-subtle">
           Applications call <code>/v1/chat/completions</code>, <code>/v1/embeddings</code> and <code>/v1/models</code> with a client token as the
           API key and a route&apos;s model name as <code>model</code>. Each request passes the client&apos;s rate limit and budgets and the
-          set&apos;s Guard profile; only metadata (tokens, cost, latency) is recorded.
+          set&apos;s rule set; only metadata (tokens, cost, latency) is recorded.
         </p>
       </section>
 
@@ -377,7 +377,7 @@ function RouteSetCard({
       )}
 
       <section className="mcp-governance" aria-label={`Governance of ${set.name}`}>
-        <GovernanceRow title="Guard">
+        <GovernanceRow title="Content rules">
           <GatewayGuardPicker scope="ai_route_set" id={set.id} isAdmin={isAdmin} />
         </GovernanceRow>
         <GovernanceRow title="Rate limit">
@@ -589,7 +589,7 @@ export function AiGatewayUsagePanel() {
         <p>
           {formatCount(totals.requests)} requests · {formatCount(totals.totalTokens)} tokens · {formatCost(totals.costUsd)}
           {totals.errors > 0 && ` · ${formatCount(totals.errors)} errors`}
-          {totals.blocked > 0 && ` · ${formatCount(totals.blocked)} blocked by Guard`}
+          {totals.blocked > 0 && ` · ${formatCount(totals.blocked)} blocked by content rules`}
         </p>
       )}
       {rows.length > 0 && (

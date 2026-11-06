@@ -4,11 +4,11 @@
  *
  * Callers authenticate with an MCP gateway client token (A1) and name a route alias as `model` (A2). Admission order:
  * client token (and its certificate and address pins) -> route granted to the client -> rate limit (the client's own, else the route set's default) ->
- * budgets (the client's, the route set's project's, the deployment's) -> model allowlist -> Guard on the prompt ->
- * provider -> Guard on the answer -> usage row -> response. Errors use the OpenAI envelope (A9). Nothing answers but
+ * budgets (the client's, the route set's project's, the deployment's) -> model allowlist -> Content rules on the prompt ->
+ * provider -> Content rules on the answer -> usage row -> response. Errors use the OpenAI envelope (A9). Nothing answers but
  * 401/404 until an admin creates a route set and grants it to a client (A12): no route set means no route to find.
  *
- * Only metadata is recorded per request (A5): tokens, cost, latency, model, finish reason and the Guard outcome, in
+ * Only metadata is recorded per request (A5): tokens, cost, latency, model, finish reason and the rule outcome, in
  * ai_gateway_requests, written before the response ends (A10) so budget checks on any replica see it.
  */
 import crypto from "node:crypto";
@@ -93,7 +93,7 @@ export interface AiGatewayDeps {
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   redact: (value: string) => string;
   auditRaw: (event: AuditEventInput) => void | Promise<void>;
-  /** Absent: /v1 runs no Guard. */
+  /** Absent: /v1 runs no content rules. */
   guard?: GuardService;
   /** Absent: no budget checks. */
   budgets?: Pick<BudgetService, "checkBlock" | "recordGatewayUsage">;
@@ -108,7 +108,7 @@ export interface AiGatewayDeps {
    * every model is allowed.
    */
   checkModel?: AiGatewayModelCheck;
-  /** Boundary sizes for streamed Guard checks (tests). */
+  /** Boundary sizes for streamed content rule checks (tests). */
   streamCheck?: { minChars?: number; maxChars?: number };
 }
 
@@ -373,8 +373,8 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
         try {
           ({ resolution } = await deps.guard.resolveGateway({ toolsetId: routeSet.id, clientId: client.id, projectId: routeSet.projectId, setScope: "ai_route_set" }));
         } catch (error) {
-          app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "AI gateway could not read the Guard bindings for a request; it was refused");
-          throw aiGatewayErrors.unavailable("Guard could not be checked for this request, so it was not sent. Try again.");
+          app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "AI gateway could not read the rule set bindings for a request; it was refused");
+          throw aiGatewayErrors.unavailable("Content rules could not be checked for this request, so it was not sent. Try again.");
         }
         if (resolution.stack.length > 0) {
           guard = {
@@ -516,7 +516,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     });
   };
 
-  /** Guard on the prompt: the messages' text (tool results apart). Returns the messages to send. */
+  /** Content rules on the prompt: the messages' text (tool results apart). Returns the messages to send. */
   const guardPrompt = async (admitted: Admitted, messages: ChatMessage[], provider: LLMProviderConfig): Promise<{ messages: ChatMessage[]; outcome: RecordedGuardOutcome }> => {
     if (!admitted.guard) return { messages, outcome: "none" };
     const plain = messages.map((message, index) => ({ message, index })).filter(({ message }) => message.role !== "tool");
@@ -570,7 +570,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       const streamsForReal = wantsStream && support.streaming && typeof adapter.generateStream === "function" && admitted.outputMode !== "buffered";
 
       if (!streamsForReal) {
-        // One answer: a non-stream request, a provider without streaming, or a Guard stack that may rewrite the answer.
+        // One answer: a non-stream request, a provider without streaming, or set of rule sets that may rewrite the answer.
         let answer;
         try {
           answer = await adapter.generate(callRequest, context);
@@ -628,7 +628,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
   };
 
   const outputBlockedEvent = () => ({
-    error: { message: "The rest of the answer was withheld by Guard.", type: "invalid_request_error", code: "content_filter", param: null }
+    error: { message: "The rest of the answer was withheld by content rules.", type: "invalid_request_error", code: "content_filter", param: null }
   });
 
   const streamChat = async (
@@ -670,7 +670,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       const verdict = await checkAiGatewayAnswer(admitted.guard!, { content: sentText + pendingText, toolCalls: [] }, false);
       // A rewrite cannot be applied to a streamed answer: it stops the stream like a block (buffered mode avoids it).
       if (verdict.action === "allow") return true;
-      cut = verdict.action === "block" ? verdict : { reason: "Blocked by Guard: the answer would have been rewritten", categories: [], profiles: [] };
+      cut = verdict.action === "block" ? verdict : { reason: "Blocked by content rules: the answer would have been rewritten", categories: [], profiles: [] };
       return false;
     };
 
@@ -735,7 +735,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       // The audit check: the whole answer (also after a cut), recorded.
       const verdict = await checkAiGatewayAnswer(admitted.guard!, { content: sentText + pendingText, toolCalls });
       if (!cut && verdict.action !== "allow") {
-        cut = verdict.action === "block" ? verdict : { reason: "Blocked by Guard: the answer would have been rewritten", categories: [], profiles: [] };
+        cut = verdict.action === "block" ? verdict : { reason: "Blocked by content rules: the answer would have been rewritten", categories: [], profiles: [] };
       }
       if (!cut) {
         flushText();

@@ -1,8 +1,8 @@
 /**
- * 12.6b — Guard on /v1 AI gateway traffic (A3, A4).
+ * 12.6b — Content rules on /v1 AI gateway traffic (A3, A4).
  *
- * A route set's or client's Guard binding turns these checks on (`GuardService.resolveGateway` with the route set in
- * the toolset's place); with neither, /v1 runs no Guard (the gg1 rule). Checkpoints:
+ * A route set's or client's rule set binding turns these checks on (`GuardService.resolveGateway` with the route set in
+ * the toolset's place); with neither, /v1 runs no content rules (the gg1 rule). Checkpoints:
  *   - `prompt` on the request before it goes to the provider: the messages' text as one array (a rewrite maps back
  *     message by message); `tool` messages (results of tools the caller ran: outside content) in a second check
  *     labelled `untrusted_external`; the deployment's destination rules on the route's provider. Embedding inputs are
@@ -134,7 +134,7 @@ export async function checkAiGatewayPrompt(
   if (first.action === "block") return first;
   if (first.action === "rewrite") {
     const next = rewrittenStrings(first.content, texts.length);
-    if (!next) return blockedRewrite("Blocked by Guard: the rewritten prompt could not be used");
+    if (!next) return blockedRewrite("Blocked by content rules: the rewritten prompt could not be used");
     texts = next;
     rewritten = true;
   }
@@ -143,7 +143,7 @@ export async function checkAiGatewayPrompt(
     if (second.action === "block") return second;
     if (second.action === "rewrite") {
       const next = rewrittenStrings(second.content, toolTexts.length);
-      if (!next) return blockedRewrite("Blocked by Guard: the rewritten tool results could not be used");
+      if (!next) return blockedRewrite("Blocked by content rules: the rewritten tool results could not be used");
       toolTexts = next;
       rewritten = true;
     }
@@ -174,7 +174,7 @@ export async function checkAiGatewayAnswer(scope: AiGatewayGuardScope, answer: A
   const record_ = content && typeof content === "object" && !Array.isArray(content) ? (content as Record<string, unknown>) : null;
   const calls = Array.isArray(record_?.tool_calls) ? (record_!.tool_calls as Array<Record<string, unknown>>) : null;
   if (!record_ || typeof record_.content !== "string" || !calls || calls.length !== answer.toolCalls.length) {
-    return blockedRewrite("Blocked by Guard: the rewritten answer could not be used");
+    return blockedRewrite("Blocked by content rules: the rewritten answer could not be used");
   }
   return {
     action: "rewrite",

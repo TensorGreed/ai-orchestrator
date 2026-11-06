@@ -3,7 +3,7 @@
  *
  * `GatewayGuardPicker` picks the Guard profile that checks a toolset's or client's tool calls (none by default).
  * `GatewayRateLimitEditor` sets an optional rate limit (a client's own, or a toolset's default for each client).
- * `ClientGovernance` is the client's Governance section: one row per setting (Guard, rate limit, budgets, and the
+ * `ClientGovernance` is the client's Governance section: one row per setting (content rules, rate limit, budgets, and the
  * AI routes it may call on /v1). Admins change them; everyone else reads them. 12.6b — the pickers also serve an AI
  * gateway route set (`ai_route_set`).
  */
@@ -567,7 +567,7 @@ export function ClientAiGrants({ clientId, isAdmin }: { clientId: string; isAdmi
       {sets && sets.length > 0 && !isAdmin && (
         <p>{granted.length === 0 ? "None" : granted.map((id) => names.get(id) ?? id).join(", ")}</p>
       )}
-      <small className="kb-subtle">The client calls these models at /v1 with its own token, by the route's model name; its Guard profile, rate limit and budgets apply there too. None by default.</small>
+      <small className="kb-subtle">The client calls these models at /v1 with its own token, by the route's model name; its rule set, rate limit and budgets apply there too. None by default.</small>
     </div>
   );
 }

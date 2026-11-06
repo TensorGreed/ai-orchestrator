@@ -103,7 +103,7 @@ describe("AiRoutesView", () => {
     expect(within(card).queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
     const usagePanel = screen.getByTestId("ai-gateway-usage");
     expect(await within(usagePanel).findByText(/12 requests/)).toBeInTheDocument();
-    expect(within(usagePanel).getByText(/1 blocked by Guard/)).toBeInTheDocument();
+    expect(within(usagePanel).getByText(/1 blocked by content rules/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByTestId("ai-gateway-endpoint").textContent).toBe("https://gateway.example.com/v1"));
   });
 

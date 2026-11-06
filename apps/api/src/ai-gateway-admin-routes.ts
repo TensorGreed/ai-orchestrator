@@ -1,6 +1,6 @@
 /**
  * 12.6b — the admin API of the /v1 AI gateway: route sets (project-owned), their routes, which clients may call
- * which sets, a set's Guard binding, and usage. Builders read; admins change. Every change is audited. A route names
+ * which sets, a set's rule set binding, and usage. Builders read; admins change. Every change is audited. A route names
  * its provider key only as a stored secret's id (secretRef); the value is never read here or returned.
  */
 import crypto from "node:crypto";
@@ -391,7 +391,7 @@ export function registerAiGatewayAdminRoutes(deps: AiGatewayAdminDeps): void {
   });
 
   // ---------------------------------------------------------------------------
-  // A route set's Guard binding (it stands where a toolset's does for /v1 calls)
+  // A route set's rule set binding (it stands where a toolset's does for /v1 calls)
   // ---------------------------------------------------------------------------
 
   const guardFail = (reply: FastifyReply, error: unknown) => {
@@ -400,7 +400,7 @@ export function registerAiGatewayAdminRoutes(deps: AiGatewayAdminDeps): void {
       reply.code(409);
       return { error: error.message };
     }
-    if (error instanceof GuardNotFoundError) return notFound(reply, "Guard profile");
+    if (error instanceof GuardNotFoundError) return notFound(reply, "rule set");
     throw error;
   };
 
@@ -412,7 +412,7 @@ export function registerAiGatewayAdminRoutes(deps: AiGatewayAdminDeps): void {
   app.get<{ Params: { id: string } }>("/api/ai-gateway/route-sets/:id/guard", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    if (!deps.guard) return notFound(reply, "Guard");
+    if (!deps.guard) return notFound(reply, "Content rules");
     const set = await store.getAiGatewayRouteSet(request.params.id);
     if (!set) return notFound(reply, "Route set");
     return await guardView(deps.guard, set);
@@ -421,7 +421,7 @@ export function registerAiGatewayAdminRoutes(deps: AiGatewayAdminDeps): void {
   app.put<{ Params: { id: string }; Body: unknown }>("/api/ai-gateway/route-sets/:id/guard", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    if (!deps.guard) return notFound(reply, "Guard");
+    if (!deps.guard) return notFound(reply, "Content rules");
     const set = await store.getAiGatewayRouteSet(request.params.id);
     if (!set) return notFound(reply, "Route set");
     const body = request.body && typeof request.body === "object" ? (request.body as Record<string, unknown>) : {};

@@ -6,7 +6,7 @@ import { mcpGatewayRateLimitSchema, type McpGatewayRateLimit } from "./gateway-l
  *
  * Admins define routes: a public model name (`alias`) that maps to a provider, an upstream model, an optional base URL
  * and a stored secret (by id only). Routes are grouped in route sets, each owned by a project (budgets, model
- * allowlists, the Guard project floor and usage attribution follow it), and route sets are granted to MCP gateway
+ * allowlists, the project rule set floor and usage attribution follow it), and route sets are granted to MCP gateway
  * clients beside their toolsets: one token, one Governance panel. Nothing answers on `/v1` until an admin creates a
  * route set and grants it to a client.
  */
@@ -81,7 +81,7 @@ export interface AiGatewayRouteSet {
   id: string;
   name: string;
   description: string;
-  /** The project that owns the set: its budgets, model allowlist and Guard floor apply. Null = deployment only. */
+  /** The project that owns the set: its budgets, model allowlist and rule set floor apply. Null = deployment only. */
   projectId: string | null;
   enabled: boolean;
   /** The default rate limit for each client of the set (a client's own limit replaces it). */
@@ -132,11 +132,11 @@ export const aiGatewayGrantsInputSchema = z
 export const AI_GATEWAY_REQUEST_STATUSES = ["ok", "blocked_prompt", "blocked_output", "upstream_error", "client_closed", "error"] as const;
 export type AiGatewayRequestStatus = (typeof AI_GATEWAY_REQUEST_STATUSES)[number];
 
-/** What Guard did on a request: nothing applied, allowed, rewrote, or blocked (the prompt or the answer). */
+/** What Content rules did on a request: nothing applied, allowed, rewrote, or blocked (the prompt or the answer). */
 export type AiGatewayGuardOutcome = "none" | "allow" | "rewrite" | "block";
 
 /**
- * 12.6b (A5, A11) — one `/v1` request that reached Guard or the provider: metadata only, never prompts or answers.
+ * 12.6b (A5, A11) — one `/v1` request that reached content rules or the provider: metadata only, never prompts or answers.
  * Counted by budgets (client, the route set's project, global).
  */
 export interface AiGatewayRequestRecord {
