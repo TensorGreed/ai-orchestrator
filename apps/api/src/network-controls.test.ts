@@ -4,7 +4,9 @@
  * forwarded client certificates.
  */
 import crypto from "node:crypto";
-import { describe, expect, it } from "vitest";
+import fastifyCookie from "@fastify/cookie";
+import Fastify from "fastify";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { NetworkScope } from "@ai-orchestrator/shared";
 import { parseConfig, resolveNetworkSettings } from "./config.js";
 import {
@@ -130,6 +132,15 @@ describe("classifyNetworkScope: every route family", () => {
       expect(scopes("/mcp/x", "bearer", method)).toEqual(["mcp_gateway"]);
       expect(scopes("/api/workflows", "cookie", method)).toEqual(["ui"]);
     }
+  });
+
+  // @fastify/cookie 11.1 loads its parser when the plugin is registered; `parse` throws until then, so load it the way
+  // the app does (the plugin is registered before any request reaches hasCookie).
+  beforeAll(async () => {
+    const app = Fastify();
+    await app.register(fastifyCookie);
+    await app.ready();
+    await app.close();
   });
 
   it("reads the session cookie by name, with a value", () => {
