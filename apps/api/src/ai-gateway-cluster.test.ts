@@ -78,6 +78,7 @@ run("/v1 AI gateway across replicas on one Postgres database", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-aigw-cluster-"));
     tempDirs.push(tempDir);
     const store = await openTestStoreTwin(primary, { maxConnections: 8 });
+    await store.ensureDefaultProject();
     const config = parseConfig({
       LOG_LEVEL: "error",
       SEED_SAMPLE_WORKFLOWS: "false",

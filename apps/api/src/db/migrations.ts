@@ -2558,7 +2558,7 @@ export const MIGRATIONS: Migration[] = [
         output_tokens INTEGER NOT NULL DEFAULT 0,
         cached_input_tokens INTEGER NOT NULL DEFAULT 0,
         total_tokens INTEGER NOT NULL DEFAULT 0,
-        cost_usd REAL,
+        cost_usd DOUBLE PRECISION,
         latency_ms INTEGER NOT NULL DEFAULT 0,
         guard_outcome TEXT NOT NULL DEFAULT 'none',
         error_code TEXT
