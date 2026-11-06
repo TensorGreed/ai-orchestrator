@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { AiGatewayRoute, AiGatewayRouteSet, McpClient, Workflow } from "@ai-orchestrator/shared";
 import { createApp, type CreateAppOptions } from "./app.js";
+import { openApiSpec } from "./openapi.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
@@ -632,6 +633,68 @@ describe("grants, rate limits and budgets", () => {
   });
 });
 
+describe("OpenAPI", () => {
+  it("documents /v1 and the admin API, each as a route the app serves", async () => {
+    const fixture = await setup();
+    const documented = Object.entries(openApiSpec.paths).flatMap(([route, methods]) =>
+      route.startsWith("/v1/") || route.startsWith("/api/ai-gateway/") ? Object.keys(methods as object).map((method) => ({ route, method: method.toUpperCase() })) : []
+    );
+    expect(documented.map((entry) => `${entry.method} ${entry.route}`).sort()).toEqual(
+      [
+        "GET /v1/models",
+        "POST /v1/chat/completions",
+        "POST /v1/embeddings",
+        "GET /api/ai-gateway/route-sets",
+        "POST /api/ai-gateway/route-sets",
+        "GET /api/ai-gateway/route-sets/{id}",
+        "PUT /api/ai-gateway/route-sets/{id}",
+        "DELETE /api/ai-gateway/route-sets/{id}",
+        "POST /api/ai-gateway/route-sets/{id}/routes",
+        "PUT /api/ai-gateway/routes/{id}",
+        "DELETE /api/ai-gateway/routes/{id}",
+        "GET /api/ai-gateway/clients/{clientId}/grants",
+        "PUT /api/ai-gateway/clients/{clientId}/grants",
+        "GET /api/ai-gateway/route-sets/{id}/guard",
+        "PUT /api/ai-gateway/route-sets/{id}/guard",
+        "GET /api/ai-gateway/usage",
+        "GET /api/ai-gateway/requests"
+      ].sort()
+    );
+    for (const { route, method } of documented) {
+      expect(fixture.app.hasRoute({ method: method as "GET", url: route.replace(/\{(\w+)\}/g, ":$1") }), `${method} ${route}`).toBe(true);
+    }
+  });
+});
+
+describe("browser calls (CORS) on /v1", () => {
+  const origin = "http://localhost:5173";
+  const preflight = (fixture: Fixture, headers: Record<string, string>, url = "/v1/chat/completions") =>
+    fixture.app.inject({ method: "OPTIONS", url, headers: { origin, "access-control-request-method": "POST", ...headers } });
+
+  it("allows the headers an OpenAI browser SDK sends, exposes Retry-After, and still refuses an origin that is not allowed", async () => {
+    const fixture = await setup();
+    const asked = "authorization,content-type,x-stainless-os,x-stainless-lang,openai-organization";
+    const allowed = await preflight(fixture, { "access-control-request-headers": asked });
+    expect(allowed.statusCode).toBe(204);
+    expect(allowed.headers["access-control-allow-origin"]).toBe(origin);
+    expect(String(allowed.headers["access-control-allow-headers"]).toLowerCase()).toContain("x-stainless-os");
+    expect(allowed.headers["access-control-allow-credentials"]).toBeUndefined();
+    const gw = await gateway(fixture, { rateLimit: { requestsPerMinute: 1 } });
+    const chat = { model: "gpt-test", messages: [{ role: "user", content: "hi" }] };
+    const call = () => fixture.app.inject({ method: "POST", url: "/v1/chat/completions", headers: { origin, authorization: `Bearer ${gw.token}` }, payload: chat });
+    await call();
+    expect((await call()).headers["access-control-expose-headers"]).toContain("Retry-After");
+    const refused = await preflight(fixture, { origin: "https://evil.example", "access-control-request-headers": asked });
+    expect(refused.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  it("leaves the MCP endpoint's header list as it was", async () => {
+    const fixture = await setup();
+    const answer = await preflight(fixture, { "access-control-request-headers": "x-stainless-os" }, "/mcp/anything");
+    expect(String(answer.headers["access-control-allow-headers"] ?? "").toLowerCase()).not.toContain("x-stainless-os");
+  });
+});
+
 describe("everything that reaches the provider is counted", () => {
   const ANSWER = "word ".repeat(200);
   const BYTES = ANSWER.length;
@@ -748,6 +811,25 @@ describe("everything that reaches the provider is counted", () => {
     const rows = await requestsOf(fixture);
     expect(rows).toHaveLength(2);
     for (const row of rows) expect(row).toMatchObject({ status: "ok", usageEstimated: true, outputTokens: ANSWER_TOKENS });
+  });
+
+  it("sends no usage chunk when the upstream reported none, and the upstream's numbers when it did", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    const withUsage = { ...streamed, stream_options: { include_usage: true } };
+    const zeros = { id: "up-1", object: "chat.completion.chunk", created: 1, model: "up-model", choices: [], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
+    const real = { ...zeros, usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 } };
+    fixture.upstream.chat.push(
+      { sse: [chunk({ content: "a" }), chunk({}, "stop")] },
+      { sse: [chunk({ content: "a" }), chunk({}, "stop"), zeros] },
+      { sse: [chunk({ content: "a" }), chunk({}, "stop"), real] }
+    );
+    const usages: Array<Record<string, number> | undefined> = [];
+    for (let index = 0; index < 3; index += 1) {
+      const list = frames(await (await v1(fixture, gw.token, "/v1/chat/completions", withUsage)).text()) as Frame[];
+      usages.push(list.find((frame) => typeof frame === "object" && frame.usage)?.usage);
+    }
+    expect(usages).toEqual([undefined, undefined, { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 }]);
   });
 
   it("counts tool call arguments streamed with no usage", async () => {
@@ -882,7 +964,10 @@ describe("Content rules on /v1", () => {
     expect(blocked.status).toBe(400);
     expect(((await blocked.json()) as { error: { code: string } }).error.code).toBe("content_filter");
     expect(fixture.upstream.requests).toHaveLength(0);
-    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "blocked_prompt", guardOutcome: "block" });
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "blocked_prompt", guardOutcome: "block", stream: false });
+    const blockedStream = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", stream: true, messages: [{ role: "user", content: `Mail ${EMAIL}` }] });
+    expect(blockedStream.status).toBe(400);
+    expect((await requestsOf(fixture)).find((row) => row.status === "blocked_prompt" && row.stream)).toBeDefined();
     expect((await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "fine" }] })).status).toBe(200);
   });
 

@@ -92,7 +92,9 @@ export function applyOpenAIParameters(
 ): void {
   if (typeof provider.temperature === "number") payload.temperature = provider.temperature;
   else if (!options?.providerDefaults) payload.temperature = 0.2;
-  if (provider.maxTokens) payload.max_tokens = provider.maxTokens;
+  if (provider.maxTokens) {
+    payload[options?.maxCompletionTokens && provider.providerId === "openai" ? "max_completion_tokens" : "max_tokens"] = provider.maxTokens;
+  }
   if (tools?.length) {
     payload.tools = tools;
     payload.tool_choice = openAIToolChoice(options?.toolChoice) ?? "auto";

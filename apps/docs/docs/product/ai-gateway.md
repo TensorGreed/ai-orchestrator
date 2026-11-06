@@ -88,7 +88,7 @@ A provider without streaming answers in one piece, sent as a stream of the same 
 
 ## Content rules
 
-A route set's rule set (and the client's, and the project's enforced profile) checks each request:
+A route set's rule set (and the client's, and the project's enforced rule set) checks each request:
 
 - **Prompt.** The request before it goes to the provider, as described below. Tool results the caller sends back (`tool` messages) are checked as outside content. The deployment's destination rules apply to the route's provider. A blocked prompt answers `400` with code `content_filter`, and the provider is never called.
 - **Answer.** The answer's text and the arguments of any tool calls. A blocked answer has `finish_reason: "content_filter"`.
@@ -105,6 +105,10 @@ The held-back tail has limits. It works for values that can be recognised within
 
 When a rule set must see the whole answer before any of it is sent, use a rule set that may rewrite answers, which makes the stream buffered, or call without streaming.
 
+Send the output limit as `max_tokens` or `max_completion_tokens`. On an `openai` route the name you use is the name sent; other providers get `max_tokens`. With `stream_options: {"include_usage": true}` the final usage chunk carries the provider's own numbers; a provider that sent none gets no usage chunk (the usage row still carries an estimate).
+
+Browser apps can call `/v1` from an origin in `MCP_GATEWAY_ALLOWED_ORIGINS` (or `WEB_ORIGIN`). The preflight accepts the extra headers the OpenAI browser SDK sends, and `Retry-After` is readable by the page. Keep the token out of public pages: anyone who can read it can use the route.
+
 Verdicts are recorded on the Security page with placement `gateway`, the request's `aigw_` id and the model name.
 
 ## Budgets and rate limits
@@ -116,6 +120,8 @@ Every request that reaches the provider writes a usage row (tokens, estimated co
 - A failed provider call is charged the request's input, because the gateway cannot tell whether it was billed. A provider that refuses a request therefore still counts toward budgets, a little.
 
 Estimates lean high: about three bytes of text a token, and a flat amount for each image. They are not provider billing figures.
+
+A budget is checked when a request starts and the spend lands when it ends, so requests that run at the same time can together pass a block budget before any of them is counted. Where that matters, set a concurrency limit on the client or route set beside the budget.
 
 [Budgets](./budgets) count these rows for the client (`mcp_client` scope), the route set's project and the deployment. When a block budget is used up, requests answer `429` with code `insufficient_quota` and a `Retry-After` until the budget's period resets.
 

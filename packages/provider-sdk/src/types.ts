@@ -82,6 +82,11 @@ export interface ProviderCallOptions {
    * it always was (a text-only deployment would refuse the image, and the data would newly leave for Azure).
    */
   images?: boolean;
+  /**
+   * OpenAI only: send the output limit as `max_completion_tokens`, the name newer models require, because the caller
+   * used that name. Other providers keep `max_tokens`: OpenAI-compatible servers do not all know the new name.
+   */
+  maxCompletionTokens?: boolean;
 }
 
 export type LLMStreamChunk =

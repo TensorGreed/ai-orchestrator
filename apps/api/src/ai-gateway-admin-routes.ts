@@ -427,7 +427,7 @@ export function registerAiGatewayAdminRoutes(deps: AiGatewayAdminDeps): void {
     if (!set) return notFound(reply, "Route set");
     const body = request.body && typeof request.body === "object" ? (request.body as Record<string, unknown>) : {};
     if (body.mode === "enforced") {
-      return invalid(reply, "Invalid binding", [{ path: "mode", message: "Only a project can enforce a profile; a route set or client overrides" }]);
+      return invalid(reply, "Invalid binding", [{ path: "mode", message: "Only a project can enforce a rule set; a route set or client overrides" }]);
     }
     const parsed = guardGatewayBindingInputSchema.safeParse(request.body);
     if (!parsed.success) return invalid(reply, "Invalid binding", issues(parsed.error));

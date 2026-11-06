@@ -5,8 +5,9 @@
  * Callers authenticate with an MCP gateway client token (A1) and name a route alias as `model` (A2). Admission order:
  * client token (and its certificate and address pins) -> route granted to the client -> rate limit (the client's own, else the route set's default) ->
  * budgets (the client's, the route set's project's, the deployment's) -> model allowlist -> Content rules on the prompt ->
- * provider -> Content rules on the answer -> usage row -> response. Errors use the OpenAI envelope (A9). Nothing answers but
- * 401/404 until an admin creates a route set and grants it to a client (A12): no route set means no route to find.
+ * provider -> Content rules on the answer -> usage row -> response. Errors use the OpenAI envelope (A9). Until an admin
+ * creates a route set and grants it to a client (A12) no request finds a route: a bad token gets 401, every model name 404, and
+ * /v1/models lists nothing. Other statuses (400, 403 for network controls, 413, 415) come from malformed or refused requests.
  *
  * Only metadata is recorded per request (A5): tokens, cost, latency, model, finish reason and the rule outcome, in
  * ai_gateway_requests, written before the response ends (A10) so budget checks on any replica see it. Every request
@@ -425,12 +426,25 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     signal: admitted.abort.signal
   });
 
+  /** The usage the provider reported, or none: zeros are a server that sent no numbers, and the caller must not read them as spend. */
+  const reportedUsage = (usage: LLMUsage | undefined): LLMUsage | undefined =>
+    usage && (usage.inputTokens || usage.outputTokens || usage.totalTokens) ? usage : undefined;
+
   /** A provider failure as the caller sees it: never the upstream text (it can name hosts or echo keys). */
   const upstreamFailure = (admitted: Admitted, error: unknown): AiGatewayHttpError => {
     // The list changed after admission: the provider registry's own check refused the call, so nothing was sent.
     if (isModelNotAllowedError(error)) return aiGatewayErrors.modelNotAllowed(admitted.route.alias);
-    const message = deps.redact(error instanceof Error ? error.message : String(error));
-    app.log.warn({ requestId: admitted.requestId, alias: admitted.route.alias, providerId: admitted.route.providerId, err: message.slice(0, 500) }, "AI gateway provider call failed");
+    // Metadata only: some servers put the prompt in their error text, and the usage rows keep none of it either.
+    app.log.warn(
+      {
+        requestId: admitted.requestId,
+        alias: admitted.route.alias,
+        providerId: admitted.route.providerId,
+        errorName: error instanceof Error ? error.name : "unknown",
+        upstreamStatus: error instanceof LLMProviderError ? error.statusCode : undefined
+      },
+      "AI gateway provider call failed"
+    );
     if (error instanceof LLMProviderError && error.statusCode === 429) return aiGatewayErrors.upstreamRateLimited(30);
     return aiGatewayErrors.upstream(error instanceof LLMProviderError ? error.statusCode : undefined);
   };
@@ -530,12 +544,12 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
   };
 
   /** Content rules on the provider request, built and ready to send. Returns the request to send. */
-  const guardRequest = async <T extends { provider: LLMProviderConfig }>(admitted: Admitted, kind: "chat" | "embedding", providerRequest: T): Promise<{ request: T; outcome: RecordedGuardOutcome }> => {
+  const guardRequest = async <T extends { provider: LLMProviderConfig }>(admitted: Admitted, kind: "chat" | "embedding", stream: boolean, providerRequest: T): Promise<{ request: T; outcome: RecordedGuardOutcome }> => {
     if (!admitted.guard) return { request: providerRequest, outcome: "none" };
     const verdict = await checkAiGatewayRequest(admitted.guard, providerRequest);
     if (verdict.action === "block") {
       await auditGuardBlock(admitted, "prompt", verdict);
-      await record(admitted, { kind, stream: false, status: "blocked_prompt", httpStatus: 400, guardOutcome: "block", errorCode: "content_filter" });
+      await record(admitted, { kind, stream, status: "blocked_prompt", httpStatus: 400, guardOutcome: "block", errorCode: "content_filter" });
       throw aiGatewayErrors.promptBlocked(deps.redact(verdict.reason));
     }
     return verdict.action === "rewrite" ? { request: verdict.content, outcome: "rewrite" } : { request: providerRequest, outcome: "allow" };
@@ -566,7 +580,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       const { options, temperature, maxTokens } = toCallOptions(body, admitted.route, { hasImages: mapped.hasImages, streamUsage });
       const provider = providerConfig(admitted.route, { ...(temperature !== undefined ? { temperature } : {}), ...(maxTokens !== undefined ? { maxTokens } : {}) });
       const tools = toToolDefinitions(body);
-      const { request: callRequest, outcome: promptOutcome } = await guardRequest(admitted, "chat", { provider, messages: mapped.messages, ...(tools ? { tools } : {}), options });
+      const { request: callRequest, outcome: promptOutcome } = await guardRequest(admitted, "chat", wantsStream, { provider, messages: mapped.messages, ...(tools ? { tools } : {}), options });
       const context = executionContext(admitted);
       const base = { id: `chatcmpl-${admitted.requestId.slice(5)}`, created: Math.floor(admitted.startedAt / 1000), model: admitted.route.alias };
       const streamsForReal = wantsStream && support.streaming && typeof adapter.generateStream === "function" && admitted.outputMode !== "buffered";
@@ -629,7 +643,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
           writer.data(chatChunk(base, { tool_calls: openAiToolCalls(toolCalls).map((call, index) => ({ index, ...call })) }));
         }
         writer.data(chatChunk(base, {}, finishReason));
-        if (includeUsage) writer.data(usageChunk(base, answer.usage));
+        if (includeUsage && reportedUsage(answer.usage)) writer.data(usageChunk(base, answer.usage));
         if (status === "blocked_output") writer.data(outputBlockedEvent());
         writer.end();
         return reply;
@@ -804,7 +818,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     await record(admitted, { kind: "chat", stream: true, status, httpStatus: 200, finishReason: finish, ...(usage ? { usage } : {}), estimate, guardOutcome });
     opening();
     writer.data(chatChunk(base, {}, finish));
-    if (input.includeUsage) writer.data(usageChunk(base, usage));
+    if (input.includeUsage && reportedUsage(usage)) writer.data(usageChunk(base, usage));
     if (cut) writer.data(outputBlockedEvent());
     writer.end();
     return reply;
@@ -832,7 +846,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
         app.log.warn({ alias: admitted.route.alias, providerId: admitted.route.providerId }, "AI gateway embedding route names a provider without embeddings");
         throw aiGatewayErrors.upstream();
       }
-      const { request: embedRequest, outcome: guardOutcome } = await guardRequest(admitted, "embedding", {
+      const { request: embedRequest, outcome: guardOutcome } = await guardRequest(admitted, "embedding", false, {
         provider: providerConfig(admitted.route),
         input: inputs,
         ...(body.dimensions !== undefined ? { dimensions: body.dimensions } : {}),

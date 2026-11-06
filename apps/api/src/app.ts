@@ -5860,6 +5860,14 @@ export async function createApp(
     allowedHeaders: ["Authorization", "Content-Type", "Accept", "Mcp-Session-Id", "MCP-Protocol-Version", "Last-Event-ID"],
     exposedHeaders: ["Mcp-Session-Id", "WWW-Authenticate"]
   };
+  // 12.6b — /v1 follows the same origin rules, but a browser OpenAI SDK sends headers of its own (x-stainless-*,
+  // openai-*) that cannot be listed in advance: with no list the preflight reflects what it asks for. Retry-After is exposed.
+  const aiGatewayCorsOptions = {
+    origin: mcpCorsOptions.origin,
+    credentials: false,
+    methods: ["GET", "POST", "OPTIONS"],
+    exposedHeaders: ["Retry-After"]
+  };
   // Phase 13.2 — network allowlists (NETWORK_ALLOW_*): one onRequest hook, installed only when a scope has a list,
   // and added before CORS and rate limiting so a refused request is cheap and consumes no bucket.
   const networkControls = new NetworkControls({
@@ -5877,9 +5885,9 @@ export async function createApp(
 
   app.register(cors, {
     delegator: (request, callback) => {
+      const url = request.url ?? "";
       // 12.6b — the /v1 AI gateway is bearer-token traffic too.
-      const isMcpEndpoint = (request.url ?? "").startsWith("/mcp/") || (request.url ?? "").startsWith("/v1/");
-      callback(null, isMcpEndpoint ? mcpCorsOptions : studioCorsOptions);
+      callback(null, url.startsWith("/v1/") ? aiGatewayCorsOptions : url.startsWith("/mcp/") ? mcpCorsOptions : studioCorsOptions);
     }
   });
 

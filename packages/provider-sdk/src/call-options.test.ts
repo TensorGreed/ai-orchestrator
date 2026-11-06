@@ -171,6 +171,17 @@ describe("OpenAI-family request parameters", () => {
     expect(calls[1]!.body).toEqual({ messages: [{ role: "user", content: "look" }], temperature: 0.2, stream: true });
   });
 
+  it("Azure streams with the key order a workflow run always sent", async () => {
+    const calls = stubFetch(sseResponse(["[DONE]"]));
+    await collect(
+      new AzureOpenAIProviderAdapter().generateStream(
+        { provider: { providerId: "azure_openai", model: "dep1", baseUrl: "https://x.openai.azure.com", maxTokens: 20 }, messages: [{ role: "user", content: "hi" }], tools: [tool] },
+        ctx
+      )
+    );
+    expect(Object.keys(calls[0]!.body)).toEqual(["messages", "temperature", "stream", "max_tokens", "tools", "tool_choice"]);
+  });
+
   it("Azure sends images only for a caller that opts in, and keeps them out with other options set", async () => {
     const reply = () => jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: "ok" } }] });
     const calls = stubFetch(reply(), reply());
@@ -282,6 +293,53 @@ describe("Anthropic and Gemini request parameters", () => {
     expect(calls[0]!.body.generationConfig).toEqual({ responseMimeType: "application/json", seed: 1, stopSequences: ["Z"] });
     expect(calls[0]!.body.toolConfig).toEqual({ functionCallingConfig: { mode: "NONE" } });
     expect(answer.finishReason).toBe("content_filter");
+  });
+});
+
+describe("max_completion_tokens", () => {
+  it("is sent under its own name to OpenAI only when the caller used it", async () => {
+    const calls = stubFetch(
+      jsonResponse(200, { choices: [{ message: { content: "a" } }] }),
+      jsonResponse(200, { choices: [{ message: { content: "b" } }] }),
+      jsonResponse(200, { choices: [{ message: { content: "c" } }] }),
+      jsonResponse(200, { choices: [{ message: { content: "d" } }] })
+    );
+    const messages: ChatMessage[] = [{ role: "user", content: "hi" }];
+    await new OpenAICloudProviderAdapter().generate({ provider: { providerId: "openai", model: "o3", maxTokens: 50 }, messages, options: { maxCompletionTokens: true } }, ctx);
+    await new OpenAICloudProviderAdapter().generate({ provider: { providerId: "openai", model: "gpt-4o", maxTokens: 50 }, messages, options: { providerDefaults: true } }, ctx);
+    await new OpenAICloudProviderAdapter().generate({ provider: { providerId: "openai", model: "gpt-4o", maxTokens: 50 }, messages }, ctx);
+    await new OpenAICompatibleProviderAdapter().generate(
+      { provider: { providerId: "openai_compatible", model: "m", baseUrl: "http://x.test/v1", maxTokens: 50 }, messages, options: { maxCompletionTokens: true } },
+      ctx
+    );
+    expect(calls[0]!.body).toMatchObject({ max_completion_tokens: 50 });
+    expect(calls[0]!.body).not.toHaveProperty("max_tokens");
+    expect(calls[1]!.body).toMatchObject({ max_tokens: 50 });
+    expect(calls[2]!.body).toMatchObject({ max_tokens: 50 });
+    expect(calls[3]!.body).toMatchObject({ max_tokens: 50 });
+    expect(calls[3]!.body).not.toHaveProperty("max_completion_tokens");
+  });
+});
+
+describe("Gemini tool results", () => {
+  it("names a tool result after the assistant call it answers", async () => {
+    const calls = stubFetch(jsonResponse(200, { candidates: [{ finishReason: "STOP", content: { parts: [{ text: "ok" }] } }] }));
+    await new GeminiProviderAdapter().generate(
+      {
+        provider: { providerId: "gemini", model: "gemini-2.0-flash" },
+        messages: [
+          { role: "user", content: "weather?" },
+          { role: "assistant", content: "", toolCalls: [{ id: "call_1", name: "get_weather", arguments: { city: "Oslo" } }] },
+          { role: "tool", content: "rain", toolCallId: "call_1" },
+          { role: "tool", content: "?", toolCallId: "unknown" },
+          { role: "tool", content: "named", toolCallId: "call_1", name: "explicit" }
+        ],
+        tools: [tool]
+      },
+      ctx
+    );
+    const contents = calls[0]!.body.contents as Array<{ parts: Array<{ functionResponse?: { name: string } }> }>;
+    expect(contents.slice(2).map((entry) => entry.parts[0]!.functionResponse!.name)).toEqual(["get_weather", "tool", "explicit"]);
   });
 });
 

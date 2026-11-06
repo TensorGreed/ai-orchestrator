@@ -160,6 +160,7 @@ export function toCallOptions(
     strictStream: true,
     ...(context.streamUsage ? { streamUsage: true } : {}),
     ...(context.hasImages ? { images: true } : {}),
+    ...(typeof request.max_completion_tokens === "number" ? { maxCompletionTokens: true } : {}),
     ...(typeof (request.top_p ?? route.defaults.topP) === "number" ? { topP: (request.top_p ?? route.defaults.topP)! } : {}),
     ...(stop?.length ? { stop } : {}),
     ...(typeof request.seed === "number" ? { seed: request.seed } : {}),

@@ -180,11 +180,16 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
   async *generateStream(request: ProviderCallRequest, context: ProviderExecutionContext): AsyncGenerator<LLMStreamChunk> {
     const provider = request.provider;
     const connection = await resolveAzureOpenAIConnection(provider, context);
+    const parameters: Record<string, unknown> = {};
+    applyOpenAIParameters(parameters, provider, toOpenAITools(request.tools), request.options);
+    // The body's key order stays what it was before options existed: messages, temperature, stream, then the rest.
+    const { temperature, ...rest } = parameters;
     const payload: Record<string, unknown> = {
-      messages: toOpenAIMessages(request.messages, { images: request.options?.images === true })
+      messages: toOpenAIMessages(request.messages, { images: request.options?.images === true }),
+      ...(temperature !== undefined ? { temperature } : {}),
+      stream: true,
+      ...rest
     };
-    applyOpenAIParameters(payload, provider, toOpenAITools(request.tools), request.options);
-    payload.stream = true;
     if (request.options?.streamUsage) payload.stream_options = { include_usage: true };
 
     const timeoutMs = typeof provider.extra?.timeoutMs === "number" ? provider.extra.timeoutMs : 120_000;

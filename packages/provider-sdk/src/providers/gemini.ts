@@ -134,6 +134,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
 
     let systemInstruction: { parts: GeminiPart[] } | undefined;
     const contents: GeminiContent[] = [];
+    const callNames = new Map<string, string>();
 
     for (const msg of request.messages) {
       if (msg.role === "system") {
@@ -142,6 +143,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
         };
       } else if (msg.role === "assistant") {
          if (msg.toolCalls && msg.toolCalls.length > 0) {
+           for (const tc of msg.toolCalls) callNames.set(tc.id, tc.name);
            contents.push({
              role: "model",
              parts: msg.toolCalls.map(tc => {
@@ -162,12 +164,13 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
            });
          }
       } else if (msg.role === "tool") {
+         const functionName = msg.name || (msg.toolCallId ? callNames.get(msg.toolCallId) : undefined) || "tool";
          contents.push({
            role: "user",
            parts: [{
              functionResponse: {
-               name: msg.name || "tool",
-               response: { name: msg.name || "tool", content: msg.content }
+               name: functionName,
+               response: { name: functionName, content: msg.content }
              }
            }]
          });
