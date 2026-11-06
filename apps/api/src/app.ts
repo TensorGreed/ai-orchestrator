@@ -11288,9 +11288,23 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     guard: guardService,
     budgets: budgetService,
     limiter: gatewayClientLimiter,
+    network: networkControls,
     priceRequest: (providerId, model, inputTokens, outputTokens, cachedInputTokens) =>
-      usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
-    ...(options.aiGatewayCheckModel ? { checkModel: options.aiGatewayCheckModel } : {})
+      usageService.estimateAiGatewayCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
+    checkModel:
+      options.aiGatewayCheckModel ??
+      (async (scope, call) =>
+        await modelAllowlistService.check(
+          {
+            // The route set owns the project (A6); one with no project uses the default project's list, like a workflow.
+            projectId: scope.projectId ?? DEFAULT_PROJECT_ID,
+            source: "ai_gateway",
+            // Audited at most once a minute per client and model, like the gateway's other refusals.
+            runKey: `aigw:${scope.clientId}:${Math.floor(Date.now() / 60_000)}`,
+            clientId: scope.clientId
+          },
+          call
+        ))
   });
   registerAiGatewayAdminRoutes({
     app,

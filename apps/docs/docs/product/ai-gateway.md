@@ -103,6 +103,16 @@ Rate limits are the client's own, or else the route set's default for each clien
 
 Usage by model name and client is shown under **MCP → AI routes**.
 
+Costs come from the same pricing table as workflow runs, including `LLM_PRICING_OVERRIDES_JSON`. `/v1` traffic is also priced for `azure_openai` models and for embedding models, which workflow runs are not: an Azure route priced this way counts toward USD budgets, while an Azure workflow run stays unpriced.
+
+## Model allowlists
+
+Each request is checked against the [model allowlists](../security/model-allowlists.md) before it reaches the provider: the deployment list and the list of the route set's project (the Default project's list for a route set with no project). Moving a route set to another project moves it to that project's list. For Azure OpenAI the name checked is the deployment. With no entries anywhere, every model is allowed.
+
+## Addresses and certificates
+
+A client's address list and certificate pins apply here as they do on the MCP gateway, and `NETWORK_ALLOW_MCP_GATEWAY` covers `/v1/*` as well as `/mcp/*`. See [Network controls](../security/network-controls.md).
+
 ## Errors
 
 Errors use the OpenAI shape: `{"error": {"message", "type", "code", "param"}}`.
@@ -111,7 +121,8 @@ Errors use the OpenAI shape: `{"error": {"message", "type", "code", "param"}}`.
 | --- | --- | --- |
 | 400 | `content_filter` | Guard blocked the prompt. |
 | 400 | `unsupported_parameter` and others | The request is malformed or asks for something the route cannot do. |
-| 401 | `invalid_api_key` | No token, or an unknown, revoked or expired one. |
+| 401 | `invalid_api_key` | No token, or an unknown, revoked or expired one, or the client's pinned certificate was not presented. |
+| 403 | `access_denied` | The caller's address is not allowed. The body never names the list or the address. |
 | 403 | `model_not_allowed` | The model allowlist refuses the route's model. |
 | 404 | `model_not_found` | The model name is unknown, disabled or not granted to the client. |
 | 429 | `rate_limit_exceeded` | Over the client's rate limit. |

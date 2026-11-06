@@ -3,7 +3,7 @@
  * `POST /v1/embeddings`, for applications outside L2M.
  *
  * Callers authenticate with an MCP gateway client token (A1) and name a route alias as `model` (A2). Admission order:
- * client token -> route granted to the client -> rate limit (the client's own, else the route set's default) ->
+ * client token (and its certificate and address pins) -> route granted to the client -> rate limit (the client's own, else the route set's default) ->
  * budgets (the client's, the route set's project's, the deployment's) -> model allowlist -> Guard on the prompt ->
  * provider -> Guard on the answer -> usage row -> response. Errors use the OpenAI envelope (A9). Nothing answers but
  * 401/404 until an admin creates a route set and grants it to a client (A12): no route set means no route to find.
@@ -15,6 +15,7 @@ import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   LLMProviderError,
+  isModelNotAllowedError,
   providerCallOptionSupport,
   type EmbeddingProviderRegistry,
   type LLMStreamChunk,
@@ -23,6 +24,7 @@ import {
 } from "@ai-orchestrator/provider-sdk";
 import {
   effectiveGatewayRateLimit,
+  effectiveModelName,
   openAiChatCompletionRequestSchema,
   openAiEmbeddingsRequestSchema,
   type AiGatewayGuardOutcome as RecordedGuardOutcome,
@@ -46,6 +48,8 @@ import { BudgetUnavailableError } from "./services/budget-service.js";
 import type { GuardService } from "./services/guard-service.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { McpClientService, resolveMcpClientSubject } from "./services/mcp-client-service.js";
+import { createMcpClientAdmission } from "./mcp-client-admission.js";
+import type { NetworkControls } from "./network-controls.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { retryAfterSeconds } from "./run-helpers.js";
 import {
@@ -72,7 +76,7 @@ import {
   usageChunk
 } from "./services/ai-gateway-wire.js";
 
-/** One model call to check against the model allowlist (the seam the 12.6 allowlist service fills). */
+/** One model call to check against the model allowlist. `model` is the name the provider is sent. */
 export interface AiGatewayModelCheck {
   (
     scope: { projectId: string | null; clientId: string; routeSetId: string; requestId: string },
@@ -95,6 +99,8 @@ export interface AiGatewayDeps {
   budgets?: Pick<BudgetService, "checkBlock" | "recordGatewayUsage">;
   /** Per-client rate limits (shared across replicas in cluster mode); absent: counted in this process. */
   limiter?: GatewayClientLimiter;
+  /** The client's own address list and certificate pins; absent: a client with either is refused. */
+  network?: NetworkControls;
   /** A request's cost from the pricing table; null when the model has no price. */
   priceRequest?: (providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number) => number | null;
   /**
@@ -240,6 +246,12 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     }
   };
 
+  const clientAdmission = createMcpClientAdmission({
+    ...(deps.network ? { network: deps.network } : {}),
+    auditRaw: audit,
+    auditMetadata: { endpoint: "ai_gateway" }
+  });
+
   /** Refusals (rate limit, budget, allowlist) are audited at most once a minute per client and kind. */
   const auditRefusal = async (client: McpClient, routeSet: AiGatewayRouteSet, eventType: string, metadata: Record<string, unknown>) => {
     const key = `${client.id}:${eventType}`;
@@ -270,6 +282,10 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
         verification.reason === "revoked" ? "This client token has been revoked." : verification.reason === "expired" ? "This client token has expired." : "Invalid client token."
       );
     }
+    // 13.2 — the token is the MCP gateway's, and so are its pins: the same checks, answered in the OpenAI format.
+    const certificateRefusal = await clientAdmission.certificateRefusal(request, verification.client);
+    if (certificateRefusal) throw aiGatewayErrors.invalidApiKey(certificateRefusal);
+    if (!(await clientAdmission.addressAdmitted(request, verification.client))) throw aiGatewayErrors.networkDenied();
     return { client: verification.client, subject: await resolveMcpClientSubject(store, verification.client) };
   };
 
@@ -340,7 +356,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       }
       if (deps.checkModel) {
         try {
-          await deps.checkModel({ projectId: routeSet.projectId, clientId: client.id, routeSetId: routeSet.id, requestId }, { providerId: route.providerId, model: route.model, operation });
+          await deps.checkModel({ projectId: routeSet.projectId, clientId: client.id, routeSetId: routeSet.id, requestId }, { providerId: route.providerId, model: effectiveModelName(route), operation });
         } catch (error) {
           if (error instanceof Error && error.name === "ModelNotAllowedError") {
             await auditRefusal(client, routeSet, "ai_gateway.model_not_allowed", { alias: route.alias, providerId: route.providerId, model: route.model });
@@ -409,6 +425,8 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
 
   /** A provider failure as the caller sees it: never the upstream text (it can name hosts or echo keys). */
   const upstreamFailure = (admitted: Admitted, error: unknown): AiGatewayHttpError => {
+    // The list changed after admission: the provider registry's own check refused the call, so nothing was sent.
+    if (isModelNotAllowedError(error)) return aiGatewayErrors.modelNotAllowed(admitted.route.alias);
     const message = deps.redact(error instanceof Error ? error.message : String(error));
     app.log.warn({ requestId: admitted.requestId, alias: admitted.route.alias, providerId: admitted.route.providerId, err: message.slice(0, 500) }, "AI gateway provider call failed");
     if (error instanceof LLMProviderError && error.statusCode === 429) return aiGatewayErrors.upstreamRateLimited(30);
@@ -849,7 +867,6 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       if (status >= 500) app.log.error({ err: deps.redact(error.message), requestId: request.id }, "AI gateway request failed");
       return sendError(reply, new AiGatewayHttpError(status, message, type, status === 413 ? "request_too_large" : null));
     });
-    scope.setNotFoundHandler(async (_request, reply) => sendError(reply, aiGatewayErrors.notFound()));
 
     scope.get(
       "/v1/models",
@@ -871,6 +888,12 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     );
     scope.post("/v1/chat/completions", handle(chatCompletions));
     scope.post("/v1/embeddings", handle(embeddings));
+    // A route and not a not-found handler: that would answer for every unknown path of the whole app. OPTIONS stays with CORS.
+    scope.route({
+      method: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+      url: "/v1/*",
+      handler: async (_request, reply) => sendError(reply, aiGatewayErrors.notFound())
+    });
   }, { prefix: "" });
 
 }

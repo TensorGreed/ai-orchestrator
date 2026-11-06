@@ -11,7 +11,8 @@
  * so every adapter call asks `check(scope, …)` first, and `embeddingCheck`
  * does the same for RAG and knowledge-base embedders. app.ts gives each run,
  * gateway sampling call, provider test, eval judge call and knowledge-base
- * request a view for its project. A refused call throws `ModelNotAllowedError`
+ * request a view for its project; the /v1 AI gateway calls `check` itself, once
+ * per request, for its route set's project. A refused call throws `ModelNotAllowedError`
  * (a node error in runs, a sampling error on the gateway) and is audited once
  * per run key, node, provider and model.
  *
@@ -67,7 +68,7 @@ export class ModelAllowlistUnavailableError extends Error {
  * Where a model call comes from, for the audit event. `deployment`: a call made through the deployment-wide registry
  * with no run, session or request behind it (a fallback; every built-in path has its own source).
  */
-export type ModelCallSource = "run" | "gateway_sampling" | "provider_test" | "eval_judge" | "knowledge_base" | "deployment";
+export type ModelCallSource = "run" | "gateway_sampling" | "ai_gateway" | "provider_test" | "eval_judge" | "knowledge_base" | "deployment";
 
 export interface ModelAllowlistFinding {
   providerId: string;
@@ -97,7 +98,7 @@ export interface ModelAllowlistScope {
   /** An error workflow's run: the failed run that started it. */
   sourceExecutionId?: string;
   workflowId?: string;
-  /** A gateway sampling call: the client and toolset, for the audit event. */
+  /** A gateway sampling call or a /v1 AI gateway request: the client (and toolset), for the audit event. */
   clientId?: string;
   toolsetId?: string;
   /** A knowledge-base request: the knowledge base. */

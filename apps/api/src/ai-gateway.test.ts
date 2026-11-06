@@ -13,9 +13,9 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { AiGatewayRoute, AiGatewayRouteSet, McpClient } from "@ai-orchestrator/shared";
+import type { AiGatewayRoute, AiGatewayRouteSet, McpClient, Workflow } from "@ai-orchestrator/shared";
 import { createApp, type CreateAppOptions } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
@@ -80,11 +80,11 @@ async function startUpstream(): Promise<Upstream> {
     req.on("end", () => {
       const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
       requests.push({ path: req.url ?? "", headers: req.headers, body });
-      if (req.headers.authorization !== `Bearer ${UPSTREAM_KEY}`) {
+      if (req.headers.authorization !== `Bearer ${UPSTREAM_KEY}` && req.headers["api-key"] !== UPSTREAM_KEY) {
         res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "bad key" } }));
         return;
       }
-      if (req.url === "/v1/embeddings") {
+      if ((req.url ?? "").split("?")[0]!.endsWith("/embeddings")) {
         const inputs = body.input as string[];
         res.writeHead(200, { "content-type": "application/json" }).end(
           JSON.stringify({
@@ -168,10 +168,11 @@ afterEach(async () => {
   }
 });
 
-async function setup(options: CreateAppOptions = {}): Promise<Fixture> {
+async function setup(options: CreateAppOptions = {}, prepare?: (store: Store) => void): Promise<Fixture> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-aigw-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
+  prepare?.(store);
   const config = parseConfig({
     LOG_LEVEL: "error",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -295,6 +296,20 @@ describe("/v1 with no route set (optional)", () => {
     expect((await v1(fixture, null, "/v1/models")).status).toBe(401);
     expect(fixture.upstream.requests).toHaveLength(0);
     expect(await requestsOf(fixture)).toHaveLength(0);
+  });
+
+  it("answers unknown /v1 paths in the OpenAI format and leaves the 404 of every other path as it was", async () => {
+    const fixture = await setup();
+    for (const method of ["GET", "POST", "DELETE"] as const) {
+      const unknown = await fixture.app.inject({ method, url: "/v1/nope" });
+      expect(unknown.statusCode).toBe(404);
+      expect(unknown.json()).toMatchObject({ error: { code: "unknown_url" } });
+    }
+    for (const url of ["/no-such-path", "/api/no-such-route"]) {
+      const response = await fixture.app.inject({ method: "GET", url });
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({ message: `Route GET:${url} not found`, error: "Not Found", statusCode: 404 });
+    }
   });
 });
 
@@ -649,5 +664,205 @@ describe("admin API", () => {
     expect((await api(fixture, "DELETE", `/api/ai-gateway/route-sets/${gw.set.id}`)).status).toBe(204);
     expect(await fixture.store.listAiGatewayClientGrants(gw.client.id)).toEqual([]);
     expect((await v1(fixture, gw.token, "/v1/models").then((response) => response.json())) as { data: unknown[] }).toEqual({ object: "list", data: [] });
+  });
+});
+
+describe("model allowlists on /v1", () => {
+  const CHAT = { model: "gpt-test", messages: [{ role: "user", content: "hi" }] };
+  const STREAM = { ...CHAT, stream: true };
+  const EMBED = { model: "embed-test", input: "x" };
+
+  async function allow(fixture: Fixture, entry: Record<string, unknown>) {
+    const created = await api(fixture, "POST", "/api/model-allowlist", entry);
+    expect(created.status, created.raw).toBe(201);
+  }
+  const deniedEvents = async (fixture: Fixture) => (await fixture.store.listAuditLogs({ eventType: "model_allowlist.call_denied", pageSize: 50 })).items;
+  const errorOf = async (response: Response) => ((await response.json()) as { error: { code: string; message: string } }).error;
+
+  it("refuses chat, stream and embeddings outside the deployment list: 403, nothing sent, no usage row, one audit per model", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await allow(fixture, { scope: "deployment", providerId: "openai", modelGlob: "gpt-4o" });
+    for (const [url, body] of [["/v1/chat/completions", CHAT], ["/v1/chat/completions", STREAM], ["/v1/embeddings", EMBED]] as const) {
+      const refused = await v1(fixture, gw.token, url, body);
+      expect(refused.status, url).toBe(403);
+      expect(refused.headers.get("content-type")).toContain("application/json");
+      expect((await errorOf(refused)).code).toBe("model_not_allowed");
+    }
+    expect(fixture.upstream.requests).toHaveLength(0);
+    expect(await requestsOf(fixture)).toHaveLength(0);
+    const events = await deniedEvents(fixture);
+    expect(events.map((event) => event.metadata as Record<string, unknown>).sort((a, b) => String(a.model).localeCompare(String(b.model)))).toEqual([
+      expect.objectContaining({ source: "ai_gateway", operation: "embed", model: "up-embed", refusedBy: "deployment", clientId: gw.client.id }),
+      expect.objectContaining({ source: "ai_gateway", operation: "generate", model: "up-model", refusedBy: "deployment", clientId: gw.client.id })
+    ]);
+  });
+
+  it("answers chat, stream and embeddings on the list", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await allow(fixture, { scope: "deployment", providerId: "openai_compatible", modelGlob: "up-*" });
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", CHAT)).status).toBe(200);
+    fixture.upstream.chat.push({ sse: [chunk({ content: "Hi" }, "stop")] });
+    const streamed = await v1(fixture, gw.token, "/v1/chat/completions", STREAM);
+    expect(streamed.status).toBe(200);
+    expect(streamedText(frames(await streamed.text()))).toBe("Hi");
+    expect((await v1(fixture, gw.token, "/v1/embeddings", EMBED)).status).toBe(200);
+    expect(await deniedEvents(fixture)).toHaveLength(0);
+  });
+
+  it("with no list checks nothing: the same calls answer and nothing is audited", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", CHAT)).status).toBe(200);
+    fixture.upstream.chat.push({ sse: [chunk({ content: "Hi" }, "stop")] });
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", STREAM)).status).toBe(200);
+    expect((await v1(fixture, gw.token, "/v1/embeddings", EMBED)).status).toBe(200);
+    expect(await deniedEvents(fixture)).toHaveLength(0);
+  });
+
+  it("follows the route set's project, and a route set with no project uses the default project's list", async () => {
+    const fixture = await setup();
+    const narrow = await api<{ id?: string; project?: { id: string } }>(fixture, "POST", "/api/projects", { name: "Narrow" });
+    expect(narrow.status, narrow.raw).toBeLessThan(300);
+    const projectId = narrow.body.project?.id ?? narrow.body.id!;
+    const gw = await gateway(fixture);
+    await allow(fixture, { scope: "project", projectId, providerId: "openai", modelGlob: "gpt-4o" });
+    // In the default project, the other project's list does not apply.
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", CHAT)).status).toBe(200);
+    const moved = await api(fixture, "PUT", `/api/ai-gateway/route-sets/${gw.set.id}`, { projectId });
+    expect(moved.status, moved.raw).toBe(200);
+    const refused = await v1(fixture, gw.token, "/v1/chat/completions", CHAT);
+    expect(refused.status).toBe(403);
+    expect((await deniedEvents(fixture))[0]).toMatchObject({ projectId, metadata: { source: "ai_gateway", refusedBy: "project" } });
+    // Back to no project: the default project's list.
+    const cleared = await api(fixture, "PUT", `/api/ai-gateway/route-sets/${gw.set.id}`, { projectId: null });
+    expect(cleared.status, cleared.raw).toBe(200);
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", CHAT)).status).toBe(200);
+    await allow(fixture, { scope: "project", projectId: "default", providerId: "openai", modelGlob: "gpt-4o" });
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", CHAT)).status).toBe(403);
+  });
+
+  it("checks the Azure deployment a route sends, not the route's model field", async () => {
+    const fixture = await setup();
+    const set = await api<AiGatewayRouteSet>(fixture, "POST", "/api/ai-gateway/route-sets", { name: "Azure", projectId: "default" });
+    const route = await api(fixture, "POST", `/api/ai-gateway/route-sets/${set.body.id}/routes`, {
+      alias: "azure-chat",
+      providerId: "azure_openai",
+      model: "gpt-4o",
+      baseUrl: fixture.upstream.baseUrl,
+      secretRef: { secretId: fixture.secretId },
+      extra: { deployment: "not-on-the-list" }
+    });
+    expect(route.status, route.raw).toBe(201);
+    const { token } = await newClient(fixture, "Azure app", [set.body.id]);
+    await allow(fixture, { scope: "deployment", providerId: "azure_openai", modelGlob: "gpt-4o" });
+    const refused = await v1(fixture, token, "/v1/chat/completions", { model: "azure-chat", messages: [{ role: "user", content: "hi" }] });
+    expect(refused.status).toBe(403);
+    expect(fixture.upstream.requests).toHaveLength(0);
+  });
+
+  it("answers 503 with Retry-After and sends nothing when the list cannot be read", async () => {
+    const fixture = await setup({}, (store) => {
+      vi.spyOn(store, "listModelAllowlistEntries").mockRejectedValue(new Error("database is down at db.internal"));
+    });
+    const gw = await gateway(fixture);
+    for (const [url, body] of [["/v1/chat/completions", CHAT], ["/v1/chat/completions", STREAM], ["/v1/embeddings", EMBED]] as const) {
+      const refused = await v1(fixture, gw.token, url, body);
+      expect(refused.status, url).toBe(503);
+      expect(refused.headers.get("retry-after")).toBe("5");
+      const text = await refused.text();
+      expect(JSON.parse(text).error.code).toBe("service_unavailable");
+      expect(text).not.toContain("db.internal");
+    }
+    expect(fixture.upstream.requests).toHaveLength(0);
+  });
+
+  it("answers 403, not an upstream error, when the list changes after admission and the provider registry refuses the call", async () => {
+    // Admission passes (the seam allows), so the deployment-wide registry check is what refuses.
+    const fixture = await setup({ aiGatewayCheckModel: async () => undefined });
+    const gw = await gateway(fixture);
+    await allow(fixture, { scope: "deployment", providerId: "openai", modelGlob: "gpt-4o" });
+    for (const body of [CHAT, STREAM]) {
+      const refused = await v1(fixture, gw.token, "/v1/chat/completions", body);
+      expect(refused.status).toBe(403);
+      expect((await errorOf(refused)).code).toBe("model_not_allowed");
+    }
+    expect(fixture.upstream.requests).toHaveLength(0);
+  });
+});
+
+describe("Azure OpenAI prices apply to /v1 only", () => {
+  const LARGE_USAGE = { prompt_tokens: 1000, completion_tokens: 1000, total_tokens: 2000 };
+  /** gpt-4o at $2.50 in and $10 out per 1M tokens. */
+  const V1_COST = 0.0125;
+
+  function azureWorkflow(fixture: Fixture): Workflow {
+    return {
+      id: "wf-azure",
+      name: "Azure run",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "trigger", type: "webhook_input", name: "Trigger", position: { x: 0, y: 0 }, config: { path: "azure-run", method: "POST" } },
+        { id: "agent", type: "agent_orchestrator", name: "Agent", position: { x: 200, y: 0 }, config: { userPromptTemplate: "hello", maxIterations: 2, toolCallingEnabled: false } },
+        {
+          id: "agent_chat",
+          type: "llm_call",
+          name: "Agent model",
+          position: { x: 200, y: 200 },
+          config: {
+            provider: { providerId: "azure_openai", model: "gpt-4o", baseUrl: fixture.upstream.baseUrl, secretRef: { secretId: fixture.secretId } },
+            promptKey: "prompt",
+            systemPromptKey: "system_prompt"
+          }
+        },
+        { id: "out", type: "output", name: "Out", position: { x: 400, y: 0 }, config: { responseTemplate: "{{answer}}", outputKey: "result" } }
+      ],
+      edges: [
+        { id: "e1", source: "trigger", target: "agent" },
+        { id: "e2", source: "agent", target: "out" },
+        { id: "e3", source: "agent", sourceHandle: "chat_model", target: "agent_chat" }
+      ]
+    } as Workflow;
+  }
+
+  const window = () => ({ from: new Date(Date.now() - 60_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() });
+
+  it("keeps an Azure run unpriced and out of USD budgets, while the same model through /v1 is priced and counted", async () => {
+    const fixture = await setup();
+    await fixture.store.upsertWorkflow(azureWorkflow(fixture), {});
+    const budget = await api(fixture, "POST", "/api/budgets", { name: "All", scopeType: "global", period: "day", limitType: "usd", limitValue: 0.01, action: "block" });
+    expect(budget.status, budget.raw).toBe(200);
+
+    // Two runs: tokens are recorded as before, the cost stays zero and the budget never fills.
+    for (let run = 0; run < 2; run += 1) {
+      fixture.upstream.chat.push({ json: completion("Hi", {}, LARGE_USAGE) });
+      const executed = await api<{ status: string }>(fixture, "POST", "/api/workflows/wf-azure/execute", { input: {} });
+      expect(executed.status, executed.raw).toBe(200);
+      expect(executed.body.status).toBe("success");
+    }
+    expect(fixture.upstream.requests).toHaveLength(2);
+    await until(async () => (await fixture.store.queryBudgetUsage({ ...window(), workflowId: "wf-azure" })).totalTokens === 4000, "the runs' usage");
+    expect(await fixture.store.queryBudgetUsage({ ...window(), workflowId: "wf-azure" })).toEqual({ costUsd: 0, totalTokens: 4000 });
+    expect((await fixture.store.queryBudgetUsage(window())).costUsd).toBe(0);
+
+    // The same model on /v1 has a price, and it fills the same budget.
+    const set = await api<AiGatewayRouteSet>(fixture, "POST", "/api/ai-gateway/route-sets", { name: "Azure", projectId: "default" });
+    await api(fixture, "POST", `/api/ai-gateway/route-sets/${set.body.id}/routes`, { alias: "azure-chat", providerId: "azure_openai", model: "gpt-4o", baseUrl: fixture.upstream.baseUrl, secretRef: { secretId: fixture.secretId } });
+    const { token } = await newClient(fixture, "Azure app", [set.body.id]);
+    const chat = { model: "azure-chat", messages: [{ role: "user", content: "hi" }] };
+    fixture.upstream.chat.push({ json: completion("Hi", {}, LARGE_USAGE) });
+    expect((await v1(fixture, token, "/v1/chat/completions", chat)).status).toBe(200);
+    expect((await requestsOf(fixture))[0]).toMatchObject({ providerId: "azure_openai", costUsd: V1_COST, totalTokens: 2000 });
+    expect((await fixture.store.queryBudgetUsage(window())).costUsd).toBeCloseTo(V1_COST, 6);
+    expect((await v1(fixture, token, "/v1/chat/completions", chat)).status).toBe(429);
+  });
+
+  it("shows the same pricing table to admins as before", async () => {
+    const fixture = await setup();
+    const { pricing } = (await api<{ pricing: Record<string, Record<string, unknown>> }>(fixture, "GET", "/api/usage/pricing")).body;
+    expect(pricing.azure_openai).toBeUndefined();
+    expect(pricing.openai?.["text-embedding-3-small"]).toBeUndefined();
   });
 });

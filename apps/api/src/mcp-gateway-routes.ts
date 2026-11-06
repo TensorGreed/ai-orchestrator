@@ -126,8 +126,8 @@ import {
   type GatewaySession
 } from "./services/mcp-gateway-sessions.js";
 import { McpClientService, capRole, resolveMcpClientSubject, roleRank } from "./services/mcp-client-service.js";
-import { KeySampler, NETWORK_AUDIT_SAMPLE_MS, type NetworkControls } from "./network-controls.js";
-import { certificateAccepted, readClientCertificate, type ClientCertificateReading } from "./client-certificate.js";
+import type { NetworkControls } from "./network-controls.js";
+import { createMcpClientAdmission } from "./mcp-client-admission.js";
 import { parseTrustProxy } from "./config.js";
 import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } from "./services/mcp-tool-telemetry.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
@@ -293,20 +293,6 @@ export interface McpGatewayDeps {
    * that pins certificates is refused, and client address lists are checked in enforce mode.
    */
   network?: NetworkControls;
-}
-
-/** 13.2 — why a client that pins certificates was refused, as the client sees it. */
-function certificateRefusal(reading: ClientCertificateReading | { status: "mismatch" }): string {
-  switch (reading.status) {
-    case "invalid":
-      return "The client certificate could not be read.";
-    case "expired":
-      return "The client certificate has expired or is not yet valid.";
-    case "mismatch":
-      return "The client certificate is not one this client accepts.";
-    default:
-      return "This client requires a client certificate, presented through the gateway's TLS proxy.";
-  }
 }
 
 /** 12.6 — the Guard stack a gateway call runs under, when a toolset or client binding applies. */
@@ -490,7 +476,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     reply.code(status).header("content-type", "application/json").send(rpcError(null, code, message));
   };
 
-  const certificateAuditSampler = new KeySampler(NETWORK_AUDIT_SAMPLE_MS);
+  const clientAdmission = createMcpClientAdmission({ ...(deps.network ? { network: deps.network } : {}), auditRaw: deps.auditRaw });
 
   const authenticate = async (request: FastifyRequest, reply: FastifyReply): Promise<AuthenticatedClient | null> => {
     const header = headerValue(request, "authorization") ?? "";
@@ -512,32 +498,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return unauthorized(reason);
     }
     // 13.2 — a client that pins certificates needs its token AND one of its certificates.
-    if (verification.client.certFingerprints.length > 0) {
-      const reading = deps.network
-        ? readClientCertificate(request, { header: deps.network.settings.clientCertHeader, proxies: deps.network.clientCertProxies })
-        : ({ status: "none" } as const);
-      const refusal =
-        reading.status !== "ok" ? reading : certificateAccepted(verification.client, reading.certificate) ? null : ({ status: "mismatch" } as const);
-      if (refusal) {
-        if (certificateAuditSampler.take(`${verification.client.id}|${request.ip}|${refusal.status}`)) {
-          await deps.auditRaw({
-            category: "system",
-            eventType: "mcp_gateway.client_certificate_refused",
-            action: "access",
-            outcome: "denied",
-            actor: { type: "api_key", email: verification.client.name, ipAddress: request.ip },
-            resourceType: "mcp_client",
-            resourceId: verification.client.id,
-            metadata: {
-              reason: refusal.status,
-              ...(reading.status === "ok" || reading.status === "expired" ? { fingerprint256: reading.certificate.fingerprint256, subject: reading.certificate.subject } : {}),
-              sampleWindowSeconds: NETWORK_AUDIT_SAMPLE_MS / 1000
-            }
-          });
-        }
-        return unauthorized(certificateRefusal(refusal));
-      }
-    }
+    const certificateRefusal = await clientAdmission.certificateRefusal(request, verification.client);
+    if (certificateRefusal) return unauthorized(certificateRefusal);
     return { client: verification.client, subject: await resolveMcpClientSubject(store, verification.client) };
   };
 
@@ -553,16 +515,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const auth = await authenticate(request, reply);
     if (!auth) return null;
     // 13.2 — the client's own address list (empty = any address).
-    if (auth.client.allowedIps.length > 0) {
-      const ref = { list: "mcp_client" as const, clientId: auth.client.id, clientName: auth.client.name };
-      const list = { restricted: true, ranges: auth.client.allowedIps };
-      const admitted = deps.network
-        ? await deps.network.checkObjectList(request, list, ref)
-        : false;
-      if (!admitted) {
-        httpError(reply, 403, NETWORK_DENIED_MESSAGE, -32001);
-        return null;
-      }
+    if (!(await clientAdmission.addressAdmitted(request, auth.client))) {
+      httpError(reply, 403, NETWORK_DENIED_MESSAGE, -32001);
+      return null;
     }
     const toolset = await store.getMcpToolsetBySlug(request.params.toolset);
     if (!toolset || !toolset.enabled) {

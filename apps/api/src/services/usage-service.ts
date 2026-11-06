@@ -44,20 +44,7 @@ export const DEFAULT_PRICING: PricingTable = {
     "gpt-3.5-turbo": { inputUsdPer1M: 0.5, outputUsdPer1M: 1.5 },
     "o1": { inputUsdPer1M: 15, outputUsdPer1M: 60 },
     "o1-mini": { inputUsdPer1M: 3, outputUsdPer1M: 12 },
-    "o3-mini": { inputUsdPer1M: 1.1, outputUsdPer1M: 4.4 },
-    // 12.6b — embedding models (input only).
-    "text-embedding-3-small": { inputUsdPer1M: 0.02, outputUsdPer1M: 0 },
-    "text-embedding-3-large": { inputUsdPer1M: 0.13, outputUsdPer1M: 0 },
-    "text-embedding-ada-002": { inputUsdPer1M: 0.1, outputUsdPer1M: 0 }
-  },
-  // 12.6b — Azure OpenAI, keyed by the model a route or node names (an Azure deployment named after its model is
-  // priced; any other deployment name is unpriced unless LLM_PRICING_OVERRIDES_JSON adds it). Global list prices.
-  azure_openai: {
-    "gpt-4o": { inputUsdPer1M: 2.5, outputUsdPer1M: 10, cachedInputUsdPer1M: 1.25 },
-    "gpt-4o-mini": { inputUsdPer1M: 0.15, outputUsdPer1M: 0.6, cachedInputUsdPer1M: 0.075 },
-    "text-embedding-3-small": { inputUsdPer1M: 0.02, outputUsdPer1M: 0 },
-    "text-embedding-3-large": { inputUsdPer1M: 0.13, outputUsdPer1M: 0 },
-    "text-embedding-ada-002": { inputUsdPer1M: 0.1, outputUsdPer1M: 0 }
+    "o3-mini": { inputUsdPer1M: 1.1, outputUsdPer1M: 4.4 }
   },
   anthropic: {
     // Current Claude models (first-party API list prices). A cache-read rate is
@@ -97,6 +84,29 @@ export const DEFAULT_PRICING: PricingTable = {
   echo: {},
   "openai-compatible": {},
   "azure-openai": {}
+};
+
+/**
+ * 12.6b — prices that apply to /v1 AI gateway traffic only, on top of the table above: Azure OpenAI and the embedding
+ * models. Workflow runs, and every other caller of `estimateCostUsd`, never read this table, so an Azure run stays
+ * unpriced and adds nothing to a USD budget, as it always has. Pricing runs is a separate, announced change.
+ *
+ * Azure rows are keyed by the model a route names (a deployment named after its model is priced; any other name is
+ * unpriced unless LLM_PRICING_OVERRIDES_JSON adds it). Global list prices.
+ */
+export const AI_GATEWAY_PRICING: PricingTable = {
+  openai: {
+    "text-embedding-3-small": { inputUsdPer1M: 0.02, outputUsdPer1M: 0 },
+    "text-embedding-3-large": { inputUsdPer1M: 0.13, outputUsdPer1M: 0 },
+    "text-embedding-ada-002": { inputUsdPer1M: 0.1, outputUsdPer1M: 0 }
+  },
+  azure_openai: {
+    "gpt-4o": { inputUsdPer1M: 2.5, outputUsdPer1M: 10, cachedInputUsdPer1M: 1.25 },
+    "gpt-4o-mini": { inputUsdPer1M: 0.15, outputUsdPer1M: 0.6, cachedInputUsdPer1M: 0.075 },
+    "text-embedding-3-small": { inputUsdPer1M: 0.02, outputUsdPer1M: 0 },
+    "text-embedding-3-large": { inputUsdPer1M: 0.13, outputUsdPer1M: 0 },
+    "text-embedding-ada-002": { inputUsdPer1M: 0.1, outputUsdPer1M: 0 }
+  }
 };
 
 interface NodeTelemetry {
@@ -261,14 +271,26 @@ export class UsageService {
    */
   estimateCostUsd(providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number): number | null {
     const p = this.pricing[providerId]?.[model];
-    if (!p) return null;
-    const billableInput = Math.max(0, inputTokens - cachedInputTokens);
-    const cachedRate = p.cachedInputUsdPer1M ?? p.inputUsdPer1M;
-    const inputCost = (billableInput / 1_000_000) * p.inputUsdPer1M;
-    const cachedCost = (cachedInputTokens / 1_000_000) * cachedRate;
-    const outputCost = (outputTokens / 1_000_000) * p.outputUsdPer1M;
-    return round6(inputCost + cachedCost + outputCost);
+    return p ? costOf(p, inputTokens, outputTokens, cachedInputTokens) : null;
   }
+
+  /**
+   * A /v1 AI gateway request's cost: the table runs use (so LLM_PRICING_OVERRIDES_JSON wins), else `AI_GATEWAY_PRICING`.
+   * Null when neither prices the model.
+   */
+  estimateAiGatewayCostUsd(providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number): number | null {
+    const p = this.pricing[providerId]?.[model] ?? AI_GATEWAY_PRICING[providerId]?.[model];
+    return p ? costOf(p, inputTokens, outputTokens, cachedInputTokens) : null;
+  }
+}
+
+function costOf(p: ModelPricing, inputTokens: number, outputTokens: number, cachedInputTokens: number): number {
+  const billableInput = Math.max(0, inputTokens - cachedInputTokens);
+  const cachedRate = p.cachedInputUsdPer1M ?? p.inputUsdPer1M;
+  const inputCost = (billableInput / 1_000_000) * p.inputUsdPer1M;
+  const cachedCost = (cachedInputTokens / 1_000_000) * cachedRate;
+  const outputCost = (outputTokens / 1_000_000) * p.outputUsdPer1M;
+  return round6(inputCost + cachedCost + outputCost);
 }
 
 function collectTelemetry(nodeResults: Record<string, unknown>): NodeTelemetry[] {

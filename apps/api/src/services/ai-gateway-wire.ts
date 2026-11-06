@@ -3,6 +3,7 @@
  * types, and the response, chunk and embedding shapes. No I/O here.
  */
 import { parseToolArguments, unsupportedCallOptions, type ProviderCallOptions } from "@ai-orchestrator/provider-sdk";
+import { NETWORK_DENIED_MESSAGE } from "@ai-orchestrator/shared";
 import type {
   AiGatewayRoute,
   ChatMessage,
@@ -40,6 +41,8 @@ export const aiGatewayErrors = {
   invalidRequest: (message: string, param: string | null = null, code: string | null = null) =>
     new AiGatewayHttpError(400, message, "invalid_request_error", code, param),
   invalidApiKey: (message: string) => new AiGatewayHttpError(401, message, "invalid_request_error", "invalid_api_key"),
+  /** The same body from the deployment's list and the client's own: it never says which list refused, or the address. */
+  networkDenied: () => new AiGatewayHttpError(403, NETWORK_DENIED_MESSAGE, "invalid_request_error", "access_denied"),
   modelNotFound: (model: string) =>
     new AiGatewayHttpError(404, `The model '${model}' does not exist or you do not have access to it.`, "invalid_request_error", "model_not_found", "model"),
   modelNotAllowed: (model: string) =>
