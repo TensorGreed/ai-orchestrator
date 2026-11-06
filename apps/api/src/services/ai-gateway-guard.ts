@@ -14,10 +14,11 @@
  *
  * Streaming: `outputGuardMode` says how an answer is checked. `buffered` when a profile may rewrite the answer
  * (redact, mask, protect, transform on final_output): text already sent cannot be rewritten, so the whole answer is
- * generated, checked and then sent. `chunked` when final_output is checked but never rewritten: text is held back
- * until the text so far passes a check at a sentence or size boundary, so nothing unchecked reaches the caller; a
- * block cuts the stream. Those boundary checks record nothing; the full answer is checked once more at the end and
- * recorded (the audit check).
+ * generated, checked and then sent. `chunked` when final_output is checked but never rewritten: the text so far is
+ * checked at sentence or size boundaries, and what passes is released except for a held-back tail
+ * (`streamReleaseLength`), so a match still forming at the end of the text is not sent before it can be seen. A block
+ * cuts the stream. Those boundary checks record nothing; the full answer is checked once more at the end and recorded
+ * (the audit check), and only then does the tail go out.
  */
 import type { GuardChannel, ProvenanceLabel } from "@ai-orchestrator/guard-sdk";
 import { providerDestinationRef } from "@ai-orchestrator/provider-sdk";
@@ -268,9 +269,48 @@ export async function checkAiGatewayAnswer(scope: AiGatewayGuardScope, answer: A
 }
 
 /** A boundary in streamed text where a check is worth it: the end of a sentence or line, or enough new text. */
-export function streamCheckDue(pending: string, options: { minChars?: number; maxChars?: number } = {}): boolean {
+export function streamCheckDue(unchecked: string, options: { minChars?: number; maxChars?: number } = {}): boolean {
   const min = options.minChars ?? 48;
   const max = options.maxChars ?? 400;
-  if (pending.length >= max) return true;
-  return pending.length >= min && /[.!?。\n]\s*$/.test(pending);
+  if (unchecked.length >= max) return true;
+  return unchecked.length >= min && /[.!?。\n]\s*$/.test(unchecked);
+}
+
+/**
+ * Checked text stays held back for this many characters. The size comes from the detectors: 254 characters is the
+ * longest address mail servers accept (RFC 5321), the longest value of bounded length they look for, and values that
+ * may contain spaces (cards, phone numbers, IBANs, a labelled credential) are far shorter. At a typical 50 to 100 tokens
+ * a second it adds about a second before the first text.
+ */
+export const STREAM_HOLD_CHARS = 256;
+
+/**
+ * An unbroken value (a token, a JWT, a URL) has no fixed length, so the release point also backs up to where the value
+ * starts, up to this far. The limit keeps memory bounded on a long run with no break in it; 4096 covers signed tokens.
+ */
+export const STREAM_MAX_VALUE_CHARS = 4096;
+
+/** Printable ASCII other than a space: what emails, keys and URLs are made of. Anything else ends such a value. */
+function inValue(code: number): boolean {
+  return code > 0x20 && code < 0x7f;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+/**
+ * How much of checked text may be released: all but the last `holdChars`, then back to the start of the value that
+ * point falls in, so a value is never cut in two. Text with no spaces in it (Chinese, say) is not held any longer:
+ * only a run of value characters holds the release point back.
+ */
+export function streamReleaseLength(pending: string, holdChars = STREAM_HOLD_CHARS, maxValueChars = STREAM_MAX_VALUE_CHARS): number {
+  const limit = pending.length - holdChars;
+  if (limit <= 0) return 0;
+  const floor = Math.max(0, limit - maxValueChars);
+  for (let at = limit; at > floor; at -= 1) {
+    const before = pending.charCodeAt(at - 1);
+    if (!inValue(before) && !isHighSurrogate(before)) return at;
+  }
+  return floor;
 }

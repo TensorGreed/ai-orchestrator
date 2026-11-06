@@ -56,6 +56,7 @@ import {
   checkAiGatewayRequest,
   outputGuardMode,
   streamCheckDue,
+  streamReleaseLength,
   type AiGatewayAnswer,
   type AiGatewayGuardScope,
   type AiGatewayOutputMode
@@ -107,8 +108,8 @@ export interface AiGatewayDeps {
    * every model is allowed.
    */
   checkModel?: AiGatewayModelCheck;
-  /** Boundary sizes for streamed content rule checks (tests). */
-  streamCheck?: { minChars?: number; maxChars?: number };
+  /** Boundary and held-back tail sizes for streamed content rule checks (tests). */
+  streamCheck?: { minChars?: number; maxChars?: number; holdChars?: number };
 }
 
 interface Admitted {
@@ -638,6 +639,8 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     const collector = new ToolCallCollector();
     let sentText = "";
     let pendingText = "";
+    /** How much of the end of `pendingText` no check has seen yet. */
+    let uncheckedChars = 0;
     let finishReason: LLMFinishReason | null = null;
     let usage: LLMUsage | undefined;
     let cut: { reason: string; categories: string[]; profiles: unknown[] } | null = null;
@@ -646,12 +649,13 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     const opening = () => {
       if (!writer.isStarted) writer.data(chatChunk(base, { role: "assistant", content: "", refusal: null }));
     };
-    const flushText = () => {
-      if (!pendingText) return;
+    const sendText = (length: number) => {
+      if (length <= 0) return;
+      const text = pendingText.slice(0, length);
       opening();
-      writer.data(chatChunk(base, { content: pendingText }));
-      sentText += pendingText;
-      pendingText = "";
+      writer.data(chatChunk(base, { content: text }));
+      sentText += text;
+      pendingText = pendingText.slice(length);
     };
     /** A boundary check of the text so far (records nothing). False when it blocks: the stream is cut. */
     const passes = async (): Promise<boolean> => {
@@ -675,9 +679,12 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
             continue;
           }
           pendingText += chunk.textDelta;
-          if (streamCheckDue(pendingText, deps.streamCheck)) {
+          uncheckedChars += chunk.textDelta.length;
+          if (streamCheckDue(pendingText.slice(-uncheckedChars), deps.streamCheck)) {
             if (!(await passes())) break;
-            flushText();
+            uncheckedChars = 0;
+            // All of it passed, but its end may be the start of a match: that part waits for the text after it.
+            sendText(streamReleaseLength(pendingText, deps.streamCheck?.holdChars));
           }
         } else if (chunk.type === "tool_call_delta") {
           const index = collector.add(chunk);
@@ -726,7 +733,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
         cut = verdict.action === "block" ? verdict : { reason: "Blocked by content rules: the answer would have been rewritten", categories: [], profiles: [] };
       }
       if (!cut) {
-        flushText();
+        sendText(pendingText.length);
         if (toolCalls.length > 0) {
           opening();
           writer.data(chatChunk(base, { tool_calls: openAiToolCalls(toolCalls).map((call, index) => ({ index, ...call })) }));

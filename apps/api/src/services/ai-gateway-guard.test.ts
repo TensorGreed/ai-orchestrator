@@ -15,7 +15,7 @@ vi.mock("@ai-orchestrator/workflow-engine", async (original) => ({
   })
 }));
 
-import { checkAiGatewayRequest, outboundTextSlots, type AiGatewayGuardScope } from "./ai-gateway-guard.js";
+import { checkAiGatewayRequest, outboundTextSlots, STREAM_HOLD_CHARS, streamCheckDue, streamReleaseLength, type AiGatewayGuardScope } from "./ai-gateway-guard.js";
 
 const provider: LLMProviderConfig = { providerId: "openai", model: "route-model", baseUrl: "https://route.example", extra: { note: "route text" } };
 
@@ -84,5 +84,59 @@ describe("checkAiGatewayRequest", () => {
     expect(checks[0]!.content).toEqual(expect.arrayContaining(["hello", "c1", "u1"]));
     expect(checks[0]!.content).not.toContain("result");
     expect(checks[1]).toEqual({ content: ["result"], labels: ["untrusted_external"] });
+  });
+});
+
+describe("streamReleaseLength", () => {
+  const words = (count: number) => "word ".repeat(count);
+
+  it("releases nothing while the text fits in the tail", () => {
+    expect(streamReleaseLength("short text")).toBe(0);
+    expect(streamReleaseLength("x".repeat(STREAM_HOLD_CHARS))).toBe(0);
+  });
+
+  it("keeps at least the tail, and stops at the end of a word", () => {
+    const text = words(200);
+    const at = streamReleaseLength(text);
+    expect(at).toBeGreaterThan(0);
+    expect(text.length - at).toBeGreaterThanOrEqual(STREAM_HOLD_CHARS);
+    expect(text[at - 1]).toBe(" ");
+  });
+
+  it("the tail covers the longest address a mail server accepts", () => {
+    expect(STREAM_HOLD_CHARS).toBeGreaterThanOrEqual(254);
+  });
+
+  it("never splits an unbroken value, wherever the tail lands in it", () => {
+    const value = `key-${"a".repeat(1500)}`;
+    const text = `${words(100)}${value}${"b".repeat(100)}`;
+    expect(streamReleaseLength(text)).toBe(500);
+  });
+
+  it("gives up on an unbroken run past the limit, so memory stays bounded", () => {
+    const text = "a".repeat(10_000);
+    const at = streamReleaseLength(text, 256, 4096);
+    expect(at).toBe(10_000 - 256 - 4096);
+  });
+
+  it("does not wait for a space in text that has none, such as Chinese", () => {
+    const text = "\u6587".repeat(1000);
+    expect(streamReleaseLength(text)).toBe(1000 - STREAM_HOLD_CHARS);
+  });
+
+  it("does not cut a surrogate pair in two", () => {
+    const text = "\u{1F600}".repeat(600);
+    const at = streamReleaseLength(text);
+    expect(at % 2).toBe(0);
+    expect(at).toBeGreaterThan(0);
+  });
+});
+
+describe("streamCheckDue", () => {
+  it("is due at the end of a sentence or after enough new text", () => {
+    expect(streamCheckDue("short.")).toBe(false);
+    expect(streamCheckDue(`${"a".repeat(60)}.`)).toBe(true);
+    expect(streamCheckDue("a".repeat(60))).toBe(false);
+    expect(streamCheckDue("a".repeat(400))).toBe(true);
   });
 });

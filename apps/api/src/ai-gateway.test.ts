@@ -649,7 +649,8 @@ describe("Content rules on /v1", () => {
     const fixture = await setup();
     const gw = await gateway(fixture);
     await guardProfile(fixture, { id: "aigw-out", name: "Out", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
-    const opening = "This first sentence is harmless and long enough to be checked. ";
+    const sentence = "This sentence is harmless and long enough to be checked. ";
+    const opening = sentence.repeat(10);
     fixture.upstream.chat.push({
       sse: [chunk({ role: "assistant", content: "" }), chunk({ content: opening }), chunk({ content: `Write to ${EMAIL} ` }), chunk({ content: "for more." }), chunk({}, "stop")]
     });
@@ -658,7 +659,11 @@ describe("Content rules on /v1", () => {
     const raw = await response.text();
     expect(raw).not.toContain(EMAIL);
     const list = frames(raw);
-    expect(streamedText(list)).toBe(opening);
+    // Only checked text, and not its last stretch: that is held back until no match can still be forming in it.
+    const released = streamedText(list);
+    expect(released.length).toBeGreaterThan(0);
+    expect(opening.startsWith(released)).toBe(true);
+    expect(released.length).toBeLessThanOrEqual(opening.length - 200);
     const objects = list.filter((frame) => typeof frame === "object") as Frame[];
     expect(objects.find((frame) => frame.choices?.[0]?.finish_reason)?.choices?.[0]?.finish_reason).toBe("content_filter");
     expect(objects.at(-1)!.error?.code).toBe("content_filter");
@@ -672,6 +677,56 @@ describe("Content rules on /v1", () => {
     }, "the rule events");
     expect(events.filter((event) => event.channel === "final_output")).toHaveLength(1);
     expect(events.every((event) => event.placement === "gateway" && event.nodeId === "gpt-test")).toBe(true);
+  });
+
+  it.each<[string, string[], string]>([
+    ["an address split after a dot", ["Here is the contact you asked me about earlier, write to jane.doe@example.", "com"], "jane.doe"],
+    ["an address split inside its name", ["Here is the contact you asked me about earlier, and you can write to jane.", "doe@example.com today"], "jane"],
+    ["an address split after a sentence end", ["Here is the contact you asked me about earlier. It is the one below. jane.doe@", "example.com"], "jane"]
+  ])("releases none of %s when the rest of the match comes later", async (_case, parts, leaked) => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-split", name: "Split", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
+    fixture.upstream.chat.push({ sse: [chunk({ role: "assistant", content: "" }), ...parts.map((content) => chunk({ content })), chunk({}, "stop")], gapMs: 5 });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    const raw = await response.text();
+    expect(raw).not.toContain(leaked);
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "blocked_output", finishReason: "content_filter" });
+  });
+
+  it("holds a match back however long the clean text before it runs", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-long", name: "Long", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
+    const opening = "Plain words go here and they are harmless to read. ".repeat(20);
+    fixture.upstream.chat.push({ sse: [chunk({ content: opening }), chunk({ content: "mail jane.doe@example." }), chunk({ content: "com" }), chunk({}, "stop")], gapMs: 5 });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    const raw = await response.text();
+    expect(raw).not.toContain("jane");
+    expect(streamedText(frames(raw)).length).toBeGreaterThan(0);
+  });
+
+  it("releases clean text while the answer is still arriving, and the held-back tail after the last check", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-tail", name: "Tail", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
+    const text = "Plain words go here and they are harmless to read. ".repeat(20);
+    fixture.upstream.chat.push({ sse: [chunk({ content: text }), chunk({ content: "The end." }), chunk({}, "stop")], gapMs: 5 });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    const list = frames(await response.text());
+    expect(streamedText(list)).toBe(`${text}The end.`);
+    const contentFrames = (list.filter((frame) => typeof frame === "object") as Frame[]).filter((frame) => frame.choices?.[0]?.delta?.content);
+    expect(contentFrames.length).toBeGreaterThanOrEqual(2);
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "ok", guardOutcome: "allow" });
+  });
+
+  it("sends an answer shorter than the tail once, after the last check", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-short", name: "Short", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
+    fixture.upstream.chat.push({ sse: [chunk({ content: "All " }), chunk({ content: "good." }), chunk({}, "stop")] });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    expect(streamedText(frames(await response.text()))).toBe("All good.");
   });
 
   it("generates the whole answer first when a profile may rewrite it (buffered mode)", async () => {
