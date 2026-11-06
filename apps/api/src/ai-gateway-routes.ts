@@ -32,7 +32,6 @@ import {
   type AiGatewayRequestStatus,
   type AiGatewayRoute,
   type AiGatewayRouteSet,
-  type ChatMessage,
   type LLMFinishReason,
   type LLMProviderConfig,
   type LLMUsage,
@@ -54,7 +53,7 @@ import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { retryAfterSeconds } from "./run-helpers.js";
 import {
   checkAiGatewayAnswer,
-  checkAiGatewayPrompt,
+  checkAiGatewayRequest,
   outputGuardMode,
   streamCheckDue,
   type AiGatewayAnswer,
@@ -516,26 +515,16 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     });
   };
 
-  /** Content rules on the prompt: the messages' text (tool results apart). Returns the messages to send. */
-  const guardPrompt = async (admitted: Admitted, messages: ChatMessage[], provider: LLMProviderConfig): Promise<{ messages: ChatMessage[]; outcome: RecordedGuardOutcome }> => {
-    if (!admitted.guard) return { messages, outcome: "none" };
-    const plain = messages.map((message, index) => ({ message, index })).filter(({ message }) => message.role !== "tool");
-    const tools = messages.map((message, index) => ({ message, index })).filter(({ message }) => message.role === "tool");
-    const verdict = await checkAiGatewayPrompt(admitted.guard, {
-      texts: plain.map(({ message }) => message.content),
-      toolTexts: tools.map(({ message }) => message.content),
-      provider
-    });
+  /** Content rules on the provider request, built and ready to send. Returns the request to send. */
+  const guardRequest = async <T extends { provider: LLMProviderConfig }>(admitted: Admitted, kind: "chat" | "embedding", providerRequest: T): Promise<{ request: T; outcome: RecordedGuardOutcome }> => {
+    if (!admitted.guard) return { request: providerRequest, outcome: "none" };
+    const verdict = await checkAiGatewayRequest(admitted.guard, providerRequest);
     if (verdict.action === "block") {
       await auditGuardBlock(admitted, "prompt", verdict);
-      await record(admitted, { kind: "chat", stream: false, status: "blocked_prompt", httpStatus: 400, guardOutcome: "block", errorCode: "content_filter" });
+      await record(admitted, { kind, stream: false, status: "blocked_prompt", httpStatus: 400, guardOutcome: "block", errorCode: "content_filter" });
       throw aiGatewayErrors.promptBlocked(deps.redact(verdict.reason));
     }
-    if (verdict.action === "allow") return { messages, outcome: "allow" };
-    const next = messages.slice();
-    plain.forEach(({ message, index }, at) => (next[index] = { ...message, content: verdict.content.texts[at]! }));
-    tools.forEach(({ message, index }, at) => (next[index] = { ...message, content: verdict.content.toolTexts[at]! }));
-    return { messages: next, outcome: "rewrite" };
+    return verdict.action === "rewrite" ? { request: verdict.content, outcome: "rewrite" } : { request: providerRequest, outcome: "allow" };
   };
 
   // ---------------------------------------------------------------------------
@@ -562,9 +551,8 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       const mapped = toChatMessages(body.messages);
       const { options, temperature, maxTokens } = toCallOptions(body, admitted.route, { hasImages: mapped.hasImages, streamUsage });
       const provider = providerConfig(admitted.route, { ...(temperature !== undefined ? { temperature } : {}), ...(maxTokens !== undefined ? { maxTokens } : {}) });
-      const { messages, outcome: promptOutcome } = await guardPrompt(admitted, mapped.messages, provider);
       const tools = toToolDefinitions(body);
-      const callRequest = { provider, messages, ...(tools ? { tools } : {}), options };
+      const { request: callRequest, outcome: promptOutcome } = await guardRequest(admitted, "chat", { provider, messages: mapped.messages, ...(tools ? { tools } : {}), options });
       const context = executionContext(admitted);
       const base = { id: `chatcmpl-${admitted.requestId.slice(5)}`, created: Math.floor(admitted.startedAt / 1000), model: admitted.route.alias };
       const streamsForReal = wantsStream && support.streaming && typeof adapter.generateStream === "function" && admitted.outputMode !== "buffered";
@@ -785,25 +773,15 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
         app.log.warn({ alias: admitted.route.alias, providerId: admitted.route.providerId }, "AI gateway embedding route names a provider without embeddings");
         throw aiGatewayErrors.upstream();
       }
-      const provider = providerConfig(admitted.route);
-      let texts = inputs;
-      let guardOutcome: RecordedGuardOutcome = "none";
-      if (admitted.guard) {
-        const verdict = await checkAiGatewayPrompt(admitted.guard, { texts, toolTexts: [], provider });
-        if (verdict.action === "block") {
-          await auditGuardBlock(admitted, "prompt", verdict);
-          await record(admitted, { kind: "embedding", stream: false, status: "blocked_prompt", httpStatus: 400, guardOutcome: "block", errorCode: "content_filter" });
-          throw aiGatewayErrors.promptBlocked(deps.redact(verdict.reason));
-        }
-        guardOutcome = verdict.action === "rewrite" ? "rewrite" : "allow";
-        if (verdict.action === "rewrite") texts = verdict.content.texts;
-      }
+      const { request: embedRequest, outcome: guardOutcome } = await guardRequest(admitted, "embedding", {
+        provider: providerConfig(admitted.route),
+        input: inputs,
+        ...(body.dimensions !== undefined ? { dimensions: body.dimensions } : {}),
+        ...(body.user ? { user: body.user } : {})
+      });
       let answer;
       try {
-        answer = await adapter.embed(
-          { provider, input: texts, ...(body.dimensions !== undefined ? { dimensions: body.dimensions } : {}), ...(body.user ? { user: body.user } : {}) },
-          executionContext(admitted)
-        );
+        answer = await adapter.embed(embedRequest, executionContext(admitted));
       } catch (error) {
         if (admitted.abort.signal.aborted) {
           await record(admitted, { kind: "embedding", stream: false, status: "client_closed", httpStatus: 499, guardOutcome });

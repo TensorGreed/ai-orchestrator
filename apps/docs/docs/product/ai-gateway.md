@@ -91,6 +91,8 @@ A route set's rule set (and the client's, and the project's enforced profile) ch
 - **Prompt.** The messages' text before it goes to the provider. Tool results the caller sends back (`tool` messages) are checked as outside content. The deployment's destination rules apply to the route's provider. A blocked prompt answers `400` with code `content_filter`, and the provider is never called.
 - **Answer.** The answer's text and the arguments of any tool calls. A blocked answer has `finish_reason: "content_filter"`.
 
+On the way in, rule sets read everything the request sends to the provider: message text, tool results (labelled as outside content), the arguments of earlier tool calls, tool names, descriptions and schemas, `response_format`, `stop` and `user`, and for embeddings the inputs and `user`. A rewrite is applied in place. Restricted text in a name or key the rest of the request depends on, such as a tool name or a schema property, blocks the request instead. Images are not read: a rule set does not see what an image contains.
+
 When streaming, text is held back until the text so far has passed a check at a sentence boundary, so nothing unchecked reaches the caller. A block cuts the stream: the last chunk has `finish_reason: "content_filter"`, an error event with code `content_filter` follows, then `[DONE]`. A profile that redacts, masks or transforms answers makes the stream buffered: the whole answer is generated and checked first, then streamed. Review and approval actions block, because nobody waits on an API call.
 
 Verdicts are recorded on the Security page with placement `gateway`, the request's `aigw_` id and the model name.

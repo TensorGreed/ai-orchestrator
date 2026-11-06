@@ -691,6 +691,127 @@ describe("Content rules on /v1", () => {
   });
 });
 
+describe("Content rules read everything the request sends", () => {
+  const CARD = 4111111111111111;
+  const user = [{ role: "user", content: "fine" }];
+  const tool = (fn: Record<string, unknown>) => [{ type: "function", function: { name: "lookup", ...fn } }];
+  const assistantCall = (args: string, extra: Record<string, unknown> = {}) => [
+    ...user,
+    { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: args }, ...extra }] },
+    { role: "tool", tool_call_id: "call_1", content: "done" }
+  ];
+  const schemaFormat = (json_schema: Record<string, unknown>) => ({ type: "json_schema", json_schema: { name: "answer", ...json_schema } });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["message content", { messages: [{ role: "user", content: `Mail ${EMAIL}` }] }],
+    ["a system message", { messages: [{ role: "system", content: EMAIL }, ...user] }],
+    ["a text part of a message", { messages: [{ role: "user", content: [{ type: "text", text: EMAIL }] }] }],
+    ["a tool result", { messages: assistantCall("{}").map((message) => (message.role === "tool" ? { ...message, content: EMAIL } : message)) }],
+    ["a user message's name", { messages: [{ role: "user", content: "fine", name: EMAIL }] }],
+    ["assistant tool call arguments", { messages: assistantCall(JSON.stringify({ to: EMAIL })) }],
+    ["a key of assistant tool call arguments", { messages: assistantCall(JSON.stringify({ [EMAIL]: true })) }],
+    ["an assistant tool call's name", { messages: assistantCall("{}").map((message) => (message.role === "assistant" ? { ...message, tool_calls: [{ id: "call_1", type: "function", function: { name: EMAIL, arguments: "{}" } }] } : message)) }],
+    ["a tool description", { messages: user, tools: tool({ description: `Ask ${EMAIL}` }) }],
+    ["a tool name", { messages: user, tools: [{ type: "function", function: { name: EMAIL } }] }],
+    ["a tool schema's property description", { messages: user, tools: tool({ parameters: { type: "object", properties: { to: { type: "string", description: EMAIL } } } }) }],
+    ["a tool schema's property name", { messages: user, tools: tool({ parameters: { type: "object", properties: { [EMAIL]: { type: "string" } } } }) }],
+    ["a tool schema's enum", { messages: user, tools: tool({ parameters: { type: "object", properties: { to: { enum: [EMAIL] } } } }) }],
+    ["response_format's description", { messages: user, response_format: schemaFormat({ description: EMAIL }) }],
+    ["response_format's name", { messages: user, response_format: schemaFormat({ name: EMAIL }) }],
+    ["response_format's schema", { messages: user, response_format: schemaFormat({ schema: { type: "object", description: EMAIL } }) }],
+    ["stop (a string)", { messages: user, stop: EMAIL }],
+    ["stop (a list)", { messages: user, stop: ["END", EMAIL] }],
+    ["user", { messages: user, user: EMAIL }]
+  ])("blocks restricted text in %s, and nothing reaches the provider", async (_where, body) => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-all", name: "All", version: "1", channels: { prompt: dlpChannel("block") } }, gw.set.id);
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", ...body });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("content_filter");
+    expect(fixture.upstream.requests).toHaveLength(0);
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "blocked_prompt", totalTokens: 0 });
+  });
+
+  it("blocks a card number sent as a JSON number in tool call arguments", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-card", name: "Card", version: "1", channels: { prompt: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { card_number: { action: "block" } }, defaultAction: { action: "allow" } } } }, gw.set.id);
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: assistantCall(`{"card":${CARD}}`) });
+    expect(response.status).toBe(400);
+    expect(fixture.upstream.requests).toHaveLength(0);
+  });
+
+  it("does not pass on tool call arguments that are not JSON, so the check has nothing to miss", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-args", name: "Args", version: "1", channels: { prompt: dlpChannel("block") } }, gw.set.id);
+    await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: assistantCall(`to ${EMAIL}`) });
+    expect(JSON.stringify(fixture.upstream.requests)).not.toContain(EMAIL);
+  });
+
+  it("checks an embeddings request's user as well as its input", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-embed", name: "Embed", version: "1", channels: { prompt: dlpChannel("block") } }, gw.set.id);
+    expect((await v1(fixture, gw.token, "/v1/embeddings", { model: "embed-test", input: ["fine", EMAIL] })).status).toBe(400);
+    expect((await v1(fixture, gw.token, "/v1/embeddings", { model: "embed-test", input: "fine", user: EMAIL })).status).toBe(400);
+    expect(fixture.upstream.requests).toHaveLength(0);
+    expect((await v1(fixture, gw.token, "/v1/embeddings", { model: "embed-test", input: "fine", user: "u1" })).status).toBe(200);
+  });
+
+  it("maps a rewrite back into each field, keeping the request's shape", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-rw", name: "Rewrite", version: "1", channels: { prompt: dlpChannel("redact") } }, gw.set.id);
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", {
+      model: "gpt-test",
+      messages: [
+        { role: "user", content: `Mail ${EMAIL}` },
+        { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: JSON.stringify({ to: EMAIL, n: 2 }) } }] },
+        { role: "tool", tool_call_id: "call_1", content: `Sent to ${EMAIL}` }
+      ],
+      tools: tool({ description: `Ask ${EMAIL}`, parameters: { type: "object", properties: { to: { type: "string", description: `Like ${EMAIL}` } } } }),
+      response_format: schemaFormat({ description: `For ${EMAIL}` }),
+      stop: [`END ${EMAIL}`],
+      user: EMAIL
+    });
+    expect(response.status).toBe(200);
+    const sent = fixture.upstream.requests[0]!;
+    expect(JSON.stringify(sent.body)).not.toContain(EMAIL);
+    const messages = sent.body.messages as Array<Record<string, unknown>>;
+    expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "tool"]);
+    expect(messages[0]!.content).toContain("Mail ");
+    const call = (messages[1]!.tool_calls as Array<{ id: string; function: { name: string; arguments: string } }>)[0]!;
+    expect(call).toMatchObject({ id: "call_1", function: { name: "lookup" } });
+    expect(JSON.parse(call.function.arguments)).toMatchObject({ n: 2 });
+    expect(messages[2]).toMatchObject({ tool_call_id: "call_1" });
+    expect((sent.body.tools as Array<{ function: { name: string; description: string } }>)[0]!.function).toMatchObject({ name: "lookup" });
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "ok", guardOutcome: "rewrite" });
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["a tool's name", { messages: user, tools: [{ type: "function", function: { name: EMAIL } }] }],
+    ["a schema's property name", { messages: user, tools: tool({ parameters: { type: "object", properties: { [EMAIL]: { type: "string" } } } }) }]
+  ])("blocks when a rewrite would change %s: the request would stop making sense", async (_where, body) => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(fixture, { id: "aigw-rw2", name: "Rewrite", version: "1", channels: { prompt: dlpChannel("redact") } }, gw.set.id);
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", ...body });
+    expect(response.status).toBe(400);
+    expect(fixture.upstream.requests).toHaveLength(0);
+  });
+
+  it("leaves a request with no rule set exactly as the caller sent it", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: EMAIL }], user: EMAIL, stop: EMAIL });
+    expect(response.status).toBe(200);
+    expect(fixture.upstream.requests[0]!.body).toMatchObject({ user: EMAIL, stop: [EMAIL], messages: [{ role: "user", content: EMAIL }] });
+    expect((await requestsOf(fixture))[0]).toMatchObject({ guardOutcome: "none" });
+  });
+});
+
 describe("admin API", () => {
   it("lets builders read and only admins change; validates providers, secrets and aliases", async () => {
     const fixture = await setup();

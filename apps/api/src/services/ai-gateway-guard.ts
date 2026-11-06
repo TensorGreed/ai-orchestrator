@@ -3,10 +3,11 @@
  *
  * A route set's or client's rule set binding turns these checks on (`GuardService.resolveGateway` with the route set in
  * the toolset's place); with neither, /v1 runs no content rules (the gg1 rule). Checkpoints:
- *   - `prompt` on the request before it goes to the provider: the messages' text as one array (a rewrite maps back
- *     message by message); `tool` messages (results of tools the caller ran: outside content) in a second check
- *     labelled `untrusted_external`; the deployment's destination rules on the route's provider. Embedding inputs are
- *     checked the same way.
+ *   - `prompt` on the final provider request, built and ready to send: `outboundTextSlots` walks all of it, so a field
+ *     added to the request later is read without anyone remembering to add it here. Everything goes in one array (a
+ *     rewrite maps back slot by slot); the contents of `tool` messages (results of tools the caller ran: outside
+ *     content) go in a second check labelled `untrusted_external`; the deployment's destination rules run on the route's
+ *     provider. Embedding requests go through the same walk. Images are not text, so these checks do not read them.
  *   - `final_output` on the answer: its text and the arguments of the tool calls it asks for.
  * `review` and `require_approval` block (nobody waits on an API call). Verdicts go to guard_events under the request's
  * `aigw_*` id, placement `gateway`, with the route's alias as the node id.
@@ -119,11 +120,92 @@ function rewrittenStrings(content: unknown, length: number): string[] | null {
 
 const blockedRewrite = (reason: string): AiGatewayGuardOutcome<never> => ({ action: "block", reason, categories: [], profiles: [] });
 
+/** One piece of caller text in a provider request. */
+export interface OutboundTextSlot {
+  path: ReadonlyArray<string | number>;
+  text: string;
+  /** The content of a `tool` message: outside content. */
+  untrusted: boolean;
+  /** An object key, or a name the rest of the request refers to: a rewrite here would leave the request broken. */
+  fixed: boolean;
+}
+
+/** Free-form JSON the caller wrote: inside it, object keys and numbers can carry data too. */
+const FREE_FORM_FIELDS = new Set(["arguments", "inputSchema", "schema"]);
+
+const FIXED_FIELD = /^(?:messages\.\d+\.(?:name|toolCallId|toolCalls\.\d+\.(?:id|name))|tools\.\d+\.name|options\.toolChoice\.name|options\.responseFormat\.jsonSchema\.name)$/;
+
+/** All that the walk leaves out: the route's own settings, roles (fixed values) and image data (not text). */
+function outsideTheWalk(path: ReadonlyArray<string | number>): boolean {
+  if (path.length === 1) return path[0] === "provider";
+  return path.length === 3 && path[0] === "messages" && (path[2] === "role" || path[2] === "images");
+}
+
 /**
- * The prompt check: `texts` (the non-tool messages, or embedding inputs) and `toolTexts` (tool results, outside
- * content). A rewrite comes back as arrays of the same lengths.
+ * Every piece of caller text in a provider request (chat or embeddings). The walk reads everything but
+ * `outsideTheWalk`, so a new field is read by default rather than missed.
  */
-export async function checkAiGatewayPrompt(
+export function outboundTextSlots(request: object): { slots: OutboundTextSlot[] } {
+  const slots: OutboundTextSlot[] = [];
+  const keys = new Set<string>();
+  const root = request as { messages?: Array<{ role?: string }> };
+  const isToolContent = (path: ReadonlyArray<string | number>) =>
+    path.length === 3 && path[0] === "messages" && path[2] === "content" && root.messages?.[path[1] as number]?.role === "tool";
+
+  const visit = (value: unknown, path: Array<string | number>, freeForm: boolean): void => {
+    if (typeof value === "string") {
+      if (value) slots.push({ path, text: value, untrusted: isToolContent(path), fixed: FIXED_FIELD.test(path.join(".")) });
+    } else if (typeof value === "number") {
+      if (freeForm) slots.push({ path, text: String(value), untrusted: false, fixed: false });
+    } else if (Array.isArray(value)) {
+      value.forEach((entry, index) => visit(entry, [...path, index], freeForm));
+    } else if (value && typeof value === "object") {
+      for (const [key, entry] of Object.entries(value)) {
+        const next = [...path, key];
+        if (outsideTheWalk(next)) continue;
+        // A key is read once however often it repeats: it is never rewritten, so one sighting is enough.
+        if (!keys.has(key)) {
+          keys.add(key);
+          slots.push({ path: next, text: key, untrusted: false, fixed: true });
+        }
+        visit(entry, next, freeForm || FREE_FORM_FIELDS.has(key));
+      }
+    }
+  };
+  visit(request, [], false);
+  return { slots };
+}
+
+/** The request with `rewritten` in its slots; null when a rewrite touches a slot that cannot take one. */
+function applyOutboundRewrite<T extends { provider: LLMProviderConfig }>(request: T, slots: OutboundTextSlot[], rewritten: string[]): T | null {
+  const { provider, ...rest } = request;
+  const copy = structuredClone(rest) as unknown as Record<string | number, unknown>;
+  for (const [index, slot] of slots.entries()) {
+    if (rewritten[index] === slot.text) continue;
+    if (slot.fixed) return null;
+    let target = copy;
+    for (const part of slot.path.slice(0, -1)) target = target[part] as Record<string | number, unknown>;
+    target[slot.path.at(-1)!] = rewritten[index];
+  }
+  return { ...copy, provider } as unknown as T;
+}
+
+/**
+ * The prompt check of a provider request, as it is about to be sent. A rewrite comes back as the same request with
+ * the new text in place; one that would change a key or a name blocks instead.
+ */
+export async function checkAiGatewayRequest<T extends { provider: LLMProviderConfig }>(scope: AiGatewayGuardScope, request: T): Promise<AiGatewayGuardOutcome<T>> {
+  const { slots } = outboundTextSlots(request);
+  const plain = slots.filter((slot) => !slot.untrusted);
+  const outside = slots.filter((slot) => slot.untrusted);
+  const verdict = await checkAiGatewayPrompt(scope, { texts: plain.map((slot) => slot.text), toolTexts: outside.map((slot) => slot.text), provider: request.provider });
+  if (verdict.action !== "rewrite") return verdict;
+  const next = applyOutboundRewrite(request, [...plain, ...outside], [...verdict.content.texts, ...verdict.content.toolTexts]);
+  return next ? { action: "rewrite", content: next } : blockedRewrite("Blocked by content rules: restricted text in a name or key that cannot be rewritten");
+}
+
+/** The two passes of the prompt check: `texts`, then `toolTexts` (outside content). A rewrite keeps both lengths. */
+async function checkAiGatewayPrompt(
   scope: AiGatewayGuardScope,
   input: { texts: string[]; toolTexts: string[]; provider: LLMProviderConfig }
 ): Promise<AiGatewayGuardOutcome<{ texts: string[]; toolTexts: string[] }>> {
