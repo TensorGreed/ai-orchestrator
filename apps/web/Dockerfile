@@ -20,9 +20,10 @@
 # builds use the same release), keeping release builds reproducible;
 # Dependabot (.github/dependabot.yml) proposes digest updates weekly.
 
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS build
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS build
 WORKDIR /app
-RUN corepack enable
+RUN npm install --global corepack@0.36.0 \
+    && corepack enable
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/web/package.json apps/web/
