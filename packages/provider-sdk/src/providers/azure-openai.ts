@@ -137,7 +137,7 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
     const provider = request.provider;
     const connection = await resolveAzureOpenAIConnection(provider, context);
     const payload: Record<string, unknown> = {
-      messages: toOpenAIMessages(request.messages)
+      messages: toOpenAIMessages(request.messages, { images: request.options?.images === true })
     };
     applyOpenAIParameters(payload, provider, toOpenAITools(request.tools), request.options);
 
@@ -181,7 +181,7 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
     const provider = request.provider;
     const connection = await resolveAzureOpenAIConnection(provider, context);
     const payload: Record<string, unknown> = {
-      messages: toOpenAIMessages(request.messages)
+      messages: toOpenAIMessages(request.messages, { images: request.options?.images === true })
     };
     applyOpenAIParameters(payload, provider, toOpenAITools(request.tools), request.options);
     payload.stream = true;

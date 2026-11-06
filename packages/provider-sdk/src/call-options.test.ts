@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ChatMessage } from "@ai-orchestrator/shared";
 import type { LLMStreamChunk } from "./types";
 import { OpenAICloudProviderAdapter } from "./providers/openai";
 import { OpenAICompatibleProviderAdapter } from "./providers/openai-compatible";
@@ -159,13 +160,24 @@ describe("OpenAI-family request parameters", () => {
     expect(calls[1]!.body.stream_options).toBeUndefined();
   });
 
-  it("Azure forwards the options and sends images it used to drop", async () => {
-    const calls = stubFetch(jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: "ok" } }] }));
+  it("Azure keeps a workflow run's body: no options, so an image in the message is not sent", async () => {
+    const provider = { providerId: "azure_openai", model: "dep1", baseUrl: "https://x.openai.azure.com" };
+    const messages: ChatMessage[] = [{ role: "user", content: "look", images: [{ data: "AAAA", mimeType: "image/png" }] }];
+    const calls = stubFetch(jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: "ok" } }] }), sseResponse(["[DONE]"]));
+    await new AzureOpenAIProviderAdapter().generate({ provider, messages }, ctx);
+    await collect(new AzureOpenAIProviderAdapter().generateStream({ provider, messages }, ctx));
+    expect(calls[0]!.body).toEqual({ messages: [{ role: "user", content: "look" }], temperature: 0.2 });
+    expect(calls[1]!.body).toEqual({ messages: [{ role: "user", content: "look" }], temperature: 0.2, stream: true });
+  });
+
+  it("Azure sends images only for a caller that opts in, and keeps them out with other options set", async () => {
+    const reply = () => jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: "ok" } }] });
+    const calls = stubFetch(reply(), reply());
     const answer = await new AzureOpenAIProviderAdapter().generate(
       {
         provider: { providerId: "azure_openai", model: "dep1", baseUrl: "https://x.openai.azure.com" },
         messages: [{ role: "user", content: "look", images: [{ data: "AAAA", mimeType: "image/png" }] }],
-        options: { seed: 3, responseFormat: { type: "json_object" } }
+        options: { seed: 3, responseFormat: { type: "json_object" }, images: true }
       },
       ctx
     );
@@ -176,6 +188,15 @@ describe("OpenAI-family request parameters", () => {
       { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }
     ]);
     expect(answer.finishReason).toBe("stop");
+    await new AzureOpenAIProviderAdapter().generate(
+      {
+        provider: { providerId: "azure_openai", model: "dep1", baseUrl: "https://x.openai.azure.com" },
+        messages: [{ role: "user", content: "look", images: [{ data: "AAAA", mimeType: "image/png" }] }],
+        options: { seed: 3 }
+      },
+      ctx
+    );
+    expect((calls[1]!.body.messages as Array<{ content: unknown }>)[0]!.content).toBe("look");
   });
 });
 

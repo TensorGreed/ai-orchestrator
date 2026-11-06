@@ -155,6 +155,7 @@ export function toCallOptions(
   const options: ProviderCallOptions = {
     providerDefaults: true,
     ...(context.streamUsage ? { streamUsage: true } : {}),
+    ...(context.hasImages ? { images: true } : {}),
     ...(typeof (request.top_p ?? route.defaults.topP) === "number" ? { topP: (request.top_p ?? route.defaults.topP)! } : {}),
     ...(stop?.length ? { stop } : {}),
     ...(typeof request.seed === "number" ? { seed: request.seed } : {}),

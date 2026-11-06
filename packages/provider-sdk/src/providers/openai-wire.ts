@@ -42,11 +42,12 @@ export function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
 }
 
-export function toOpenAIMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
+export function toOpenAIMessages(messages: ChatMessage[], wire: { images?: boolean } = {}): Array<Record<string, unknown>> {
+  const sendImages = wire.images !== false;
   return messages.map((message) => {
     const payload: Record<string, unknown> = { role: message.role };
     // Multipart content with images (OpenAI vision format).
-    const validImages = (message.images ?? []).filter((img) => img.data && img.mimeType && img.mimeType.startsWith("image/"));
+    const validImages = sendImages ? (message.images ?? []).filter((img) => img.data && img.mimeType && img.mimeType.startsWith("image/")) : [];
     if (validImages.length > 0 && message.role === "user") {
       const parts: Array<Record<string, unknown>> = [{ type: "text", text: message.content }];
       for (const img of validImages) {

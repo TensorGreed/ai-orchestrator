@@ -859,6 +859,23 @@ describe("Azure OpenAI prices apply to /v1 only", () => {
     expect((await v1(fixture, token, "/v1/chat/completions", chat)).status).toBe(429);
   });
 
+  it("sends an image on an Azure /v1 route, which a workflow run on the same provider does not", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    const azure = await api<AiGatewayRoute>(fixture, "POST", `/api/ai-gateway/route-sets/${gw.set.id}/routes`, {
+      alias: "azure-vision",
+      providerId: "azure_openai",
+      model: "gpt-4o",
+      baseUrl: fixture.upstream.baseUrl,
+      secretRef: { secretId: fixture.secretId }
+    });
+    expect(azure.status, azure.raw).toBe(201);
+    const image = { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } };
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "azure-vision", messages: [{ role: "user", content: [{ type: "text", text: "look" }, image] }] });
+    expect(response.status).toBe(200);
+    expect(fixture.upstream.requests[0]!.body.messages).toEqual([{ role: "user", content: [{ type: "text", text: "look" }, { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }]);
+  });
+
   it("shows the same pricing table to admins as before", async () => {
     const fixture = await setup();
     const { pricing } = (await api<{ pricing: Record<string, Record<string, unknown>> }>(fixture, "GET", "/api/usage/pricing")).body;

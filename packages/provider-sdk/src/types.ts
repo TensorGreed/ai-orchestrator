@@ -72,6 +72,11 @@ export interface ProviderCallOptions {
   providerDefaults?: boolean;
   /** Streaming (OpenAI family): ask for a final usage chunk (`stream_options.include_usage`). */
   streamUsage?: boolean;
+  /**
+   * Azure OpenAI: send the images of user messages. Workflow runs leave this unset and Azure's body stays text only, as
+   * it always was (a text-only deployment would refuse the image, and the data would newly leave for Azure).
+   */
+  images?: boolean;
 }
 
 export type LLMStreamChunk =
