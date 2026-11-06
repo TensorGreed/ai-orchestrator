@@ -159,6 +159,7 @@ export async function* callOpenAICompatibleStream(
     idleTimeoutMs,
     signal: context.signal,
     provider: options.id,
+    strict: request.options?.strictStream === true,
     timeoutMessage: `Provider ${options.id} stream sent no data for ${idleTimeoutMs}ms; the connection looks stalled. Raise extra.streamIdleTimeoutMs on the model if it needs longer between chunks.`
   });
 }

@@ -42,7 +42,8 @@ interface UpstreamRequest {
 
 type UpstreamAnswer =
   | { json: unknown; status?: number }
-  | { sse: Array<unknown>; gapMs?: number; hang?: boolean; drop?: boolean };
+  /** `eof`: the body just ends, with no `[DONE]`. */
+  | { sse: Array<unknown>; gapMs?: number; hang?: boolean; drop?: boolean; eof?: boolean };
 
 interface Upstream {
   baseUrl: string;
@@ -117,7 +118,7 @@ async function startUpstream(): Promise<Upstream> {
           res.destroy();
           return;
         }
-        res.write("data: [DONE]\n\n");
+        if (!answer.eof) res.write("data: [DONE]\n\n");
         finished = true;
         res.end();
       })();
@@ -394,6 +395,62 @@ describe("/v1/chat/completions", () => {
     expect((list.at(-2) as Frame).error?.code).toBe("upstream_error");
     expect(list.at(-1)).toBe("[DONE]");
     expect((await requestsOf(fixture))[0]).toMatchObject({ status: "upstream_error", stream: true });
+  });
+
+  it("reports an error frame inside the stream as an upstream failure, without its text", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ sse: [chunk({ role: "assistant", content: "" }), chunk({ content: "partial " }), { error: { message: "overloaded at node-7.internal", type: "server_error" } }] });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    const raw = await response.text();
+    expect(raw).not.toContain("node-7");
+    const list = frames(raw);
+    expect(streamedText(list)).toBe("partial ");
+    const objects = list.filter((frame) => typeof frame === "object") as Frame[];
+    expect(objects.some((frame) => frame.choices?.[0]?.finish_reason)).toBe(false);
+    expect(objects.at(-1)!.error?.code).toBe("upstream_error");
+    expect(list.at(-1)).toBe("[DONE]");
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "upstream_error", errorCode: "upstream_error", finishReason: null });
+  });
+
+  it("reports a stream that just ends, with no finish and no [DONE], as an upstream failure", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ sse: [chunk({ role: "assistant", content: "" }), chunk({ content: "partial " })], eof: true });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    const objects = frames(await response.text()).filter((frame) => typeof frame === "object") as Frame[];
+    expect(objects.some((frame) => frame.choices?.[0]?.finish_reason)).toBe(false);
+    expect(objects.at(-1)!.error?.code).toBe("upstream_error");
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "upstream_error", finishReason: null });
+  });
+
+  it("answers 502, not an empty 200 stream, when a stream fails before any text", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push({ sse: [{ error: { message: "overloaded" } }] });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    expect(response.status).toBe(502);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("upstream_error");
+    expect((await requestsOf(fixture))[0]).toMatchObject({ status: "upstream_error", httpStatus: 502 });
+  });
+
+  it("keeps a normal end normal: [DONE] with no finish reason, a finish with no [DONE], and a finish reason outside OpenAI's list", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.upstream.chat.push(
+      { sse: [chunk({ content: "one" })] },
+      { sse: [chunk({ content: "two" }), chunk({}, "stop")], eof: true },
+      { sse: [chunk({ content: "three" }), chunk({}, "eos")], eof: true }
+    );
+    for (const text of ["one", "two", "three"]) {
+      const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+      const list = frames(await response.text());
+      expect(streamedText(list)).toBe(text);
+      const objects = list.filter((frame) => typeof frame === "object") as Frame[];
+      expect(objects.some((frame) => frame.error)).toBe(false);
+      expect(objects.find((frame) => frame.choices?.[0]?.finish_reason)?.choices?.[0]?.finish_reason).toBe("stop");
+    }
+    expect((await requestsOf(fixture)).map((row) => row.status)).toEqual(["ok", "ok", "ok"]);
   });
 
   it("passes tools through and returns the tool calls", async () => {

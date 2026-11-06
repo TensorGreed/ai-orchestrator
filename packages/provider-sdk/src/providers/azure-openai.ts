@@ -216,6 +216,7 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
       idleTimeoutMs,
       signal: context.signal,
       provider: "azure_openai",
+      strict: request.options?.strictStream === true,
       timeoutMessage: `Provider azure_openai stream sent no data for ${idleTimeoutMs}ms; the connection looks stalled. Raise extra.streamIdleTimeoutMs on the model if it needs longer between chunks.`
     });
   }

@@ -8,6 +8,7 @@ import { AnthropicProviderAdapter } from "./providers/anthropic";
 import { GeminiProviderAdapter } from "./providers/gemini";
 import { providerCallOptionSupport, unsupportedCallOptions } from "./call-options";
 import { ModelTapeRecorder, recordingProviderAdapter } from "./model-tape";
+import { LLMProviderError } from "./resilient-fetch";
 
 const ctx = { resolveSecret: async () => "test-key" };
 
@@ -197,6 +198,53 @@ describe("OpenAI-family request parameters", () => {
       ctx
     );
     expect((calls[1]!.body.messages as Array<{ content: unknown }>)[0]!.content).toBe("look");
+  });
+});
+
+describe("failures inside a stream", () => {
+  const frame = (content: string) => JSON.stringify({ choices: [{ delta: { content } }] });
+  const provider = { providerId: "openai", model: "gpt-4o" };
+  const messages: ChatMessage[] = [{ role: "user", content: "hi" }];
+
+  it("stays silent for a workflow run: no option, so an error frame or a bare end reads as it always did", async () => {
+    stubFetch(sseResponse([frame("partial "), JSON.stringify({ error: { message: "overloaded" } })]), sseResponse([frame("partial ")]));
+    const expected = [{ type: "text_delta", textDelta: "partial " }];
+    expect(await collect(new OpenAICloudProviderAdapter().generateStream({ provider, messages }, ctx))).toEqual(expected);
+    expect(await collect(new OpenAICloudProviderAdapter().generateStream({ provider, messages }, ctx))).toEqual(expected);
+  });
+
+  it.each([
+    ["an error frame", [frame("a"), JSON.stringify({ error: { message: "secret host" } })]],
+    ["an error object frame", [frame("a"), JSON.stringify({ object: "error", message: "secret host" })]],
+    ["a bare end", [frame("a")]]
+  ])("with strictStream throws on %s, with no upstream text", async (_name, events) => {
+    stubFetch(sseResponse(events));
+    const chunks: LLMStreamChunk[] = [];
+    const run = async () => {
+      for await (const chunk of new OpenAICloudProviderAdapter().generateStream({ provider, messages, options: { strictStream: true } }, ctx)) chunks.push(chunk);
+    };
+    const failure = await run().then(() => null, (error: unknown) => error as Error);
+    expect(failure).toBeInstanceOf(LLMProviderError);
+    expect(failure!.message).not.toContain("secret host");
+    expect(chunks).toEqual([{ type: "text_delta", textDelta: "a" }]);
+  });
+
+  it("with strictStream accepts each normal ending", async () => {
+    const options = { strictStream: true };
+    const usage = JSON.stringify({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+    const finished = (reason: string) => JSON.stringify({ choices: [{ delta: {}, finish_reason: reason }] });
+    stubFetch(sseResponse([frame("a"), "[DONE]"]), sseResponse([frame("a"), finished("stop")]), sseResponse([frame("a"), finished("eos")]), sseResponse([frame("a"), usage]));
+    for (let call = 0; call < 4; call += 1) {
+      const chunks = await collect(new OpenAICloudProviderAdapter().generateStream({ provider, messages, options }, ctx));
+      expect(chunks[0]).toEqual({ type: "text_delta", textDelta: "a" });
+    }
+  });
+
+  it("Azure honours strictStream too", async () => {
+    stubFetch(sseResponse([frame("a")]));
+    await expect(
+      collect(new AzureOpenAIProviderAdapter().generateStream({ provider: { providerId: "azure_openai", model: "dep1", baseUrl: "https://x.openai.azure.com" }, messages, options: { strictStream: true } }, ctx))
+    ).rejects.toBeInstanceOf(LLMProviderError);
   });
 });
 

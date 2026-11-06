@@ -59,6 +59,8 @@ export const aiGatewayErrors = {
       "server_error",
       "upstream_error"
     ),
+  /** The provider failed after part of the answer was sent. */
+  upstreamInterrupted: () => new AiGatewayHttpError(502, "The model provider failed before finishing this answer.", "server_error", "upstream_error"),
   upstreamRateLimited: (retryAfterSeconds: number) =>
     new AiGatewayHttpError(429, "The model provider is rate limiting this route. Try again shortly.", "requests", "upstream_rate_limited", null, retryAfterSeconds),
   unavailable: (message: string) => new AiGatewayHttpError(503, message, "server_error", "service_unavailable", null, 5),
@@ -154,6 +156,7 @@ export function toCallOptions(
   const choice = request.tool_choice;
   const options: ProviderCallOptions = {
     providerDefaults: true,
+    strictStream: true,
     ...(context.streamUsage ? { streamUsage: true } : {}),
     ...(context.hasImages ? { images: true } : {}),
     ...(typeof (request.top_p ?? route.defaults.topP) === "number" ? { topP: (request.top_p ?? route.defaults.topP)! } : {}),

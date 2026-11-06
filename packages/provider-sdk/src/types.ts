@@ -73,6 +73,11 @@ export interface ProviderCallOptions {
   /** Streaming (OpenAI family): ask for a final usage chunk (`stream_options.include_usage`). */
   streamUsage?: boolean;
   /**
+   * Streaming (OpenAI family): throw on a failure the provider reports inside the stream (an error frame) and on a body
+   * that ends with no finish reason, `[DONE]` or usage frame. Runs leave this unset: both read as a normal end.
+   */
+  strictStream?: boolean;
+  /**
    * Azure OpenAI: send the images of user messages. Workflow runs leave this unset and Azure's body stays text only, as
    * it always was (a text-only deployment would refuse the image, and the data would newly leave for Azure).
    */

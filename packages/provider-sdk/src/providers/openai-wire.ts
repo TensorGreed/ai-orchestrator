@@ -5,7 +5,7 @@
  */
 import type { ChatMessage, LLMFinishReason, LLMProviderConfig, LLMUsage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMStreamChunk, ProviderCallOptions } from "../types";
-import { readStreamChunk } from "../resilient-fetch";
+import { ErrorCategory, LLMProviderError, readStreamChunk } from "../resilient-fetch";
 import { parseToolArguments } from "../tool-arg-parser";
 
 export interface OpenAIWireToolCall {
@@ -211,18 +211,49 @@ function chunksOfEvent(payload: string): LLMStreamChunk[] {
   return out;
 }
 
+function streamFailure(provider: string, what: string): LLMProviderError {
+  // The upstream's own text stays out: it can name hosts or echo the prompt.
+  return new LLMProviderError({ message: `Provider ${provider} ${what}.`, provider, category: ErrorCategory.PROVIDER_TRANSIENT, retryAttempts: 0, retryable: false });
+}
+
+/**
+ * What a strict read learns from one event: whether it is a failure (throws) and whether it shows an orderly end. A
+ * finish reason of any spelling counts, as does `[DONE]` or a usage frame: compatible servers differ in which of these
+ * they send, and only a stream with none of them looks cut off.
+ */
+function orderlyEndIn(rawEvent: string, payload: string, provider: string): boolean {
+  if (payload === "[DONE]") return true;
+  if (/^event:\s*error\s*$/m.test(rawEvent)) throw streamFailure(provider, "sent an error event inside the stream");
+  let parsed: (OpenAIWireStreamResponse & { error?: unknown; object?: unknown }) | null;
+  try {
+    parsed = JSON.parse(payload) as OpenAIWireStreamResponse & { error?: unknown; object?: unknown };
+  } catch {
+    return false;
+  }
+  if (parsed?.error || parsed?.object === "error") throw streamFailure(provider, "sent an error frame inside the stream");
+  const reason = parsed?.choices?.[0]?.finish_reason;
+  return (typeof reason === "string" && reason.length > 0) || Boolean(parsed?.usage);
+}
+
 /**
  * Reads an OpenAI-style SSE body into chunks. A consumer that stops early (a canceled run, a client that went away)
  * or a failed read cancels the body, so the upstream connection is freed.
+ *
+ * `strict` (`ProviderCallOptions.strictStream`) throws on an error frame and on a body that ends with no sign of an
+ * orderly end. Without it both read as a normal end, as they always have for workflow runs.
  */
 export async function* readOpenAIStream(
   body: ReadableStream<Uint8Array>,
-  input: { idleTimeoutMs: number; signal?: AbortSignal; provider: string; timeoutMessage: string }
+  input: { idleTimeoutMs: number; signal?: AbortSignal; provider: string; timeoutMessage: string; strict?: boolean }
 ): AsyncGenerator<LLMStreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let finished = false;
+  let orderly = false;
+  const observe = (rawEvent: string, payload: string) => {
+    if (input.strict && orderlyEndIn(rawEvent, payload, input.provider)) orderly = true;
+  };
   try {
     while (true) {
       const { done, value } = await readStreamChunk(reader, {
@@ -243,6 +274,7 @@ export async function* readOpenAIStream(
         buffer = buffer.slice(boundary.index + boundary.separatorLength);
         const payload = parseSSEEventPayload(rawEvent);
         if (!payload) continue;
+        observe(rawEvent, payload);
         for (const chunk of chunksOfEvent(payload)) yield chunk;
       }
     }
@@ -254,6 +286,10 @@ export async function* readOpenAIStream(
   }
   if (buffer.trim().length > 0) {
     const trailing = parseSSEEventPayload(buffer);
-    if (trailing) for (const chunk of chunksOfEvent(trailing)) yield chunk;
+    if (trailing) {
+      observe(buffer, trailing);
+      for (const chunk of chunksOfEvent(trailing)) yield chunk;
+    }
   }
+  if (input.strict && !orderly) throw streamFailure(input.provider, "ended the stream without finishing");
 }

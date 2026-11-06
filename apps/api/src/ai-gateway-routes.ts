@@ -725,7 +725,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       await record(admitted, { kind: "chat", stream: true, status: "upstream_error", httpStatus: writer.isStarted ? 200 : failure.status, finishReason, ...(usage ? { usage } : {}), guardOutcome, errorCode: failure.code });
       if (!writer.isStarted) throw failure;
       // Mid-stream: an OpenAI-style error event, then the end of the stream.
-      writer.data(failure.body());
+      writer.data(aiGatewayErrors.upstreamInterrupted().body());
       writer.end();
       return reply;
     }
