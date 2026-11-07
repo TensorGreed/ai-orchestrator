@@ -12,7 +12,7 @@ import { canonicalIpRange } from "./data-destinations";
  * - `api`: `/api/*` with a bearer token or API key
  * - `webhook`: `/webhook/*`, `/webhook-test/*`, provider webhooks under `/api/webhooks/*`, `/api/mcp-server/*`
  * - `public`: forms, chat, the widget and the helper chat
- * - `mcp_gateway`: `/mcp/*`
+ * - `mcp_gateway`: `/mcp/*` and the `/v1/*` AI gateway (the same client tokens)
  * - `metrics`: `/metrics` and the API docs
  */
 export const NETWORK_SCOPES = ["ui", "api", "webhook", "public", "mcp_gateway", "metrics"] as const;

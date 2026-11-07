@@ -599,7 +599,8 @@ export const mcpToolsetUpdateSchema = mcpToolsetInputSchema
 
 export const mcpClientCreateSchema = z.object({
   name: z.string().trim().min(1).max(120),
-  toolsetIds: z.array(z.string().trim().min(1)).min(1).max(50),
+  /** 12.6b — may be empty: a client that only calls the /v1 AI gateway (its route-set grants) needs no toolset. */
+  toolsetIds: z.array(z.string().trim().min(1)).max(50),
   role: mcpPolicyRoleSchema,
   /** ISO timestamp in the future; null or absent = never expires. */
   expiresAt: z.string().datetime({ offset: true }).nullable().optional()

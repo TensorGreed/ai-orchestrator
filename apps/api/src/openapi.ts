@@ -24,6 +24,7 @@ export const openApiSpec = {
     { name: "Variables", description: "Project-scoped variable management" },
     { name: "Providers", description: "LLM provider testing and model discovery" },
     { name: "MCP", description: "MCP tool discovery" },
+    { name: "AI gateway", description: "The OpenAI-compatible /v1 endpoint and the admin API for route sets, routes, grants and usage" },
     { name: "Content rules", description: "Rule sets, rule set bindings, rule events and Security page counts" },
     { name: "Audit bundles", description: "Signed run manifests, audit bundle export and the deployment signing keys" },
     { name: "Evals", description: "Eval datasets, golden sets, eval runs, replay jobs and their per-case scores and diffs" },
@@ -3021,6 +3022,131 @@ export const openApiSpec = {
           { name: "memberId", in: "path", required: true, schema: { type: "string" } }
         ],
         responses: { "200": { description: "Updated toolset" }, "404": { description: "Not found" } }
+      }
+    },
+    "/v1/models": {
+      get: {
+        tags: ["AI gateway"],
+        summary: "The route aliases granted to the calling client, in the OpenAI list shape. Bearer client token (the same tokens as the MCP endpoint); a client with no grant gets an empty list.",
+        responses: { "200": { description: "OK" }, "401": { description: "Missing, invalid, revoked or expired client token (OpenAI error body)" } }
+      }
+    },
+    "/v1/chat/completions": {
+      post: {
+        tags: ["AI gateway"],
+        summary: "OpenAI-compatible chat completions, JSON or SSE (stream: true). model is a route alias. Errors use the OpenAI error body: 400, 401, 403 (network controls, model allowlist), 404 model_not_found, 429 (rate limit, budget), 502, 503.",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+        responses: { "200": { description: "OK" }, "400": { description: "Invalid request or blocked by content rules" }, "401": { description: "Missing, invalid, revoked or expired client token (OpenAI error body)" }, "429": { description: "Rate limit or budget" }, "502": { description: "The model provider failed" } }
+      }
+    },
+    "/v1/embeddings": {
+      post: {
+        tags: ["AI gateway"],
+        summary: "OpenAI-compatible embeddings (float or base64). model is an embedding route alias.",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+        responses: { "200": { description: "OK" }, "400": { description: "Invalid request or blocked by content rules" }, "401": { description: "Missing, invalid, revoked or expired client token (OpenAI error body)" }, "429": { description: "Rate limit or budget" } }
+      }
+    },
+    "/api/ai-gateway/route-sets": {
+      get: {
+        tags: ["AI gateway"],
+        summary: "Route sets with their routes and clients (builder)",
+        responses: { "200": { description: "OK" } }
+      },
+      post: {
+        tags: ["AI gateway"],
+        summary: "Create a route set (admin)",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+        responses: { "201": { description: "Created" }, "400": { description: "Invalid" } }
+      }
+    },
+    "/api/ai-gateway/route-sets/{id}": {
+      get: {
+        tags: ["AI gateway"],
+        summary: "One route set (builder)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "OK" }, "404": { description: "Not found" } }
+      },
+      put: {
+        tags: ["AI gateway"],
+        summary: "Update a route set: name, project, enabled, default rate limit (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+        responses: { "200": { description: "OK" }, "404": { description: "Not found" } }
+      },
+      delete: {
+        tags: ["AI gateway"],
+        summary: "Delete a route set and its routes and grants (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "OK" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/ai-gateway/route-sets/{id}/routes": {
+      post: {
+        tags: ["AI gateway"],
+        summary: "Add a route to a set (admin). The secret is referenced by id and must be usable by the set's project.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+        responses: { "201": { description: "Created" }, "400": { description: "Invalid or alias already used" } }
+      }
+    },
+    "/api/ai-gateway/routes/{id}": {
+      put: {
+        tags: ["AI gateway"],
+        summary: "Update a route (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+        responses: { "200": { description: "OK" }, "404": { description: "Not found" } }
+      },
+      delete: {
+        tags: ["AI gateway"],
+        summary: "Delete a route (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "OK" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/ai-gateway/clients/{clientId}/grants": {
+      get: {
+        tags: ["AI gateway"],
+        summary: "Route sets granted to a gateway client (builder)",
+        parameters: [{ name: "clientId", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "OK" } }
+      },
+      put: {
+        tags: ["AI gateway"],
+        summary: "Replace the route sets granted to a client (admin)",
+        parameters: [{ name: "clientId", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+        responses: { "200": { description: "OK" } }
+      }
+    },
+    "/api/ai-gateway/route-sets/{id}/guard": {
+      get: {
+        tags: ["AI gateway"],
+        summary: "The set's content rule binding (builder)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "OK" }, "404": { description: "Not found" } }
+      },
+      put: {
+        tags: ["AI gateway"],
+        summary: "Bind a rule set to the route set, or inherit (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+        responses: { "200": { description: "OK" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/ai-gateway/usage": {
+      get: {
+        tags: ["AI gateway"],
+        summary: "Usage of /v1 by model name and client for a window (admin)",
+        responses: { "200": { description: "OK" } }
+      }
+    },
+    "/api/ai-gateway/requests": {
+      get: {
+        tags: ["AI gateway"],
+        summary: "Recent /v1 request rows: metadata only, never prompts or answers (admin)",
+        responses: { "200": { description: "OK" } }
       }
     },
     "/api/mcp/clients": {

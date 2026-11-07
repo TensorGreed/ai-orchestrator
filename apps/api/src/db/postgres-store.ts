@@ -5,6 +5,7 @@ import type { PostgresSslSettings } from "../config.js";
 import { createPgContext, type PgContext } from "./postgres/context.js";
 import { createPostgresPool, type PoolErrorLogger } from "./postgres/pool.js";
 import { PG_TIMESTAMPTZ_OID, parseTimestamptz, toNum } from "./postgres/helpers.js";
+import * as ai_gateway from "./postgres/ai-gateway.js";
 import * as approvals from "./postgres/approvals.js";
 import * as audit from "./postgres/audit.js";
 import * as auth from "./postgres/auth.js";
@@ -978,6 +979,61 @@ export class PostgresStore implements Store {
   }
   async getGuardBinding(...args: Parameters<Store["getGuardBinding"]>): ReturnType<Store["getGuardBinding"]> {
     return guard.getGuardBinding(this.ctx, ...args);
+  }
+  // 12.6b — the /v1 AI gateway tables (postgres/ai-gateway.ts).
+  async listAiGatewayRouteSets(...args: Parameters<Store["listAiGatewayRouteSets"]>): ReturnType<Store["listAiGatewayRouteSets"]> {
+    return ai_gateway.listAiGatewayRouteSets(this.ctx, ...args);
+  }
+  async getAiGatewayRouteSet(...args: Parameters<Store["getAiGatewayRouteSet"]>): ReturnType<Store["getAiGatewayRouteSet"]> {
+    return ai_gateway.getAiGatewayRouteSet(this.ctx, ...args);
+  }
+  async createAiGatewayRouteSet(...args: Parameters<Store["createAiGatewayRouteSet"]>): ReturnType<Store["createAiGatewayRouteSet"]> {
+    return ai_gateway.createAiGatewayRouteSet(this.ctx, ...args);
+  }
+  async updateAiGatewayRouteSet(...args: Parameters<Store["updateAiGatewayRouteSet"]>): ReturnType<Store["updateAiGatewayRouteSet"]> {
+    return ai_gateway.updateAiGatewayRouteSet(this.ctx, ...args);
+  }
+  async deleteAiGatewayRouteSet(...args: Parameters<Store["deleteAiGatewayRouteSet"]>): ReturnType<Store["deleteAiGatewayRouteSet"]> {
+    return ai_gateway.deleteAiGatewayRouteSet(this.ctx, ...args);
+  }
+  async listAiGatewayRoutes(...args: Parameters<Store["listAiGatewayRoutes"]>): ReturnType<Store["listAiGatewayRoutes"]> {
+    return ai_gateway.listAiGatewayRoutes(this.ctx, ...args);
+  }
+  async getAiGatewayRoute(...args: Parameters<Store["getAiGatewayRoute"]>): ReturnType<Store["getAiGatewayRoute"]> {
+    return ai_gateway.getAiGatewayRoute(this.ctx, ...args);
+  }
+  async createAiGatewayRoute(...args: Parameters<Store["createAiGatewayRoute"]>): ReturnType<Store["createAiGatewayRoute"]> {
+    return ai_gateway.createAiGatewayRoute(this.ctx, ...args);
+  }
+  async updateAiGatewayRoute(...args: Parameters<Store["updateAiGatewayRoute"]>): ReturnType<Store["updateAiGatewayRoute"]> {
+    return ai_gateway.updateAiGatewayRoute(this.ctx, ...args);
+  }
+  async deleteAiGatewayRoute(...args: Parameters<Store["deleteAiGatewayRoute"]>): ReturnType<Store["deleteAiGatewayRoute"]> {
+    return ai_gateway.deleteAiGatewayRoute(this.ctx, ...args);
+  }
+  async listAiGatewayClientGrants(...args: Parameters<Store["listAiGatewayClientGrants"]>): ReturnType<Store["listAiGatewayClientGrants"]> {
+    return ai_gateway.listAiGatewayClientGrants(this.ctx, ...args);
+  }
+  async setAiGatewayClientGrants(...args: Parameters<Store["setAiGatewayClientGrants"]>): ReturnType<Store["setAiGatewayClientGrants"]> {
+    return ai_gateway.setAiGatewayClientGrants(this.ctx, ...args);
+  }
+  async listAllAiGatewayClientGrants(...args: Parameters<Store["listAllAiGatewayClientGrants"]>): ReturnType<Store["listAllAiGatewayClientGrants"]> {
+    return ai_gateway.listAllAiGatewayClientGrants(this.ctx, ...args);
+  }
+  async resolveAiGatewayRoute(...args: Parameters<Store["resolveAiGatewayRoute"]>): ReturnType<Store["resolveAiGatewayRoute"]> {
+    return ai_gateway.resolveAiGatewayRoute(this.ctx, ...args);
+  }
+  async listAiGatewayRoutesForClient(...args: Parameters<Store["listAiGatewayRoutesForClient"]>): ReturnType<Store["listAiGatewayRoutesForClient"]> {
+    return ai_gateway.listAiGatewayRoutesForClient(this.ctx, ...args);
+  }
+  async insertAiGatewayRequest(...args: Parameters<Store["insertAiGatewayRequest"]>): ReturnType<Store["insertAiGatewayRequest"]> {
+    return ai_gateway.insertAiGatewayRequest(this.ctx, ...args);
+  }
+  async listAiGatewayRequests(...args: Parameters<Store["listAiGatewayRequests"]>): ReturnType<Store["listAiGatewayRequests"]> {
+    return ai_gateway.listAiGatewayRequests(this.ctx, ...args);
+  }
+  async summarizeAiGatewayUsage(...args: Parameters<Store["summarizeAiGatewayUsage"]>): ReturnType<Store["summarizeAiGatewayUsage"]> {
+    return ai_gateway.summarizeAiGatewayUsage(this.ctx, ...args);
   }
   async getGatewayGuardBindings(...args: Parameters<Store["getGatewayGuardBindings"]>): ReturnType<Store["getGatewayGuardBindings"]> {
     return guard.getGatewayGuardBindings(this.ctx, ...args);

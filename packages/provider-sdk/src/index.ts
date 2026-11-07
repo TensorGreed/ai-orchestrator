@@ -13,6 +13,8 @@ export * from "./resilient-fetch";
 export * from "./model-tape";
 export * from "./gated-registry";
 export * from "./default-base-urls";
+export * from "./call-options";
+export * from "./embeddings";
 export * from "./providers/echo";
 export * from "./providers/openai-compatible";
 export * from "./providers/openai";
@@ -20,6 +22,7 @@ export * from "./providers/ollama";
 export * from "./providers/gemini";
 export * from "./providers/anthropic";
 export * from "./providers/azure-openai";
+export * from "./providers/openai-wire";
 
 export function createDefaultProviderRegistry(): ProviderRegistry {
   const registry = new ProviderRegistry();
@@ -32,3 +35,4 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
   registry.register(new AnthropicProviderAdapter());
   return registry;
 }
+export { parseToolArguments } from "./tool-arg-parser";

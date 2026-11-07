@@ -20,6 +20,7 @@ const STUDIO_MODES: StudioMode[] = [
   "mcp-policies",
   "mcp-toolsets",
   "mcp-clients",
+  "mcp-ai-routes",
   "mcp-playground",
   "mcp-changes",
   "connections",

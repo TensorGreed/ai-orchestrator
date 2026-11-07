@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Store } from "./db/store.js";
-import { UsageService, DEFAULT_PRICING } from "./services/usage-service.js";
+import { AI_GATEWAY_PRICING, UsageService, DEFAULT_PRICING } from "./services/usage-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
 describe("Phase 8.2 — FinOps cost rollup", () => {
@@ -29,6 +29,31 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
       expect(DEFAULT_PRICING.anthropic!["claude-opus-5-5"]).toEqual({ inputUsdPer1M: 4, outputUsdPer1M: 20, cachedInputUsdPer1M: 0.2 });
       expect(DEFAULT_PRICING.anthropic!["claude-3-5-sonnet"]).toBeDefined();
       expect(DEFAULT_PRICING.gemini!["gemini-2.0-flash"]).toBeDefined();
+    });
+
+    it("keeps Azure OpenAI and embedding prices out of everything but /v1 traffic", () => {
+      expect(DEFAULT_PRICING.azure_openai).toBeUndefined();
+      expect(Object.keys(DEFAULT_PRICING.openai!).filter((model) => model.includes("embedding"))).toEqual([]);
+      const u = new UsageService(store);
+      for (const [providerId, models] of Object.entries(AI_GATEWAY_PRICING)) {
+        for (const model of Object.keys(models)) {
+          expect(u.estimateCostUsd(providerId, model, 1_000_000, 0, 0), `${providerId}/${model}`).toBeNull();
+          expect(u.priceTelemetry(providerId, model, 1_000_000, 0, 0), `${providerId}/${model}`).toBe(0);
+          expect(u.estimateAiGatewayCostUsd(providerId, model, 1_000_000, 0, 0), `${providerId}/${model}`).toBeGreaterThan(0);
+        }
+      }
+      expect(u.estimateAiGatewayCostUsd("azure_openai", "gpt-4o", 1_000_000, 1_000_000, 0)).toBe(12.5);
+      expect(u.estimateAiGatewayCostUsd("azure_openai", "text-embedding-3-small", 1_000_000, 0, 0)).toBe(0.02);
+      expect(u.estimateAiGatewayCostUsd("azure_openai", "my-deployment", 1_000_000, 0, 0)).toBeNull();
+      expect(u.estimateAiGatewayCostUsd("openai", "gpt-4o", 1_000_000, 0, 0)).toBe(u.estimateCostUsd("openai", "gpt-4o", 1_000_000, 0, 0));
+    });
+
+    it("lets LLM_PRICING_OVERRIDES_JSON price /v1 and, as before, runs too", () => {
+      const u = new UsageService(store, { pricingOverridesJson: JSON.stringify({ azure_openai: { "gpt-4o": { inputUsdPer1M: 1, outputUsdPer1M: 1 } } }) });
+      expect(u.estimateCostUsd("azure_openai", "gpt-4o", 1_000_000, 0, 0)).toBe(1);
+      expect(u.estimateAiGatewayCostUsd("azure_openai", "gpt-4o", 1_000_000, 0, 0)).toBe(1);
+      expect(u.estimateCostUsd("azure_openai", "gpt-4o-mini", 1_000_000, 0, 0)).toBeNull();
+      expect(u.estimateAiGatewayCostUsd("azure_openai", "gpt-4o-mini", 1_000_000, 0, 0)).toBe(0.15);
     });
 
     it("computes cost from input/output tokens at $/1M rates", () => {

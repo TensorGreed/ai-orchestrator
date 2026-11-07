@@ -81,6 +81,12 @@ describe("classifyNetworkScope: every route family", () => {
     // The MCP gateway.
     ["/mcp/support", "bearer", ["mcp_gateway"]],
     ["/mcp", "none", ["mcp_gateway"]],
+    // The /v1 AI gateway takes the same client tokens, whatever credential comes with the request.
+    ["/v1/chat/completions", "bearer", ["mcp_gateway"]],
+    ["/v1/models/*", "none", ["mcp_gateway"]],
+    ["/v1", "cookie", ["mcp_gateway"]],
+    ["/%761/models", "bearer", ["mcp_gateway"]],
+    ["http://x/v1/embeddings", "bearer", ["mcp_gateway"]],
     // Metrics and API docs.
     ["/metrics", "none", ["metrics"]],
     ["/api/docs", "none", ["metrics"]],
@@ -89,6 +95,8 @@ describe("classifyNetworkScope: every route family", () => {
     // Look-alikes stay in the default family.
     ["/webhooks", "none", ["ui"]],
     ["/mcpx/support", "bearer", ["api"]],
+    ["/v1x/models", "bearer", ["api"]],
+    ["/api/v1/models", "none", ["ui"]],
     ["/api/formsx", "none", ["ui"]],
     ["/healthz", "none", ["ui"]],
     ["/", "none", ["ui"]],

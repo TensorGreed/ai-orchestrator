@@ -222,9 +222,13 @@ export class ModelTapeRecorder {
 /** The answer a stream added up to. */
 function responseFromChunks(chunks: LLMStreamChunk[]): LLMCallResponse {
   let content = "";
+  let finishReason: LLMCallResponse["finishReason"];
+  let usage: LLMCallResponse["usage"];
   const calls = new Map<string, { id: string; name: string; argumentsText: string }>();
   for (const chunk of chunks) {
     if (chunk.type === "text_delta") content += chunk.textDelta;
+    else if (chunk.type === "finish") finishReason = chunk.reason;
+    else if (chunk.type === "usage") usage = chunk.usage;
     else {
       const id = chunk.toolCallId ?? `toolcall_${calls.size}`;
       const entry = calls.get(id) ?? { id, name: chunk.name ?? `tool_${calls.size}`, argumentsText: "" };
@@ -235,6 +239,8 @@ function responseFromChunks(chunks: LLMStreamChunk[]): LLMCallResponse {
   }
   return {
     content,
+    ...(finishReason ? { finishReason } : {}),
+    ...(usage ? { usage } : {}),
     toolCalls: [...calls.values()].map((call) => {
       let args: Record<string, unknown> = {};
       try {

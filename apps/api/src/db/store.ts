@@ -104,6 +104,7 @@ import type {
   WorkflowReleaseRecord
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
+import type { AiGatewayStore } from "./ai-gateway-store.js";
 
 /** The decision `decideApprovalRequest` records. */
 export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0];
@@ -347,7 +348,7 @@ export interface UserInviteCreate {
   expiresAt: string;
 }
 
-export interface Store {
+export interface Store extends AiGatewayStore {
   // ---- Store lifecycle
 
   /** Phase 10.7 — where the database lives (a file path, or ":memory:"); names this deployment's sandbox containers. */
@@ -798,7 +799,12 @@ export interface Store {
   deleteGuardProfile(id: string): Promise<boolean>;
   getGuardBinding(scope: GuardBindingScope, scopeId: string): Promise<GuardBindingRecord | null>;
   /** 12.6 — a gateway call's toolset and client Guard bindings, in one read (null where there is none). */
-  getGatewayGuardBindings(toolsetId: string, clientId: string): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }>;
+  /** 12.6b — `setScope` `ai_route_set`: the binding of an AI gateway route set (in `toolset`) instead of a toolset's. */
+  getGatewayGuardBindings(
+    toolsetId: string,
+    clientId: string,
+    setScope?: "toolset" | "ai_route_set"
+  ): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }>;
   listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]>;
   setGuardBinding(input: { scope: GuardBindingScope; scopeId: string; mode: string; profileId: string | null; updatedBy: string | null }): Promise<GuardBindingRecord>;
   insertGuardEvents(rows: GuardEventInsert[]): Promise<void>;
@@ -2632,6 +2638,8 @@ export interface Store {
    * by client_id; rows written before v54 (no client_id) by `user_id = 'mcp-client:<the client's current name>'`,
    * only from the client's creation on, so a client made later under an old name does not inherit them. A rename
    * drops the client's pre-v54 rows; two clients that existed together under one name before v54 both count them.
+   * 12.6b: global, project and client scopes also count `/v1` AI gateway requests (ai_gateway_requests; a project by
+   * its route sets' current project).
    */
   queryBudgetUsage(input: {
     from: string;

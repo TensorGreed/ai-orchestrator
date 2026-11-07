@@ -16,6 +16,7 @@ export type StudioMode =
   | "mcp-policies"
   | "mcp-toolsets"
   | "mcp-clients"
+  | "mcp-ai-routes"
   | "mcp-playground"
   | "mcp-changes"
   | "connections"
@@ -40,6 +41,8 @@ export const MCP_MODE_ITEMS: ReadonlyArray<StudioModeItem> = [
   { mode: "mcp-policies", label: "Policies", adminOnly: true, section: "mcp" },
   { mode: "mcp-toolsets", label: "Toolsets", adminOnly: true, section: "mcp" },
   { mode: "mcp-clients", label: "Clients", adminOnly: true, section: "mcp" },
+  // 12.6b — the models served on the OpenAI-compatible /v1 endpoint.
+  { mode: "mcp-ai-routes", label: "AI routes", adminOnly: true, section: "mcp" },
   { mode: "mcp-playground", label: "Playground", adminOnly: true, section: "mcp" },
   { mode: "mcp-changes", label: "Changes", adminOnly: true, section: "mcp" }
 ];

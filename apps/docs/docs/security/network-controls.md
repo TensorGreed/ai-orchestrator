@@ -28,7 +28,7 @@ Each request falls in one scope by its path and credential. A scope without a li
 | API | `NETWORK_ALLOW_API` | `/api/*` with an API key (`Authorization: Bearer ao_…`), including `/api/webhooks/execute` and `/api/triggers/manual/*` |
 | Webhook | `NETWORK_ALLOW_WEBHOOK` | `/webhook/*`, `/webhook-test/*`, provider webhooks (`/api/webhooks/slack/*` and the others), `/api/mcp-server/*` (with or without an API key) |
 | Public | `NETWORK_ALLOW_PUBLIC` | Forms (`/api/forms/*`), chat (`/api/chat/*`), `/widget.js`, `/helper-chat` |
-| MCP gateway | `NETWORK_ALLOW_MCP_GATEWAY` | `/mcp/*` |
+| MCP gateway | `NETWORK_ALLOW_MCP_GATEWAY` | `/mcp/*` and the `/v1/*` AI gateway, which takes the same client tokens |
 | Metrics | `NETWORK_ALLOW_METRICS` | `/metrics`, `/api/docs`, `/api/openapi.json` |
 
 `/health`, `/ready` and the SAML metadata (`/api/auth/saml/metadata`, which the identity provider fetches) are never
@@ -80,8 +80,8 @@ Invalid environment configuration: NETWORK_ALLOW_API entry "10.0.0.300/8" is not
 ## What a refused request sees
 
 A refused request gets `403` with a fixed body, `{"error":"Access from this address is not allowed"}`, or on
-`/mcp/*` a JSON-RPC error with code `-32001` and the same message. The body never names the list or the address. The
-check runs before rate limiting, so refused requests use no rate-limit budget.
+`/mcp/*` a JSON-RPC error with code `-32001` and the same message, or on `/v1/*` an OpenAI-format error with code
+`access_denied` and the same message. The body never names the list or the address. The check runs before rate limiting, so refused requests use no rate-limit budget.
 
 Refusals are recorded:
 
@@ -129,6 +129,9 @@ because nginx is its single hop; do not publish port 4000 while it is set.
 
 ## Per-client lists and certificates (MCP gateway)
 
+These settings belong to the client's token, so they apply on both endpoints that accept it: `/mcp/*` and the
+[`/v1` AI gateway](../product/ai-gateway.md).
+
 Open **MCP › Clients**, pick a client and **Network**. An admin can set:
 
 - **Allowed addresses**: the client's token works only from these addresses. Empty means any address.
@@ -145,8 +148,8 @@ after. The same settings are on the API: `PUT /api/mcp/clients/:id/network` with
 and `certSubject` (each field given replaces the stored one).
 
 A call that fails the certificate check gets `401` and is audited as `mcp_gateway.client_certificate_refused` (at most
-once a minute per client, address and reason: `none`, `untrusted`, `invalid`, `expired` or `mismatch`). A call from an
-address outside the client's list gets the `403` above.
+once a minute per endpoint, client, address and reason: `none`, `untrusted`, `invalid`, `expired` or `mismatch`; events
+from `/v1/*` carry `endpoint: "ai_gateway"`). A call from an address outside the client's list gets the `403` above.
 
 ### How the certificate reaches L2M
 
@@ -172,7 +175,9 @@ rule, so only the proxy can reach the API port. Any other proxy in front of the 
 nginx, must clear the header (`proxy_set_header X-SSL-Client-Cert "";`) if it can reach the API from a listed address.
 :::
 
-**nginx.** Verify client certificates where nginx terminates TLS and forward them on `/mcp/`:
+**nginx.** Verify client certificates where nginx terminates TLS and forward them on `/mcp/`. Give `/v1/` a `location`
+with the same settings: a location that does not set the header passes a client's own value through, from an address
+the API trusts.
 
 ```nginx
 server {

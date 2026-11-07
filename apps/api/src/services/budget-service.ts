@@ -293,6 +293,11 @@ export class BudgetService {
       const projectId = (await this.store.getMcpToolset(toolsetId))?.projectId ?? null;
       if (projectId && !projectIds.includes(projectId)) projectIds.push(projectId);
     }
+    // 12.6b — the projects of the AI gateway route sets granted to the client count its /v1 usage too.
+    for (const routeSetId of await this.store.listAiGatewayClientGrants(client.id)) {
+      const projectId = (await this.store.getAiGatewayRouteSet(routeSetId))?.projectId ?? null;
+      if (projectId && !projectIds.includes(projectId)) projectIds.push(projectId);
+    }
     const projectNames = new Map<string, string>();
     for (const projectId of projectIds) projectNames.set(projectId, (await this.store.getProject(projectId))?.name ?? projectId);
     const readable = new Set<string>();

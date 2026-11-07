@@ -48,7 +48,7 @@ function Shell({ canManageSecrets = true, initialMode = "dashboard" as StudioMod
   );
 }
 
-const MCP_LABELS = ["Overview", "Servers", "Tools", "Policies", "Toolsets", "Clients", "Playground", "Changes"];
+const MCP_LABELS = ["Overview", "Servers", "Tools", "Policies", "Toolsets", "Clients", "AI routes", "Playground", "Changes"];
 
 describe("MCP navigation", () => {
   let restore: () => void;

@@ -12,7 +12,7 @@ const SCOPE_LABELS: Record<NetworkScope, { label: string; hint: string }> = {
   api: { label: "API", hint: "/api/* with a bearer token or API key" },
   webhook: { label: "Webhooks", hint: "/webhook/*, provider webhooks, workflow MCP endpoints" },
   public: { label: "Public", hint: "Forms, chat, the widget" },
-  mcp_gateway: { label: "MCP gateway", hint: "/mcp/*" },
+  mcp_gateway: { label: "MCP gateway", hint: "/mcp/*, /v1/*" },
   metrics: { label: "Metrics", hint: "/metrics and the API docs" }
 };
 

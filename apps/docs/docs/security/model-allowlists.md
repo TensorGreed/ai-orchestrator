@@ -96,11 +96,14 @@ allowlist applies on top of them.
 - The provider test answers `403` with `code: "MODEL_NOT_ALLOWED"` and
   `refusedBy` (`deployment` or `project`); knowledge-base ingest, upload and
   search answer `403` with the same code, before any text is embedded.
+- The [`/v1` AI gateway](../product/ai-gateway.md) answers `403` with the
+  OpenAI-format code `model_not_allowed`, under the list of the route set's
+  project, and records at most one event a minute per client and model.
 
 Each refusal is written to the audit log as `model_allowlist.call_denied`, with
 the provider, model, `operation` (`generate`, `stream`, `test` or `embed`),
 which list refused it, where the call came from (`run`, `gateway_sampling`,
-`provider_test`, `eval_judge` or `knowledge_base`; `deployment` for a call made
+`ai_gateway`, `provider_test`, `eval_judge` or `knowledge_base`; `deployment` for a call made
 with none of these behind it) and the node, run, client, toolset or knowledge
 base. A run (or a gateway session) records one event per node, provider and
 model, however often it retries; an error workflow records one per failed run

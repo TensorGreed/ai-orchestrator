@@ -17,6 +17,7 @@ import {
   type NetworkSettingsView
 } from "@ai-orchestrator/shared";
 import { parseTrustProxy, type AppConfig, type NetworkSettings } from "./config.js";
+import { aiGatewayErrors } from "./services/ai-gateway-wire.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { NotificationEvent } from "./services/notification-service.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
@@ -93,6 +94,10 @@ function startsWithSegment(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(`${prefix}/`);
 }
 
+function isAiGatewayPath(path: string): boolean {
+  return startsWithSegment(path, "/v1");
+}
+
 /** The request path as the router matches it: no query, percent-decoding applied where it is valid. */
 function routePath(url: string): string {
   // An absolute-form target (`GET http://host/metrics`) is routed by its path, so it is classified by its path too.
@@ -117,7 +122,8 @@ export function classifyNetworkScope(input: ScopeRequest): NetworkScope[] {
   const path = routePath(input.url);
   if (EXEMPT_PATHS.has(path)) return [];
   if (METRICS_PATHS.has(path) || path.startsWith("/api/docs/")) return ["metrics"];
-  if (startsWithSegment(path, "/mcp")) return ["mcp_gateway"];
+  // `/v1/*` takes the same client tokens as `/mcp/*`, so it is the same scope.
+  if (startsWithSegment(path, "/mcp") || isAiGatewayPath(path)) return ["mcp_gateway"];
   if (
     startsWithSegment(path, "/webhook") ||
     startsWithSegment(path, "/webhook-test") ||
@@ -299,9 +305,10 @@ export class NetworkControls {
 
   /** The request hook's check: true when the request may go on (the reply is sent otherwise). */
   async checkRequest(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
+    const url = classificationPath(request);
     const scopes = classifyNetworkScope({
       method: request.method,
-      url: classificationPath(request),
+      url,
       hasSessionCookie: hasCookie(request.headers.cookie, this.deps.config.SESSION_COOKIE_NAME),
       hasApiKey: hasApiKeyBearer(request.headers.authorization)
     });
@@ -315,7 +322,7 @@ export class NetworkControls {
     }
     await this.recordRefusal(facts, { scope: verdict.scope });
     if (this.reportOnly) return true;
-    sendDenied(reply, scopes.includes("mcp_gateway"));
+    sendDenied(reply, isAiGatewayPath(routePath(url)) ? "openai" : scopes.includes("mcp_gateway") ? "json_rpc" : "plain");
     return false;
   }
 
@@ -446,11 +453,16 @@ function describeTrustProxy(value: boolean | number | string[]): string {
   return `Trusted proxies: ${value.join(", ")}`;
 }
 
-/** 403 with a fixed body; a JSON-RPC error on the MCP endpoint. The lists and the address are never echoed. */
-export function sendDenied(reply: FastifyReply, jsonRpc: boolean): void {
+/**
+ * 403 with a fixed body: a JSON-RPC error on the MCP endpoint, the OpenAI error envelope on `/v1/*`. The lists and the
+ * address are never echoed.
+ */
+export function sendDenied(reply: FastifyReply, format: "plain" | "json_rpc" | "openai"): void {
   reply.code(403).header("content-type", "application/json; charset=utf-8");
-  if (jsonRpc) {
+  if (format === "json_rpc") {
     reply.send({ jsonrpc: "2.0", id: null, error: { code: -32001, message: NETWORK_DENIED_MESSAGE } });
+  } else if (format === "openai") {
+    reply.send(aiGatewayErrors.networkDenied().body());
   } else {
     reply.send({ error: NETWORK_DENIED_MESSAGE });
   }

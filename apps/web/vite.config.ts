@@ -121,6 +121,11 @@ export default defineConfig(({ mode }) => {
           target: `http://${targetHost}:${targetPort}`,
           changeOrigin: true
         },
+        // 12.6b — the OpenAI-compatible AI gateway (/v1/...).
+        "/v1/": {
+          target: `http://${targetHost}:${targetPort}`,
+          changeOrigin: true
+        },
         "/health": {
           target: `http://${targetHost}:${targetPort}`,
           changeOrigin: true

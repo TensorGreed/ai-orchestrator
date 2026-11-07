@@ -1,5 +1,5 @@
-import type { LLMCallResponse, LLMUsage, ProviderDefinition, ToolCall, ChatMessage } from "@ai-orchestrator/shared";
-import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import type { LLMCallResponse, LLMFinishReason, LLMUsage, ProviderDefinition, ToolCall, ChatMessage } from "@ai-orchestrator/shared";
+import type { LLMProviderAdapter, ProviderCallOptions, ProviderCallRequest, ProviderExecutionContext } from "../types";
 import { PROVIDER_DEFAULT_BASE_URLS } from "../default-base-urls";
 import { providerHttpError, readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
 
@@ -67,6 +67,23 @@ export function describeAnthropicFailure(status: number, body: string, model: st
     );
   }
   return `Anthropic request failed (${status}): ${body}`;
+}
+
+/** 12.6b — the Messages API `tool_choice` for a tool choice (and parallel tool calls turned off), when not the default. */
+function anthropicToolChoice(choice: ProviderCallOptions["toolChoice"], parallel: boolean | undefined): Record<string, unknown> | undefined {
+  const noParallel = parallel === false ? { disable_parallel_tool_use: true } : {};
+  if (!choice || choice === "auto") return parallel === false ? { type: "auto", ...noParallel } : undefined;
+  if (choice === "none") return { type: "none" };
+  if (choice === "required") return { type: "any", ...noParallel };
+  return { type: "tool", name: choice.name, ...noParallel };
+}
+
+/** 12.6b — `stop_reason` in the OpenAI vocabulary. */
+function anthropicFinishReason(value: unknown, toolCalls: ToolCall[]): LLMFinishReason {
+  if (value === "tool_use" || toolCalls.length > 0) return "tool_calls";
+  if (value === "max_tokens" || value === "model_context_window_exceeded") return "length";
+  if (value === "refusal") return "content_filter";
+  return "stop";
 }
 
 export class AnthropicProviderAdapter implements LLMProviderAdapter {
@@ -167,7 +184,13 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
 
     if (tools && tools.length > 0) {
       body.tools = tools;
+      const toolChoice = anthropicToolChoice(request.options?.toolChoice, request.options?.parallelToolCalls);
+      if (toolChoice) body.tool_choice = toolChoice;
     }
+    const options = request.options;
+    if (options?.stop?.length) body.stop_sequences = options.stop;
+    if (!rejectsSampling && typeof options?.topP === "number") body.top_p = options.topP;
+    if (options?.user) body.metadata = { user_id: options.user };
 
     const startedAt = Date.now();
     const send = () =>
@@ -237,6 +260,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       content,
       toolCalls,
       raw: json,
+      finishReason: anthropicFinishReason(json.stop_reason, toolCalls),
       usage,
       latencyMs: Date.now() - startedAt
     };

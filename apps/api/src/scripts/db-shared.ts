@@ -169,7 +169,12 @@ export const EXPORTED_TABLES = [
   // Usage and budgets
   "usage_events",
   "budgets",
-  "budget_alerts"
+  "budget_alerts",
+  // 12.6b — the /v1 AI gateway
+  "ai_gateway_route_sets",
+  "ai_gateway_routes",
+  "ai_gateway_client_grants",
+  "ai_gateway_requests"
 ] as const;
 
 /** Tables db:export leaves out on purpose, and why (the runbook lists them as safe to lose). */

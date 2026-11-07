@@ -69,6 +69,7 @@ import {
 } from "./mcpConnection";
 import { McpCatalogBanner } from "./McpCatalogBanner";
 import { McpClientsView } from "./McpClientsView";
+import { AiRoutesView } from "./AiRoutesView";
 import { McpImportDialog } from "./McpImportDialog";
 import { McpOAuthPanel, usesOAuth } from "./McpOAuthPanel";
 import { McpPlaygroundPage } from "./McpPlaygroundPage";
@@ -132,7 +133,7 @@ export function StatusBadge({ status }: { status: McpRegisteredServer["status"] 
 }
 
 /** Phase 10.3 — the MCP sidebar section opens one of these views as its own page. */
-export type McpServersPageView = "servers" | "policies" | "toolsets" | "clients" | "playground";
+export type McpServersPageView = "servers" | "policies" | "toolsets" | "clients" | "ai-routes" | "playground";
 
 const VIEW_HEAD: Record<McpServersPageView, { title: string; sub?: string }> = {
   servers: { title: "MCP servers" },
@@ -147,6 +148,10 @@ const VIEW_HEAD: Record<McpServersPageView, { title: string; sub?: string }> = {
   clients: {
     title: "MCP clients",
     sub: "Tokens that let MCP clients call toolsets through the gateway, with each client's recent usage."
+  },
+  "ai-routes": {
+    title: "AI routes",
+    sub: "Models L2M serves on its OpenAI-compatible /v1 endpoint, grouped in route sets that clients are granted."
   },
   playground: {
     title: "MCP playground",
@@ -276,6 +281,7 @@ export function McpServersPage({
       {view === "toolsets" && <McpToolsetsView isAdmin={isAdmin} servers={servers} activeProjectId={activeProjectId} />}
 
       {view === "clients" && <McpClientsView isAdmin={isAdmin} />}
+      {view === "ai-routes" && <AiRoutesView isAdmin={isAdmin} activeProjectId={activeProjectId} />}
 
       {view === "playground" && canBuild && (
         <McpPlaygroundPage servers={servers} activeProjectId={activeProjectId} userId={currentUserId} />

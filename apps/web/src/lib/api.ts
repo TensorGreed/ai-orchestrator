@@ -52,7 +52,10 @@ import type {
   McpSandboxSettings,
   McpSandboxStatus,
   McpToolLimitRule,
-  McpUserConnectionView
+  McpUserConnectionView,
+  AiGatewayRoute,
+  AiGatewayRouteSet,
+  AiGatewayUsageSummary
 } from "@ai-orchestrator/shared";
 import type {
   McpCatalogEntry,
@@ -4472,4 +4475,102 @@ export async function acceptInviteAndSignIn(token: string, password: string): Pr
     body: JSON.stringify({ token, password })
   });
   return await loginUser({ email: accepted.email, password });
+}
+
+// ---------------------------------------------------------------------------
+// 12.6b — the /v1 AI gateway's admin API: route sets, routes, client grants, a set's rule set binding and usage.
+// ---------------------------------------------------------------------------
+
+export interface AiGatewayRouteSetView extends AiGatewayRouteSet {
+  routes: AiGatewayRoute[];
+  /** The clients granted this set. */
+  clientIds: string[];
+}
+
+export interface AiGatewayRouteSetsResponse {
+  routeSets: AiGatewayRouteSetView[];
+  /** The provider ids a chat or embedding route may name. */
+  providers: { chat: string[]; embedding: string[] };
+}
+
+export interface AiGatewayRouteSetPayload {
+  name?: string;
+  description?: string;
+  projectId?: string | null;
+  enabled?: boolean;
+  rateLimit?: McpGatewayRateLimitInput | null;
+}
+
+export interface AiGatewayRoutePayload {
+  alias?: string;
+  kind?: "chat" | "embedding";
+  providerId?: string;
+  model?: string;
+  baseUrl?: string | null;
+  secretRef?: { secretId: string } | null;
+  extra?: Record<string, unknown>;
+  defaults?: { temperature?: number; maxTokens?: number; topP?: number };
+  enabled?: boolean;
+}
+
+export async function fetchAiGatewayRouteSets() {
+  return apiRequest<AiGatewayRouteSetsResponse>("/api/ai-gateway/route-sets");
+}
+
+export async function createAiGatewayRouteSet(payload: AiGatewayRouteSetPayload & { name: string }) {
+  return apiRequest<AiGatewayRouteSetView>("/api/ai-gateway/route-sets", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function updateAiGatewayRouteSet(id: string, payload: AiGatewayRouteSetPayload) {
+  return apiRequest<AiGatewayRouteSetView>(`/api/ai-gateway/route-sets/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) });
+}
+
+export async function deleteAiGatewayRouteSet(id: string) {
+  return apiRequest<null>(`/api/ai-gateway/route-sets/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function createAiGatewayRoute(routeSetId: string, payload: AiGatewayRoutePayload & { alias: string; providerId: string; model: string }) {
+  return apiRequest<AiGatewayRoute>(`/api/ai-gateway/route-sets/${encodeURIComponent(routeSetId)}/routes`, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function updateAiGatewayRoute(id: string, payload: AiGatewayRoutePayload) {
+  return apiRequest<AiGatewayRoute>(`/api/ai-gateway/routes/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) });
+}
+
+export async function deleteAiGatewayRoute(id: string) {
+  return apiRequest<null>(`/api/ai-gateway/routes/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function fetchAiGatewayClientGrants(clientId: string) {
+  return apiRequest<{ clientId: string; routeSetIds: string[] }>(`/api/ai-gateway/clients/${encodeURIComponent(clientId)}/grants`);
+}
+
+export async function updateAiGatewayClientGrants(clientId: string, routeSetIds: string[]) {
+  return apiRequest<{ clientId: string; routeSetIds: string[] }>(`/api/ai-gateway/clients/${encodeURIComponent(clientId)}/grants`, {
+    method: "PUT",
+    body: JSON.stringify({ routeSetIds })
+  });
+}
+
+export interface AiGatewayGuardBindingResponse {
+  binding: GuardBindingView & { scope: "ai_route_set"; scopeId: string };
+  effective: GuardResolutionView;
+}
+
+export async function fetchAiGatewayRouteSetGuard(routeSetId: string) {
+  return apiRequest<AiGatewayGuardBindingResponse>(`/api/ai-gateway/route-sets/${encodeURIComponent(routeSetId)}/guard`);
+}
+
+export async function updateAiGatewayRouteSetGuard(routeSetId: string, payload: GuardGatewayBindingInput) {
+  return apiRequest<AiGatewayGuardBindingResponse>(`/api/ai-gateway/route-sets/${encodeURIComponent(routeSetId)}/guard`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchAiGatewayUsage(query: { window?: "24h" | "7d" | "30d"; clientId?: string; routeSetId?: string } = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) if (value) params.set(key, value);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<AiGatewayUsageSummary>(`/api/ai-gateway/usage${suffix}`);
 }

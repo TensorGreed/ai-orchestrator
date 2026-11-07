@@ -6,6 +6,7 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -505,6 +506,170 @@ describe("forwarded client certificates", () => {
     expect(refused.statusCode).toBe(400);
     expect(refused.json<{ error: string }>().error).toContain("MCP_GATEWAY_CLIENT_CERT_HEADER");
     expect((await initialize(context, slug, token, OUTSIDE, certHeader(CLIENT_CERT_A_PEM))).statusCode).toBe(200);
+  });
+});
+
+describe("the /v1 AI gateway", () => {
+  const CHAT = { model: "net-chat", messages: [{ role: "user", content: "hi" }] };
+  const JSON_HEADERS = { "content-type": "application/json" };
+  const OPENAI_DENIED = { error: { message: NETWORK_DENIED_MESSAGE, type: "invalid_request_error", code: "access_denied", param: null } };
+  const upstreams: http.Server[] = [];
+
+  afterEach(async () => {
+    for (const server of upstreams.splice(0)) await new Promise((resolve) => server.close(resolve));
+  });
+
+  /** An OpenAI-compatible upstream, and a client granted a chat and an embedding route on it. */
+  async function aiClient(context: TestContext, cookie: string): Promise<{ client: McpClient; token: string; calls: () => number }> {
+    let calls = 0;
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        calls += 1;
+        const body = (req.url ?? "").endsWith("/embeddings")
+          ? { object: "list", data: [{ object: "embedding", index: 0, embedding: [1, 2] }], usage: { prompt_tokens: 1, total_tokens: 1 } }
+          : { id: "1", object: "chat.completion", created: 1, model: "m", choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }] };
+        res.writeHead(200, JSON_HEADERS).end(JSON.stringify(body));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    upstreams.push(server);
+    const baseUrl = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}/v1`;
+    const post = async (url: string, payload: object) => {
+      const response = await send(context, { method: "POST", url, headers: { cookie }, payload });
+      expect(response.statusCode, response.body).toBeLessThan(300);
+      return response.json<{ id: string; client: McpClient; token: string }>();
+    };
+    const set = await post("/api/ai-gateway/route-sets", { name: `Net ${crypto.randomUUID().slice(0, 6)}`, projectId: "default" });
+    await post(`/api/ai-gateway/route-sets/${set.id}/routes`, { alias: "net-chat", providerId: "openai_compatible", model: "m", baseUrl });
+    await post(`/api/ai-gateway/route-sets/${set.id}/routes`, { alias: "net-embed", kind: "embedding", providerId: "openai_compatible", model: "e", baseUrl });
+    const { client, token } = await post("/api/mcp/clients", { name: "App", toolsetIds: [], role: "builder" });
+    const granted = await send(context, { method: "PUT", url: `/api/ai-gateway/clients/${client.id}/grants`, headers: { cookie }, payload: { routeSetIds: [set.id] } });
+    expect(granted.statusCode, granted.body).toBe(200);
+    return { client, token, calls: () => calls };
+  }
+
+  /** Every /v1 route, with the status each answers when admitted. */
+  function everyRoute(context: TestContext, token: string, from: string, headers: Record<string, string> = {}) {
+    const auth = { authorization: `Bearer ${token}`, ...headers };
+    return Promise.all([
+      send(context, { method: "GET", url: "/v1/models", from, headers: auth }),
+      send(context, { method: "GET", url: "/v1/models/net-chat", from, headers: auth }),
+      send(context, { method: "POST", url: "/v1/chat/completions", from, headers: { ...auth, ...JSON_HEADERS }, payload: JSON.stringify(CHAT) }),
+      send(context, { method: "POST", url: "/v1/embeddings", from, headers: { ...auth, ...JSON_HEADERS }, payload: JSON.stringify({ model: "net-embed", input: "x" }) })
+    ]);
+  }
+
+  const statuses = (responses: Array<{ statusCode: number }>) => responses.map((response) => response.statusCode);
+
+  it("is unchanged with no network settings: every address reaches every route", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const { token, calls } = await aiClient(context, cookie);
+    expect(statuses(await everyRoute(context, token, OUTSIDE))).toEqual([200, 200, 200, 200]);
+    expect(calls()).toBe(2);
+    expect(await auditEvents(context.store, "network.request_denied")).toHaveLength(0);
+    expect((await send(context, { method: "GET", url: "/metrics" })).body).not.toContain("ao_network_requests_total{");
+  });
+
+  it("is the MCP gateway scope: refused in the OpenAI format with a fixed body, audited and counted, on known and unknown paths", async () => {
+    const context = await createTestContext({ NETWORK_ALLOW_MCP_GATEWAY: "10.0.0.0/8" });
+    const cookie = await login(context);
+    const { token, calls } = await aiClient(context, cookie);
+    const refused = await everyRoute(context, token, OUTSIDE);
+    expect(statuses(refused)).toEqual([403, 403, 403, 403]);
+    for (const response of refused) {
+      expect(response.json()).toEqual(OPENAI_DENIED);
+      expect(response.body).not.toContain("10.0.0.0");
+      expect(response.body).not.toContain(OUTSIDE);
+    }
+    const unknown = await send(context, { method: "GET", url: "/v1/nope", from: OUTSIDE });
+    expect(unknown.statusCode).toBe(403);
+    expect(unknown.json()).toEqual(OPENAI_DENIED);
+    expect(calls()).toBe(0);
+
+    const denied = await auditEvents(context.store, "network.request_denied");
+    expect(denied).toHaveLength(1);
+    expect(denied[0]).toMatchObject({ outcome: "denied", ipAddress: OUTSIDE });
+    expect(denied[0]!.metadata).toMatchObject({ scope: "mcp_gateway", list: "deployment" });
+    expect((await send(context, { method: "GET", url: "/metrics" })).body).toContain('ao_network_requests_total{scope="mcp_gateway",outcome="denied"} 5');
+
+    expect(statuses(await everyRoute(context, token, INSIDE))).toEqual([200, 200, 200, 200]);
+  });
+
+  it("does not take the ui or api lists, or break-glass", async () => {
+    const context = await createTestContext({ NETWORK_ALLOW_UI: "10.0.0.0/8", NETWORK_ALLOW_API: "10.0.0.0/8" });
+    const cookie = await login(context);
+    const { token } = await aiClient(context, cookie);
+    expect(statuses(await everyRoute(context, token, OUTSIDE))).toEqual([200, 200, 200, 200]);
+
+    const strict = await createTestContext({ NETWORK_ALLOW_MCP_GATEWAY: "10.0.0.0/8" });
+    expect((await send(strict, { method: "GET", url: "/v1/models", from: "127.0.0.1" })).statusCode).toBe(403);
+  });
+
+  it("only records in report mode", async () => {
+    const context = await createTestContext({ NETWORK_ALLOW_MCP_GATEWAY: "10.0.0.0/8", NETWORK_ALLOWLIST_MODE: "report" });
+    const cookie = await login(context);
+    const { client, token } = await aiClient(context, cookie);
+    expect((await setNetwork(context, cookie, client.id, { allowedIps: ["198.51.100.0/24"] })).statusCode).toBe(200);
+    expect(statuses(await everyRoute(context, token, OUTSIDE))).toEqual([200, 200, 200, 200]);
+    const lists = (await auditEvents(context.store, "network.request_would_be_denied")).map((event) => (event.metadata as Record<string, unknown>).list);
+    expect(lists.map(String).sort()).toEqual(["deployment", "mcp_client"]);
+  });
+
+  it("holds a token to its client's address list on every route, with the body the deployment list sends", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const { client, token, calls } = await aiClient(context, cookie);
+    expect((await setNetwork(context, cookie, client.id, { allowedIps: ["198.51.100.0/24"] })).statusCode).toBe(200);
+
+    const refused = await everyRoute(context, token, OUTSIDE);
+    expect(statuses(refused)).toEqual([403, 403, 403, 403]);
+    for (const response of refused) expect(response.json()).toEqual(OPENAI_DENIED);
+    const stream = await send(context, {
+      method: "POST",
+      url: "/v1/chat/completions",
+      from: OUTSIDE,
+      headers: { authorization: `Bearer ${token}`, ...JSON_HEADERS },
+      payload: JSON.stringify({ ...CHAT, stream: true })
+    });
+    expect(stream.statusCode).toBe(403);
+    expect(stream.json()).toEqual(OPENAI_DENIED);
+    expect(calls()).toBe(0);
+    expect(await context.store.listAiGatewayRequests({ from: "1970-01-01T00:00:00.000Z", limit: 10 })).toHaveLength(0);
+
+    const denied = await auditEvents(context.store, "network.request_denied");
+    expect(denied).toHaveLength(1);
+    expect(denied[0]!.metadata).toMatchObject({ scope: "mcp_gateway", list: "mcp_client", clientId: client.id, clientName: "App" });
+    expect((await send(context, { method: "GET", url: "/metrics" })).body).toContain('ao_network_requests_total{scope="mcp_gateway",outcome="denied"} 5');
+
+    expect(statuses(await everyRoute(context, token, "198.51.100.7"))).toEqual([200, 200, 200, 200]);
+    // A bad token is refused as one, whatever the address: the list is only read for a valid client.
+    expect((await send(context, { method: "GET", url: "/v1/models", from: OUTSIDE, headers: { authorization: "Bearer nope" } })).statusCode).toBe(401);
+  });
+
+  it("holds a token to its client's certificate pin on every route; an endpoint's refusal is audited as such", async () => {
+    const context = await createTestContext({ MCP_GATEWAY_CLIENT_CERT_HEADER: "x-ssl-client-cert", MCP_GATEWAY_CLIENT_CERT_PROXIES: PROXY });
+    const cookie = await login(context);
+    const { client, token, calls } = await aiClient(context, cookie);
+    expect((await setNetwork(context, cookie, client.id, { certFingerprints: [FP_A] })).statusCode).toBe(200);
+
+    const bare = await everyRoute(context, token, PROXY);
+    expect(statuses(bare)).toEqual([401, 401, 401, 401]);
+    for (const response of bare) {
+      expect(response.headers["www-authenticate"]).toContain("Bearer");
+      expect(response.json<{ error: { code: string; type: string } }>().error).toMatchObject({ code: "invalid_api_key", type: "invalid_request_error" });
+    }
+    // The wrong certificate, and the right one from an address that is not the proxy.
+    expect(statuses(await everyRoute(context, token, PROXY, certHeader(CLIENT_CERT_B_PEM)))).toEqual([401, 401, 401, 401]);
+    expect(statuses(await everyRoute(context, token, "10.0.0.6", certHeader(CLIENT_CERT_A_PEM)))).toEqual([401, 401, 401, 401]);
+    expect(calls()).toBe(0);
+
+    expect(statuses(await everyRoute(context, token, PROXY, certHeader(CLIENT_CERT_A_PEM)))).toEqual([200, 200, 200, 200]);
+
+    const reasons = (await auditEvents(context.store, "mcp_gateway.client_certificate_refused")).map((event) => event.metadata as Record<string, unknown>);
+    expect(reasons.map((metadata) => metadata.reason).sort()).toEqual(["mismatch", "none", "untrusted"]);
+    for (const metadata of reasons) expect(metadata).toMatchObject({ endpoint: "ai_gateway" });
   });
 });
 
