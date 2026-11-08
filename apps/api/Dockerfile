@@ -66,7 +66,10 @@ RUN pnpm install --prod --frozen-lockfile --filter "@ai-orchestrator/api..."
 FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-RUN apk add --no-cache wget tini \
+# zlib from the Alpine repository: the base image ships 1.3.2-r1, affected by
+# CVE-2026-4738 (critical, fixed in 1.4-r0). Drop once the pinned base has it.
+RUN apk upgrade --no-cache zlib \
+    && apk add --no-cache wget tini \
     && corepack enable \
     && addgroup -S nodeuser \
     && adduser -S nodeuser -G nodeuser
