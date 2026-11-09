@@ -217,12 +217,14 @@ log and its chain, projects, roles, MCP servers, rule sets, knowledge bases, rel
      COMMIT;
      SQL
      ```
-  3. **Before reopening access**, set `MFA_ENFORCE=true`, so admins must enrol again at their next sign-in, and
-     ask every affected user to enrol again right after signing in. L2M has no forced password reset: if a reset
+  3. **Before reopening access**, set `MFA_REQUIRED_ROLES` (for example `admin`, or `MFA_ENFORCE=true`), so those
+     roles must set MFA up again before they can do anything else, and ask every other affected user to enrol again
+     right after signing in. L2M has no forced password reset: if a reset
      account's password may be known to someone else, keep access closed for it (or delete the account and create it
      again with a new password) until that is settled.
 
-  An admin route to reset one user's MFA is planned; until then this is the procedure.
+  For one user, an admin can instead use **Settings > Users > Reset MFA** (`POST /api/users/:id/mfa/reset`, see
+  [Resetting a user's MFA](../security/auth-rbac.md#resetting-a-user-s-mfa)).
 - **Log-stream destinations** whose credentials were stored encrypted: enter them again.
 - **MCP OAuth connections** (their tokens are stored secrets): connect again.
 - **The rules token vault**: values tokenized before the loss cannot be turned back into the original.

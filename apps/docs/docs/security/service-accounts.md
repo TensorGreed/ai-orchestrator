@@ -86,6 +86,20 @@ ceiling and project list, not with the owner's full role. If the key has been re
 work is refused as it would be for a deleted user: a queued run goes to the dead-letter queue, an eval case fails, and
 an approval goes back to pending for someone else to decide.
 
+## Step-up and MFA
+
+With step-up on (`STEP_UP_MAX_AGE_MINUTES`), security-admin actions refuse personal API keys, because a key cannot
+answer a code. A service account's key whose role ceiling is `role:admin` is let through, as long as the account is
+still an admin and the key lists no projects; that is the key to give automation that changes roles, creates keys or
+manages secrets. It is still refused on actions that target a person's account (resetting their MFA, signing them out,
+changing their role or deleting them): those need a person who has passed a second factor. Creating a service-account key, changing a service account's role and deleting one need a recent MFA
+check on the admin's session, like the same actions for people. `MFA_REQUIRED_ROLES` applies to people only: a service
+account never signs in, so its keys are not refused when its role is listed. See
+[Step-up for security actions](./auth-rbac.md#step-up-for-security-actions).
+
+A service account never counts as the last admin: demoting the only person who is an admin is refused even when an
+admin service account exists.
+
 ## Audit
 
 Every audit entry made with an API key has actor type `api_key` and records the key in its metadata

@@ -48,6 +48,9 @@ import {
   executeWorkflow,
   executeWorkflowStream,
   fetchAuthMe,
+  mfaGateFromMe,
+  setAuthChallengeHandlers,
+  type MfaGate,
   fetchOidcLoginUrl,
   isSsoMfaLanding,
   SSO_MFA_CHALLENGE,
@@ -172,6 +175,8 @@ import {
   replaceSecretRefs
 } from "./lib/external-import";
 import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
+import { MfaGateCard } from "./components/MfaGateCard";
+import { StepUpPrompt } from "./components/StepUpPrompt";
 import { withAgentToolPresets } from "./lib/agent-tool-presets";
 import { paletteKey } from "./components/NodePalette";
 
@@ -1120,6 +1125,12 @@ function StudioApp() {
     typeof window !== "undefined" && isSsoMfaLanding(window.location.search) ? SSO_MFA_CHALLENGE : null
   );
   const [mfaCode, setMfaCode] = useState("");
+  // 13.2 — a session restricted by MFA_REQUIRED_ROLES: it can only set up (`enroll`) or verify (`verify`) MFA.
+  const [mfaGate, setMfaGate] = useState<MfaGate | null>(null);
+  useEffect(() => {
+    setAuthChallengeHandlers({ onMfaGate: setMfaGate });
+    return () => setAuthChallengeHandlers({ onMfaGate: undefined });
+  }, []);
   // Phase 13.2 — set when the API has OIDC SSO on; the login card then offers "Sign in with SSO (OIDC)".
   const [oidcLoginUrl, setOidcLoginUrl] = useState<string | null>(null);
   // Phase 13.2 — a failed SSO login comes back as ?sso_error=<code>; show it once and drop it from the URL.
@@ -2227,10 +2238,11 @@ function StudioApp() {
     let cancelled = false;
     const checkSession = async () => {
       try {
-        const { user, session } = await fetchAuthMe();
+        const me = await fetchAuthMe();
         if (!cancelled) {
-          setAuthSession(session ?? null);
-          setAuthUser(user);
+          setAuthSession(me.session ?? null);
+          setAuthUser(me.user);
+          setMfaGate(mfaGateFromMe(me));
           setAuthError(null);
         }
       } catch (sessionError) {
@@ -4589,6 +4601,7 @@ function StudioApp() {
           setLoginPassword("");
           return;
         }
+        setMfaGate(result.mfaEnrollmentRequired ? "enroll" : null);
         setAuthUser(result.user);
         setError(null);
         setLoginPassword("");
@@ -4629,6 +4642,7 @@ function StudioApp() {
     }
 
     setAuthUser(null);
+    setMfaGate(null);
     setWorkflowList([]);
     setCurrentWorkflow(createBlankWorkflow());
     setDefinitions(nodeDefinitions as unknown as DefinitionNode[]);
@@ -4764,6 +4778,20 @@ function StudioApp() {
     );
   }
 
+  if (mfaGate) {
+    return (
+      <MfaGateCard
+        gate={mfaGate}
+        email={authUser.email}
+        // The studio's first loads were refused while restricted: start again with the unrestricted session.
+        onDone={() => window.location.reload()}
+        onSignOut={() => {
+          void handleLogout();
+        }}
+      />
+    );
+  }
+
   if (loading && workflowList.length === 0) {
     return <div className="loading-screen">Loading L²M...</div>;
   }
@@ -4771,6 +4799,7 @@ function StudioApp() {
   return (
     <div className="studio-shell">
       <IdleSessionWarning session={authSession} onSessionRefreshed={setAuthSession} onSignedOut={(reason) => notifySessionEnded(reason)} />
+      <StepUpPrompt />
       <WelcomeModal
         open={showWelcome}
         docsUrl={docsUrl}

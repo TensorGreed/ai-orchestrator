@@ -256,6 +256,133 @@ describeStoreContract("store contract: users and auth", (ctx) => {
     expect(await store.deleteMfaSecret("u1")).toBe(false);
   });
 
+  it("TOTP steps: each step is accepted once and never one at or before the last (v63)", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    expect(await store.markTotpStepUsed("u1", 100)).toBe(false);
+    await store.upsertMfaSecret({ userId: "u1", secretIv: "iv", secretAuthTag: "tag", secretCiphertext: "ct", backupCodes: [], enabled: true, activatedAt: null });
+    expect(await store.markTotpStepUsed("u1", 100)).toBe(true);
+    expect(await store.markTotpStepUsed("u1", 100)).toBe(false);
+    expect(await store.markTotpStepUsed("u1", 99)).toBe(false);
+    expect(await store.markTotpStepUsed("u1", 59_000_000)).toBe(true);
+    // Re-saving the secret (activation) keeps the step; a two-way race on one step has one winner.
+    await store.upsertMfaSecret({ userId: "u1", secretIv: "iv", secretAuthTag: "tag", secretCiphertext: "ct", backupCodes: [], enabled: true, activatedAt: null });
+    expect(await store.markTotpStepUsed("u1", 59_000_000)).toBe(false);
+    const raced = await Promise.all([store.markTotpStepUsed("u1", 59_000_001), store.markTotpStepUsed("u1", 59_000_001)]);
+    expect(raced.filter(Boolean)).toHaveLength(1);
+    // A new authenticator (secret deleted, then set up again) starts with no step recorded.
+    await store.deleteMfaSecret("u1");
+    await store.upsertMfaSecret({ userId: "u1", secretIv: "iv", secretAuthTag: "tag", secretCiphertext: "ct", backupCodes: [], enabled: true, activatedAt: null });
+    expect(await store.markTotpStepUsed("u1", 100)).toBe(true);
+  });
+
+  it("updateUserRoleKeepingAdmin never demotes the last accepted admin; invited admins do not count", async () => {
+    const store = ctx.store();
+    await store.saveUser({ id: "a1", email: "a1@example.com", passwordHash: "h", role: "admin" });
+    expect(await store.updateUserRoleKeepingAdmin("missing", "viewer")).toBe("not_found");
+    expect(await store.updateUserRoleKeepingAdmin("a1", "viewer")).toBe("last_admin");
+    expect(await store.updateUserRoleKeepingAdmin("a1", "admin")).toBe("updated");
+    // An invited admin who never accepted cannot sign in: not counted, and can itself be demoted.
+    const now = new Date();
+    const invite = (inviteId: string, userId: string, email: string) =>
+      store.createUserInvite({
+        inviteId,
+        userId,
+        email,
+        role: "admin",
+        tokenHash: `hash-${inviteId}`,
+        createdBy: "a1",
+        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 3_600_000).toISOString()
+      });
+    expect(await invite("inv1", "a2", "a2@example.com")).toMatchObject({ created: true });
+    expect(await store.updateUserRoleKeepingAdmin("a1", "builder")).toBe("last_admin");
+    expect(await store.updateUserRoleKeepingAdmin("a2", "viewer")).toBe("updated");
+    expect(await store.getUserById("a2")).toMatchObject({ role: "viewer" });
+    // Once an invited admin accepts, they count.
+    await store.updateUserRole("a2", "admin");
+    expect(await store.acceptUserInvite({ tokenHash: "hash-inv1", passwordHash: "h2", now: now.toISOString() })).toMatchObject({ id: "a2" });
+    expect(await store.updateUserRoleKeepingAdmin("a1", "builder")).toBe("updated");
+    expect(await store.getUserById("a1")).toMatchObject({ role: "builder" });
+    expect(await store.updateUserRoleKeepingAdmin("a2", "operator")).toBe("last_admin");
+    // Non-admin changes are never checked.
+    expect(await store.updateUserRoleKeepingAdmin("a1", "viewer")).toBe("updated");
+  });
+
+  it("updateUserRoleKeepingAdmin: an admin service account is not an admin who can recover the deployment", async () => {
+    const store = ctx.store();
+    await store.saveUser({ id: "a1", email: "a1@example.com", passwordHash: "h", role: "admin" });
+    expect(await store.createServiceAccount({ id: "svc-admin", email: "ci@service.invalid", role: "admin", description: null, createdBy: "a1" })).not.toBeNull();
+    // The only person who is an admin stays one, even with an admin service account next to it.
+    expect(await store.updateUserRoleKeepingAdmin("a1", "viewer")).toBe("last_admin");
+    // The service account itself is never the "last admin".
+    expect(await store.updateUserRoleKeepingAdmin("svc-admin", "viewer")).toBe("updated");
+    expect(await store.getUserById("svc-admin")).toMatchObject({ role: "viewer", kind: "service" });
+  });
+
+  it("deleteUserKeepingAdmin never deletes the last person who is an admin; service accounts and pending invites do not count", async () => {
+    const store = ctx.store();
+    await store.saveUser({ id: "a1", email: "a1@example.com", passwordHash: "h", role: "admin" });
+    expect(await store.createServiceAccount({ id: "svc-admin", email: "ci@service.invalid", role: "admin", description: null, createdBy: "a1" })).not.toBeNull();
+    expect(await store.deleteUserKeepingAdmin("missing")).toBe("not_found");
+    expect(await store.deleteUserKeepingAdmin("a1")).toBe("last_admin");
+    expect(await store.getUserById("a1")).toMatchObject({ role: "admin" });
+    // An invited admin who never accepted cannot sign in: not counted, and can itself be deleted.
+    const now = new Date();
+    expect(
+      await store.createUserInvite({
+        inviteId: "inv-del",
+        userId: "a2",
+        email: "a2@example.com",
+        role: "admin",
+        tokenHash: "hash-inv-del",
+        createdBy: "a1",
+        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 3_600_000).toISOString()
+      })
+    ).toMatchObject({ created: true });
+    expect(await store.deleteUserKeepingAdmin("a1")).toBe("last_admin");
+    expect(await store.deleteUserKeepingAdmin("a2")).toBe("deleted");
+    // A service account, admin or not, is never the last admin.
+    expect(await store.deleteUserKeepingAdmin("svc-admin")).toBe("deleted");
+    expect(await store.getUserById("svc-admin")).toBeNull();
+    // With a second person who is an admin, either one can go, not both.
+    await store.saveUser({ id: "a3", email: "a3@example.com", passwordHash: "h", role: "admin" });
+    await store.saveUser({ id: "v1", email: "v1@example.com", passwordHash: "h", role: "viewer" });
+    expect(await store.deleteUserKeepingAdmin("v1")).toBe("deleted");
+    expect(await store.deleteUserKeepingAdmin("a3")).toBe("deleted");
+    expect(await store.deleteUserKeepingAdmin("a1")).toBe("last_admin");
+  });
+
+  it("two last admins deleted at once: at most one delete wins, an admin always remains", async () => {
+    const store = ctx.store();
+    for (let round = 0; round < 5; round += 1) {
+      await store.saveUser({ id: `dx${round}`, email: `dx${round}@example.com`, passwordHash: "h", role: "admin" });
+      await store.saveUser({ id: `dy${round}`, email: `dy${round}@example.com`, passwordHash: "h", role: "admin" });
+      const results = await Promise.all([store.deleteUserKeepingAdmin(`dx${round}`), store.deleteUserKeepingAdmin(`dy${round}`)]);
+      expect(results.filter((result) => result === "deleted")).toHaveLength(1);
+      expect(results.filter((result) => result === "last_admin")).toHaveLength(1);
+      expect((await store.listUsers()).filter((u) => u.role === "admin")).toHaveLength(1);
+      for (const u of await store.listUsers()) if (u.role === "admin") await store.updateUserRole(u.id, "viewer");
+    }
+  });
+
+  it("two admins demoting each other at once: at most one wins, an admin always remains", async () => {
+    const store = ctx.store();
+    for (let round = 0; round < 5; round += 1) {
+      await store.saveUser({ id: `x${round}`, email: `x${round}@example.com`, passwordHash: "h", role: "admin" });
+      await store.saveUser({ id: `y${round}`, email: `y${round}@example.com`, passwordHash: "h", role: "admin" });
+      const results = await Promise.all([
+        store.updateUserRoleKeepingAdmin(`x${round}`, "viewer"),
+        store.updateUserRoleKeepingAdmin(`y${round}`, "viewer")
+      ]);
+      expect(results.filter((result) => result === "updated")).toHaveLength(1);
+      expect((await store.listUsers()).filter((u) => u.role === "admin")).toHaveLength(1);
+      // Leave one admin standing for the next round's pair.
+      for (const u of await store.listUsers()) if (u.role === "admin") await store.updateUserRole(u.id, "viewer");
+    }
+  });
+
   it("two backup-code spends of the same stored codes at once: exactly one wins", async () => {
     const store = ctx.store();
     await user(store, "u1");

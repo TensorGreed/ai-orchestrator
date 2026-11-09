@@ -2640,6 +2640,17 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE users DROP CONSTRAINT IF EXISTS users_kind_check;
       ALTER TABLE users DROP COLUMN IF EXISTS kind;
     `
+  },
+  {
+    version: 63,
+    description: "13.2 — the last TOTP time step accepted per user, so a code is accepted once",
+    // Nullable: an authenticator set up before the upgrade has no step recorded, and its next code is accepted as before.
+    up: `
+      ALTER TABLE mfa_secrets ADD COLUMN IF NOT EXISTS last_totp_step INTEGER;
+    `,
+    down: `
+      ALTER TABLE mfa_secrets DROP COLUMN IF EXISTS last_totp_step;
+    `
   }
 ];
 

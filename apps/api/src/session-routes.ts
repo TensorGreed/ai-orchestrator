@@ -18,6 +18,8 @@ export interface SessionRoutesDeps {
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   audit: (request: FastifyRequest, user: SafeUser, event: AuditEventInput) => Promise<void>;
   clearSessionCookie: (reply: FastifyReply) => void;
+  /** 13.2 — step-up (STEP_UP_MAX_AGE_MINUTES) before ending another user's sessions; false means it has answered. */
+  requireStepUp?: (request: FastifyRequest, reply: FastifyReply, action: "user.sessions_revoke", targetUserId: string) => Promise<boolean>;
 }
 
 /** What the sessions API shows about one session (no ID: the handle names it). */
@@ -158,6 +160,8 @@ export function registerSessionRoutes(deps: SessionRoutesDeps): void {
       reply.code(404);
       return { error: "User not found" };
     }
+    // Signing another user out is a security-admin action (step-up when it is on); your own sessions are not.
+    if (target.id !== admin.id && deps.requireStepUp && !(await deps.requireStepUp(request, reply, "user.sessions_revoke", target.id))) return reply;
     // An admin ending their own sessions here keeps the one they are using.
     const keepId = target.id === admin.id ? currentSessionId(request) : null;
     let revoked = 0;

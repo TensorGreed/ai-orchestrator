@@ -234,6 +234,8 @@ export interface McpGatewayDeps {
   redact: (value: string) => string;
   resolveRegisteredMcpServer: (registryServerId: string) => Promise<MCPServerConfig>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** 13.2 — step-up before creating a client (STEP_UP_MAX_AGE_MINUTES); false means the answer was sent. Absent = none. */
+  requireStepUp?: (request: FastifyRequest, reply: FastifyReply, action: "mcp_client.create") => Promise<boolean>;
   /** Project scope: toolset candidates only list workflows the user can read. */
   runAccess: RunAccess;
   /** Audit with the signed-in admin as actor. */
@@ -2297,6 +2299,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   app.post("/api/mcp/clients", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["admin"]);
     if (!user) return reply;
+    if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "mcp_client.create"))) return reply;
     const parsed = mcpClientCreateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);

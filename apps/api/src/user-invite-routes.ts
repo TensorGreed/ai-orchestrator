@@ -41,6 +41,8 @@ export interface UserInviteRoutesDeps {
   app: FastifyInstance;
   store: Store;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** 13.2 — step-up before inviting (STEP_UP_MAX_AGE_MINUTES); false means the answer was sent. Absent = no step-up. */
+  requireStepUp?: (request: FastifyRequest, reply: FastifyReply, action: "user.invite") => Promise<boolean>;
   audit: (
     request: FastifyRequest,
     user: SafeUser | null,
@@ -82,6 +84,7 @@ export function registerUserInviteRoutes(deps: UserInviteRoutesDeps): void {
   app.post<{ Body: unknown }>("/api/users/invite", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "user.invite"))) return;
     const parsed = inviteCreateSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);

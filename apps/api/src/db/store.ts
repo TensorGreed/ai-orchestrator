@@ -1490,7 +1490,20 @@ export interface Store extends AiGatewayStore {
     total: number;
   }>;
   updateUserRole(id: string, role: string): Promise<boolean>;
+  /**
+   * 13.2 — changes a user's global role, but never demotes the last admin: when the user is an accepted admin and
+   * `role` is not admin, the change happens only if another accepted admin remains (an invited user who never accepted
+   * does not count). Counted and written in one transaction (Postgres locks the admin rows), so two admins demoting
+   * each other at once cannot both succeed.
+   */
+  updateUserRoleKeepingAdmin(id: string, role: string): Promise<"updated" | "not_found" | "last_admin">;
   deleteUser(id: string): Promise<boolean>;
+  /**
+   * 13.2 — deletes a user (as deleteUser), but never the last accepted admin who is a person: a service account never
+   * counts, since it cannot sign in or get a break-glass link. Counted and deleted in one transaction (Postgres locks
+   * the admin rows), so two deletes at once cannot remove both of the last two admins.
+   */
+  deleteUserKeepingAdmin(id: string): Promise<"deleted" | "not_found" | "last_admin">;
   getSession(sessionId: string): Promise<LoginSession | null>;
   /**
    * Inserts a session. Only services/session-service.ts calls this (issueSession), so every sign-in path records the
@@ -1515,6 +1528,8 @@ export interface Store extends AiGatewayStore {
    * is missing, revoked, past its expiry, or belongs to another user.
    */
   markSessionMfaVerified(sessionId: string, input: { userId: string; at: string }): Promise<boolean>;
+  /** 13.2 — forgets a session's MFA check (after MFA was turned off); false when the session does not exist. */
+  clearSessionMfaVerified(sessionId: string): Promise<boolean>;
   /**
    * 13.2 — deletes sessions that ended (revoked, or past their expiry) before `before`; returns how many. Personal
    * fields are already cleared when a session ends; this removes the rows themselves after the retention window.
@@ -1590,6 +1605,11 @@ export interface Store extends AiGatewayStore {
    */
   replaceMfaBackupCodes(input: { userId: string; expected: readonly string[]; next: readonly string[] }): Promise<boolean>;
   deleteMfaSecret(userId: string): Promise<boolean>;
+  /**
+   * 13.2 (v63) — records that the TOTP time step `step` was accepted for this user. Compare-and-set: true only when no
+   * step at or after it was accepted before, so one code is accepted once (RFC 6238 §5.2) even across instances.
+   */
+  markTotpStepUsed(userId: string, step: number): Promise<boolean>;
   findSsoIdentity(provider: string, subject: string): Promise<{
     id: string;
     userId: string;

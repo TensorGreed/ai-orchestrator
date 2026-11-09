@@ -412,8 +412,8 @@ describe("scoped API keys", () => {
     expect(status(await asKey(context, dashboard.key, "POST", "/api/auth/api-keys", { name: "child" }))).not.toBe(200);
     expect(status(await asKey(context, dashboard.key, "DELETE", `/api/auth/api-keys/${dashboard.record.id}`))).toBe(200);
     expect(status(await asKey(context, dashboard.key, "GET", "/api/auth/me"))).toBe(401);
-    // An unscoped key and a session keep the old behaviour.
-    expect(status(await asKey(context, other.key, "POST", "/api/auth/mfa/enroll"))).toBe(200);
+    // An unscoped key passes this gate, but setting up an authenticator needs a signed-in session (400 for any key).
+    expect(status(await asKey(context, other.key, "POST", "/api/auth/mfa/enroll"))).toBe(400);
     expect(status(await asCookie(context, admin.cookie, "DELETE", `/api/auth/api-keys/${projectKey.record.id}`))).toBe(200);
   });
 

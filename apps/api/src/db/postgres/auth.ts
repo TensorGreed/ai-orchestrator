@@ -254,6 +254,49 @@ export async function listUsersPage(ctx: PgContext, options: Parameters<Store["l
   };
 }
 
+/** SQL: the user named by `column` accepted an invite, or was never invited. */
+function acceptedUser(column: string): string {
+  return `(NOT EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NOT NULL))`;
+}
+
+/**
+ * Changes a role, never demoting the last accepted admin. The admin rows are locked for the transaction, so a second
+ * demotion waits for the first and then counts again.
+ */
+type PgClient = Parameters<Parameters<PgContext["withTransaction"]>[0]>[0];
+
+/**
+ * 13.2 — locks the admin rows and the target, then reads the target: null when it does not exist, else whether it is
+ * the only accepted admin who is a person (who could still sign in, or get a break-glass link). Only people count: a
+ * service account can never sign in. A second change waits for the lock and then counts again.
+ */
+async function lockAndCheckLastHumanAdmin(client: PgClient, id: string): Promise<{ lastAdmin: boolean; role: string } | null> {
+  await client.query(`SELECT id FROM users WHERE role = 'admin' OR id = $1 ORDER BY id FOR UPDATE`, [id]);
+  const target = await client.query<{ role: string; kind: string | null; accepted: boolean }>(
+    `SELECT u.role, u.kind, ${acceptedUser("u.id")} AS accepted FROM users u WHERE u.id = $1`,
+    [id]
+  );
+  const row = target.rows[0];
+  if (!row) return null;
+  if (toStr(row.role) !== "admin" || toStr(row.kind) !== "human" || !row.accepted) return { lastAdmin: false, role: toStr(row.role) };
+  const others = await client.query<{ count: string | number }>(
+    `SELECT COUNT(*) AS count FROM users u WHERE u.role = 'admin' AND u.kind = 'human' AND u.id <> $1 AND ${acceptedUser("u.id")}`,
+    [id]
+  );
+  return { lastAdmin: toNum(others.rows[0]?.count ?? 0) === 0, role: toStr(row.role) };
+}
+
+export async function updateUserRoleKeepingAdmin(ctx: PgContext, id: string, role: string): Promise<"updated" | "not_found" | "last_admin"> {
+  return ctx.withTransaction(async (client) => {
+    const checked = await lockAndCheckLastHumanAdmin(client, id);
+    if (!checked) return "not_found";
+    if (role !== "admin" && checked.lastAdmin) return "last_admin";
+    await client.query(`UPDATE users SET role = $1, updated_at = $2 WHERE id = $3`, [role, new Date().toISOString(), id]);
+    return "updated";
+  });
+}
+
 export async function updateUserRole(ctx: PgContext, id: string, role: string): Promise<boolean> {
   const existing = await ctx.store.getUserById(id);
   if (!existing) return false;
@@ -275,15 +318,30 @@ export async function deleteUser(ctx: PgContext, id: string): Promise<boolean> {
     // row: one already in flight commits before this lock is granted, so the deletes below see and remove it; one that
     // starts later waits and then fails with StoreReferenceMissingError. Either way the user delete cannot hit 23503.
     await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [id]);
-    await client.query(`DELETE FROM sessions WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM api_keys WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM mfa_secrets WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM sso_identities WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM user_project_roles WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM user_invites WHERE user_id = $1`, [id]);
-    const result = await client.query(`DELETE FROM users WHERE id = $1`, [id]);
-    return (result.rowCount ?? 0) > 0;
+    return await deleteUserRows(client, id);
   });
+}
+
+/** 13.2 — deletes a user unless it is the last accepted admin who is a person; counted and deleted in one transaction. */
+export async function deleteUserKeepingAdmin(ctx: PgContext, id: string): Promise<"deleted" | "not_found" | "last_admin"> {
+  return ctx.withTransaction(async (client) => {
+    // Locks the admin rows and the target (as for deleteUser, the target's lock also orders it after child inserts).
+    const checked = await lockAndCheckLastHumanAdmin(client, id);
+    if (!checked) return "not_found";
+    if (checked.lastAdmin) return "last_admin";
+    return (await deleteUserRows(client, id)) ? "deleted" : "not_found";
+  });
+}
+
+async function deleteUserRows(client: PgClient, id: string): Promise<boolean> {
+  await client.query(`DELETE FROM sessions WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM api_keys WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM mfa_secrets WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM sso_identities WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM user_project_roles WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM user_invites WHERE user_id = $1`, [id]);
+  const result = await client.query(`DELETE FROM users WHERE id = $1`, [id]);
+  return (result.rowCount ?? 0) > 0;
 }
 
 /** A stored JSON array of strings (SQLite's parseJsonArray): anything else reads as []. */
@@ -654,6 +712,15 @@ export async function replaceMfaBackupCodes(ctx: PgContext, input: Parameters<St
   const result = await ctx.pool.query(
     `UPDATE mfa_secrets SET backup_codes_json = $1, updated_at = $2 WHERE user_id = $3 AND backup_codes_json = $4`,
     [JSON.stringify(input.next), new Date().toISOString(), input.userId, JSON.stringify(input.expected)]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Compare-and-set on the last accepted TOTP step: true only for a step after every step accepted before. */
+export async function markTotpStepUsed(ctx: PgContext, userId: string, step: number): Promise<boolean> {
+  const result = await ctx.pool.query(
+    `UPDATE mfa_secrets SET last_totp_step = $1 WHERE user_id = $2 AND (last_totp_step IS NULL OR last_totp_step < $1)`,
+    [step, userId]
   );
   return (result.rowCount ?? 0) > 0;
 }

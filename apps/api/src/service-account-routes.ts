@@ -58,6 +58,15 @@ export interface ServiceAccountRoutesDeps {
   requestKeyScope: (request: FastifyRequest) => KeyScope | null;
   /** Removes the account's own MCP OAuth connections (and their tokens), as deleting a person does. */
   disconnectMcpOAuth: (userId: string) => Promise<unknown>;
+  /**
+   * 13.2 — step-up (STEP_UP_MAX_AGE_MINUTES) before creating a service-account key, changing a service account's role
+   * or deleting one; false means it has answered.
+   */
+  requireStepUp?: (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    action: "api_key.create" | "user.role_change" | "user.delete"
+  ) => Promise<boolean>;
 }
 
 /** The service account's name: the email's local part, without the random part after the last `+`. */
@@ -160,6 +169,9 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
     }
     const existing = await findAccount(request.params.id);
     if (!existing) return notFound(reply);
+    if (parsed.data.role && parsed.data.role !== existing.role && deps.requireStepUp && !(await deps.requireStepUp(request, reply, "user.role_change"))) {
+      return reply;
+    }
     const updated = await store.updateServiceAccount(existing.id, {
       ...(parsed.data.role ? { role: parsed.data.role } : {}),
       ...(parsed.data.description !== undefined ? { description: parsed.data.description || null } : {})
@@ -184,6 +196,7 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
     if (!user) return;
     const existing = await findAccount(request.params.id);
     if (!existing) return notFound(reply);
+    if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "user.delete"))) return reply;
     // Its keys, project roles, MCP OAuth connections and any other rows go with it (the same delete as for a person).
     await disconnectMcpOAuth(existing.id);
     if (!await store.deleteUser(existing.id)) return notFound(reply);
@@ -211,6 +224,7 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
     if (!user) return;
     const account = await findAccount(request.params.id);
     if (!account) return notFound(reply);
+    if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "api_key.create"))) return reply;
     const parsed = apiKeyCreateBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
