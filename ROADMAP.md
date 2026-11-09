@@ -1,4 +1,4 @@
-# n8n Feature Parity Roadmap
+# L2M Roadmap
 
 > Reference document for achieving feature parity with n8n. Use this in implementation prompts.
 > Generated: 2026-04-13 | Baseline: ai-orchestrator current main branch
@@ -579,7 +579,7 @@ by what blocks adoption first. All of it stays self-hosted.
 - [x] OIDC single sign-on alongside SAML (Authorization Code + PKCE, optional, `OIDC_*` settings; see the Authentication and RBAC docs page)
 - [ ] SCIM 2.0 provisioning and deprovisioning of users and groups, with immediate session revocation
 - [ ] Session policy: idle and absolute timeouts, concurrent-session limits, MFA required per role, step-up authentication for sensitive actions (partial: MFA on SSO delivered, optional `SSO_MFA` for OIDC and SAML with IdP-asserted MFA or the local TOTP step; missing: timeouts, session limits, per-role MFA, step-up)
-- [ ] Network controls: IP allowlists for UI, API and webhooks, trusted-proxy configuration, mutual TLS option for the MCP gateway
+- [ ] Network controls: IP allowlists for UI, API and webhooks, trusted-proxy configuration, mutual TLS option for the MCP gateway — *partial:* delivered are address and CIDR allowlists per scope (UI, API, webhooks, public, MCP gateway, metrics) with report mode and loopback break-glass, per-client gateway and per-webhook address lists, trusted-proxy handling through `TRUST_PROXY`, and client-certificate pinning (SHA-256 fingerprints, optional subject) for the MCP gateway through a verifying TLS-terminating proxy; a native TLS listener with mutual TLS in the API itself remains
 - [ ] Service accounts with scoped, rotating keys; break-glass admin access with alerting
 
 ### 13.3 Data protection and tenancy
