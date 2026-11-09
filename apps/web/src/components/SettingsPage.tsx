@@ -28,6 +28,10 @@ import {
   fetchMcpPresets,
   fetchObservability,
   fetchRecentTraces,
+  fetchDeploymentUsers,
+  inBackground,
+  revokeUserSessions,
+  type DeploymentUserView,
   fetchLogStreamDestinations,
   fetchMfaStatus,
   fetchProjectMembers,
@@ -129,9 +133,11 @@ import { NetworkSettingsTab } from "./NetworkSettingsTab";
 import { ServiceAccountsTab } from "./ServiceAccountsTab";
 import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
 import { describeKeyScopes } from "../lib/key-scopes";
+import { SignedInSessionsCard } from "./SignedInSessionsCard";
 
 type SettingsTab =
   | "security"
+  | "users"
   | "api-keys"
   | "members"
   | "roles"
@@ -190,7 +196,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     {
       label: "Account",
       tabs: [
-        { id: "security", label: "Security (MFA)" },
+        { id: "security", label: "Security" },
         { id: "api-keys", label: "API Keys" }
       ]
     },
@@ -205,6 +211,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     {
       label: "Access control",
       tabs: [
+        { id: "users", label: "Users", restricted: !isAdmin },
         { id: "roles", label: "Custom Roles", restricted: !isAdmin },
         { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
         { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
@@ -276,7 +283,13 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         </nav>
 
         <div className="settings-body">
-        {tab === "security" && <SecurityTab />}
+        {tab === "security" && (
+          <>
+            <SecurityTab />
+            <SignedInSessionsCard />
+          </>
+        )}
+        {tab === "users" && isAdmin && <UsersTab currentUserId={authUser.id} />}
         {tab === "api-keys" && <ApiKeysTab isAdmin={isAdmin} ownerRole={authUser.role} projects={projects} />}
         {tab === "members" && (
           <ProjectMembersTab
@@ -475,6 +488,114 @@ function SecurityTab() {
               Enrol in MFA
             </button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Users (admin) — Phase 13.2: end a user's sessions everywhere
+// ---------------------------------------------------------------------------
+
+function UsersTab({ currentUserId }: { currentUserId: string }) {
+  const [users, setUsers] = useState<DeploymentUserView[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busyUserId, setBusyUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchDeploymentUsers()
+      .then((response) => {
+        if (!cancelled) setUsers(response.users);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(formatError(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const signOutEverywhere = async (user: DeploymentUserView) => {
+    const self = user.id === currentUserId;
+    const prompt = self
+      ? "Sign yourself out on every other device and browser? This session stays signed in."
+      : `Sign ${user.email} out everywhere? They will need to sign in again.`;
+    if (!window.confirm(prompt)) return;
+    setBusyUserId(user.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await revokeUserSessions(user.id);
+      const count = result.revoked === 1 ? "1 session" : `${result.revoked} sessions`;
+      setNotice(`Ended ${count} for ${user.email}.`);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusyUserId(null);
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <h3>Users</h3>
+      <p className="settings-help">Everyone with an account on this deployment. Signing a user out everywhere ends all of their live sessions.</p>
+      {error && <div className="settings-error">{error}</div>}
+      {notice && (
+        <div className="info-banner" role="status">
+          {notice}
+        </div>
+      )}
+      {!loaded ? (
+        <div className="settings-loading">Loading users…</div>
+      ) : (
+        <div className="settings-card">
+          {users.length === 0 ? (
+            <p className="settings-muted">No users.</p>
+          ) : (
+            <table className="settings-table">
+              <thead>
+                <tr>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Created</th>
+                  <th>
+                    <span className="sr-only">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.map((user) => (
+                  <tr key={user.id}>
+                    <td>
+                      {user.email}
+                      {user.id === currentUserId && <span className="settings-chip">You</span>}
+                      {user.pending && <span className="settings-chip">Invited</span>}
+                    </td>
+                    <td>{user.role}</td>
+                    <td>{formatDate(user.createdAt)}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="mini-btn"
+                        onClick={() => void signOutEverywhere(user)}
+                        disabled={busyUserId !== null}
+                        aria-label={`Sign ${user.email} out everywhere`}
+                      >
+                        Sign out everywhere
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
     </div>
@@ -2873,7 +2994,7 @@ function ObservabilityTab() {
 
   useEffect(() => {
     refresh();
-    const interval = window.setInterval(refresh, 10000);
+    const interval = window.setInterval(() => void inBackground(refresh), 10000);
     return () => window.clearInterval(interval);
   }, [refresh]);
 

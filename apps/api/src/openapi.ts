@@ -208,8 +208,42 @@ export const openApiSpec = {
         tags: ["Auth"],
         summary: "Get current authenticated user info",
         responses: {
-          "200": { description: "Current user, MFA status, project memberships" },
-          "401": { description: "Not authenticated" }
+          "200": {
+            description:
+              "Current user, MFA status, project memberships, and `session` (null for an API key): handle, createdAt, expiresAt, idleTimeoutMinutes (null when none), idleExpiresAt, breakGlass"
+          },
+          "401": { description: "Not authenticated; `reason` (idle, expired, evicted, admin, logout, policy) says why a session ended" }
+        }
+      }
+    },
+    "/api/auth/sessions": {
+      get: {
+        tags: ["Auth"],
+        summary: "List your signed-in sessions (live only, newest first) and the session policy for your role",
+        description:
+          "Each session: handle (never the session ID), current, authMethod, ipAddress, userAgent, createdAt, lastSeenAt, expiresAt, mfaVerified, breakGlass. policy: idleTimeoutMinutes, absoluteTimeoutHours, absoluteTimeoutConfigured, maxPerUser. Requests with `X-L2M-Background: 1` never count as activity for the idle timeout.",
+        responses: { "200": { description: "Sessions and policy" }, "401": { description: "Not authenticated" } }
+      }
+    },
+    "/api/auth/sessions/{handle}": {
+      delete: {
+        tags: ["Auth"],
+        summary: "Sign out one of your sessions; ending the current one clears the cookie",
+        parameters: [{ name: "handle", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ ok, current }" },
+          "403": { description: "Called with an API key: needs a signed-in browser session; nothing is ended" },
+          "404": { description: "No live session of yours has this handle" }
+        }
+      }
+    },
+    "/api/auth/sessions/revoke-others": {
+      post: {
+        tags: ["Auth"],
+        summary: "Sign out all your other sessions (keeps this one)",
+        responses: {
+          "200": { description: "{ revoked: number }" },
+          "403": { description: "Called with an API key: needs a signed-in browser session; nothing is ended" }
         }
       }
     },
@@ -474,6 +508,26 @@ export const openApiSpec = {
           { name: "keyId", in: "path", required: true, schema: { type: "string" } }
         ],
         responses: { "200": { description: "Revoked" }, "404": { description: "Service account or key not found" } }
+      }
+    },
+    "/api/users/{id}/sessions": {
+      get: {
+        tags: ["Users"],
+        summary: "List a user's signed-in sessions (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ sessions }" }, "404": { description: "User not found" } }
+      }
+    },
+    "/api/users/{id}/sessions/revoke": {
+      post: {
+        tags: ["Users"],
+        summary: "Sign a user out everywhere, or end one session by handle (admin; your own current session is kept)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", additionalProperties: false, properties: { handle: { type: "string" } } } } }
+        },
+        responses: { "200": { description: "{ revoked: number }" }, "404": { description: "User or session not found" } }
       }
     },
     "/api/users/invite": {

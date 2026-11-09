@@ -616,6 +616,25 @@
   gap: 14px;
 }
 
+/* Idle sign-out warning (Phase 13.2): above every other modal. */
+.idle-warning-backdrop {
+  z-index: 1200;
+}
+
+.idle-warning-modal {
+  width: min(440px, 100%);
+}
+
+.idle-warning-countdown {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--warn);
+}
+
+.session-policy-line {
+  margin: 0 0 12px;
+}
+
 /* ---- Dashboard ---------------------------------------------------------- */
 
 .dashboard-toolbar {

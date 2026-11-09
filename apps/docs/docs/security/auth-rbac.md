@@ -10,9 +10,11 @@ description: "Authentication and access control in L2M: session cookies, admin, 
   (SQLite or Postgres). A password that still needs an MFA code creates no session until the code is accepted.
 - API sets an `httpOnly` cookie (`SESSION_COOKIE_NAME`).
 - Frontend uses `credentials: include`.
-- A session lasts `SESSION_TTL_HOURS` (168 by default) from sign-in.
+- A session lasts `SESSION_TTL_HOURS` (168 by default) from sign-in, unless the session policy below sets another
+  lifetime for the user's role.
 - Each session records how it was signed in (`password`, `oidc`, `saml` or `ldap`), the client address and user
-  agent, when it last passed an MFA check, and, once it ends, why (`logout` or `expired`). Sessions created before
+  agent, when it last passed an MFA check, and, once it ends, why (`logout`, `expired`, `idle`, `evicted` or
+  `admin`). Sessions created before
   this was recorded keep working; their fields are empty.
 - The client address is kept only when it is a valid IPv4 or IPv6 address (behind a proxy it comes from
   `X-Forwarded-For`, see `TRUST_PROXY`); the user agent is cut to 512 characters.
@@ -20,6 +22,63 @@ description: "Authentication and access control in L2M: session cookies, admin, 
 - Ended sessions are deleted after `AUDIT_LOG_RETENTION_DAYS` (365 by default), the same window as the audit log;
   with `AUDIT_LOG_RETENTION_DAYS=0` they are kept, without address or user agent. Sign-in events stay in the audit
   log under its own retention.
+
+## Session policy
+
+Three optional settings limit how long sessions last and how many a user keeps. With none of them set, sessions
+behave as before: no idle timeout, a lifetime of `SESSION_TTL_HOURS`, and no limit on sessions per user.
+
+| Setting | Meaning | `0` |
+| --- | --- | --- |
+| `SESSION_IDLE_TIMEOUT_MINUTES` | Signs a session out after this many minutes without user activity. | no idle timeout |
+| `SESSION_ABSOLUTE_TIMEOUT_HOURS` | The longest a session lives after sign-in, whatever the activity. Falls back to `SESSION_TTL_HOURS`. | not allowed |
+| `SESSION_MAX_PER_USER` | The most sessions a user keeps at once. | unlimited |
+
+Each one takes a global value and optional per-role overrides, in the form `<global>[,role:value]*`:
+
+```bash
+SESSION_IDLE_TIMEOUT_MINUTES=60,admin:15
+SESSION_ABSOLUTE_TIMEOUT_HOURS=168,admin:12
+SESSION_MAX_PER_USER=5,admin:2
+```
+
+Either part may be left out (`admin:15` sets only admins). A malformed value stops the API at startup with an error
+naming the setting and the entry. The settings are read-only in the studio: Settings > Security shows the values for
+your role.
+
+- **The current role applies.** Promoting a user to a role with a stricter value tightens the sessions they already
+  have.
+- **Only real activity counts toward the idle timeout.** The studio marks its background refreshes with the header
+  `X-L2M-Background: 1`, and the server never counts those requests as activity. Your own scripts can send the same
+  header. Activity is written at most once a minute per session, so the server allows one extra minute: a session
+  ends between the configured idle time and one minute after it, never earlier. `GET /api/auth/me` returns that
+  deadline (`idleExpiresAt`), and two minutes before it the studio asks whether to stay signed in.
+- **Going over the session limit never refuses a sign-in.** The new session is kept and the user's oldest sessions
+  end (reason `evicted`, audit event `session.evicted`). Signing in again in the same browser replaces that browser's
+  session, so it never evicts another device. Sessions that are already idle or past their role's lifetime end first
+  and are not counted. Break-glass sessions are neither counted nor ended by a normal sign-in; they skip the idle timeout too, but always
+  end at their fixed expiry, which activity never extends. With several API
+  instances the limit holds across them.
+- **Why a session ended.** A request with an ended session gets `401` with `reason` (`idle`, `expired`, `evicted`,
+  `admin`, `logout`); the studio's sign-in page explains it. The reason is reported to that session's cookie until the
+  ended row is deleted (`AUDIT_LOG_RETENTION_DAYS`); an unknown cookie gets no reason.
+- **Live-update streams close too.** A run, execution or eval event stream opened with a session checks it about every
+  two heartbeats (`SSE_HEARTBEAT_INTERVAL_MS`). When the session has ended, the stream sends a `session_ended` event
+  with the reason and closes. A run started from that stream keeps running.
+
+### Signed-in sessions
+
+Settings > Security lists your signed-in sessions (device, address, sign-in method, sign-in time, last activity). You
+can sign out one session or all others. These two actions need a signed-in browser session: called with an API key
+they answer `403` and end nothing. Admins can sign a user out everywhere from Settings > Access control > Users.
+Sessions are named by a handle derived from the session, never by the session cookie itself. Ending sessions is
+audited as `session.revoked`.
+
+### Upgrading
+
+Nothing changes until you set one of the settings. When you add an idle timeout, sessions that have already been idle
+longer than it are signed out on their next request; users sign in again. Lowering
+`SESSION_ABSOLUTE_TIMEOUT_HOURS` ends sessions older than the new value the same way.
 
 ## Roles
 
@@ -556,7 +615,9 @@ SSO_MFA=idp
 - `POST /api/auth/login`
 - `POST /api/auth/login/mfa` (`{ challenge?, code }`; an SSO login's challenge comes from the `l2m_sso_mfa` cookie)
 - `POST /api/auth/logout`
-- `GET /api/auth/me`
+- `GET /api/auth/me` (with `session`: lifetime and idle deadline; null for an API key)
+- `GET /api/auth/sessions`, `DELETE /api/auth/sessions/:handle`, `POST /api/auth/sessions/revoke-others`
+- `GET /api/users/:id/sessions`, `POST /api/users/:id/sessions/revoke` (admin; `{ handle? }`)
 - `GET /api/auth/oidc/metadata` (public; `{ "enabled": false }` when OIDC is off)
 - `GET /api/auth/oidc/login` (browser navigation; redirects to the IdP)
 - `GET /api/auth/oidc/callback` (IdP redirect target)
@@ -568,6 +629,7 @@ SSO_MFA=idp
 
 ## Error contracts
 
-- `401` unauthenticated / invalid session
+- `401` unauthenticated / invalid session (with `reason` when a session ended: `idle`, `expired`, `evicted`, `admin`,
+  `logout`)
 - `403` authenticated but unauthorized
 - `404` not found, or in a project you cannot read
