@@ -179,6 +179,9 @@ import { MfaGateCard } from "./components/MfaGateCard";
 import { StepUpPrompt } from "./components/StepUpPrompt";
 import { withAgentToolPresets } from "./lib/agent-tool-presets";
 import { paletteKey } from "./components/NodePalette";
+import { BreakGlassBanner } from "./components/BreakGlassBanner";
+import { BreakGlassConfirmCard } from "./components/BreakGlassConfirmCard";
+import { breakGlassLinkFromHash, stripBreakGlassFragment, type BreakGlassLink } from "./lib/break-glass";
 
 interface DefinitionNode {
   type: string;
@@ -1143,6 +1146,14 @@ function StudioApp() {
   const [inviteToken, setInviteToken] = useState<string | null>(() =>
     typeof window === "undefined" ? null : inviteTokenFromLocation(window.location.search, window.location.hash)
   );
+  // 13.2 — a break-glass link (#break_glass=<token>) opens its confirm page; the token leaves the address bar at once.
+  const [breakGlassLink, setBreakGlassLink] = useState<BreakGlassLink | null>(() =>
+    typeof window === "undefined" ? null : breakGlassLinkFromHash(window.location.hash)
+  );
+  useEffect(() => {
+    const cleaned = stripBreakGlassFragment(window.location.pathname, window.location.search, window.location.hash);
+    if (cleaned !== null) window.history.replaceState(window.history.state, "", cleaned);
+  }, []);
   useEffect(() => {
     const cleaned = stripInviteParam(window.location.pathname, window.location.search, window.location.hash);
     if (cleaned !== null) window.history.replaceState(window.history.state, "", cleaned);
@@ -4671,6 +4682,17 @@ function StudioApp() {
     return <div className="loading-screen">Checking session...</div>;
   }
 
+  if (breakGlassLink) {
+    return (
+      <BreakGlassConfirmCard
+        link={breakGlassLink}
+        // A fresh load picks up the new session everywhere (the banner, projects, settings).
+        onSignedIn={() => window.location.assign(import.meta.env.BASE_URL)}
+        onDismiss={() => setBreakGlassLink(null)}
+      />
+    );
+  }
+
   if (!authUser) {
     if (mfaChallengeId) {
       return (
@@ -4823,6 +4845,7 @@ function StudioApp() {
       />
 
       <div className="studio-main">
+        <BreakGlassBanner />
         <StudioHeader
           activeMode={activeMode}
           canManageSecrets={canManageSecrets}

@@ -1563,6 +1563,9 @@ export class PostgresStore implements Store {
   async deletePendingChallenges(...args: Parameters<Store["deletePendingChallenges"]>): ReturnType<Store["deletePendingChallenges"]> {
     return flow_state.deletePendingChallenges(this.ctx, ...args);
   }
+  async listPendingChallenges(...args: Parameters<Store["listPendingChallenges"]>): ReturnType<Store["listPendingChallenges"]> {
+    return flow_state.listPendingChallenges(this.ctx, ...args);
+  }
   async prunePendingChallenges(...args: Parameters<Store["prunePendingChallenges"]>): ReturnType<Store["prunePendingChallenges"]> {
     return flow_state.prunePendingChallenges(this.ctx, ...args);
   }

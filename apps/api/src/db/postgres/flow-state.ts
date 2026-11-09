@@ -4,7 +4,7 @@
  * replay-capture reservations. Every check-and-act is one statement or one transaction under a per-key lock, and every
  * time comparison uses the database clock (`now()`), so instances whose clocks disagree still agree.
  */
-import type { ConsumedPendingChallenge, PendingChallengeInput } from "../store.js";
+import type { ConsumedPendingChallenge, PendingChallengeInput, PendingChallengeRow } from "../store.js";
 import type { PgContext } from "./context.js";
 import { toNum, toStr } from "./helpers.js";
 
@@ -50,6 +50,22 @@ export async function deletePendingChallenges(ctx: PgContext, input: { kind: str
     [input.kind, input.scope, input.userId]
   );
   return result.rowCount ?? 0;
+}
+
+/** Oldest first, read only; uses idx_pending_challenges_scope (kind, scope) for the kind filter. */
+export async function listPendingChallenges(ctx: PgContext, input: { kind: string; limit: number }): Promise<PendingChallengeRow[]> {
+  const result = await ctx.pool.query<{ id_hash: string; user_id: string | null; scope: string | null; payload_sealed: string; expired: boolean }>(
+    `SELECT id_hash, user_id, scope, payload_sealed, expires_at <= now() AS expired FROM pending_challenges
+     WHERE kind = $1 ORDER BY created_at, id_hash LIMIT $2`,
+    [input.kind, Math.max(0, Math.floor(input.limit))]
+  );
+  return result.rows.map((row) => ({
+    idHash: toStr(row.id_hash),
+    userId: row.user_id === null ? null : toStr(row.user_id),
+    scope: row.scope === null ? null : toStr(row.scope),
+    payloadSealed: toStr(row.payload_sealed),
+    expired: row.expired === true
+  }));
 }
 
 export async function prunePendingChallenges(ctx: PgContext): Promise<number> {
