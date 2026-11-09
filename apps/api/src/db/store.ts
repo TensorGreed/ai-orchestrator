@@ -114,6 +114,41 @@ export type ReleaseApprovalDecisionInput = Parameters<Store["decideReleaseApprov
 export type GateCaseDecisionRecordInput = Parameters<Store["decideGateCaseRequest"]>[0];
 
 /** Phase 13.1 — the claim a queued run's writes are fenced on. */
+/** 13.2 (v61) — how a sign-in session was issued (`sessions.auth_method`; null on rows from before v61). */
+export type SessionAuthMethod = "password" | "oidc" | "saml" | "ldap" | "break_glass";
+
+/** 13.2 (v61) — why a session ended (`sessions.ended_reason`; null while live, and on rows revoked before v61). */
+export type SessionEndReason = "logout" | "expired" | "idle" | "evicted" | "admin" | "policy";
+
+/** 13.2 — a sign-in session row as both stores return it. */
+export interface LoginSession {
+  id: string;
+  userId: string;
+  expiresAt: string;
+  createdAt: string;
+  lastSeenAt: string;
+  revokedAt: string | null;
+  authMethod: SessionAuthMethod | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  /** When the session last passed an MFA check (TOTP or IdP-asserted MFA); null when it never did. */
+  mfaVerifiedAt: string | null;
+  breakGlass: boolean;
+  endedReason: SessionEndReason | null;
+}
+
+/** 13.2 — what saveSession writes. Everything after `expiresAt` is optional, so a session can still be saved bare. */
+export interface LoginSessionInput {
+  id: string;
+  userId: string;
+  expiresAt: string;
+  authMethod?: SessionAuthMethod | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  mfaVerifiedAt?: string | null;
+  breakGlass?: boolean;
+}
+
 export interface QueueClaimFence {
   queueItemId: string;
   claimToken: string;
@@ -1427,28 +1462,43 @@ export interface Store extends AiGatewayStore {
   }>;
   updateUserRole(id: string, role: string): Promise<boolean>;
   deleteUser(id: string): Promise<boolean>;
-  getSession(sessionId: string): Promise<{
-    id: string;
-    userId: string;
-    expiresAt: string;
-    createdAt: string;
-    lastSeenAt: string;
-    revokedAt: string | null;
-  } | null>;
-  saveSession(input: {
-    id: string;
-    userId: string;
-    expiresAt: string;
-  }): Promise<{
-    id: string;
-    userId: string;
-    expiresAt: string;
-    createdAt: string;
-    lastSeenAt: string;
-  }>;
+  getSession(sessionId: string): Promise<LoginSession | null>;
+  /**
+   * Inserts a session. Only services/session-service.ts calls this (issueSession), so every sign-in path records the
+   * same fields. A source scan in session-service.test.ts looks for `saveSession(` calls elsewhere; it is a tripwire,
+   * not a guarantee (an indexed or destructured call would pass it).
+   */
+  saveSession(input: LoginSessionInput): Promise<LoginSession>;
   touchSession(sessionId: string): Promise<void>;
-  revokeSession(sessionId: string): Promise<void>;
+  /** Ends a live session with an optional reason; false when it was already ended or does not exist. */
+  revokeSession(sessionId: string, reason?: SessionEndReason): Promise<boolean>;
+  /** Ends every session past its expiry (reason `expired`). */
   revokeExpiredSessions(): Promise<void>;
+  /**
+   * 13.2 — a user's sessions, newest first (created_at, then id). `liveOnly`: not revoked and not past expiry at
+   * `now` (default: the current time).
+   */
+  listUserSessions(userId: string, options?: { liveOnly?: boolean; now?: string }): Promise<LoginSession[]>;
+  /** 13.2 — ends all of a user's live sessions except `exceptId`; returns how many were ended. */
+  revokeUserSessions(userId: string, options: { exceptId?: string; reason: SessionEndReason }): Promise<number>;
+  /**
+   * 13.2 — records that a live session of `userId` just passed an MFA check. False (nothing written) when the session
+   * is missing, revoked, past its expiry, or belongs to another user.
+   */
+  markSessionMfaVerified(sessionId: string, input: { userId: string; at: string }): Promise<boolean>;
+  /**
+   * 13.2 — deletes sessions that ended (revoked, or past their expiry) before `before`; returns how many. Personal
+   * fields are already cleared when a session ends; this removes the rows themselves after the retention window.
+   */
+  purgeEndedSessions(before: string): Promise<number>;
+  /**
+   * 13.2 — keeps the user's `keep` newest live sessions (created_at, then id) and ends the rest with `reason`;
+   * returns the ended ids, oldest first. `protectId` (the session being issued) is never ended: it is kept first and
+   * counts toward `keep`. Atomic across instances: Postgres locks the user row (`FOR UPDATE`) for the transaction,
+   * SQLite runs one immediate write transaction, so two sign-ins racing past a limit leave exactly `keep` live
+   * sessions (each racer's own session survives its own call).
+   */
+  revokeOldestUserSessions(userId: string, keep: number, reason: SessionEndReason, options?: { protectId?: string }): Promise<string[]>;
   saveApiKey(input: {
     id: string;
     userId: string;

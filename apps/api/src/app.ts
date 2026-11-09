@@ -311,7 +311,7 @@ import {
   resolveMcpOAuthRedirectUri
 } from "./services/mcp-oauth-service.js";
 import { isInternalSecretProvider } from "./services/secret-service.js";
-import type { QueueClaimFence, Store } from "./db/store.js";
+import type { QueueClaimFence, SessionAuthMethod, Store } from "./db/store.js";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -1951,6 +1951,14 @@ export async function createApp(
     authService.addCleanupTask(async () => await challengeStore.prune());
     authService.addCleanupTask(async () => await store.pruneRateLimitBuckets());
   }
+  // 13.2 — ended sessions are kept as long as audit logs (AUDIT_LOG_RETENTION_DAYS, 0 = keep), then deleted. Their
+  // address and user agent were already cleared when they ended.
+  if (config.AUDIT_LOG_RETENTION_DAYS > 0) {
+    authService.addCleanupTask(async () =>
+      await store.purgeEndedSessions(new Date(Date.now() - config.AUDIT_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString())
+    );
+  }
+  authService.sessions.setLogger(app.log);
   authService.startSessionCleanup();
   app.addHook("onClose", async () => {
     authService.stopSessionCleanup();
@@ -5394,25 +5402,9 @@ export async function createApp(
     return match ? match[1].trim() : null;
   };
 
-  type StoredSession = NonNullable<Awaited<ReturnType<typeof store.getSession>>>;
-  // Session IDs this server issues: `sess_` plus 24 to 64 URL-safe characters. Anything else cannot name a session.
-  const SESSION_ID_FORMAT = /^sess_[A-Za-z0-9_-]{24,64}$/;
-  const requestSessions = new WeakMap<object, Promise<StoredSession | null>>();
-
-  /**
-   * The session row the request's cookie names, looked up at most once per request: the rate-limit exemption check
-   * and the auth layer share the result. A cookie that is not shaped like a session ID costs no lookup. A failed
-   * lookup is not remembered as a miss for the auth layer (it looks again); the exemption treats it as no session.
-   */
-  const getRequestSession = (request: object, sessionId: string): Promise<StoredSession | null> => {
-    if (!SESSION_ID_FORMAT.test(sessionId)) return Promise.resolve(null);
-    const cached = requestSessions.get(request);
-    if (cached) return cached;
-    const lookup = store.getSession(sessionId) as Promise<StoredSession | null>;
-    requestSessions.set(request, lookup);
-    lookup.catch(() => requestSessions.delete(request));
-    return lookup;
-  };
+  // 13.2 — sessions are issued and looked up (once per request) through the session service.
+  const sessionService = authService.sessions;
+  const getRequestSession = (request: object, sessionId: string) => sessionService.getRequestSession(request, sessionId);
 
   /**
    * True when a request is studio traffic from a signed-in browser: a session cookie naming a live session, and no
@@ -5432,7 +5424,10 @@ export async function createApp(
     }
   };
 
-  const authenticateApiKey = async (headers: Record<string, unknown>): Promise<SafeUser | null> => {
+  /** The user, key id and scopes a request's API key names, or null. */
+  const authenticateApiKeyCredential = async (
+    headers: Record<string, unknown>
+  ): Promise<{ user: SafeUser; apiKeyId: string; keyScopes: string[] } | null> => {
     const token = extractBearerToken(headers);
     if (!token) return null;
     const verified = await apiKeyService.verify(token);
@@ -5440,14 +5435,21 @@ export async function createApp(
     const user = await store.getUserById(verified.userId);
     if (!user) return null;
     return {
-      id: user.id,
-      email: user.email,
-      role:
-        user.role === "admin" || user.role === "builder" || user.role === "operator" || user.role === "viewer"
-          ? user.role
-          : "viewer"
+      user: {
+        id: user.id,
+        email: user.email,
+        role:
+          user.role === "admin" || user.role === "builder" || user.role === "operator" || user.role === "viewer"
+            ? user.role
+            : "viewer"
+      },
+      apiKeyId: verified.keyId,
+      keyScopes: verified.scopes
     };
   };
+
+  const authenticateApiKey = async (headers: Record<string, unknown>): Promise<SafeUser | null> =>
+    (await authenticateApiKeyCredential(headers))?.user ?? null;
 
   const setSessionCookie = (reply: FastifyReply, sessionId: string) => {
     reply.setCookie(config.SESSION_COOKIE_NAME, sessionId, {
@@ -5478,13 +5480,15 @@ export async function createApp(
     allowedRoles: UserRole[]
   ): Promise<SafeUser | null> => {
     // Allow API key authentication (Phase 5.1) as a first-class alternative to session cookies.
-    const apiKeyUser = await authenticateApiKey(request.headers as Record<string, unknown>);
-    if (apiKeyUser) {
-      if (!hasRequiredRole(apiKeyUser, allowedRoles)) {
+    const apiKey = await authenticateApiKeyCredential(request.headers as Record<string, unknown>);
+    if (apiKey) {
+      // 13.2 — the request's sign-in context, for checks that run after this one.
+      sessionService.setRequestAuth(request, { credential: "api_key", ...apiKey });
+      if (!hasRequiredRole(apiKey.user, allowedRoles)) {
         deny(reply, 403, "Insufficient permissions");
         return null;
       }
-      return apiKeyUser;
+      return apiKey.user;
     }
 
     const sessionId = getSessionIdFromRequest(request);
@@ -5493,12 +5497,14 @@ export async function createApp(
       return null;
     }
 
-    const user = await authService.getSessionUser(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
-    if (!user) {
+    const resolved = await authService.getSessionAuth(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
+    if (!resolved) {
       clearSessionCookie(reply);
       deny(reply, 401, "Session expired or invalid");
       return null;
     }
+    const user = resolved.user;
+    sessionService.setRequestAuth(request, { credential: "session", user, session: resolved.session });
 
     if (!hasRequiredRole(user, allowedRoles)) {
       deny(reply, 403, "Insufficient permissions");
@@ -5625,14 +5631,22 @@ export async function createApp(
     return { user, created };
   };
 
-  const issueSessionForUser = async (user: SafeUser, reply: FastifyReply): Promise<{ expiresAt: string }> => {
-    const expiresAtDate = new Date();
-    expiresAtDate.setHours(expiresAtDate.getHours() + config.SESSION_TTL_HOURS);
-    const expiresAt = expiresAtDate.toISOString();
-    const sessionId = `sess_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomBytes(6).toString("hex")}`;
-    await store.saveSession({ id: sessionId, userId: user.id, expiresAt });
-    setSessionCookie(reply, sessionId);
-    return { expiresAt };
+  /** 13.2 — issues a session through the session service (the only path that saves one) and sets the cookie. */
+  const issueSessionForUser = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    user: SafeUser,
+    options: { method: SessionAuthMethod; mfaVerified: boolean }
+  ): Promise<{ expiresAt: string }> => {
+    const issued = await sessionService.issueSession({
+      user,
+      method: options.method,
+      request,
+      mfaVerified: options.mfaVerified,
+      ttlHours: config.SESSION_TTL_HOURS
+    });
+    setSessionCookie(reply, issued.sessionId);
+    return { expiresAt: issued.expiresAt };
   };
 
   // ---------------------------------------------------------------------------
@@ -5671,11 +5685,14 @@ export async function createApp(
     const { user, created } = await provisionSsoUser(input.provision);
     const previousSessionId = getSessionIdFromRequest(request);
     if (previousSessionId) {
-      await store.revokeSession(previousSessionId).catch((revokeError: unknown) => {
+      await sessionService.endSession(previousSessionId, "logout").catch((revokeError: unknown) => {
         request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
       });
     }
-    const { expiresAt } = await issueSessionForUser(user, reply);
+    const { expiresAt } = await issueSessionForUser(request, reply, user, {
+      method: input.method,
+      mfaVerified: input.mfa === "local_totp" || (input.mfa !== null && typeof input.mfa === "object")
+    });
     try {
       if (input.firstLink && !created) {
         // First SSO link to an account that already existed (possibly with local MFA): make it visible.
@@ -7309,6 +7326,12 @@ export async function createApp(
     }
   });
 
+  /** A password sign-in that needs no MFA step now: issues the session (SESSION_TTL_HOURS) and sets the cookie. */
+  const issuePasswordSession = async (request: FastifyRequest, reply: FastifyReply, user: SafeUser) => {
+    const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "password", mfaVerified: false });
+    return { user, expiresAt };
+  };
+
   app.post<{ Body: unknown }>("/api/auth/login", async (request, reply) => {
     const parsed = authLoginSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -7320,15 +7343,16 @@ export async function createApp(
     }
 
     try {
-      const result = await authService.login(parsed.data.email, parsed.data.password);
+      const user = await authService.verifyCredentials(parsed.data.email, parsed.data.password);
       // MFA gate: if the user has MFA enabled (or MFA_ENFORCE is on for admin), require a challenge step.
-      const mfaStatus = await mfaService.status(result.user.id);
-      const mustProvideMfa = mfaStatus.enabled || (config.MFA_ENFORCE && result.user.role === "admin");
+      // 13.2 — a session is issued only once no MFA step is pending, so a password alone never creates one.
+      const mfaStatus = await mfaService.status(user.id);
+      const mustProvideMfa = mfaStatus.enabled || (config.MFA_ENFORCE && user.role === "admin");
       if (mustProvideMfa) {
         if (!mfaStatus.enabled) {
           // MFA enforced but not enrolled — still issue the session so user can enrol immediately,
           // but flag it so the UI can redirect to the MFA enrolment flow.
-          setSessionCookie(reply, result.sessionId);
+          const result = await issuePasswordSession(request, reply, user);
           await audit(request, result.user, {
             category: "auth",
             eventType: "user.login",
@@ -7343,15 +7367,14 @@ export async function createApp(
             mfaEnrollmentRequired: true
           };
         }
-        // Revoke the freshly-created session and exchange it for a short-lived MFA challenge token.
-        await store.revokeSession(result.sessionId);
-        const challengeId = await issueMfaChallenge(result.user.id);
-        await audit(request, result.user, {
+        // No session yet: the password step earns a short-lived MFA challenge token instead.
+        const challengeId = await issueMfaChallenge(user.id);
+        await audit(request, user, {
           category: "auth",
           eventType: "user.login.mfa_challenge",
           action: "login",
           resourceType: "user",
-          resourceId: result.user.id,
+          resourceId: user.id,
           metadata: { mfaChallengeIssued: true }
         });
         reply.code(200);
@@ -7360,7 +7383,7 @@ export async function createApp(
           expiresInSeconds: Math.floor(MFA_CHALLENGE_TTL_MS / 1000)
         };
       }
-      setSessionCookie(reply, result.sessionId);
+      const result = await issuePasswordSession(request, reply, user);
       await audit(request, result.user, {
         category: "auth",
         eventType: "user.login",
@@ -7452,7 +7475,7 @@ export async function createApp(
           ? storeUser.role
           : "viewer"
     };
-    const { expiresAt } = await issueSessionForUser(safeUser, reply);
+    const { expiresAt } = await issueSessionForUser(request, reply, safeUser, { method: "password", mfaVerified: true });
     return { user: safeUser, expiresAt };
   });
 
@@ -7819,7 +7842,7 @@ export async function createApp(
         email: profile.email,
         groups: profile.groups
       });
-      const { expiresAt } = await issueSessionForUser(user, reply);
+      const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: false });
       return { user, expiresAt, provisioned: created };
     } catch (error) {
       const err = error as Error & { code?: string };
