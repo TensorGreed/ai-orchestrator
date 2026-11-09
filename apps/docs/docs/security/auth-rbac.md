@@ -167,7 +167,8 @@ on top of the global role:
   starts empty.
 - Running a workflow through an execute share needs `workflow:execute` in the
   project it is shared to; a viewer there can see it but not run it.
-- API keys act as their owner, with the owner's memberships.
+- API keys act as their owner, with the owner's memberships, unless the key carries a role ceiling or a project
+  list: see [Service accounts and API keys](./service-accounts.md).
 - A job a user put on the queue records that user as `triggeredBy` (a
   `triggeredBy` in the request body is kept as `customData.requestedBy`), and
   runs only if that user may still run the workflow when the job starts. If

@@ -377,6 +377,12 @@ export class PostgresStore implements Store {
   async listUsers(...args: Parameters<Store["listUsers"]>): ReturnType<Store["listUsers"]> {
     return auth.listUsers(this.ctx, ...args);
   }
+  async createServiceAccount(...args: Parameters<Store["createServiceAccount"]>): ReturnType<Store["createServiceAccount"]> {
+    return auth.createServiceAccount(this.ctx, ...args);
+  }
+  async updateServiceAccount(...args: Parameters<Store["updateServiceAccount"]>): ReturnType<Store["updateServiceAccount"]> {
+    return auth.updateServiceAccount(this.ctx, ...args);
+  }
   async createUserInvite(...args: Parameters<Store["createUserInvite"]>): ReturnType<Store["createUserInvite"]> {
     return auth.createUserInvite(this.ctx, ...args);
   }

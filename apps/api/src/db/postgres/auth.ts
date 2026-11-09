@@ -6,7 +6,16 @@
  * (and projects). A write whose user or project was deleted meanwhile throws StoreReferenceMissingError (409), not the
  * raw 23503.
  */
-import { type Store, type UserInviteCreate, type UserInviteRecord } from "../store.js";
+import {
+  type ServiceAccountCreate,
+  type Store,
+  type StoredUser,
+  type StoredUserKind,
+  type StoredUserSummary,
+  type UserInviteCreate,
+  type UserInviteRecord,
+  userKindWhere
+} from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { withReferenceCheck } from "../store-errors.js";
@@ -16,64 +25,48 @@ export async function countUsers(ctx: PgContext): Promise<number> {
   return row ? toNum(row.count) : 0;
 }
 
-export async function getUserByEmail(ctx: PgContext, email: string): Promise<{
+type UserRow = {
   id: string;
   email: string;
-  passwordHash: string;
+  password_hash: string;
   role: string;
-  createdAt: string;
-  updatedAt: string;
-} | null> {
-  const row = await ctx.queryOne<{
-    id: string;
-    email: string;
-    password_hash: string;
-    role: string;
-    created_at: string;
-    updated_at: string;
-  }>(
-    `SELECT id, email, password_hash, role, created_at, updated_at FROM users WHERE lower(email) = lower($1)`,
-    [email]
-  );
-  if (!row) return null;
+  kind: string | null;
+  description: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+const USER_COLUMNS = "id, email, password_hash, role, kind, description, created_by, created_at, updated_at";
+
+function storedUserFromRow(row: UserRow): StoredUser {
   return {
     id: toStr(row.id),
     email: toStr(row.email),
     passwordHash: toStr(row.password_hash),
     role: toStr(row.role),
+    // Fails closed: only 'human' is a person; any other value (a typo, a manual fix) is a service account, which cannot sign in.
+    kind: row.kind === "human" ? "human" : "service",
+    description: row.description ? toStr(row.description) : null,
+    createdBy: row.created_by ? toStr(row.created_by) : null,
     createdAt: toStr(row.created_at),
     updatedAt: toStr(row.updated_at)
   };
 }
 
-export async function getUserById(ctx: PgContext, id: string): Promise<{
-  id: string;
-  email: string;
-  passwordHash: string;
-  role: string;
-  createdAt: string;
-  updatedAt: string;
-} | null> {
-  const row = await ctx.queryOne<{
-    id: string;
-    email: string;
-    password_hash: string;
-    role: string;
-    created_at: string;
-    updated_at: string;
-  }>(
-    `SELECT id, email, password_hash, role, created_at, updated_at FROM users WHERE id = $1`,
-    [id]
-  );
-  if (!row) return null;
-  return {
-    id: toStr(row.id),
-    email: toStr(row.email),
-    passwordHash: toStr(row.password_hash),
-    role: toStr(row.role),
-    createdAt: toStr(row.created_at),
-    updatedAt: toStr(row.updated_at)
-  };
+function userSummaryFromRow(row: UserRow): StoredUserSummary {
+  const { passwordHash: _hash, ...summary } = storedUserFromRow(row);
+  return summary;
+}
+
+export async function getUserByEmail(ctx: PgContext, email: string): Promise<StoredUser | null> {
+  const row = await ctx.queryOne<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE lower(email) = lower($1)`, [email]);
+  return row ? storedUserFromRow(row) : null;
+}
+
+export async function getUserById(ctx: PgContext, id: string): Promise<StoredUser | null> {
+  const row = await ctx.queryOne<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE id = $1`, [id]);
+  return row ? storedUserFromRow(row) : null;
 }
 
 export async function saveUser(ctx: PgContext, input: {
@@ -104,27 +97,38 @@ export async function saveUser(ctx: PgContext, input: {
   return { id: input.id, email: input.email.toLowerCase(), role: input.role, createdAt, updatedAt: now };
 }
 
-export async function listUsers(ctx: PgContext): Promise<Array<{
-  id: string;
-  email: string;
-  role: string;
-  createdAt: string;
-  updatedAt: string;
-}>> {
-  const rows = await ctx.query<{
-    id: string;
-    email: string;
-    role: string;
-    created_at: string;
-    updated_at: string;
-  }>(`SELECT id, email, role, created_at, updated_at FROM users ORDER BY created_at DESC`);
-  return rows.map((r: { id: string; email: string; role: string; created_at: string; updated_at: string }) => ({
-    id: r.id,
-    email: r.email,
-    role: r.role,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at
-  }));
+export async function listUsers(ctx: PgContext, options: { kind?: StoredUserKind } = {}): Promise<StoredUserSummary[]> {
+  const rows = await ctx.query<UserRow>(`SELECT ${USER_COLUMNS} FROM users ${userKindWhere(options.kind)} ORDER BY created_at DESC`);
+  return rows.map(userSummaryFromRow);
+}
+
+export async function createServiceAccount(ctx: PgContext, input: ServiceAccountCreate): Promise<StoredUserSummary | null> {
+  const now = new Date().toISOString();
+  const row = await ctx.queryOne<UserRow>(
+    `INSERT INTO users (id, email, password_hash, role, kind, description, created_by, created_at, updated_at)
+     VALUES ($1, $2, '!', $3, 'service', $4, $5, $6, $6)
+     ON CONFLICT DO NOTHING
+     RETURNING ${USER_COLUMNS}`,
+    [input.id, input.email.toLowerCase(), input.role, input.description, input.createdBy, now]
+  );
+  return row ? userSummaryFromRow(row) : null;
+}
+
+export async function updateServiceAccount(
+  ctx: PgContext,
+  id: string,
+  patch: { role?: string; description?: string | null }
+): Promise<StoredUserSummary | null> {
+  const row = await ctx.queryOne<UserRow>(
+    `UPDATE users SET
+       role = COALESCE($2, role),
+       description = CASE WHEN $3::boolean THEN $4 ELSE description END,
+       updated_at = $5
+     WHERE id = $1 AND kind = 'service'
+     RETURNING ${USER_COLUMNS}`,
+    [id, patch.role ?? null, patch.description !== undefined, patch.description ?? null, new Date().toISOString()]
+  );
+  return row ? userSummaryFromRow(row) : null;
 }
 
 type UserInviteRow = {
@@ -238,13 +242,14 @@ export async function closeUserInvites(ctx: PgContext, userId: string, now: stri
 }
 
 export async function listUsersPage(ctx: PgContext, options: Parameters<Store["listUsersPage"]>[0]): ReturnType<Store["listUsersPage"]> {
-  const count = await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM users`);
-  const rows = await ctx.query<{ id: string; email: string; role: string; created_at: string; updated_at: string }>(
-    `SELECT id, email, role, created_at, updated_at FROM users ORDER BY created_at DESC, id ASC LIMIT $1 OFFSET $2`,
+  const where = userKindWhere(options.kind);
+  const count = await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM users ${where}`);
+  const rows = await ctx.query<UserRow>(
+    `SELECT ${USER_COLUMNS} FROM users ${where} ORDER BY created_at DESC, id ASC LIMIT $1 OFFSET $2`,
     [options.limit, options.offset]
   );
   return {
-    items: rows.map((r) => ({ id: r.id, email: r.email, role: r.role, createdAt: r.created_at, updatedAt: r.updated_at })),
+    items: rows.map(userSummaryFromRow),
     total: count ? toNum(count.count) : 0
   };
 }

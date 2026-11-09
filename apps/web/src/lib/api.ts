@@ -1322,7 +1322,13 @@ export async function fetchApiKeys() {
   return apiRequest<{ keys: ApiKeyRecord[] }>("/api/auth/api-keys");
 }
 
-export async function createApiKey(payload: { name: string; scopes?: string[]; expiresInDays?: number }) {
+/** 13.2 — a key's scope: `role` caps the role it acts with, `projects` limits it to those projects. */
+export interface ApiKeyScopeInput {
+  role?: "admin" | "builder" | "operator" | "viewer" | null;
+  projects?: string[] | null;
+}
+
+export async function createApiKey(payload: { name: string; scopes?: string[]; expiresInDays?: number } & ApiKeyScopeInput) {
   return apiRequest<{ key: string; record: ApiKeyRecord }>("/api/auth/api-keys", {
     method: "POST",
     body: JSON.stringify(payload)
@@ -1331,6 +1337,62 @@ export async function createApiKey(payload: { name: string; scopes?: string[]; e
 
 export async function revokeApiKey(id: string) {
   return apiRequest<{ ok: boolean }>(`/api/auth/api-keys/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 13.2 — Service accounts (admin)
+// ---------------------------------------------------------------------------
+
+export interface ServiceAccount {
+  id: string;
+  name: string;
+  email: string;
+  role: "admin" | "builder" | "operator" | "viewer";
+  description: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  projects: Array<{ projectId: string; role: string; customRoleId: string | null }>;
+  activeKeys: number;
+}
+
+export async function fetchServiceAccounts() {
+  return apiRequest<{ serviceAccounts: ServiceAccount[] }>("/api/service-accounts");
+}
+
+export async function createServiceAccount(payload: { name: string; role: ServiceAccount["role"]; description?: string | null }) {
+  return apiRequest<{ serviceAccount: ServiceAccount }>("/api/service-accounts", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateServiceAccount(id: string, payload: { role?: ServiceAccount["role"]; description?: string | null }) {
+  return apiRequest<{ serviceAccount: ServiceAccount }>(`/api/service-accounts/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteServiceAccount(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/service-accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function fetchServiceAccountKeys(id: string) {
+  return apiRequest<{ keys: ApiKeyRecord[] }>(`/api/service-accounts/${encodeURIComponent(id)}/keys`);
+}
+
+export async function createServiceAccountKey(id: string, payload: { name: string; expiresInDays?: number } & ApiKeyScopeInput) {
+  return apiRequest<{ key: string; record: ApiKeyRecord }>(`/api/service-accounts/${encodeURIComponent(id)}/keys`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function revokeServiceAccountKey(id: string, keyId: string) {
+  return apiRequest<{ ok: boolean }>(`/api/service-accounts/${encodeURIComponent(id)}/keys/${encodeURIComponent(keyId)}`, {
     method: "DELETE"
   });
 }

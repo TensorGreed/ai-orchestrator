@@ -32,10 +32,10 @@ export interface McpToolPolicySubjectStore {
 export async function resolveMcpToolPolicySubject(
   store: McpToolPolicySubjectStore,
   workflowId: string,
-  actor?: { id: string; email: string; role: McpPolicyRole } | null
+  actor?: { id: string; email: string; role: McpPolicyRole; apiKeyId?: string } | null
 ): Promise<McpToolPolicySubject> {
   if (actor) {
-    return { role: actor.role, source: "user", userId: actor.id, email: actor.email };
+    return { role: actor.role, source: "user", userId: actor.id, email: actor.email, ...(actor.apiKeyId ? { apiKeyId: actor.apiKeyId } : {}) };
   }
   const ownerId = await store.getWorkflowCreatedBy(workflowId);
   if (!ownerId) {

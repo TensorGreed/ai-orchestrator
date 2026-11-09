@@ -258,24 +258,17 @@ export const openApiSpec = {
       },
       post: {
         tags: ["Auth"],
-        summary: "Create a new API key",
+        summary:
+          "Create a new API key, optionally with a role ceiling and a project list. A key made with another key expires no later than that key; a service account's own keys cannot create keys.",
         requestBody: {
           required: true,
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                required: ["name"],
-                properties: {
-                  name: { type: "string" },
-                  scopes: { type: "array", items: { type: "string" } },
-                  expiresInDays: { type: "integer" }
-                }
-              }
-            }
-          }
+          content: { "application/json": { schema: { $ref: "#/components/schemas/ApiKeyCreate" } } }
         },
-        responses: { "200": { description: "API key created (plaintext returned once)" } }
+        responses: {
+          "200": { description: "API key created (plaintext returned once)" },
+          "400": { description: "Invalid scope, unknown project, or admin ceiling with a project list" },
+          "403": { description: "Ceiling above your role, outside the scope of the API key making the request, or the caller is a service account" }
+        }
       }
     },
     "/api/auth/api-keys/{id}": {
@@ -388,8 +381,99 @@ export const openApiSpec = {
       get: {
         tags: ["Users"],
         summary: "List users (admin); pending invited users carry pending and inviteExpiresAt",
-        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
+        parameters: [
+          { $ref: "#/components/parameters/Page" },
+          { $ref: "#/components/parameters/PageSize" },
+          { name: "kind", in: "query", required: false, schema: { type: "string", enum: ["human", "service"] }, description: "People (default) or service accounts" }
+        ],
         responses: { "200": { description: "User list" } }
+      }
+    },
+    "/api/service-accounts": {
+      get: {
+        tags: ["Users"],
+        summary: "List service accounts (admin), with their project roles and number of live keys",
+        responses: { "200": { description: "{ serviceAccounts }" } }
+      },
+      post: {
+        tags: ["Users"],
+        summary: "Create a service account (admin): a machine identity that acts only through API keys",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name"],
+                properties: {
+                  name: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,62}$", description: "Its email becomes <name>+<random>@service.invalid" },
+                  role: { type: "string", enum: ["admin", "builder", "operator", "viewer"], default: "viewer" },
+                  description: { type: "string", nullable: true, maxLength: 500 }
+                }
+              }
+            }
+          }
+        },
+        responses: { "201": { description: "{ serviceAccount }" }, "400": { description: "Invalid payload" }, "409": { description: "Name taken" } }
+      }
+    },
+    "/api/service-accounts/{id}": {
+      patch: {
+        tags: ["Users"],
+        summary: "Change a service account's role and/or description (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  role: { type: "string", enum: ["admin", "builder", "operator", "viewer"] },
+                  description: { type: "string", nullable: true, maxLength: 500 }
+                }
+              }
+            }
+          }
+        },
+        responses: { "200": { description: "{ serviceAccount }" }, "404": { description: "No service account with this id" } }
+      },
+      delete: {
+        tags: ["Users"],
+        summary: "Delete a service account with its keys and project roles (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Deleted" }, "404": { description: "No service account with this id" } }
+      }
+    },
+    "/api/service-accounts/{id}/keys": {
+      get: {
+        tags: ["Users"],
+        summary: "List a service account's API keys (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ keys }" }, "404": { description: "No service account with this id" } }
+      },
+      post: {
+        tags: ["Users"],
+        summary: "Create an API key for a service account (admin); the key is returned once",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/ApiKeyCreate" } } } },
+        responses: {
+          "201": { description: "{ key, record }" },
+          "400": { description: "Invalid scope, unknown project, or admin ceiling with a project list" },
+          "403": { description: "Ceiling above the service account's role" },
+          "404": { description: "No service account with this id" }
+        }
+      }
+    },
+    "/api/service-accounts/{id}/keys/{keyId}": {
+      delete: {
+        tags: ["Users"],
+        summary: "Revoke a service account's API key (admin)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "keyId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "Revoked" }, "404": { description: "Service account or key not found" } }
       }
     },
     "/api/users/invite": {
@@ -3355,6 +3439,19 @@ export const openApiSpec = {
       }
     },
     schemas: {
+      ApiKeyCreate: {
+        type: "object",
+        required: ["name"],
+        description:
+          "A key with no role and no projects acts with its owner's role in every project. role caps the role it acts with (never above the owner's); projects limits it to those projects, caps it at builder, and lets it call only the workflow, run and approval routes. scopes takes the stored strings directly (role:<role>, project:<id>; any other string is kept as a legacy scope and enforces nothing).",
+        properties: {
+          name: { type: "string", maxLength: 120 },
+          role: { type: "string", enum: ["admin", "builder", "operator", "viewer"], nullable: true },
+          projects: { type: "array", items: { type: "string" }, maxItems: 50, nullable: true },
+          scopes: { type: "array", items: { type: "string", maxLength: 160 } },
+          expiresInDays: { type: "integer", minimum: 0 }
+        }
+      },
       SafeUser: {
         type: "object",
         properties: {

@@ -1769,6 +1769,29 @@ button.tag-chip:hover {
   display: block;
 }
 
+/* 13.2 — API key scope pickers (role ceiling + project list). */
+.settings-fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.settings-fieldset legend {
+  padding: 0 4px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
+.settings-card label.settings-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .settings-actions {
   display: flex;
   gap: 8px;

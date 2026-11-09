@@ -126,6 +126,9 @@ import {
 } from "../lib/api";
 import { AuditSigningKeysSection } from "./AuditSigningKeysSection";
 import { NetworkSettingsTab } from "./NetworkSettingsTab";
+import { ServiceAccountsTab } from "./ServiceAccountsTab";
+import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
+import { describeKeyScopes } from "../lib/key-scopes";
 
 type SettingsTab =
   | "security"
@@ -135,6 +138,7 @@ type SettingsTab =
   | "sso"
   | "external-secrets"
   | "network"
+  | "service-accounts"
   | "audit-log"
   | "audit-signing"
   | "log-streams"
@@ -204,7 +208,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         { id: "roles", label: "Custom Roles", restricted: !isAdmin },
         { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
         { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
-        { id: "network", label: "Network", restricted: !isAdmin }
+        { id: "network", label: "Network", restricted: !isAdmin },
+        { id: "service-accounts", label: "Service Accounts", restricted: !isAdmin }
       ]
     },
     {
@@ -272,7 +277,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
 
         <div className="settings-body">
         {tab === "security" && <SecurityTab />}
-        {tab === "api-keys" && <ApiKeysTab isAdmin={isAdmin} />}
+        {tab === "api-keys" && <ApiKeysTab isAdmin={isAdmin} ownerRole={authUser.role} projects={projects} />}
         {tab === "members" && (
           <ProjectMembersTab
             projects={projects}
@@ -286,6 +291,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
           <ExternalSecretsTab activeProjectId={activeProjectId} />
         )}
         {tab === "network" && isAdmin && <NetworkSettingsTab />}
+        {tab === "service-accounts" && isAdmin && <ServiceAccountsTab projects={projects} />}
         {tab === "audit-log" && isAdmin && <AuditLogTab />}
         {tab === "audit-signing" && isAdmin && <AuditSigningKeysSection />}
         {tab === "log-streams" && isAdmin && <LogStreamsTab />}
@@ -479,11 +485,11 @@ function SecurityTab() {
 // API keys
 // ---------------------------------------------------------------------------
 
-function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
+function ApiKeysTab({ isAdmin, ownerRole, projects }: { isAdmin: boolean; ownerRole: AuthUser["role"]; projects: Project[] }) {
   const [keys, setKeys] = useState<ApiKeyRecord[]>([]);
   const [name, setName] = useState("");
   const [expiresInDays, setExpiresInDays] = useState("");
-  const [scopes, setScopes] = useState("");
+  const [scope, setScope] = useState<KeyScopeValue>(EMPTY_KEY_SCOPE);
   const [plaintext, setPlaintext] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -509,19 +515,15 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
     setError(null);
     setBusy(true);
     try {
-      const parsedScopes = scopes
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
       const parsedDays = expiresInDays.trim() ? Number(expiresInDays.trim()) : undefined;
       const response = await createApiKey({
         name: name.trim(),
-        scopes: parsedScopes.length ? parsedScopes : undefined,
+        ...keyScopePayload(scope),
         expiresInDays: parsedDays && Number.isFinite(parsedDays) ? parsedDays : undefined
       });
       setPlaintext(response.key);
       setName("");
-      setScopes("");
+      setScope(EMPTY_KEY_SCOPE);
       setExpiresInDays("");
       await refresh();
     } catch (err) {
@@ -548,9 +550,10 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
     <div className="settings-section">
       <h3>API keys</h3>
       <p className="settings-help">
-        Use an API key as <code>Authorization: Bearer &lt;key&gt;</code> on any API call. Keys inherit your user role;
-        scopes are informational today and reserved for finer-grained enforcement later. Keys are only shown once on
-        creation.
+        Use an API key as <code>Authorization: Bearer &lt;key&gt;</code> on any API call. A key acts with your role in
+        every project you can reach, unless you give it a role ceiling or limit it to projects (a key limited to
+        projects acts as builder at most and can call only the workflow, run and approval routes). Keys are only shown
+        once on creation.
       </p>
       {error && <div className="settings-error">{error}</div>}
 
@@ -563,13 +566,7 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
           onChange={(event) => setName(event.target.value)}
           placeholder="ci-pipeline"
         />
-        <label htmlFor="api-key-scopes">Scopes (comma-separated, optional)</label>
-        <input
-          id="api-key-scopes"
-          value={scopes}
-          onChange={(event) => setScopes(event.target.value)}
-          placeholder="workflow:read,workflow:execute"
-        />
+        <KeyScopeFields idPrefix="api-key" ownerRole={ownerRole} projects={projects} value={scope} onChange={setScope} />
         <label htmlFor="api-key-expiry">Expires in N days (leave empty for no expiry)</label>
         <input
           id="api-key-expiry"
@@ -602,6 +599,7 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
                 <th>Name</th>
                 <th>Prefix</th>
                 {isAdmin && <th>User</th>}
+                <th>Scope</th>
                 <th>Last used</th>
                 <th>Expires</th>
                 <th></th>
@@ -615,6 +613,7 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
                     <code>{key.keyPrefix}</code>
                   </td>
                   {isAdmin && <td>{key.userId}</td>}
+                  <td>{describeKeyScopes(key.scopes, (id) => projects.find((project) => project.id === id)?.name ?? id)}</td>
                   <td>{formatDate(key.lastUsedAt)}</td>
                   <td>{key.expiresAt ? formatDate(key.expiresAt) : "never"}</td>
                   <td>

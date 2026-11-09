@@ -90,7 +90,7 @@ import { gatewayGuardField, parseRecordedCallLabels } from "@ai-orchestrator/sha
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, McpPolicyEnforceRefusedError, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
-import { mcpGatewayApprovalRetentionCutoff } from "./store.js";
+import { mcpGatewayApprovalRetentionCutoff, userKindWhere } from "./store.js";
 import { sessionsToEvict } from "./session-eviction.js";
 import {
   auditEntryHash,
@@ -123,9 +123,13 @@ import type {
   McpPolicySuggestionWrite,
   McpToolCallScanFilter,
   McpToolPolicyPatch,
+  ServiceAccountCreate,
   SessionAuthMethod,
   SessionEndReason,
   Store,
+  StoredUser,
+  StoredUserKind,
+  StoredUserSummary,
   UserInviteCreate,
   UserInviteRecord
 } from "./store.js";
@@ -318,8 +322,33 @@ interface UserRow {
   email: string;
   password_hash: string;
   role: string;
+  kind?: string | null;
+  description?: string | null;
+  created_by?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+const USER_COLUMNS = "id, email, password_hash, role, kind, description, created_by, created_at, updated_at";
+
+function storedUserFromRow(row: UserRow): StoredUser {
+  return {
+    id: toString(row.id),
+    email: toString(row.email),
+    passwordHash: toString(row.password_hash),
+    role: toString(row.role),
+    // Fails closed: only 'human' is a person; any other value (a typo, a manual fix) is a service account, which cannot sign in.
+    kind: row.kind === "human" ? "human" : "service",
+    description: row.description ? toString(row.description) : null,
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
+function userSummaryFromRow(row: UserRow): StoredUserSummary {
+  const { passwordHash: _hash, ...summary } = storedUserFromRow(row);
+  return summary;
 }
 
 interface SessionRow {
@@ -1994,6 +2023,10 @@ export interface ApprovalRequestRecord {
   decidedByUserId: string | null;
   decidedBy: string | null;
   decidedAt: string | null;
+  /** 13.2 (v62) — the API key that decided, when one did: the resumed run keeps that key's limits. */
+  decidedByApiKeyId: string | null;
+  /** 13.2 (v62) — the API key that started the run that asked, when one did (a timeout resumes with its limits). */
+  requestedByApiKeyId: string | null;
   reason: string | null;
   edits: Record<string, unknown> | null;
   editedFields: string[];
@@ -2022,6 +2055,7 @@ export interface ApprovalRequestInsert {
   details?: Record<string, unknown> | null;
   requestedByUserId?: string | null;
   requestedBy?: string | null;
+  requestedByApiKeyId?: string | null;
   timeoutMinutes?: number | null;
   expiresAt?: string | null;
   askingWorkflowId?: string | null;
@@ -2297,6 +2331,8 @@ function mapApprovalRequestRow(row: ApprovalRequestRow): ApprovalRequestRecord {
     decidedByUserId: nullableText(row.decided_by_user_id),
     decidedBy: nullableText(row.decided_by),
     decidedAt: nullableText(row.decided_at),
+    decidedByApiKeyId: nullableText(row.decided_by_api_key_id),
+    requestedByApiKeyId: nullableText(row.requested_by_api_key_id),
     reason: nullableText(row.reason),
     edits: edits && typeof edits === "object" && !Array.isArray(edits) ? (edits as Record<string, unknown>) : null,
     editedFields: parseJsonArray(row.edited_fields_json),
@@ -3694,6 +3730,9 @@ export class SqliteStore implements Store {
     this.ensureColumn("approval_requests", "asking_workflow_id", "TEXT");
     this.ensureColumn("approval_requests", "edits_salt", "TEXT");
     this.ensureColumn("approval_requests", "workflow_deleted_at", "TEXT");
+    // 13.2 (v62) — the API key behind a decision, or behind the run that asked.
+    this.ensureColumn("approval_requests", "requested_by_api_key_id", "TEXT");
+    this.ensureColumn("approval_requests", "decided_by_api_key_id", "TEXT");
     // When approval requests (migration 32) first came up: runs paused before it get one full timeout from here.
     this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES ('approval_requests', ?)`, [new Date().toISOString()]);
 
@@ -4224,6 +4263,11 @@ export class SqliteStore implements Store {
     this.ensureColumn("sessions", "break_glass", "INTEGER NOT NULL", "0");
     this.ensureColumn("sessions", "ended_reason", "TEXT");
     this.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user_live ON sessions(user_id, revoked_at, expires_at)`);
+    // 13.2 (v62) — service accounts: users.kind, a description and the creating admin.
+    this.ensureColumn("users", "kind", "TEXT NOT NULL", "'human'");
+    this.ensureColumn("users", "description", "TEXT");
+    this.ensureColumn("users", "created_by", "TEXT");
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_users_kind ON users(kind)`);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -4746,73 +4790,18 @@ export class SqliteStore implements Store {
     return row ? toNumber(row.count) : 0;
   }
 
-  async getUserByEmail(email: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null> {
-    const row = this.queryOne<UserRow>(
-      `SELECT id, email, password_hash, role, created_at, updated_at
-       FROM users
-       WHERE lower(email) = lower(?)`,
-      [email]
-    );
-
-    if (!row) {
-      return null;
-    }
-
-    return {
-      id: toString(row.id),
-      email: toString(row.email),
-      passwordHash: toString(row.password_hash),
-      role: toString(row.role),
-      createdAt: toString(row.created_at),
-      updatedAt: toString(row.updated_at)
-    };
+  async getUserByEmail(email: string): Promise<StoredUser | null> {
+    const row = this.queryOne<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE lower(email) = lower(?)`, [email]);
+    return row ? storedUserFromRow(row) : null;
   }
 
-  async getUserById(id: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null> {
+  async getUserById(id: string): Promise<StoredUser | null> {
     return this.getUserByIdSync(id);
   }
 
-  private getUserByIdSync(id: string): {
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null {
-    const row = this.queryOne<UserRow>(
-      `SELECT id, email, password_hash, role, created_at, updated_at
-       FROM users
-       WHERE id = ?`,
-      [id]
-    );
-
-    if (!row) {
-      return null;
-    }
-
-    return {
-      id: toString(row.id),
-      email: toString(row.email),
-      passwordHash: toString(row.password_hash),
-      role: toString(row.role),
-      createdAt: toString(row.created_at),
-      updatedAt: toString(row.updated_at)
-    };
+  private getUserByIdSync(id: string): StoredUser | null {
+    const row = this.queryOne<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`, [id]);
+    return row ? storedUserFromRow(row) : null;
   }
 
   async saveUser(input: {
@@ -4852,23 +4841,44 @@ export class SqliteStore implements Store {
     };
   }
 
-  async listUsers(): Promise<Array<{
-    id: string;
-    email: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  }>> {
-    const rows = this.queryAll<UserRow>(
-      `SELECT id, email, password_hash, role, created_at, updated_at FROM users ORDER BY created_at DESC`
-    );
-    return rows.map((row) => ({
-      id: toString(row.id),
-      email: toString(row.email),
-      role: toString(row.role),
-      createdAt: toString(row.created_at),
-      updatedAt: toString(row.updated_at)
-    }));
+  async listUsers(options: { kind?: StoredUserKind } = {}): Promise<StoredUserSummary[]> {
+    const where = userKindWhere(options.kind);
+    const rows = this.queryAll<UserRow>(`SELECT ${USER_COLUMNS} FROM users ${where} ORDER BY created_at DESC`);
+    return rows.map(userSummaryFromRow);
+  }
+
+  async createServiceAccount(input: ServiceAccountCreate): Promise<StoredUserSummary | null> {
+    const now = new Date().toISOString();
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO users (id, email, password_hash, role, kind, description, created_by, created_at, updated_at)
+         VALUES (?, ?, '!', ?, 'service', ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`
+      )
+      .run(input.id, input.email.toLowerCase(), input.role, input.description, input.createdBy, now, now);
+    if (inserted.changes === 0) return null;
+    this.persist();
+    const row = this.getUserByIdSync(input.id);
+    if (!row) return null;
+    const { passwordHash: _hash, ...summary } = row;
+    return summary;
+  }
+
+  async updateServiceAccount(id: string, patch: { role?: string; description?: string | null }): Promise<StoredUserSummary | null> {
+    const existing = this.getUserByIdSync(id);
+    if (!existing || existing.kind !== "service") return null;
+    const now = new Date().toISOString();
+    this.exec(`UPDATE users SET role = ?, description = ?, updated_at = ? WHERE id = ? AND kind = 'service'`, [
+      patch.role ?? existing.role,
+      patch.description === undefined ? existing.description : patch.description,
+      now,
+      id
+    ]);
+    this.persist();
+    const row = this.getUserByIdSync(id);
+    if (!row) return null;
+    const { passwordHash: _hash, ...summary } = row;
+    return summary;
   }
 
   async createUserInvite(input: UserInviteCreate): ReturnType<Store["createUserInvite"]> {
@@ -4949,19 +4959,14 @@ export class SqliteStore implements Store {
   }
 
   async listUsersPage(options: Parameters<Store["listUsersPage"]>[0]): ReturnType<Store["listUsersPage"]> {
-    const count = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM users`);
+    const where = userKindWhere(options.kind);
+    const count = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM users ${where}`);
     const rows = this.queryAll<UserRow>(
-      `SELECT id, email, password_hash, role, created_at, updated_at FROM users ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?`,
+      `SELECT ${USER_COLUMNS} FROM users ${where} ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?`,
       [options.limit, options.offset]
     );
     return {
-      items: rows.map((row) => ({
-        id: toString(row.id),
-        email: toString(row.email),
-        role: toString(row.role),
-        createdAt: toString(row.created_at),
-        updatedAt: toString(row.updated_at)
-      })),
+      items: rows.map(userSummaryFromRow),
       total: toNumber(count?.count ?? 0)
     };
   }
@@ -6341,8 +6346,8 @@ export class SqliteStore implements Store {
       `INSERT INTO approval_requests (
          id, execution_id, workflow_id, workflow_name, project_id, node_id, node_type, kind, status, message,
          spec_json, path_json, details_json, requested_by_user_id, requested_by, timeout_minutes, expires_at,
-         asking_workflow_id, edits_salt, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         asking_workflow_id, edits_salt, requested_by_api_key_id, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.executionId,
@@ -6362,6 +6367,7 @@ export class SqliteStore implements Store {
         input.expiresAt ?? null,
         input.askingWorkflowId ?? null,
         input.editsSalt ?? null,
+        input.requestedByApiKeyId ?? null,
         now,
         now
       ]
@@ -6465,26 +6471,18 @@ export class SqliteStore implements Store {
     return this.decideApprovalRequestSync(input);
   }
 
-  private decideApprovalRequestSync(input: {
-    id: string;
-    status: "approved" | "rejected" | "timed_out" | "canceled";
-    decidedByUserId?: string | null;
-    decidedBy?: string | null;
-    reason?: string | null;
-    edits?: Record<string, unknown> | null;
-    editedFields?: string[];
-    decidedAt?: string;
-  }): boolean {
+  private decideApprovalRequestSync(input: ApprovalDecisionInput): boolean {
     const decidedAt = input.decidedAt ?? new Date().toISOString();
     const result = this.db
       .prepare(
         `UPDATE approval_requests
-            SET status = ?, decided_by_user_id = ?, decided_by = ?, decided_at = ?, reason = ?, edits_json = ?, edited_fields_json = ?, updated_at = ?
+            SET status = ?, decided_by_user_id = ?, decided_by_api_key_id = ?, decided_by = ?, decided_at = ?, reason = ?, edits_json = ?, edited_fields_json = ?, updated_at = ?
           WHERE id = ? AND status = 'pending'`
       )
       .run(
         input.status,
         input.decidedByUserId ?? null,
+        input.decidedByApiKeyId ?? null,
         input.decidedBy ?? null,
         decidedAt,
         input.reason ?? null,
@@ -6510,7 +6508,7 @@ export class SqliteStore implements Store {
     const result = this.db
       .prepare(
         `UPDATE approval_requests
-            SET status = 'pending', decided_by_user_id = NULL, decided_by = NULL, decided_at = NULL, reason = NULL,
+            SET status = 'pending', decided_by_user_id = NULL, decided_by_api_key_id = NULL, decided_by = NULL, decided_at = NULL, reason = NULL,
                 edits_json = NULL, edited_fields_json = NULL, updated_at = ?
           WHERE id = ? AND status IN ('approved', 'rejected', 'timed_out')`
       )

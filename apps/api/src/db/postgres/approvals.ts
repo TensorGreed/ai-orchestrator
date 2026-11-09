@@ -40,6 +40,8 @@ interface ApprovalRequestRow {
   timeout_minutes: number | null;
   expires_at: string | null;
   decided_by_user_id: string | null;
+  decided_by_api_key_id: string | null;
+  requested_by_api_key_id: string | null;
   decided_by: string | null;
   decided_at: string | null;
   reason: string | null;
@@ -85,6 +87,8 @@ function mapApprovalRequestRow(row: ApprovalRequestRow): ApprovalRequestRecord {
     decidedByUserId: nullableText(row.decided_by_user_id),
     decidedBy: nullableText(row.decided_by),
     decidedAt: nullableText(row.decided_at),
+    decidedByApiKeyId: nullableText(row.decided_by_api_key_id),
+    requestedByApiKeyId: nullableText(row.requested_by_api_key_id),
     reason: nullableText(row.reason),
     edits: edits && typeof edits === "object" && !Array.isArray(edits) ? (edits as Record<string, unknown>) : null,
     editedFields: parseStringArray(row.edited_fields_json),
@@ -107,8 +111,8 @@ export async function insertApprovalRequest(
     `INSERT INTO approval_requests (
        id, execution_id, workflow_id, workflow_name, project_id, node_id, node_type, kind, status, message,
        spec_json, path_json, details_json, requested_by_user_id, requested_by, timeout_minutes, expires_at,
-       asking_workflow_id, edits_salt, created_at, updated_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+       asking_workflow_id, edits_salt, created_at, updated_at, requested_by_api_key_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
      RETURNING *`,
     [
       input.id,
@@ -130,7 +134,8 @@ export async function insertApprovalRequest(
       input.askingWorkflowId ?? null,
       input.editsSalt ?? null,
       now,
-      now
+      now,
+      input.requestedByApiKeyId ?? null
     ]
   )).rows[0]!;
   // The run's earlier pending request is superseded in the same transaction as the insert.
@@ -225,7 +230,8 @@ async function decideOn(db: Queryable, input: ApprovalDecisionInput): Promise<bo
   const decidedAt = input.decidedAt ?? new Date().toISOString();
   const result = await db.query(
     `UPDATE approval_requests
-        SET status = $1, decided_by_user_id = $2, decided_by = $3, decided_at = $4, reason = $5, edits_json = $6, edited_fields_json = $7, updated_at = $4
+        SET status = $1, decided_by_user_id = $2, decided_by = $3, decided_at = $4, reason = $5, edits_json = $6, edited_fields_json = $7, updated_at = $4,
+            decided_by_api_key_id = $9
       WHERE id = $8 AND status = 'pending'`,
     [
       input.status,
@@ -235,7 +241,8 @@ async function decideOn(db: Queryable, input: ApprovalDecisionInput): Promise<bo
       input.reason ?? null,
       input.edits ? JSON.stringify(input.edits) : null,
       JSON.stringify(input.editedFields ?? []),
-      input.id
+      input.id,
+      input.decidedByApiKeyId ?? null
     ]
   );
   return (result.rowCount ?? 0) > 0;
@@ -244,7 +251,7 @@ async function decideOn(db: Queryable, input: ApprovalDecisionInput): Promise<bo
 async function reopenOn(db: Queryable, id: string): Promise<boolean> {
   const result = await db.query(
     `UPDATE approval_requests
-        SET status = 'pending', decided_by_user_id = NULL, decided_by = NULL, decided_at = NULL, reason = NULL,
+        SET status = 'pending', decided_by_user_id = NULL, decided_by_api_key_id = NULL, decided_by = NULL, decided_at = NULL, reason = NULL,
             edits_json = NULL, edited_fields_json = NULL, updated_at = $1
       WHERE id = $2 AND status IN ('approved', 'rejected', 'timed_out')`,
     [new Date().toISOString(), id]

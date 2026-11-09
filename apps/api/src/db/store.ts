@@ -115,6 +115,36 @@ export type GateCaseDecisionRecordInput = Parameters<Store["decideGateCaseReques
 
 /** Phase 13.1 — the claim a queued run's writes are fenced on. */
 /** 13.2 (v61) — how a sign-in session was issued (`sessions.auth_method`; null on rows from before v61). */
+/** 13.2 (v62) — `users.kind`: a person, or a service account (no password, signs in only with API keys). */
+export type StoredUserKind = "human" | "service";
+
+/** A user row as the store reads it (the password hash included). */
+export interface StoredUser {
+  id: string;
+  email: string;
+  passwordHash: string;
+  role: string;
+  kind: StoredUserKind;
+  /** Service accounts: what the account is for. */
+  description: string | null;
+  /** Service accounts: the admin who created it (kept as text; deleting that admin leaves the account working). */
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A user row without the password hash (listings). */
+export type StoredUserSummary = Omit<StoredUser, "passwordHash">;
+
+/** 13.2 — a new service account: stored with kind `service` and an unusable password hash. */
+export interface ServiceAccountCreate {
+  id: string;
+  email: string;
+  role: string;
+  description: string | null;
+  createdBy: string | null;
+}
+
 export type SessionAuthMethod = "password" | "oidc" | "saml" | "ldap" | "break_glass";
 
 /** 13.2 (v61) — why a session ended (`sessions.ended_reason`; null while live, and on rows revoked before v61). */
@@ -353,6 +383,12 @@ export type McpGatewayApprovalCreateResult =
  * were requested, whatever the history retention, so the table and its argument previews never grow without bound.
  */
 export const MCP_GATEWAY_APPROVAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The WHERE clause of a user listing by kind: anything but 'human' lists as a service account, as storedUserFromRow reads it. */
+export function userKindWhere(kind: StoredUserKind | undefined): string {
+  if (!kind) return "";
+  return kind === "human" ? "WHERE kind = 'human'" : "WHERE kind <> 'human'";
+}
 
 /** The cutoff for `MCP_GATEWAY_APPROVAL_RETENTION_MS` at `now`. */
 export function mcpGatewayApprovalRetentionCutoff(now: string): string {
@@ -1402,23 +1438,14 @@ export interface Store extends AiGatewayStore {
 
   // ---- Users, sessions, API keys, MFA and SSO identities
 
+  /** Every user row, service accounts included (first-run bootstrap only asks whether any exists). */
   countUsers(): Promise<number>;
-  getUserByEmail(email: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null>;
-  getUserById(id: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null>;
+  getUserByEmail(email: string): Promise<StoredUser | null>;
+  getUserById(id: string): Promise<StoredUser | null>;
+  /**
+   * Inserts or updates a user. An insert is a person (`kind` human); an update never changes the kind, description or
+   * creator.
+   */
   saveUser(input: {
     id: string;
     email: string;
@@ -1431,13 +1458,15 @@ export interface Store extends AiGatewayStore {
     createdAt: string;
     updatedAt: string;
   }>;
-  listUsers(): Promise<Array<{
-    id: string;
-    email: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  }>>;
+  /** Users, newest first; `kind` keeps only people or only service accounts (default: both). */
+  listUsers(options?: { kind?: StoredUserKind }): Promise<StoredUserSummary[]>;
+  /**
+   * 13.2 — creates a service account (kind `service`, the unusable password hash `!`). Null when a user with the
+   * email exists.
+   */
+  createServiceAccount(input: ServiceAccountCreate): Promise<StoredUserSummary | null>;
+  /** 13.2 — changes a service account's role and/or description; null when no service account has the id. */
+  updateServiceAccount(id: string, patch: { role?: string; description?: string | null }): Promise<StoredUserSummary | null>;
   /**
    * Roadmap 7.3 — a deployment-level invite: a pending user (an unusable password, so it cannot sign in with one) and
    * its one-time invite, written together. An email whose user still has an unaccepted invite (pending) is invited
@@ -1456,8 +1485,8 @@ export interface Store extends AiGatewayStore {
   /** Marks the user's unaccepted invites accepted (the user signed in another way, for example SSO). */
   closeUserInvites(userId: string, now: string): Promise<number>;
   /** Roadmap 7.3 — one page of listUsers' rows (newest first, id tiebreak) and the number of users. */
-  listUsersPage(options: { limit: number; offset: number }): Promise<{
-    items: Array<{ id: string; email: string; role: string; createdAt: string; updatedAt: string }>;
+  listUsersPage(options: { limit: number; offset: number; kind?: StoredUserKind }): Promise<{
+    items: StoredUserSummary[];
     total: number;
   }>;
   updateUserRole(id: string, role: string): Promise<boolean>;
@@ -2027,6 +2056,8 @@ export interface Store extends AiGatewayStore {
     id: string;
     status: "approved" | "rejected" | "timed_out" | "canceled";
     decidedByUserId?: string | null;
+    /** 13.2 — the API key that decided, when one did. */
+    decidedByApiKeyId?: string | null;
     decidedBy?: string | null;
     reason?: string | null;
     edits?: Record<string, unknown> | null;

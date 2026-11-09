@@ -13,6 +13,7 @@ import crypto from "node:crypto";
 import net from "node:net";
 import type { LoginSession, SessionAuthMethod, SessionEndReason, Store } from "../db/store.js";
 import type { SafeUser } from "./auth-service.js";
+import type { KeyScope } from "./key-scopes.js";
 
 export type { LoginSession, SessionAuthMethod, SessionEndReason };
 
@@ -57,7 +58,18 @@ export interface IssuedSession {
 /** What the auth layer resolved for one request. */
 export type RequestAuthContext =
   | { credential: "session"; user: SafeUser; session: LoginSession }
-  | { credential: "api_key"; user: SafeUser; apiKeyId: string; keyScopes: string[] };
+  | {
+      credential: "api_key";
+      /** The key's owner as the key acts: role capped by the key's scope, `projectScope` set when it lists projects. */
+      user: SafeUser;
+      apiKeyId: string;
+      /** The scopes as stored. */
+      keyScopes: string[];
+      /** 13.2 — the parsed scope (key-scopes.ts). */
+      keyScope: KeyScope;
+      /** 13.2 — the key belongs to a service account. */
+      serviceAccount: boolean;
+    };
 
 /** Where the service reports housekeeping failures it carries on from (pino's `warn(object, message)` shape). */
 export interface SessionServiceLogger {
@@ -173,15 +185,16 @@ export class SessionService {
     return lookup;
   }
 
-  /** Records what the auth layer resolved for this request (called by requireRole). */
+  /** Records what the auth layer resolved for this request (app.ts `resolveRequestAuth`). */
   setRequestAuth(request: object, context: RequestAuthContext): void {
     this.requestAuth.set(request, context);
   }
 
   /**
-   * What the auth layer resolved for this request, or undefined when it has not authenticated it. Only requireRole
-   * records it, so a check that finds undefined must deny: the request was authenticated another way (or not at
-   * all), not "nothing to check". The session row is the one read at the start of the request.
+   * What the auth layer resolved for this request, or undefined when it has not authenticated it. Only app.ts
+   * `resolveRequestAuth` records it (requireRole, requestIsAdmin and executeChannelFor go through it), so a check
+   * that finds undefined must deny: the request was authenticated another way (or not at all), not "nothing to
+   * check". The session row is the one read at the start of the request.
    */
   getRequestAuth(request: object): RequestAuthContext | undefined {
     return this.requestAuth.get(request);
