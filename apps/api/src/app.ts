@@ -183,6 +183,7 @@ import { TracingService, parseKeyValueList, parseTraceparent } from "./services/
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
+import { SubWorkflowSpendTracker, usageUserOf, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
@@ -268,6 +269,9 @@ import {
   guardedFetch,
   type CodeSandboxPlan,
   type OutboundGuardConfig,
+  type SubWorkflowAdmission,
+  type SubWorkflowAdmissionRequest,
+  type SubWorkflowUsage,
   type WorkflowExecutionDependencies
 } from "@ai-orchestrator/workflow-engine";
 import {
@@ -2181,6 +2185,18 @@ export async function createApp(
       if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
       runReleases.set(input.executionId, { channel, version: releaseVersion });
     }
+    // The model spend of the run's sub-workflows joins its usage row (a replay starts none).
+    const runSubWorkflowSpend =
+      input.executionId && !input.replay
+        ? subWorkflowSpend.start({
+            executionId: input.executionId,
+            workflowId: input.workflow.id,
+            workflowName: input.workflow.name ?? null,
+            projectId: input.workflow.projectId ?? null,
+            ...(typeof input.triggeredBy === "string" ? { triggeredBy: input.triggeredBy } : {}),
+            ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {})
+          })
+        : undefined;
     // Phase 15.6 — sampled for production capture: the run records like a "Record calls" run.
     const captureTicket =
       replayCapture && input.executionId
@@ -2299,6 +2315,14 @@ export async function createApp(
           // A replay never starts a sub-workflow (Execute Workflow nodes are stubbed).
           loadWorkflow: input.replay ? undefined : scoped.loadWorkflow,
           scopeSubWorkflow: input.replay ? undefined : modelScopedSubWorkflows(scoped.scopeSubWorkflow, runModelRegistry, runModelScope),
+          // A child is refused while a used-up block budget applies to this run (its earlier children counted).
+          ...(input.replay
+            ? {}
+            : {
+                admitSubWorkflow: async (child: Workflow, request: SubWorkflowAdmissionRequest) =>
+                  await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend)
+              }),
+          ...(runSubWorkflowSpend ? { onSubWorkflowUsage: async (usage: SubWorkflowUsage) => await runSubWorkflowSpend.report(usage) } : {}),
           // Phase 9.1 — built-in persistent vector store, limited to the
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
@@ -2372,7 +2396,9 @@ export async function createApp(
                 // 12.6 — and its client and toolset, so the resumed part's usage is charged to them.
                 ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {}),
                 // 12.7 — an eval run's resumed part still records its Content rules verdicts as eval traffic.
-                ...(input.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {})
+                ...(input.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
+                // Who the run's budgets are matched against, kept for the resumed part (not the approver).
+                budgetSubject: input.budgetSubject ?? (({ userEmail, userId }) => ({ userEmail, userId }))(runBudgetContext(input))
               })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
@@ -2735,6 +2761,8 @@ export async function createApp(
     gatewayUsage?: RunWorkflowExecutionInput["gatewayUsage"];
   }) => {
     if (input.result.status === "waiting_approval") {
+      // The resumed run is recorded apart: what the children spent so far is recorded now.
+      await subWorkflowSpend.take(input.executionId)?.closeDetached();
       app.log.info(
         {
           executionId: input.executionId,
@@ -2827,12 +2855,10 @@ export async function createApp(
         }
       }
       // 12.6 — a gateway call's run is the client's, also the part after an approval (whoever decided it).
-      const usageUser = input.gatewayUsage
-        ? { email: null, id: `mcp-client:${input.gatewayUsage.clientName}` }
-        : {
-            email: typeof input.triggeredBy === "string" && input.triggeredBy.includes("@") ? input.triggeredBy : null,
-            id: typeof input.triggeredBy === "string" && !input.triggeredBy.includes("@") ? input.triggeredBy : null
-          };
+      const usageUser = usageUserOf(input.triggeredBy, input.gatewayUsage);
+      // The run's sub-workflows' spend joins its row; a child that ends later is recorded on its own.
+      const runSubWorkflowSpend = subWorkflowSpend.take(input.executionId);
+      const subWorkflowTelemetry = runSubWorkflowSpend?.closeIntoRun() ?? [];
       const usageResult = await usageService.recordExecution({
         executionId: input.executionId,
         workflowId: input.workflow.id,
@@ -2845,8 +2871,21 @@ export async function createApp(
         status: input.result.status,
         durationMs: toDurationMs(input.result.startedAt, input.result.completedAt) ?? 0,
         nodeResults: nodeOutputs,
-        ...(input.liveModelCalls ? { liveModelCalls: input.liveModelCalls } : {})
-      });
+        ...(input.liveModelCalls ? { liveModelCalls: input.liveModelCalls } : {}),
+        ...(subWorkflowTelemetry.length > 0 ? { subWorkflowTelemetry } : {})
+      })
+        .catch((error: unknown) => {
+          // The run's row failed: its sub-workflows' spend was in it, and is lost with the run's own.
+          if (subWorkflowTelemetry.length > 0) {
+            const lost = usageService.totalTelemetry(subWorkflowTelemetry);
+            app.log.warn(
+              { executionId: input.executionId, workflowId: input.workflow.id, costUsd: lost.costUsd, totalTokens: lost.totalTokens },
+              "A run's usage row was not written; its sub-workflows' spend is not recorded"
+            );
+          }
+          throw error;
+        })
+        .finally(() => runSubWorkflowSpend?.recorded());
 
       // Phase 8.3 — fire budget alerts on threshold crossings. Debounced per
       // (budget, period, severity) so users don't get spammed. Phase 15.1 — a
@@ -3338,6 +3377,11 @@ export async function createApp(
    * signed-in user, else the trigger's name as usage records it) and, for a gateway call's run, the client and the
    * toolset's project.
    */
+  /** A run's budget user from its trigger's name (paused states written before the subject was kept). */
+  const budgetSubjectOf = (triggeredBy: string | undefined): { userEmail: string | null; userId: string | null } => {
+    const user = usageUserOf(triggeredBy, undefined);
+    return { userEmail: user.email, userId: user.id };
+  };
   const runBudgetContext = (run: Pick<DispatchedRunInput, "workflow" | "triggeredBy" | "policyActor" | "gatewayUsage">): BudgetCheckContext => {
     const by = typeof run.triggeredBy === "string" ? run.triggeredBy : null;
     return {
@@ -3349,6 +3393,48 @@ export async function createApp(
         ? { client: { id: run.gatewayUsage.clientId, name: run.gatewayUsage.clientName }, toolsetProjectId: run.gatewayUsage.toolsetProjectId }
         : {})
     };
+  };
+  /**
+   * A sub-workflow (Execute Workflow, Workflow Tool) is refused while a used-up `block` budget applies to its run:
+   * matched as the run was admitted (the top-level run's workflow, project and client, and the user who started it,
+   * also after an approval: not the approver), counting what the run's earlier children spent and a reservation for
+   * each child still running beside it (sub-workflow-spend.ts). The check and the child's reservation are one step
+   * per execution (`admitIf`), so children admitted at once cannot together pass the cap. Not for the runs that are
+   * never refused (golden-run replays, eval runs, resumed or not). With no block budget no usage is read and every
+   * child starts. Returns the child's admission, settled when it stops running.
+   */
+  const admitSubWorkflowBudget = async (
+    run: Pick<RunWorkflowExecutionInput, "workflow" | "triggerType" | "triggeredBy" | "policyActor" | "gatewayUsage" | "guardRunSource" | "budgetSubject">,
+    child: Workflow,
+    request: SubWorkflowAdmissionRequest,
+    spend: RunSubWorkflowSpend | undefined
+  ): Promise<SubWorkflowAdmission | void> => {
+    const exempt = Boolean(run.triggerType && (BUDGET_EXEMPT_TRIGGER_TYPES.has(run.triggerType) || run.triggerType === "eval")) || run.guardRunSource === "eval";
+    if (!exempt) {
+      const ctx: BudgetCheckContext = { ...runBudgetContext(run), ...(run.budgetSubject ?? {}) };
+      const notStarted = (reason: string) => new Error(`Sub-workflow '${child.name}' was not started: ${reason}`);
+      const refusal: { blocked: BudgetExceededError | null } = { blocked: null };
+      const fits = async (pending?: () => Spend): Promise<boolean> => {
+        if (!(await budgetService.appliesBlock(ctx))) return true;
+        refusal.blocked = await budgetService.checkBlock(ctx, pending);
+        return !refusal.blocked;
+      };
+      let admission: SubWorkflowAdmission | undefined;
+      try {
+        if (spend) admission = await spend.admitIf(request, fits);
+        else await fits();
+      } catch (error) {
+        throw notStarted(error instanceof Error ? error.message : String(error));
+      }
+      const blocked = refusal.blocked;
+      if (blocked) {
+        blocked.run = { workflowId: run.workflow.id, projectId: run.workflow.projectId ?? null, triggerType: "sub_workflow" };
+        await noteRefusedRun(blocked, { subWorkflowId: child.id });
+        throw notStarted(blocked.message);
+      }
+      return admission;
+    }
+    return spend?.admit(request);
   };
   /**
    * 12.6 (D8) — a used-up `block` budget refuses every run a trigger starts, not only `POST /api/workflows/:id/execute`:
@@ -3384,14 +3470,23 @@ export async function createApp(
     }
   };
   const noteRefusedHttpRun = async (error: BudgetExceededError, request: FastifyRequest): Promise<void> => {
+    await noteRefusedRun(error, { url: request.url });
+  };
+  /**
+   * A run (or a sub-workflow, trigger type `sub_workflow`) a budget refused: logged and audited as `budget.run_refused`
+   * once per workflow, trigger type, budget and period on this instance.
+   */
+  const noteRefusedRun = async (error: BudgetExceededError, details: { url?: string; subWorkflowId?: string }): Promise<void> => {
     if (!error.run) return;
     const key = JSON.stringify([error.run.workflowId, error.run.triggerType, error.budget.id, error.periodStart]);
     if (refusedRunsNoted.has(key)) return;
     if (refusedRunsNoted.size >= 10_000) refusedRunsNoted.clear();
     refusedRunsNoted.add(key);
     app.log.warn(
-      { workflowId: error.run.workflowId, triggerType: error.run.triggerType, budgetId: error.budget.id, periodStart: error.periodStart, url: request.url },
-      "A budget refused a run (HTTP 402); later refusals this period are not logged again"
+      { workflowId: error.run.workflowId, triggerType: error.run.triggerType, budgetId: error.budget.id, periodStart: error.periodStart, ...details },
+      error.run.triggerType === "sub_workflow"
+        ? "A budget refused a sub-workflow; later refusals this period are not logged again"
+        : "A budget refused a run (HTTP 402); later refusals this period are not logged again"
     );
     try {
       await auditService.record({
@@ -3405,6 +3500,7 @@ export async function createApp(
         projectId: error.run.projectId,
         metadata: {
           triggerType: error.run.triggerType,
+          ...(details.subWorkflowId ? { subWorkflowId: details.subWorkflowId } : {}),
           budgetId: error.budget.id,
           budgetName: error.budget.name,
           period: error.budget.period,
@@ -4694,6 +4790,11 @@ export async function createApp(
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
   });
   const budgetService = new BudgetService(store);
+  const subWorkflowSpend = new SubWorkflowSpendTracker({
+    usageService,
+    budgetService,
+    logger: { warn: (fields, message) => app.log.warn(fields, message) }
+  });
   budgetService.setLogger({
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
@@ -4911,6 +5012,10 @@ export async function createApp(
   const abandonQueueStoppedRun = (executionId: string, workflowId: string, job: QueueJobContext) => {
     runReleases.delete(executionId);
     dropCapture(executionId, "skipped_not_stored");
+    // The run leaves no usage row; what its sub-workflows spent is still recorded.
+    subWorkflowSpend.abandon(executionId, "stopped by the queue").catch((error: unknown) => {
+      app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record a stopped run's sub-workflow spend");
+    });
     app.log.warn({ executionId, workflowId, reason: String(job.signal.reason) }, "Queued run stopped by the queue");
   };
 
@@ -5033,6 +5138,8 @@ export async function createApp(
           ...(gatewayGuard ? { gatewayGuard } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           ...(state.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
+          // Sub-workflows the resumed part starts are checked against the budgets of the user who started the run.
+          budgetSubject: state.budgetSubject ?? budgetSubjectOf(pending.triggeredBy ?? undefined),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
@@ -5066,8 +5173,16 @@ export async function createApp(
         });
         return result;
       } catch (error) {
-        // Stopped by the queue: the decision stands and the queue's policy decides who resumes it.
-        if (queueJob?.signal.aborted) throw error;
+        // Stopped by the queue: the decision stands and the queue's policy decides who resumes it. What this attempt's
+        // sub-workflows spent is recorded now (the next attempt starts its own).
+        if (queueJob?.signal.aborted) {
+          await subWorkflowSpend.abandon(job.executionId, "the resume was stopped by the queue").catch((spendError: unknown) => {
+            app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a stopped resume's sub-workflow spend");
+          });
+          throw error;
+        }
+        // What the failed resume's sub-workflows spent is still recorded.
+        await subWorkflowSpend.abandon(job.executionId, "the resume failed");
         // The decision is kept for a new try: the run waits again and the request is pending again.
         await approvalService.reopenAfterFailedResume(job);
         throw error;
