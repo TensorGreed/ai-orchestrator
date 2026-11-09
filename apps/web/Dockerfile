@@ -36,7 +36,7 @@ COPY packages/shared packages/shared
 RUN pnpm --filter @ai-orchestrator/web build
 
 # ---------- runtime stage ----------
-FROM nginx:1.30-alpine-slim@sha256:dede8895648b461178c3bc604f7eed4423efe5220b2c4d839f5eb3d34ac3f8f7 AS runtime
+FROM nginx:1.31-alpine-slim@sha256:9c68ad4f28e7dee4b9484a7859bf451da39ef661bcd038ef62e87593fcd91c86 AS runtime
 # zlib from the Alpine repository: the base image ships 1.3.2-r1, affected by
 # CVE-2026-4738 (critical, fixed in 1.4-r0). Drop once the pinned base has it.
 RUN apk upgrade --no-cache zlib
