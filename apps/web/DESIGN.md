@@ -8,7 +8,7 @@ when in doubt about how something should look.
 
 ## Why
 
-L2M is an agent-native workflow runtime, but the old UI reads as an n8n clone: a left rail
+L2M is an agent-native workflow runtime, but the old UI reads as a generic node-graph automation tool: a left rail
 of text buttons, a top bar, a free-drag grid canvas of rectangular nodes, agent attachments
 dangling below as sub-nodes, and a three-pane Input | Parameters | Output modal. The
 revamp keeps the same functionality while making the product's real difference, the agent
