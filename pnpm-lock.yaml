@@ -128,7 +128,7 @@ importers:
   apps/vscode-l2m-agent:
     devDependencies:
       '@types/vscode':
-        specifier: ^1.144.0
+        specifier: ^1.93.0
         version: 1.145.0
       '@vscode/vsce':
         specifier: ^3.2.1
