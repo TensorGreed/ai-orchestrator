@@ -54,8 +54,14 @@ describe("whole-answer checks on /v1 answers", () => {
     expect(await checkAiGatewayAnswer(scope, { content: '{"status":"ok"}', toolCalls: [] }, true)).toEqual({ action: "allow" });
   });
 
-  it("stream: buffer on a rule buffers the answer; without it the answer streams in chunks", () => {
-    expect(outputGuardMode([schemaRule()])).toBe("chunked");
+  it("a blocking whole-answer check buffers the answer on its own; a shadow or allowing one streams in chunks", () => {
+    expect(outputGuardMode([schemaRule()])).toBe("buffered");
     expect(outputGuardMode([schemaRule("buffer")])).toBe("buffered");
+    const shadow = resolved({
+      channels: { final_output: { detectors: [{ id: "output.schema", threshold: 0.5, options: { schema: SCHEMA } }], actions: { schema_violation: { action: "block", shadow: true } }, defaultAction: { action: "allow" } } }
+    } as never);
+    expect(outputGuardMode([shadow])).toBe("chunked");
+    const safetyOnly = resolved({ channels: { final_output: { detectors: [{ id: "output.safety", threshold: 0.5 }], actions: {}, defaultAction: { action: "block" } } } } as never);
+    expect(outputGuardMode([safetyOnly])).toBe("chunked");
   });
 });

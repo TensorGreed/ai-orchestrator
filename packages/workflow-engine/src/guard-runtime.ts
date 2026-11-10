@@ -20,6 +20,8 @@ import {
   guardVerdictMemoKey,
   hashGuardProfile,
   profilesUseGrounding,
+  isRetrievalTool,
+  OUTPUT_GROUNDING_DETECTOR_ID,
   isMemoisableVerdict,
   mergeGuardProfileOverride,
   PROMPT_HARDENING_TEXT,
@@ -685,6 +687,11 @@ export async function createAgentGuardSession(input: {
   // Phase 12 coverage — grounding sources for the answer: upstream documents plus this run's tool results, kept only when checked.
   const groundingChannels = new Set<GuardChannel>((["final_output", "model_output"] as GuardChannel[]).filter((channel) => profilesUseGrounding(profiles.map((entry) => entry.profile), channel)));
   const toolSources: GuardSource[] = [];
+  // Only retrieval tools' answers count as sources unless a grounding rule asks for all tool results: a web fetch or
+  // search can echo anything, so its result would "ground" any claim.
+  const allToolSources = profiles.some((entry) =>
+    Object.values(entry.profile.channels).some((config) => config?.detectors.some((detector) => detector.id === OUTPUT_GROUNDING_DETECTOR_ID && detector.options.toolSources === "all"))
+  );
   const sourcesFor = (channel: GuardChannel): GuardSource[] | undefined => {
     if (!groundingChannels.has(channel)) return undefined;
     return [...(input.groundingSources?.() ?? []), ...toolSources];
@@ -775,7 +782,7 @@ export async function createAgentGuardSession(input: {
         verdicts: result.verdicts
       };
       verdictLog.push(entry);
-      if (check.channel === "tool_result" && groundingChannels.size > 0 && result.action !== "block" && toolSources.length < 50) {
+      if (check.channel === "tool_result" && groundingChannels.size > 0 && result.action !== "block" && toolSources.length < 50 && (allToolSources || isRetrievalTool(tool))) {
         const content = result.transformed ? result.content : check.content;
         toolSources.push({ id: `tool:${check.iteration}:${toolSources.length + 1}`, text: typeof content === "string" ? content : JSON.stringify(content ?? "") });
       }

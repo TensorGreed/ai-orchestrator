@@ -19,9 +19,10 @@
  * (`streamReleaseLength`), so a match still forming at the end of the text is not sent before it can be seen. A block
  * cuts the stream. Those boundary checks record nothing; the full answer is checked once more at the end and recorded
  * (the audit check), and only then does the tail go out. Whole-answer checks (a JSON schema, grounding) skip the
- * boundary checks and run in the audit check; a rule with `stream: "buffer"` makes the answer `buffered` instead.
+ * boundary checks; one that can block makes the answer `buffered`, and so does any rule with `stream: "buffer"`.
+ * Checks that call a model do not run here yet: rule sets bound to AI route sets or clients cannot use them.
  */
-import { channelRequestsBufferedStream, type GuardChannel, type ProvenanceLabel } from "@ai-orchestrator/guard-sdk";
+import { channelRequestsBufferedStream, profileBlocksOnWholeAnswer, type GuardChannel, type ProvenanceLabel } from "@ai-orchestrator/guard-sdk";
 import { providerDestinationRef } from "@ai-orchestrator/provider-sdk";
 import type { DataLabels, LLMProviderConfig, McpToolPolicySubject, SecretReference } from "@ai-orchestrator/shared";
 import {
@@ -48,6 +49,9 @@ export function outputGuardMode(stack: ReadonlyArray<ResolvedGuardProfile>): AiG
     checked = true;
     // Phase 12 coverage — a rule that asks for it (`stream: "buffer"`) gets the whole answer checked before any is sent.
     if (channelRequestsBufferedStream(channel)) return "buffered";
+    // A whole-answer check (schema, grounding) that blocks runs only on the complete answer: hold the stream back so
+    // a block stops the answer instead of cutting it off after most of it was sent.
+    if (profileBlocksOnWholeAnswer(profile, "final_output")) return "buffered";
     const rules = [channel.defaultAction, ...Object.values(channel.actions)];
     for (const rule of rules) {
       const shadow = rule.shadow ?? profile.shadow[rule.action] ?? false;

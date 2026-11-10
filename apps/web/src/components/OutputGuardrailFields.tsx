@@ -6,7 +6,8 @@
 
 import { useState } from "react";
 import { CONTENT_SAFETY_CATEGORY_VALUES, OUTPUT_GUARDRAIL_CHECK_VALUES } from "@ai-orchestrator/shared";
-import { SAFETY_CATEGORY_LABELS, modelFields, textToTopics, topicsToText, withModelField, withOption } from "../lib/output-check-edit";
+import type { SecretListItem } from "../lib/api";
+import { SAFETY_CATEGORY_LABELS, modelFields, modelSecretId, textToTopics, topicsToText, withModelField, withModelSecret, withOption } from "../lib/output-check-edit";
 
 type Config = Record<string, unknown>;
 type SetConfig = (update: (current: Config) => Config) => void;
@@ -14,7 +15,7 @@ type SetConfig = (update: (current: Config) => Config) => void;
 const rec = (value: unknown): Record<string, unknown> => (value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
 
 export const OUTPUT_GUARDRAIL_CHECK_LABELS: Record<string, { label: string; help: string }> = {
-  no_pii: { label: "No personal data", help: "Emails, phone numbers, payment cards (checksum-verified), IBANs and national ids." },
+  no_pii: { label: "No personal data", help: "Emails, phone numbers, social security numbers and long digit runs (or, if chosen below, the content rules data detector)." },
   no_profanity: { label: "No profanity", help: "A short list of swear words." },
   must_contain_json: { label: "Contains JSON", help: "The answer holds a JSON value, bare or in a code block." },
   matches_schema: { label: "Matches a JSON Schema", help: "With a schema, the answer's JSON must match it; without one, the whole answer must be JSON." },
@@ -23,7 +24,7 @@ export const OUTPUT_GUARDRAIL_CHECK_LABELS: Record<string, { label: string; help
   grounding: { label: "Grounded in sources", help: "Each claim is supported by the documents of the retrieval steps before this node." }
 };
 
-export function OutputGuardrailFields({ config, setConfig }: { config: Config; setConfig: SetConfig }) {
+export function OutputGuardrailFields({ config, setConfig, secrets = [] }: { config: Config; setConfig: SetConfig; secrets?: SecretListItem[] }) {
   const checks = Array.isArray(config.checks) ? config.checks.map(String) : ["no_pii"];
   const topics = rec(config.topics);
   const safety = rec(config.safety);
@@ -76,8 +77,28 @@ export function OutputGuardrailFields({ config, setConfig }: { config: Config; s
             <span>{OUTPUT_GUARDRAIL_CHECK_LABELS[check]?.label ?? check}</span>
           </label>
         ))}
-        <div className="cfg-help">Personal data, schema, topic, safety and grounding findings are recorded as content rule events.</div>
+        <div className="cfg-help">Failed checks fail the node (or retry it); they are not recorded as content rule events.</div>
       </fieldset>
+
+      {checks.includes("no_pii") && (
+        <label className="cfg-field">
+          <span className="cfg-label">Personal data detection</span>
+          <select
+            className="cfg-input"
+            aria-label="Personal data detection"
+            value={config.piiDetection === "data_classes" ? "data_classes" : "patterns"}
+            onChange={(event) =>
+              setConfig((current) => {
+                const { piiDetection: _old, ...rest } = current;
+                return event.target.value === "data_classes" ? { ...rest, piiDetection: "data_classes" } : rest;
+              })
+            }
+          >
+            <option value="patterns">Patterns (emails, phone numbers, SSNs, any 13–16 digit run)</option>
+            <option value="data_classes">Data detector (checksum-verified cards, IBANs, national ids; international phone numbers)</option>
+          </select>
+        </label>
+      )}
 
       {checks.includes("matches_schema") && (
         <label className="cfg-field">
@@ -186,6 +207,20 @@ export function OutputGuardrailFields({ config, setConfig }: { config: Config; s
             value={checkModel.model}
             onChange={(event) => setConfig((current) => ({ ...withOption(current, "checkModel", withModelField(current.checkModel, "model", event.target.value)) }))}
           />
+          <select
+            className="cfg-input"
+            aria-label="Check model key"
+            value={modelSecretId(config.checkModel)}
+            disabled={!checkModel.providerId && !checkModel.model}
+            onChange={(event) => setConfig((current) => ({ ...withOption(current, "checkModel", withModelSecret(current.checkModel, event.target.value)) }))}
+          >
+            <option value="">The server&apos;s key for this provider</option>
+            {secrets.map((secret) => (
+              <option key={secret.id} value={secret.id}>
+                {secret.name}
+              </option>
+            ))}
+          </select>
           <span className="cfg-help">Each check is a model call, counted in the run&apos;s cost. Empty: the model of the step before this node.</span>
         </div>
       )}

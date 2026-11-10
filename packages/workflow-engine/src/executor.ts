@@ -707,6 +707,12 @@ interface NodeRuntimeContext {
   writeToolSession?: WriteToolCallSession;
   /** Phase 16 — this node's data labels while it runs (what it read, what it adds). */
   labelScope?: NodeLabelScope;
+  /**
+   * Phase 12 coverage — where content rule checks and Output Guardrail retries record their model calls, at call
+   * time. The run loop adds them to the node's result whether it succeeds, fails or pauses, so blocked or failed
+   * nodes are metered too. Absent: the node reports them on its output only.
+   */
+  checkUsage?: CheckModelUsage[];
   recordAttachmentUsage?: (usage: {
     attachedNodeId: string;
     usedByNodeId: string;
@@ -3922,8 +3928,26 @@ function checkModelServicesFor(
     ...(defaultModel ? { defaultModel } : {}),
     ...(dependencies.checkEmbeddingModel ? { checkEmbeddingModel: (target) => dependencies.checkEmbeddingModel!(target, { nodeId: node.id }) } : {}),
     guardPrompt: (provider, prompts) => guardModelPrompt(node, context, dependencies, provider, prompts, "content rules check"),
-    throwIfAborted: () => throwIfAborted(dependencies.abortSignal)
+    throwIfAborted: () => throwIfAborted(dependencies.abortSignal),
+    ...(dependencies.replayNodeHook ? { liveEmbeddings: false } : {})
   });
+}
+
+/** Phase 12 coverage — a check scope that records no rule events (the Output Guardrail is not a stored rule set). */
+function withoutEventRecording(scope: GuardEvalScope): GuardEvalScope {
+  const { onVerdict: _onVerdict, ...guard } = scope.guard;
+  return { ...scope, guard };
+}
+
+/** Phase 12 coverage — the check usage a node reports itself: none when the run loop records it (`context.checkUsage`). */
+function ownCheckUsage(context: Pick<NodeRuntimeContext, "checkUsage">, usage: readonly CheckModelUsage[]): readonly CheckModelUsage[] {
+  return context.checkUsage ? [] : usage;
+}
+
+/** Phase 12 coverage — a node output with the check usage the run loop recorded for it (outputs that are not objects stay as they are). */
+function withRecordedCheckUsage<T>(output: T, usage: readonly CheckModelUsage[]): T {
+  if (usage.length === 0 || !output || typeof output !== "object" || Array.isArray(output)) return output;
+  return withCheckUsage(output as Record<string, unknown>, usage) as T;
 }
 
 /** Phase 12 coverage — the check usage a node reports, after any it already carries. */
@@ -6469,7 +6493,7 @@ async function executeNodeHandler(
       // when the host does not take it through onSubWorkflowUsage.
       const childTelemetry: Record<string, unknown>[] = [];
       // Phase 12 coverage — model calls the agent's output checks made.
-      const agentCheckUsage: CheckModelUsage[] = [];
+      const agentCheckUsage: CheckModelUsage[] = context.checkUsage ?? [];
       if (workflowToolConfigs.length > 0) {
         const runWorkflowTool: WorkflowToolRunner = async (call) => {
           const failure = (error: string) => ({ ok: false, output: null, error, errorKind: "tool" as const });
@@ -7159,7 +7183,9 @@ async function executeNodeHandler(
           },
           // Phase 6.4 — what the workflows this agent called as tools spent on models, each priced by its own model.
           // Phase 12 coverage — and what its output checks spent.
-          ...(childTelemetry.length + agentCheckUsage.length > 0 ? { _childTelemetry: [...childTelemetry, ...agentCheckUsage.map((entry) => ({ ...entry }))] } : {}),
+          ...(childTelemetry.length + ownCheckUsage(context, agentCheckUsage).length > 0
+            ? { _childTelemetry: [...childTelemetry, ...ownCheckUsage(context, agentCheckUsage).map((entry) => ({ ...entry }))] }
+            : {}),
           // Phase: agent_clarify — when the agent paused to ask the user a
           // question, surface the clarification details on the node output
           // so workflow consumers (chat UI, /executions response, downstream
@@ -7337,7 +7363,7 @@ async function executeNodeHandler(
         context.workflow.edges.filter((edge) => edge.source === node.id && edge.sourceHandle).map((edge) => edge.sourceHandle as string)
       );
       // Phase 12 coverage — output checks here may ask a model (the upstream one by default); their usage is this node's.
-      const checkUsage: CheckModelUsage[] = [];
+      const checkUsage: CheckModelUsage[] = context.checkUsage ?? [];
       const upstreamModel = normalizeProvider(context.merged._provider);
       const guardStep = await executeGuardNodeStep({
         node,
@@ -7352,7 +7378,7 @@ async function executeNodeHandler(
         ...(context.labelScope ? { labelScope: context.labelScope } : {}),
         groundingSources: () => groundingSourcesFor(context.workflow, node.id, context.nodeOutputs)
       });
-      const output = withCheckUsage(guardStep, checkUsage);
+      const output = withCheckUsage(guardStep, ownCheckUsage(context, checkUsage));
       for (const protectionNode of protectionNodes) {
         await context.recordAttachmentUsage?.({
           attachedNodeId: protectionNode.id,
@@ -7385,15 +7411,14 @@ async function executeNodeHandler(
             ? ""
             : JSON.stringify(guardrailInput);
       const upstreamProvider = normalizeProvider(templateData._provider);
-      // Phase 12 coverage — PII, schema, topic, safety and grounding run as content rules: rule events, the
-      // data detector (Luhn-checked cards), Ajv schemas. Model-backed checks use the check model, else the upstream one.
+      // Phase 12 coverage — schema, topic, safety and grounding (and no_pii with `piiDetection: "data_classes"`) run on
+      // the content rules detectors, without recording rule events. Model-backed checks use the check model, else the
+      // upstream one.
       const ruleProfile = outputGuardrailProfile(guardrail);
-      const checkUsage: CheckModelUsage[] = [];
-      const ruleScope = ruleProfile
-        ? guardScopeFor(node, context, dependencies, "node", {
+      const checkUsage: CheckModelUsage[] = context.checkUsage ?? [];
+      const ruleScope = ruleProfile ? withoutEventRecording(guardScopeFor(node, context, dependencies, "node", {
             models: checkModelServicesFor(node, context, dependencies, checkUsage, guardrail.checkModel ?? upstreamProvider)
-          })
-        : undefined;
+          })) : undefined;
       const sources = ruleProfile && guardrail.checks.includes("grounding") ? groundingSourcesFor(context.workflow, node.id, context.nodeOutputs) : undefined;
       const containsJson = (text: string) => {
         try {
@@ -7492,7 +7517,7 @@ async function executeNodeHandler(
             passed: true
           }
         },
-        checkUsage
+        ownCheckUsage(context, checkUsage)
       );
     }
 
@@ -9072,6 +9097,8 @@ async function executeWorkflowRun(
     labelScope?: NodeLabelScope;
     /** 12.2 — what the request showed the approver (an approval endorses only that). */
     shown?: ApprovalShown;
+    /** Phase 12 coverage — model calls the node's checks made before it paused. */
+    checkUsage?: readonly CheckModelUsage[];
   }): Promise<WorkflowExecutionResult> => {
     // Phase 16 — the paused node's labels so far travel with the run, for the output it routes or decides on resume.
     if (pause.labelScope) labelState.set(pause.node.id, pause.labelScope.pendingLabels());
@@ -9087,7 +9114,8 @@ async function executeWorkflowRun(
       message: pause.approvalMessage,
       timeoutMinutes: pause.timeoutMinutes,
       ...(pause.handoff ? { handoff: pause.handoff.source } : {}),
-      ...(pause.details ? toRecord(toJsonSafeValue(pause.details)) : {})
+      ...(pause.details ? toRecord(toJsonSafeValue(pause.details)) : {}),
+      ...(pause.checkUsage && pause.checkUsage.length > 0 ? { _childTelemetry: pause.checkUsage.map((entry) => ({ ...entry })) } : {})
     };
     nodeResults.push({
       nodeId: pause.node.id,
@@ -9413,6 +9441,8 @@ async function executeWorkflowRun(
       input: nodeInput
     });
 
+    // Phase 12 coverage — model calls the node's content rule checks make, recorded as they happen (see checkUsage).
+    const nodeCheckUsage: CheckModelUsage[] = [];
     try {
       if (hasOwnRecordKey(pinnedData, node.id)) {
         const output = pinnedData[node.id];
@@ -9691,7 +9721,7 @@ async function executeWorkflowRun(
       // Phase 11.2 — the decision belongs to the node the run paused at, once.
       const resumeDecision = pendingResumeDecision?.nodeId === node.id ? pendingResumeDecision : undefined;
       pendingResumeDecision = undefined;
-      const { output, attempts } = await executeNodeWithRetry(
+      const { output: nodeOutput, attempts } = await executeNodeWithRetry(
         node,
         {
           globals,
@@ -9707,10 +9737,12 @@ async function executeWorkflowRun(
           writeToolCalls,
           ...(resumeDecision ? { resumeDecision } : {}),
           recordAttachmentUsage,
-          labelScope
+          labelScope,
+          checkUsage: nodeCheckUsage
         },
         dependencies
       );
+      const output = withRecordedCheckUsage(nodeOutput, nodeCheckUsage);
       // Single use: a granted approval covers the re-run of the node it paused, not later nodes or runs.
       approvedHandoffKeys.clear();
       writeToolCalls.clear();
@@ -9762,6 +9794,7 @@ async function executeWorkflowRun(
           handoff: error.request.handoff,
           ...(error.request.details ? { details: error.request.details } : {}),
           labelScope,
+          checkUsage: nodeCheckUsage,
           ...(error.shown ? { shown: error.shown } : {})
         });
       }
@@ -9827,7 +9860,9 @@ async function executeWorkflowRun(
         error: errorMessage,
         errorCategory: errorCategoryName,
         errorRemediation,
-        retryable: errorRetryable
+        retryable: errorRetryable,
+        // Phase 12 coverage — check and retry model calls of a failed node still count in the run's usage.
+        ...(nodeCheckUsage.length > 0 ? { output: withRecordedCheckUsage({}, nodeCheckUsage) } : {})
       };
 
       // Check if this node is inside a try_catch scope

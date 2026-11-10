@@ -733,6 +733,7 @@ Validates and optionally retries model output when guardrail checks fail: person
 | `checks` | `array<string>` | yes | — |
 | `onFail` | `string` | yes | `retry` \| `error` |
 | `inputKey` | `string` | no | — |
+| `piiDetection` | `string` | no | `patterns` \| `data_classes` |
 | `schema` | `object` | no | — |
 | `topics` | `object` | no | — |
 | `safety` | `object` | no | — |

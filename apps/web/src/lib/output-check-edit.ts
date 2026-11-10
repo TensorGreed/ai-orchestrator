@@ -90,6 +90,22 @@ export function withModelField(model: unknown, field: "providerId" | "model", va
   return record;
 }
 
+/** The stored secret a model option names (`secretRef.secretId`), or "". */
+export function modelSecretId(model: unknown): string {
+  const record = model && typeof model === "object" ? (model as Record<string, unknown>) : {};
+  const ref = record.secretRef && typeof record.secretRef === "object" ? (record.secretRef as Record<string, unknown>) : {};
+  return typeof ref.secretId === "string" ? ref.secretId : "";
+}
+
+/** A model option naming a stored secret (never a key); "" removes it. Undefined when no model is named. */
+export function withModelSecret(model: unknown, secretId: string): Record<string, unknown> | undefined {
+  const record = { ...(model && typeof model === "object" ? (model as Record<string, unknown>) : {}) };
+  if (secretId) record.secretRef = { secretId };
+  else delete record.secretRef;
+  if (!record.providerId && !record.model) return undefined;
+  return record;
+}
+
 /** Set or drop one option; `undefined`, empty strings and empty lists drop it. */
 export function withOption(options: Record<string, unknown>, key: string, value: unknown): Record<string, unknown> {
   const next = { ...options };

@@ -132,18 +132,34 @@ describe("Output Guardrail: original checks keep their behaviour", () => {
 });
 
 describe("Output Guardrail: rule checks", () => {
-  it("no_pii uses the data detector: Luhn-checked cards, emails; random digits pass", async () => {
-    expect((await runGuardrail("Order 1234 5678 9012 3456 is confirmed.", { checks: ["no_pii"] })).rail?.status).toBe("success");
-    expect((await runGuardrail("Card 4111 1111 1111 1111 on file.", { checks: ["no_pii"] })).rail?.error).toMatch(/^Output guardrail checks failed: no_pii \(block: sensitive_data\/card_number/);
-    expect((await runGuardrail("Mail me at jane@example.com", { checks: ["no_pii"] })).rail?.error).toContain("no_pii");
+  it("no_pii keeps its original patterns by default", async () => {
+    // The reviewer's table: the default is unchanged.
+    expect((await runGuardrail("Card 1234 5678 9012 3456", { checks: ["no_pii"] })).rail?.error).toBe("Output guardrail checks failed: no_pii");
+    expect((await runGuardrail("Order ref 12345678901234", { checks: ["no_pii"] })).rail?.error).toBe("Output guardrail checks failed: no_pii");
+    expect((await runGuardrail("SSN 123-45-6789", { checks: ["no_pii"] })).rail?.error).toBe("Output guardrail checks failed: no_pii");
+    expect((await runGuardrail("Contact +44 20 7946 0958", { checks: ["no_pii"] })).rail?.status).toBe("success");
+    expect((await runGuardrail("Mail me at jane@example.com", { checks: ["no_pii"] })).rail?.error).toBe("Output guardrail checks failed: no_pii");
   });
 
-  it("records rule events with placement node under the Output Guardrail rule set", async () => {
+  it("no_pii with piiDetection data_classes uses the data detector: Luhn-checked cards, emails; random digits pass", async () => {
+    const rail = { checks: ["no_pii"], piiDetection: "data_classes" };
+    expect((await runGuardrail("Order 1234 5678 9012 3456 is confirmed.", rail)).rail?.status).toBe("success");
+    expect((await runGuardrail("Card 4111 1111 1111 1111 on file.", rail)).rail?.error).toMatch(/^Output guardrail checks failed: no_pii \(block: sensitive_data\/card_number/);
+    expect((await runGuardrail("Mail me at jane@example.com", rail)).rail?.error).toContain("no_pii");
+  });
+
+  it("records no rule events, clean or not (it is not a stored rule set)", async () => {
     const harness = guardDeps();
-    await runGuardrail("Mail me at jane@example.com", { checks: ["no_pii"] }, { guard: harness.guard });
-    expect(harness.events).toHaveLength(1);
-    expect(harness.events[0]).toMatchObject({ nodeId: "rail", placement: "node", channel: "final_output", profile: { profileId: OUTPUT_GUARDRAIL_PROFILE_ID } });
-    expect(harness.events[0]!.verdict.findings[0]!.evidence).not.toContain("jane@example.com");
+    await runGuardrail("Mail me at jane@example.com", { checks: ["no_pii"], piiDetection: "data_classes" }, { guard: harness.guard });
+    await runGuardrail("A fine answer.", { checks: ["safety"] }, { guard: harness.guard });
+    await runGuardrail("I am going to kill you.", { checks: ["safety"] }, { guard: harness.guard });
+    expect(harness.events).toEqual([]);
+  });
+
+  it("matches_schema with a schema needs the whole answer to be JSON, as without one", async () => {
+    const schema = { type: "object", required: ["status"] };
+    expect((await runGuardrail('Here you go:\n```json\n{"status":"ok"}\n```', { checks: ["matches_schema"], schema })).rail?.error).toContain("matches_schema");
+    expect((await runGuardrail('{"status":"ok"}', { checks: ["matches_schema"], schema })).rail?.status).toBe("success");
   });
 
   it("matches_schema reads the node's schema (an object or JSON text)", async () => {
@@ -195,6 +211,31 @@ describe("Output Guardrail: rule checks", () => {
     const output = outputOf(retried, "rail");
     expect(output.answer).toBe("A calm answer.");
     expect((output._childTelemetry as CheckModelUsage[]).map((entry) => entry.purpose)).toEqual(["content_rules", "guardrail_retry", "content_rules"]);
+  });
+
+  it("a failed node still reports its check and retry calls, so they are metered", async () => {
+    const judge = new MockModel("mock", () => '{"violence":0.95}', { inputTokens: 40, outputTokens: 6 });
+    const rail = { checks: ["safety"], safety: { mode: "model" }, checkModel: { providerId: "mock", model: "judge-1" } };
+    const blocked = await runGuardrail("A violent answer.", rail, { models: [judge] });
+    expect(blocked.rail?.status).toBe("error");
+    expect((blocked.rail?.output as Record<string, unknown>)._childTelemetry).toEqual([
+      { providerId: "mock", model: "judge-1", usage: { inputTokens: 40, outputTokens: 6 }, llmCallCount: 1, latencyMs: 5, purpose: "content_rules", detectorId: "output.safety" }
+    ]);
+    // With retries that never pass: three rewrites and four checks, all reported on the failed node.
+    const wf = workflow(
+      [
+        node("in", "webhook_input"),
+        node("llm", "llm_call", { provider: { providerId: "writer", model: "w-1" } }),
+        node("rail", "output_guardrail", { ...rail, onFail: "retry" }),
+        node("out", "output")
+      ],
+      [{ source: "in", target: "llm" }, { source: "llm", target: "rail" }, { source: "rail", target: "out" }]
+    );
+    const writer = new MockModel("writer", () => "A violent answer.");
+    const failed = await executeWorkflow({ workflow: wf, executionId: "retry-fail", webhookPayload: { user_prompt: "hi" } }, deps({ models: [writer, judge] }));
+    const entries = (resultOf(failed, "rail")?.output as { _childTelemetry: CheckModelUsage[] })._childTelemetry;
+    expect(entries.filter((entry) => entry.purpose === "guardrail_retry")).toHaveLength(3);
+    expect(entries.filter((entry) => entry.purpose === "content_rules")).toHaveLength(4);
   });
 
   it("a model check that cannot get scores fails closed, naming the check", async () => {
@@ -389,6 +430,51 @@ describe("createGuardModelServices", () => {
     await expect(services.embed!({ model: { providerId: "nope", model: "x" }, texts: ["a"], detectorId: "output.topic" })).rejects.toThrow(/no embedding adapter/);
   });
 
+  it("passes the check's abort signal to the provider, refuses a call already timed out, and lets destination rules rewrite embedded text", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const chat: LLMProviderAdapter = {
+      definition: { id: "mock", label: "mock", supportsTools: false, configSchema: {} },
+      generate: async (_request, context) => ((seenSignal = context.signal), { content: "{}", toolCalls: [] })
+    };
+    const providers = new ProviderRegistry();
+    providers.register(chat);
+    const calls: string[][] = [];
+    const registry = new EmbeddingProviderRegistry();
+    registry.register(embedder(calls));
+    const run = new AbortController();
+    const services = createGuardModelServices({
+      providerRegistry: providers,
+      embeddingRegistry: registry,
+      providerContext: () => ({ resolveSecret: async () => undefined, signal: run.signal }),
+      usage: [],
+      defaultModel: { providerId: "mock", model: "m" },
+      guardPrompt: async (_provider, prompts) => ({ ...prompts, userPrompt: prompts.userPrompt.replace(/\S+@\S+/g, "[email]") })
+    });
+    const check = new AbortController();
+    await services.complete!({ system: "s", prompt: "p", detectorId: "output.safety", signal: check.signal });
+    expect(seenSignal).toBeDefined();
+    check.abort();
+    expect(seenSignal!.aborted).toBe(true);
+    await expect(services.complete!({ system: "s", prompt: "p", detectorId: "output.safety", signal: check.signal })).rejects.toThrow(/timed out/);
+    await services.embed!({ model: { providerId: "mock-embed", model: "e-1" }, texts: ["mail jane@example.com"], detectorId: "output.topic" });
+    expect(calls).toEqual([["mail [email]"]]);
+  });
+
+  it("a replay makes no live embedding calls", async () => {
+    const calls: string[][] = [];
+    const registry = new EmbeddingProviderRegistry();
+    registry.register(embedder(calls));
+    const services = createGuardModelServices({
+      providerRegistry: new ProviderRegistry(),
+      embeddingRegistry: registry,
+      providerContext: () => ({ resolveSecret: async () => undefined }),
+      usage: [],
+      liveEmbeddings: false
+    });
+    await expect(services.embed!({ model: { providerId: "mock-embed", model: "e-1" }, texts: ["a"], detectorId: "output.topic" })).rejects.toThrow(/replay cannot make live embedding calls/);
+    expect(calls).toEqual([]);
+  });
+
   it("a refused embedding model is never called", async () => {
     const calls: string[][] = [];
     const registry = new EmbeddingProviderRegistry();
@@ -441,9 +527,10 @@ describe("createGuardModelServices", () => {
 
 describe("readOutputGuardrailConfig / outputGuardrailProfile", () => {
   it("old configs map to the same checks; only rule checks build a rule set", () => {
-    expect(outputGuardrailProfile(readOutputGuardrailConfig({ checks: ["no_profanity", "must_contain_json", "matches_schema"] }))).toBeUndefined();
-    const profile = outputGuardrailProfile(readOutputGuardrailConfig({ checks: ["no_pii", "matches_schema"], schema: { type: "object" } }))!;
+    expect(outputGuardrailProfile(readOutputGuardrailConfig({ checks: ["no_profanity", "must_contain_json", "matches_schema", "no_pii"] }))).toBeUndefined();
+    const profile = outputGuardrailProfile(readOutputGuardrailConfig({ checks: ["no_pii", "matches_schema"], piiDetection: "data_classes", schema: { type: "object" } }))!;
     expect(profile.profile.channels.final_output!.detectors.map((entry) => entry.id)).toEqual(["dlp.patterns", "output.schema"]);
+    expect(profile.profile.channels.final_output!.detectors[1]!.options).toMatchObject({ extract: false });
     expect(() => readOutputGuardrailConfig({ checks: [], checkModel: { providerId: "" } })).toThrow(/check model/);
   });
 });
@@ -460,15 +547,36 @@ describe("agent grounding sources", () => {
     return created!;
   }
 
-  it("the run's tool results become sources for the final answer", async () => {
+  it("the run's retrieval tool results become sources for the final answer", async () => {
     const guard = await session();
     const answer = "The warehouse in Leeds ships parcels every Tuesday morning.";
     expect((await guard.hooks.check({ channel: "final_output", content: answer, labels: [], iteration: 1 })).outcome).toBe("allow");
     // Sources exist now, and the answer is not supported by them.
-    await guard.hooks.check({ channel: "tool_result", content: "Opening hours: 9 to 5 on weekdays.", labels: ["untrusted_external"], iteration: 1, tool: { name: "hours" } });
+    await guard.hooks.check({ channel: "tool_result", content: "Opening hours: 9 to 5 on weekdays.", labels: ["untrusted_external"], iteration: 1, tool: { name: "search_docs" } });
     expect((await guard.hooks.check({ channel: "final_output", content: answer, labels: [], iteration: 2 })).outcome).toBe("block");
-    await guard.hooks.check({ channel: "tool_result", content: "The Leeds warehouse ships parcels every Tuesday morning.", labels: ["untrusted_external"], iteration: 2, tool: { name: "ship" } });
+    await guard.hooks.check({ channel: "tool_result", content: "The Leeds warehouse ships parcels every Tuesday morning.", labels: ["untrusted_external"], iteration: 2, tool: { name: "knowledge_lookup" } });
     expect((await guard.hooks.check({ channel: "final_output", content: answer, labels: [], iteration: 3 })).outcome).toBe("allow");
+  });
+
+  it("other tools' results (web fetch, search) do not ground an answer unless the rule asks for all tool results", async () => {
+    const answer = "The warehouse in Leeds ships parcels every Tuesday morning.";
+    const echo = "The Leeds warehouse ships parcels every Tuesday morning.";
+    const guard = await session();
+    await guard.hooks.check({ channel: "tool_result", content: echo, labels: ["untrusted_external"], iteration: 1, tool: { name: "fetch_url" } });
+    await guard.hooks.check({ channel: "tool_result", content: echo, labels: ["untrusted_external"], iteration: 1, tool: { name: "web_search_docs" } });
+    expect((await guard.hooks.check({ channel: "final_output", content: answer, labels: [], iteration: 2 })).outcome).toBe("allow");
+    // allow: no sources at all yet, so the check finds nothing; a retrieval source that disagrees then blocks.
+    await guard.hooks.check({ channel: "tool_result", content: "Opening hours: 9 to 5 on weekdays.", labels: [], iteration: 2, tool: { name: "retrieve" } });
+    expect((await guard.hooks.check({ channel: "final_output", content: answer, labels: [], iteration: 3 })).outcome).toBe("block");
+
+    const all = resolved("all-tools", {
+      channels: { final_output: { detectors: [{ id: "output.grounding", threshold: 0.5, options: { toolSources: "all" } }], actions: {}, defaultAction: { action: "block" } } }
+    } as never);
+    const harness = guardDeps([all]);
+    const scope: GuardEvalScope = { guard: harness.guard, resolveSecret: async () => undefined, executionId: "x", workflowId: "wf", nodeId: "agent", placement: "agent" };
+    const open = (await createAgentGuardSession({ scope, protectionNodes: [], describeTool: () => undefined }))!;
+    await open.hooks.check({ channel: "tool_result", content: echo, labels: ["untrusted_external"], iteration: 1, tool: { name: "fetch_url" } });
+    expect((await open.hooks.check({ channel: "final_output", content: answer, labels: [], iteration: 2 })).outcome).toBe("allow");
   });
 
   it("upstream documents are read only when a rule set checks grounding", async () => {

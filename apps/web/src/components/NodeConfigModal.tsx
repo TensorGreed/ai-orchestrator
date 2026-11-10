@@ -6764,7 +6764,7 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
               placeholder="answer"
             />
-            <OutputGuardrailFields config={config} setConfig={setConfig} />
+            <OutputGuardrailFields config={config} setConfig={setConfig} secrets={availableSecrets} />
           </>
         );
       case "if_node":

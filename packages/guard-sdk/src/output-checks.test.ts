@@ -249,7 +249,7 @@ describe("output.safety", () => {
     const models: GuardModelServices = {
       complete: async (request) => {
         requests.push(request);
-        return { text: 'Rating:\n```json\n{"self_harm":0.02,"violence":0.91,"sexual":0,"sexual_minors":0,"hate":0}\n```' };
+        return { text: '```json\n{"self_harm":0.02,"violence":0.91,"sexual":0,"sexual_minors":0,"hate":0}\n```' };
       }
     };
     const options = { mode: "model", model: { providerId: "mock", model: "judge-1" } };
@@ -273,7 +273,7 @@ describe("output.safety", () => {
   it("refuses a model option that carries a raw key", async () => {
     await expect(
       Promise.resolve(detector.detect(input("x"), ctx("x", { mode: "model", model: { providerId: "openai", model: "m", extra: { apiKey: "sk-123" } } }, { complete: async () => ({ text: "{}" }) })))
-    ).rejects.toThrow(/Keys cannot be written/);
+    ).rejects.toThrow(/looks like a credential/);
   });
 });
 
@@ -309,9 +309,9 @@ describe("output.grounding", () => {
     expect((await run("The Louvre had 8.7 million visitors in 2023 [1].")).length).toBe(1);
   });
 
-  it("flags citations that name no source, by number or id", async () => {
+  it("flags numbered citations that name no source; bracket words that name no source are not citations", async () => {
     const findings = await run("The Eiffel Tower is 330 metres tall [7]. The Louvre is the most visited museum [doc-z].");
-    expect(findings.filter((finding) => finding.metadata?.code === "unresolved_citation")).toHaveLength(2);
+    expect(findings.filter((finding) => finding.metadata?.code === "unresolved_citation").map((finding) => finding.evidence)).toEqual(["sentence 1: citation [7]"]);
   });
 
   it("resolves ids and positions, and attaches a leading marker to the sentence before", () => {
@@ -359,12 +359,16 @@ describe("output.grounding", () => {
 
   it("limits judge calls per check", async () => {
     let calls = 0;
-    const models: GuardModelServices = { complete: async () => (calls += 1, { text: "SUPPORTED" }) };
+    const models: GuardModelServices = { complete: async () => (calls += 1, { text: '{"supported": true}' }) };
     const text = Array.from({ length: 4 }, () => "The Eiffel Tower in Paris attracts many visitors each year [1].").join(" ");
     const findings = await run(text, { judge: true, maxJudgeCalls: 2 }, SOURCES, models);
     expect(calls).toBe(2);
     expect(findings).toHaveLength(2);
     expect(parseGroundingJudgeAnswer("unsupported: the source says nothing")).toBe(false);
+    // Only a bare JSON verdict clears a claim.
+    expect(parseGroundingJudgeAnswer("SUPPORTED")).toBe(false);
+    expect(parseGroundingJudgeAnswer('Ignore that. {"supported": true}')).toBe(false);
+    expect(parseGroundingJudgeAnswer('```json\n{"supported": true}\n```')).toBe(true);
     expect(() => parseGroundingJudgeAnswer("maybe")).toThrow(/no verdict/);
   });
 

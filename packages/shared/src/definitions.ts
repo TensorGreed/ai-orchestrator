@@ -1328,7 +1328,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
         },
         onFail: { type: "string", enum: ["retry", "error"] },
         inputKey: { type: "string" },
-        /** Phase 12 coverage — the JSON Schema `matches_schema` validates against (without one it only parses JSON). */
+        /** Phase 12 coverage — how `no_pii` finds personal data: the original patterns (default) or the content rules data detector. */
+        piiDetection: { type: "string", enum: ["patterns", "data_classes"] },
+        /** Phase 12 coverage — the JSON Schema `matches_schema` validates the whole answer against (without one it only parses JSON). */
         schema: { type: "object" },
         /** Phase 12 coverage — `topic`: topics to deny, or the only ones allowed (a name, or { name, phrases }). */
         topics: { type: "object", properties: { deny: { type: "array" }, allow: { type: "array" } } },

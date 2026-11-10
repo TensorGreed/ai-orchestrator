@@ -35,7 +35,7 @@ import {
 import type { GuardEventFilters } from "./db/database.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
-import { GuardConflictError, GuardNotFoundError, GuardValidationError, type GuardFieldIssue, type GuardService } from "./services/guard-service.js";
+import { GuardConflictError, GuardNotFoundError, GuardValidationError, type GuardFieldIssue, type GuardSaveActor, type GuardService } from "./services/guard-service.js";
 import type { RunAccess } from "./run-access.js";
 import type { Store } from "./db/store.js";
 import { filterAsync } from "./async-array.js";
@@ -50,6 +50,8 @@ export interface GuardRoutesDeps {
   canAccessWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }, permission: "workflow:read" | "workflow:write") => Promise<boolean>;
   /** Project-level permission (memberships, then the global role); admins always pass. */
   canInProject: (user: SafeUser, projectId: string, permission: "workflow:read" | "workflow:write") => Promise<boolean>;
+  /** Phase 12 coverage — whether the user may use a stored secret in a run (a rule set's check model may name one). */
+  canUseSecret: (user: SafeUser, secretId: string) => Promise<boolean>;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
 }
 
@@ -145,6 +147,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     return { error: REVEAL_RULES_ADMIN_ONLY_MESSAGE };
   };
 
+  const saveActor = (user: SafeUser): GuardSaveActor => ({ admin: user.role === "admin", canUseSecret: async (secretId) => await deps.canUseSecret(user, secretId) });
+
   const forbidden = (reply: FastifyReply) => {
     reply.code(403);
     return { error: "Insufficient permissions for project" };
@@ -177,7 +181,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const refusedReveal = await refuseRevealRules(request, user, reply, parsed.data.document, createId, "create");
     if (refusedReveal) return refusedReveal;
     try {
-      const profile = await guard.createProfile(parsed.data, user.id);
+      const profile = await guard.createProfile(parsed.data, user.id, { actor: saveActor(user) });
       await deps.audit(request, user, { eventType: "guard.profile.created", category: "system", action: "create", resourceType: "guard_profile", resourceId: profile.id, metadata: { version: 1, hash: profile.hash } });
       reply.code(201);
       return { profile };
@@ -209,7 +213,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const refusedReveal = await refuseRevealRules(request, user, reply, document, importId, "import");
     if (refusedReveal) return refusedReveal;
     try {
-      const result = await guard.importProfile({ document: document as Record<string, unknown>, ...(str(body.note) ? { note: str(body.note) } : {}) }, user.id);
+      const result = await guard.importProfile({ document: document as Record<string, unknown>, ...(str(body.note) ? { note: str(body.note) } : {}) }, user.id, saveActor(user));
       await deps.audit(request, user, {
         eventType: "guard.profile.imported",
         category: "system",
@@ -255,7 +259,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const refusedReveal = await refuseRevealRules(request, user, reply, parsed.data.document, request.params.id, "update");
     if (refusedReveal) return refusedReveal;
     try {
-      const result = await guard.updateProfile(request.params.id, parsed.data, user.id);
+      const result = await guard.updateProfile(request.params.id, parsed.data, user.id, saveActor(user));
       if (result.changed) {
         await deps.audit(request, user, {
           eventType: "guard.profile.updated",

@@ -1,7 +1,7 @@
 import type { GuardDictionary } from "../profile";
 import { unsafeDictionaryPattern } from "../profile";
 import { clampScore, type DetectorContext, type GuardDetector, type GuardFinding, type GuardInput, type GuardSpan } from "../types";
-import { clipForModel, cosineSimilarity, guardModelRefIssue, guardModelRefOption, positiveNumber, requireEmbedding, unitNumber } from "./output-model";
+import { clipForModel, cosineSimilarity, guardModelRefIssue, guardModelRefOption, positiveNumber, requireEmbedding, timeoutOptionIssues, unitNumber } from "./output-model";
 import { plainView } from "./text-normalize";
 
 export const OUTPUT_TOPIC_DETECTOR_ID = "output.topic";
@@ -100,6 +100,7 @@ export function outputTopicOptionIssues(options: Record<string, unknown>, dictio
     const value = options[key];
     if (value !== undefined && (typeof value !== "number" || value < 0 || value > 1)) issues.push({ option: key, message: "Must be a number from 0 to 1" });
   }
+  issues.push(...timeoutOptionIssues(options));
   return issues;
 }
 
@@ -171,6 +172,7 @@ export function createOutputTopicDetector(): GuardDetector {
     description: "Topic limits: phrases (or, in semantic mode, embedding similarity) for topics the answer must avoid or stay within.",
     channels: ["model_output", "final_output", "response"],
     categories: ["off_topic"],
+    callsModel: (options) => options.mode === "semantic",
     async detect(_input: GuardInput, context: DetectorContext) {
       const options = context.options;
       const deny = readTopics(options.deny, "deny");
@@ -204,11 +206,12 @@ export function createOutputTopicDetector(): GuardDetector {
       if (options.mode === "semantic") {
         const model = guardModelRefOption(options.model, OUTPUT_TOPIC_DETECTOR_ID);
         const embed = requireEmbedding(context, OUTPUT_TOPIC_DETECTOR_ID);
-        const modelKey = model ? `${model.providerId}/${model.model}` : "default";
+        // Two endpoints may serve different models under one name: the endpoint is part of the key.
+        const modelKey = model ? `${model.providerId}/${model.baseUrl ?? ""}/${model.model}` : "default";
         const topicStrings = [...new Set([...deny, ...allow].flatMap(topicTexts))];
         const missing = topicStrings.filter((entry) => !vectors.has(`${modelKey}\u0000${entry}`));
         const request = [clipForModel(text, EMBED_CHARS), ...missing];
-        const answer = await embed({ ...(model ? { model } : {}), texts: request, detectorId: OUTPUT_TOPIC_DETECTOR_ID });
+        const answer = await embed({ ...(model ? { model } : {}), texts: request, detectorId: OUTPUT_TOPIC_DETECTOR_ID, ...(context.signal ? { signal: context.signal } : {}) });
         if (!Array.isArray(answer) || answer.length !== request.length) throw new Error(`${OUTPUT_TOPIC_DETECTOR_ID}: the embedding model returned ${Array.isArray(answer) ? answer.length : 0} vectors for ${request.length} texts`);
         missing.forEach((entry, index) => remember(`${modelKey}\u0000${entry}`, answer[index + 1]!));
         const textVector = answer[0]!;

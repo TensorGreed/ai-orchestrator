@@ -1,8 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { fetchSecrets, type SecretListItem } from "../lib/api";
 import {
   OUTPUT_CHECK_LABELS,
   SAFETY_CATEGORY_LABELS,
   modelFields,
+  modelSecretId,
+  withModelSecret,
   textToTopics,
   topicsToText,
   withModelField,
@@ -41,11 +44,11 @@ export function OutputCheckOptions({
       {(detectorId === "output.schema" || detectorId === "output.grounding") && (
         <label className="guard-check">
           <input type="checkbox" checked={buffered} onChange={(event) => onBuffered(event.target.checked)} />
-          <span>Check the whole answer before streaming any of it</span>
+          <span>Always check the whole answer before streaming any of it</span>
         </label>
       )}
       {(detectorId === "output.schema" || detectorId === "output.grounding") && !buffered && (
-        <p className="kb-subtle">Streamed answers are checked when they end; if this check fails then, the rest of the answer is withheld.</p>
+        <p className="kb-subtle">When this check blocks, a streamed AI gateway answer is held back until it is complete; otherwise it streams and is checked at the end.</p>
       )}
     </fieldset>
   );
@@ -88,7 +91,6 @@ function SchemaFields({ options, onChange }: { options: Record<string, unknown>;
 
 function TopicFields({ options, onChange }: { options: Record<string, unknown>; onChange: (options: Record<string, unknown>) => void }) {
   const semantic = options.mode === "semantic";
-  const model = modelFields(options.model);
   return (
     <>
       <label>
@@ -106,7 +108,8 @@ function TopicFields({ options, onChange }: { options: Record<string, unknown>; 
           <option value="semantic">Meaning (an embedding model; counted in the run's cost)</option>
         </select>
       </label>
-      {semantic && <ModelInputs label="Embedding model" value={model} onChange={(field, value) => onChange(withOption(options, "model", withModelField(options.model, field, value)))} />}
+      {semantic && <p className="kb-subtle">Not available on AI gateway routes yet.</p>}
+      {semantic && <ModelInputs label="Embedding model" model={options.model} onModel={(next) => onChange(withOption(options, "model", next))} />}
     </>
   );
 }
@@ -136,12 +139,9 @@ function SafetyFields({ options, onChange }: { options: Record<string, unknown>;
           <option value="model">A chat model (counted in the run's cost)</option>
         </select>
       </label>
+      {byModel && <p className="kb-subtle">Not available on AI gateway routes yet.</p>}
       {byModel && (
-        <ModelInputs
-          label="Chat model (empty: the model of the node being checked)"
-          value={modelFields(options.model)}
-          onChange={(field, value) => onChange(withOption(options, "model", withModelField(options.model, field, value)))}
-        />
+        <ModelInputs label="Chat model (empty: the model of the node being checked)" model={options.model} onModel={(next) => onChange(withOption(options, "model", next))} />
       )}
     </>
   );
@@ -175,16 +175,59 @@ function GroundingFields({ options, onChange }: { options: Record<string, unknow
         <input type="checkbox" checked={judge} onChange={(event) => onChange(withOption(options, "judge", event.target.checked ? true : undefined))} />
         <span>Ask a chat model about borderline sentences (counted in the run's cost)</span>
       </label>
+      <label className="guard-check">
+        <input type="checkbox" checked={options.toolSources === "all"} onChange={(event) => onChange(withOption(options, "toolSources", event.target.checked ? "all" : undefined))} />
+        <span>In agents, count every tool&apos;s results as sources (by default only retrieval tools; web results can say anything)</span>
+      </label>
     </>
   );
 }
 
-function ModelInputs({ label, value, onChange }: { label: string; value: { providerId: string; model: string }; onChange: (field: "providerId" | "model", value: string) => void }) {
+/** Stored secrets the model inputs offer (names only; keys never reach the browser). Loaded when a model input shows. */
+function useSecretList(): SecretListItem[] {
+  const [secrets, setSecrets] = useState<SecretListItem[]>([]);
+  useEffect(() => {
+    let live = true;
+    fetchSecrets()
+      .then((list) => live && setSecrets(Array.isArray(list) ? list : []))
+      .catch(() => live && setSecrets([]));
+    return () => {
+      live = false;
+    };
+  }, []);
+  return secrets;
+}
+
+export function ModelInputs({
+  label,
+  model,
+  onModel,
+  secrets
+}: {
+  label: string;
+  model: unknown;
+  onModel: (model: Record<string, unknown> | undefined) => void;
+  /** Absent: loaded here. */
+  secrets?: SecretListItem[];
+}) {
+  const value = modelFields(model);
+  const loaded = useSecretList();
+  const list = secrets ?? loaded;
+  const secretId = modelSecretId(model);
   return (
     <div className="guard-output-model" role="group" aria-label={label}>
       <span>{label}</span>
-      <input aria-label={`${label}: provider`} placeholder="Provider id (openai, azure_openai, ollama…)" value={value.providerId} onChange={(event) => onChange("providerId", event.target.value)} />
-      <input aria-label={`${label}: model`} placeholder="Model" value={value.model} onChange={(event) => onChange("model", event.target.value)} />
+      <input aria-label={`${label}: provider`} placeholder="Provider id (openai, azure_openai, ollama…)" value={value.providerId} onChange={(event) => onModel(withModelField(model, "providerId", event.target.value))} />
+      <input aria-label={`${label}: model`} placeholder="Model" value={value.model} onChange={(event) => onModel(withModelField(model, "model", event.target.value))} />
+      <select aria-label={`${label}: key`} value={secretId} disabled={!value.providerId && !value.model} onChange={(event) => onModel(withModelSecret(model, event.target.value))}>
+        <option value="">The server&apos;s key for this provider</option>
+        {list.map((secret) => (
+          <option key={secret.id} value={secret.id}>
+            {secret.name}
+          </option>
+        ))}
+        {secretId && !list.some((secret) => secret.id === secretId) && <option value={secretId}>{secretId}</option>}
+      </select>
     </div>
   );
 }

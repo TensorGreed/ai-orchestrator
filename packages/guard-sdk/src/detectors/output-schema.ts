@@ -1,6 +1,8 @@
-import type { ErrorObject } from "ajv";
+import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
+import formatsPlugin from "ajv-formats";
+import { unsafeDictionaryPattern } from "../profile";
 import type { DetectorContext, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
-import { compileJsonSchema } from "./argument-validation";
+import { DEFAULT_ARGUMENT_LIMITS, jsonLimitIssues, strictSchema } from "./argument-validation";
 import { positiveNumber } from "./output-model";
 import { locateValue } from "./path-guard";
 
@@ -10,10 +12,16 @@ export const OUTPUT_SCHEMA_DETECTOR_ID = "output.schema";
  * Phase 12 coverage — schema conformance of an answer. The answer is read as
  * JSON (the whole text, else a fenced ```json block, else the outermost
  * object or array in the text) and validated with Ajv against the JSON
- * Schema in `options.schema`; schemas are compiled once per schema text, with
- * the cache the tool argument check uses. Without a schema the check only
- * asks for JSON. It judges a complete answer, so a partial stream check
- * skips it.
+ * Schema in `options.schema`. Without a schema the check only asks for JSON.
+ * It judges a complete answer, so a partial stream check skips it.
+ *
+ * Answers are model output an attacker can steer, so validation is bounded:
+ * schemas are at most 64 KB and 32 levels deep, `$ref` stays inside the
+ * schema, `pattern`s that can backtrack catastrophically (nested or
+ * alternated quantifiers, backreferences, more than two unbounded
+ * quantifiers) are refused at save and at compile, `format`s are checked
+ * (an unknown format is refused), and the answer's JSON is held to size,
+ * depth and string-length limits before Ajv sees it.
  *
  * Options: `schema` (JSON Schema), `strict` (true: objects may not carry
  * properties the schema does not declare; default false), `extract` (false:
@@ -31,13 +39,135 @@ export interface OutputSchemaIssue {
 
 const DEFAULT_MAX_BYTES = 1_000_000;
 
+const MAX_SCHEMA_BYTES = 64 * 1024;
+const MAX_SCHEMA_DEPTH = 32;
+const MAX_PATTERN_LENGTH = 200;
+/** Longest string a pattern is run on: keeps even quadratic patterns cheap. */
+const MAX_PATTERNED_STRING = 5_000;
+const ANSWER_LIMITS = { ...DEFAULT_ARGUMENT_LIMITS, maxStringLength: 100_000 };
+
+/** Why a schema `pattern` is refused, or undefined when it is safe to run on model output. */
+export function unsafeSchemaPattern(pattern: string): string | undefined {
+  if (pattern.length > MAX_PATTERN_LENGTH) return `Patterns are limited to ${MAX_PATTERN_LENGTH} characters`;
+  const nested = unsafeDictionaryPattern(pattern);
+  if (nested) return nested;
+  if (/\\[1-9]|\\k</.test(pattern)) return "Backreferences can backtrack catastrophically; remove them";
+  if (/\(\?<?[=!]/.test(pattern)) return "Lookarounds are not allowed in answer schemas";
+  // A quantified group with alternatives, such as (a|ab)*, can backtrack catastrophically.
+  if (/\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)(?:[*+]|\{\d+,\d*\})/.test(pattern)) return "Quantified alternatives such as (a|ab)* can backtrack catastrophically; rewrite the pattern";
+  const unbounded = pattern.replace(/\\./g, "").replace(/\[[^\]]*\]/g, "x").match(/[*+]|\{\d+,\}/g)?.length ?? 0;
+  if (unbounded > 2) return "Use at most two unbounded repetitions (*, +, {n,}) in one pattern";
+  try {
+    new RegExp(pattern, "u");
+  } catch {
+    return "Not a valid regular expression";
+  }
+  return undefined;
+}
+
+/** The regular expression engine the answer schemas compile with: refuses unsafe patterns (the schema then fails to compile). */
+const safeRegExp = Object.assign(
+  (pattern: string, flags: string) => {
+    const issue = unsafeSchemaPattern(pattern);
+    if (issue) throw new Error(issue);
+    return new RegExp(pattern, flags);
+  },
+  { code: "new RegExp" }
+);
+
+const addFormats = ((formatsPlugin as unknown as { default?: typeof formatsPlugin }).default ?? formatsPlugin) as typeof formatsPlugin;
+const ajv = new Ajv({ allErrors: true, strict: false, validateSchema: false, allowUnionTypes: true, code: { regExp: safeRegExp } });
+addFormats(ajv, { mode: "fast" });
+const KNOWN_FORMATS = new Set(Object.keys((ajv as unknown as { formats: Record<string, unknown> }).formats));
+/** Compiled schemas by text, oldest dropped first (also from Ajv's own cache). */
+const compiled = new Map<string, { validate: ValidateFunction; schema: Record<string, unknown> }>();
+const COMPILED_ENTRIES = 200;
+
+/** Compile an answer schema (null when it cannot be compiled or holds an unsafe part). */
+export function compileOutputSchema(schema: Record<string, unknown>, strict: boolean): ValidateFunction | null {
+  if (outputSchemaSafetyIssues(schema).length > 0) return null;
+  const { $schema: _s, $id: _i, ...rest } = schema;
+  const effective = strict ? strictSchema(rest) : rest;
+  const key = JSON.stringify(effective);
+  const cached = compiled.get(key);
+  if (cached) {
+    compiled.delete(key);
+    compiled.set(key, cached);
+    return cached.validate;
+  }
+  try {
+    const validate = ajv.compile(effective);
+    compiled.set(key, { validate, schema: effective });
+    if (compiled.size > COMPILED_ENTRIES) {
+      const [oldestKey, oldest] = compiled.entries().next().value as [string, { schema: Record<string, unknown> }];
+      compiled.delete(oldestKey);
+      ajv.removeSchema(oldest.schema);
+    }
+    return validate;
+  } catch {
+    return null;
+  }
+}
+
+/** Parts of a schema that are unsafe or unsupported for answers: size, depth, remote `$ref`, unsafe patterns, unknown formats. */
+export function outputSchemaSafetyIssues(schema: Record<string, unknown>): string[] {
+  const issues: string[] = [];
+  const text = JSON.stringify(schema);
+  if (new TextEncoder().encode(text).length > MAX_SCHEMA_BYTES) return [`The schema is larger than ${MAX_SCHEMA_BYTES / 1024} KB`];
+  const visit = (node: unknown, path: string, depth: number) => {
+    if (issues.length >= 10) return;
+    if (depth > MAX_SCHEMA_DEPTH) {
+      issues.push(`${path || "(schema)"}: nested deeper than ${MAX_SCHEMA_DEPTH} levels`);
+      return;
+    }
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => visit(item, `${path}[${index}]`, depth + 1));
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      const at = path ? `${path}.${key}` : key;
+      if ((key === "$ref" || key === "$dynamicRef" || key === "$recursiveRef") && typeof value === "string" && !value.startsWith("#")) {
+        issues.push(`${at}: only references inside the schema (starting with #) are allowed`);
+      } else if (key === "$id" && depth > 0) {
+        issues.push(`${at}: nested $id is not allowed`);
+      } else if (key === "pattern" && typeof value === "string") {
+        const issue = unsafeSchemaPattern(value);
+        if (issue) issues.push(`${at}: ${issue}`);
+      } else if (key === "patternProperties" && value && typeof value === "object" && !Array.isArray(value)) {
+        for (const pattern of Object.keys(value)) {
+          const issue = unsafeSchemaPattern(pattern);
+          if (issue) issues.push(`${at}.${pattern}: ${issue}`);
+        }
+      } else if (key === "format" && typeof value === "string" && !KNOWN_FORMATS.has(value)) {
+        issues.push(`${at}: unknown format '${value}' (known: ${[...KNOWN_FORMATS].join(", ")})`);
+      }
+      if (key === "properties" || key === "patternProperties" || key === "$defs" || key === "definitions" || key === "dependentSchemas") {
+        if (value && typeof value === "object" && !Array.isArray(value)) for (const [name, inner] of Object.entries(value)) visit(inner, `${at}.${name}`, depth + 1);
+      } else if (key !== "enum" && key !== "const" && key !== "examples" && key !== "default") {
+        visit(value, at, depth + 1);
+      }
+    }
+  };
+  visit(schema, "", 0);
+  return issues;
+}
+
+function hasPattern(schema: Record<string, unknown>): boolean {
+  return /"(?:pattern|patternProperties)"\s*:/.test(JSON.stringify(schema));
+}
+
 /** Why an `output.schema` options object is unusable, keyed by option; empty when fine. */
 export function outputSchemaOptionIssues(options: Record<string, unknown>): Array<{ option: string; message: string }> {
   const issues: Array<{ option: string; message: string }> = [];
   const schema = options.schema;
   if (schema !== undefined) {
     if (!schema || typeof schema !== "object" || Array.isArray(schema)) issues.push({ option: "schema", message: "Must be a JSON Schema object" });
-    else if (!compileJsonSchema(schema as Record<string, unknown>, options.strict === true)) issues.push({ option: "schema", message: "The JSON Schema could not be compiled" });
+    else {
+      const unsafe = outputSchemaSafetyIssues(schema as Record<string, unknown>);
+      if (unsafe.length > 0) issues.push({ option: "schema", message: unsafe.join("; ") });
+      else if (!compileOutputSchema(schema as Record<string, unknown>, options.strict === true)) issues.push({ option: "schema", message: "The JSON Schema could not be compiled" });
+    }
   }
   if (options.strict !== undefined && typeof options.strict !== "boolean") issues.push({ option: "strict", message: "Must be true or false" });
   if (options.extract !== undefined && typeof options.extract !== "boolean") issues.push({ option: "extract", message: "Must be true or false" });
@@ -98,7 +228,12 @@ export function validateOutputSchema(
     value = content;
   }
   if (!options.schema) return { issues: [], span };
-  const validate = compileJsonSchema(options.schema, options.strict === true);
+  const limits = hasPattern(options.schema) ? { ...ANSWER_LIMITS, maxStringLength: MAX_PATTERNED_STRING } : ANSWER_LIMITS;
+  const limited = jsonLimitIssues(value, limits);
+  if (limited.length > 0) {
+    return { issues: limited.slice(0, 5).map((issue) => ({ code: "too_large" as const, path: issue.path, message: `${issue.path || "answer"}: ${issue.message}` })), span };
+  }
+  const validate = compileOutputSchema(options.schema, options.strict === true);
   if (!validate) return { issues: [{ code: "schema_invalid", path: "", message: "The rule's JSON Schema could not be compiled; the answer is refused" }], span };
   if (validate(value)) return { issues: [], span };
   const issues = ((validate.errors ?? []) as ErrorObject[]).map<OutputSchemaIssue>((error) => {

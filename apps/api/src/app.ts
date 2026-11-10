@@ -4030,14 +4030,14 @@ export async function createApp(
   // Test and discovery routes resolve a secretRef the caller typed in. They
   // may only use a secret the caller could use in a run: `secret:use` in the
   // secret's project or in a project it is shared to.
+  const userCanUseSecret = async (user: SafeUser, row: { id: string; projectId?: string | null }): Promise<boolean> =>
+    await rbacService.can(user, row.projectId ?? DEFAULT_PROJECT_ID, "secret:use") ||
+    await someAsync(await rbacService.listSecretShares(row.id), (share) => rbacService.can(user, share.projectId, "secret:use"));
   const resolveSecretForUser = (user: SafeUser) => async (secretRef?: SecretReference): Promise<string | undefined> => {
     if (!secretRef?.secretId) return undefined;
     const row = await store.getSecret(secretRef.secretId);
     if (!row) return undefined;
-    const usable =
-      await rbacService.can(user, row.projectId ?? DEFAULT_PROJECT_ID, "secret:use") ||
-      await someAsync(await rbacService.listSecretShares(row.id), (share) => rbacService.can(user, share.projectId, "secret:use"));
-    if (!usable) throw new Error(`Secret '${secretRef.secretId}' is not available to you.`);
+    if (!await userCanUseSecret(user, row)) throw new Error(`Secret '${secretRef.secretId}' is not available to you.`);
     return secretService.resolveSecret(secretRef);
   };
   // Which projects claim a pre-scoping session namespace: each workflow's
@@ -13739,6 +13739,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runAccess,
     canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
     canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    canUseSecret: async (user, secretId) => {
+      const row = await store.getSecret(secretId);
+      return Boolean(row) && await userCanUseSecret(user, row!);
+    },
     audit: async (request, user, event) => await audit(request, user, event)
   });
 

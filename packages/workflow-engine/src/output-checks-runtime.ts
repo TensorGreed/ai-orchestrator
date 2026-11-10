@@ -52,6 +52,11 @@ export interface GuardModelServicesInput {
   guardPrompt?: (provider: LLMProviderConfig, prompts: { systemPrompt: string; userPrompt: string }) => Promise<{ systemPrompt: string; userPrompt: string }>;
   /** Called before each call: a canceled run stops checking. */
   throwIfAborted?: () => void;
+  /**
+   * False in a replay: the model tape records chat calls only, so an embedding call would go out live. The check
+   * then fails as unavailable instead.
+   */
+  liveEmbeddings?: boolean;
 }
 
 function providerConfigOf(model: GuardModelRef | undefined, fallback: LLMProviderConfig | undefined, detectorId: string): LLMProviderConfig {
@@ -62,11 +67,18 @@ function providerConfigOf(model: GuardModelRef | undefined, fallback: LLMProvide
   return parsed.data as LLMProviderConfig;
 }
 
+/** The provider context of one check call: the run's abort signal joined with the check's own (aborted on its timeout). */
+function callContext(base: ProviderExecutionContext, signal: AbortSignal | undefined): ProviderExecutionContext {
+  if (!signal) return base;
+  return { ...base, signal: base.signal ? AbortSignal.any([base.signal, signal]) : signal };
+}
+
 /** Model calls for detectors, each going through the run's registries (so allowlists, replays and retries apply) and counted. */
 export function createGuardModelServices(input: GuardModelServicesInput): GuardModelServices {
   return {
     complete: async (request) => {
       input.throwIfAborted?.();
+      if (request.signal?.aborted) throw new Error(`${request.detectorId} timed out`);
       const provider = providerConfigOf(request.model, input.defaultModel, request.detectorId);
       const prompts = input.guardPrompt
         ? await input.guardPrompt(provider, { systemPrompt: request.system, userPrompt: request.prompt })
@@ -80,7 +92,7 @@ export function createGuardModelServices(input: GuardModelServicesInput): GuardM
             { role: "user", content: prompts.userPrompt }
           ]
         },
-        input.providerContext()
+        callContext(input.providerContext(), request.signal)
       );
       input.usage.push({
         providerId: provider.providerId,
@@ -95,13 +107,19 @@ export function createGuardModelServices(input: GuardModelServicesInput): GuardM
     },
     embed: async (request) => {
       input.throwIfAborted?.();
+      if (request.signal?.aborted) throw new Error(`${request.detectorId} timed out`);
+      if (input.liveEmbeddings === false) throw new Error(`${request.detectorId}: a replay cannot make live embedding calls`);
       if (!request.model) throw new Error(`${request.detectorId} needs options.model naming an embedding model`);
       const provider = providerConfigOf(request.model, undefined, request.detectorId);
       const registry = input.embeddingRegistry;
       const adapter = registry?.tryGet(provider.providerId);
       if (!adapter) throw new Error(`${request.detectorId}: no embedding adapter for provider '${provider.providerId}'`);
       await input.checkEmbeddingModel?.({ providerId: provider.providerId, model: provider.model });
-      const response = await adapter.embed({ provider, input: request.texts }, input.providerContext());
+      // Phase 16 — destination rules judge what goes to the embedding provider, as for chat calls.
+      const texts = input.guardPrompt
+        ? await Promise.all(request.texts.map(async (text) => (await input.guardPrompt!(provider, { systemPrompt: "", userPrompt: text })).userPrompt))
+        : request.texts;
+      const response = await adapter.embed({ provider, input: texts }, callContext(input.providerContext(), request.signal));
       input.usage.push({
         providerId: provider.providerId,
         model: provider.model,
@@ -195,6 +213,12 @@ const NOT_PII = ["credential", "private_key", "jwt"];
 
 export interface OutputGuardrailConfig {
   checks: string[];
+  /**
+   * How `no_pii` finds personal data. `patterns` (the default, as before): emails, phone numbers, US SSNs and any
+   * 13–16 digit run. `data_classes`: the content rules data detector (checksum-verified cards, IBANs, national ids;
+   * fewer false alarms on order numbers, more on international phone numbers).
+   */
+  piiDetection: "patterns" | "data_classes";
   schema?: Record<string, unknown>;
   topics?: { allow?: unknown[]; deny?: unknown[] };
   safety?: { categories?: string[]; mode?: "rules" | "model" };
@@ -222,6 +246,7 @@ export function readOutputGuardrailConfig(config: Record<string, unknown>): Outp
   if (checkModel && !checkModel.success) throw new Error("Output Guardrail: the check model config is invalid");
   return {
     checks,
+    piiDetection: config.piiDetection === "data_classes" ? "data_classes" : "patterns",
     ...(schema ? { schema } : {}),
     ...(topics ? { topics: { ...(Array.isArray(topics.allow) ? { allow: topics.allow } : {}), ...(Array.isArray(topics.deny) ? { deny: topics.deny } : {}) } } : {}),
     ...(safety
@@ -249,15 +274,18 @@ export const OUTPUT_GUARDRAIL_PROFILE_ID = "output-guardrail";
 
 /**
  * The node's rule checks as a rule set on `final_output`: every finding
- * blocks (fails the check), no rewrites. `matches_schema` without a schema
+ * blocks (fails the check), no rewrites. The node does not record rule
+ * events for them (it is not a stored rule set); findings show in its
+ * error. `matches_schema` without a schema
  * keeps its original meaning (the text must parse as JSON) and is not part
  * of it. Undefined when no rule check is configured.
  */
 export function outputGuardrailProfile(config: OutputGuardrailConfig): ResolvedGuardProfile | undefined {
   const detectors: Array<{ id: string; threshold?: number; options?: Record<string, unknown> }> = [];
   const checks = new Set(config.checks);
-  if (checks.has("no_pii")) detectors.push({ id: DLP_DETECTOR_ID, threshold: 0.6, options: { disable: NOT_PII } });
-  if (checks.has("matches_schema") && config.schema) detectors.push({ id: OUTPUT_SCHEMA_DETECTOR_ID, options: { schema: config.schema } });
+  if (checks.has("no_pii") && config.piiDetection === "data_classes") detectors.push({ id: DLP_DETECTOR_ID, threshold: 0.6, options: { disable: NOT_PII } });
+  // The whole answer must be JSON, as without a schema: the node passes the text on, and later steps parse it.
+  if (checks.has("matches_schema") && config.schema) detectors.push({ id: OUTPUT_SCHEMA_DETECTOR_ID, options: { schema: config.schema, extract: false } });
   if (checks.has("topic")) {
     if (!config.topics || ((config.topics.allow?.length ?? 0) === 0 && (config.topics.deny?.length ?? 0) === 0)) {
       throw new Error("Output Guardrail: the topic check needs topics to allow or deny");
@@ -279,15 +307,24 @@ export function outputGuardrailProfile(config: OutputGuardrailConfig): ResolvedG
 }
 
 const LEGACY_PROFANITY = ["damn", "shit", "fuck", "bitch", "bastard"];
+/** `no_pii` with `piiDetection: "patterns"`: the original patterns, unchanged. */
+const LEGACY_PII = [
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+  /\b(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/,
+  /\b\d{3}-\d{2}-\d{4}\b/,
+  /\b(?:\d[ -]*?){13,16}\b/
+];
 
 /**
- * The checks that stay local: `no_profanity` (the original word list, kept
- * for compatibility), `must_contain_json`, and `matches_schema` without a
- * schema (the whole text must parse as JSON, as before).
+ * The checks that stay local: `no_pii` with the original patterns (the
+ * default), `no_profanity` (the original word list, kept for
+ * compatibility), `must_contain_json`, and `matches_schema` without a schema
+ * (the whole text must parse as JSON, as before).
  */
 export function localGuardrailFailures(text: string, config: OutputGuardrailConfig, containsJson: (text: string) => boolean): string[] {
   const failures: string[] = [];
   const checks = new Set(config.checks);
+  if (checks.has("no_pii") && config.piiDetection !== "data_classes" && LEGACY_PII.some((pattern) => pattern.test(text))) failures.push("no_pii");
   if (checks.has("no_profanity")) {
     const lower = text.toLowerCase();
     if (LEGACY_PROFANITY.some((token) => lower.includes(token))) failures.push("no_profanity");

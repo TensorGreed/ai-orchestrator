@@ -243,6 +243,12 @@ export interface DetectorContext {
    * usage in the run's cost.
    */
   models?: GuardModelServices;
+  /**
+   * Phase 12 coverage — aborted when the check runs out of time, so a model
+   * call it started is stopped instead of running on (and spending) after the
+   * verdict.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -267,12 +273,15 @@ export interface GuardModelCompletionRequest {
   prompt: string;
   /** The detector asking, for traces and usage records. */
   detectorId: string;
+  /** Aborted when the check times out; the host stops the call. */
+  signal?: AbortSignal;
 }
 
 export interface GuardModelEmbeddingRequest {
   model?: GuardModelRef;
   texts: string[];
   detectorId: string;
+  signal?: AbortSignal;
 }
 
 /** Phase 12 coverage — model calls offered to detectors. Each method is optional. */
@@ -302,6 +311,13 @@ export interface GuardDetector {
    * (`GuardInput.partial`) and runs on the final one.
    */
   wholeAnswer?: true;
+  /**
+   * Phase 12 coverage — true when these options make the check call a model.
+   * Such a check gets its own time limit (`options.timeoutMs`, default
+   * 30 000 ms) instead of the rule set's latency budget, and the time it
+   * takes does not count against that budget.
+   */
+  callsModel?(options: Record<string, unknown>): boolean;
   detect(input: GuardInput, context: DetectorContext): GuardFinding[] | Promise<GuardFinding[]>;
   /**
    * For the `transform` action: return the content with the findings'
