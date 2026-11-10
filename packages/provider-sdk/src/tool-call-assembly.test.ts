@@ -157,7 +157,7 @@ describe("model tape and streamed tool calls", () => {
     const context = { resolveSecret: async () => "k" };
     for await (const _chunk of recordingProviderAdapter(base, recorder).generateStream!(request, context)) void _chunk;
     const tape = recorder.toTape();
-    expect(tape.entries[0]!.response!.toolCalls).toHaveLength(2);
+    expect((tape.entries[0]!.response as { toolCalls: unknown[] }).toolCalls).toHaveLength(2);
     const replay = createModelTapeReplayRegistry(tape).registry.get("fake");
     const assembler = new ToolCallAssembler();
     for await (const chunk of replay.generateStream!(request, context)) if (chunk.type === "tool_call_delta") assembler.add(chunk);
