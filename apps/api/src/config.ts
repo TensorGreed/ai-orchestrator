@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import { z } from "zod";
+import { parseSessionPolicy } from "./services/session-policy.js";
 import {
   NETWORK_SCOPES,
   NETWORK_SCOPE_ENV,
@@ -99,6 +100,11 @@ const envSchema = z.object({
   SECRET_MASTER_KEY_BASE64: z.string().min(1).optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("ao_session"),
   SESSION_TTL_HOURS: z.coerce.number().int().positive().default(168),
+  // 13.2 — session policy, each `<global>[,role:value]*` (checked by parseSessionPolicy). Unset: no idle timeout,
+  // sessions live SESSION_TTL_HOURS, no limit on sessions per user.
+  SESSION_IDLE_TIMEOUT_MINUTES: z.string().optional(),
+  SESSION_ABSOLUTE_TIMEOUT_HOURS: z.string().optional(),
+  SESSION_MAX_PER_USER: z.string().optional(),
   COOKIE_SECURE: booleanFromEnv.default(false),
   AUTH_ALLOW_PUBLIC_REGISTER: booleanFromEnv.default(false),
   // How a non-admin with no membership in a project is treated there:
@@ -633,6 +639,8 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   resolveSamlSettings(parsed.data);
   resolveSsoMfaSettings(parsed.data);
   parseTrustProxy(parsed.data.TRUST_PROXY);
+  // 13.2 — a malformed session policy refuses to start, naming the setting and the entry.
+  parseSessionPolicy(parsed.data);
   // Phase 13.2 — a bad address list refuses to start, naming the setting and the entry.
   resolveNetworkSettings(parsed.data);
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.

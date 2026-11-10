@@ -70,7 +70,7 @@ import type { RunAccess, RunAccessDenial } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { EvalRunError, type EvalService } from "./services/eval-service.js";
-import { startSseHeartbeat } from "./sse-heartbeat.js";
+import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
 import { pageOfById, pageRequestFromQuery } from "./pagination.js";
 import type { Store } from "./db/store.js";
 
@@ -98,6 +98,8 @@ export interface EvalRoutesDeps {
   canUseSecret: (user: SafeUser, secretId: string, scope: { id?: string; projectId?: string | null }) => Promise<boolean>;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
   sseHeartbeatMs: number;
+  /** 13.2 — closes a stream when the sign-in session that opened it ends (undefined for API-key requests). */
+  streamSessionWatch?: (request: FastifyRequest, onEnded: (reason: string) => void) => SseSessionWatch | undefined;
   /** `strict` isolation: a dataset made before projects scoped datasets belongs to the default project. */
   strictIsolation: boolean;
   /**
@@ -650,7 +652,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       // Phase 13.1 — running on another instance (cluster mode): follow its stored state until it finishes. Each read
       // is acted on as read; a progress event goes out only when the stored view changed.
       send("progress", run);
-      stopHeartbeat = startSseHeartbeat(reply.raw, deps.sseHeartbeatMs, () => closed);
+      stopHeartbeat = startSseHeartbeat(reply.raw, deps.sseHeartbeatMs, () => closed, deps.streamSessionWatch?.(request, finish));
       let last = JSON.stringify(run);
       const follow = async (): Promise<void> => {
         while (!closed) {
@@ -688,7 +690,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       finish();
       return reply;
     }
-    stopHeartbeat = startSseHeartbeat(reply.raw, deps.sseHeartbeatMs, () => closed);
+    stopHeartbeat = startSseHeartbeat(reply.raw, deps.sseHeartbeatMs, () => closed, deps.streamSessionWatch?.(request, finish));
     return reply;
   });
 

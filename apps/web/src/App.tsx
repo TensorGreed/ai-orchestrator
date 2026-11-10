@@ -26,6 +26,13 @@ import {
 } from "@ai-orchestrator/shared";
 import {
   ApiError,
+  inBackground,
+  notifySessionEnded,
+  onSessionEnded,
+  sessionEndMessage,
+  sessionEndReasonOf,
+  type SessionEndReason,
+  type SessionInfo,
   cancelExecution,
   completeMfaLogin,
   createFolder,
@@ -148,6 +155,7 @@ import { useMcpCanvasStatus } from "./lib/use-mcp-canvas-status";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { AcceptInviteCard } from "./components/AcceptInviteCard";
+import { IdleSessionWarning } from "./components/IdleSessionWarning";
 import { INVITE_SIGNED_IN_NOTICE, inviteTokenFromLocation, stripInviteParam } from "./lib/user-invite";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WriteToolApprovalDialog } from "./components/WriteToolApprovalDialog";
@@ -1102,6 +1110,8 @@ function StudioApp() {
   const [authChecking, setAuthChecking] = useState(true);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  // Phase 13.2 — the session behind the cookie (undefined until known; null for API-key auth or an older API).
+  const [authSession, setAuthSession] = useState<SessionInfo | null | undefined>(undefined);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   // Phase 13.2 — an SSO sign-in that needs the local TOTP step lands here with ?sso_mfa=totp (the challenge itself is in
@@ -1436,7 +1446,7 @@ function StudioApp() {
     }
     let cancelled = false;
     const refresh = () => {
-      listApprovals({ status: "pending" })
+      inBackground(() => listApprovals({ status: "pending" }))
         .then((response) => {
           if (!cancelled) setPendingApprovalCount(response.items.filter((item) => item.canDecide).length);
         })
@@ -1725,11 +1735,13 @@ function StudioApp() {
       }
 
       try {
-        const history = await fetchExecutions({
-          page: 1,
-          pageSize: 1,
-          workflowId: currentWorkflow.id
-        });
+        const history = await inBackground(() =>
+          fetchExecutions({
+            page: 1,
+            pageSize: 1,
+            workflowId: currentWorkflow.id
+          })
+        );
         if (cancelled) {
           return;
         }
@@ -1771,7 +1783,7 @@ function StudioApp() {
           setLogsTab("logs");
         }
 
-        const detail = await fetchExecutionById(latest.id);
+        const detail = await inBackground(() => fetchExecutionById(latest.id));
         if (cancelled) {
           return;
         }
@@ -2216,8 +2228,9 @@ function StudioApp() {
     let cancelled = false;
     const checkSession = async () => {
       try {
-        const { user } = await fetchAuthMe();
+        const { user, session } = await fetchAuthMe();
         if (!cancelled) {
+          setAuthSession(session ?? null);
           setAuthUser(user);
           setAuthError(null);
         }
@@ -2242,6 +2255,34 @@ function StudioApp() {
       cancelled = true;
     };
   }, [ssoError]);
+
+  // Phase 13.2 — a 401 that says why the session ended returns to the sign-in screen with that reason.
+  const handleSessionEnded = useCallback((reason: SessionEndReason) => {
+    setAuthUser(null);
+    setAuthError(sessionEndMessage(reason));
+  }, []);
+
+  useEffect(() => onSessionEnded(handleSessionEnded), [handleSessionEnded]);
+
+  // After a sign-in (login, MFA, invite, SSO) the session details come from one background /me.
+  useEffect(() => {
+    if (!authUser) {
+      setAuthSession(undefined);
+      return;
+    }
+    if (authSession !== undefined) return;
+    let cancelled = false;
+    inBackground(() => fetchAuthMe())
+      .then((result) => {
+        if (!cancelled) setAuthSession(result.session ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setAuthSession(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, authSession]);
 
   useEffect(() => {
     if (authUser || authChecking) return;
@@ -2404,9 +2445,10 @@ function StudioApp() {
 
   const handleApiError = useCallback((apiError: unknown, fallbackMessage: string): string => {
     if (apiError instanceof ApiError && apiError.status === 401) {
+      const message = sessionEndMessage(sessionEndReasonOf(apiError.payload)) ?? "Session expired. Sign in again.";
       setAuthUser(null);
-      setAuthError("Session expired. Sign in again.");
-      return "Session expired. Sign in again.";
+      setAuthError(message);
+      return message;
     }
 
     let message = apiError instanceof Error ? apiError.message : fallbackMessage;
@@ -4729,6 +4771,7 @@ function StudioApp() {
 
   return (
     <div className="studio-shell">
+      <IdleSessionWarning session={authSession} onSessionRefreshed={setAuthSession} onSignedOut={(reason) => notifySessionEnded(reason)} />
       <WelcomeModal
         open={showWelcome}
         docsUrl={docsUrl}

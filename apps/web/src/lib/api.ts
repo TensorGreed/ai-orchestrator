@@ -158,11 +158,85 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Phase 13.2 — session policy on the client.
+ *
+ * Background traffic (timers and pollers) carries `X-L2M-Background: 1` so the server does not count it as user
+ * activity for the idle timeout. `inBackground(() => fetchX())` marks every request that `fetchX` starts before its
+ * first `await`, which covers the plain client functions below (each calls `apiRequest` straight away). A request
+ * that is not background is foreground: its start time is what the idle warning counts from.
+ */
+export const BACKGROUND_HEADER = "X-L2M-Background";
+
+let backgroundDepth = 0;
+let lastForegroundRequestAt = Date.now();
+
+export function inBackground<T>(run: () => Promise<T>): Promise<T> {
+  backgroundDepth += 1;
+  try {
+    return run();
+  } finally {
+    backgroundDepth -= 1;
+  }
+}
+
+/** Epoch ms of the last foreground (user-driven) API request this tab sent. */
+export function getLastForegroundRequestAt(): number {
+  return lastForegroundRequestAt;
+}
+
+export type SessionEndReason = "idle" | "expired" | "evicted" | "admin" | "logout" | "policy";
+const SESSION_END_REASONS: readonly SessionEndReason[] = ["idle", "expired", "evicted", "admin", "logout", "policy"];
+
+/** Why a 401 says the session ended, or null when the payload carries no known reason. */
+export function sessionEndReasonOf(payload: unknown): SessionEndReason | null {
+  if (!payload || typeof payload !== "object") return null;
+  const reason = (payload as { reason?: unknown }).reason;
+  return typeof reason === "string" && (SESSION_END_REASONS as readonly string[]).includes(reason) ? (reason as SessionEndReason) : null;
+}
+
+/** The sign-in screen's explanation for a reason, or null when the reason needs none. */
+export function sessionEndMessage(reason: SessionEndReason | null | undefined): string | null {
+  switch (reason) {
+    case "idle":
+      return "You were signed out after a period of inactivity.";
+    case "expired":
+      return "Your session reached its maximum length. Sign in again.";
+    case "evicted":
+      return "You were signed out because you signed in on another device or browser.";
+    case "admin":
+      return "An administrator ended your session.";
+    default:
+      return null;
+  }
+}
+
+type SessionEndedListener = (reason: SessionEndReason) => void;
+const sessionEndedListeners = new Set<SessionEndedListener>();
+
+/** Called whenever a response says this browser's session has ended (a 401 that carries a reason). */
+export function onSessionEnded(listener: SessionEndedListener): () => void {
+  sessionEndedListeners.add(listener);
+  return () => {
+    sessionEndedListeners.delete(listener);
+  };
+}
+
+/** Tells the app this browser's session is over (for example after ending the current session from Settings). */
+export function notifySessionEnded(reason: SessionEndReason): void {
+  for (const listener of [...sessionEndedListeners]) listener(reason);
+}
+
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   const body = init?.body;
   if (body !== undefined && body !== null && !(body instanceof FormData) && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
+  }
+  if (backgroundDepth > 0) {
+    headers.set(BACKGROUND_HEADER, "1");
+  } else if (!headers.has(BACKGROUND_HEADER)) {
+    lastForegroundRequestAt = Date.now();
   }
 
   const response = await apiFetch(`${API_BASE}${path}`, {
@@ -180,6 +254,10 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const payload = json && typeof json === "object" ? (json as Record<string, unknown>) : {};
+    if (response.status === 401) {
+      const reason = sessionEndReasonOf(payload);
+      if (reason) notifySessionEnded(reason);
+    }
     throw new ApiError(String(payload.error ?? "API request failed"), response.status, payload);
   }
 
@@ -216,8 +294,83 @@ export async function logoutUser() {
   });
 }
 
+/** Phase 13.2 — the session behind this browser's cookie; null when the caller authenticated with an API key. */
+export interface SessionInfo {
+  handle: string;
+  createdAt: string;
+  expiresAt: string;
+  /** Null when the user's role has no idle timeout. */
+  idleTimeoutMinutes: number | null;
+  idleExpiresAt: string | null;
+  breakGlass: boolean;
+}
+
 export async function fetchAuthMe() {
-  return apiRequest<{ user: AuthUser }>("/api/auth/me");
+  return apiRequest<{ user: AuthUser; session?: SessionInfo | null }>("/api/auth/me");
+}
+
+export type SessionAuthMethod = "password" | "oidc" | "saml" | "ldap" | "break_glass";
+
+/** One live sign-in. `handle` is an opaque, non-secret id (never the cookie). */
+export interface SessionView {
+  handle: string;
+  current: boolean;
+  authMethod: SessionAuthMethod | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  lastSeenAt: string | null;
+  expiresAt: string;
+  mfaVerified: boolean;
+  breakGlass: boolean;
+}
+
+export interface SessionPolicyView {
+  idleTimeoutMinutes: number | null;
+  absoluteTimeoutHours: number;
+  maxPerUser: number | null;
+}
+
+/** My live sessions, newest first, plus the policy that applies to me. */
+export async function fetchMySessions() {
+  return apiRequest<{ sessions: SessionView[]; policy: SessionPolicyView }>("/api/auth/sessions");
+}
+
+/** Ends one of my sessions; `current: true` means it was this browser's (the server has cleared the cookie). */
+export async function revokeMySession(handle: string) {
+  return apiRequest<{ ok: true; current: boolean }>(`/api/auth/sessions/${encodeURIComponent(handle)}`, { method: "DELETE" });
+}
+
+/** Ends all my live sessions except this one. */
+export async function revokeMyOtherSessions() {
+  return apiRequest<{ revoked: number }>("/api/auth/sessions/revoke-others", { method: "POST" });
+}
+
+/** Admin: one user's live sessions. */
+export async function fetchUserSessions(userId: string) {
+  return apiRequest<{ sessions: SessionView[] }>(`/api/users/${encodeURIComponent(userId)}/sessions`);
+}
+
+/** Admin: ends one session (`handle`) or all of a user's sessions; an admin targeting themselves keeps the current one. */
+export async function revokeUserSessions(userId: string, handle?: string) {
+  return apiRequest<{ revoked: number }>(`/api/users/${encodeURIComponent(userId)}/sessions/revoke`, {
+    method: "POST",
+    body: JSON.stringify(handle ? { handle } : {})
+  });
+}
+
+export interface DeploymentUserView {
+  id: string;
+  email: string;
+  role: AuthUser["role"];
+  createdAt: string;
+  pending?: boolean;
+  inviteExpiresAt?: string;
+}
+
+/** Admin: every user in the deployment. */
+export async function fetchDeploymentUsers() {
+  return apiRequest<{ users: DeploymentUserView[] }>("/api/users");
 }
 
 /**
@@ -2860,7 +3013,8 @@ export function subscribeEvalRun(runId: string, onEvent: (event: EvalRunEvent) =
       timer = null;
       if (stopped) return;
       try {
-        emit(await poll(runId));
+        // Background traffic: following a long run is not user activity for the idle timeout.
+        emit(await inBackground(() => poll(runId)));
       } catch {
         // A failed poll is retried on the next tick.
       }

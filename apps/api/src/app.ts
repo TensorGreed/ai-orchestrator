@@ -127,6 +127,7 @@ import { CommunityPackageLoader } from "./services/community-package-loader";
 import { EVAL_RUN_STALE_MS, EvalService, REPLAY_JOB_MAX_EXECUTIONS_DEFAULT, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
 import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
 import { AuthService, isServiceAccountEmail, type SafeUser, type UserRole } from "./services/auth-service";
+import { isBackgroundRequest, isPolicyExempt, sessionHandle } from "./services/session-service.js";
 import { SchedulerService } from "./services/scheduler-service";
 import { RunWriteChains } from "./services/run-write-chains.js";
 import { NonRetryableQueueError, QueueFullError, QueueProducer, QueueService, type QueueJobContext } from "./services/queue-service";
@@ -134,7 +135,7 @@ import { AppLifecycle } from "./services/app-lifecycle.js";
 import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError, resumeEffectFreeNodeId } from "./db/queue-leases.js";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
 import { ApiKeyService } from "./services/api-key-service";
-import type { RequestAuthContext } from "./services/session-service.js";
+import type { RequestAuthContext, SessionRejectReason } from "./services/session-service.js";
 import { apiKeyCreateBodySchema, isStructuredScope, keyBoundUser, keyMayCallRoute, keyMayManageAccount, parseKeyScopes, resolveNewKeyScope, scopedKeyUser } from "./services/key-scopes.js";
 import { MfaService } from "./services/mfa-service";
 import {
@@ -238,7 +239,9 @@ import { environmentSecretValues, scrubExemptionWarnings } from "./services/audi
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
-import { startSseHeartbeat } from "./sse-heartbeat.js";
+import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
+import { idleExpiresAt, idleMinutesFor, maxSessionsFor, parseSessionPolicy } from "./services/session-policy.js";
+import { registerSessionRoutes } from "./session-routes.js";
 import {
   cronQueueItemId,
   DISPATCH_SPEC_VERSION,
@@ -1966,6 +1969,8 @@ export async function createApp(
     );
   }
   authService.sessions.setLogger(app.log);
+  // 13.2 — idle and absolute timeouts and the per-user session limit (SESSION_*; unset keeps today's behaviour).
+  authService.sessions.setPolicy(parseSessionPolicy(config));
   authService.startSessionCleanup();
   app.addHook("onClose", async () => {
     authService.stopSessionCleanup();
@@ -5580,34 +5585,44 @@ export async function createApp(
    * later checks read it (`sessionService.getRequestAuth`). requireRole, requestIsAdmin and executeChannelFor all go
    * through here. Null when the request carries no valid credential.
    */
-  const resolveRequestAuth = async (request: {
+  const resolveRequestCredential = async (request: {
     cookies: Record<string, string | undefined>;
     headers: Record<string, unknown>;
-  }): Promise<RequestAuthContext | null> => {
+  }): Promise<{ auth: RequestAuthContext } | { auth: null; reason?: SessionRejectReason }> => {
     const known = sessionService.getRequestAuth(request);
-    if (known) return known;
+    if (known) return { auth: known };
     const apiKey = await authenticateApiKeyCredential(request.headers);
     if (apiKey) {
       const context: RequestAuthContext = { credential: "api_key", ...apiKey };
       sessionService.setRequestAuth(request, context);
-      return context;
+      return { auth: context };
     }
     const sessionId = getSessionIdFromRequest(request);
-    if (!sessionId) return null;
-    const resolved = await authService.getSessionAuth(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
-    if (!resolved) return null;
+    if (!sessionId) return { auth: null };
+    // 13.2 — idle and absolute timeouts are applied here; background traffic never counts as activity.
+    const resolved = await authService.resolveSession(sessionId, await getRequestSession(request, sessionId).catch(() => undefined), {
+      background: isBackgroundRequest(request.headers)
+    });
+    if (!resolved.ok) return { auth: null, reason: resolved.reason };
     const context: RequestAuthContext = { credential: "session", user: resolved.user, session: resolved.session };
     sessionService.setRequestAuth(request, context);
-    return context;
+    return { auth: context };
   };
 
-  const setSessionCookie = (reply: FastifyReply, sessionId: string) => {
+  const resolveRequestAuth = async (request: {
+    cookies: Record<string, string | undefined>;
+    headers: Record<string, unknown>;
+  }): Promise<RequestAuthContext | null> => (await resolveRequestCredential(request)).auth;
+
+  /** Sets the session cookie; it lives as long as the session (`expiresAt`), never longer. */
+  const setSessionCookie = (reply: FastifyReply, sessionId: string, expiresAt: string) => {
+    const remainingSeconds = Math.floor((Date.parse(expiresAt) - Date.now()) / 1000);
     reply.setCookie(config.SESSION_COOKIE_NAME, sessionId, {
       path: "/",
       httpOnly: true,
       sameSite: "lax",
       secure: config.COOKIE_SECURE,
-      maxAge: config.SESSION_TTL_HOURS * 60 * 60
+      maxAge: Number.isFinite(remainingSeconds) ? Math.max(1, remainingSeconds) : config.SESSION_TTL_HOURS * 60 * 60
     });
   };
 
@@ -5635,11 +5650,14 @@ export async function createApp(
     allowedRoles: UserRole[]
   ): Promise<SafeUser | null> => {
     // An API key (Phase 5.1) or the session cookie; 13.2: resolved once per request through resolveRequestAuth.
-    const auth = await resolveRequestAuth(request);
+    const credential = await resolveRequestCredential(request);
+    const auth = credential.auth;
     if (!auth) {
       if (getSessionIdFromRequest(request)) {
         clearSessionCookie(reply);
-        deny(reply, 401, "Session expired or invalid");
+        // 13.2 — say why (idle, expired, evicted, admin, ...) so the studio can tell the user; nothing for an unknown ID.
+        const reason = credential.auth === null ? credential.reason : undefined;
+        reply.code(401).send(!reason || reason === "invalid" ? { error: "Session expired or invalid" } : { error: "Session expired or invalid", reason });
       } else {
         deny(reply, 401, "Authentication required");
       }
@@ -5663,6 +5681,24 @@ export async function createApp(
     }
 
     return auth.user;
+  };
+
+  /**
+   * 13.2 — what an SSE stream checks about the session that opened it: the stream closes when the session is signed
+   * out, revoked, evicted, idle or expired. The checks are background traffic (they never count as activity). API-key
+   * streams have no session to watch.
+   */
+  const streamSessionWatch = (request: object, onEnded: (reason: string) => void): SseSessionWatch | undefined => {
+    const context = sessionService.getRequestAuth(request);
+    if (context?.credential !== "session") return undefined;
+    const sessionId = context.session.id;
+    return {
+      check: async () => {
+        const resolved = await authService.resolveSession(sessionId, undefined, { background: true });
+        return resolved.ok ? null : resolved.reason;
+      },
+      onEnded
+    };
   };
 
   const requirePermission = async (
@@ -5793,14 +5829,34 @@ export async function createApp(
     user: SafeUser,
     options: { method: SessionAuthMethod; mfaVerified: boolean }
   ): Promise<{ expiresAt: string }> => {
+    // The browser's previous session (if any) ends first, so signing in again here never counts against the session
+    // limit or evicts the user's session on another device.
+    const previousSessionId = getSessionIdFromRequest(request);
+    if (previousSessionId) {
+      await sessionService.endSession(previousSessionId, "logout").catch((revokeError: unknown) => {
+        request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
+      });
+    }
     const issued = await sessionService.issueSession({
       user,
       method: options.method,
       request,
-      mfaVerified: options.mfaVerified,
-      ttlHours: config.SESSION_TTL_HOURS
+      mfaVerified: options.mfaVerified
     });
-    setSessionCookie(reply, issued.sessionId);
+    setSessionCookie(reply, issued.sessionId, issued.expiresAt);
+    // SESSION_MAX_PER_USER — every session this sign-in ended is audited; a failing audit never fails the sign-in.
+    if (issued.evictedSessionIds.length > 0) {
+      await audit(request, user, {
+        category: "auth",
+        eventType: "session.evicted",
+        action: "revoke",
+        resourceType: "user",
+        resourceId: user.id,
+        metadata: { sessions: issued.evictedSessionIds.map(sessionHandle), limit: maxSessionsFor(sessionService.policy, user.role) }
+      }).catch((auditError: unknown) => {
+        request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "Session eviction not audited");
+      });
+    }
     return { expiresAt: issued.expiresAt };
   };
 
@@ -5838,12 +5894,7 @@ export async function createApp(
       request.log.info({ provider: "saml" }, "Legacy SAML identity upgraded to the IdP-scoped key");
     }
     const { user, created } = await provisionSsoUser(input.provision);
-    const previousSessionId = getSessionIdFromRequest(request);
-    if (previousSessionId) {
-      await sessionService.endSession(previousSessionId, "logout").catch((revokeError: unknown) => {
-        request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
-      });
-    }
+    // issueSessionForUser ends the browser's previous session.
     const { expiresAt } = await issueSessionForUser(request, reply, user, {
       method: input.method,
       mfaVerified: input.mfa === "local_totp" || (input.mfa !== null && typeof input.mfa === "object")
@@ -7339,6 +7390,7 @@ export async function createApp(
     canUseSecret: canUseJudgeSecret,
     audit: async (request, user, event) => await audit(request, user, event),
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
+    streamSessionWatch: (request, onEnded) => streamSessionWatch(request, onEnded),
     strictIsolation: config.PROJECT_ISOLATION === "strict",
     goldenSetChangeDenial: async (user, datasetId, change, target) => await releaseService.goldenSetChangeDenial(user, datasetId, change, target),
     releaseGateAdmission: async (run) => await releaseService.jobGateAdmission(run),
@@ -7661,7 +7713,35 @@ export async function createApp(
     const mfa = await mfaService.status(user.id);
     // 13.2 — a key limited to projects sees only those memberships.
     const memberships = (await rbacService.listUserProjects(user.id)).filter((m) => !user.projectScope || user.projectScope.includes(m.projectId));
-    return { user, mfa, memberships };
+    // 13.2 — the session's lifetime and idle deadline, so the studio can warn before an idle sign-out.
+    const context = sessionService.getRequestAuth(request);
+    const session =
+      context?.credential === "session"
+        ? {
+            handle: sessionHandle(context.session.id),
+            createdAt: context.session.createdAt,
+            expiresAt: context.session.expiresAt,
+            idleTimeoutMinutes: isPolicyExempt(context.session) ? null : idleMinutesFor(sessionService.policy, user.role),
+            idleExpiresAt: idleExpiresAt(
+              sessionService.policy,
+              { createdAt: context.session.createdAt, lastSeenAt: sessionService.recordedActivityAt(context.session) },
+              user.role,
+              { exempt: isPolicyExempt(context.session) }
+            ),
+            breakGlass: context.session.breakGlass
+          }
+        : null;
+    return { user, mfa, memberships, session };
+  });
+
+  // 13.2 — signed-in sessions (own, and an admin's view of another user's).
+  registerSessionRoutes({
+    app,
+    store,
+    sessions: sessionService,
+    requireRole: async (request, reply, roles) => await requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event),
+    clearSessionCookie
   });
 
   // ---------------------------------------------------------------------------
@@ -10256,6 +10336,7 @@ export async function createApp(
     store,
     config,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    streamSessionWatch: (request, onEnded) => streamSessionWatch(request, onEnded),
     runAccess,
     denyRunAccess,
     executeChannelFor,
@@ -11611,7 +11692,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (typeof reply.raw.flushHeaders === "function") {
       reply.raw.flushHeaders();
     }
-    const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => streamClosed);
+    const stopHeartbeat = startSseHeartbeat(
+      reply.raw,
+      config.SSE_HEARTBEAT_INTERVAL_MS,
+      () => streamClosed,
+      streamSessionWatch(request, () => {
+        // The run goes on without this client, as when the client goes away.
+        streamClosed = true;
+        markClientGone();
+      })
+    );
 
     sendSseEvent("execution_started", {
       executionId,

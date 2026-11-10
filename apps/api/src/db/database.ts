@@ -5131,7 +5131,7 @@ export class SqliteStore implements Store {
         const now = new Date().toISOString();
         const live = this.queryAll<{ id: string }>(
           `SELECT id FROM sessions
-           WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?
+           WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? AND break_glass = 0
            ORDER BY created_at DESC, id DESC`,
           [userId, now]
         ).map((row) => toString(row.id));

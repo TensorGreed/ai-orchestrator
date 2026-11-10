@@ -33,7 +33,8 @@ import {
   type ReplayRecordingSummary,
   type SecretListItem,
   type ToolSequenceMode,
-  type WorkflowVersionSummary
+  type WorkflowVersionSummary,
+  inBackground
 } from "../lib/api";
 import {
   buildReplayJobRequest,
@@ -1033,7 +1034,7 @@ function ReplayJobsView({ workflowNames, activeProjectId, canEdit, openJobId, on
   const anyActive = (jobs ?? []).some(isEvalRunActive);
   useEffect(() => {
     if (!anyActive || openJobId) return;
-    const timer = setInterval(() => void refresh(), JOB_LIST_POLL_MS);
+    const timer = setInterval(() => void inBackground(refresh), JOB_LIST_POLL_MS);
     return () => clearInterval(timer);
   }, [anyActive, openJobId, refresh]);
 

@@ -178,6 +178,18 @@ describeStoreContract("store contract: sessions, webhooks and triggers", (ctx) =
     expect(await store.revokeOldestUserSessions("nobody", 1, "evicted")).toEqual([]);
   });
 
+  it("revokeOldestUserSessions never counts or ends a break-glass session", async () => {
+    const store = ctx.store();
+    await store.saveUser({ id: "u1", email: "u1@example.com", passwordHash: "x", role: "admin" });
+    const future = "2099-01-01T00:00:00.000Z";
+    await store.saveSession({ id: "old", userId: "u1", expiresAt: future });
+    await store.saveSession({ id: "glass", userId: "u1", expiresAt: future, authMethod: "break_glass", breakGlass: true });
+    await store.saveSession({ id: "new", userId: "u1", expiresAt: future });
+    expect(await store.revokeOldestUserSessions("u1", 1, "evicted", { protectId: "new" })).toEqual(["old"]);
+    expect(await store.revokeOldestUserSessions("u1", 0, "evicted")).toEqual(["new"]);
+    expect((await store.getSession("glass"))?.revokedAt).toBeNull();
+  });
+
   it("revokeOldestUserSessions never ends the protected session, also when it ties on created_at and loses the id tiebreak", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-09T12:00:00.000Z"));

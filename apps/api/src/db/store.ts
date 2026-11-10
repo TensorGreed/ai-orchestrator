@@ -1525,7 +1525,8 @@ export interface Store extends AiGatewayStore {
    * returns the ended ids, oldest first. `protectId` (the session being issued) is never ended: it is kept first and
    * counts toward `keep`. Atomic across instances: Postgres locks the user row (`FOR UPDATE`) for the transaction,
    * SQLite runs one immediate write transaction, so two sign-ins racing past a limit leave exactly `keep` live
-   * sessions (each racer's own session survives its own call).
+   * sessions (each racer's own session survives its own call). Break-glass sessions are neither counted nor ended:
+   * a normal sign-in never ends a break-glass session.
    */
   revokeOldestUserSessions(userId: string, keep: number, reason: SessionEndReason, options?: { protectId?: string }): Promise<string[]>;
   saveApiKey(input: {

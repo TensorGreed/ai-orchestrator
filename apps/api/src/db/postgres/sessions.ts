@@ -175,7 +175,7 @@ export async function revokeOldestUserSessions(
     const now = new Date().toISOString();
     const live = await client.query<{ id: string }>(
       `SELECT id FROM sessions
-         WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > $2
+         WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > $2 AND break_glass = 0
          ORDER BY created_at DESC, id DESC`,
       [userId, now]
     );
