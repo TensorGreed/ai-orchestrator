@@ -194,6 +194,8 @@ import { clusterCancelReason, REMOTE_CANCEL_REASON, startClusterSignals, type Cl
 import { DEAD_EXECUTOR_RUN_ERROR, InstanceRegistry, RunOwnerTracker, SelfFencedAbortError, type ClusterWarning } from "./services/instance-registry.js";
 import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC, ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH } from "./db/postgres/cluster.js";
 import { DbChallengeStore, MemoryChallengeStore, type ChallengeStore } from "./services/challenge-store.js";
+import { BREAK_GLASS_ALERT_TIMEOUT_MS, BreakGlassService } from "./services/break-glass-service.js";
+import { registerBreakGlassRoutes } from "./break-glass-routes.js";
 import { createSharedRateLimitStore, SHARED_RATE_LIMIT_BUCKET, type SharedRateLimitBucket } from "./services/shared-rate-limit-store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
@@ -6033,6 +6035,26 @@ export async function createApp(
     return { user, created };
   };
 
+  // 13.2 — break-glass sign-in. Its links always live in the database (they are minted by another process, the
+  // admin:break-glass command), whatever the deployment. Its audit rows are written even with AUDIT_LOG_ENABLED=false:
+  // a break-glass session is only acceptable because everything it does is recorded.
+  const breakGlassAudit = new AuditService(store, { enabled: true });
+  const recordBreakGlassAudit = async (event: AuditEventInput) => {
+    await breakGlassAudit.record(event);
+    await logStreamingService.dispatchAudit(event);
+  };
+  const breakGlassService = new BreakGlassService({
+    store,
+    challenges: new DbChallengeStore(store, secretService, { warn: (message, fields) => app.log.warn(fields ?? {}, message) }),
+    audit: recordBreakGlassAudit,
+    notify: async (event) => await notificationService.notifyWithResults(event, { timeoutMs: BREAK_GLASS_ALERT_TIMEOUT_MS }),
+    warn: (message, fields) => app.log.warn(fields ?? {}, message)
+  });
+  // The end of a break-glass session (expiry, or ended by an admin) is reported by the cleanup tick, once overall.
+  authService.addCleanupTask(async () => await breakGlassService.sweepEnded());
+  // Outside cluster mode nothing else prunes the shared flow-state table, which then holds only break-glass rows.
+  if (!clusterMode) authService.addCleanupTask(async () => await store.prunePendingChallenges());
+
   /** 13.2 — issues a session through the session service (the only path that saves one) and sets the cookie. */
   const issueSessionForUser = async (
     request: FastifyRequest,
@@ -6384,6 +6406,8 @@ export async function createApp(
       "/api/auth/login",
       "/api/auth/register",
       "/api/auth/invite",
+      // 13.2 — a break-glass link's confirm POST (each attempt is audited).
+      "/api/auth/break-glass",
       "/api/auth/saml/login",
       "/api/auth/saml/callback",
       "/api/auth/ldap/login",
@@ -7932,6 +7956,9 @@ export async function createApp(
     const sessionUser = sessionId ? await authService.getSessionUser(sessionId) : null;
     if (sessionId) {
       await authService.logout(sessionId);
+      // 13.2 — a break-glass session's end is audited and alerted (once; the cleanup sweep skips it afterwards).
+      const ended = await getRequestSession(request, sessionId).catch(() => null);
+      if (ended?.breakGlass) await breakGlassService.reportEnded(ended, "logout").catch(() => false);
     }
     clearSessionCookie(reply);
     if (sessionUser) {
@@ -8699,6 +8726,18 @@ export async function createApp(
       return { error: "SSO mapping not found" };
     }
     return { ok: true };
+  });
+
+  // ---------------------------------------------------------------------------
+  // 13.2 — break-glass sign-in (links minted on the host with admin:break-glass; break-glass-service.ts)
+  // ---------------------------------------------------------------------------
+
+  registerBreakGlassRoutes(app, {
+    config,
+    breakGlass: breakGlassService,
+    sessions: sessionService,
+    requestActor: (request) => extractIpAndUa(request),
+    audit: recordBreakGlassAudit
   });
 
   // ---------------------------------------------------------------------------

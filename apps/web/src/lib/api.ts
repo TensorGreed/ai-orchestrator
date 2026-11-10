@@ -4798,6 +4798,11 @@ export async function acceptInviteAndSignIn(token: string, password: string): Pr
   return await loginUser({ email: accepted.email, password });
 }
 
+/** 13.2 — confirms a break-glass link (the token from the page fragment): sets a one-hour break-glass session cookie. */
+export async function confirmBreakGlass(token: string) {
+  return apiRequest<{ user: AuthUser; expiresAt: string }>("/api/auth/break-glass", { method: "POST", body: JSON.stringify({ token }) });
+}
+
 // ---------------------------------------------------------------------------
 // 12.6b — the /v1 AI gateway's admin API: route sets, routes, client grants, a set's rule set binding and usage.
 // ---------------------------------------------------------------------------

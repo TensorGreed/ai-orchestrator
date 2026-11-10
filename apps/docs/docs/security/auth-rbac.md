@@ -286,6 +286,75 @@ Triggers without a user (production webhooks, schedules, chat and form
 triggers in public or bearer mode, the MCP gateway) are not checked against a
 user, by design; they still get the run-time limits above.
 
+## Break-glass sign-in
+
+Break-glass sign-in is the way back in when no admin can sign in: the only admin is locked out, their authenticator
+is lost, or SSO is down. It is a one-time link minted on the server host. Nothing exists until someone runs the
+command, and nothing changes for deployments that never use it.
+
+```bash
+# On the API host, with the API's settings (the same .env or environment):
+pnpm --filter @ai-orchestrator/api admin:break-glass -- --email admin@example.com [--minutes 15]
+
+# Docker Compose: run it in the API container (`api-1` in docker-compose.prod.yml)
+docker compose exec api pnpm --filter @ai-orchestrator/api admin:break-glass -- --email admin@example.com
+```
+
+The command prints `<APP_PUBLIC_URL>/#break_glass=<token>&email=<admin>` (the first `WEB_ORIGIN` when
+`APP_PUBLIC_URL` is unset). Open it in a browser that can reach the studio. The page names the admin and the
+one-hour session; **Sign in for one hour** sends the token to `POST /api/auth/break-glass` and signs you in.
+
+- **The link** works once, for 5 to 60 minutes (`--minutes`, 15 by default). The token is in the `#` fragment, which
+  browsers never send to a server, so it does not reach web-server or proxy access logs or a `Referer`. Opening the
+  page uses nothing: a mail scanner, a chat link preview or a browser prefetch that fetches the link leaves it valid.
+  Only the confirm button uses it. It is kept in the database, so the running API sees it on SQLite and on every
+  instance of a cluster; only its SHA-256 is stored. Confirmed on two instances at once, it signs in once.
+- **Cross-site requests are refused.** The confirm POST must come from the studio: an `Origin` must be one of
+  `WEB_ORIGIN` or `APP_PUBLIC_URL`, and a browser request without one must be same-origin (`Sec-Fetch-Site`). A
+  refused request does not touch the link and is audited. A client on the host with no browser headers (curl) is
+  accepted.
+- **Who** can be signed in: a human admin. Other roles, unknown emails and service accounts are refused. The account
+  is checked again when the link is confirmed.
+- **The session** lasts one hour from confirmation, is never renewed, and is marked break-glass (sign-in method
+  `break_glass`). The sign-in policies (per-role MFA, step-up, session limits and idle timeouts) do not apply to it,
+  so a locked-out admin can reach Settings to fix them. Its one-hour expiry always applies. The
+  [network allowlists](./network-controls.md) still apply: a refused address never reaches the link, which stays
+  unused.
+- **The studio** shows a red banner for the whole session: "Break-glass session. Every action is recorded. It ends
+  at HH:MM."
+- **Audit**: `auth.break_glass_issued` (the command, with the host and OS user it ran as), `auth.break_glass_used`
+  (the link confirmed, or refused with the reason), `auth.break_glass_request` for **every** request made in the
+  session (method, route, status; not sampled) and `auth.break_glass_ended` (logout, expiry, or ended by an admin).
+  These rows are written even with `AUDIT_LOG_ENABLED=false`, and they also go to the external log streams when
+  those are on (the command sends its issue event there too).
+  Rows carry a short reference to the session, never the link or the session ID.
+- **Alerts**: the notification event `auth.break_glass_used` fires when the link is issued, when it is used and when
+  the session ends. Channels set in the environment receive it automatically; on a channel made in Settings, pick
+  **Break-glass sign-in**. The command reports what happened: which channels took the alert, which failed (a webhook
+  that answers with an error counts as failed), or that **no channel receives the event, so nobody was alerted**.
+  It still prints the link, since the outage that calls for break-glass may be what broke the channel. In the API the
+  used and ended alerts go out in the background, at most 10 seconds per channel, so a stalled channel never holds
+  up the sign-in. The audit log is the record either way.
+
+Who may run it: anyone with shell access to the API host and its database settings (including
+`SECRET_MASTER_KEY_BASE64`) can mint a link. That access already amounts to admin access, so the command adds no new
+trust; restrict host access as you would the database.
+
+What outlives the hour: the session ends after one hour, but what it created does not. API keys, invited or promoted
+admins, changed roles, MFA resets and settings changes stay. Review them afterwards.
+
+After using it:
+
+1. Fix what locked the admin out (re-enrol MFA, correct the SSO or network settings, reset the password).
+2. Sign out, or let the hour run out, and sign in normally.
+3. Review the session's `auth.break_glass_request` rows in the audit log. Revoke any API key or access it created
+   that should not stay, and record why break-glass was needed.
+4. If the issued alert came as a surprise, treat it as an incident: someone has shell access to the host.
+
+Break-glass sign-in is separate from [network break-glass](./network-controls.md#break-glass)
+(`NETWORK_BREAK_GLASS_CIDRS`), which admits addresses outside a wrong allowlist but still needs a normal sign-in.
+The two work together: from the host, the loopback range reaches the studio and the link signs you in.
+
 ## OIDC single sign-on
 
 OpenID Connect login works alongside password, SAML and LDAP login. It is off
