@@ -28,7 +28,7 @@ import {
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
 import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { chargedUsage, estimateAnswerTokens, estimateRequestTokens, isStreamUsageRefusal, providerDestinationRef } from "@ai-orchestrator/provider-sdk";
+import { ToolCallAssembler, chargedUsage, estimateAnswerTokens, estimateRequestTokens, isStreamUsageRefusal, providerDestinationRef } from "@ai-orchestrator/provider-sdk";
 import {
   GUARD_EFFECTIVE_PROFILE_REF,
   NODE_ACTIVITY_LIMIT,
@@ -3661,7 +3661,7 @@ async function runLlmCall(
 ): Promise<Record<string, unknown>> {
   if (input.dependencies.onLLMDelta && providerAdapter.generateStream) {
     let streamedText = "";
-    const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
+    const toolCallAssembler = new ToolCallAssembler();
     let llmDeltaIndex = 0;
     let reportedUsage: Extract<LLMStreamChunk, { type: "usage" }>["usage"] | undefined;
     const streamRequest: ProviderCallRequest = {
@@ -3691,23 +3691,11 @@ async function runLlmCall(
         });
         llmDeltaIndex += 1;
       } else if (chunk.type === "tool_call_delta") {
-        const toolCallId = chunk.toolCallId ?? `toolcall_${toolCallById.size}`;
-        const existing = toolCallById.get(toolCallId) ?? {
-          id: toolCallId,
-          name: chunk.name ?? `tool_${toolCallById.size}`,
-          argumentsText: ""
-        };
-        if (typeof chunk.name === "string" && chunk.name) {
-          existing.name = chunk.name;
-        }
-        if (typeof chunk.argumentsDelta === "string") {
-          existing.argumentsText += chunk.argumentsDelta;
-        }
-        toolCallById.set(toolCallId, existing);
+        toolCallAssembler.add(chunk);
       }
     }
 
-    const toolCalls = [...toolCallById.values()].map((entry) => {
+    const toolCalls = toolCallAssembler.calls().map((entry) => {
       let parsedArguments: Record<string, unknown> = {};
       try {
         parsedArguments = JSON.parse(entry.argumentsText || "{}") as Record<string, unknown>;
@@ -3727,7 +3715,7 @@ async function runLlmCall(
       input: estimateRequestTokens(streamRequest),
       output: estimateAnswerTokens(
         streamedText,
-        [...toolCallById.values()].map((entry) => ({ name: entry.name, arguments: entry.argumentsText }))
+        toolCallAssembler.calls().map((entry) => ({ name: entry.name, arguments: entry.argumentsText }))
       )
     }));
 
