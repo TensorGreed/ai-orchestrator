@@ -132,7 +132,13 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
    * values). A refused save is audited as denied.
    */
   const refuseRevealRules = async (request: FastifyRequest, user: SafeUser, reply: FastifyReply, document: unknown, profileId: string, operation: "create" | "import" | "update") => {
-    if (user.role === "admin" || !guardDocumentHasRevealRules(document)) return null;
+    if (!guardDocumentHasRevealRules(document)) return null;
+    if (user.role === "admin") {
+      const problem = await revealSubjectProblem(document);
+      if (!problem) return null;
+      reply.code(400);
+      return { error: problem };
+    }
     await deps.audit(request, user, {
       eventType: "guard.profile.reveal_rules_denied",
       category: "system",
@@ -144,6 +150,27 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     });
     reply.code(403);
     return { error: REVEAL_RULES_ADMIN_ONLY_MESSAGE };
+  };
+
+  /**
+   * Phase 12 coverage — reveal rule subjects name the right kind of account: `serviceAccounts` only service accounts,
+   * `users` only people (a service account listed there would never match: its runs match only by service account).
+   */
+  const revealSubjectProblem = async (document: unknown): Promise<string | null> => {
+    const rules = ((document as { reveal?: { rules?: unknown } }).reveal?.rules ?? []) as unknown[];
+    for (const [index, rule] of rules.entries()) {
+      const subjects = (rule && typeof rule === "object" ? (rule as { subjects?: Record<string, unknown> }).subjects : undefined) ?? {};
+      const ids = (value: unknown) => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []);
+      for (const id of ids(subjects.serviceAccounts)) {
+        const found = await deps.store.getUserById(id);
+        if (found?.kind !== "service") return `Reveal rule ${index + 1}: '${id}' is not a service account`;
+      }
+      for (const id of ids(subjects.users)) {
+        const found = await deps.store.getUserById(id);
+        if (found?.kind === "service") return `Reveal rule ${index + 1}: '${id}' is a service account; list it under service accounts`;
+      }
+    }
+    return null;
   };
 
   const forbidden = (reply: FastifyReply) => {

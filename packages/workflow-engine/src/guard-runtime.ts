@@ -207,7 +207,7 @@ export interface GuardRevealEvent {
   workflowId: string;
   nodeId: string;
   /** Who the rules judged: the run subject's source and role, and the user or service account when there is one. */
-  subject: { source: string; role?: string; userId?: string; serviceAccountId?: string } | null;
+  subject: { source: string; role?: string; userId?: string; serviceAccountId?: string; apiKeyId?: string } | null;
   /** The rule sets whose reveal rules applied (the first one is the event's rule set when nothing was revealed). */
   profiles: GuardProfileRef[];
   revealed: RevealClassSummary[];

@@ -201,7 +201,9 @@ export async function executeRevealNodeStep(input: {
                 source: subject.source,
                 ...(subject.role ? { role: subject.role } : {}),
                 ...(subject.userId ? { userId: subject.userId } : {}),
-                ...(subject.serviceAccountId ? { serviceAccountId: subject.serviceAccountId } : {})
+                ...(subject.serviceAccountId ? { serviceAccountId: subject.serviceAccountId } : {}),
+                // The API key a signed-in run (or a service account) started it with, for the audit entry.
+                ...(input.scope.subject?.source === "user" && input.scope.subject.apiKeyId ? { apiKeyId: input.scope.subject.apiKeyId } : {})
               }
             : null,
           profiles: profiles.map(guardProfileRef),

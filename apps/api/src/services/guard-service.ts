@@ -1162,7 +1162,14 @@ export class GuardService {
       category: "execution",
       action: "reveal",
       outcome: event.revealed.length > 0 ? "success" : "denied",
-      actor: startedBy ? { type: "user", userId: startedBy } : { type: "system" },
+      actor: startedBy
+        ? {
+            type: "user",
+            userId: startedBy,
+            ...(event.subject?.apiKeyId ? { apiKeyId: event.subject.apiKeyId } : {}),
+            ...(event.subject?.serviceAccountId ? { serviceAccount: true } : {})
+          }
+        : { type: "system" },
       resourceType: "workflow",
       ...(event.workflowId ? { resourceId: event.workflowId } : {}),
       projectId: context.projectId ?? null,

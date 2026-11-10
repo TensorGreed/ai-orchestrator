@@ -26,6 +26,8 @@ import { testSql } from "./test-support/test-sql.js";
 import { AuthService } from "./services/auth-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { LogStreamingService } from "./services/log-streaming-service.js";
+import { QueueService } from "./services/queue-service.js";
+import { resolveMcpToolPolicySubject } from "./services/mcp-tool-policy.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { GuardSimulationSink, GuardSimulationVault } from "./services/guard-simulation-sink.js";
@@ -36,6 +38,7 @@ interface TestContext {
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
+  queue?: QueueService;
 }
 
 const contexts: TestContext[] = [];
@@ -44,6 +47,7 @@ const dirs: string[] = [];
 afterEach(async () => {
   while (contexts.length > 0) {
     const context = contexts.pop()!;
+    context.queue?.stop();
     await context.app.close();
     try {
       await context.store.close();
@@ -55,7 +59,7 @@ afterEach(async () => {
   while (dirs.length > 0) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
 });
 
-async function createTestContext(): Promise<TestContext> {
+async function createTestContext(options: { queue?: boolean } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-reveal-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
@@ -70,9 +74,10 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = await createApp(config, store, secretService, authService);
+  const queue = options.queue ? new QueueService(store, { pollIntervalMs: 20 }) : undefined;
+  const app = await createApp(config, store, secretService, authService, undefined, queue);
   await app.ready();
-  const context = { app, store, authService, config, tempDir };
+  const context = { app, store, authService, config, tempDir, ...(queue ? { queue } : {}) };
   contexts.push(context);
   return context;
 }
@@ -303,6 +308,120 @@ describe("Reveal over the API", () => {
     const builder = await login(context, "builder");
     const saved = await call(context, "POST", "/api/guard/profiles", builder, { id: "support", document: SUPPORT_RULES });
     expect(saved.statusCode).toBe(403);
+  });
+});
+
+describe("Reveal and service accounts", () => {
+  const rulesFor = (subjects: Record<string, unknown>) => ({ ...SUPPORT_RULES, reveal: { rules: [{ name: "Bots", dataClasses: ["email"], subjects }] } });
+
+  async function serviceAccount(context: TestContext, admin: string) {
+    const created = await call(context, "POST", "/api/service-accounts", admin, { name: "crm-bot", role: "admin", description: "CRM sync" });
+    expect(created.statusCode, created.body).toBe(201);
+    const account = created.json<{ serviceAccount: { id: string; email: string } }>().serviceAccount;
+    const issued = await call(context, "POST", `/api/service-accounts/${account.id}/keys`, admin, { name: "ci" });
+    expect(issued.statusCode, issued.body).toBe(201);
+    const key = issued.json<{ key: string; record: { id: string } }>();
+    return { account, key: key.key, keyId: key.record.id };
+  }
+
+  const viaKey = (context: TestContext, key: string, url: string, payload: unknown) =>
+    context.app.inject({ method: "POST", url, headers: { authorization: `Bearer ${key}` }, payload: payload as object });
+
+  it("an admin-role service account's key run never matches role rules or reveals older tokens, but matches a rule naming it", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const { account, key, keyId } = await serviceAccount(context, admin);
+    const { token, workflow } = await setUp(context, admin, { rules: { ...rulesFor({ roles: ["admin"] }), id: "bots" } });
+    // A token issued before tokens were scoped to a project (a signed-in admin's run could reveal it).
+    const legacy = new GuardService(context.store, new SecretService(context.store, context.config.SECRET_MASTER_KEY_BASE64));
+    await legacy.vault.put({ token: "tok_email_LLLLLLLLLLLLLLLL", dataClass: "email", value: "legacy@example.org", createdAt: new Date().toISOString() });
+
+    const byRole = (await viaKey(context, key, `/api/workflows/${workflow.id}/execute`, { user_prompt: `Mail ${token}` })).json<RunResult>();
+    expect(byRole.status, byRole.error).toBe("success");
+    expect(outputOf(byRole, "reveal").reveal.revealed).toEqual([]);
+    expect(outputOf(byRole, "reveal").reveal.refused).toEqual([expect.objectContaining({ reason: "no_rule" })]);
+
+    const named = await call(context, "PUT", "/api/guard/profiles/bots", admin, { document: { ...rulesFor({ serviceAccounts: [account.id] }), id: "bots" } });
+    expect(named.statusCode, named.body).toBe(200);
+    const byId = (await viaKey(context, key, `/api/workflows/${workflow.id}/execute`, { user_prompt: `Mail ${token} and tok_email_LLLLLLLLLLLLLLLL` })).json<RunResult>();
+    expect(byId.status, byId.error).toBe("success");
+    expect(outputOf(byId, "reveal").reveal.revealed).toEqual([expect.objectContaining({ dataClass: "email", count: 1 })]);
+    expect(outputOf(byId, "reveal").reveal.refused).toEqual([expect.objectContaining({ reason: "unscoped_token" })]);
+    const audit = (await context.store.listAuditLogs({ eventType: "content_rules.reveal", outcome: "success", pageSize: 10 })).items;
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actorType: "user", actorUserId: account.id });
+    expect(audit[0]!.metadata).toMatchObject({ actorServiceAccount: true, actorApiKeyId: keyId, subject: { source: "service_account", serviceAccountId: account.id } });
+  });
+
+  it("marks a service account's queued run from the stored account kind", async () => {
+    const context = await createTestContext({ queue: true });
+    const admin = await login(context, "admin");
+    const { account, key } = await serviceAccount(context, admin);
+    const { token, workflow } = await setUp(context, admin, { rules: { ...rulesFor({ roles: ["admin"] }), id: "bots" } });
+    const run = async () => {
+      const enqueued = await viaKey(context, key, `/api/workflows/${workflow.id}/enqueue`, { userPrompt: `Mail ${token}` });
+      expect(enqueued.statusCode, enqueued.body).toBe(200);
+      const executionId = enqueued.json<{ executionId: string }>().executionId;
+      const until = Date.now() + 20_000;
+      for (;;) {
+        const history = await context.store.getExecutionHistory(executionId);
+        if (history && ["success", "error"].includes(history.status)) return history;
+        if (Date.now() > until) throw new Error("The queued run did not finish");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    const reveal = (history: { nodeResults: unknown }) => (history.nodeResults as Array<{ nodeId: string; output?: Record<string, any> }>).find((entry) => entry.nodeId === "reveal")?.output?.reveal;
+    // The admin role rule never matches the service account's queued run.
+    const byRole = await run();
+    expect(byRole.status).toBe("success");
+    expect(reveal(byRole)).toMatchObject({ revealed: [], refused: [expect.objectContaining({ reason: "no_rule" })] });
+    expect(JSON.stringify(byRole)).not.toContain(EMAIL);
+    // A rule naming it does.
+    expect((await call(context, "PUT", "/api/guard/profiles/bots", admin, { document: { ...rulesFor({ serviceAccounts: [account.id] }), id: "bots" } })).statusCode).toBe(200);
+    const byId = await run();
+    expect(reveal(byId).revealed).toEqual([expect.objectContaining({ dataClass: "email", count: 1 })]);
+    expect(JSON.stringify(byId)).not.toContain(EMAIL);
+  });
+
+  it("refuses reveal rules that list a service account as a user or a person as a service account", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const { account } = await serviceAccount(context, admin);
+    const adminId = (await context.store.getUserByEmail("admin@example.com"))!.id;
+    const asUser = await call(context, "POST", "/api/guard/profiles", admin, { id: "bad-user", document: { ...rulesFor({ users: [account.id] }), id: "bad-user" } });
+    expect(asUser.statusCode).toBe(400);
+    expect(asUser.json<{ error: string }>().error).toContain("is a service account");
+    const asAccount = await call(context, "POST", "/api/guard/profiles", admin, { id: "bad-account", document: { ...rulesFor({ serviceAccounts: [adminId] }), id: "bad-account" } });
+    expect(asAccount.statusCode).toBe(400);
+    expect(asAccount.json<{ error: string }>().error).toContain("is not a service account");
+    const fine = await call(context, "POST", "/api/guard/profiles", admin, { id: "good", document: { ...rulesFor({ users: [adminId], serviceAccounts: [account.id] }), id: "good" } });
+    expect(fine.statusCode, fine.body).toBe(201);
+  });
+});
+
+describe("resolveMcpToolPolicySubject and service accounts", () => {
+  const users = new Map([
+    ["sa-1", { id: "sa-1", email: "renamed-bot@example.com", role: "admin", kind: "service" }],
+    ["u-1", { id: "u-1", email: "ana@example.com", role: "admin", kind: "human" }]
+  ]);
+  const store = { getWorkflowCreatedBy: async () => "sa-1", getUserById: async (id: string) => users.get(id) ?? null };
+
+  it("marks a run a service account started from its stored kind, whatever the actor carries", async () => {
+    expect(await resolveMcpToolPolicySubject(store, "wf", { id: "sa-1", email: "renamed-bot@example.com", role: "admin", apiKeyId: "key-1" })).toEqual({
+      role: "admin",
+      source: "user",
+      userId: "sa-1",
+      email: "renamed-bot@example.com",
+      apiKeyId: "key-1",
+      serviceAccountId: "sa-1"
+    });
+    expect((await resolveMcpToolPolicySubject(store, "wf", { id: "u-1", email: "ana@example.com", role: "admin" })).serviceAccountId).toBeUndefined();
+  });
+
+  it("leaves the owner's run of a workflow a service account created unmarked (webhook, schedule)", async () => {
+    const subject = await resolveMcpToolPolicySubject(store, "wf", null);
+    expect(subject).toMatchObject({ source: "owner", userId: "sa-1" });
+    expect(subject.serviceAccountId).toBeUndefined();
   });
 });
 
