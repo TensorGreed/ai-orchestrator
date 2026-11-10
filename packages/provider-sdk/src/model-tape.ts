@@ -13,6 +13,7 @@ import {
   type SecretReference
 } from "@ai-orchestrator/shared";
 import { ProviderRegistry } from "./registry";
+import { ToolCallAssembler } from "./tool-call-assembly";
 import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "./types";
 import { chargedUsage, estimateAnswerTokens, estimateRequestTokens } from "./usage-estimate";
 import { isStreamUsageRefusal } from "./call-options";
@@ -226,24 +227,18 @@ function responseFromChunks(chunks: LLMStreamChunk[]): LLMCallResponse {
   let content = "";
   let finishReason: LLMCallResponse["finishReason"];
   let usage: LLMCallResponse["usage"];
-  const calls = new Map<string, { id: string; name: string; argumentsText: string }>();
+  const assembler = new ToolCallAssembler();
   for (const chunk of chunks) {
     if (chunk.type === "text_delta") content += chunk.textDelta;
     else if (chunk.type === "finish") finishReason = chunk.reason;
     else if (chunk.type === "usage") usage = chunk.usage;
-    else {
-      const id = chunk.toolCallId ?? `toolcall_${calls.size}`;
-      const entry = calls.get(id) ?? { id, name: chunk.name ?? `tool_${calls.size}`, argumentsText: "" };
-      if (chunk.name) entry.name = chunk.name;
-      if (chunk.argumentsDelta) entry.argumentsText += chunk.argumentsDelta;
-      calls.set(id, entry);
-    }
+    else assembler.add(chunk);
   }
   return {
     content,
     ...(finishReason ? { finishReason } : {}),
     ...(usage ? { usage } : {}),
-    toolCalls: [...calls.values()].map((call) => {
+    toolCalls: assembler.calls().map((call) => {
       let args: Record<string, unknown> = {};
       try {
         const parsed = JSON.parse(call.argumentsText || "{}") as unknown;
