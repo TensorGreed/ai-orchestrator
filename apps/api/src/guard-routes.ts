@@ -21,7 +21,9 @@ import {
   GUARD_BUILTIN_PROFILE_ID,
   GUARD_DESTINATION_RULES_PROFILE_ID,
   GUARD_PROFILE_CHANNEL_VALUES,
+  REVEAL_RULES_ADMIN_ONLY_MESSAGE,
   destinationRulesEnforcementSchema,
+  guardDocumentHasRevealRules,
   destinationRulesUpdateSchema,
   guardGatewayBindingInputSchema,
   guardProfileCreateSchema,
@@ -124,6 +126,25 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     return { error: "This rule set is enforced on a project; only an admin can change it" };
   };
 
+  /**
+   * Phase 12 coverage — only an admin may save a rule set that carries reveal rules (who may turn tokens back into
+   * values). A refused save is audited as denied.
+   */
+  const refuseRevealRules = async (request: FastifyRequest, user: SafeUser, reply: FastifyReply, document: unknown, profileId: string, operation: "create" | "import" | "update") => {
+    if (user.role === "admin" || !guardDocumentHasRevealRules(document)) return null;
+    await deps.audit(request, user, {
+      eventType: "guard.profile.reveal_rules_denied",
+      category: "system",
+      action: operation,
+      outcome: "denied",
+      resourceType: "guard_profile",
+      ...(profileId ? { resourceId: profileId } : {}),
+      message: REVEAL_RULES_ADMIN_ONLY_MESSAGE
+    });
+    reply.code(403);
+    return { error: REVEAL_RULES_ADMIN_ONLY_MESSAGE };
+  };
+
   const forbidden = (reply: FastifyReply) => {
     reply.code(403);
     return { error: "Insufficient permissions for project" };
@@ -153,6 +174,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const createId = parsed.data.id ?? (typeof parsed.data.document.id === "string" ? parsed.data.document.id : "");
     const refusedCreate = createId ? await refuseEnforcedEdit(user, reply, createId) : null;
     if (refusedCreate) return refusedCreate;
+    const refusedReveal = await refuseRevealRules(request, user, reply, parsed.data.document, createId, "create");
+    if (refusedReveal) return refusedReveal;
     try {
       const profile = await guard.createProfile(parsed.data, user.id);
       await deps.audit(request, user, { eventType: "guard.profile.created", category: "system", action: "create", resourceType: "guard_profile", resourceId: profile.id, metadata: { version: 1, hash: profile.hash } });
@@ -183,6 +206,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const importId = typeof (document as Record<string, unknown>).id === "string" ? ((document as Record<string, unknown>).id as string) : "";
     const refused = importId ? await refuseEnforcedEdit(user, reply, importId) : null;
     if (refused) return refused;
+    const refusedReveal = await refuseRevealRules(request, user, reply, document, importId, "import");
+    if (refusedReveal) return refusedReveal;
     try {
       const result = await guard.importProfile({ document: document as Record<string, unknown>, ...(str(body.note) ? { note: str(body.note) } : {}) }, user.id);
       await deps.audit(request, user, {
@@ -227,6 +252,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     }
     const refused = await refuseEnforcedEdit(user, reply, request.params.id);
     if (refused) return refused;
+    const refusedReveal = await refuseRevealRules(request, user, reply, parsed.data.document, request.params.id, "update");
+    if (refusedReveal) return refusedReveal;
     try {
       const result = await guard.updateProfile(request.params.id, parsed.data, user.id);
       if (result.changed) {
