@@ -59,7 +59,13 @@ did.
   - can call only the routes that check projects: `GET /api/auth/me`, `GET /api/projects`, listing, reading,
     creating, updating and running workflows (`/api/workflows`, `/api/workflows/:id`, `…/execute`,
     `…/execute/stream`), the run history (`/api/executions`, `/api/executions/:id`, `…/events`, `…/retry`,
-    `…/cancel`) and approvals (`/api/approvals`, `…/approve`, `…/reject`). Every other route answers `403`.
+    `…/cancel`), approvals (`/api/approvals`, `…/approve`, `…/reject`) and releases (`…/publish`, `…/releases`,
+    `…/release-state`, `…/publish-preview`, `…/rollback`). Every other route answers `403`, among them unpublish,
+    the release-gate settings, workflow delete, secrets and knowledge bases.
+  - publishes and rolls back as a builder, whatever its owner's role: it cannot override a release gate, and while a
+    gate is on and enforced it cannot roll back. A publish judges the replay jobs that already ran for the version
+    and starts none, so a key that may publish cannot start work through it. To have the gate's replay job run
+    first, start it from a session or an unscoped key.
   - reaches a workflow of another project only when that workflow is shared to one of its projects.
 
 The scope is stored with the key as strings (`role:operator`, `project:proj_payments`), and `scopes` in the create
@@ -103,7 +109,8 @@ admin service account exists.
 ## Audit
 
 Every audit entry made with an API key has actor type `api_key` and records the key in its metadata
-(`actorApiKeyId`), plus `actorServiceAccount: true` when a service account owns the key. Creating, changing and
+(`actorApiKeyId`), plus `actorServiceAccount: true` when a service account owns the key. Release events (publish,
+rollback, release requests and their decisions) record the key the same way. Creating, changing and
 deleting service accounts are audited as `service_account.create`, `service_account.update` and
 `service_account.delete`; creating and revoking keys as `api_key.create` and `api_key.revoke`, with the owner's kind.
 

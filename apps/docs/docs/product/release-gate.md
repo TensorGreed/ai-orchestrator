@@ -161,7 +161,7 @@ A published or released version is pinned: version retention never prunes it. Th
 
 ## Permissions
 
-Publishing, rollback, unpublish and deciding a release request need `workflow:publish` on the workflow's project. Admins, builders, project admins and editors have it; operators and viewers do not, and a custom role can grant it. Changing the gate needs `workflow:write`; turning it on when nothing is published also needs `workflow:publish`, since that publishes the baseline in your name. A workflow the user cannot read answers `404` on every release route, and one they can read but not change `403`. `PROJECT_ISOLATION=strict` applies as everywhere else.
+Publishing, rollback, unpublish and deciding a release request need `workflow:publish` on the workflow's project. Admins, builders, project admins and editors have it; operators and viewers do not, and a custom role can grant it. Changing the gate needs `workflow:write`; turning it on when nothing is published also needs `workflow:publish`, since that publishes the baseline in your name. A workflow the user cannot read answers `404` on every release route, and one they can read but not change `403`. `PROJECT_ISOLATION=strict` applies as everywhere else. An API key limited to projects may publish, roll back and read releases (history, state and the publish preview) of workflows in its projects, acting as a builder at most: it never overrides the gate, and cannot roll back while the gate is on and enforced (see [Service accounts and API keys](../security/service-accounts.md#key-scopes)).
 
 ## API
 

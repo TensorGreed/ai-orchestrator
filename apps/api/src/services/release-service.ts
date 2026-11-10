@@ -121,7 +121,7 @@ import {
   type WorkflowRelease
 } from "@ai-orchestrator/shared";
 import type { EvalFixtureRecord, ReleaseApprovalRequestRecord, ReleaseGateRecord, WorkflowReleaseRecord } from "../db/database.js";
-import type { AuditEventInput } from "./audit-service.js";
+import type { AuditActor, AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { RunAccessResult } from "../run-access.js";
@@ -371,6 +371,17 @@ export interface RoutingConflict {
   workflowId: string;
 }
 
+/** 13.2 — who an audit entry names: the user, and the API key the request was made with (when there was one). */
+function userActor(user: SafeUser): AuditActor {
+  return {
+    userId: user.id,
+    email: user.email,
+    type: user.apiKeyId ? "api_key" : "user",
+    ...(user.apiKeyId ? { apiKeyId: user.apiKeyId } : {}),
+    ...(user.apiKeyId && user.serviceAccount ? { serviceAccount: true } : {})
+  };
+}
+
 function sameIdentity(a: { id?: string | null; email?: string | null }, b: { id?: string | null; email?: string | null }): boolean {
   if (a.id && b.id && a.id === b.id) return true;
   return Boolean(a.email && b.email && a.email.toLowerCase() === b.email.toLowerCase());
@@ -566,7 +577,7 @@ export class ReleaseService {
           eventType: "release.gate.update_refused",
           action: "update",
           outcome: "denied",
-          actor: { userId: user.id, email: user.email, type: "user" },
+          actor: userActor(user),
           resourceType: "workflow",
           resourceId: workflowId,
           projectId: await this.projectOf(workflowId),
@@ -641,7 +652,7 @@ export class ReleaseService {
       eventType: "release.gate.updated",
       action: "update",
       outcome: "success",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: workflowId,
       projectId: await this.projectOf(workflowId),
@@ -833,7 +844,7 @@ export class ReleaseService {
       eventType,
       action,
       outcome: "denied",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: workflowId,
       projectId: await this.projectOf(workflowId),
@@ -959,7 +970,7 @@ export class ReleaseService {
         eventType: "release.gate.cases_removed",
         action: "delete",
         outcome: "success",
-        actor: { userId: user.id, email: user.email, type: "user" },
+        actor: userActor(user),
         resourceType: "workflow",
         resourceId: workflowId,
         projectId: await this.projectOf(workflowId),
@@ -1021,7 +1032,7 @@ export class ReleaseService {
         eventType: "release.jobs.evidence_removed",
         action: "update",
         outcome: "success",
-        actor: { userId: user.id, email: user.email, type: "user" },
+        actor: userActor(user),
         resourceType: workflowId ? "workflow" : "eval_run",
         resourceId: workflowId ?? stale[0]!,
         projectId: workflowId ? await this.projectOf(workflowId) : null,
@@ -1397,7 +1408,7 @@ export class ReleaseService {
       eventType: input.verdict === "rollback" ? "release.rolled_back" : input.verdict === "overridden" ? "release.overridden" : "release.published",
       action: input.verdict === "rollback" ? "rollback" : "publish",
       outcome: "success",
-      actor: { userId: input.actor.id, email: input.actor.email, type: "user" },
+      actor: userActor(input.actor),
       resourceType: "workflow",
       resourceId: input.workflowId,
       projectId: await this.projectOf(input.workflowId),
@@ -1493,7 +1504,7 @@ export class ReleaseService {
       eventType: "release.blocked",
       action: "publish",
       outcome: "denied",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: workflowId,
       projectId: await this.projectOf(workflowId),
@@ -1631,7 +1642,7 @@ export class ReleaseService {
       eventType: "release.unpublished",
       action: "unpublish",
       outcome: "success",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: workflowId,
       projectId: await this.projectOf(workflowId),
@@ -1716,7 +1727,7 @@ export class ReleaseService {
       eventType: "release.approval.requested",
       action: "request",
       outcome: "success",
-      actor: { userId: input.user.id, email: input.user.email, type: "user" },
+      actor: userActor(input.user),
       resourceType: "workflow",
       resourceId: input.workflowId,
       projectId: record.projectId,
@@ -1907,7 +1918,7 @@ export class ReleaseService {
       eventType: status === "timed_out" ? "release.approval.timed_out" : "release.approval.canceled",
       action: status === "timed_out" ? "timeout" : "cancel",
       outcome: "success",
-      actor: actor ? { userId: actor.id, email: actor.email, type: "user" } : { type: "system", email: "system" },
+      actor: actor ? userActor(actor) : { type: "system", email: "system" },
       resourceType: "workflow",
       resourceId: record.workflowId,
       projectId: await this.projectOf(record.workflowId),
@@ -1935,7 +1946,7 @@ export class ReleaseService {
         eventType: "release.approval.decided",
         action: decision,
         outcome: "denied",
-        actor: { userId: user.id, email: user.email, type: "user" },
+        actor: userActor(user),
         resourceType: "workflow",
         resourceId: record.workflowId,
         projectId: await this.projectOf(record.workflowId),
@@ -1998,7 +2009,7 @@ export class ReleaseService {
       eventType: "release.published",
       action: "publish",
       outcome: "success",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: record.workflowId,
       projectId: await this.projectOf(record.workflowId),
@@ -2028,7 +2039,7 @@ export class ReleaseService {
       eventType: "release.approval.decided",
       action: decision,
       outcome: "success",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: record.workflowId,
       projectId: await this.projectOf(record.workflowId),
