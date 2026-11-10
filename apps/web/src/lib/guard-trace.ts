@@ -2,7 +2,7 @@
 // the Security page. Everything here reads verdict summaries (masked evidence
 // only) from node outputs and guard events; nothing holds raw content.
 
-import type { GuardEventView } from "@ai-orchestrator/shared";
+import type { GuardEventView, GuardPlacementValue } from "@ai-orchestrator/shared";
 
 export type GuardActionName = "allow" | "transform" | "mask" | "redact" | "protect" | "review" | "require_approval" | "block";
 
@@ -29,7 +29,9 @@ export const GUARD_CHANNEL_LABEL: Record<string, string> = {
   tool_arguments: "Tool arguments",
   tool_result: "Tool result",
   final_output: "Final answer",
-  egress: "Outbound (egress)"
+  egress: "Outbound (egress)",
+  response: "Response",
+  trigger_input: "Trigger input"
 };
 
 export function actionLabel(action: string): string {
@@ -55,7 +57,7 @@ export interface GuardTraceFinding {
 export interface GuardTraceVerdict {
   key: string;
   nodeId: string;
-  placement: "node" | "agent" | "gateway";
+  placement: GuardPlacementValue;
   iteration?: number;
   channel: string;
   toolName?: string;
@@ -85,7 +87,7 @@ export interface GuardTraceProfile {
 
 export interface GuardTraceNode {
   nodeId: string;
-  placement: "node" | "agent" | "gateway";
+  placement: GuardPlacementValue;
   /** Where the profiles came from: port, enforced, workflow, project, instance or a guard node's own choice. */
   source?: string;
   profiles: GuardTraceProfile[];
@@ -173,7 +175,7 @@ export function mergeTimings(timings: GuardTraceVerdict["timings"]): GuardTraceV
 function verdictFromSummaries(input: {
   key: string;
   nodeId: string;
-  placement: "node" | "agent" | "gateway";
+  placement: GuardPlacementValue;
   iteration?: number;
   channel: string;
   toolName?: string;
