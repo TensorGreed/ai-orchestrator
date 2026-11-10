@@ -37,6 +37,19 @@ export const RETENTION_DATA_CLASS_LABELS: Record<RetentionDataClass, { label: st
   agent_memory: { label: "Agent memory", what: "Simple Memory sessions, agent artifacts and the session tool cache" }
 };
 
+/**
+ * The classes that hold security evidence about a project (what its tools were called with, what content rules
+ * caught): only a deployment admin may set them shorter than the deployment's value. A project's admins may raise
+ * them, and set runs and agent memory either way, within the bounds.
+ */
+export const RETENTION_ADMIN_TO_SHORTEN: readonly RetentionDataClass[] = ["tool_calls", "rule_events"];
+
+/** Whether `days` keeps a class for less time than the deployment's `deploymentDays` (0 = forever on both sides). */
+export function retentionShortensDeployment(days: number, deploymentDays: number): boolean {
+  if (days <= 0) return false;
+  return deploymentDays <= 0 || days < deploymentDays;
+}
+
 /** What time-based retention never deletes, whatever the project sets. */
 export const RETENTION_EXEMPTIONS_TEXT =
   "Golden runs and golden-set cases, paused runs, pending approvals, and the eval runs that back a workflow's current " +
@@ -119,6 +132,8 @@ export interface ProjectRetentionClassView {
   effectiveDays: number;
   /** The stored value lies outside the current bounds, so the nearest bound applies. */
   clamped: boolean;
+  /** Only a deployment admin may set this class shorter than the deployment's value (RETENTION_ADMIN_TO_SHORTEN). */
+  shortenNeedsAdmin: boolean;
   updatedBy: string | null;
   updatedAt: string | null;
 }
@@ -131,6 +146,8 @@ export interface ProjectRetentionView {
   exemptions: string;
   /** Whether the caller may change the values (admins and the project's admins). */
   canEdit: boolean;
+  /** Whether the caller is a deployment admin, who may also shorten the classes in RETENTION_ADMIN_TO_SHORTEN. */
+  deploymentAdmin: boolean;
 }
 
 /** A project with values of its own, on the admin Data protection page. */

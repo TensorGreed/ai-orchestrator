@@ -1177,7 +1177,10 @@ export const openApiSpec = {
         responses: {
           "200": { description: "The updated project retention view" },
           "400": { description: "Invalid body, or a value outside the deployment's bounds (retention_out_of_bounds)" },
-          "403": { description: "Not an admin of the project, or step_up_required" },
+          "403": {
+            description:
+              "Not an admin of the project, step_up_required, or retention_admin_required (only an admin may set tool_calls or rule_events shorter than the deployment's value)"
+          },
           "404": { description: "Project not found or not readable" }
         }
       }

@@ -170,6 +170,13 @@ export function ProjectRetentionTab({ projects, initialProjectId }: { projects: 
                       </div>
                     )}
                     {entry.clamped && <div className="settings-muted">Outside the deployment's current range, so the nearest limit applies.</div>}
+                    {view.canEdit && !view.deploymentAdmin && entry.shortenNeedsAdmin && (
+                      <div className="settings-muted" data-testid={`retention-admin-only-${entry.class}`}>
+                        {entry.deploymentDays > 0
+                          ? `Only an admin can set less than the deployment default (${formatRetentionDays(entry.deploymentDays)}).`
+                          : "The deployment keeps this forever; only an admin can set a number of days."}
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

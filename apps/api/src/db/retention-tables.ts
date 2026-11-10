@@ -55,6 +55,13 @@ export interface RetentionScope {
   limit: number;
   projectId?: string;
   excludeProjects?: readonly string[];
+  /**
+   * Agent memory only: older session keys (written before keys carried the project) by exact value. With `projectId`,
+   * the keys only that project owns (they go with its rows); with `excludeProjects`, every key an excluded project
+   * claims (they stay). Any other older key belongs to no project. The service builds both lists from the workflows'
+   * own default namespaces, `<workflowId>:<nodeId>`, as run-scope.ts reads them.
+   */
+  legacyNamespaces?: readonly string[];
 }
 
 /** Rows one batch deletes at most; the store yields between batches. */
@@ -136,16 +143,17 @@ export function retentionRunFromRow(row: RetentionRunRow): RetentionRunView {
  * 13.3 R1 — how a retention table's rows belong to a project:
  * - `project_id`: the row's own column (rows without one belong to no project and follow the deployment);
  * - `workflow`: the project of the row's workflow, now (a workflow moved to another project takes its rows along);
+ * - `workflow_or_project`: the project of the row's workflow while it exists, else the row's own `project_id`, so
+ *   cassettes and decided approvals go with the runs they belong to (a moved workflow takes them along too);
  * - `namespace`: agent memory, by session key. Keys written since sessions were scoped start with the project
- *   (`project:<length>:<id>:`, run-scope.ts); older keys under a workflow's own default namespace (`<workflowId>:...`)
- *   belong to that workflow's project. Any other older key belongs to no project.
+ *   (`project:<length>:<id>:`, run-scope.ts); older keys follow `RetentionScope.legacyNamespaces`.
  */
-export const RETENTION_PROJECT_KEYS: Partial<Record<RetentionTable, "project_id" | "workflow" | "namespace">> = {
+export const RETENTION_PROJECT_KEYS: Partial<Record<RetentionTable, "project_id" | "workflow" | "workflow_or_project" | "namespace">> = {
   execution_history: "workflow",
   mcp_tool_calls: "project_id",
   guard_events: "project_id",
-  approval_requests: "project_id",
-  mcp_cassettes: "project_id",
+  approval_requests: "workflow_or_project",
+  mcp_cassettes: "workflow_or_project",
   mcp_gateway_approvals: "project_id",
   execution_queue: "workflow",
   execution_queue_dlq: "workflow",
@@ -193,7 +201,7 @@ export type RetentionDialect = "sqlite" | "postgres";
  */
 export function retentionScopeWhere(
   table: RetentionTable,
-  scope: Pick<RetentionScope, "before" | "projectId" | "excludeProjects">,
+  scope: Pick<RetentionScope, "before" | "projectId" | "excludeProjects" | "legacyNamespaces">,
   dialect: RetentionDialect
 ): { sql: string; params: unknown[] } {
   const params: unknown[] = [scope.before];
@@ -209,10 +217,13 @@ export function retentionScopeWhere(
     dialect === "sqlite"
       ? `EXISTS (SELECT 1 FROM json_each(${bind(JSON.stringify(prefixes))}) WHERE substr(${column}, 1, length(value)) = value)`
       : `EXISTS (SELECT 1 FROM unnest(${bind([...prefixes])}::text[]) AS p(prefix) WHERE substr(${column}, 1, length(p.prefix)) = p.prefix)`;
-  // An older session key under a workflow's own default namespace, for a workflow of the projects `projectMatch` picks.
-  const legacyKeyOf = (projectMatch: string): string =>
-    `(namespace NOT LIKE 'project:%' AND EXISTS (SELECT 1 FROM workflows w WHERE w.project_id ${projectMatch} ` +
-    `AND substr(namespace, 1, length(w.id) + 1) = w.id || ':'))`;
+  // The row's project by its workflow while the workflow exists, else by its own column; columns are qualified with the
+  // table, since workflows has a project_id of its own.
+  const viaWorkflow = (projectMatch: string): string =>
+    `EXISTS (SELECT 1 FROM workflows w WHERE w.id = ${table}.workflow_id AND w.project_id ${projectMatch})`;
+  const viaOwnColumn = (projectMatch: string): string =>
+    `(${table}.project_id IS NOT NULL AND ${table}.project_id ${projectMatch} AND NOT EXISTS (SELECT 1 FROM workflows w WHERE w.id = ${table}.workflow_id))`;
+  const legacy = scope.legacyNamespaces ?? [];
 
   const excluded = scope.excludeProjects ?? [];
   if (scope.projectId === undefined && excluded.length === 0) return { sql: clauses[0], params };
@@ -222,12 +233,20 @@ export function retentionScopeWhere(
     const projectId = scope.projectId;
     if (key === "project_id") clauses.push(`project_id = ${bind(projectId)}`);
     else if (key === "workflow") clauses.push(`workflow_id IN (SELECT id FROM workflows WHERE project_id = ${bind(projectId)})`);
-    else clauses.push(`(${startsWithAny("namespace", [projectNamespacePrefix(projectId)])} OR ${legacyKeyOf(`= ${bind(projectId)}`)})`);
+    else if (key === "workflow_or_project") clauses.push(`(${viaWorkflow(`= ${bind(projectId)}`)} OR ${viaOwnColumn(`= ${bind(projectId)}`)})`);
+    else {
+      const own = startsWithAny("namespace", [projectNamespacePrefix(projectId)]);
+      clauses.push(legacy.length > 0 ? `(${own} OR namespace ${inList(legacy)})` : own);
+    }
   }
   if (excluded.length > 0) {
     if (key === "project_id") clauses.push(`(project_id IS NULL OR NOT (project_id ${inList(excluded)}))`);
     else if (key === "workflow") clauses.push(`workflow_id NOT IN (SELECT id FROM workflows WHERE project_id ${inList(excluded)})`);
-    else clauses.push(`NOT ${startsWithAny("namespace", excluded.map(projectNamespacePrefix))} AND NOT ${legacyKeyOf(inList(excluded))}`);
+    else if (key === "workflow_or_project") clauses.push(`NOT ${viaWorkflow(inList(excluded))} AND NOT ${viaOwnColumn(inList(excluded))}`);
+    else {
+      clauses.push(`NOT ${startsWithAny("namespace", excluded.map(projectNamespacePrefix))}`);
+      if (legacy.length > 0) clauses.push(`NOT (namespace ${inList(legacy)})`);
+    }
   }
   return { sql: clauses.join(" AND "), params };
 }

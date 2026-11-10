@@ -100,21 +100,34 @@ the project's admins (`project:manage`) can change them; every member can read t
 (`STEP_UP_MAX_AGE_MINUTES`), a change needs a fresh MFA check. Each change writes a `project.retention.update` audit
 entry with the values before and after.
 
+**Tool calls and rule events need an admin to shorten.** They are the security evidence about what a project's tools
+were called with and what content rules caught. Only an admin can keep them for less time than the deployment's value
+(when the deployment keeps them forever, any number of days is shorter). A project admin can raise them, set them back
+to the deployment default, and set runs and agent memory shorter or longer within the bounds. A project admin's attempt
+to shorten tool calls or rule events answers `403 retention_admin_required` and writes a
+`project.retention.update_denied` audit entry.
+
 - **Bounds.** A value must lie between `RETENTION_MIN_DAYS` and `RETENTION_MAX_DAYS`. `0` keeps that kind forever and
   is allowed only when `RETENTION_MAX_DAYS` is unset. If the bounds change later, a stored value outside them is
   treated as the nearest bound (keep forever becomes the maximum), and the project page says so.
 - **Kinds can differ.** Rule events or tool calls may be kept longer than runs, for example a year of rule events for
-  an audit while runs go after 30 days. They then outlive the run they came from: the Security page shows "Run deleted
-  by retention" in place of the run link.
-- **Which project a row belongs to.** Runs and queue jobs follow their workflow's project now, so a workflow moved to
-  another project takes its history to the new project's values. Tool calls, rule events, cassettes and approvals
-  keep the project they were recorded in. Agent memory belongs to the project in its session key; memory written
-  before sessions were scoped per project belongs to the project of the workflow whose default namespace it uses.
-  Rows of no project (gateway calls outside any toolset project, older memory under a custom namespace, tool calls
-  recorded before they carried a project) follow the deployment.
-- **How a purge applies it.** For each kind, a purge first takes each project with its own value at that project's
-  cutoff, then every other row at the deployment's. The row cap is per table across all of them. Shortening a project
+  an audit while runs go after 30 days. They then outlive the run they came from: the Security page shows "Run no
+  longer stored" in place of the run link.
+- **Which project a row belongs to.**
+  - Runs, queue jobs, cassettes and decided approvals follow their workflow's project now, so a workflow moved to
+    another project takes all of them to the new project's values. A cassette or approval whose workflow is gone
+    keeps the project it was recorded in.
+  - Tool calls, rule events and gateway approvals keep the project they were recorded in.
+  - Agent memory belongs to the project in its session key. Memory written before sessions were scoped per project
+    belongs to a project only when its key is exactly one of that project's workflows' default namespaces
+    (`<workflowId>:<nodeId>`) and no other project's workflow claims the same key.
+  - Rows of no project follow the deployment. These include gateway calls outside any toolset project, older memory
+    under any other key, and tool calls recorded before they carried a project.
+- **How a purge applies it.** For each kind, a purge takes each project with its own value at that project's cutoff,
+  then every other row at the deployment's. The row cap is per table: each of those passes first gets an equal share,
+  and what one leaves unused goes to the others, so one project's backlog never stops the rest. Shortening a project
   from a year to a week deletes its backlog over several purges; the admin page's "Due now" counts it.
+- **Timing.** A purge reads the values when it starts. A value raised while a purge runs applies from the next purge.
 
 The exemptions are the same as for the deployment: golden runs and cases, paused runs, pending approvals and release
 evidence are never deleted by age. Admins see the projects with values of their own on the Data protection page.

@@ -31,12 +31,13 @@ const contexts: TestContext[] = [];
 const DAY = 24 * 60 * 60 * 1000;
 const daysAgo = (days: number) => new Date(Date.now() - days * DAY).toISOString();
 
-async function createTestContext(env: Record<string, string> = {}): Promise<TestContext> {
+async function createTestContext(env: Record<string, string> = {}, prepare?: (store: Store) => Promise<void>): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-project-retention-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   await store.upsertProject({ id: "proj-a", name: "Project A", createdBy: "ana" });
   await store.upsertWorkflow({ id: "wf-a", name: "wf-a", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [], projectId: "proj-a" } as never);
+  await prepare?.(store);
   const config = parseConfig({
     LOG_LEVEL: "fatal",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -161,6 +162,7 @@ describe("per-project retention routes", () => {
     await addMember(context, admin.cookie, editor.user.id, "editor");
 
     expect((await put(context, owner.cookie, { runs: 14 })).statusCode).toBe(200);
+    expect((await get(context, owner.cookie)).json<ProjectRetentionView>().deploymentAdmin).toBe(false);
     expect((await get(context, owner.cookie)).json<ProjectRetentionView>().canEdit).toBe(true);
 
     for (const reader of [editor, viewer, outsider]) {
@@ -225,5 +227,72 @@ describe("per-project retention routes", () => {
     expect(byId.get("ev-gone")?.runDeleted).toBe(true);
     expect(byId.get("ev-live")?.runDeleted).toBeUndefined();
     expect(byId.get("ev-gateway")?.runDeleted).toBeUndefined();
+  });
+
+  it("only an admin may keep tool calls or rule events for less than the deployment; project admins may raise them", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const owner = await login(context, "builder");
+    await addMember(context, admin.cookie, owner.user.id, "project_admin");
+
+    for (const classes of [{ rule_events: 7 }, { tool_calls: 29 }, { runs: 400, rule_events: 1 }] as Array<Record<string, number>>) {
+      const refused = await put(context, owner.cookie, classes);
+      expect(refused.statusCode, JSON.stringify(classes)).toBe(403);
+      expect(refused.json()).toMatchObject({ code: "retention_admin_required" });
+    }
+    expect(await context.store.listRetentionPolicies()).toEqual([]);
+    const denied = await testSql(context.store).all<{ metadata_json: string; outcome: string }>(
+      `SELECT metadata_json, outcome FROM audit_logs WHERE event_type = 'project.retention.update_denied' ORDER BY created_at, id`
+    );
+    expect(denied).toHaveLength(3);
+    expect(JSON.parse(denied[0]!.metadata_json)).toMatchObject({ refused: ["rule_events"], requested: { rule_events: 7 } });
+    expect(denied[0]!.outcome).toBe("failure");
+
+    // Raising them, matching the deployment, shortening runs and setting memory (kept forever by the deployment) are fine.
+    expect((await put(context, owner.cookie, { rule_events: 400, tool_calls: 30, runs: 1, agent_memory: 3 })).statusCode).toBe(200);
+    // An admin may shorten them; the project admin may then return them to the default, but not shorten them again.
+    expect((await put(context, admin.cookie, { rule_events: 7 })).statusCode).toBe(200);
+    expect((await put(context, owner.cookie, { rule_events: 14 })).statusCode).toBe(403);
+    expect((await put(context, owner.cookie, { rule_events: null })).statusCode).toBe(200);
+    expect((await context.store.listRetentionPolicies({ scopeId: "proj-a" })).map((policy) => [policy.dataClass, policy.days])).toEqual([
+      ["agent_memory", 3],
+      ["runs", 1],
+      ["tool_calls", 30]
+    ]);
+  });
+
+  it("with the deployment keeping tool calls forever, any number of days is shorter", async () => {
+    const context = await createTestContext({ EXECUTION_HISTORY_RETENTION_DAYS: "0" });
+    const admin = await login(context, "admin");
+    const owner = await login(context, "builder");
+    await addMember(context, admin.cookie, owner.user.id, "project_admin");
+    expect((await put(context, owner.cookie, { tool_calls: 3650 })).statusCode).toBe(403);
+    expect((await put(context, owner.cookie, { tool_calls: 0 })).statusCode).toBe(200);
+    expect((await put(context, admin.cookie, { tool_calls: 3650 })).statusCode).toBe(200);
+  });
+
+  it("the start-up purge gives older memory to a project only for its own workflows' default namespaces", async () => {
+    const workflowWith = (id: string, projectId: string, nodeId: string) =>
+      ({ id, name: id, schemaVersion: "1.0.0", workflowVersion: 1, projectId, edges: [], nodes: [{ id: nodeId, type: "llm_call", name: nodeId, position: { x: 0, y: 0 }, config: {} }] }) as never;
+    const context = await createTestContext({}, async (store) => {
+      await store.upsertProject({ id: "proj-b", name: "Project B", createdBy: "ana" });
+      await store.upsertWorkflow(workflowWith("team:wf1", "proj-b", "node1"));
+      await store.upsertWorkflow(workflowWith("team", "proj-a", "wf1:node1"));
+      await store.upsertWorkflow(workflowWith("crm", "proj-a", "n"));
+      await store.upsertWorkflow(workflowWith("wf-own", "proj-a", "agent"));
+      await store.setRetentionPolicies({ scopeId: "proj-a", values: { agent_memory: 7 }, updatedBy: "ana" });
+      const sql = testSql(store);
+      for (const [sessionId, namespace] of [
+        ["b-legacy", "team:wf1:node1"],
+        ["unowned", "crm:emea"],
+        ["a-legacy", "wf-own:agent"]
+      ]) {
+        await sql.run(
+          `INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at) VALUES ('${namespace}', '${sessionId}', '[]', '${daysAgo(10)}', '${daysAgo(10)}')`
+        );
+      }
+    });
+    const rows = await testSql(context.store).all<{ session_id: string }>(`SELECT session_id FROM session_memory ORDER BY session_id`);
+    expect(rows.map((row) => row.session_id)).toEqual(["b-legacy", "unowned"]);
   });
 });

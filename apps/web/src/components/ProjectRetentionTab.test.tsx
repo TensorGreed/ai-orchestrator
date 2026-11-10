@@ -25,6 +25,7 @@ function view(overrides: Partial<ProjectRetentionView> = {}): ProjectRetentionVi
     bounds: { minDays: 1, maxDays: null },
     exemptions: "Golden runs and golden-set cases, paused runs, pending approvals are never deleted by age.",
     canEdit: true,
+    deploymentAdmin: true,
     classes: [
       {
         class: "runs",
@@ -35,6 +36,7 @@ function view(overrides: Partial<ProjectRetentionView> = {}): ProjectRetentionVi
         days: 7,
         effectiveDays: 7,
         clamped: false,
+        shortenNeedsAdmin: false,
         updatedBy: "ana",
         updatedAt: "2026-11-10T00:00:00.000Z"
       },
@@ -47,6 +49,7 @@ function view(overrides: Partial<ProjectRetentionView> = {}): ProjectRetentionVi
         days: null,
         effectiveDays: 30,
         clamped: false,
+        shortenNeedsAdmin: false,
         updatedBy: null,
         updatedAt: null
       },
@@ -59,6 +62,7 @@ function view(overrides: Partial<ProjectRetentionView> = {}): ProjectRetentionVi
         days: 1000,
         effectiveDays: 365,
         clamped: true,
+        shortenNeedsAdmin: true,
         updatedBy: "ana",
         updatedAt: "2026-11-10T00:00:00.000Z"
       },
@@ -71,6 +75,7 @@ function view(overrides: Partial<ProjectRetentionView> = {}): ProjectRetentionVi
         days: null,
         effectiveDays: 0,
         clamped: false,
+        shortenNeedsAdmin: false,
         updatedBy: null,
         updatedAt: null
       }
@@ -118,6 +123,22 @@ describe("ProjectRetentionTab", () => {
     fireEvent.change(runs, { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Runs: must be at least 7 days")).toBeInTheDocument();
+  });
+
+  it("tells a project admin which classes only an admin can shorten", async () => {
+    vi.mocked(api.fetchProjectRetention).mockResolvedValue(view({ deploymentAdmin: false }));
+    render(<ProjectRetentionTab projects={projects} initialProjectId="proj-a" />);
+    expect(await screen.findByTestId("retention-admin-only-rule_events")).toHaveTextContent(
+      "Only an admin can set less than the deployment default (30 days)."
+    );
+    expect(screen.queryByTestId("retention-admin-only-runs")).toBeNull();
+  });
+
+  it("shows no admin-only note to an admin", async () => {
+    vi.mocked(api.fetchProjectRetention).mockResolvedValue(view());
+    render(<ProjectRetentionTab projects={projects} initialProjectId="proj-a" />);
+    await screen.findByLabelText("Runs days");
+    expect(screen.queryByTestId("retention-admin-only-rule_events")).toBeNull();
   });
 
   it("is read-only for members who cannot change it, and loads another project when picked", async () => {

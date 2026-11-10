@@ -308,7 +308,7 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                     <td>
                       {event.runDeleted ? (
                         <span className="kb-subtle" title={`Run ${event.executionId}`}>
-                          Run deleted by retention
+                          Run no longer stored
                         </span>
                       ) : onOpenRun && event.placement !== "gateway" ? (
                         <button type="button" className="mcp-ov-link mono-cell" onClick={() => onOpenRun(event.executionId)}>

@@ -158,8 +158,60 @@ for (const kind of kinds) {
         memory("custom", "shared-namespace", daysAgo(10))
       ]);
       // The deployment keeps agent memory (unset): only proj-a's go.
-      await makeService(store).tick("manual");
+      const owners = new Map([["wf-a:agent", ["proj-a"]]]);
+      await makeService(store, { legacyMemoryOwners: async () => owners }).tick("manual");
       expect(await ids(store, "session_memory", "session_id")).toEqual(["b-scoped", "custom"]);
+    });
+
+    it("older memory keys: a key two projects claim, or a lookalike of another project's, never goes with one project", async () => {
+      const store = await open();
+      await store.setRetentionPolicies({ scopeId: "proj-a", values: { agent_memory: 7 }, updatedBy: "ana" });
+      await store.setRetentionPolicies({ scopeId: "proj-b", values: { agent_memory: 0 }, updatedBy: "ana" });
+      await seed(store, [
+        memory("b-legacy", "team:wf1:node1", daysAgo(10)),
+        memory("unowned", "crm:emea", daysAgo(10)),
+        memory("shared", "both:n", daysAgo(10)),
+        memory("a-legacy", "wf-a:agent", daysAgo(10))
+      ]);
+      // Default namespaces only, as the app indexes them: proj-a's workflow `team` with node `wf1:node1` claims the same
+      // key as proj-b's `team:wf1` with `node1`; `crm:emea` is nobody's default namespace.
+      const owners = new Map<string, string[]>([
+        ["team:wf1:node1", ["proj-b", "proj-a"]],
+        ["both:n", ["proj-a", "proj-b"]],
+        ["wf-a:agent", ["proj-a"]]
+      ]);
+      // The deployment purges agent memory after 5 days; proj-b keeps it forever.
+      await makeService(store, { legacyMemoryOwners: async () => owners, env: { AGENT_MEMORY_RETENTION_DAYS: 5 } }).tick("manual");
+      expect(await ids(store, "session_memory", "session_id")).toEqual(["b-legacy", "shared"]);
+    });
+
+    it("one project's backlog does not take the whole row cap from the deployment pass", async () => {
+      const store = await open();
+      await store.setRetentionPolicies({ scopeId: "proj-a", values: { runs: 7 }, updatedBy: "ana" });
+      await seed(store, [
+        ...Array.from({ length: 1500 }, (_, i) => run(`a-${String(i).padStart(4, "0")}`, "wf-a", daysAgo(10))),
+        ...Array.from({ length: 10 }, (_, i) => run(`d-${i}`, "wf-d", daysAgo(40)))
+      ]);
+      const result = await makeService(store, { env: { RETENTION_MAX_ROWS_PER_TICK: 1000 } }).tick("manual");
+      expect(result.status === "ran" && result.run.counts.runs).toBe(1000);
+      const left = await ids(store, "execution_history");
+      expect(left.filter((id) => id.startsWith("d-"))).toEqual([]);
+      expect(left).toHaveLength(510);
+    }, 60_000);
+
+    it("the admin page still renders when project values cannot be read", async () => {
+      const store = await open();
+      const failing = new Proxy(store, {
+        get(target, property, receiver) {
+          if (property === "listRetentionPolicies") return async () => Promise.reject(new Error("db down"));
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+        }
+      });
+      const view = await makeService(failing as Store, { evalRunDays: 90 }).view();
+      expect(view.classes.find((entry) => entry.class === "runs")).toMatchObject({ days: 30, backlog: null });
+      expect(view.classes.find((entry) => entry.class === "eval_runs")).toBeDefined();
+      expect(view.projectOverrides).toEqual([]);
     });
 
     it("the row cap holds per table across a class's passes", async () => {

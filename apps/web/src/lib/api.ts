@@ -4436,7 +4436,7 @@ export async function fetchExecutionGuardEvents(executionId: string) {
 }
 
 export async function fetchGuardEvents(filter: GuardEventFilter = {}) {
-  // `runDeleted`: the run was deleted by retention while its rule event is kept (a project keeps rule events longer).
+  // `runDeleted`: the run is no longer stored (retention, a delete) while its rule event is kept.
   return apiRequest<{ events: Array<GuardEventView & { workflowName?: string; runDeleted?: boolean }>; total: number }>(`/api/guard/events${guardQuery(filter)}`);
 }
 

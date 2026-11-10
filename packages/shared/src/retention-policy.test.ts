@@ -4,9 +4,11 @@ import {
   RETENTION_DATA_CLASSES,
   RETENTION_DATA_CLASS_PURGES,
   clampRetentionDays,
+  RETENTION_ADMIN_TO_SHORTEN,
   projectRetentionUpdateSchema,
   retentionDataClassOf,
-  retentionDaysProblem
+  retentionDaysProblem,
+  retentionShortensDeployment
 } from "./retention-policy";
 
 describe("per-project retention values", () => {
@@ -46,6 +48,16 @@ describe("per-project retention values", () => {
     expect(clampRetentionDays(0, bounded)).toBe(365);
     expect(clampRetentionDays(0, { minDays: 7, maxDays: null })).toBe(0);
     expect(clampRetentionDays(3, { minDays: 1, maxDays: null })).toBe(3);
+  });
+
+  it("tells when a value keeps a class for less time than the deployment", () => {
+    expect(RETENTION_ADMIN_TO_SHORTEN).toEqual(["tool_calls", "rule_events"]);
+    expect(retentionShortensDeployment(7, 30)).toBe(true);
+    expect(retentionShortensDeployment(30, 30)).toBe(false);
+    expect(retentionShortensDeployment(400, 30)).toBe(false);
+    expect(retentionShortensDeployment(0, 30)).toBe(false);
+    expect(retentionShortensDeployment(3650, 0)).toBe(true);
+    expect(retentionShortensDeployment(0, 0)).toBe(false);
   });
 
   it("accepts days or null per known class only", () => {

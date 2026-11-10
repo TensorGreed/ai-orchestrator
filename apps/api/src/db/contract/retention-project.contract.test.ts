@@ -111,13 +111,16 @@ describeStoreContract("store contract: per-project retention", (ctx) => {
     const tables = Object.keys(RETENTION_PROJECT_KEYS) as RetentionTable[];
     await seed(tables.flatMap(rowsPerProject));
     for (const table of tables) {
-      const aRows = RETENTION_PROJECT_KEYS[table] === "namespace" ? ["a-legacy", "a-scoped"] : ["a-1"];
-      expect(await store.countRetentionDue(table, { before: CUT, cap: 100, projectId: "proj-a" }), table).toBe(aRows.length);
-      expect(await store.countRetentionDue(table, { before: CUT, cap: 100, excludeProjects: ["proj-a"] }), table).toBe(
+      const memory = RETENTION_PROJECT_KEYS[table] === "namespace";
+      const aRows = memory ? ["a-legacy", "a-scoped"] : ["a-1"];
+      // The older key proj-a alone claims (the service works it out from the workflows).
+      const aLegacy = memory ? { legacyNamespaces: ["wf-a:agent-1"] } : {};
+      expect(await store.countRetentionDue(table, { before: CUT, cap: 100, projectId: "proj-a", ...aLegacy }), table).toBe(aRows.length);
+      expect(await store.countRetentionDue(table, { before: CUT, cap: 100, excludeProjects: ["proj-a"], ...aLegacy }), table).toBe(
         (await names(table)).length - aRows.length
       );
       // Only rows of proj-a go; proj-b's and those of no project stay.
-      expect(await store.pruneRetentionTable(table, { before: CUT, limit: 100, projectId: "proj-a" }), table).toBe(aRows.length);
+      expect(await store.pruneRetentionTable(table, { before: CUT, limit: 100, projectId: "proj-a", ...aLegacy }), table).toBe(aRows.length);
       expect((await names(table)).some((name) => aRows.includes(name)), table).toBe(false);
       // Everyone but proj-b: the rows of no project go, proj-b's stay.
       await store.pruneRetentionTable(table, { before: CUT, limit: 100, excludeProjects: ["proj-b"] });
@@ -152,6 +155,50 @@ describeStoreContract("store contract: per-project retention", (ctx) => {
     expect(await store.pruneRetentionTable("execution_history", { before: CUT, limit: 10, projectId: "proj-a" })).toBe(0);
     expect(await store.pruneRetentionTable("execution_history", { before: CUT, limit: 10, excludeProjects: ["proj-b"] })).toBe(0);
     expect(await store.pruneRetentionTable("execution_history", { before: CUT, limit: 10, projectId: "proj-b" })).toBe(1);
+  });
+
+  it("older session keys go with a project only when listed: lookalike workflow ids claim nothing", async () => {
+    const store = ctx.store();
+    await twoProjects(store);
+    // proj-b's workflow id holds a colon; proj-a picks workflow ids that prefix other keys.
+    await workflow(store, "team:wf1", "proj-b");
+    await workflow(store, "team", "proj-a");
+    await workflow(store, "crm", "proj-a");
+    await seed([
+      ownedRow("session_memory", "b-legacy", { namespace: "team:wf1:node1" }),
+      ownedRow("session_memory", "unowned", { namespace: "crm:emea" }),
+      ownedRow("session_memory", "a-legacy", { namespace: "wf-a:agent" })
+    ]);
+    // proj-a's pass: only its scoped keys and the older keys it alone claims.
+    expect(await store.pruneRetentionTable("session_memory", { before: CUT, limit: 10, projectId: "proj-a" })).toBe(0);
+    expect(await store.pruneRetentionTable("session_memory", { before: CUT, limit: 10, projectId: "proj-a", legacyNamespaces: ["wf-a:agent"] })).toBe(1);
+    expect(await names("session_memory")).toEqual(["b-legacy", "unowned"]);
+    // The deployment pass without proj-b keeps every older key proj-b claims, and takes the unowned one.
+    expect(
+      await store.pruneRetentionTable("session_memory", { before: CUT, limit: 10, excludeProjects: ["proj-b"], legacyNamespaces: ["team:wf1:node1"] })
+    ).toBe(1);
+    expect(await names("session_memory")).toEqual(["b-legacy"]);
+  });
+
+  it("cassettes and approvals follow their workflow's project while it exists, else their own", async () => {
+    const store = ctx.store();
+    await twoProjects(store);
+    await seed([
+      ownedRow("mcp_cassettes", "moved", { projectId: "proj-a", workflowId: "wf-a" }),
+      ownedRow("approval_requests", "moved", { projectId: "proj-a", workflowId: "wf-a" }),
+      ownedRow("mcp_cassettes", "orphan", { projectId: "proj-a", workflowId: "wf-gone" }),
+      ownedRow("approval_requests", "orphan", { projectId: "proj-a", workflowId: "wf-gone" })
+    ]);
+    await workflow(store, "wf-a", "proj-b");
+    for (const table of ["mcp_cassettes", "approval_requests"] as const) {
+      // The moved workflow's rows are proj-b's now; the orphan keeps proj-a, its recorded project.
+      expect(await store.countRetentionDue(table, { before: CUT, cap: 10, projectId: "proj-b" }), table).toBe(1);
+      expect(await store.countRetentionDue(table, { before: CUT, cap: 10, excludeProjects: ["proj-b"] }), table).toBe(1);
+      expect(await store.pruneRetentionTable(table, { before: CUT, limit: 10, projectId: "proj-a" }), table).toBe(1);
+      expect(await names(table), table).toEqual(["moved"]);
+      expect(await store.pruneRetentionTable(table, { before: CUT, limit: 10, excludeProjects: ["proj-b"] }), table).toBe(0);
+      expect(await store.pruneRetentionTable(table, { before: CUT, limit: 10, projectId: "proj-b" }), table).toBe(1);
+    }
   });
 
   it("a project id with LIKE characters matches only its own session keys", async () => {
