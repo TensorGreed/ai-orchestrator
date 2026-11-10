@@ -1,9 +1,10 @@
 /**
- * 12.6b — what a /v1 request is charged when the provider's own usage is missing or partial: a caller that hung up
+ * 12.6b — what a model call is charged when the provider's own usage is missing or partial: a caller that hung up
  * before the usage frame, a server that sends none, a stream cut by a content rule, a provider failure. Budgets count
- * tokens and cost from the usage row, so a request that reached the provider must never record zero.
+ * tokens and cost from the recorded usage, so a call that reached the provider must never record zero.
  *
- * Every number here leans high. The estimate is flagged on the row (`usageEstimated`).
+ * Used by the /v1 AI gateway (its usage row) and by streamed `llm_call` nodes in workflow runs (the node's
+ * `_telemetry`). Every number here leans high. The estimate is flagged where it is recorded (`usageEstimated`).
  */
 import type { LLMUsage } from "@ai-orchestrator/shared";
 
@@ -78,9 +79,10 @@ export function chargedUsage(reported: LLMUsage | undefined, estimate: () => Usa
   }
   const guess = estimate();
   if (total !== undefined && input === undefined && output === undefined) {
-    // A real total with no split: keep the total, and split it as well as can be done for the price.
+    // A real total with no split: keep the total, and split it as well as can be done for the price. The split is a
+    // guess, priced at two rates, so the usage counts as estimated.
     const outputTokens = Math.min(total, guess.output);
-    return { usage: { ...reported, inputTokens: total - outputTokens, outputTokens, totalTokens: total }, estimated: false };
+    return { usage: { ...reported, inputTokens: total - outputTokens, outputTokens, totalTokens: total }, estimated: true };
   }
   const inputTokens = input ?? guess.input;
   const outputTokens = output ?? guess.output;
