@@ -7265,6 +7265,19 @@ export async function createApp(
         return;
       }
     } else if (existingUsers > 0 && config.AUTH_ALLOW_PUBLIC_REGISTER) {
+      // Public registration is for people: a request carrying an API key is refused rather than treated as signed out
+      // or as the key's owner. Admins create users with a session or a key while public registration is off.
+      if (extractBearerToken(request.headers as Record<string, unknown>)) {
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.register",
+          action: "register",
+          outcome: "denied",
+          metadata: { email: parsed.data.email, reason: "api_key" }
+        });
+        reply.code(403);
+        return { error: "API keys cannot be used for public registration" };
+      }
       actor = await authService.getSessionUser(getSessionIdFromRequest(request));
     }
 
@@ -7273,10 +7286,21 @@ export async function createApp(
     if (existingUsers === 0) {
       role = parsed.data.role ?? "admin";
     } else if (!actor) {
+      // A signed-out caller always gets the lowest role, whatever it asked for.
       role = "viewer";
-    } else if (role === "admin" && actor.role !== "admin") {
+    } else if (rolePriority[role] > rolePriority[actor.role]) {
+      // A signed-in caller cannot create a user with a role above its own.
+      await audit(request, actor, {
+        category: "auth",
+        eventType: "user.register",
+        action: "register",
+        outcome: "denied",
+        metadata: { email: parsed.data.email, role, reason: "role_above_actor", actorEmail: actor.email, actorRole: actor.role }
+      });
       reply.code(403);
-      return { error: "Only admins can create admin users" };
+      return {
+        error: role === "admin" ? "Only admins can create admin users" : `A ${actor.role} cannot create a user with the ${role} role`
+      };
     }
 
     try {

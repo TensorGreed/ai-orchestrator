@@ -23,9 +23,14 @@ description: "Authentication and access control in L2M: session cookies, admin, 
 - Workflow create/update/delete: `builder`, `admin`
 - Execute workflow/webhook API trigger: `builder`, `admin`
 - Secrets list/create: `builder`, `admin`
-- User registration:
-  - first-user bootstrap or public registration (as configured)
-  - `admin` can create admin users
+- User registration (`POST /api/auth/register`):
+  - the first user is the bootstrap admin
+  - with `AUTH_ALLOW_PUBLIC_REGISTER=false` (the default) only an `admin`, signed in or with an API key, creates
+    users, with any role
+  - with `AUTH_ALLOW_PUBLIC_REGISTER=true`, a signed-out caller always gets `viewer`, whatever role it asks for; a
+    signed-in user can give a role up to their own (a `viewer` creates viewers, a `builder` up to `builder`, an
+    `admin` any role) and gets `403` above it; a request with an API key (`Authorization: Bearer`) gets `403`.
+    Refusals are audited as `user.register` with outcome `denied`.
   - `admin` can invite a user by email (see [User invites](#user-invites))
 
 ## User invites

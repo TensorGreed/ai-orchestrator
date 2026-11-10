@@ -140,7 +140,8 @@ export const openApiSpec = {
         responses: {
           "200": { description: "User created", content: { "application/json": { schema: { type: "object", properties: { user: { $ref: "#/components/schemas/SafeUser" } } } } } },
           "400": { description: "Validation error" },
-          "403": { description: "Insufficient permissions" }
+          "401": { description: "Public registration is off and no admin is signed in" },
+          "403": { description: "A role above the caller's own, a non-admin caller while public registration is off, or an API key on public registration" }
         }
       }
     },
