@@ -6,14 +6,10 @@
 
 /**
  * The notification event every stage of a break-glass sign-in raises: the link was issued, it was used, the session
- * ended. Channels set in the environment receive it by default; a channel made in the settings picks it.
+ * ended. Channels set in the environment receive it by default; a channel made in the settings picks it (it is listed
+ * in NOTIFICATION_EVENT_TYPES).
  */
 export const BREAK_GLASS_SIGN_IN_EVENT = "auth.break_glass_used" as const;
-
-/** Picker entries for the break-glass sign-in alert (value and label, as the settings notification picker lists). */
-export const BREAK_GLASS_NOTIFICATION_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: BREAK_GLASS_SIGN_IN_EVENT, label: "Break-glass sign-in" }
-];
 
 /** Which step of a break-glass sign-in an alert is about. */
 export type BreakGlassStage = "issued" | "used" | "ended";
