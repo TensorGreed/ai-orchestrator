@@ -14,6 +14,7 @@ export * from "./model-tape";
 export * from "./gated-registry";
 export * from "./default-base-urls";
 export * from "./call-options";
+export * from "./tool-call-assembly";
 export * from "./embeddings";
 export * from "./usage-estimate";
 export * from "./providers/echo";

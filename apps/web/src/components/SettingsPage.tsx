@@ -40,6 +40,7 @@ import {
   pushGit,
   removeProjectMember,
   revokeApiKey,
+  rotateApiKey,
   testExternalProvider,
   testLogStreamDestination,
   updateExternalProvider,
@@ -126,6 +127,7 @@ import {
   type AuditChainStatus,
   type AuditExportDestination
 } from "../lib/api";
+import { CredentialExpiry, RotateCredentialButton, rotatedNotice } from "./CredentialRotation";
 import { AuditSigningKeysSection } from "./AuditSigningKeysSection";
 import { NetworkSettingsTab } from "./NetworkSettingsTab";
 import { ServiceAccountsTab } from "./ServiceAccountsTab";
@@ -288,7 +290,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
             <SignedInSessionsCard />
           </>
         )}
-        {tab === "api-keys" && <ApiKeysTab isAdmin={isAdmin} ownerRole={authUser.role} projects={projects} />}
+        {tab === "api-keys" && <ApiKeysTab isAdmin={isAdmin} currentUserId={authUser.id} ownerRole={authUser.role} projects={projects} />}
         {tab === "members" && (
           <ProjectMembersTab
             projects={projects}
@@ -524,12 +526,24 @@ function SecurityTab() {
 // API keys
 // ---------------------------------------------------------------------------
 
-function ApiKeysTab({ isAdmin, ownerRole, projects }: { isAdmin: boolean; ownerRole: AuthUser["role"]; projects: Project[] }) {
+export function ApiKeysTab({
+  isAdmin,
+  currentUserId,
+  ownerRole,
+  projects
+}: {
+  isAdmin: boolean;
+  /** 13.2 — only your own keys can be rotated (an admin sees everyone's but rotates only theirs). */
+  currentUserId?: string;
+  ownerRole: AuthUser["role"];
+  projects: Project[];
+}) {
   const [keys, setKeys] = useState<ApiKeyRecord[]>([]);
   const [name, setName] = useState("");
   const [expiresInDays, setExpiresInDays] = useState("");
   const [scope, setScope] = useState<KeyScopeValue>(EMPTY_KEY_SCOPE);
   const [plaintext, setPlaintext] = useState<string | null>(null);
+  const [rotatedNote, setRotatedNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -561,6 +575,7 @@ function ApiKeysTab({ isAdmin, ownerRole, projects }: { isAdmin: boolean; ownerR
         expiresInDays: parsedDays && Number.isFinite(parsedDays) ? parsedDays : undefined
       });
       setPlaintext(response.key);
+      setRotatedNote(null);
       setName("");
       setScope(EMPTY_KEY_SCOPE);
       setExpiresInDays("");
@@ -569,6 +584,18 @@ function ApiKeysTab({ isAdmin, ownerRole, projects }: { isAdmin: boolean; ownerR
       setError(formatError(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleRotate = async (id: string, graceHours: number) => {
+    setError(null);
+    try {
+      const response = await rotateApiKey(id, graceHours);
+      setPlaintext(response.key);
+      setRotatedNote(rotatedNotice("key", response.previous.expiresAt));
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
     }
   };
 
@@ -592,7 +619,8 @@ function ApiKeysTab({ isAdmin, ownerRole, projects }: { isAdmin: boolean; ownerR
         Use an API key as <code>Authorization: Bearer &lt;key&gt;</code> on any API call. A key acts with your role in
         every project you can reach, unless you give it a role ceiling or limit it to projects (a key limited to
         projects acts as builder at most and can call only the workflow, run and approval routes). Keys are only shown
-        once on creation.
+        once on creation. Rotating a key gives you a new one with the same name and scope; the old key keeps working
+        for the window you pick (24 hours by default), so callers can switch over.
       </p>
       {error && <div className="settings-error">{error}</div>}
 
@@ -623,6 +651,7 @@ function ApiKeysTab({ isAdmin, ownerRole, projects }: { isAdmin: boolean; ownerR
           <div className="settings-highlight">
             <strong>New key — copy it now. It will not be shown again:</strong>
             <code>{plaintext}</code>
+            {rotatedNote && <p>{rotatedNote}</p>}
           </div>
         )}
       </div>
@@ -654,14 +683,21 @@ function ApiKeysTab({ isAdmin, ownerRole, projects }: { isAdmin: boolean; ownerR
                   {isAdmin && <td>{key.userId}</td>}
                   <td>{describeKeyScopes(key.scopes, (id) => projects.find((project) => project.id === id)?.name ?? id)}</td>
                   <td>{formatDate(key.lastUsedAt)}</td>
-                  <td>{key.expiresAt ? formatDate(key.expiresAt) : "never"}</td>
+                  <td>
+                    <CredentialExpiry expiresAt={key.expiresAt} rotated={Boolean(key.supersededBy)} revoked={Boolean(key.revokedAt)} />
+                  </td>
                   <td>
                     {key.revokedAt ? (
                       <span className="settings-muted">revoked</span>
                     ) : (
-                      <button className="mini-btn" onClick={() => handleRevoke(key.id)}>
-                        Revoke
-                      </button>
+                      <>
+                        {!key.supersededBy && (!key.expiresAt || Date.parse(key.expiresAt) > Date.now()) && (!currentUserId || key.userId === currentUserId) && (
+                          <RotateCredentialButton what="key" name={key.name} onRotate={(graceHours) => handleRotate(key.id, graceHours)} />
+                        )}{" "}
+                        <button className="mini-btn" onClick={() => handleRevoke(key.id)}>
+                          Revoke
+                        </button>
+                      </>
                     )}
                   </td>
                 </tr>

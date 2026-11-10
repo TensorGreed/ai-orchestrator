@@ -50,7 +50,9 @@ import {
   type GatewayGuardProfileRef,
   type McpGatewaySessionView,
   type Workflow,
-  mcpServerDestinationRef
+  mcpServerDestinationRef,
+  credentialRotateBodySchema,
+  KEY_ROTATION_GRACE_HOURS
 } from "@ai-orchestrator/shared";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { createMcpSamplingHandler, referencesSecretIn, type GuardRunResolution } from "@ai-orchestrator/workflow-engine";
@@ -235,7 +237,7 @@ export interface McpGatewayDeps {
   resolveRegisteredMcpServer: (registryServerId: string) => Promise<MCPServerConfig>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** 13.2 — step-up before creating a client (STEP_UP_MAX_AGE_MINUTES); false means the answer was sent. Absent = none. */
-  requireStepUp?: (request: FastifyRequest, reply: FastifyReply, action: "mcp_client.create") => Promise<boolean>;
+  requireStepUp?: (request: FastifyRequest, reply: FastifyReply, action: "mcp_client.create" | "mcp_client.rotate") => Promise<boolean>;
   /** Project scope: toolset candidates only list workflows the user can read. */
   runAccess: RunAccess;
   /** Audit with the signed-in admin as actor. */
@@ -2364,6 +2366,64 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       });
     }
     return { client: await clientView(revoked) };
+  });
+
+  // 13.2 — an admin rotates a client's token: a new token (shown once), and the old one keeps working for the grace
+  // window (graceHours, 24 by default, 0 ends it now). The client's name, role, toolsets, limits, network settings and
+  // live sessions stay as they are; a session keeps working while it presents either token. While an old token is in
+  // its window, only a rotation with graceHours 0 (which ends every old token) is taken.
+  app.post<{ Params: { id: string } }>("/api/mcp/clients/:id/rotate", async (request, reply) => {
+    const user = await deps.requireRole(request, reply, ["admin"]);
+    if (!user) return reply;
+    if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "mcp_client.rotate"))) return reply;
+    const parsed = credentialRotateBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid rotation payload", details: parsed.error.issues };
+    }
+    const existing = await store.getMcpClient(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Client not found" };
+    }
+    const graceHours = parsed.data.graceHours ?? KEY_ROTATION_GRACE_HOURS.default;
+    const rotated = await clientService.rotate({ client: existing, graceHours });
+    if (!rotated.ok) {
+      if (rotated.reason === "not_found") {
+        reply.code(404);
+        return { error: "Client not found" };
+      }
+      reply.code(409);
+      if (rotated.reason === "pending") {
+        return {
+          error: `The previous token still works until ${existing.previousExpiresAt}. Wait for it to end, or rotate with graceHours 0 to end every old token now.`,
+          code: "rotation_pending"
+        };
+      }
+      return rotated.reason === "inactive"
+        ? { error: "A revoked or expired client cannot be rotated; create a new one", code: "inactive" }
+        : { error: "The client's token was rotated at the same time by another request; reload and try again", code: "rotation_conflict" };
+    }
+    await deps.auditUser(request, user, {
+      category: "system",
+      eventType: "mcp_client.rotated",
+      action: "update",
+      outcome: "success",
+      resourceType: "mcp_client",
+      resourceId: existing.id,
+      metadata: {
+        name: existing.name,
+        previousTokenPrefix: existing.tokenPrefix,
+        tokenPrefix: rotated.client.tokenPrefix,
+        graceHours,
+        previousExpiresAt: rotated.client.previousExpiresAt ?? null,
+        ...(existing.previousTokenPrefix && existing.previousExpiresAt && Date.parse(existing.previousExpiresAt) > Date.now()
+          ? { endedEarlierTokenPrefix: existing.previousTokenPrefix }
+          : {})
+      }
+    });
+    // The only response that carries the new token.
+    return { client: await clientView(rotated.client), token: rotated.token };
   });
 
   // 12.6 — an admin renames a client or sets its rate limit (null removes it). Nothing else about it changes.

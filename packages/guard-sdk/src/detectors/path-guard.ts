@@ -100,6 +100,8 @@ export function createPathGuardDetector(defaults: { realpath?: RealpathFn } = {}
     description: "Resolves path arguments against allowed roots; blocks traversal and symlink escapes.",
     channels: ["tool_arguments"],
     categories: ["path_traversal"],
+    // Resolves symlinks on the filesystem at check time.
+    memoisable: false,
     async detect(input: GuardInput, context: DetectorContext) {
       const roots = Array.isArray(context.options.roots) ? (context.options.roots as string[]) : [];
       const keys = new Set(Array.isArray(context.options.pathKeys) ? (context.options.pathKeys as string[]) : ["path", "file", "filename", "filepath", "file_path", "dir", "directory", "src", "dest", "destination", "target", "source", "output", "input"]);

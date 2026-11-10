@@ -451,7 +451,7 @@ describeStoreContract("store contract: MCP", (ctx) => {
     expect(created).toEqual({
       id: "c1", name: "First", tokenPrefix: "pre1", toolsetIds: ["ts1"], role: "operator", createdBy: "u1", createdByEmail: "u1@example.com",
       expiresAt: iso(86_400_000), lastUsedAt: null, revokedAt: null, createdAt: created.createdAt, rateLimit: null,
-      allowedIps: [], certFingerprints: [], certSubject: null
+      allowedIps: [], certFingerprints: [], certSubject: null, previousTokenPrefix: null, previousExpiresAt: null, rotatedAt: null
     });
     expect(created.createdAt).toMatch(ISO);
     expect("tokenHash" in created).toBe(false);
@@ -480,6 +480,68 @@ describeStoreContract("store contract: MCP", (ctx) => {
     expect(await store.findMcpClientByTokenPrefix("pre-c2")).toMatchObject({ allowedIps: ["10.0.0.0/8", "2001:db8::/32"], certFingerprints: [fingerprint] });
     expect(await store.updateMcpClientNetwork("c2", { allowedIps: [], certFingerprints: [], certSubject: null })).toMatchObject({ allowedIps: [], certFingerprints: [], certSubject: null });
     expect(await store.updateMcpClientNetwork("missing", { allowedIps: [], certFingerprints: [], certSubject: null })).toBeNull();
+  });
+
+  it("13.2 gateway client rotation: the old token moves to previous_*, both are found, the hashes stay out", async () => {
+    const store = ctx.store();
+    await store.createMcpClient({ id: "c1", name: "First", tokenPrefix: "pre1", tokenHash: "hash1", toolsetIds: [], role: "viewer", createdBy: null, createdByEmail: null, expiresAt: null });
+    const now = iso(0);
+    const rotated = await store.rotateMcpClient({ id: "c1", expectedTokenPrefix: "pre1", tokenPrefix: "pre2", tokenHash: "hash2", previousExpiresAt: iso(3_600_000), now });
+    expect(rotated.status).toBe("rotated");
+    const client = rotated.status === "rotated" ? rotated.client : null;
+    expect(client).toMatchObject({ id: "c1", name: "First", tokenPrefix: "pre2", previousTokenPrefix: "pre1", previousExpiresAt: iso(3_600_000), rotatedAt: now });
+    expect(client && ("tokenHash" in client || "previousTokenHash" in client)).toBe(false);
+    expect(await store.findMcpClientByTokenPrefix("pre2")).toMatchObject({ id: "c1", tokenHash: "hash2", previousTokenHash: "hash1" });
+    expect(await store.findMcpClientByTokenPrefix("pre1")).toMatchObject({ id: "c1", tokenPrefix: "pre2", previousTokenPrefix: "pre1", previousTokenHash: "hash1" });
+    expect((await store.listMcpClients()).every((c) => !("previousTokenHash" in c))).toBe(true);
+    expect(await store.getMcpClient("c1")).not.toHaveProperty("previousTokenHash");
+
+    // A stale expected prefix is a conflict, nothing changes.
+    expect(await store.rotateMcpClient({ id: "c1", expectedTokenPrefix: "pre1", tokenPrefix: "pre3", tokenHash: "hash3", previousExpiresAt: null, now })).toEqual({ status: "conflict" });
+    expect((await store.getMcpClient("c1"))?.tokenPrefix).toBe("pre2");
+    // Without a grace window the old token goes at once (and the earlier previous one with it).
+    const immediate = await store.rotateMcpClient({ id: "c1", expectedTokenPrefix: "pre2", tokenPrefix: "pre3", tokenHash: "hash3", previousExpiresAt: null, now });
+    expect(immediate.status === "rotated" ? immediate.client : null).toMatchObject({ tokenPrefix: "pre3", previousTokenPrefix: null, previousExpiresAt: null });
+    expect(await store.findMcpClientByTokenPrefix("pre1")).toBeNull();
+    expect(await store.findMcpClientByTokenPrefix("pre2")).toBeNull();
+    expect(await store.findMcpClientByTokenPrefix("pre3")).toMatchObject({ tokenHash: "hash3", previousTokenHash: null });
+
+    expect(await store.rotateMcpClient({ id: "missing", expectedTokenPrefix: "x", tokenPrefix: "pre9", tokenHash: "h", previousExpiresAt: null, now })).toEqual({ status: "not_found" });
+    await store.revokeMcpClient("c1");
+    expect(await store.rotateMcpClient({ id: "c1", expectedTokenPrefix: "pre3", tokenPrefix: "pre4", tokenHash: "h", previousExpiresAt: null, now })).toEqual({ status: "inactive" });
+    await store.createMcpClient({ id: "c2", name: "Old", tokenPrefix: "pre-old", tokenHash: "h", toolsetIds: [], role: "viewer", createdBy: null, createdByEmail: null, expiresAt: iso(-1000) });
+    expect(await store.rotateMcpClient({ id: "c2", expectedTokenPrefix: "pre-old", tokenPrefix: "pre5", tokenHash: "h", previousExpiresAt: null, now })).toEqual({ status: "inactive" });
+  });
+
+  it("13.2 two rotations of one gateway client at once: exactly one applies, the original token stays the previous one", async () => {
+    const store = ctx.store();
+    for (let round = 0; round < 5; round += 1) {
+      const id = `rc${round}`;
+      await store.createMcpClient({ id, name: id, tokenPrefix: `${id}-a`, tokenHash: "ha", toolsetIds: [], role: "viewer", createdBy: null, createdByEmail: null, expiresAt: null });
+      const now = new Date().toISOString();
+      const grace = iso(3_600_000);
+      const results = await Promise.all([
+        store.rotateMcpClient({ id, expectedTokenPrefix: `${id}-a`, tokenPrefix: `${id}-b`, tokenHash: "hb", previousExpiresAt: grace, now }),
+        store.rotateMcpClient({ id, expectedTokenPrefix: `${id}-a`, tokenPrefix: `${id}-c`, tokenHash: "hc", previousExpiresAt: grace, now })
+      ]);
+      expect(results.filter((result) => result.status === "rotated")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "conflict")).toHaveLength(1);
+      const stored = await store.getMcpClient(id);
+      expect(stored?.previousTokenPrefix).toBe(`${id}-a`);
+      expect(stored?.tokenPrefix).toBe(results[0]!.status === "rotated" ? `${id}-b` : `${id}-c`);
+    }
+  });
+
+  it("13.2 expiry notices for gateway clients: claimed at most once per window", async () => {
+    const store = ctx.store();
+    await store.createMcpClient({ id: "c1", name: "First", tokenPrefix: "pre1", tokenHash: "h", toolsetIds: [], role: "viewer", createdBy: null, createdByEmail: null, expiresAt: iso(86_400_000) });
+    const day = 86_400_000;
+    expect(await store.claimCredentialExpiryNotice("mcp_client", "c1", iso(0), iso(-day))).toBe(true);
+    // A rotation does not change the client's expiry, so it does not reopen today's notice.
+    expect((await store.rotateMcpClient({ id: "c1", expectedTokenPrefix: "pre1", tokenPrefix: "pre1b", tokenHash: "h2", previousExpiresAt: iso(7_200_000), now: iso(1_000) })).status).toBe("rotated");
+    expect(await store.claimCredentialExpiryNotice("mcp_client", "c1", iso(3_600_000), iso(3_600_000 - day))).toBe(false);
+    expect(await store.claimCredentialExpiryNotice("mcp_client", "c1", iso(day), iso(0))).toBe(true);
+    expect(await store.claimCredentialExpiryNotice("mcp_client", "missing", iso(0), iso(-day))).toBe(false);
   });
 
   it("two settles of one elicitation at once: exactly one wins", async () => {

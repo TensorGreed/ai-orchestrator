@@ -412,6 +412,31 @@ describe("API keys limited to projects", () => {
   });
 
   /**
+   * 13.2 — rotation routes, aimed at real targets (the key's own id, its account, a live gateway client): a key limited
+   * to projects is refused before anything is rotated, even for itself, as it is for revoking itself.
+   */
+  const ROTATION_ROUTES = ["POST /api/auth/api-keys/:id/rotate", "POST /api/service-accounts/:id/keys/:keyId/rotate", "POST /api/mcp/clients/:id/rotate"];
+
+  it("13.2 rotation routes: refuse a key limited to projects, even on itself, and rotate nothing", async () => {
+    const registered = new Set(registeredRoutes(ctx.app));
+    for (const route of ROTATION_ROUTES) expect(registered.has(route), route).toBe(true);
+    const account = (await ctx.store.listUsers({ kind: "service" }))[0]!;
+    const ownKey = (await ctx.store.listApiKeys(account.id))[0]!;
+    const toolset = json<{ toolset: { id: string } }>(
+      await ctx.app.inject({ method: "POST", url: "/api/mcp/toolsets", headers: { cookie: ctx.adminCookie }, payload: { name: "Rotation", members: [] } })
+    ).toolset;
+    const client = json<{ client: { id: string; tokenPrefix: string } }>(
+      await ctx.app.inject({ method: "POST", url: "/api/mcp/clients", headers: { cookie: ctx.adminCookie }, payload: { name: "rot", toolsetIds: [toolset.id], role: "viewer" } })
+    ).client;
+    for (const url of [`/api/auth/api-keys/${ownKey.id}/rotate`, `/api/service-accounts/${account.id}/keys/${ownKey.id}/rotate`, `/api/mcp/clients/${client.id}/rotate`]) {
+      const response = await withKey("POST", url, { graceHours: 1 });
+      expect({ url, status: response.statusCode, error: (response.json() as { error?: string }).error }).toEqual({ url, status: 403, error: SCOPED_KEY_REFUSAL });
+    }
+    expect((await ctx.store.listApiKeys(account.id)).map((key) => key.supersededBy)).toEqual([null]);
+    expect((await ctx.store.getMcpClient(client.id))?.tokenPrefix).toBe(client.tokenPrefix);
+  });
+
+  /**
    * Routes outside /api never call requireRole: each family is anonymous or takes its own credential, so an API key
    * is not a credential there at all. A new route outside /api fails this test until it is placed here (and, if it
    * calls requireRole, it belongs under /api and in the sweep above instead).

@@ -73,6 +73,8 @@ import {
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
 import { BUDGET_SCOPE_TYPES, isBudgetScopeType, type BudgetScopeType } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
 import {
   executeCodeNodeSandbox,
   executeWorkflow,
@@ -108,6 +110,7 @@ import {
   resolveOidcSettings,
   resolveSamlSettings,
   parseTrustProxy,
+  toFastifyTrustProxy,
   resolveNetworkSettings,
   resolveSsoMfaSettings,
   resolveMfaPolicy,
@@ -134,7 +137,7 @@ import { NonRetryableQueueError, QueueFullError, QueueProducer, QueueService, ty
 import { AppLifecycle } from "./services/app-lifecycle.js";
 import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError, resumeEffectFreeNodeId } from "./db/queue-leases.js";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
-import { ApiKeyService } from "./services/api-key-service";
+import { ApiKeyService, apiKeyRotationRefusal } from "./services/api-key-service";
 import type { RequestAuthContext, SessionRejectReason } from "./services/session-service.js";
 import { apiKeyCreateBodySchema, isStructuredScope, keyBoundUser, keyMayCallRoute, keyMayManageAccount, parseKeyScopes, resolveNewKeyScope, scopedKeyUser } from "./services/key-scopes.js";
 import { MfaService } from "./services/mfa-service";
@@ -1492,8 +1495,8 @@ export async function createApp(
   // - `genReqId` falls back to nanoid for fresh requests; nanoid is already
   //   a transitive dep here and produces shorter URL-safe IDs than crypto
   //   randomUUID without collision risk in the lifetime of an instance.
-  // - `requestIdLogLabel: "reqId"` keys the ID under `reqId` in every log
-  //   line that Pino emits via request.log, so `grep reqId=<id>` works.
+  // - Fastify's default log label is `reqId`, so every line that Pino emits
+  //   via request.log carries the ID under `reqId` and `grep reqId=<id>` works.
   // The X-Request-ID response header is set in the onSend hook below so
   // clients (and curl --include) see the same ID their request carried.
   const app = Fastify({
@@ -1514,9 +1517,8 @@ export async function createApp(
     },
     bodyLimit: config.API_BODY_LIMIT_BYTES,
     // TRUST_PROXY unset = false: request.ip (and so the rate-limit key) is the address that connected.
-    trustProxy: parseTrustProxy(config.TRUST_PROXY),
+    trustProxy: toFastifyTrustProxy(parseTrustProxy(config.TRUST_PROXY)),
     requestIdHeader: "x-request-id",
-    requestIdLogLabel: "reqId",
     genReqId: () => nanoid()
   });
   // 12.6 — model allowlists. Every model call goes through this seam: each run, gateway sampling call, provider test,
@@ -4976,6 +4978,32 @@ export async function createApp(
     }))
   );
 
+  // 13.2 — credential.expiring: the leader warns (at most once a day per credential) about API keys and gateway
+  // clients that stop working soon, and old keys still in use as their rotation grace window ends.
+  const credentialExpiryService = new CredentialExpiryService({
+    store,
+    notify: async (event) => await notificationService.notify(event),
+    subscribed: async () => await notificationService.subscribes(CREDENTIAL_EXPIRING_EVENT),
+    isLeader: () => runsBackgroundWorkers && leaderElection.isLeader()
+  });
+  const sweepCredentialExpiry = async () => {
+    try {
+      const sent = await credentialExpiryService.sweep();
+      if (sent > 0) app.log.info({ sent }, "Sent credential expiry warnings");
+    } catch (err) {
+      app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to sweep expiring credentials");
+    }
+  };
+  // promise-ok: the sweep catches and logs its own errors
+  const credentialExpiryTimer = setInterval(async () => await sweepCredentialExpiry(), CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS);
+  credentialExpiryTimer.unref?.();
+  app.addHook("onReady", async () => {
+    void sweepCredentialExpiry();
+  });
+  app.addHook("onClose", async () => {
+    clearInterval(credentialExpiryTimer);
+  });
+
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
   const approvalResumes = new ApprovalResumeRunner();
   // A timed-out approval whose run cannot continue: the run ends as an error and its paused state is cleared.
@@ -8319,6 +8347,63 @@ export async function createApp(
       resourceId: request.params.id
     });
     return { ok: true };
+  });
+
+  /**
+   * 13.2 — rotates one of the caller's own keys: a new key (shown once) with the same name, scope and limits, and the
+   * old key keeps working for the grace window (graceHours, 24 by default, 0 ends it now). Only the owner rotates a
+   * personal key (an admin would otherwise receive someone else's credential); a scoped key may rotate only itself; a
+   * key made this way ends no later than the calling key, as on create.
+   */
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/auth/api-keys/:id/rotate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const owner = await store.getUserById(user.id);
+    if (owner?.kind === "service" || user.serviceAccount) {
+      reply.code(403);
+      return { error: "A service account's API keys are rotated by an admin under Settings > Service Accounts, not with its own key" };
+    }
+    const auth = sessionService.getRequestAuth(request);
+    if (auth?.credential === "api_key" && isStructuredScope(auth.keyScope) && auth.apiKeyId !== request.params.id) {
+      reply.code(403);
+      return { error: "A scoped API key can rotate only itself; sign in, or use an unscoped key" };
+    }
+    // As on create: for an owner whose role requires MFA, a new key always needs a recent MFA check.
+    const ownerRole = safeUserRole(owner?.role ?? user.role);
+    const keyStepUp = mfaRequiredFor(mfaPolicy, ownerRole) ? mfaPolicy.stepUpMaxAgeMinutes || LISTED_ROLE_KEY_MFA_MINUTES : undefined;
+    if (!await requireStepUp(request, reply, "api_key.rotate", keyStepUp === undefined ? {} : { maxAgeMinutes: keyStepUp })) return;
+    const parsed = credentialRotateBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid rotation payload", details: parsed.error.issues };
+    }
+    const callerKey = auth?.credential === "api_key" ? await apiKeyService.get(auth.apiKeyId, user.id) : null;
+    const graceHours = parsed.data.graceHours ?? KEY_ROTATION_GRACE_HOURS.default;
+    const rotated = await apiKeyService.rotate({ id: request.params.id, userId: user.id, graceHours, notAfter: callerKey?.expiresAt ?? null });
+    if (!rotated.ok) {
+      const refusal = apiKeyRotationRefusal(rotated.reason);
+      reply.code(refusal.status);
+      return refusal.body;
+    }
+    await audit(request, user, {
+      category: "api_key",
+      eventType: "api_key.rotate",
+      action: "update",
+      resourceType: "api_key",
+      resourceId: rotated.previous.id,
+      metadata: {
+        name: rotated.record.name,
+        newKeyId: rotated.record.id,
+        keyPrefix: rotated.record.keyPrefix,
+        previousKeyPrefix: rotated.previous.keyPrefix,
+        graceHours,
+        previousExpiresAt: rotated.previous.expiresAt,
+        expiresAt: rotated.record.expiresAt,
+        ownerKind: "human",
+        ...(callerKey ? { rotatedWithApiKeyId: callerKey.id } : {})
+      }
+    });
+    return { key: rotated.plaintext, record: rotated.record, previous: rotated.previous };
   });
 
   // ---------------------------------------------------------------------------
@@ -14914,8 +14999,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const auth = sessionService.getRequestAuth(request);
       return auth?.credential === "api_key" ? auth.keyScope : null;
     },
+    requestApiKeyId: (request) => {
+      const auth = sessionService.getRequestAuth(request);
+      return auth?.credential === "api_key" ? auth.apiKeyId : null;
+    },
     disconnectMcpOAuth: async (userId) => await mcpOAuthService.disconnectUserEverywhere(userId),
-    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action)
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    keyMaxAgeDays: config.SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS ?? 0
   });
 
   registerUserInviteRoutes({
