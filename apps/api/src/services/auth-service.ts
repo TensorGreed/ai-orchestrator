@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
-import type { Store } from "../db/store.js";
+import type { LoginSession, Store } from "../db/store.js";
+import { SessionService, type SessionRequestInfo } from "./session-service.js";
 
 export type UserRole = "admin" | "builder" | "operator" | "viewer";
 
@@ -45,11 +46,16 @@ function verifyPassword(password: string, storedHash: string): boolean {
 export class AuthService {
   private cleanupTimer: NodeJS.Timeout | null = null;
   private readonly cleanupTasks: Array<() => Promise<unknown>> = [];
+  /** 13.2 — issues every sign-in session and holds the per-request sign-in context. */
+  readonly sessions: SessionService;
 
   constructor(
     private readonly store: Store,
-    private readonly sessionTtlHours: number
-  ) {}
+    sessionTtlHours: number,
+    sessions?: SessionService
+  ) {
+    this.sessions = sessions ?? new SessionService(store, { ttlHours: sessionTtlHours });
+  }
 
   async countUsers(): Promise<number> {
     return await this.store.countUsers();
@@ -117,40 +123,42 @@ export class AuthService {
     return this.toSafeUser(saved);
   }
 
-  async login(emailInput: string, password: string): Promise<{ user: SafeUser; sessionId: string; expiresAt: string }> {
+  /** Checks an email and password without issuing a session; throws "Invalid email or password" on a mismatch. */
+  async verifyCredentials(emailInput: string, password: string): Promise<SafeUser> {
     const email = normalizeEmail(emailInput);
     const user = await this.store.getUserByEmail(email);
     if (!user || !verifyPassword(password, user.passwordHash)) {
       throw new Error("Invalid email or password");
     }
+    return this.toSafeUser(user);
+  }
 
-    await this.store.revokeExpiredSessions();
-
-    const expiresAtDate = new Date();
-    expiresAtDate.setHours(expiresAtDate.getHours() + this.sessionTtlHours);
-    const expiresAt = expiresAtDate.toISOString();
-
-    const session = await this.store.saveSession({
-      id: `sess_${nanoid(24)}`,
-      userId: user.id,
-      expiresAt
-    });
-
+  /** Checks the password and issues a password session (no MFA step; the login route decides on MFA first). */
+  async login(
+    emailInput: string,
+    password: string,
+    request?: SessionRequestInfo
+  ): Promise<{ user: SafeUser; sessionId: string; expiresAt: string }> {
+    const user = await this.verifyCredentials(emailInput, password);
+    const issued = await this.sessions.issueSession({ user, method: "password", request });
     return {
-      user: this.toSafeUser(user),
-      sessionId: session.id,
-      expiresAt: session.expiresAt
+      user,
+      sessionId: issued.sessionId,
+      expiresAt: issued.expiresAt
     };
   }
 
   /**
+   * The user and live session a session ID names, or null (unknown, revoked, expired, or the user is gone). An
+   * expired session is ended here with reason `expired`; a live one is touched.
+   *
    * `knownSession` is the row a caller already looked up for this ID (`null`: it does not exist). Leave it out to
    * look the session up here.
    */
-  async getSessionUser(
+  async getSessionAuth(
     sessionId: string,
-    knownSession?: Awaited<ReturnType<Store["getSession"]>>
-  ): Promise<SafeUser | null> {
+    knownSession?: LoginSession | null
+  ): Promise<{ user: SafeUser; session: LoginSession } | null> {
     if (!sessionId) {
       return null;
     }
@@ -161,7 +169,7 @@ export class AuthService {
     }
 
     if (new Date(session.expiresAt).getTime() <= Date.now()) {
-      await this.store.revokeSession(session.id);
+      await this.store.revokeSession(session.id, "expired");
       return null;
     }
 
@@ -171,14 +179,19 @@ export class AuthService {
     }
 
     await this.store.touchSession(session.id);
-    return this.toSafeUser(user);
+    return { user: this.toSafeUser(user), session };
+  }
+
+  /** The signed-in user a session ID names (see getSessionAuth). */
+  async getSessionUser(sessionId: string, knownSession?: LoginSession | null): Promise<SafeUser | null> {
+    return (await this.getSessionAuth(sessionId, knownSession))?.user ?? null;
   }
 
   async logout(sessionId: string): Promise<void> {
     if (!sessionId) {
       return;
     }
-    await this.store.revokeSession(sessionId);
+    await this.store.revokeSession(sessionId, "logout");
   }
 
   async bootstrapAdmin(email?: string, password?: string): Promise<SafeUser | null> {

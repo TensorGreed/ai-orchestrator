@@ -492,3 +492,42 @@ describe("SSO_MFA=idp_or_local", () => {
     expect((await completeTotp(context, { challenge: localChallenge, code: generateTotpCode(secret) })).statusCode).toBe(401);
   });
 });
+
+describe("13.2 — SSO sessions record how they were issued", () => {
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  it("OIDC: IdP MFA and the local TOTP step set the MFA time; the method, address and user agent are kept", async () => {
+    const context = await createContext({ SSO_MFA: "idp_or_local" });
+    context.oidc.user = { sub: "amy", email: "amy@example.com", email_verified: true, amr: ["pwd", "mfa"] };
+    const idp = await oidcLogin(context);
+    expect(await context.store.getSession(idp.session!)).toMatchObject({
+      authMethod: "oidc",
+      mfaVerifiedAt: expect.stringMatching(ISO),
+      breakGlass: false,
+      endedReason: null,
+      ipAddress: "127.0.0.1",
+      userAgent: "lightMyRequest"
+    });
+
+    const { secret } = await withTotp(context, "hana@example.com", "operator");
+    context.oidc.user = { sub: "hana", email: "hana@example.com", email_verified: true, amr: ["pwd"] };
+    const pending = await oidcLogin(context);
+    const done = await completeTotp(context, { cookie: pending.challengeCookie, code: generateTotpCode(secret) });
+    const session = cookieValue(setCookies(done.headers["set-cookie"]), "ao_session")!;
+    expect(await context.store.getSession(session)).toMatchObject({ authMethod: "oidc", mfaVerifiedAt: expect.stringMatching(ISO) });
+  });
+
+  it("SSO_MFA=off: OIDC and SAML sessions have their method and no MFA time; a new sign-in ends the browser's old session", async () => {
+    const context = await createContext();
+    context.oidc.user = { sub: "tess", email: "tess@example.com", email_verified: true, amr: ["pwd"] };
+    const oidc = await oidcLogin(context);
+    expect(await context.store.getSession(oidc.session!)).toMatchObject({ authMethod: "oidc", mfaVerifiedAt: null });
+
+    const saml = await samlFormLogin(context, { nameID: "tess-saml", email: "tess@example.com", authnContexts: [PASSWORD_ONLY] });
+    expect(await context.store.getSession(saml.session!)).toMatchObject({ authMethod: "saml", mfaVerifiedAt: null });
+
+    const again = await oidcLogin(context, { ao_session: oidc.session! });
+    expect(again.session).toBeTruthy();
+    expect(await context.store.getSession(oidc.session!)).toMatchObject({ revokedAt: expect.stringMatching(ISO), endedReason: "logout" });
+  });
+});

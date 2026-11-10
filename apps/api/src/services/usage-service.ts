@@ -144,6 +144,17 @@ export interface RecordExecutionInput {
    * answers never show as spend.
    */
   liveModelCalls?: Array<{ providerId: string; model: string; inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null }>;
+  /** The model usage of the sub-workflows the run started (Execute Workflow), counted in this run's row. */
+  subWorkflowTelemetry?: ReadonlyArray<Record<string, unknown>>;
+}
+
+export interface UsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  llmCallCount: number;
 }
 
 export class UsageService {
@@ -180,14 +191,7 @@ export class UsageService {
    * unconditionally — emits a no-op row when no LLM calls happened (still
    * useful as a spend-attribution artifact for the workflow execution).
    */
-  async recordExecution(input: RecordExecutionInput): Promise<{
-    inputTokens: number;
-    outputTokens: number;
-    cachedInputTokens: number;
-    totalTokens: number;
-    costUsd: number;
-    llmCallCount: number;
-  }> {
+  async recordExecution(input: RecordExecutionInput): Promise<UsageTotals> {
     const telemetries: NodeTelemetry[] = input.liveModelCalls
       ? input.liveModelCalls.map((call) => ({
           providerId: call.providerId,
@@ -196,6 +200,35 @@ export class UsageService {
           llmCallCount: 1
         }))
       : collectTelemetry(input.nodeResults);
+    for (const blob of input.subWorkflowTelemetry ?? []) telemetries.push(blob as NodeTelemetry);
+    const { totals, providers } = this.summarize(telemetries);
+
+    await this.store.writeUsageEvent({
+      id: `usage_${randomUUID()}`,
+      executionId: input.executionId,
+      workflowId: input.workflowId,
+      workflowName: input.workflowName,
+      userId: input.userId,
+      userEmail: input.userEmail,
+      projectId: input.projectId,
+      triggerType: input.triggerType,
+      ...(input.clientId ? { clientId: input.clientId } : {}),
+      ...(input.toolsetId ? { toolsetId: input.toolsetId } : {}),
+      status: input.status,
+      ...totals,
+      durationMs: input.durationMs,
+      providers
+    });
+
+    return totals;
+  }
+
+  /** What model-usage blobs (`_telemetry`) add up to, priced like a run's; nothing is written. */
+  totalTelemetry(blobs: ReadonlyArray<Record<string, unknown>>): UsageTotals {
+    return this.summarize(blobs as ReadonlyArray<NodeTelemetry>).totals;
+  }
+
+  private summarize(telemetries: ReadonlyArray<NodeTelemetry>): { totals: UsageTotals; providers: Array<{ providerId: string; model: string; calls: number }> } {
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedInputTokens = 0;
@@ -226,29 +259,10 @@ export class UsageService {
       else providerCounts.set(key, { providerId: t.providerId, model: t.model, calls });
     }
 
-    await this.store.writeUsageEvent({
-      id: `usage_${randomUUID()}`,
-      executionId: input.executionId,
-      workflowId: input.workflowId,
-      workflowName: input.workflowName,
-      userId: input.userId,
-      userEmail: input.userEmail,
-      projectId: input.projectId,
-      triggerType: input.triggerType,
-      ...(input.clientId ? { clientId: input.clientId } : {}),
-      ...(input.toolsetId ? { toolsetId: input.toolsetId } : {}),
-      status: input.status,
-      inputTokens,
-      outputTokens,
-      cachedInputTokens,
-      totalTokens,
-      costUsd,
-      llmCallCount,
-      durationMs: input.durationMs,
+    return {
+      totals: { inputTokens, outputTokens, cachedInputTokens, totalTokens, costUsd, llmCallCount },
       providers: Array.from(providerCounts.values())
-    });
-
-    return { inputTokens, outputTokens, cachedInputTokens, totalTokens, costUsd, llmCallCount };
+    };
   }
 
   /** Public so /api/usage/pricing can show the table to admins. */

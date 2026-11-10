@@ -416,6 +416,21 @@ export class PostgresStore implements Store {
   async revokeExpiredSessions(...args: Parameters<Store["revokeExpiredSessions"]>): ReturnType<Store["revokeExpiredSessions"]> {
     return sessions.revokeExpiredSessions(this.ctx, ...args);
   }
+  async listUserSessions(...args: Parameters<Store["listUserSessions"]>): ReturnType<Store["listUserSessions"]> {
+    return sessions.listUserSessions(this.ctx, ...args);
+  }
+  async revokeUserSessions(...args: Parameters<Store["revokeUserSessions"]>): ReturnType<Store["revokeUserSessions"]> {
+    return sessions.revokeUserSessions(this.ctx, ...args);
+  }
+  async markSessionMfaVerified(...args: Parameters<Store["markSessionMfaVerified"]>): ReturnType<Store["markSessionMfaVerified"]> {
+    return sessions.markSessionMfaVerified(this.ctx, ...args);
+  }
+  async purgeEndedSessions(...args: Parameters<Store["purgeEndedSessions"]>): ReturnType<Store["purgeEndedSessions"]> {
+    return sessions.purgeEndedSessions(this.ctx, ...args);
+  }
+  async revokeOldestUserSessions(...args: Parameters<Store["revokeOldestUserSessions"]>): ReturnType<Store["revokeOldestUserSessions"]> {
+    return sessions.revokeOldestUserSessions(this.ctx, ...args);
+  }
   async loadSessionMemory(...args: Parameters<Store["loadSessionMemory"]>): ReturnType<Store["loadSessionMemory"]> {
     return sessions.loadSessionMemory(this.ctx, ...args);
   }
