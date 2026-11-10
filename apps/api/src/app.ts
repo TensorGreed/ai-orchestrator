@@ -108,6 +108,7 @@ import {
   resolveOidcSettings,
   resolveSamlSettings,
   parseTrustProxy,
+  toFastifyTrustProxy,
   resolveNetworkSettings,
   resolveSsoMfaSettings,
   resolveQueueSettings,
@@ -1484,7 +1485,7 @@ export async function createApp(
     },
     bodyLimit: config.API_BODY_LIMIT_BYTES,
     // TRUST_PROXY unset = false: request.ip (and so the rate-limit key) is the address that connected.
-    trustProxy: parseTrustProxy(config.TRUST_PROXY),
+    trustProxy: toFastifyTrustProxy(parseTrustProxy(config.TRUST_PROXY)),
     requestIdHeader: "x-request-id",
     requestIdLogLabel: "reqId",
     genReqId: () => nanoid()

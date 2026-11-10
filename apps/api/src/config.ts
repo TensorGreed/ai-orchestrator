@@ -810,6 +810,19 @@ export function parseTrustProxy(raw: string | undefined): boolean | number | str
   return entries;
 }
 
+/**
+ * The value handed to Fastify's `trustProxy`. Booleans and address lists pass through. A hop count becomes a function:
+ * Fastify 5.12 and later treat a bare number as "trust nothing" (it cannot check who the immediate peer is), which
+ * would silently turn `TRUST_PROXY=1` off. The function keeps the meaning this setting has always had: the first N
+ * addresses on the path (the connecting socket, then entries of X-Forwarded-For from the right) are trusted, so the
+ * client is the address just beyond them. As before, the API port must be reachable only through the proxy.
+ */
+export function toFastifyTrustProxy(value: boolean | number | string[]): boolean | string[] | ((address: string, hop: number) => boolean) {
+  if (typeof value !== "number") return value;
+  if (value <= 0) return false;
+  return (address, hop) => address != null && hop < value;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 13.2 — network controls. Every setting is optional; with none set every scope is open, as before.
 // ---------------------------------------------------------------------------
