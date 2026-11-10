@@ -877,6 +877,64 @@ describe("everything that reaches the provider is counted", () => {
     expect((await onlyRow(fixture)).outputTokens).toBeGreaterThanOrEqual(200);
   });
 
+  /** What a client sees of a streamed answer's tool calls: the deltas grouped by their index. */
+  function clientToolCalls(list: unknown[]): Array<{ id?: string; name: string; arguments: string }> {
+    const calls: Array<{ id?: string; name: string; arguments: string }> = [];
+    for (const frame of list.filter((entry) => typeof entry === "object") as Array<{ choices?: Array<{ delta?: { tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> } }> }>) {
+      for (const call of frame.choices?.[0]?.delta?.tool_calls ?? []) {
+        const entry = (calls[call.index] ??= { name: "", arguments: "" });
+        if (call.id) entry.id = call.id;
+        if (call.function?.name) entry.name = call.function.name;
+        if (call.function?.arguments) entry.arguments += call.function.arguments;
+      }
+    }
+    return calls;
+  }
+
+  const toolStream = (...deltas: Array<Record<string, unknown>>) => ({
+    sse: [...deltas.map((delta) => chunk({ tool_calls: [delta] })), chunk({}, "tool_calls")]
+  });
+
+  it.each([false, true])("keeps streamed tool calls apart when the upstream reuses one index (content rules %s)", async (rules) => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    if (rules) await guardProfile(fixture, { id: "aigw-tools", name: "Tools", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
+    fixture.upstream.chat.push(
+      toolStream(
+        { index: 0, id: "c1", type: "function", function: { name: "lookup", arguments: '{"q"' } },
+        { index: 0, function: { arguments: ":1}" } },
+        { index: 0, id: "c2", type: "function", function: { name: "weather", arguments: '{"c"' } },
+        { index: 0, id: "c2", function: { arguments: ":2}" } }
+      ),
+      toolStream(
+        { index: 0, function: { name: "lookup", arguments: '{"q":1}' } },
+        { index: 0, function: { name: "weather", arguments: '{"c":2}' } }
+      )
+    );
+    const withIds = frames(await (await v1(fixture, gw.token, "/v1/chat/completions", streamed)).text());
+    expect(clientToolCalls(withIds)).toEqual([
+      { id: "c1", name: "lookup", arguments: '{"q":1}' },
+      { id: "c2", name: "weather", arguments: '{"c":2}' }
+    ]);
+    const noIds = clientToolCalls(frames(await (await v1(fixture, gw.token, "/v1/chat/completions", streamed)).text()));
+    expect(noIds.map((call) => [call.name, call.arguments])).toEqual([
+      ["lookup", '{"q":1}'],
+      ["weather", '{"c":2}']
+    ]);
+  });
+
+  it.each([false, true])("does not allocate for a huge upstream tool call index (content rules %s)", async (rules) => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    if (rules) await guardProfile(fixture, { id: "aigw-huge", name: "Huge", version: "1", channels: { final_output: dlpChannel("block") } }, gw.set.id);
+    fixture.upstream.chat.push(
+      toolStream({ index: 1_000_000_000, id: "c1", type: "function", function: { name: "lookup", arguments: '{"q"' } }, { index: 1_000_000_000, function: { arguments: ":1}" } })
+    );
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", streamed);
+    expect(response.status).toBe(200);
+    expect(clientToolCalls(frames(await response.text()))).toEqual([{ id: "c1", name: "lookup", arguments: '{"q":1}' }]);
+  });
+
   it("charges a stream a content rule cut, including what the upstream was still producing", async () => {
     const fixture = await setup();
     const gw = await gateway(fixture);

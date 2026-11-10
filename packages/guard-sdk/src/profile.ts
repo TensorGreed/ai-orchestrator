@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { DESTINATION_TIERS, PROVENANCE_LABELS, dataClassNameSchema } from "@ai-orchestrator/shared";
+import { DESTINATION_TIERS, PROVENANCE_LABELS, dataClassNameSchema, mcpPolicyRoleSchema } from "@ai-orchestrator/shared";
 import { GUARD_ACTIONS, GUARD_CHANNELS, GuardProfileError, stableStringify, type GuardAction, type GuardChannel } from "./types";
 
 /**
@@ -19,7 +19,13 @@ export const actionRuleSchema = z.object({
   /** Observe only: record what would have happened, let the content through unchanged. Overrides the profile-level flag. */
   shadow: z.boolean().optional(),
   /** For `protect`: the provider to use instead of the data-class mapping. */
-  providerId: z.string().min(1).optional()
+  providerId: z.string().min(1).optional(),
+  /**
+   * Phase 12 coverage — `buffer`: a streamed answer this rule applies to is
+   * generated in full and checked before any of it is sent. Absent: the rule
+   * follows the stream's normal mode (whole-answer checks run at the end).
+   */
+  stream: z.literal("buffer").optional()
 });
 
 export const detectorEntrySchema = z.object({
@@ -104,6 +110,54 @@ export const destinationRuleSchema = z.object({
   }
 });
 
+/**
+ * Phase 12 coverage — how untrusted pieces reaching a model are handled.
+ * `perDocument`: retrieval nodes check each document and drop blocked ones.
+ * `onBlock`: `fail` (the node fails, the default) or `withhold` (the piece is
+ * replaced by a marker and the model call goes ahead).
+ */
+export const RETRIEVAL_ON_BLOCK_VALUES = ["fail", "withhold"] as const;
+export type RetrievalOnBlock = (typeof RETRIEVAL_ON_BLOCK_VALUES)[number];
+
+export const retrievalSettingsSchema = z.object({
+  perDocument: z.boolean().optional(),
+  onBlock: z.enum(RETRIEVAL_ON_BLOCK_VALUES).optional()
+});
+
+/** Text that replaces a withheld untrusted piece (`retrieval.onBlock: "withhold"`). */
+export const RETRIEVAL_WITHHELD_MARKER = "[content withheld by content rules]";
+
+const idList = z.array(z.string().trim().min(1).max(200)).max(200);
+
+/**
+ * Phase 12 coverage — a reveal rule: who may turn tokens of these data
+ * classes back into values. Reveal is denied unless a rule matches, so a
+ * rule must name at least one subject. `workflows` absent: any workflow.
+ * `requireApproval`: a person approves each reveal first. Only an admin may
+ * save a rule set with reveal rules, and `roles` / `users` match only runs a
+ * signed-in person started (see `revealRuleMatchesSubject` in shared);
+ * `serviceAccounts` match explicitly.
+ */
+export const revealRuleSchema = z
+  .object({
+    dataClasses: z.array(dataClassNameSchema).min(1).max(100),
+    subjects: z.object({
+      roles: z.array(mcpPolicyRoleSchema).max(4).optional(),
+      users: idList.optional(),
+      serviceAccounts: idList.optional()
+    }),
+    workflows: idList.optional(),
+    requireApproval: z.boolean().optional(),
+    /** Shown in the editor and in refusal reasons. */
+    name: z.string().trim().min(1).max(120).optional()
+  })
+  .superRefine((rule, ctx) => {
+    const subjects = (rule.subjects.roles?.length ?? 0) + (rule.subjects.users?.length ?? 0) + (rule.subjects.serviceAccounts?.length ?? 0);
+    if (subjects === 0) {
+      ctx.addIssue({ code: "custom", path: ["subjects"], message: "Name at least one role, user or service account; reveal is denied to everyone else" });
+    }
+  });
+
 export const guardProfileSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -153,7 +207,18 @@ export const guardProfileSchema = z.object({
    * Phase 16 — where data may go. Absent means no destination checks, so
    * existing profiles keep their hash and behaviour.
    */
-  destinations: z.object({ rules: z.array(destinationRuleSchema).max(100).default([]) }).optional()
+  destinations: z.object({ rules: z.array(destinationRuleSchema).max(100).default([]) }).optional(),
+  /**
+   * Phase 12 coverage — untrusted pieces at the model boundary and retrieved
+   * documents. Absent keeps the hash and today's behaviour (no per-document
+   * checks; a blocked piece fails the node).
+   */
+  retrieval: retrievalSettingsSchema.optional(),
+  /**
+   * Phase 12 coverage — who may reveal protected tokens. Absent (or no
+   * rules) means nobody: reveal is denied by default.
+   */
+  reveal: z.object({ rules: z.array(revealRuleSchema).max(100).default([]) }).optional()
 });
 
 export type GuardProfileInput = z.input<typeof guardProfileSchema>;
@@ -163,6 +228,8 @@ export type DetectorEntry = z.output<typeof detectorEntrySchema>;
 export type ActionRule = z.output<typeof actionRuleSchema>;
 export type GuardDictionary = z.output<typeof dictionarySchema>;
 export type DestinationRule = z.output<typeof destinationRuleSchema>;
+export type RevealRule = z.output<typeof revealRuleSchema>;
+export type RetrievalSettings = z.output<typeof retrievalSettingsSchema>;
 
 /**
  * Phase 16 — the opt-in predicate: a profile that asks for propagated
@@ -190,6 +257,36 @@ export function profileFeedsPropagatedLabels(profile: Pick<GuardProfile, "labels
 export function profileChecksOutbound(profile: Partial<Pick<GuardProfile, "destinations" | "channels">> | null | undefined): boolean {
   if (!profile) return false;
   return (profile.destinations?.rules.length ?? 0) > 0 || profile.channels?.egress !== undefined;
+}
+
+/**
+ * Phase 12 coverage — the profile checks what external callers receive
+ * (webhook, chat and MCP invoke responses): it configures the `response`
+ * channel. The built-in default profile does not.
+ */
+export function profileChecksResponses(profile: Partial<Pick<GuardProfile, "channels">> | null | undefined): boolean {
+  return profile?.channels?.response !== undefined;
+}
+
+/** Phase 12 coverage — the profile checks incoming webhook payloads at the route, before dispatch. */
+export function profileChecksTriggerInput(profile: Partial<Pick<GuardProfile, "channels">> | null | undefined): boolean {
+  return profile?.channels?.trigger_input !== undefined;
+}
+
+/** Phase 12 coverage — the profile's reveal rules; empty (deny everything) when it has none. */
+export function profileRevealRules(profile: Partial<Pick<GuardProfile, "reveal">> | null | undefined): RevealRule[] {
+  return profile?.reveal?.rules ?? [];
+}
+
+/** Phase 12 coverage — the profile's retrieval settings with defaults filled: no per-document checks, a block fails. */
+export function profileRetrievalSettings(profile: Partial<Pick<GuardProfile, "retrieval">> | null | undefined): Required<RetrievalSettings> {
+  return { perDocument: profile?.retrieval?.perDocument ?? false, onBlock: profile?.retrieval?.onBlock ?? "fail" };
+}
+
+/** Phase 12 coverage — rules on this channel ask a streamed answer to be generated in full before any of it is sent. */
+export function channelRequestsBufferedStream(channel: Pick<ChannelProfile, "actions" | "defaultAction"> | undefined): boolean {
+  if (!channel) return false;
+  return channel.defaultAction.stream === "buffer" || Object.values(channel.actions).some((rule) => rule.stream === "buffer");
 }
 
 /** Validate and fill defaults. Throws `GuardProfileError` with every issue listed. */

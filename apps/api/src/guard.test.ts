@@ -584,3 +584,36 @@ describe("guard security review fixes", () => {
     await vi.waitFor(() => expect(resolveRun).toHaveBeenCalledWith(expect.objectContaining({ workflowId: "wf-onerror" })), { timeout: 3000 });
   });
 });
+
+describe("reveal rules are admin-only (Phase 12 coverage)", () => {
+  const withReveal = (id: string) => ({ ...strictProfile(id), reveal: { rules: [{ dataClasses: ["card_number"], subjects: { roles: ["builder"] } }] } });
+
+  it("refuses a builder's create, import and update with reveal rules (403, audited) and lets an admin save them", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+
+    const created = await call(context, "POST", "/api/guard/profiles", builder.cookie, { document: withReveal("b-reveal") });
+    expect(created.statusCode).toBe(403);
+    expect(created.json<{ error: string }>().error).toBe("Only an admin can save a rule set with reveal rules");
+    const imported = await call(context, "POST", "/api/guard/profiles/import", builder.cookie, { document: withReveal("b-import") });
+    expect(imported.statusCode).toBe(403);
+    expect((await call(context, "GET", "/api/guard/profiles/b-reveal", builder.cookie)).statusCode).toBe(404);
+    expect((await call(context, "GET", "/api/guard/profiles/b-import", builder.cookie)).statusCode).toBe(404);
+
+    // A builder may still save rule sets without reveal rules, including an empty reveal block.
+    expect((await call(context, "POST", "/api/guard/profiles", builder.cookie, { document: { ...strictProfile("b-plain"), reveal: { rules: [] } } })).statusCode).toBe(201);
+    const widened = await call(context, "PUT", "/api/guard/profiles/b-plain", builder.cookie, { document: withReveal("b-plain") });
+    expect(widened.statusCode).toBe(403);
+
+    // An admin saves them; a builder can then neither change nor keep them, but can remove them.
+    expect((await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: withReveal("a-reveal") })).statusCode).toBe(201);
+    expect((await call(context, "POST", "/api/guard/profiles/import", admin.cookie, { document: withReveal("a-import") })).statusCode).toBe(201);
+    expect((await call(context, "PUT", "/api/guard/profiles/a-reveal", builder.cookie, { document: { ...withReveal("a-reveal"), description: "edited" } })).statusCode).toBe(403);
+    expect((await call(context, "PUT", "/api/guard/profiles/a-reveal", builder.cookie, { document: strictProfile("a-reveal") })).statusCode).toBe(200);
+
+    const denied = (await context.store.listAuditLogs({ eventType: "guard.profile.reveal_rules_denied" } as never)) as unknown as { items: Array<{ outcome: string; action: string }> };
+    expect(denied.items.map((item) => item.action).sort()).toEqual(["create", "import", "update", "update"]);
+    expect(denied.items.every((item) => item.outcome === "denied")).toBe(true);
+  });
+});
