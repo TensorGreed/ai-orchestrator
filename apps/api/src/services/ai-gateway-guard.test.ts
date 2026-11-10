@@ -27,7 +27,9 @@ import {
   createAiGatewayHistoryMemo,
   outboundTextSlots,
   outputGuardMode,
+  rewrittenValuePieces,
   STREAM_HOLD_CHARS,
+  streamContextChars,
   streamCheckDue,
   streamReleaseLength,
   type AiGatewayGuardScope
@@ -173,13 +175,47 @@ describe("outputGuardMode", () => {
   const resolved = (finalOutput: Record<string, unknown> | undefined) =>
     ({ profile: { ...createDefaultGuardProfile(), channels: finalOutput ? { final_output: finalOutput } : {} } }) as unknown as ResolvedGuardProfile;
 
-  it("streams a rule set that rewrites (a copy of the built-in one), and buffers only on request", () => {
-    expect(outputGuardMode([{ profile: createDefaultGuardProfile() } as unknown as ResolvedGuardProfile])).toBe("chunked");
-    expect(outputGuardMode([resolved({ detectors: [], actions: { email: { action: "redact" } }, defaultAction: { action: "allow" } })])).toBe("chunked");
+  it("buffers a rule set that rewrites (a copy of the built-in one) unless its rewrites opt in to windows", () => {
+    expect(outputGuardMode([{ profile: createDefaultGuardProfile() } as unknown as ResolvedGuardProfile])).toBe("buffered");
+    expect(outputGuardMode([resolved({ detectors: [], actions: { email: { action: "redact" } }, defaultAction: { action: "allow" } })])).toBe("buffered");
+    expect(outputGuardMode([resolved({ detectors: [], actions: { email: { action: "redact", stream: "window" } }, defaultAction: { action: "allow" } })])).toBe("chunked");
+    expect(outputGuardMode([resolved({ detectors: [{ id: "dlp.patterns" }], actions: { private_key: { action: "redact", stream: "window" } }, defaultAction: { action: "allow" } })])).toBe("buffered");
+    expect(outputGuardMode([resolved({ detectors: [], actions: { email: { action: "block" } }, defaultAction: { action: "allow" } })])).toBe("chunked");
     expect(outputGuardMode([resolved({ detectors: [], actions: { email: { action: "redact", stream: "buffer" } }, defaultAction: { action: "allow" } })])).toBe("buffered");
     expect(outputGuardMode([resolved({ detectors: [], actions: {}, defaultAction: { action: "block", stream: "buffer" } })])).toBe("buffered");
     expect(outputGuardMode([resolved(undefined)])).toBe("none");
     expect(outputGuardMode([])).toBe("none");
+  });
+});
+
+describe("rewrittenValuePieces", () => {
+  const summary = (spans: Array<[number, number]>, effective = "redact", shadow = false) => ({
+    findings: spans.map(([start, end]) => ({ spans: [{ start, end }] })),
+    actions: spans.map(() => ({ effective, shadow }))
+  });
+
+  it("lists the pieces of rewritten values that the rewritten text no longer has", () => {
+    const raw = "key: -----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0\n-----END PRIVATE KEY----- ok";
+    const pieces = rewrittenValuePieces(raw, "key: [REDACTED:private_key] ok", summary([[5, raw.length - 3]]));
+    expect(pieces).toEqual(expect.arrayContaining(["-----BEGIN", "KEY-----", "MIIEvQIBADANBgkqhkiG9w0", "-----END"]));
+    expect(pieces.every((piece) => piece.length >= 8 && !piece.includes("\n"))).toBe(true);
+  });
+
+  it("skips short pieces, kept words, shadow and non-rewrite actions", () => {
+    const raw = "card 4111 1111 1111 1111 tokenvalue123";
+    expect(rewrittenValuePieces(raw, "card •••• 1111 tokenvalue123", summary([[5, 24]]))).toEqual([]);
+    expect(rewrittenValuePieces(raw, "card", summary([[25, 38]], "redact", true))).toEqual([]);
+    expect(rewrittenValuePieces(raw, "card", summary([[25, 38]], "block"))).toEqual([]);
+    expect(rewrittenValuePieces(raw, "card", summary([[25, 38]]))).toEqual(["tokenvalue123"]);
+    expect(rewrittenValuePieces(raw, "card", undefined)).toEqual([]);
+  });
+});
+
+describe("streamContextChars", () => {
+  it("reads back the hold after a word break, and the full overlap inside a value", () => {
+    expect(streamContextChars("plain text. ")).toBe(STREAM_HOLD_CHARS);
+    expect(streamContextChars("")).toBe(STREAM_HOLD_CHARS);
+    expect(streamContextChars("token abcdef")).toBeGreaterThan(STREAM_HOLD_CHARS + 4000);
   });
 });
 

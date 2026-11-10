@@ -158,6 +158,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     APPROVAL_SWEEP_INTERVAL_MS: 60_000,
     APP_PUBLIC_URL: "",
     GUARD_AUTO_APPLY: true,
+    GATEWAY_RULES_WITHOUT_BINDING: true,
     MCP_SANDBOX_DEFAULT: "none",
     MCP_SANDBOX_REQUIRED: false,
     MCP_SANDBOX_ALLOWED_MOUNT_ROOTS: "",

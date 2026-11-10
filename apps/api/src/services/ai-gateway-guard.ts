@@ -19,20 +19,28 @@
  * `review` and `require_approval` block (nobody waits on an API call). Verdicts go to guard_events under the request's
  * `aigw_*` id, placement `gateway`, with the route's alias as the node id.
  *
- * Streaming: `outputGuardMode` says how an answer is checked. `buffered` only when a rule set asks for it
- * (`stream: "buffer"` on a final_output rule): the whole answer is generated, checked and then sent. Otherwise
- * `chunked`: at sentence or size boundaries the new text is checked, with the end of what was already sent in front of
- * it for context (`STREAM_OVERLAP_CHARS`), and what passes is released except for a held-back tail
- * (`streamReleaseLength`), so a match still forming at the end of the text is not sent before it can be seen. Redact,
- * mask, protect and the hidden-character transform apply to the part being released (`GuardInput.streamWindow`); a
- * value that runs past the release point waits for a later release, so it is never sent in two pieces. A block cuts the
- * stream. Those boundary checks record nothing; the full answer is checked once more at the end and recorded (the audit
- * check), and only then does the tail go out. Each boundary check reads a bounded window, so the work grows with the
- * answer's length, not its square. Checks that need the whole answer run in the audit check.
+ * Streaming: `outputGuardMode` says how an answer is checked (`channelStreamMode` per rule set).
+ *   - `buffered`: a rule set may rewrite the answer and has not opted in to windowed streaming, or a rule asks for
+ *     `stream: "buffer"`. The whole answer is generated, checked and then sent. Rule sets written before windowed
+ *     streaming, the built-in one included, stay here.
+ *   - `chunked`: the answer is checked but rewritten by no rule, or only by redact, mask and transform rules marked
+ *     `stream: "window"` that cannot catch a finding wider than a stretch of text (a key block).
+ * In `chunked` mode, at sentence or size boundaries the new text is checked with the end of what was already released
+ * in front of it for context, and what passes is released except for a held-back tail (`streamReleaseLength`), so a
+ * match still forming is not sent before it can be seen. Windowed rewrites apply to the part being released
+ * (`GuardInput.streamWindow`); a value that runs past the release point waits, so it is never sent in two pieces, and
+ * one that began in text already sent stops the stream. A block cuts the stream. Those boundary checks record nothing;
+ * the full raw answer is checked once more at the end and recorded (the audit check), and only then does the tail go
+ * out. If the audit check rewrites a value that went out unchanged, the stream ends with `content_filter` and is
+ * recorded as blocked, never as rewritten. Each boundary check reads a bounded window, so the work grows with the
+ * answer's length, not its square.
  */
 import {
-  channelRequestsBufferedStream,
+  channelStreamMode,
+  contentText,
+  createDefaultGuardRegistry,
   createGuardVerdictMemo,
+  type GuardRegistry,
   isMemoisableVerdict,
   type GuardChannel,
   type GuardSpan,
@@ -56,16 +64,39 @@ import { gatewayBlockReason } from "./mcp-gateway-guard.js";
 
 export type AiGatewayOutputMode = "none" | "chunked" | "buffered";
 
+let defaultRegistry: GuardRegistry | undefined;
+
 /** How the answer is checked for this stack (see the module comment). */
-export function outputGuardMode(stack: ReadonlyArray<ResolvedGuardProfile>): AiGatewayOutputMode {
+export function outputGuardMode(stack: ReadonlyArray<ResolvedGuardProfile>, registry: Pick<GuardRegistry, "get"> = (defaultRegistry ??= createDefaultGuardRegistry())): AiGatewayOutputMode {
   let checked = false;
   for (const { profile } of stack) {
-    const channel = profile.channels.final_output;
-    if (!channel) continue;
-    if (channelRequestsBufferedStream(channel)) return "buffered";
+    if (!profile.channels.final_output) continue;
+    if (channelStreamMode(profile, "final_output", registry) === "buffer") return "buffered";
     checked = true;
   }
   return checked ? "chunked" : "none";
+}
+
+const VALUE_REWRITES = new Set(["redact", "mask", "protect"]);
+
+/**
+ * The pieces of the values a check rewrote (from the first rule set's verdict, in the raw text's coordinates): runs of
+ * at least 8 characters between spaces, line breaks and quotes, left out when the rewritten text still has them (a
+ * label kept in place, a word used elsewhere). If one of these reached a caller, a value went out unchanged.
+ */
+export function rewrittenValuePieces(rawText: string, rewrittenText: string, summary: { findings: Array<{ spans: Array<{ start: number; end: number }> }>; actions: Array<{ effective: string; shadow: boolean }> } | undefined): string[] {
+  if (!summary) return [];
+  const pieces = new Set<string>();
+  summary.findings.forEach((finding, index) => {
+    const action = summary.actions[index];
+    if (!action || action.shadow || !VALUE_REWRITES.has(action.effective)) return;
+    for (const span of finding.spans) {
+      for (const piece of rawText.slice(span.start, span.end).split(/\s+|\\[nrt]|"/)) {
+        if (piece.length >= 8 && !rewrittenText.includes(piece)) pieces.add(piece);
+      }
+    }
+  });
+  return [...pieces];
 }
 
 /** A history memo entry: only that the text passed cleanly. */
@@ -95,7 +126,8 @@ export interface AiGatewayGuardScope {
 
 export type AiGatewayGuardOutcome<T> =
   | { action: "allow" }
-  | { action: "rewrite"; content: T }
+  /** `values`: pieces of the values the check rewrote, when it read them (the answer check). */
+  | { action: "rewrite"; content: T; values?: string[] }
   | { action: "block"; reason: string; categories: string[]; profiles: Array<{ profileId: string; version: number }> };
 
 type BlockOutcome = { action: "block"; reason: string; categories: string[]; profiles: Array<{ profileId: string; version: number }> };
@@ -103,8 +135,15 @@ type BlockOutcome = { action: "block"; reason: string; categories: string[]; pro
 type CheckOutcome =
   /** `clean`: nothing was found and nothing changed in any rule set (a memo may keep it). */
   | { action: "allow"; clean: boolean; window?: GuardSpan }
-  | { action: "rewrite"; content: unknown; window?: GuardSpan }
+  /** `values`: pieces of the rewritten values (`rewrittenValuePieces`). */
+  | { action: "rewrite"; content: unknown; window?: GuardSpan; values: string[] }
   | BlockOutcome;
+
+/** `outputGuardMode` for a scope, with the detectors its checks run (a detector the registry lacks counts as not local). */
+export function aiGatewayOutputMode(scope: AiGatewayGuardScope): AiGatewayOutputMode {
+  const registry = runtimeOf(scope).registry;
+  return registry ? outputGuardMode(scope.resolution.stack, registry) : outputGuardMode(scope.resolution.stack);
+}
 
 function runtimeOf(scope: AiGatewayGuardScope) {
   return scope.guard.gatewayRuntime(
@@ -148,7 +187,10 @@ async function check(
     };
   }
   const window = result.window ? { window: result.window } : {};
-  if (result.transformed) return { action: "rewrite", content: result.content, ...window };
+  if (result.transformed) {
+    const values = options.streamWindow ? [] : rewrittenValuePieces(contentText(content), contentText(result.content), result.verdicts[0]?.summary);
+    return { action: "rewrite", content: result.content, ...window, values };
+  }
   const clean = result.action === "allow" && result.verdicts.length === profiles.length && result.verdicts.every((entry) => isMemoisableVerdict(entry.summary));
   return { action: "allow", clean, ...window };
 }
@@ -337,7 +379,8 @@ export async function checkAiGatewayAnswer(scope: AiGatewayGuardScope, answer: A
   const outcome = await check(scope, "final_output", answerContent(answer), { labels: [], record });
   if (outcome.action !== "rewrite") return outcome;
   const content = outcome.content;
-  if (typeof content === "string" && answer.toolCalls.length === 0) return { action: "rewrite", content: { content, toolCalls: [] } };
+  const values = outcome.values;
+  if (typeof content === "string" && answer.toolCalls.length === 0) return { action: "rewrite", content: { content, toolCalls: [] }, values };
   const record_ = content && typeof content === "object" && !Array.isArray(content) ? (content as Record<string, unknown>) : null;
   const calls = Array.isArray(record_?.tool_calls) ? (record_!.tool_calls as Array<Record<string, unknown>>) : null;
   if (!record_ || typeof record_.content !== "string" || !calls || calls.length !== answer.toolCalls.length) {
@@ -345,6 +388,7 @@ export async function checkAiGatewayAnswer(scope: AiGatewayGuardScope, answer: A
   }
   return {
     action: "rewrite",
+    values,
     content: {
       content: record_.content,
       toolCalls: answer.toolCalls.map((call, index) => ({ ...call, arguments: typeof calls[index]!.arguments === "string" ? (calls[index]!.arguments as string) : call.arguments }))
@@ -414,6 +458,18 @@ export const STREAM_MAX_VALUE_CHARS = 4096;
  * hold could have kept back, so a check never misses context a whole-answer check would have seen nearby.
  */
 export const STREAM_OVERLAP_CHARS = STREAM_HOLD_CHARS + STREAM_MAX_VALUE_CHARS;
+
+/** Text a boundary check waits for before checking at a sentence end (the hold delays the text that long anyway). */
+export const STREAM_CHECK_MIN_CHARS = 256;
+
+/**
+ * How much of the released text a boundary check reads in front of the new text: the tail's length, or the full
+ * overlap when the released text ends inside an unbroken value (the release point gave up backing up to its start).
+ */
+export function streamContextChars(released: string, holdChars = STREAM_HOLD_CHARS): number {
+  const last = released.charCodeAt(released.length - 1);
+  return released.length > 0 && inValue(last) ? holdChars + STREAM_MAX_VALUE_CHARS : holdChars;
+}
 
 /** Printable ASCII other than a space: what emails, keys and URLs are made of. Anything else ends such a value. */
 function inValue(code: number): boolean {

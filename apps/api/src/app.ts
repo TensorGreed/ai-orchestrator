@@ -1547,6 +1547,7 @@ export async function createApp(
   const runtimeMasterKey = Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64");
   const guardService = new GuardService(store, secretService, {
     autoApply: config.GUARD_AUTO_APPLY,
+    gatewayRulesWithoutBinding: config.GATEWAY_RULES_WITHOUT_BINDING,
     logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
     // Phase 16 — destination rows are read when a run first needs them.
     destinationRows: async () => await store.listDataDestinations(),

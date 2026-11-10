@@ -64,10 +64,12 @@ import {
   checkAiGatewayRequest,
   checkAiGatewayStreamWindow,
   createAiGatewayHistoryMemo,
-  outputGuardMode,
+  aiGatewayOutputMode,
+  STREAM_CHECK_MIN_CHARS,
+  STREAM_HOLD_CHARS,
   STREAM_MAX_VALUE_CHARS,
-  STREAM_OVERLAP_CHARS,
   streamCheckDue,
+  streamContextChars,
   streamReleaseLength,
   type AiGatewayAnswer,
   type AiGatewayGuardScope,
@@ -412,7 +414,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
             logger: (message, metadata) => app.log.warn({ metadata }, message),
             historyMemo
           };
-          outputMode = outputGuardMode(resolution.stack);
+          outputMode = aiGatewayOutputMode(guard);
         }
       }
       const abort = new AbortController();
@@ -712,6 +714,8 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     const collector = new ToolCallCollector();
     /** The raw answer text released so far: the audit check reads it, and the boundary checks read its end for context. */
     let releasedText = "";
+    /** What the caller received of it (rewritten where a rule rewrote it). */
+    let sentText = "";
     let pendingText = "";
     /** How much of the end of `pendingText` no check has seen yet. */
     let uncheckedChars = 0;
@@ -734,9 +738,12 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       if (!release.text) return;
       opening();
       writer.data(chatChunk(base, { content: release.text }));
+      sentText += release.text;
     };
     const holdChars = deps.streamCheck?.holdChars;
-    const overlapChars = holdChars === undefined ? STREAM_OVERLAP_CHARS : holdChars + STREAM_MAX_VALUE_CHARS;
+    /** Pending text past this means releases have stalled (a value no window could place): the stream stops. */
+    const stallChars = (holdChars ?? STREAM_HOLD_CHARS) + 2 * STREAM_MAX_VALUE_CHARS;
+    const checkSpacing = { minChars: STREAM_CHECK_MIN_CHARS, ...deps.streamCheck };
     /**
      * A boundary check (records nothing) of the pending text, with the end of the released text in front of it. `final`:
      * all of it may go (the answer is complete); otherwise all but the held-back tail. Null when nothing could be released.
@@ -744,7 +751,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     const windowCheck = async (final: boolean): Promise<AiGatewayStreamRelease | null> => {
       const release = final ? pendingText.length : streamReleaseLength(pendingText, holdChars);
       if (release <= 0) return null;
-      return await checkAiGatewayStreamWindow(admitted.guard!, { context: releasedText.slice(-overlapChars), pending: pendingText, release });
+      return await checkAiGatewayStreamWindow(admitted.guard!, { context: releasedText.slice(-streamContextChars(releasedText, holdChars)), pending: pendingText, release });
     };
 
     /** When output last arrived: how long the provider may have been producing what the gateway never read. */
@@ -772,7 +779,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
           }
           pendingText += chunk.textDelta;
           uncheckedChars += chunk.textDelta.length;
-          if (streamCheckDue(pendingText.slice(-uncheckedChars), deps.streamCheck)) {
+          if (streamCheckDue(pendingText.slice(-uncheckedChars), checkSpacing)) {
             let verdict: AiGatewayStreamRelease | null;
             try {
               // The end of the pending text may be the start of a match: that part waits for the text after it.
@@ -789,6 +796,10 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
             if (verdict) {
               uncheckedChars = 0;
               sendRelease(verdict);
+              if (pendingText.length > stallChars) {
+                cut = { reason: "Blocked by content rules: the answer could not be released in checked parts", categories: [], profiles: [] };
+                break;
+              }
             }
           }
         } else if (chunk.type === "tool_call_delta") {
@@ -818,7 +829,21 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     }
 
     const providerFinished = finishReason !== null;
+    /**
+     * Parts were rewritten as they went out, but the stream ends early (the caller left, the provider failed): the
+     * whole-answer check still runs, so the rule events say what was rewritten. Best effort.
+     */
+    const recordRewrites = async () => {
+      if (!answerRewritten) return;
+      guardOutcome = "rewrite";
+      try {
+        await checkAiGatewayAnswer(admitted.guard!, { content: releasedText + pendingText, toolCalls: [] });
+      } catch (error) {
+        app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)), requestId: admitted.requestId }, "AI gateway could not record the rewrites of a stream that ended early");
+      }
+    };
     if (admitted.abort.signal.aborted || (writer.isStarted && writer.closed)) {
+      await recordRewrites();
       await record(admitted, { kind: "chat", stream: true, status: "client_closed", httpStatus: 499, finishReason, ...(usage ? { usage } : {}), estimate: spend(!providerFinished), guardOutcome });
       return reply;
     }
@@ -832,6 +857,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       return reply;
     }
     if (upstreamError) {
+      await recordRewrites();
       const failure = upstreamFailure(admitted, upstreamError);
       // What arrived is known; a stream the provider ended itself left nothing in flight.
       const charge = isModelNotAllowedError(upstreamError) ? {} : { estimate: spend(false) };
@@ -868,6 +894,14 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       if (!cut && verdict.action === "block") cut = verdict;
       if (!cut && tail?.action === "release" && tail.consumed < pendingText.length) {
         cut = { reason: "Blocked by content rules: the end of the answer could not be checked", categories: [], profiles: [] };
+      }
+      // The audit check rewrote a value: if any part of it reached the caller unchanged, the answer was not what the
+      // rules allow. Stop here, and record it as blocked, never as rewritten.
+      if (!cut && verdict.action === "rewrite") {
+        const delivered = sentText + (tail?.action === "release" ? tail.text : "");
+        if ((verdict.values ?? []).some((piece) => delivered.includes(piece))) {
+          cut = { reason: "Blocked by content rules: part of a value was sent before it could be rewritten", categories: [], profiles: [] };
+        }
       }
       if (!cut) {
         if (tail?.action === "release") sendRelease(tail);

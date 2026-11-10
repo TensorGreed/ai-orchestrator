@@ -1029,16 +1029,34 @@ describe("a Guard-blocked call held for approval", () => {
   });
 });
 
+describe("GATEWAY_RULES_WITHOUT_BINDING=false", () => {
+  it("leaves gateway calls with no toolset or client binding unchecked, even with an enforced project rule set", async () => {
+    const fixture = await setup({ GATEWAY_RULES_WITHOUT_BINDING: "false" });
+    const call = caller(fixture.context);
+    expect((await call(fixture.admin, "PUT", "/api/guard/bindings/projects/default", { mode: "enforced", profileId: "gw-strict" })).statusCode).toBe(200);
+    const tool = toolCaller(fixture);
+    expect((await tool("lookup_kb", { topic: "contact" })).text).toContain(EMAIL);
+    expect(await guardEvents(fixture)).toEqual([]);
+    // A toolset binding brings the project's enforced rule set back with it.
+    expect((await call(fixture.admin, "PUT", `/api/guard/bindings/toolsets/${fixture.toolset.id}`, { mode: "override", profileId: "default" })).statusCode).toBe(200);
+    expect((await tool("lookup_kb", { topic: "contact" })).text).not.toContain(EMAIL);
+  });
+});
+
 describe("Guard binding reads on a gateway call", () => {
-  it("take one read of the gateway bindings and one of the project's with no binding, and refuse the call when a read fails", async () => {
+  it("take one read of the bindings (the project's with them) and no profile read with no binding, and refuse the call when a read fails", async () => {
     const fixture = await setup();
     const reads = vi.spyOn(fixture.context.store, "getGatewayGuardBindings");
     const single = vi.spyOn(fixture.context.store, "getGuardBinding");
+    const profiles = vi.spyOn(fixture.context.store, "getGuardProfile");
     const tool = toolCaller(fixture);
     expect((await tool("get_current_time", { tz: "UTC" })).outcome).toBe("ok");
-    expect(reads).toHaveBeenCalledTimes(1);
-    expect(single).toHaveBeenCalledTimes(1);
-    expect(single).toHaveBeenCalledWith("project", fixture.toolset.projectId);
+    expect((await tool("get_current_time", { tz: "UTC" })).outcome).toBe("ok");
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(reads).toHaveBeenCalledWith(fixture.toolset.id, fixture.client.id, "toolset", fixture.toolset.projectId);
+    expect(single).not.toHaveBeenCalled();
+    // The deployment's destination rules are kept per profile revision: looked up once, not on every call.
+    expect(profiles.mock.calls.length).toBeLessThanOrEqual(1);
 
     reads.mockRejectedValueOnce(new Error("database is locked"));
     const invoke = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool");

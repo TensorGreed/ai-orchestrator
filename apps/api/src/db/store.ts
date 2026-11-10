@@ -835,11 +835,13 @@ export interface Store extends AiGatewayStore {
   getGuardBinding(scope: GuardBindingScope, scopeId: string): Promise<GuardBindingRecord | null>;
   /** 12.6 — a gateway call's toolset and client Guard bindings, in one read (null where there is none). */
   /** 12.6b — `setScope` `ai_route_set`: the binding of an AI gateway route set (in `toolset`) instead of a toolset's. */
+  /** Phase 12 coverage — with `projectId`, the project's binding comes back in the same read. */
   getGatewayGuardBindings(
     toolsetId: string,
     clientId: string,
-    setScope?: "toolset" | "ai_route_set"
-  ): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }>;
+    setScope?: "toolset" | "ai_route_set",
+    projectId?: string | null
+  ): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null; project: GuardBindingRecord | null }>;
   listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]>;
   setGuardBinding(input: { scope: GuardBindingScope; scopeId: string; mode: string; profileId: string | null; updatedBy: string | null }): Promise<GuardBindingRecord>;
   insertGuardEvents(rows: GuardEventInsert[]): Promise<void>;

@@ -1070,7 +1070,8 @@ describe("everything that reaches the provider is counted", () => {
     let calls = 0;
     const spy = vi.spyOn(GuardService.prototype, "gatewayRuntime").mockImplementation(function (this: GuardService, ...args: Parameters<GuardService["gatewayRuntime"]>) {
       calls += 1;
-      if (calls >= 2) throw new Error("the rule store went away");
+      // The first call picks the stream mode, the second checks the prompt.
+      if (calls >= 3) throw new Error("the rule store went away");
       return real.apply(this, args);
     });
     try {
@@ -1098,7 +1099,8 @@ describe("everything that reaches the provider is counted", () => {
     let calls = 0;
     const spy = vi.spyOn(GuardService.prototype, "gatewayRuntime").mockImplementation(function (this: GuardService, ...args: Parameters<GuardService["gatewayRuntime"]>) {
       calls += 1;
-      if (calls >= 2) throw new Error("the rule store went away");
+      // The first call picks the stream mode, the second checks the prompt.
+      if (calls >= 3) throw new Error("the rule store went away");
       return real.apply(this, args);
     });
     try {
@@ -1239,16 +1241,31 @@ async function builtInCopy(fixture: Fixture, setId: string, id = "aigw-builtin-c
   await guardProfile(fixture, document as unknown as Record<string, unknown>, setId);
 }
 
+/** A copy of the built-in rule set that opts in to windowed streaming: its answer rewrites say `stream: "window"`, and key blocks block. */
+async function windowedCopy(fixture: Fixture, setId: string, id = "aigw-windowed-copy") {
+  const base = createDefaultGuardProfile();
+  const final = base.channels.final_output!;
+  const actions = Object.fromEntries(
+    Object.entries(final.actions).map(([key, rule]) => [key, key === "private_key" ? { action: "block" } : ["redact", "mask", "transform"].includes(rule.action) ? { ...rule, stream: "window" } : rule])
+  );
+  const document = { ...base, id, name: "Windowed copy", version: "1", channels: { ...base.channels, final_output: { ...final, actions } } };
+  await guardProfile(fixture, document as unknown as Record<string, unknown>, setId);
+}
+
+/** A private key block, as a model would stream it: a line at a time. */
+const PEM_BODY = Array.from({ length: 20 }, (_, index) => `MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC${String(index).padStart(2, "0")}kLmNoPqRsT`);
+const PEM_LINES = ["-----BEGIN PRIVATE KEY-----", ...PEM_BODY, "-----END PRIVATE KEY-----"];
+
 const CARD = "4111 1111 1111 1111";
 const MASKED_CARD = "•••• •••• •••• 1111";
 const GH_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD";
 const PLAIN = "Plain words go here and they are harmless to read. ";
 
 describe("rewrites on a real stream (D14)", () => {
-  it("streams with a rule set copied from the built-in one: text goes out before the answer is finished", async () => {
+  it("streams with a rule set that opts in to windowed rewrites: text goes out before the answer is finished", async () => {
     const fixture = await setup();
     const gw = await gateway(fixture);
-    await builtInCopy(fixture, gw.set.id);
+    await windowedCopy(fixture, gw.set.id);
     // The upstream sends clean text and then never finishes.
     fixture.upstream.chat.push({ sse: [chunk({ role: "assistant", content: "" }), ...Array.from({ length: 12 }, () => chunk({ content: PLAIN }))], gapMs: 5, hang: true });
     const abort = new AbortController();
@@ -1266,10 +1283,121 @@ describe("rewrites on a real stream (D14)", () => {
     expect(fixture.upstream.requests[0]!.body.stream).toBe(true);
   });
 
-  it("redacts and masks values split at every position across two chunks, and never sends them raw", async () => {
+  it("keeps buffering a rule set that rewrites and has not opted in (a copy of the built-in one)", async () => {
     const fixture = await setup();
     const gw = await gateway(fixture);
     await builtInCopy(fixture, gw.set.id);
+    fixture.upstream.chat.push({ json: completion(`${PLAIN.repeat(4)}Card ${CARD}.`) });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    const raw = await response.text();
+    expect(raw).not.toContain("4111");
+    expect(streamedText(frames(raw))).toBe(`${PLAIN.repeat(4)}Card ${MASKED_CARD}.`);
+    // Buffered: the upstream was asked for the whole answer.
+    expect(fixture.upstream.requests[0]!.body.stream).not.toBe(true);
+  });
+
+  it.each([
+    ["a copy of the built-in rule set (buffered)", builtInCopy],
+    ["a rule set that opts in to windowed rewrites", windowedCopy]
+  ])("never streams private key body lines with %s", async (_case, bind) => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await bind(fixture, gw.set.id);
+    const answer = `Here is the key you asked for:\n${PEM_LINES.join("\n")}\nKeep it safe.`;
+    if (bind === builtInCopy) fixture.upstream.chat.push({ json: completion(answer) });
+    else fixture.upstream.chat.push({ sse: [chunk({ role: "assistant", content: "" }), ...answer.split(/(?<=\n)/).map((line) => chunk({ content: line })), chunk({}, "stop")], gapMs: 2 });
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+    const raw = await response.text();
+    for (const line of PEM_BODY) expect(raw).not.toContain(line.slice(0, 40));
+    const row = (await requestsOf(fixture))[0]!;
+    if (bind === builtInCopy) {
+      expect(streamedText(frames(raw))).toBe("Here is the key you asked for:\n[REDACTED:private_key]\nKeep it safe.");
+      expect(row).toMatchObject({ status: "ok", guardOutcome: "rewrite" });
+    } else {
+      expect(row).toMatchObject({ status: "blocked_output", guardOutcome: "block" });
+    }
+  });
+
+  it("stops a stream, and records a block, when the whole-answer check rewrites a value that already went out", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await guardProfile(
+      fixture,
+      {
+        id: "aigw-late",
+        name: "Late",
+        version: "1",
+        channels: { final_output: { detectors: [{ id: "custom.late", threshold: 0.5 }], actions: { credential: { action: "redact", stream: "window" } }, defaultAction: { action: "allow" } } }
+      },
+      gw.set.id
+    );
+    // A detector that only sees the value once the text after it arrives, and claims to be local: the boundary checks
+    // release the value before the whole-answer check catches it.
+    const registry = createDefaultGuardRegistry();
+    registry.register({
+      id: "custom.late",
+      tier: "rule",
+      description: "Flags codename-7f3a9c2b1e once the answer says it was a secret.",
+      channels: ["final_output"],
+      categories: ["credential"],
+      detect: (_input, context) => {
+        const at = context.text.indexOf("codename-7f3a9c2b1e");
+        if (at < 0 || !context.text.includes("that was a secret")) return [];
+        return [{ detectorId: "custom.late", category: "credential", dataClass: "credential", score: 1, spans: [{ start: at, end: at + 18 }], evidence: "codename", message: "late" }];
+      }
+    });
+    const real = GuardService.prototype.gatewayRuntime;
+    const spy = vi.spyOn(GuardService.prototype, "gatewayRuntime").mockImplementation(function (this: GuardService, ...args: Parameters<GuardService["gatewayRuntime"]>) {
+      return { ...real.apply(this, args), registry };
+    });
+    try {
+      fixture.upstream.chat.push({
+        sse: [chunk({ content: `Use codename-7f3a9c2b1e today. ${PLAIN.repeat(12)}` }), chunk({ content: PLAIN.repeat(4) }), chunk({ content: "And that was a secret." }), chunk({}, "stop")],
+        gapMs: 5
+      });
+      const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
+      const raw = await response.text();
+      expect(raw, raw).toContain("codename-7f3a9c2b1e");
+      const objects = frames(raw).filter((frame) => typeof frame === "object") as Frame[];
+      expect(objects.find((frame) => frame.choices?.[0]?.finish_reason)?.choices?.[0]?.finish_reason).toBe("content_filter");
+      expect(raw).not.toContain("that was a secret");
+      const row = (await requestsOf(fixture))[0]!;
+      expect(row).toMatchObject({ status: "blocked_output", guardOutcome: "block" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("records the parts it rewrote when the caller leaves mid-stream", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await windowedCopy(fixture, gw.set.id);
+    fixture.upstream.chat.push({ sse: [chunk({ content: `${PLAIN.repeat(8)}Card ${CARD}. ${PLAIN.repeat(8)}` }), ...Array.from({ length: 8 }, () => chunk({ content: PLAIN }))], gapMs: 5, hang: true });
+    const abort = new AbortController();
+    const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true }, { signal: abort.signal });
+    const reader = response.body!.getReader();
+    let seen = "";
+    while (!seen.includes(MASKED_CARD)) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      seen += new TextDecoder().decode(value);
+    }
+    expect(seen).toContain(MASKED_CARD);
+    abort.abort();
+    await reader.cancel().catch(() => undefined);
+    const row = await until(async () => (await requestsOf(fixture))[0] ?? null, "the usage row");
+    expect(row).toMatchObject({ status: "client_closed", guardOutcome: "rewrite" });
+    const events = await until(async () => {
+      const found = await fixture.store.listGuardEventsForExecution(row.id);
+      return found.some((event) => event.channel === "final_output") ? found : null;
+    }, "the rule events");
+    expect(events.filter((event) => event.channel === "final_output")).toHaveLength(1);
+  });
+
+  it("redacts and masks values split at every position across two chunks, and never sends them raw", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    await windowedCopy(fixture, gw.set.id);
     const before = `${PLAIN.repeat(8)}Card `;
     const middle = " and key ";
     const after = `. ${PLAIN.repeat(8)}`;
@@ -1295,7 +1423,7 @@ describe("rewrites on a real stream (D14)", () => {
   it("releases the text before a value as it arrives and the value only once it is whole", async () => {
     const fixture = await setup();
     const gw = await gateway(fixture);
-    await builtInCopy(fixture, gw.set.id);
+    await windowedCopy(fixture, gw.set.id);
     const opening = PLAIN.repeat(10);
     fixture.upstream.chat.push({
       sse: [chunk({ content: opening }), chunk({ content: "Pay with 4111 1111" }), chunk({ content: " 1111 1111 now. " }), chunk({ content: PLAIN.repeat(8) }), chunk({}, "stop")],
@@ -1345,7 +1473,7 @@ describe("rewrites on a real stream (D14)", () => {
   it("rewrites streamed tool call arguments from the audit check", async () => {
     const fixture = await setup();
     const gw = await gateway(fixture);
-    await builtInCopy(fixture, gw.set.id);
+    await windowedCopy(fixture, gw.set.id);
     const call = { index: 0, id: "call_1", type: "function", function: { name: "pay", arguments: `{"card":"${CARD}"}` } };
     fixture.upstream.chat.push({ sse: [chunk({ content: "Paying now." }), chunk({ tool_calls: [call] }), chunk({}, "tool_calls")] });
     const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
@@ -1360,7 +1488,7 @@ describe("windowed boundary checks (D15)", () => {
   it("read a bounded window each time, so the work grows linearly with the answer", async () => {
     const fixture = await setup();
     const gw = await gateway(fixture);
-    await builtInCopy(fixture, gw.set.id);
+    await windowedCopy(fixture, gw.set.id);
     const scanned: number[] = [];
     const registry = createDefaultGuardRegistry();
     const dlp = registry.get(DLP_DETECTOR_ID)!;
@@ -1383,11 +1511,12 @@ describe("windowed boundary checks (D15)", () => {
         const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
         expect(streamedText(frames(await response.text()))).toBe(answer);
         // The last scan is the audit check of the whole answer; every boundary check before it reads at most the
-        // released text's last 4352 characters plus what is pending (the held tail and the new text).
+        // released text's last 256 characters (it does not end inside a value) plus what is pending (the held tail and
+        // at least 256 new characters).
         expect(scanned.at(-1)).toBe(answer.length);
         const boundary = scanned.slice(0, -1);
         expect(boundary.length).toBeGreaterThan(10);
-        expect(Math.max(...boundary)).toBeLessThanOrEqual(4352 + 256 + 4096 + 400 + PLAIN.length);
+        expect(Math.max(...boundary)).toBeLessThanOrEqual(3 * 256 + 2 * PLAIN.length);
         return boundary.reduce((sum, value) => sum + value, 0);
       };
       const short = await scan(200); // about 10 000 characters

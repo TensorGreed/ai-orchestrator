@@ -5,6 +5,10 @@ import { createDefaultGuardRegistry } from "./index";
 import { parseGuardProfile } from "./profile";
 import { guardVerdictMemoKey } from "./verdict-memo";
 import { evaluateGuardStack } from "./wiring";
+import { channelStreamMode } from "./stream-local";
+import { guardCheckIsMemoisable } from "./verdict-memo";
+import { GuardRegistry } from "./registry";
+import { createInjectionClassifierDetector } from "./detectors/classifier";
 
 /**
  * Phase 12 coverage — `GuardInput.streamWindow`: a streamed answer's check judges and rewrites only the part about to
@@ -82,15 +86,26 @@ describe("stream windows", () => {
     expect(verdict.content).toBe(content);
   });
 
-  it("rewrites from the window's start a value that began in the text already sent", async () => {
-    // A value the hold should have kept whole: what is still unsent is rewritten, the sent part stays as it was.
+  it("stops the stream when a value to rewrite began in the text already sent", async () => {
+    // A value the hold should have kept whole: rewriting only the unsent part would hide that part of it went out.
     const content = `x ${TOKEN} y`;
-    const start = 10;
-    const verdict = await windowed(content, start, content.length);
-    expect(verdict.action).toBe("redact");
-    const out = verdict.content as string;
-    expect(out.slice(0, start)).toBe(content.slice(0, start));
-    expect(out.slice(start)).toBe("[REDACTED:credential] y");
+    const verdict = await windowed(content, 10, content.length);
+    expect(verdict.action).toBe("block");
+    expect(verdict.actions[0]?.reason).toContain("already sent");
+  });
+
+  it("never lets a private key's body out a line at a time", async () => {
+    const body = Array.from({ length: 20 }, (_, index) => `MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC${String(index).padStart(2, "0")}abcdefghij`);
+    const pem = `-----BEGIN PRIVATE KEY-----\n${body.join("\n")}\n-----END PRIVATE KEY-----`;
+    const content = `Here it is:\n${pem}\nDone.`;
+    // Released while only the header has matched: the header is redacted...
+    const headerOnly = `Here it is:\n-----BEGIN PRIVATE KEY-----\n${body.slice(0, 2).join("\n")}`;
+    const early = await windowed(headerOnly, 0, headerOnly.length);
+    expect(early.content as string).toContain("[REDACTED:private_key]");
+    // ...and once the whole block matches, its start lies in sent text: the stream is cut, nothing is clipped and sent.
+    const sent = headerOnly.length;
+    const late = await windowed(content, sent, content.length);
+    expect(late.action).toBe("block");
   });
 
   it("strips hidden characters inside the window only", async () => {
@@ -144,5 +159,42 @@ describe("stream windows", () => {
   it("puts the window in the memo key", () => {
     const base = { channel: "final_output" as const, content: "hello" };
     expect(guardVerdictMemoKey(["h"], { ...base, streamWindow: { start: 0, end: 2 } })).not.toBe(guardVerdictMemoKey(["h"], base));
+  });
+});
+
+describe("channelStreamMode", () => {
+  const withFinal = (final: Record<string, unknown>) =>
+    parseGuardProfile({ id: "p", name: "P", version: "1", channels: { final_output: { detectors: [{ id: "dlp.patterns", threshold: 0.6 }], defaultAction: { action: "allow" }, ...final } } });
+
+  it("keeps buffering a rule set that rewrites unless every rewrite rule opts in (the built-in one included)", () => {
+    expect(channelStreamMode(builtIn, "final_output", registry)).toBe("buffer");
+    expect(channelStreamMode(withFinal({ actions: { email: { action: "redact" } } }), "final_output", registry)).toBe("buffer");
+    expect(channelStreamMode(withFinal({ actions: { email: { action: "redact", stream: "window" }, card_number: { action: "mask", stream: "window" } } }), "final_output", registry)).toBe("window");
+    expect(channelStreamMode(withFinal({ actions: { email: { action: "redact", stream: "window" }, jwt: { action: "redact" } } }), "final_output", registry)).toBe("buffer");
+    expect(channelStreamMode(withFinal({ actions: { email: { action: "block" } } }), "final_output", registry)).toBe("none");
+    expect(channelStreamMode(withFinal({ actions: { email: { action: "redact", shadow: true } } }), "final_output", registry)).toBe("none");
+    expect(channelStreamMode(withFinal({ actions: { email: { action: "block", stream: "buffer" } } }), "final_output", registry)).toBe("buffer");
+  });
+
+  it("buffers when a windowed rule could catch a key block, protect, or the default action", () => {
+    expect(channelStreamMode(withFinal({ actions: { private_key: { action: "redact", stream: "window" } } }), "final_output", registry)).toBe("buffer");
+    // A category rule catches key blocks that have no rule of their own.
+    expect(channelStreamMode(withFinal({ actions: { sensitive_data: { action: "redact", stream: "window" } } }), "final_output", registry)).toBe("buffer");
+    expect(
+      channelStreamMode(withFinal({ actions: { sensitive_data: { action: "redact", stream: "window" }, private_key: { action: "block" } } }), "final_output", registry)
+    ).toBe("window");
+    expect(channelStreamMode(withFinal({ actions: { card_number: { action: "protect", stream: "window" } } }), "final_output", registry)).toBe("buffer");
+    expect(channelStreamMode(withFinal({ actions: {}, defaultAction: { action: "redact", stream: "window" } }), "final_output", registry)).toBe("buffer");
+    const unknown = parseGuardProfile({ id: "u", name: "U", version: "1", channels: { final_output: { detectors: [{ id: "custom.x" }], actions: { email: { action: "redact", stream: "window" } } } } });
+    expect(channelStreamMode(unknown, "final_output", registry)).toBe("buffer");
+  });
+});
+
+describe("the injection classifier", () => {
+  it("is never answered from a memo: it scores the whole text", () => {
+    const classifierRegistry = new GuardRegistry().register(createInjectionClassifierDetector());
+    const profile = parseGuardProfile({ id: "c", name: "C", version: "1", channels: { prompt: { detectors: [{ id: "injection.classifier" }] } } });
+    expect(guardCheckIsMemoisable({ channel: "prompt", content: "hi" }, [profile], classifierRegistry)).toBe(false);
+    expect(createInjectionClassifierDetector().nonStreamLocal).toBe(true);
   });
 });

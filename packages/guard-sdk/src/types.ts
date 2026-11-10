@@ -255,6 +255,16 @@ export interface GuardDetector {
    * its input and options.
    */
   memoisable?: false;
+  /**
+   * Phase 12 coverage — findings that are not local to a stretch of a
+   * streamed answer: a match that can grow past the stream's held-back tail
+   * (a multi-line key block) or a score over the whole text. `true` for every
+   * finding, or the data classes and categories that are not. A streamed
+   * answer is buffered when a rewrite rule could apply to one of them.
+   * Absent: findings are local (bounded values, or unbroken values up to
+   * 4096 characters).
+   */
+  nonStreamLocal?: true | readonly string[];
   detect(input: GuardInput, context: DetectorContext): GuardFinding[] | Promise<GuardFinding[]>;
   /**
    * For the `transform` action: return the content with the findings'

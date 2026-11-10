@@ -107,6 +107,13 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
   // Phase 12 coverage — a streamed answer's window: only the released part is judged and rewritten.
   const win = streamWindowOf(input, text);
   let windowEnd = win?.end ?? text.length;
+  /** Findings with a span that began in the text already sent (clipped to the window's start). */
+  const startsBeforeWindow = new WeakSet<GuardFinding>();
+  const inWindow = (finding: GuardFinding): GuardFinding | null => {
+    const windowed = windowedFinding(finding, win!);
+    if (windowed && finding.spans.some((span) => span.start < win!.start && span.end > win!.start)) startsBeforeWindow.add(windowed);
+    return windowed;
+  };
   const channel = profile.channels[input.channel];
   const profileRef = { id: profile.id, version: profile.version, hash: hashGuardProfile(profile) };
   const budget = { limitMs: profile.latencyBudget.ms, exceeded: false, policy: profile.latencyBudget.onExceeded };
@@ -126,7 +133,7 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
   // Phase 16 — destination rules: the scan of the outgoing content (issued surrogates dropped) plus its labels.
   const destinationEntries = win
     ? evaluateDestinationStep().flatMap((entry) => {
-        const finding = windowedFinding(entry.finding, win);
+        const finding = inWindow(entry.finding);
         return finding ? [{ ...entry, finding }] : [];
       })
     : evaluateDestinationStep();
@@ -224,7 +231,7 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       }));
     }
     if (win) result = result.flatMap((finding) => {
-      const inside = windowedFinding(finding, win);
+      const inside = inWindow(finding);
       return inside ? [inside] : [];
     });
     for (const finding of result) {
@@ -248,6 +255,12 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       if (effective === "transform" && !detector.transform) {
         effective = "block";
         reason = `${detector.id} has no transform; the finding blocks instead`;
+        log("coerced", reason, { detectorId: finding.detectorId });
+      }
+      // Phase 12 coverage — part of this value was already sent: rewriting the rest would hide that, so it blocks.
+      if (win && startsBeforeWindow.has(finding) && (effective === "redact" || effective === "mask" || effective === "protect")) {
+        effective = "block";
+        reason = `part of this ${finding.dataClass ?? finding.category} was already sent; the stream stops`;
         log("coerced", reason, { detectorId: finding.detectorId });
       }
       const shadow = shadowFor(rule, effective);
