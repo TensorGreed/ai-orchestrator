@@ -155,7 +155,6 @@ describe("sub-workflow usage reports", () => {
   });
 
   it("reports a paused child after the resume, with what it spent before the pause", async () => {
-    // The gate follows a Set node: an approved gate passes on its input, which would repeat the model's usage blob.
     const gated = chainWorkflow("wf-gated", [
       node("start", "sub_workflow_trigger"),
       model("model", "wf-gated"),

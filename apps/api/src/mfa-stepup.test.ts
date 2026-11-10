@@ -329,7 +329,9 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "POST", url: `/api/users/${other.id}/mfa/reset` },
       { method: "POST", url: "/api/auth/mfa/disable", payload: {} },
       { method: "POST", url: "/api/auth/api-keys", payload: { name: "ci" } },
+      { method: "POST", url: "/api/auth/api-keys/apk_x/rotate", payload: {} },
       { method: "POST", url: "/api/mcp/clients", payload: {} },
+      { method: "POST", url: "/api/mcp/clients/mcc_x/rotate", payload: {} },
       { method: "POST", url: "/api/secrets", payload: {} },
       { method: "PUT", url: "/api/secrets/sec_x/sensitive-output", payload: { sensitiveOutput: true } },
       { method: "POST", url: "/api/secrets/sec_x/shares", payload: {} },
@@ -353,6 +355,7 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "POST", url: "/api/mcp/servers/import", payload: {} },
       { method: "POST", url: `/api/users/${other.id}/sessions/revoke`, payload: {} },
       { method: "POST", url: `/api/service-accounts/${account.id}/keys`, payload: { name: "ci" } },
+      { method: "POST", url: `/api/service-accounts/${account.id}/keys/apk_x/rotate`, payload: {} },
       { method: "PATCH", url: `/api/service-accounts/${account.id}`, payload: { role: "operator" } },
       { method: "DELETE", url: `/api/service-accounts/${account.id}` }
     ];

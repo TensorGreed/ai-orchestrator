@@ -48,6 +48,9 @@ function optionalIntFromEnv(min: number, max: number) {
   );
 }
 
+/** 13.3 — the shortest usage retention: monthly budgets sum a month of usage events. */
+export const USAGE_EVENTS_MIN_RETENTION_DAYS = 31;
+
 const envSchema = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("warn"),
   API_PORT: z.coerce.number().int().positive().default(4000),
@@ -96,6 +99,17 @@ const envSchema = z.object({
   SSE_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().max(30000).default(15000),
   EXECUTION_HISTORY_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(30),
   EXECUTION_HISTORY_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000),
+  // 13.3 — retention. Every setting is optional; unset keeps today's behaviour (see docs/operations/data-retention.md).
+  /** Rows one purge deletes at most per table (default 50 000); the rest go on the next purge. */
+  RETENTION_MAX_ROWS_PER_TICK: optionalIntFromEnv(1000, 10_000_000),
+  /** The shortest retention a project may set, in days (default 1). */
+  RETENTION_MIN_DAYS: optionalIntFromEnv(1, 36_500),
+  /** The longest retention a project may set, in days (unset: no limit, and a project may keep forever). */
+  RETENTION_MAX_DAYS: optionalIntFromEnv(1, 36_500),
+  /** /v1 AI gateway request metadata (ai_gateway_requests), in days. Unset or 0 keeps it forever. */
+  AI_GATEWAY_REQUEST_RETENTION_DAYS: optionalIntFromEnv(0, 36_500),
+  /** Agent memory (Simple Memory sessions, agent artifacts, the session tool cache) by last update, in days. Unset or 0 keeps it. */
+  AGENT_MEMORY_RETENTION_DAYS: optionalIntFromEnv(0, 36_500),
   SEED_SAMPLE_WORKFLOWS: booleanFromEnv.default(false),
   SECRET_MASTER_KEY_BASE64: z.string().min(1).optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("ao_session"),
@@ -121,6 +135,8 @@ const envSchema = z.object({
 
   // Phase 5.1 — Authentication enhancements
   API_KEY_DEFAULT_EXPIRY_DAYS: z.coerce.number().int().nonnegative().default(0),
+  // 13.2 — a service account's keys expire within this many days (new keys and rotated ones). 0 or unset = no limit.
+  SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS: optionalIntFromEnv(0, 3650),
   // MFA_ENABLED has no effect (TOTP is always available); a boot note says so when it is set.
   MFA_ENABLED: booleanFromEnv.default(false),
   // 13.2 — MFA_ENFORCE=true is an alias for MFA_REQUIRED_ROLES=admin (see resolveMfaPolicy).
@@ -542,8 +558,20 @@ const envSchema = z.object({
   // shape: `{ providerId: { model: { inputUsdPer1M, outputUsdPer1M, cachedInputUsdPer1M? } } }`.
   // Operators with negotiated rates / self-hosted GPU costs override here.
   LLM_PRICING_OVERRIDES_JSON: z.string().default(""),
-  /** Retention for usage_events rows. 0 disables pruning. */
-  USAGE_EVENTS_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(365),
+  /**
+   * 13.3 — usage_events rows older than this many days are deleted. 0 (the default) keeps them. An explicit value is
+   * honoured as set, so an install whose .env still has the old `USAGE_EVENTS_RETENTION_DAYS=365` line now deletes
+   * older usage rows (the start-up log warns, naming the date). At least 31 when set: monthly budgets sum a month of
+   * usage. No upper limit, as before.
+   */
+  USAGE_EVENTS_RETENTION_DAYS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(0)
+    .refine((days) => days === 0 || days >= USAGE_EVENTS_MIN_RETENTION_DAYS, {
+      message: `USAGE_EVENTS_RETENTION_DAYS must be 0 (keep) or at least ${USAGE_EVENTS_MIN_RETENTION_DAYS} days: monthly budgets sum a month of usage`
+    }),
 
   // Phase 7.1 — Deployment & HA
   WORKER_MODE: z.enum(["all", "api", "webhook", "worker"]).default("all"),
@@ -562,6 +590,8 @@ const envSchema = z.object({
   NOTIFICATIONS_ENABLED: booleanFromEnv.default(false),
   /** Phase 11.2 — channels set from the environment also send approval.requested and approval.timed_out. */
   NOTIFICATIONS_APPROVAL_EVENTS: booleanFromEnv.default(true),
+  /** 13.2 — channels set from the environment also send credential.expiring (keys and gateway clients about to stop working). Off unless set. */
+  NOTIFICATIONS_CREDENTIAL_EVENTS: optionalBooleanFromEnv,
   NOTIFICATION_SMTP_HOST: z.string().optional(),
   NOTIFICATION_SMTP_PORT: z.coerce.number().int().positive().default(587),
   NOTIFICATION_SMTP_SECURE: booleanFromEnv.default(false),
@@ -653,12 +683,60 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   parseSessionPolicy(parsed.data);
   // Phase 13.2 — a bad address list refuses to start, naming the setting and the entry.
   resolveNetworkSettings(parsed.data);
+  // 13.3 — retention bounds that contradict each other refuse to start.
+  resolveRetentionSettings(parsed.data);
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.
   resolveQueueSettings(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
   checkClusterTimings(parsed.data, env.DB_TYPE);
   resolveExecutionDispatch(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
 
   return parsed.data;
+}
+
+// ---------------------------------------------------------------------------
+// 13.3 — retention. Unset values keep today's behaviour: nothing new is deleted.
+// ---------------------------------------------------------------------------
+
+export const RETENTION_DEFAULTS = {
+  maxRowsPerTick: 50_000,
+  minDays: 1
+} as const;
+
+export interface RetentionSettings {
+  maxRowsPerTick: number;
+  /** The range a project's own retention must fall in (per-project retention); maxDays null = no upper limit. */
+  minDays: number;
+  maxDays: number | null;
+  /** Days per deployment-wide class; 0 = kept forever. */
+  agentMemoryDays: number;
+  aiGatewayRequestDays: number;
+  usageEventDays: number;
+}
+
+export function resolveRetentionSettings(
+  config: Pick<
+    AppConfig,
+    | "RETENTION_MAX_ROWS_PER_TICK"
+    | "RETENTION_MIN_DAYS"
+    | "RETENTION_MAX_DAYS"
+    | "AGENT_MEMORY_RETENTION_DAYS"
+    | "AI_GATEWAY_REQUEST_RETENTION_DAYS"
+    | "USAGE_EVENTS_RETENTION_DAYS"
+  >
+): RetentionSettings {
+  const minDays = config.RETENTION_MIN_DAYS ?? RETENTION_DEFAULTS.minDays;
+  const maxDays = config.RETENTION_MAX_DAYS ?? null;
+  if (maxDays !== null && maxDays < minDays) {
+    throw new Error(`Invalid environment configuration: RETENTION_MAX_DAYS (${maxDays}) is below RETENTION_MIN_DAYS (${minDays}).`);
+  }
+  return {
+    maxRowsPerTick: config.RETENTION_MAX_ROWS_PER_TICK ?? RETENTION_DEFAULTS.maxRowsPerTick,
+    minDays,
+    maxDays,
+    agentMemoryDays: config.AGENT_MEMORY_RETENTION_DAYS ?? 0,
+    aiGatewayRequestDays: config.AI_GATEWAY_REQUEST_RETENTION_DAYS ?? 0,
+    usageEventDays: config.USAGE_EVENTS_RETENTION_DAYS ?? 0
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -818,7 +896,9 @@ export function parseTrustProxy(raw: string | undefined): boolean | number | str
     const family = net.isIP(address ?? "");
     const prefixOk =
       prefix === undefined || (/^\d+$/.test(prefix) && Number(prefix) <= (family === 6 ? 128 : 32));
-    if (family === 0 || !prefixOk || extra !== undefined) {
+    // A /0 range matches every address, which proxy-addr refuses; say so by name rather than failing at boot.
+    const matchesAll = prefix !== undefined && /^0+$/.test(prefix);
+    if (family === 0 || !prefixOk || extra !== undefined || matchesAll) {
       throw new Error(
         `Invalid environment configuration: TRUST_PROXY entry "${entry}" is not an IP address, a CIDR range, ` +
           "loopback, linklocal or uniquelocal (or use true, false or a hop count)"
@@ -826,6 +906,19 @@ export function parseTrustProxy(raw: string | undefined): boolean | number | str
     }
   }
   return entries;
+}
+
+/**
+ * The value handed to Fastify's `trustProxy`. Booleans and address lists pass through. A hop count becomes a function:
+ * Fastify 5.12 and later treat a bare number as "trust nothing" (it cannot check who the immediate peer is), which
+ * would silently turn `TRUST_PROXY=1` off. The function keeps the meaning this setting has always had: the first N
+ * addresses on the path (the connecting socket, then entries of X-Forwarded-For from the right) are trusted, so the
+ * client is the address just beyond them. As before, the API port must be reachable only through the proxy.
+ */
+export function toFastifyTrustProxy(value: boolean | number | string[]): boolean | string[] | ((address: string, hop: number) => boolean) {
+  if (typeof value !== "number") return value;
+  if (value <= 0) return false;
+  return (address, hop) => address != null && hop < value;
 }
 
 // ---------------------------------------------------------------------------

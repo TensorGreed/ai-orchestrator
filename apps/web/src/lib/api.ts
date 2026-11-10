@@ -110,6 +110,7 @@ import type {
   McpClientBudgetUsage,
   McpGatewayRateLimit,
   NetworkSettingsView,
+  RetentionAdminView,
   McpGatewaySessionView,
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -1574,6 +1575,16 @@ export interface ApiKeyRecord {
   expiresAt: string | null;
   revokedAt: string | null;
   createdAt: string;
+  /** 13.2 — the key that replaced this one in a rotation (its expiresAt is then the end of the grace window). */
+  supersededBy?: string | null;
+  rotatedAt?: string | null;
+}
+
+/** 13.2 — what a rotation returns: the new key (shown once), its record, and the old key with its new expiry. */
+export interface ApiKeyRotation {
+  key: string;
+  record: ApiKeyRecord;
+  previous: ApiKeyRecord;
 }
 
 export async function fetchApiKeys() {
@@ -1590,6 +1601,14 @@ export async function createApiKey(payload: { name: string; scopes?: string[]; e
   return apiRequest<{ key: string; record: ApiKeyRecord }>("/api/auth/api-keys", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+/** 13.2 — rotates one of your keys; the old key keeps working for graceHours (default 24, 0 = stop now). */
+export async function rotateApiKey(id: string, graceHours: number) {
+  return apiRequest<ApiKeyRotation>(`/api/auth/api-keys/${encodeURIComponent(id)}/rotate`, {
+    method: "POST",
+    body: JSON.stringify({ graceHours })
   });
 }
 
@@ -1646,6 +1665,14 @@ export async function createServiceAccountKey(id: string, payload: { name: strin
   return apiRequest<{ key: string; record: ApiKeyRecord }>(`/api/service-accounts/${encodeURIComponent(id)}/keys`, {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+/** 13.2 — rotates a service account's key (admin); the old key keeps working for graceHours. */
+export async function rotateServiceAccountKey(id: string, keyId: string, graceHours: number) {
+  return apiRequest<ApiKeyRotation>(`/api/service-accounts/${encodeURIComponent(id)}/keys/${encodeURIComponent(keyId)}/rotate`, {
+    method: "POST",
+    body: JSON.stringify({ graceHours })
   });
 }
 
@@ -3831,6 +3858,14 @@ export async function fetchMcpClientBudgets(id: string) {
   return apiRequest<{ clientId: string; budgets: McpClientBudgetUsage[] }>(`/api/mcp/clients/${encodeURIComponent(id)}/budgets`);
 }
 
+/** 13.2 — rotates a client's token (admin); the old token keeps working for graceHours (0 = stop now). */
+export async function rotateMcpClient(id: string, graceHours: number) {
+  return apiRequest<{ client: McpClientView; token: string }>(`/api/mcp/clients/${encodeURIComponent(id)}/rotate`, {
+    method: "POST",
+    body: JSON.stringify({ graceHours })
+  });
+}
+
 export async function revokeMcpClient(id: string) {
   return apiRequest<{ client: McpClientView }>(`/api/mcp/clients/${encodeURIComponent(id)}/revoke`, {
     method: "POST"
@@ -3851,6 +3886,11 @@ export async function updateMcpClientNetwork(
 /** 13.2 — the deployment's network allowlists (read-only) and how this browser's address fares (admin). */
 export async function fetchNetworkSettings() {
   return apiRequest<NetworkSettingsView>("/api/settings/network");
+}
+
+/** 13.3 — the deployment's retention per class, the backlog and the latest purges (admin, read-only). */
+export async function fetchRetention() {
+  return apiRequest<RetentionAdminView>("/api/admin/retention");
 }
 
 /** 12.2 — a client's open sessions on the instance that answers, with the labels each has collected. */

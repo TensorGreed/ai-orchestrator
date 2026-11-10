@@ -7,7 +7,9 @@
  * raw 23503.
  */
 import {
+  type ApiKeyRotationOutcome,
   type ServiceAccountCreate,
+  type StoredApiKey,
   type Store,
   type StoredUser,
   type StoredUserKind,
@@ -579,9 +581,11 @@ interface ApiKeyRow {
   expires_at: string | null;
   revoked_at: string | null;
   created_at: string;
+  superseded_by: string | null;
+  rotated_at: string | null;
 }
 
-function mapApiKey(row: ApiKeyRow) {
+function mapApiKey(row: ApiKeyRow): StoredApiKey {
   return {
     id: toStr(row.id),
     userId: toStr(row.user_id),
@@ -591,7 +595,9 @@ function mapApiKey(row: ApiKeyRow) {
     lastUsedAt: nullableStr(row.last_used_at),
     expiresAt: nullableStr(row.expires_at),
     revokedAt: nullableStr(row.revoked_at),
-    createdAt: toStr(row.created_at)
+    createdAt: toStr(row.created_at),
+    supersededBy: nullableStr(row.superseded_by),
+    rotatedAt: nullableStr(row.rotated_at)
   };
 }
 
@@ -605,7 +611,7 @@ export async function saveApiKey(ctx: PgContext, input: Parameters<Store["saveAp
 }
 
 export async function listApiKeys(ctx: PgContext, userId?: string): ReturnType<Store["listApiKeys"]> {
-  const columns = `id, user_id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at`;
+  const columns = `id, user_id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at, superseded_by, rotated_at`;
   const rows = userId
     ? await ctx.query<ApiKeyRow>(`SELECT ${columns} FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC`, [userId])
     : await ctx.query<ApiKeyRow>(`SELECT ${columns} FROM api_keys ORDER BY created_at DESC`);
@@ -614,24 +620,12 @@ export async function listApiKeys(ctx: PgContext, userId?: string): ReturnType<S
 
 export async function findApiKeyByPrefix(ctx: PgContext, prefix: string): ReturnType<Store["findApiKeyByPrefix"]> {
   const row = await ctx.queryOne<ApiKeyRow>(
-    `SELECT id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at
+    `SELECT id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at, superseded_by, rotated_at
        FROM api_keys WHERE key_prefix = $1 AND revoked_at IS NULL ORDER BY created_at ASC LIMIT 1`,
     [prefix]
   );
   if (!row) return null;
-  const mapped = mapApiKey(row);
-  return {
-    id: mapped.id,
-    userId: mapped.userId,
-    name: mapped.name,
-    keyPrefix: mapped.keyPrefix,
-    keyHash: toStr(row.key_hash),
-    scopes: mapped.scopes,
-    lastUsedAt: mapped.lastUsedAt,
-    expiresAt: mapped.expiresAt,
-    revokedAt: mapped.revokedAt,
-    createdAt: mapped.createdAt
-  };
+  return { ...mapApiKey(row), keyHash: toStr(row.key_hash) };
 }
 
 export async function touchApiKey(ctx: PgContext, id: string): ReturnType<Store["touchApiKey"]> {
@@ -640,9 +634,64 @@ export async function touchApiKey(ctx: PgContext, id: string): ReturnType<Store[
 
 export async function revokeApiKey(ctx: PgContext, id: string, userId?: string): ReturnType<Store["revokeApiKey"]> {
   // Like SQLite, a key that is already revoked is revoked again (true, with a new revoked_at).
-  const result = userId
-    ? await ctx.pool.query(`UPDATE api_keys SET revoked_at = $1 WHERE id = $2 AND user_id = $3`, [new Date().toISOString(), id, userId])
-    : await ctx.pool.query(`UPDATE api_keys SET revoked_at = $1 WHERE id = $2`, [new Date().toISOString(), id]);
+  const now = new Date().toISOString();
+  return await ctx.withTransaction(async (client) => {
+    const result = userId
+      ? await client.query(`UPDATE api_keys SET revoked_at = $1 WHERE id = $2 AND user_id = $3`, [now, id, userId])
+      : await client.query(`UPDATE api_keys SET revoked_at = $1 WHERE id = $2`, [now, id]);
+    if ((result.rowCount ?? 0) === 0) return false;
+    // 13.2 — the keys this one replaced and that still work (a rotation's grace window) end with it, back along the chain.
+    let frontier = [id];
+    for (let depth = 0; frontier.length > 0 && depth < 64; depth += 1) {
+      const live = await client.query<{ id: string }>(
+        `UPDATE api_keys SET revoked_at = $1
+          WHERE superseded_by = ANY($2::text[]) AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at > $1
+          RETURNING id`,
+        [now, frontier]
+      );
+      frontier = live.rows.map((row) => String(row.id));
+    }
+    return true;
+  });
+}
+
+/** 13.2 (v64) — see Store.rotateApiKey. The old row is locked, so a second rotation waits and then reads it rotated. */
+export async function rotateApiKey(ctx: PgContext, input: Parameters<Store["rotateApiKey"]>[0]): Promise<ApiKeyRotationOutcome> {
+  return withReferenceCheck(() =>
+    ctx.withTransaction(async (client): Promise<ApiKeyRotationOutcome> => {
+      const result = await client.query<{ name: string; scopes_json: string; expires_at: string | null; revoked_at: string | null; superseded_by: string | null }>(
+        `SELECT name, scopes_json, expires_at, revoked_at, superseded_by FROM api_keys WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+        [input.id, input.userId]
+      );
+      const old = result.rows[0];
+      if (!old) return { status: "not_found" };
+      if (old.superseded_by) return { status: "already_rotated", supersededBy: toStr(old.superseded_by) };
+      const oldExpiresAt = nullableStr(old.expires_at);
+      if (old.revoked_at || (oldExpiresAt && Date.parse(oldExpiresAt) <= Date.parse(input.now))) return { status: "inactive" };
+      const previousExpiresAt = oldExpiresAt && Date.parse(oldExpiresAt) < Date.parse(input.graceUntil) ? oldExpiresAt : input.graceUntil;
+      await client.query(
+        `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, NULL, $8)`,
+        [input.next.id, input.userId, toStr(old.name), input.next.keyPrefix, input.next.keyHash, toStr(old.scopes_json), input.next.expiresAt, input.now]
+      );
+      await client.query(`UPDATE api_keys SET expires_at = $1, superseded_by = $2, rotated_at = $3, expiry_notified_at = NULL WHERE id = $4`, [
+        previousExpiresAt,
+        input.next.id,
+        input.now,
+        input.id
+      ]);
+      return { status: "rotated", previousExpiresAt };
+    })
+  );
+}
+
+/** 13.2 (v64) — see Store.claimCredentialExpiryNotice; one conditional UPDATE, so exactly one racer claims it. */
+export async function claimCredentialExpiryNotice(ctx: PgContext, kind: "api_key" | "mcp_client", id: string, now: string, notBefore: string): Promise<boolean> {
+  const table = kind === "api_key" ? "api_keys" : "mcp_clients";
+  const result = await ctx.pool.query(
+    `UPDATE ${table} SET expiry_notified_at = $1 WHERE id = $2 AND (expiry_notified_at IS NULL OR expiry_notified_at <= $3)`,
+    [now, id, notBefore]
+  );
   return (result.rowCount ?? 0) > 0;
 }
 

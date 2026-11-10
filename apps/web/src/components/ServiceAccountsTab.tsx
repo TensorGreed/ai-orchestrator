@@ -1,7 +1,7 @@
 /**
  * 13.2 — Settings > Access control > Service accounts (admin): machine identities that act only through API keys.
  * Create one with a role, add it to projects, and give it keys with an optional role ceiling and project list. A key
- * is shown once, when it is created.
+ * is shown once, when it is created or rotated (the old key keeps working for the grace window the admin picks).
  */
 import { useCallback, useEffect, useState } from "react";
 import type { Project } from "@ai-orchestrator/shared";
@@ -15,12 +15,14 @@ import {
   fetchServiceAccounts,
   removeProjectMember,
   revokeServiceAccountKey,
+  rotateServiceAccountKey,
   updateServiceAccount,
   type ApiKeyRecord,
   type ServiceAccount
 } from "../lib/api";
 import { describeKeyScopes, KEY_SCOPE_ROLES } from "../lib/key-scopes";
 import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
+import { CredentialExpiry, RotateCredentialButton, rotatedNotice } from "./CredentialRotation";
 
 type Role = ServiceAccount["role"];
 
@@ -211,6 +213,7 @@ function ServiceAccountDetail({
   const [expiresInDays, setExpiresInDays] = useState("");
   const [scope, setScope] = useState<KeyScopeValue>(EMPTY_KEY_SCOPE);
   const [plaintext, setPlaintext] = useState<string | null>(null);
+  const [rotatedNote, setRotatedNote] = useState<string | null>(null);
   const [memberProject, setMemberProject] = useState(projects[0]?.id ?? "");
   const [memberRole, setMemberRole] = useState("editor");
   const [busy, setBusy] = useState(false);
@@ -308,6 +311,7 @@ function ServiceAccountDetail({
                 ...(days ? { expiresInDays: days } : {})
               });
               setPlaintext(created.key);
+              setRotatedNote(null);
               setKeyName("");
               setExpiresInDays("");
               setScope(EMPTY_KEY_SCOPE);
@@ -321,6 +325,7 @@ function ServiceAccountDetail({
         <div className="settings-highlight">
           <strong>New key — copy it now. It will not be shown again:</strong>
           <code>{plaintext}</code>
+          {rotatedNote && <p>{rotatedNote}</p>}
         </div>
       )}
 
@@ -347,11 +352,28 @@ function ServiceAccountDetail({
                 </td>
                 <td>{describeKeyScopes(key.scopes, projectName)}</td>
                 <td>{formatDate(key.lastUsedAt)}</td>
-                <td>{key.expiresAt ? formatDate(key.expiresAt) : "never"}</td>
+                <td>
+                  <CredentialExpiry expiresAt={key.expiresAt} rotated={Boolean(key.supersededBy)} revoked={Boolean(key.revokedAt)} />
+                </td>
                 <td>
                   {key.revokedAt ? (
                     <span className="settings-muted">revoked</span>
                   ) : (
+                    <>
+                    {!key.supersededBy && (!key.expiresAt || Date.parse(key.expiresAt) > Date.now()) && (
+                      <RotateCredentialButton
+                        what="key"
+                        name={key.name}
+                        disabled={busy}
+                        onRotate={(graceHours) =>
+                          run(async () => {
+                            const rotated = await rotateServiceAccountKey(account.id, key.id, graceHours);
+                            setPlaintext(rotated.key);
+                            setRotatedNote(rotatedNotice("key", rotated.previous.expiresAt));
+                          })
+                        }
+                      />
+                    )}{" "}
                     <button
                       className="mini-btn"
                       disabled={busy}
@@ -361,6 +383,7 @@ function ServiceAccountDetail({
                     >
                       Revoke
                     </button>
+                    </>
                   )}
                 </td>
               </tr>

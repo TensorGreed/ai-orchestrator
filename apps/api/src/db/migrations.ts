@@ -2651,6 +2651,91 @@ export const MIGRATIONS: Migration[] = [
     down: `
       ALTER TABLE mfa_secrets DROP COLUMN IF EXISTS last_totp_step;
     `
+  },
+  {
+    version: 64,
+    description: "13.2 — key and gateway client rotation with a grace window, and expiry warnings sent once a day",
+    // Every column is nullable, so keys and clients from before the upgrade behave as before (no backfill).
+    // api_keys: a rotated key names the key that replaced it (superseded_by) and when (rotated_at); its expires_at was
+    // already moved to the end of the grace window, so it needs no new check. mcp_clients: the old token's prefix and
+    // hash stay in previous_* until previous_expires_at. expiry_notified_at records the last credential.expiring alert
+    // so the leader sends at most one per credential per day, across instances and restarts.
+    up: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS superseded_by TEXT;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expiry_notified_at TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_token_prefix TEXT;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_token_hash TEXT;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_expires_at TIMESTAMPTZ;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS expiry_notified_at TIMESTAMPTZ;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_clients_previous_token_prefix ON mcp_clients(previous_token_prefix);
+    `,
+    // Rolling back ends every old gateway token still in its grace window (the previous_* columns go); rotated API
+    // keys keep the shortened expires_at, so nothing is widened.
+    down: `
+      DROP INDEX IF EXISTS idx_mcp_clients_previous_token_prefix;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS expiry_notified_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS rotated_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_expires_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_token_hash;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_token_prefix;
+      DROP INDEX IF EXISTS idx_api_keys_expires_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS expiry_notified_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS rotated_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS superseded_by;
+    `
+  },
+  {
+    version: 65,
+    description: "13.3 — retention: per-scope policies, the purge log, and indexes for purging by age",
+    // retention_policies is read from per-project retention on; scope_type is 'project' (other scopes are refused by
+    // the API). retention_runs keeps counts only, for 90 days. The indexes serve purging and counting by age.
+    // On a large install the execution_history index can take minutes to build, and CREATE INDEX blocks writes to the
+    // table meanwhile. To avoid that, build it beforehand with
+    //   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_execution_history_workflow_started ON execution_history(workflow_id, started_at);
+    // (and the same for the others): IF NOT EXISTS then skips each one here.
+    up: `
+      CREATE TABLE IF NOT EXISTS retention_policies (
+        id TEXT PRIMARY KEY,
+        scope_type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        data_class TEXT NOT NULL,
+        days INTEGER NOT NULL,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_retention_policies_scope ON retention_policies(scope_type, scope_id, data_class);
+      CREATE TABLE IF NOT EXISTS retention_runs (
+        id TEXT PRIMARY KEY,
+        started_at TIMESTAMPTZ NOT NULL,
+        finished_at TIMESTAMPTZ NOT NULL,
+        instance_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        counts_json TEXT NOT NULL DEFAULT '{}',
+        capped_json TEXT NOT NULL DEFAULT '[]',
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_retention_runs_started ON retention_runs(started_at);
+      CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_started ON execution_history(workflow_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_project_started ON mcp_tool_calls(project_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_project_created ON guard_events(project_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_session_memory_updated ON session_memory(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_session_artifacts_updated ON session_artifacts(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_session_tool_cache_created ON session_tool_cache(created_at);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_session_tool_cache_created;
+      DROP INDEX IF EXISTS idx_session_artifacts_updated;
+      DROP INDEX IF EXISTS idx_session_memory_updated;
+      DROP INDEX IF EXISTS idx_guard_events_project_created;
+      DROP INDEX IF EXISTS idx_mcp_tool_calls_project_started;
+      DROP INDEX IF EXISTS idx_execution_history_workflow_started;
+      DROP TABLE IF EXISTS retention_runs;
+      DROP TABLE IF EXISTS retention_policies;
+    `
   }
 ];
 
