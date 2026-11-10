@@ -29,6 +29,7 @@ function fakeProvider(id = "openai") {
       yield { type: "text_delta", textDelta: "answer" };
       yield { type: "tool_call_delta", toolCallId: "t1", name: "lookup", argumentsDelta: '{"q":' };
       yield { type: "tool_call_delta", toolCallId: "t1", argumentsDelta: '"x"}' };
+      yield { type: "usage", usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 } };
     }
   };
   const registry = new ProviderRegistry();
@@ -128,6 +129,24 @@ describe("model tape", () => {
     expect(player.report().liveCalls).toEqual([{ nodeId: "agent_1", iteration: 0, providerId: "openai", model: expect.any(String), inputTokens: 10, outputTokens: 2, cachedInputTokens: null }]);
   });
 
+  it("charges a lenient live call the estimate when the live provider reports no usage", async () => {
+    const { tape } = await record(async (registry) => {
+      await registry.get("openai").generate(request("hi"), context("agent_1", 0));
+    });
+    const live = new ProviderRegistry();
+    live.register({
+      definition: { id: "openai", label: "openai", supportsTools: true, configSchema: {} },
+      async generate() {
+        return { content: "abcdef", toolCalls: [] } satisfies LLMCallResponse;
+      }
+    });
+    const { registry, player } = createModelTapeReplayRegistry(tape, { mode: "lenient", live });
+    await registry.get("openai").generate(request("new"), context("agent_1", 0));
+    const [call] = player.report().liveCalls ?? [];
+    expect(call!.outputTokens).toBe(2);
+    expect(call!.inputTokens).toBeGreaterThan(0);
+  });
+
   it("lists the calls the tape answered, once each, and leaves lenient live calls out", async () => {
     const { tape } = await record(async (registry) => {
       await registry.get("openai").generate(request("hi"), context("agent_1", 0));
@@ -145,14 +164,19 @@ describe("model tape", () => {
     const { tape } = await record(async (registry) => {
       const chunks = [];
       for await (const chunk of registry.get("openai").generateStream!(request("hi"), context("llm"))) chunks.push(chunk);
-      expect(chunks).toHaveLength(4);
+      expect(chunks).toHaveLength(5);
     });
-    expect(tape.entries[0]).toMatchObject({ streamed: true, response: { content: "streamed answer", toolCalls: [{ id: "t1", name: "lookup", arguments: { q: "x" } }] } });
+    expect(tape.entries[0]).toMatchObject({
+      streamed: true,
+      response: { content: "streamed answer", toolCalls: [{ id: "t1", name: "lookup", arguments: { q: "x" } }], usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 } }
+    });
     const { registry } = createModelTapeReplayRegistry(tape, { mode: "lenient" });
     expect((await registry.get("openai").generate(request("hi"), context("llm"))).toolCalls[0]?.arguments).toEqual({ q: "x" });
     const replayed = [];
     for await (const chunk of registry.get("openai").generateStream!(request("hi"), context("llm"))) replayed.push(chunk);
     expect(replayed[0]).toEqual({ type: "text_delta", textDelta: "streamed answer" });
+    // The recorded usage comes back too, so a replayed stream is not charged an estimate of its own.
+    expect(replayed[replayed.length - 1]).toEqual({ type: "usage", usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 } });
   });
 
   it("replays a recorded error, and stops recording at the size limit", async () => {

@@ -1,4 +1,16 @@
+import { LLMProviderError } from "./resilient-fetch";
 import type { ProviderCallOptions } from "./types";
+
+/**
+ * A provider refusing a streamed request because of the usage option (`stream_options.include_usage`): HTTP 400 or
+ * 422 whose message names the field (Azure: "Unrecognized request argument supplied: stream_options"; schema-checked
+ * servers list it in the error's location). Any other 400 or 422 is a real error of the request and is not this.
+ */
+export function isStreamUsageRefusal(error: unknown): boolean {
+  if (!(error instanceof LLMProviderError)) return false;
+  if (error.statusCode !== 400 && error.statusCode !== 422) return false;
+  return /stream_options|include_usage/i.test(error.message);
+}
 
 /**
  * 12.6b — which request parameters each built-in adapter honours. A caller that must not drop one silently (the

@@ -15,6 +15,7 @@ export * from "./gated-registry";
 export * from "./default-base-urls";
 export * from "./call-options";
 export * from "./embeddings";
+export * from "./usage-estimate";
 export * from "./providers/echo";
 export * from "./providers/openai-compatible";
 export * from "./providers/openai";
