@@ -9,6 +9,8 @@ export * from "./data-label-provenance";
 export * from "./guard";
 export * from "./data-destinations";
 export * from "./network-controls";
+export * from "./break-glass";
+export * from "./credential-rotation";
 export * from "./destination-rules";
 
 export * from "./node-credentials";
@@ -34,3 +36,4 @@ export * from "./agent-tools";
 export * from "./guard-benchmark";
 export * from "./ai-gateway";
 export * from "./notification-events";
+export * from "./retention";

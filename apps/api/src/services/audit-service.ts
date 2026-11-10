@@ -26,6 +26,24 @@ export interface AuditActor {
   type?: "user" | "api_key" | "system";
   ipAddress?: string | null;
   userAgent?: string | null;
+  /** 13.2 — the API key the request was made with; stored in the entry's metadata as `actorApiKeyId`. */
+  apiKeyId?: string | null;
+  /** 13.2 — the key belongs to a service account; stored in the metadata as `actorServiceAccount: true`. */
+  serviceAccount?: boolean;
+}
+
+/**
+ * 13.2 — the metadata stored for an event: the event's own, plus the API key the actor used (when there was one). A
+ * non-object metadata value is wrapped as `{ value }` when a key has to be added. The key fields go last, so an
+ * event's own metadata cannot spoof them.
+ */
+function metadataWithActorKey(metadata: unknown, actor: AuditActor): unknown {
+  if (!actor.apiKeyId) return metadata;
+  const keyFields = { actorApiKeyId: actor.apiKeyId, ...(actor.serviceAccount ? { actorServiceAccount: true } : {}) };
+  if (metadata === undefined || metadata === null) return keyFields;
+  // A string, number or array is kept under `value`, so the key is never left out.
+  if (typeof metadata !== "object" || Array.isArray(metadata)) return { value: metadata, ...keyFields };
+  return { ...(metadata as Record<string, unknown>), ...keyFields };
 }
 
 export interface AuditEventInput {
@@ -111,7 +129,7 @@ export class AuditService {
       projectId: textOrNull(event.projectId),
       ipAddress: textOrNull(actor.ipAddress),
       userAgent: textOrNull(actor.userAgent),
-      metadata: event.metadata,
+      metadata: metadataWithActorKey(event.metadata, actor),
       message: textOrNull(event.message)
     };
     try {

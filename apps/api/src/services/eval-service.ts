@@ -133,6 +133,8 @@ export interface EvalRunRequest {
   /** The starting user: every case runs as them, looked up again by id (with this email) each time. */
   triggeredBy: string;
   triggeredByUserId: string;
+  /** 13.2 — the API key that started the run: every case runs with that key's limits, and stops once it is revoked. */
+  triggeredByApiKeyId?: string;
   /** Phase 10.8 — record each fixture's MCP calls into a cassette. */
   recordMcp?: boolean;
   /**
@@ -172,6 +174,8 @@ export interface EvalWorkflowExecutor {
     executionId?: string;
     triggeredBy: string;
     triggeredByUserId: string;
+    /** 13.2 — see EvalRunRequest. */
+    triggeredByApiKeyId?: string;
     mcp?: { record?: boolean; replay?: EvalMcpReplay };
     /** Phase 12.7 — the eval run's rule set override. */
     guardProfileOverride?: { profileId: string; version: number };
@@ -257,7 +261,7 @@ export interface EvalReplayDeps {
    * no longer hold `permission` on it (Phase 15.3: an inline or overridden
    * candidate needs `workflow:write` for every case, not only at the start).
    */
-  actorFor: (userId: string, email: string, workflowId: string, permission?: "workflow:read" | "workflow:execute" | "workflow:write") => Promise<SafeUser | null>;
+  actorFor: (userId: string, email: string, workflowId: string, permission?: "workflow:read" | "workflow:execute" | "workflow:write", apiKeyId?: string) => Promise<SafeUser | null>;
 }
 
 /** Phase 15.6 — one workflow's part of a guard policy simulation, as a replay job. */
@@ -417,6 +421,8 @@ const UNPRICED_WARNING = "Some model or judge calls have no price in the price t
 interface ReplayJobContext {
   actorUserId: string;
   actorEmail: string;
+  /** 13.2 — the API key that started the job: every case runs with that key's limits. */
+  actorApiKeyId?: string;
   /** Phase 15.3 — an inline or overridden candidate: every case re-checks workflow:write. */
   needsWrite: boolean;
   /** Phase 15.6 — a guard policy simulation's job (see `runSimulationCase`). */
@@ -751,6 +757,7 @@ export class EvalService {
     const job: ReplayJobContext = {
       actorUserId: context.actor.id,
       actorEmail: context.actor.email,
+      ...(context.actor.apiKeyId ? { actorApiKeyId: context.actor.apiKeyId } : {}),
       needsWrite: candidate.kind === "inline" || Boolean(candidate.overrides),
       candidate,
       options,
@@ -823,6 +830,7 @@ export class EvalService {
     const job: ReplayJobContext = {
       actorUserId: actor.id,
       actorEmail: actor.email,
+      ...(actor.apiKeyId ? { actorApiKeyId: actor.apiKeyId } : {}),
       needsWrite: false,
       // Recent traffic includes captured runs still in the inbox: server-internal, never from a request body.
       allowCandidates: true,
@@ -1642,6 +1650,7 @@ export class EvalService {
       executionId,
       triggeredBy: request.triggeredBy,
       triggeredByUserId: request.triggeredByUserId,
+      ...(request.triggeredByApiKeyId ? { triggeredByApiKeyId: request.triggeredByApiKeyId } : {}),
       ...(request.recordMcp || request.replayMcp
         ? { mcp: { ...(request.recordMcp ? { record: true } : {}), ...(request.replayMcp ? { replay: request.replayMcp } : {}) } }
         : {}),
@@ -1662,7 +1671,7 @@ export class EvalService {
         candidate: exec.facts ?? null,
         ...(this.options.random ? { random: this.options.random } : {})
       },
-      { runId, workflowId: request.workflowId, actorUserId: request.triggeredByUserId, actorEmail: request.triggeredBy, ...(exec.executionId ? { executionId: exec.executionId } : {}) }
+      { runId, workflowId: request.workflowId, actorUserId: request.triggeredByUserId, actorEmail: request.triggeredBy, actorApiKeyId: request.triggeredByApiKeyId ?? null, ...(exec.executionId ? { executionId: exec.executionId } : {}) }
     );
     return {
       status: score.pass ? "pass" : "fail",
@@ -1706,7 +1715,7 @@ export class EvalService {
     // Phase 15.6 — the same candidate policy as every golden-run path; a simulation job allows captured runs.
     const refusal = candidateRefusal(recording, { allowCandidates: job.allowCandidates });
     if (refusal) return await skip(refusal);
-    const actor = await replay.actorFor(job.actorUserId, job.actorEmail, workflowId, "workflow:read");
+    const actor = await replay.actorFor(job.actorUserId, job.actorEmail, workflowId, "workflow:read", job.actorApiKeyId);
     if (!actor) return await skip(`The user who started this simulation (${job.actorEmail}) can no longer read this workflow.`);
     const denied = await simulation.canRun(actor);
     if (denied) return await skip(`The user who started this simulation (${job.actorEmail}) may no longer simulate this rule set: ${denied}`);
@@ -1748,7 +1757,7 @@ export class EvalService {
     // Phase 15.6 — a captured run is not a golden run until a builder promotes it.
     const refusal = candidateRefusal(recording, { allowCandidates: job.allowCandidates });
     if (refusal) return { status: "error", recordingId, error: refusal };
-    const actor = await replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.needsWrite ? "workflow:write" : "workflow:execute");
+    const actor = await replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.needsWrite ? "workflow:write" : "workflow:execute", job.actorApiKeyId);
     if (!actor) {
       return {
         status: "error",
@@ -2020,7 +2029,7 @@ export class EvalService {
         baselineUnverified: !baselineFacts && recording.capabilities?.origin === "imported",
         ...(this.options.random ? { random: this.options.random } : {})
       },
-      { runId, workflowId, actorUserId: job.actorUserId, actorEmail: job.actorEmail, executionId: response.executionId }
+      { runId, workflowId, actorUserId: job.actorUserId, actorEmail: job.actorEmail, actorApiKeyId: job.actorApiKeyId ?? null, executionId: response.executionId }
     );
     return { ...base, status: score.pass ? "pass" : "fail", score, costUsd: roundUsd((modelCost ?? 0) + judgeCostUsd), judgeCostUsd, costUnknown: modelCostUnknown || judgeCostUnknown };
   }

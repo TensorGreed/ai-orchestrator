@@ -156,7 +156,7 @@ describe("password sign-in sessions", () => {
     expect(await booted.store.listUserSessions(user.id)).toHaveLength(1);
   });
 
-  it("MFA_ENFORCE: an unenrolled admin still gets a session (not MFA-verified) flagged for enrolment, as before", async () => {
+  it("MFA_ENFORCE: an unenrolled admin gets a session (not MFA-verified) flagged for enrolment, restricted to MFA setup", async () => {
     const booted = await boot({ MFA_ENFORCE: "true" });
     const user = await booted.authService.register({ email: "root@example.com", password: "Root-Pass-123!", role: "admin" });
     const login = await passwordLogin(booted, "root@example.com", "Root-Pass-123!");
@@ -164,7 +164,10 @@ describe("password sign-in sessions", () => {
     expect(login.json()).toMatchObject({ user: { id: user.id }, mfaEnrollmentRequired: true });
     const sessionId = sessionCookie(login.headers["set-cookie"])!;
     expect(await booted.store.getSession(sessionId)).toMatchObject({ authMethod: "password", mfaVerifiedAt: null });
-    expect((await booted.app.inject({ method: "GET", url: "/api/workflows", cookies: { ao_session: sessionId } })).statusCode).toBe(200);
+    // 13.2 (D5) — MFA_ENFORCE is enforced now: only MFA setup (and /api/auth/me, sign-out) until a code is activated.
+    const refused = await booted.app.inject({ method: "GET", url: "/api/workflows", cookies: { ao_session: sessionId } });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ code: "mfa_enrollment_required" });
   });
 });
 
@@ -186,9 +189,12 @@ describe("API key requests", () => {
     const recorded = booted.contexts.filter((entry) => entry.url === "/api/workflows").at(-1)?.context;
     expect(recorded).toEqual({
       credential: "api_key",
-      user: { id: user.id, email: "bot@example.com", role: "builder" },
+      user: { id: user.id, email: "bot@example.com", role: "builder", apiKeyId: record.id },
       apiKeyId: record.id,
-      keyScopes: ["legacy-scope"]
+      keyScopes: ["legacy-scope"],
+      // 13.2 (L3a) — the parsed scope: a legacy string enforces nothing.
+      keyScope: { roleCeiling: null, projects: null, legacy: ["legacy-scope"] },
+      serviceAccount: false
     });
   });
 });

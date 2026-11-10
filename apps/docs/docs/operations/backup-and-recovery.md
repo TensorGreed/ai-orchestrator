@@ -217,12 +217,14 @@ log and its chain, projects, roles, MCP servers, rule sets, knowledge bases, rel
      COMMIT;
      SQL
      ```
-  3. **Before reopening access**, set `MFA_ENFORCE=true`, so admins must enrol again at their next sign-in, and
-     ask every affected user to enrol again right after signing in. L2M has no forced password reset: if a reset
+  3. **Before reopening access**, set `MFA_REQUIRED_ROLES` (for example `admin`, or `MFA_ENFORCE=true`), so those
+     roles must set MFA up again before they can do anything else, and ask every other affected user to enrol again
+     right after signing in. L2M has no forced password reset: if a reset
      account's password may be known to someone else, keep access closed for it (or delete the account and create it
      again with a new password) until that is settled.
 
-  An admin route to reset one user's MFA is planned; until then this is the procedure.
+  For one user, an admin can instead use **Settings > Users > Reset MFA** (`POST /api/users/:id/mfa/reset`, see
+  [Resetting a user's MFA](../security/auth-rbac.md#resetting-a-user-s-mfa)).
 - **Log-stream destinations** whose credentials were stored encrypted: enter them again.
 - **MCP OAuth connections** (their tokens are stored secrets): connect again.
 - **The rules token vault**: values tokenized before the loss cannot be turned back into the original.
@@ -352,7 +354,8 @@ What moves the numbers:
   and hold the data in memory, so they slow down and need more memory as the database grows.
 - **Backup interval.** The RPO of every scheduled method is its interval. Only WAL archiving gets below minutes.
 - **Run history and the audit log** are usually the largest tables. `EXECUTION_HISTORY_RETENTION_DAYS` and
-  `AUDIT_LOG_RETENTION_DAYS` bound them; `db:export --exclude-history` leaves them out.
+  `AUDIT_LOG_RETENTION_DAYS` bound them; `db:export --exclude-history` leaves them out. Every retention setting is
+  listed in [Data retention](./data-retention.md).
 - **Where the backup lives.** Fetching it from another region or from cold storage adds to the RTO.
 
 ## The restore drill

@@ -27,32 +27,33 @@ describeStoreContract("store contract: approvals", (ctx) => {
     const store = ctx.store();
     const saved = await store.insertApprovalRequest(request("r1", {
       workflowName: "Flow", nodeType: "approval_gate", message: "Please check", path: [{ nodeId: "a", label: "A" }] as never,
-      details: { amount: 3 }, requestedByUserId: "u1", requestedBy: "u1@example.com", timeoutMinutes: 30.7,
+      details: { amount: 3 }, requestedByUserId: "u1", requestedBy: "u1@example.com", requestedByApiKeyId: "key-start", timeoutMinutes: 30.7,
       expiresAt: "2030-01-01T00:00:00.000Z", askingWorkflowId: "wf-parent", editsSalt: "salt", createdAt: "2026-01-01T00:00:00.000Z"
     }));
     expect(saved).toEqual({
       id: "r1", executionId: "run-1", workflowId: "wf", workflowName: "Flow", projectId: "default", nodeId: "gate", nodeType: "approval_gate",
       kind: "approval_gate", status: "pending", message: "Please check", spec, path: [{ nodeId: "a", label: "A" }], details: { amount: 3 },
       requestedByUserId: "u1", requestedBy: "u1@example.com", timeoutMinutes: 30, expiresAt: "2030-01-01T00:00:00.000Z",
-      decidedByUserId: null, decidedBy: null, decidedAt: null, reason: null, edits: null, editedFields: [], askingWorkflowId: "wf-parent",
+      decidedByUserId: null, decidedBy: null, decidedAt: null, decidedByApiKeyId: null, requestedByApiKeyId: "key-start",
+      reason: null, edits: null, editedFields: [], askingWorkflowId: "wf-parent",
       editsSalt: "salt", workflowDeletedAt: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z"
     });
     expect(await store.getApprovalRequest("r1")).toEqual(saved);
     expect(await store.getApprovalRequest("missing")).toBeNull();
     const bare = await store.insertApprovalRequest(request("r2", { executionId: "run-2" }));
-    expect(bare).toMatchObject({ workflowName: null, nodeType: null, message: null, path: [], details: null, timeoutMinutes: null, expiresAt: null });
+    expect(bare).toMatchObject({ requestedByApiKeyId: null, decidedByApiKeyId: null, workflowName: null, nodeType: null, message: null, path: [], details: null, timeoutMinutes: null, expiresAt: null });
     expect(bare.createdAt).toMatch(ISO);
   });
 
   it("decides once, reopens a decided request, and cancels pending ones", async () => {
     const store = ctx.store();
     await store.insertApprovalRequest(request("r1"));
-    const decision = { id: "r1", status: "approved" as const, decidedByUserId: "u1", decidedBy: "u1@example.com", reason: "ok", edits: { a: 1 }, editedFields: ["a"], decidedAt: "2026-02-02T00:00:00.000Z" };
+    const decision = { id: "r1", status: "approved" as const, decidedByUserId: "u1", decidedBy: "u1@example.com", decidedByApiKeyId: "key-1", reason: "ok", edits: { a: 1 }, editedFields: ["a"], decidedAt: "2026-02-02T00:00:00.000Z" };
     expect(await store.decideApprovalRequest(decision)).toBe(true);
     expect(await store.decideApprovalRequest({ id: "r1", status: "rejected" })).toBe(false);
-    expect(await store.getApprovalRequest("r1")).toMatchObject({ status: "approved", decidedBy: "u1@example.com", decidedAt: "2026-02-02T00:00:00.000Z", reason: "ok", edits: { a: 1 }, editedFields: ["a"], updatedAt: "2026-02-02T00:00:00.000Z" });
+    expect(await store.getApprovalRequest("r1")).toMatchObject({ status: "approved", decidedBy: "u1@example.com", decidedByApiKeyId: "key-1", decidedAt: "2026-02-02T00:00:00.000Z", reason: "ok", edits: { a: 1 }, editedFields: ["a"], updatedAt: "2026-02-02T00:00:00.000Z" });
     expect(await store.reopenApprovalRequest("r1")).toBe(true);
-    expect(await store.getApprovalRequest("r1")).toMatchObject({ status: "pending", decidedBy: null, decidedAt: null, reason: null, edits: null, editedFields: [] });
+    expect(await store.getApprovalRequest("r1")).toMatchObject({ status: "pending", decidedBy: null, decidedByApiKeyId: null, decidedAt: null, reason: null, edits: null, editedFields: [] });
     expect(await store.reopenApprovalRequest("r1")).toBe(false);
 
     await store.insertApprovalRequest(request("r2", { executionId: "run-3" }));
