@@ -28,6 +28,7 @@ import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./N
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields";
+import { OutputGuardrailFields } from "./OutputGuardrailFields";
 import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
@@ -6763,20 +6764,7 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
               placeholder="answer"
             />
-            <TextField
-              label="Checks (comma-separated)"
-              value={Array.isArray(config.checks) ? config.checks.map(String).join(", ") : "no_pii"}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  checks: next
-                    .split(",")
-                    .map((value) => value.trim())
-                    .filter(Boolean)
-                }))
-              }
-              placeholder="no_pii, no_profanity, must_contain_json"
-            />
+            <OutputGuardrailFields config={config} setConfig={setConfig} />
           </>
         );
       case "if_node":

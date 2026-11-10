@@ -18,9 +18,10 @@
  * checked at sentence or size boundaries, and what passes is released except for a held-back tail
  * (`streamReleaseLength`), so a match still forming at the end of the text is not sent before it can be seen. A block
  * cuts the stream. Those boundary checks record nothing; the full answer is checked once more at the end and recorded
- * (the audit check), and only then does the tail go out.
+ * (the audit check), and only then does the tail go out. Whole-answer checks (a JSON schema, grounding) skip the
+ * boundary checks and run in the audit check; a rule with `stream: "buffer"` makes the answer `buffered` instead.
  */
-import type { GuardChannel, ProvenanceLabel } from "@ai-orchestrator/guard-sdk";
+import { channelRequestsBufferedStream, type GuardChannel, type ProvenanceLabel } from "@ai-orchestrator/guard-sdk";
 import { providerDestinationRef } from "@ai-orchestrator/provider-sdk";
 import type { DataLabels, LLMProviderConfig, McpToolPolicySubject, SecretReference } from "@ai-orchestrator/shared";
 import {
@@ -45,6 +46,8 @@ export function outputGuardMode(stack: ReadonlyArray<ResolvedGuardProfile>): AiG
     const channel = profile.channels.final_output;
     if (!channel) continue;
     checked = true;
+    // Phase 12 coverage — a rule that asks for it (`stream: "buffer"`) gets the whole answer checked before any is sent.
+    if (channelRequestsBufferedStream(channel)) return "buffered";
     const rules = [channel.defaultAction, ...Object.values(channel.actions)];
     for (const rule of rules) {
       const shadow = rule.shadow ?? profile.shadow[rule.action] ?? false;
@@ -78,7 +81,7 @@ async function check(
   scope: AiGatewayGuardScope,
   channel: GuardChannel,
   content: unknown,
-  options: { labels: ProvenanceLabel[]; provider?: LLMProviderConfig; record: boolean }
+  options: { labels: ProvenanceLabel[]; provider?: LLMProviderConfig; record: boolean; partial?: boolean }
 ): Promise<{ action: "allow" } | { action: "rewrite"; content: unknown } | { action: "block"; reason: string; categories: string[]; profiles: Array<{ profileId: string; version: number }> }> {
   const profiles = scope.resolution.stack;
   if (profiles.length === 0) return { action: "allow" };
@@ -102,7 +105,7 @@ async function check(
       ...(scope.logger ? { logger: scope.logger } : {})
     },
     profiles,
-    { content, channel, labels: options.labels, ...(destination ? { destination, dataLabels } : {}) }
+    { content, channel, labels: options.labels, ...(destination ? { destination, dataLabels } : {}), ...(options.partial ? { partial: true } : {}) }
   );
   if (result.action === "block" || needsApproval(result.action)) {
     return {
@@ -250,7 +253,8 @@ function answerContent(answer: AiGatewayAnswer): unknown {
  * the full answer's check records.
  */
 export async function checkAiGatewayAnswer(scope: AiGatewayGuardScope, answer: AiGatewayAnswer, record = true): Promise<AiGatewayGuardOutcome<AiGatewayAnswer>> {
-  const outcome = await check(scope, "final_output", answerContent(answer), { labels: [], record });
+  // Phase 12 coverage — a boundary check sees the answer so far: whole-answer checks (schema, grounding) wait for the end.
+  const outcome = await check(scope, "final_output", answerContent(answer), { labels: [], record, ...(record ? {} : { partial: true }) });
   if (outcome.action !== "rewrite") return outcome;
   const content = outcome.content;
   if (typeof content === "string" && answer.toolCalls.length === 0) return { action: "rewrite", content: { content, toolCalls: [] } };

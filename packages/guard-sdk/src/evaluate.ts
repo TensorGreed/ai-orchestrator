@@ -17,6 +17,7 @@ import {
   type GuardDetector,
   type GuardFinding,
   type GuardInput,
+  type GuardModelServices,
   type GuardSpan,
   type GuardTraceEntry,
   type GuardVerdict
@@ -52,6 +53,8 @@ export interface EvaluateGuardOptions {
   /** Wall-clock timer for detector timeouts; defaults to `setTimeout`. */
   setTimer?: (callback: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /** Phase 12 coverage — model calls offered to detectors (see `DetectorContext.models`). */
+  models?: GuardModelServices;
 }
 
 const SEVERITY: Record<GuardAction, number> = {
@@ -130,14 +133,16 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     return finish("allow");
   }
 
-  const entries = orderByTier(
-    (runDetectors ? channel!.detectors : []).map((entry) => ({
-      id: entry.id,
-      threshold: entry.threshold,
-      options: entry.options,
-      detector: options.registry.get(entry.id)
-    }))
-  );
+  const configured = (runDetectors ? channel!.detectors : []).map((entry) => ({
+    id: entry.id,
+    threshold: entry.threshold,
+    options: entry.options,
+    detector: options.registry.get(entry.id)
+  }));
+  // Phase 12 coverage — a partial stream check leaves whole-answer detectors to the final check.
+  const deferred = input.partial ? configured.filter((entry) => entry.detector?.wholeAnswer === true) : [];
+  if (deferred.length > 0) log("detector", `Partial content: ${deferred.map((entry) => entry.id).join(", ")} run on the complete answer`);
+  const entries = orderByTier(deferred.length > 0 ? configured.filter((entry) => entry.detector?.wholeAnswer !== true) : configured);
 
   const shadowFor = (rule: ActionRule, action: GuardAction): boolean => rule.shadow ?? profile.shadow[action] ?? false;
 
@@ -179,7 +184,8 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     const context: DetectorContext = {
       text,
       options: { ...(dictionaries.length ? { dictionaries } : {}), ...entry.options },
-      now
+      now,
+      ...(options.models ? { models: options.models } : {})
     };
     const detectorStart = now();
     const remaining = Math.max(1, budget.limitMs - elapsed);

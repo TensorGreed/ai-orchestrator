@@ -95,7 +95,7 @@ function sha256(text: string): string {
  * the channel, the sorted provenance labels and the SHA-256 of the canonical
  * content. Everything else in the input that can change a verdict (tool,
  * canaries, redirect chain, destination, data labels, subject, ignored
- * values, sources) is folded in as one more hash, so a hit always means the
+ * values, sources, a partial stream check) is folded in as one more hash, so a hit always means the
  * same check. Piece metadata does not change verdicts and is left out.
  */
 export function guardVerdictMemoKey(profileHashes: readonly string[], input: GuardInput): string {
@@ -109,7 +109,9 @@ export function guardVerdictMemoKey(profileHashes: readonly string[], input: Gua
     subject: input.subject,
     ignoredValues: input.ignoredValues ? [...input.ignoredValues].sort() : undefined,
     destinationOnly: input.destinationOnly,
-    sources: input.sources
+    sources: input.sources,
+    // Absent unless set, so keys of complete checks are unchanged.
+    partial: input.partial === true ? true : undefined
   };
   return [
     "v1",

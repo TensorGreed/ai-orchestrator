@@ -19,6 +19,7 @@ import {
   guardCheckIsMemoisable,
   guardVerdictMemoKey,
   hashGuardProfile,
+  profilesUseGrounding,
   isMemoisableVerdict,
   mergeGuardProfileOverride,
   PROMPT_HARDENING_TEXT,
@@ -31,7 +32,9 @@ import {
   type GuardAction,
   type GuardChannel,
   type GuardInput,
+  type GuardModelServices,
   type GuardProfile,
+  type GuardSource,
   type GuardRegistry,
   type GuardToolContext,
   type GuardVerdictMemo,
@@ -195,6 +198,13 @@ export interface GuardEvalScope {
    * runs and records, as before.
    */
   memo?: GuardVerdictMemo<GuardCheckResult["verdicts"]>;
+  /**
+   * Phase 12 coverage — model calls the output checks may make here (a
+   * semantic topic check, a model safety check, the grounding judge). The
+   * node counts their usage. Absent: a check that needs a model fails, and
+   * the rule set's failure policy decides.
+   */
+  models?: GuardModelServices;
 }
 
 export interface GuardCheckResult {
@@ -450,7 +460,7 @@ export async function runGuardCheck(
   const stack = await evaluateGuardStack(
     profiles.map((entry) => entry.profile),
     evaluated,
-    { registry, protection }
+    { registry, protection, ...(scope.models ? { models: scope.models } : {}) }
   );
   // Phase 16 — remember the surrogates this check issued: later checks and capture masking leave them alone.
   if (!stack.verdicts.some((verdict) => verdict.blocked)) {
@@ -617,6 +627,12 @@ export async function createAgentGuardSession(input: {
   modelDestination?: DestinationRef | null;
   /** Phase 16 — where a tool call goes (its MCP server), by exposed tool name; null for workers and offline servers. */
   toolDestination?: (exposedName: string) => DestinationRef | null;
+  /**
+   * Phase 12 coverage — documents the agent's answer drew on before the loop
+   * (retrieval nodes upstream). The tool results of this run are added to
+   * them. Read only when a rule set runs the grounding check.
+   */
+  groundingSources?: () => GuardSource[];
 }): Promise<AgentGuardSession | undefined> {
   const { scope } = input;
   let profiles: ResolvedGuardProfile[];
@@ -665,6 +681,13 @@ export async function createAgentGuardSession(input: {
       entry.approved = true;
     }
     return result.transformed ? { outcome: "rewrite", content: result.content, declassified: declassifiedClasses(result) } : { outcome: "allow" };
+  };
+  // Phase 12 coverage — grounding sources for the answer: upstream documents plus this run's tool results, kept only when checked.
+  const groundingChannels = new Set<GuardChannel>((["final_output", "model_output"] as GuardChannel[]).filter((channel) => profilesUseGrounding(profiles.map((entry) => entry.profile), channel)));
+  const toolSources: GuardSource[] = [];
+  const sourcesFor = (channel: GuardChannel): GuardSource[] | undefined => {
+    if (!groundingChannels.has(channel)) return undefined;
+    return [...(input.groundingSources?.() ?? []), ...toolSources];
   };
   const boundary = `DATA-${randomBytes(6).toString("hex").toUpperCase()}`;
   const verdictLog: AgentGuardTraceEntry[] = [];
@@ -728,12 +751,14 @@ export async function createAgentGuardSession(input: {
           : check.channel === "tool_arguments" && check.tool
             ? await destinationOf(input.toolDestination?.(check.tool.name))
             : undefined;
+      const sources = sourcesFor(check.channel);
       const result = await runGuardCheck(
         scope,
         profiles,
         {
           content: check.content,
           channel: check.channel,
+          ...(sources ? { sources } : {}),
           // Propagated labels add to the checkpoint's fixed ones: a check never sees weaker labels than with the switch off.
           labels: (propagatedLabels && check.dataLabels ? orderedProvenance([...check.labels, ...check.dataLabels.provenance]) : check.labels) as ProvenanceLabel[],
           ...(tool ? { tool } : {}),
@@ -750,6 +775,10 @@ export async function createAgentGuardSession(input: {
         verdicts: result.verdicts
       };
       verdictLog.push(entry);
+      if (check.channel === "tool_result" && groundingChannels.size > 0 && result.action !== "block" && toolSources.length < 50) {
+        const content = result.transformed ? result.content : check.content;
+        toolSources.push({ id: `tool:${check.iteration}:${toolSources.length + 1}`, text: typeof content === "string" ? content : JSON.stringify(content ?? "") });
+      }
       return decide(check.channel, result, entry, check.iteration, tool);
     }
   };

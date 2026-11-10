@@ -27,8 +27,9 @@ import {
   parseMcpRuntimeRejection,
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
-import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { providerDestinationRef } from "@ai-orchestrator/provider-sdk";
+import type { EmbeddingProviderRegistry, ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
+import { createDefaultEmbeddingRegistry, providerDestinationRef } from "@ai-orchestrator/provider-sdk";
+import type { GuardModelServices } from "@ai-orchestrator/guard-sdk";
 import {
   GUARD_EFFECTIVE_PROFILE_REF,
   NODE_ACTIVITY_LIMIT,
@@ -161,6 +162,15 @@ import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
 import {
+  createGuardModelServices,
+  groundingSourcesFor,
+  guardrailCheckOfDetector,
+  localGuardrailFailures,
+  outputGuardrailProfile,
+  readOutputGuardrailConfig,
+  type CheckModelUsage
+} from "./output-checks-runtime";
+import {
   approvalGateOutcome,
   approvalGatePause,
   writeToolApprovalKey,
@@ -188,6 +198,8 @@ import {
 } from "./destination-guard";
 import {
   builtInGuardProfile,
+  describeGuardVerdict,
+  runGuardCheck,
   runVerdictMemoOf,
   createAgentGuardSession,
   GuardBlockedError,
@@ -326,6 +338,11 @@ export interface WorkflowExecutionDependencies {
   mcpRegistry: MCPRegistry;
   connectorRegistry: ConnectorRegistry;
   embeddingRegistry?: EmbeddingRegistry;
+  /**
+   * Phase 12 coverage — embedding models (with token usage) for content rule checks that compare by similarity
+   * (`output.topic` in semantic mode). Default: the provider SDK's embedding adapters.
+   */
+  embeddingProviderRegistry?: EmbeddingProviderRegistry;
   vectorStoreRegistry?: VectorStoreRegistry;
   /**
    * Phase 9.1 — built-in persistent vector store. When supplied,
@@ -3238,55 +3255,6 @@ function parseWithOutputParserStrategies(text: string, strictness: OutputParserP
   };
 }
 
-function validateGuardrailChecks(text: string, checks: string[]): string[] {
-  const failures: string[] = [];
-  const normalizedText = String(text ?? "");
-
-  for (const check of checks) {
-    if (check === "no_pii") {
-      const piiPatterns = [
-        /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
-        /\b(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/,
-        /\b\d{3}-\d{2}-\d{4}\b/,
-        /\b(?:\d[ -]*?){13,16}\b/
-      ];
-      if (piiPatterns.some((pattern) => pattern.test(normalizedText))) {
-        failures.push("no_pii");
-      }
-      continue;
-    }
-
-    if (check === "no_profanity") {
-      const profanityTokens = ["damn", "shit", "fuck", "bitch", "bastard"];
-      const lower = normalizedText.toLowerCase();
-      if (profanityTokens.some((token) => lower.includes(token))) {
-        failures.push("no_profanity");
-      }
-      continue;
-    }
-
-    if (check === "must_contain_json") {
-      const candidate = extractJsonFromText(normalizedText);
-      try {
-        JSON.parse(candidate);
-      } catch {
-        failures.push("must_contain_json");
-      }
-    }
-
-    if (check === "matches_schema") {
-      // Check if content is valid JSON matching a provided schema structure
-      try {
-        JSON.parse(normalizedText);
-      } catch {
-        failures.push("matches_schema");
-      }
-    }
-  }
-
-  return failures;
-}
-
 /**
  * Phase 10.5 — when an LLM node binds a registry server prompt, fetch it and
  * use its text as the system or user prompt. The server session opened for
@@ -3732,12 +3700,13 @@ function guardScopeFor(
   context: NodeRuntimeContext,
   dependencies: WorkflowExecutionDependencies,
   placement: GuardEvalScope["placement"],
-  options: { memo?: boolean } = {}
+  options: { memo?: boolean; models?: GuardModelServices } = {}
 ): GuardEvalScope {
   const guard = dependencies.guard ?? STANDALONE_GUARD;
   return {
     guard,
     ...(options.memo ? { memo: guardRunMemo(context, dependencies) } : {}),
+    ...(options.models ? { models: options.models } : {}),
     resolveSecret: dependencies.resolveSecret,
     executionId: typeof context.globals.execution_id === "string" ? context.globals.execution_id : "",
     workflowId: context.workflow.id,
@@ -3746,6 +3715,41 @@ function guardScopeFor(
     ...(context.toolPolicySubject ? { subject: context.toolPolicySubject } : {}),
     ...(dependencies.logger ? { logger: dependencies.logger } : {})
   };
+}
+
+let defaultEmbeddingProviders: EmbeddingProviderRegistry | undefined;
+
+/**
+ * Phase 12 coverage — model calls the output checks of this node may make,
+ * through the run's registries (allowlists, replays and retries apply) and
+ * with destination rules on what is sent. Each call's usage lands in
+ * `usage`, which the node reports as `_childTelemetry` so it counts in the
+ * run's cost.
+ */
+function checkModelServicesFor(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies,
+  usage: CheckModelUsage[],
+  defaultModel?: LLMProviderConfig
+): GuardModelServices {
+  return createGuardModelServices({
+    providerRegistry: dependencies.providerRegistry,
+    embeddingRegistry: dependencies.embeddingProviderRegistry ?? (defaultEmbeddingProviders ??= createDefaultEmbeddingRegistry()),
+    providerContext: () => providerCallContext(dependencies, node.id),
+    usage,
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(dependencies.checkEmbeddingModel ? { checkEmbeddingModel: (target) => dependencies.checkEmbeddingModel!(target, { nodeId: node.id }) } : {}),
+    guardPrompt: (provider, prompts) => guardModelPrompt(node, context, dependencies, provider, prompts, "content rules check"),
+    throwIfAborted: () => throwIfAborted(dependencies.abortSignal)
+  });
+}
+
+/** Phase 12 coverage — the check usage a node reports, after any it already carries. */
+function withCheckUsage(output: Record<string, unknown>, usage: readonly CheckModelUsage[]): Record<string, unknown> {
+  if (usage.length === 0) return output;
+  const existing = Array.isArray(output._childTelemetry) ? (output._childTelemetry as unknown[]) : [];
+  return { ...output, _childTelemetry: [...existing, ...usage.map((entry) => ({ ...entry }))] };
 }
 
 /** Protection Provider nodes on a guard node's protection port. */
@@ -6263,6 +6267,8 @@ async function executeNodeHandler(
       const workflowToolResultKey = (toolName: string, toolCallId: string | undefined) => `${toolName}\u0000${toolCallId ?? ""}`;
       // Phase 6.4 — the children's model usage, counted in this node's usage (and so in the run's spend and budgets).
       const childTelemetry: Record<string, unknown>[] = [];
+      // Phase 12 coverage — model calls the agent's output checks made.
+      const agentCheckUsage: CheckModelUsage[] = [];
       if (workflowToolConfigs.length > 0) {
         const runWorkflowTool: WorkflowToolRunner = async (call) => {
           const failure = (error: string) => ({ ok: false, output: null, error, errorKind: "tool" as const });
@@ -6487,7 +6493,9 @@ async function executeNodeHandler(
         const guardSession: AgentGuardSession | undefined =
           dependencies.guard || portGuardNode
             ? await createAgentGuardSession({
-                scope: guardScopeFor(node, context, dependencies, "agent"),
+                // Phase 12 coverage — output checks may ask a model (the agent's own by default), counted in this node's usage.
+                scope: guardScopeFor(node, context, dependencies, "agent", { models: checkModelServicesFor(node, context, dependencies, agentCheckUsage, provider) }),
+                groundingSources: () => groundingSourcesFor(context.workflow, node.id, context.nodeOutputs),
                 ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
                 ...(portGuardNode ? { portGuardNode } : {}),
                 protectionNodes: portGuardNode ? protectionNodesFor(portGuardNode, context) : [],
@@ -6919,7 +6927,8 @@ async function executeNodeHandler(
             ...(samplingRequests > 0 ? { samplingUsage, samplingRequests } : {})
           },
           // Phase 6.4 — what the workflows this agent called as tools spent on models, each priced by its own model.
-          ...(childTelemetry.length > 0 ? { _childTelemetry: childTelemetry } : {}),
+          // Phase 12 coverage — and what its output checks spent.
+          ...(childTelemetry.length + agentCheckUsage.length > 0 ? { _childTelemetry: [...childTelemetry, ...agentCheckUsage.map((entry) => ({ ...entry }))] } : {}),
           // Phase: agent_clarify — when the agent paused to ask the user a
           // question, surface the clarification details on the node output
           // so workflow consumers (chat UI, /executions response, downstream
@@ -7096,16 +7105,23 @@ async function executeNodeHandler(
       const connectedHandles = new Set(
         context.workflow.edges.filter((edge) => edge.source === node.id && edge.sourceHandle).map((edge) => edge.sourceHandle as string)
       );
-      const output = await executeGuardNodeStep({
+      // Phase 12 coverage — output checks here may ask a model (the upstream one by default); their usage is this node's.
+      const checkUsage: CheckModelUsage[] = [];
+      const upstreamModel = normalizeProvider(context.merged._provider);
+      const guardStep = await executeGuardNodeStep({
         node,
-        scope: guardScopeFor(node, context, dependencies, "node"),
+        scope: guardScopeFor(node, context, dependencies, "node", {
+          models: checkModelServicesFor(node, context, dependencies, checkUsage, upstreamModel ?? undefined)
+        }),
         merged: context.merged,
         parentIds: Object.keys(context.parentOutputs),
         globals: context.globals,
         protectionNodes,
         connectedHandles,
-        ...(context.labelScope ? { labelScope: context.labelScope } : {})
+        ...(context.labelScope ? { labelScope: context.labelScope } : {}),
+        groundingSources: () => groundingSourcesFor(context.workflow, node.id, context.nodeOutputs)
       });
+      const output = withCheckUsage(guardStep, checkUsage);
       for (const protectionNode of protectionNodes) {
         await context.recordAttachmentUsage?.({
           attachedNodeId: protectionNode.id,
@@ -7123,9 +7139,7 @@ async function executeNodeHandler(
     }
 
     case "output_guardrail": {
-      const checks = Array.isArray(config.checks)
-        ? config.checks.map((value) => String(value)).filter(Boolean)
-        : [];
+      const guardrail = readOutputGuardrailConfig(config);
       const onFail = config.onFail === "retry" ? "retry" : "error";
       const inputKey = typeof config.inputKey === "string" && config.inputKey ? config.inputKey : "answer";
       const guardrailInput =
@@ -7139,11 +7153,56 @@ async function executeNodeHandler(
           : guardrailInput === undefined || guardrailInput === null
             ? ""
             : JSON.stringify(guardrailInput);
-      let failures = validateGuardrailChecks(candidate, checks);
+      const upstreamProvider = normalizeProvider(templateData._provider);
+      // Phase 12 coverage — PII, schema, topic, safety and grounding run as content rules: rule events, the
+      // data detector (Luhn-checked cards), Ajv schemas. Model-backed checks use the check model, else the upstream one.
+      const ruleProfile = outputGuardrailProfile(guardrail);
+      const checkUsage: CheckModelUsage[] = [];
+      const ruleScope = ruleProfile
+        ? guardScopeFor(node, context, dependencies, "node", {
+            models: checkModelServicesFor(node, context, dependencies, checkUsage, guardrail.checkModel ?? upstreamProvider)
+          })
+        : undefined;
+      const sources = ruleProfile && guardrail.checks.includes("grounding") ? groundingSourcesFor(context.workflow, node.id, context.nodeOutputs) : undefined;
+      const containsJson = (text: string) => {
+        try {
+          JSON.parse(extractJsonFromText(text));
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const runChecks = async (text: string): Promise<{ failures: string[]; reasons: string[] }> => {
+        const failures = localGuardrailFailures(text, guardrail, containsJson);
+        const reasons: string[] = [];
+        if (ruleProfile && ruleScope) {
+          const result = await runGuardCheck(ruleScope, [ruleProfile], { content: text, channel: "final_output", labels: [], ...(sources ? { sources } : {}) });
+          if (result.action !== "allow") {
+            for (const { summary } of result.verdicts) {
+              for (const action of summary.actions) {
+                if (action.shadow || action.effective === "allow" || action.detectorId === "<engine>") continue;
+                const check = guardrailCheckOfDetector(action.detectorId);
+                if (!failures.includes(check)) failures.push(check);
+              }
+              // A check that could not finish (a model that failed or did not answer) fails as itself.
+              for (const timing of summary.timings.detectors) {
+                if (timing.status !== "error" && timing.status !== "timed_out" && timing.status !== "missing") continue;
+                const check = guardrailCheckOfDetector(timing.detectorId);
+                if (!failures.includes(check)) failures.push(check);
+                reasons.push(`${timing.detectorId} ${timing.status === "error" ? `failed: ${timing.error ?? "unknown error"}` : timing.status === "timed_out" ? "timed out" : "is not available"}`);
+              }
+            }
+            if (failures.length === 0) failures.push("content_rules");
+            reasons.unshift(describeGuardVerdict(result));
+          }
+        }
+        return { failures, reasons };
+      };
+      let { failures, reasons } = await runChecks(candidate);
       let attempts = 0;
 
       if (failures.length > 0 && onFail === "retry") {
-        const provider = normalizeProvider(templateData._provider);
+        const provider = upstreamProvider;
         if (!provider) {
           throw new Error("Output Guardrail retry requested but no upstream provider context was found.");
         }
@@ -7173,24 +7232,37 @@ async function executeNodeHandler(
             },
             providerCallContext(dependencies, node.id)
           );
+          // Phase 12 coverage — retries are model calls too: counted in the run's usage.
+          checkUsage.push({
+            providerId: provider.providerId,
+            model: provider.model,
+            usage: { ...(retryResponse.usage ?? {}) },
+            llmCallCount: 1,
+            ...(typeof retryResponse.latencyMs === "number" ? { latencyMs: retryResponse.latencyMs } : {}),
+            purpose: "guardrail_retry",
+            detectorId: node.type
+          });
           candidate = retryResponse.content;
-          failures = validateGuardrailChecks(candidate, checks);
+          ({ failures, reasons } = await runChecks(candidate));
         }
       }
 
       if (failures.length > 0) {
-        throw new Error(`Output guardrail checks failed: ${failures.join(", ")}`);
+        throw new Error(`Output guardrail checks failed: ${failures.join(", ")}${reasons.length > 0 ? ` (${reasons.join("; ")})` : ""}`);
       }
 
-      return {
-        answer: candidate,
-        text: candidate,
-        guardrail: {
-          checks,
-          attempts,
-          passed: true
-        }
-      };
+      return withCheckUsage(
+        {
+          answer: candidate,
+          text: candidate,
+          guardrail: {
+            checks: guardrail.checks,
+            attempts,
+            passed: true
+          }
+        },
+        checkUsage
+      );
     }
 
     case "basic_llm_chain": {

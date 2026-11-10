@@ -83,7 +83,12 @@ function mapValues(value: unknown, fn: (v: unknown) => unknown): unknown {
   return out;
 }
 
-function compile(schema: Record<string, unknown>, strict: boolean): ValidateFunction | null {
+/**
+ * Compile a JSON Schema once per schema text (shared with the output schema
+ * check). `strict` adds `additionalProperties: false` where a schema is
+ * silent. Null when the schema cannot be compiled.
+ */
+export function compileJsonSchema(schema: Record<string, unknown>, strict: boolean): ValidateFunction | null {
   const { $schema: _s, $id: _i, ...rest } = schema;
   const effective = strict ? strictSchema(rest) : rest;
   const key = JSON.stringify(effective);
@@ -115,7 +120,7 @@ export function validateToolArguments(args: unknown, schema: Record<string, unkn
       return issues;
     }
   }
-  const validate = compile(schema, effectiveLimits.rejectAdditional);
+  const validate = compileJsonSchema(schema, effectiveLimits.rejectAdditional);
   if (!validate) {
     issues.push({ code: "schema_invalid", path: "", message: "The tool's input schema could not be compiled; arguments are refused" });
     return issues;

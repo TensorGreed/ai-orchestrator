@@ -27,6 +27,8 @@ import {
   profileHasDestinationRules,
   profileUsesLabels,
   serializeGuardProfile,
+  outputCheckOptionIssues,
+  outputCheckSecretRefs,
   unsafeDictionaryPattern,
   type GuardProfile,
   type GuardProfileChange,
@@ -303,6 +305,12 @@ export class GuardService {
           issues.push({ path: `dictionaries.${index}.patterns.${patternIndex}`, message: "Not a valid regular expression" });
         }
       }
+    }
+    // Phase 12 coverage — output checks: a schema that compiles, topics that name this rule set's dictionaries, model
+    // configs that name stored secrets (never raw keys).
+    issues.push(...outputCheckOptionIssues(result.data));
+    for (const ref of outputCheckSecretRefs(result.data)) {
+      if (!(await this.store.getSecret(ref.secretId))) issues.push({ path: ref.path, message: "secretId must be the id of a stored secret" });
     }
     if (issues.length > 0) throw new GuardValidationError("Invalid rule set", issues);
     return result.data;

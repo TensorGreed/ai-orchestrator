@@ -200,6 +200,13 @@ export interface GuardInput {
   sources?: GuardSource[];
   /** Phase 12 coverage — templated pieces of the content and their provenance (metadata only). */
   pieces?: GuardContentPiece[];
+  /**
+   * Phase 12 coverage — the content is the start of an answer that is still
+   * streaming (a boundary check). Detectors that judge the whole answer
+   * (`wholeAnswer`, such as schema and grounding checks) are skipped; they run
+   * on the final check. Absent: the content is complete.
+   */
+  partial?: boolean;
 }
 
 /** Half-open character range in the inspected text (`contentText`). */
@@ -229,6 +236,50 @@ export interface DetectorContext {
   options: Record<string, unknown>;
   /** Monotonic clock for timings. */
   now(): number;
+  /**
+   * Phase 12 coverage — model calls the host offers this check (a chat model,
+   * an embedding model). Optional: detectors that need one and find none
+   * throw, and the rule set's failure policy decides. The host counts their
+   * usage in the run's cost.
+   */
+  models?: GuardModelServices;
+}
+
+/**
+ * Phase 12 coverage — a model a detector option names: the same fields as a
+ * workflow's model config. Keys are never written into a rule set; a stored
+ * secret is named by `secretRef.secretId`.
+ */
+export interface GuardModelRef {
+  providerId: string;
+  model: string;
+  baseUrl?: string;
+  secretRef?: { secretId: string };
+  temperature?: number;
+  maxTokens?: number;
+  extra?: Record<string, unknown>;
+}
+
+export interface GuardModelCompletionRequest {
+  /** The model to ask; absent: the host's default for this check (for example the node's model). */
+  model?: GuardModelRef;
+  system: string;
+  prompt: string;
+  /** The detector asking, for traces and usage records. */
+  detectorId: string;
+}
+
+export interface GuardModelEmbeddingRequest {
+  model?: GuardModelRef;
+  texts: string[];
+  detectorId: string;
+}
+
+/** Phase 12 coverage — model calls offered to detectors. Each method is optional. */
+export interface GuardModelServices {
+  complete?(request: GuardModelCompletionRequest): Promise<{ text: string }>;
+  /** One vector per text, in order. */
+  embed?(request: GuardModelEmbeddingRequest): Promise<number[][]>;
 }
 
 export interface GuardDetector {
@@ -245,6 +296,12 @@ export interface GuardDetector {
    * its input and options.
    */
   memoisable?: false;
+  /**
+   * Phase 12 coverage — the detector judges a complete answer (a JSON schema,
+   * grounding against sources), so it is skipped on a partial stream check
+   * (`GuardInput.partial`) and runs on the final one.
+   */
+  wholeAnswer?: true;
   detect(input: GuardInput, context: DetectorContext): GuardFinding[] | Promise<GuardFinding[]>;
   /**
    * For the `transform` action: return the content with the findings'
