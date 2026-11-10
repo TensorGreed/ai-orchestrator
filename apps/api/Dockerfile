@@ -2,9 +2,11 @@
 #
 # Multi-stage build for the L2M API.
 #
-# - toolchain stage: node:26-alpine with the build tools better-sqlite3 needs
-#   (it has no prebuilt binary for Node 26 on musl and compiles from source),
-#   plus the workspace manifests and the lockfile.
+# - toolchain stage: node:26-alpine with corepack, python3 and make,
+#   plus the workspace manifests and the lockfile. better-sqlite3 13 ships
+#   prebuilt N-API binaries for linux musl (x64 and arm64), so no compiler is
+#   installed and nothing is compiled; its install script still starts
+#   node-gyp, which needs python3 and make to find the prebuilt binary.
 # - deps stage installs every dependency, dev tools included, for the build.
 # - build stage runs `pnpm --filter api build` (tsc --noEmit) so a TS error
 #   fails the image build instead of crashing the container at startup, and
@@ -36,7 +38,7 @@ FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a
 WORKDIR /app
 RUN npm install --global corepack@0.36.0 \
     && corepack enable \
-    && apk add --no-cache python3 make g++ libc6-compat
+    && apk add --no-cache python3 make libc6-compat
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/api/package.json apps/api/
 COPY packages/shared/package.json packages/shared/
