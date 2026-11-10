@@ -1,40 +1,13 @@
-# n8n Feature Parity Roadmap
+# L2M Roadmap
 
-> Reference document for achieving feature parity with n8n. Use this in implementation prompts.
-> Generated: 2026-04-13 | Baseline: ai-orchestrator current main branch
-
----
-
-## Gap Analysis Summary
-
-| Area | n8n | ai-orchestrator | Parity % |
-|---|---|---|---|
-| Integrations/Connectors | 400+ built-in | 7 legacy + 11 Tier 1 + 13 Tier 2 (MS Teams, Notion, Airtable, Jira, Salesforce, HubSpot, Stripe, AWS S3, Telegram, Discord, Google Drive trigger, Google Calendar, Twilio) = 24 integrations / 50+ node types | ~25% |
-| Trigger Types | 15 core + 90 app-specific | webhook, schedule, slack, github, imap, google_sheets, postgres, redis, error, sub_workflow, manual, form, chat, file, rss, sse, mcp_server, kafka/rabbitmq/mqtt (stubs) (19) | ~19% |
-| Workflow Engine | Full (sub-workflows, parallel, queue) | Sub-workflows, queue, flow control, per-node error settings, error workflows | ~65% |
-| Data Transformation | 25+ dedicated nodes | 23 (5 base + 18 Phase 2 transformation nodes) | ~80% |
-| Code/Scripting | JS + Python + expressions | JS + Python code node, JS expression engine ($jmespath, $if, $ifEmpty, built-ins) | ~60% |
-| Error Handling | Error workflows, retry, continue-on-fail | Try/catch, error categories | ~35% |
-| Execution History | Full with debug/replay/pin | Basic history table | ~25% |
-| Version Control | Git integration, workflow history | None | 0% |
-| User Management | RBAC, projects, SAML, LDAP | Global RBAC (4 roles) + per-project RBAC (3 built-in + custom), session auth, API keys, MFA/TOTP, SAML + LDAP (optional-dep), SSO group-to-role mapping | ~75% |
-| AI/LLM Features | LangChain, 15+ models, 12 vector stores | Agent loop, 6 providers, 5 vector stores | ~50% |
-| Self-Hosting/Scaling | Queue mode, workers, PostgreSQL, K8s | SQLite + PostgreSQL, in-process queue, concurrency control | ~35% |
-| Community/Marketplace | 5800+ community nodes, 9100+ templates | 8 sample workflows | ~1% |
-| API | Full REST API (OpenAPI 3.0) | Partial REST API | ~40% |
-| UI Features | Mini-map, sticky notes, tags, folders, dark mode, undo/redo | Mini-map + Controls, multi-select, copy/paste/duplicate, undo/redo, sticky notes (markdown), node color coding, disable toggle, shortcuts panel, dark mode, project switcher, folder sidebar, tag chips + filter; structured config editors for all Phase 1 + 2 nodes | ~80% |
-| Testing/Debug | Pin data, debug executions, single-node run | Workflow-level pinned node data, single-node execution, failed-run debug load/re-run, inline execution preview, schema/table inspector, expression preview/autocomplete | ~70% |
-| Notifications/Alerting | Error workflow pattern | None | 0% |
-| Logging/Observability | Log streaming (Syslog, Webhook, Sentry), audit | Comprehensive audit log (auth/MFA/SSO/API keys/secrets/workflows/executions/RBAC/sharing) with filters + CSV export + configurable retention; execution logs; still missing log streaming destinations | ~45% |
-| Variables/Environments | Global + project vars, 200+ env config | Workflow variables only | ~20% |
-| Enterprise Features | SSO, LDAP, audit logs, external secrets, HA | SAML + LDAP SSO (optional-dep) with group-based provisioning, MFA/TOTP, API keys, encrypted secrets, workflow/secret sharing, external secret providers (AWS/Vault/GCP/Azure) with rotation cache, comprehensive audit log with CSV export. Still missing: HA | ~70% |
+> Reference document for the L2M roadmap: run and govern MCP agents, self-hosted. Use this in implementation prompts.
+> Generated: 2026-04-13
 
 ---
 
 ## Phase 1: Core Engine Parity (Sprints 1-3)
 
 ### 1.1 Sub-Workflow Execution
-**n8n equivalent:** Execute Workflow node + Execute Sub-workflow Trigger
 - [x] `execute_workflow` node that calls another workflow by ID
 - [x] `sub_workflow_trigger` node for child workflows
 - [x] Sync mode (wait for result) and async (fire-and-forget)
@@ -42,28 +15,24 @@
 - [x] Recursion depth limit (`MAX_SUB_WORKFLOW_DEPTH = 10`)
 
 ### 1.2 Enhanced Flow Control Nodes
-**n8n equivalent:** Filter, Stop And Error, No Operation, Wait (webhook resume)
 - [x] `filter_node` — pass/reject items based on conditions (13 operators, AND/OR, passMode)
 - [x] `stop_and_error` — halt execution with custom error + errorCode
 - [x] `noop_node` — pass-through for routing clarity
 - [x] `wait_node` enhancement — datetime resume mode added (alongside timer)
 
 ### 1.3 Node-Level Error Settings
-**n8n equivalent:** Continue on Fail, Retry on Fail (per-node)
 - [x] Per-node `continueOnFail` setting — workflow continues, error passed downstream
 - [x] Per-node `retryOnFail` — max retries + wait interval (ms), configurable in node settings
 - [x] `alwaysOutputData` — node returns output even with no input
 - [x] Dedicated error output branch on supported nodes (`onError: "branch"`)
 
 ### 1.4 Error Workflows
-**n8n equivalent:** Error Workflow system + Error Trigger node
 - [x] `error_trigger` node type — fires when any designated workflow fails
 - [x] Workflow settings: designate an "Error Workflow" via `workflow.settings.errorWorkflowId`
 - [x] Error payload: execution ID, workflow name, error message, stack trace, timestamp
 - [x] One error workflow can serve multiple production workflows
 
 ### 1.5 Execution Queue & Worker Architecture
-**n8n equivalent:** Queue mode with Redis (BullMQ) + worker processes
 - [x] Job queue backend (SQLite-persisted in-process queue, Redis/BullMQ-ready interface)
 - [x] Main process: handle triggers, enqueue execution jobs via `POST /api/workflows/:id/enqueue`
 - [x] Worker processes: `QueueService` dequeues and executes jobs with concurrency control
@@ -72,7 +41,6 @@
 - [x] Dead letter queue for permanently failed executions (DLQ with exponential backoff)
 
 ### 1.6 Database Upgrade Path
-**n8n equivalent:** PostgreSQL for production
 - [x] PostgreSQL adapter alongside SQLite (`PostgresStore` with full method parity)
 - [x] Database migration system (versioned migrations via `migrations.ts`)
 - [x] Connection pooling (`pg.Pool` with configurable max connections)
@@ -83,7 +51,6 @@
 ## Phase 2: Data Transformation & Expression Engine (Sprints 4-5)
 
 ### 2.1 Dedicated Data Transformation Nodes
-**n8n equivalent:** 25+ transformation nodes
 - [x] `aggregate_node` — group items (sum, avg, min, max, count, concatenate)
 - [x] `split_out_node` — unpack array field into separate items
 - [x] `sort_node` — ascending, descending, random, custom expression
@@ -104,7 +71,6 @@
 - [x] `edit_image_node` — registered + graceful NOT_IMPLEMENTED (image editing requires optional native dep, e.g. sharp/jimp)
 
 ### 2.2 Expression Engine Enhancement
-**n8n equivalent:** JS expressions with built-in variables and methods
 - [x] Replace Handlebars with JS-based expression engine (`packages/workflow-engine/src/expression.ts`)
 - [x] Built-in variables: `$input`, `$json`, `$node`, `$workflow`, `$execution`, `$env`, `$vars`, `$now`, `$today`, `$itemIndex`
 - [x] Built-in methods: JS-native string/number/date/array/object access via sandboxed `with` scope
@@ -113,7 +79,6 @@
 - [ ] Expression editor with autocomplete and syntax highlighting in UI (deferred to Phase 4 — UI work) (partial: `NodeConfigModal.tsx` `ExpressionField` suggestions + `POST /api/expressions/preview`, missing: syntax highlighting)
 
 ### 2.3 Python Support in Code Node
-**n8n equivalent:** Code node with JS + Python
 - [x] Python runtime in code node (subprocess via `child_process.spawn`, graceful CONFIGURATION error if `python3`/`python` is missing)
 - [x] "Run Once for All Items" vs "Run Once for Each Item" modes (both JS and Python)
 - [x] Access to incoming item data (`items` / `item` variables in user code)
@@ -126,7 +91,7 @@
 ### 3.1 Priority Tier 1 — Essential (Sprint 6)
 **Must-have for MVP parity. Each needs: trigger node + action node + credential type.**
 
-| Integration | n8n nodes | Priority | Status |
+| Integration | Node types | Priority | Status |
 |---|---|---|---|
 | **HTTP Request** (universal) | GET/POST/PUT/DELETE, auth, pagination, binary | P0 | [x] existing, enhanced |
 | **Slack** | Send message, update, triggers, channels, files | P0 | [x] `slack_send_message` + `slack_trigger` (webhook w/ signing-secret validation) |
@@ -174,7 +139,6 @@
 | **File/Doc** | Microsoft Excel, Dropbox, Box, OneDrive |
 
 ### 3.4 Connector SDK V2 — Community Node System
-**n8n equivalent:** npm-based community nodes (5800+)
 - [x] Standardized node package format (`l2m-nodes-*` npm packages) — `apps/api/src/services/community-package-loader.ts` `l2m-nodes-*` loader
 - [ ] Node package manifest (name, version, description, node types, credentials) (partial: package.json `l2m` field with kind + apiVersion validated, missing: version/description/node types/credentials manifest fields)
 - [x] Install community nodes from UI (Settings > Community Nodes) — `apps/web/src/components/SettingsPage.tsx` `CommunityNodesTab`
@@ -183,7 +147,6 @@
 - [x] Hot-reload on install (no restart required) — `apps/api/src/app.ts` `POST /api/community-nodes/reload`
 
 ### 3.5 Trigger System Expansion
-**n8n equivalent:** 15 core triggers + 90 app-specific
 - [x] `manual_trigger` — `POST /api/triggers/manual/:workflowId` (builder role) with testData + payload merge
 - [x] `error_trigger` — fires on workflow failure (see Phase 1.4)
 - [x] `form_trigger` — HTML form rendered at `GET /api/forms/:path`, submitted via `POST /api/forms/:path` (public or session auth)
@@ -218,7 +181,6 @@
 - [x] Workflow duplication — verified end-to-end: duplicates preserve `tags`, `projectId`, and `folderId` from the source (covered by API integration test).
 
 ### 4.3 Testing & Debug Tools
-**n8n equivalent:** Pin data, debug executions, single-node run
 - [x] **Data pinning** — `workflow.pinnedData` stores node output by node ID; editor can pin/unpin last-run output and executor reuses pins without calling node handlers.
 - [x] **Execute single node** — `runMode: "single_node"` executes only the selected node using supplied previous `nodeOutputs` and/or pinned parent data.
 - [x] **Debug past executions** — execution history rows can load run data back into the editor or re-run from `sourceExecutionId`.
@@ -252,7 +214,6 @@
 - [x] Cross-project workflow sharing controls — `workflow_shares` table + `/api/workflows/:id/shares` CRUD with `accessLevel: "read" | "execute"`. `RbacService.canAccessWorkflow` honours shares when evaluating permissions.
 
 ### 5.3 External Secrets
-**n8n equivalent:** AWS Secrets Manager, HashiCorp Vault, Google Secret Manager
 - [x] External secrets provider interface — `ExternalSecretsService` with a pluggable `ProviderAdapter` registry (`apps/api/src/services/external-secrets-service.ts`). `SecretService.resolveSecret` transparently dispatches to the adapter when a secret's `source === "external"`.
 - [x] AWS Secrets Manager adapter — optional-dep pattern (`@aws-sdk/client-secrets-manager`); 503/CONFIGURATION_ERROR if the SDK is not installed.
 - [x] HashiCorp Vault adapter — native `fetch`-based (no extra dep), KV v1 + v2 aware, configurable `field` extraction.
@@ -266,7 +227,6 @@
 - [x] Audit report generation via API — `GET /api/audit` (admin) with filters `category`, `eventType`, `outcome`, `actorUserId`, `resourceType`, `resourceId`, `projectId`, `from`, `to`, `page`, `pageSize`. `GET /api/audit/export` streams a CSV attachment.
 
 ### 5.5 Log Streaming
-**n8n equivalent:** Syslog, Webhook, Sentry destinations
 - [x] Log streaming framework with pluggable destinations — `LogStreamingService` with adapter registry (`registerAdapter`), encrypted-at-rest config (AES-256-GCM with the shared master key), asynchronous buffered dispatch (`LOG_STREAM_BUFFER_SIZE`, `LOG_STREAM_FLUSH_INTERVAL_MS`) with bounded retries (`LOG_STREAM_RETRY_MAX_ATTEMPTS`), per-destination delivery history in `log_stream_events` (retention governed by `LOG_STREAM_EVENT_RETENTION_DAYS`).
 - [x] Syslog destination — RFC 5424 framing with configurable facility/appName/hostname; UDP (`dgram`) or TCP (`net`) transport. Severity derived from level (debug/info/warn/error → 7/6/4/3).
 - [x] Webhook destination (custom headers) — POSTs JSON via native `fetch`, arbitrary header map, optional HMAC-SHA256 signing with configurable header name (default `x-ao-signature: sha256=<hex>`), method override.
@@ -276,7 +236,6 @@
 - [x] Routes: `GET|POST /api/log-streams`, `PUT|DELETE /api/log-streams/:id`, `POST /api/log-streams/:id/test`, `GET /api/log-streams/:id/events` — all admin-gated and audit-logged.
 
 ### 5.6 Version Control & Environments
-**n8n equivalent:** Git-based source control with branch-per-environment
 - [x] Connect instance to Git repository — admin-only `PUT /api/git` registers a singleton `git_configs` row (repo URL, default branch, auth secret ref, workflows dir, variables file, commit author). `DELETE /api/git` disconnects and clears the local mirror. `GitSyncService` drives the `git` CLI via `child_process.spawnSync` with `GIT_TERMINAL_PROMPT=0` and a configurable command timeout.
 - [x] Push/pull workflows from UI — new `Source Control` tab in `SettingsPage` surfaces repo config, current branch/status, last push/pull timestamps, last error, and exposes Push/Pull buttons. Backend routes: `POST /api/git/push`, `POST /api/git/pull`, `GET /api/git/status`.
 - [x] Branch-per-environment (dev, staging, prod) — config stores a default branch; every push/pull call accepts a `branch` override so the same instance can sync different branches for different environments. Working tree is checked out to the requested branch on each operation.
@@ -298,14 +257,12 @@
 > ai-orchestrator already leads in some AI areas (MCP, Swarm). Focus on closing remaining gaps.
 
 ### 6.1 Additional AI Agent Types
-**n8n equivalent:** Conversational, OpenAI Functions, Plan-and-Execute, ReAct, SQL, Tools agents
 - [x] Plan-and-Execute agent type — `packages/agent-runtime/src/default-agent-runtime.ts` `plan-and-execute`
 - [x] ReAct agent type — `packages/agent-runtime/src/default-agent-runtime.ts` `react`
 - [ ] SQL Agent (natural language to SQL) (partial: `sql` agentType adds SQL instructions to the system prompt in `packages/agent-runtime/src/default-agent-runtime.ts`, missing: schema introspection and query tools)
 - [x] Agent type selection in agent_orchestrator config — `apps/web/src/components/NodeConfigModal.tsx` `agentType`
 
 ### 6.2 LangChain-Style Chains
-**n8n equivalent:** Basic LLM Chain, QA Chain, Summarization Chain, extractors, classifiers
 - [x] `basic_llm_chain` — simple prompt → response — `packages/workflow-engine/src/executor.ts` `basic_llm_chain`
 - [x] `qa_chain` — RAG question answering (enhance existing rag_retrieve) — `packages/workflow-engine/src/executor.ts` `qa_chain`
 - [x] `summarization_chain` — document summarization — `packages/workflow-engine/src/executor.ts` `summarization_chain`
@@ -350,7 +307,6 @@
 - [ ] Streaming execution for large datasets (item-level processing)
 
 ### 7.3 API Completeness
-**n8n equivalent:** Full OpenAPI 3.0 REST API
 - [x] OpenAPI 3.0 spec generation — `apps/api/src/app.ts` `GET /api/openapi.json`
 - [x] API key authentication — `apps/api/src/services/api-key-service.ts`
 - [x] Workflow activate/deactivate endpoints — `apps/api/src/app.ts` `POST /api/workflows/:id/activate`
@@ -382,7 +338,7 @@
 
 ## Phase 8: Orbit UI Revamp (in progress, branch `ui/orbit`)
 
-Visual identity change so the Studio stops reading as an n8n clone while keeping every
+Visual identity change giving the Studio its own look while keeping every
 feature. Brief: [apps/web/DESIGN.md](apps/web/DESIGN.md); chosen prototype:
 `apps/web/prototype/ui-revamp.html` (direction B · Orbit, with Loom's run tape, docked
 inspector, slot rows and stage auto-layout).
@@ -394,26 +350,26 @@ inspector, slot rows and stage auto-layout).
 - [x] Playwright golden-journey spec updated to the new selectors
 - [ ] Delete `apps/web/prototype/` once the direction is signed off
 
-## Phase 9: n8n Workflow Importer (scheduled after Phase 8)
+## Phase 9: Workflow importer (scheduled after Phase 8)
 
-**Why:** lowest-friction way for n8n users to try L2M on a flow they already have. Interop
-beats replacement; the importer plus "workflow as MCP tool" lets L2M sit next to n8n.
+**Why:** lowest-friction way to try L2M on a flow you already have. Interop
+beats replacement; the importer plus "workflow as MCP tool" lets L2M sit next to other automation tools.
 
 ### 9.1 Import pipeline
-- [x] `POST /api/workflows/import/external` accepting an n8n workflow export (`nodes[]`, `connections{}`, `settings`, `pinData`), with `dryRun`, project/folder targeting and an audit event
-- [x] Pure converter in `packages/workflow-engine/src/import/external-builder.ts`: n8n node → L2M node type map, `connections` → edges (main outputs, index-based ports → `if`/`switch` handles), positions carried over, sticky notes → `sticky_note`
+- [x] `POST /api/workflows/import/external` accepting a workflow JSON export from another automation tool (`nodes[]`, `connections{}`, `settings`, `pinData`), with `dryRun`, project/folder targeting and an audit event
+- [x] Pure converter in `packages/workflow-engine/src/import/external-builder.ts`: source node → L2M node type map, `connections` → edges (main outputs, index-based ports → `if`/`switch` handles), positions carried over, sticky notes → `sticky_note`
 - [x] Expression translation for the common subset: `{{ $json.x }}` → `{{results.<prev>.x}}`, `$node["Name"].json` → `results.<id>`, `$now`, `$env` → variables; unknown expressions preserved verbatim and flagged
-- [x] Credentials: n8n `credentials` refs become `secretRef` placeholders with a post-import "resolve secrets" checklist, never raw values
+- [x] Credentials: source `credentials` refs become `secretRef` placeholders with a post-import "resolve secrets" checklist, never raw values
 - [x] Import report: per-node `mapped | approximated | unsupported` with reasons; unsupported nodes become disabled `noop_node` placeholders carrying the original config so the flow still loads
 
-### 9.2 Node coverage (first wave, by n8n usage frequency)
+### 9.2 Node coverage (first wave, by usage frequency)
 - [x] Triggers: Manual, Webhook, Schedule/Cron, Chat Trigger, Error Trigger, Form Trigger, RSS, Email (IMAP)
 - [x] Core: HTTP Request, Code (JS/Python), Set/Edit Fields, IF, Switch, Merge, Split Out, Aggregate, Filter, Sort, Limit, Wait, No Op, Stop and Error, Execute Workflow, Sticky Note
 - [x] AI: OpenAI / Anthropic / Gemini / Ollama chat models → `*_chat_model`, AI Agent → `agent_orchestrator` (sub-node connections `ai_languageModel` / `ai_memory` / `ai_tool` → `chat_model` / `memory` / `tool` attachment edges), Simple Memory → `local_memory`, MCP Client Tool → `mcp_tool`, Structured Output Parser → `output_parser` (vector stores → existing RAG nodes still open)
 - [x] Apps with existing Tier 1/2 connectors: Slack, GitHub, Google Sheets, Postgres, Notion, Jira, Airtable, HubSpot, Salesforce, Stripe, S3, Telegram, Discord (resource/operation pairs dispatched onto the existing connector nodes in `packages/workflow-engine/src/import/apps/`; unsupported pairs stay disabled placeholders)
 
 ### 9.3 UX
-- [x] "Import from n8n" in the HUD overflow and the command palette; drag an n8n JSON onto the canvas
+- [x] "Import workflow" in the HUD overflow and the command palette; drag an exported workflow JSON onto the canvas
 - [x] Post-import panel: mapping report, secrets to resolve, one-click Tidy layout, "Run a dry validation"
 - [x] Docs page "Importing a workflow from another builder" with the coverage table generated from the converter's map (`pnpm --filter @ai-orchestrator/workflow-engine gen:import-coverage`)
 - [x] Fixture corpus of real exports under `samples/external-imports/` with golden-file tests
@@ -579,7 +535,7 @@ by what blocks adoption first. All of it stays self-hosted.
 - [x] OIDC single sign-on alongside SAML (Authorization Code + PKCE, optional, `OIDC_*` settings; see the Authentication and RBAC docs page)
 - [ ] SCIM 2.0 provisioning and deprovisioning of users and groups, with immediate session revocation
 - [ ] Session policy: idle and absolute timeouts, concurrent-session limits, MFA required per role, step-up authentication for sensitive actions (partial: MFA on SSO delivered, optional `SSO_MFA` for OIDC and SAML with IdP-asserted MFA or the local TOTP step; missing: timeouts, session limits, per-role MFA, step-up)
-- [ ] Network controls: IP allowlists for UI, API and webhooks, trusted-proxy configuration, mutual TLS option for the MCP gateway
+- [ ] Network controls: IP allowlists for UI, API and webhooks, trusted-proxy configuration, mutual TLS option for the MCP gateway — *partial:* delivered are address and CIDR allowlists per scope (UI, API, webhooks, public, MCP gateway, metrics) with report mode and loopback break-glass, per-client gateway and per-webhook address lists, trusted-proxy handling through `TRUST_PROXY`, and client-certificate pinning (SHA-256 fingerprints, optional subject) for the MCP gateway through a verifying TLS-terminating proxy; a native TLS listener with mutual TLS in the API itself remains
 - [ ] Service accounts with scoped, rotating keys; break-glass admin access with alerting (partial: service accounts and API keys scoped by a role ceiling and a project list delivered; missing: key rotation and expiry warnings, break-glass)
 
 ### 13.3 Data protection and tenancy
@@ -739,22 +695,8 @@ with the same verdicts, rule set hashes and latency.
 | **P2 — Medium** | Phase 3.2-3.3 (Tier 2-3 Connectors) | 4 sprints | Ecosystem breadth |
 | **P2 — Medium** | Phase 5.5-5.7 (Observability) | 3 sprints | Operations readiness |
 | **P2 — Medium** | Phase 7 (Scaling) | 4 sprints | Production scale |
-| **P3 — Lower** | Phase 6 (AI Expansion) | 4 sprints | Already ahead of n8n here |
+| **P3 — Lower** | Phase 6 (AI Expansion) | 4 sprints | Already a strength |
 | **P3 — Lower** | Phase 3.4 (Community Nodes) | 2 sprints | Ecosystem growth |
-
----
-
-## What ai-orchestrator Already Does Better Than n8n
-
-These are areas where the current codebase is **ahead** — protect and build on these:
-
-1. **MCP Integration** — First-class Model Context Protocol support with tool discovery; n8n only has basic MCP Client Tool
-2. **Multi-Agent Swarm** — Supervisor + Worker agent delegation with recursive nesting; n8n has no equivalent
-3. **Structured Error Categories** — 15 typed error categories with retryability metadata; n8n uses generic errors
-4. **Agent Tool Output Controls** — Configurable truncation, depth limits, key limits for tool payloads; n8n lacks this
-5. **Session Tool Cache** — Automatic caching of tool results across multi-turn sessions; unique feature
-6. **Webhook Security** — HMAC-SHA256 signing + replay protection + idempotency built-in; n8n webhook auth is simpler
-7. **Output Parser Strictness** — Three parsing modes (strict/lenient/anything_goes); more flexible than n8n
 
 ---
 
@@ -763,11 +705,11 @@ These are areas where the current codebase is **ahead** — protect and build on
 In implementation prompts, reference specific sections:
 
 ```
-Implement Phase 1.1 (Sub-Workflow Execution) from N8N_PARITY_ROADMAP.md
+Implement Phase 1.1 (Sub-Workflow Execution) from ROADMAP.md
 ```
 
 ```
-Implement Phase 3.1 Slack integration from N8N_PARITY_ROADMAP.md
+Implement Phase 3.1 Slack integration from ROADMAP.md
 ```
 
-Check off items as completed. Update parity percentages in the summary table after each phase.
+Check off items as completed.

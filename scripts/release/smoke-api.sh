@@ -131,8 +131,13 @@ check_community() {
 }
 
 check_code_sandbox_notice() {
-  docker logs "$run_id-api" 2>&1 | grep -q '"codeSandboxMode"' || fail "no code sandbox mode logged at startup"
-  pass "code sandbox: $(docker logs "$run_id-api" 2>&1 | grep -o '"codeSandboxMode":"[a-z_]*"' | head -n 1)"
+  # Capture the logs first: piping into `grep -q` under pipefail can fail on SIGPIPE
+  # when grep exits at the first match before docker logs finishes writing.
+  local logs mode
+  logs="$(docker logs "$run_id-api" 2>&1)"
+  mode="$(grep -o '"codeSandboxMode":"[a-z_]*"' <<< "$logs" | head -n 1 || true)"
+  [ -n "$mode" ] || fail "no code sandbox mode logged at startup"
+  pass "code sandbox: $mode"
 }
 
 wait_healthy() {
