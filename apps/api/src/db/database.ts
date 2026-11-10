@@ -1,3 +1,4 @@
+import { SUB_WORKFLOW_USAGE_TRIGGER, USAGE_AVG_DURATION, USAGE_EXECS, USAGE_EXECUTION_ROW } from "./usage-sql.js";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -11224,11 +11225,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT strftime('${fmt}', created_at) AS bucket,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY bucket
          ORDER BY bucket ASC
@@ -11255,11 +11256,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT workflow_id, MAX(workflow_name) AS workflow_name,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY workflow_id
          ORDER BY cost DESC, tt DESC
@@ -11288,11 +11289,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT user_id, MAX(user_email) AS user_email,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY user_id
          ORDER BY cost DESC, tt DESC
@@ -11321,11 +11322,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT project_id,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY project_id
          ORDER BY cost DESC, tt DESC
@@ -11353,11 +11354,11 @@ export class SqliteStore implements Store {
     const rows = this.queryAll<{
       providers_json: string | null;
       ti: number; to: number; ci: number; tt: number;
-      cost: number; calls: number; duration: number;
+      cost: number; calls: number; duration: number; trigger_type: string | null;
     }>(
       `SELECT providers_json, input_tokens AS ti, output_tokens AS "to",
               cached_input_tokens AS ci, total_tokens AS tt,
-              cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration
+              cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration, trigger_type
        FROM usage_events ${where}`,
       params
     );
@@ -11382,14 +11383,15 @@ export class SqliteStore implements Store {
           executions: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0,
           totalTokens: 0, costUsd: 0, llmCallCount: 0, totalDurationMs: 0
         };
-        cur.executions += 1;
+        const execution = r.trigger_type !== SUB_WORKFLOW_USAGE_TRIGGER;
+        if (execution) cur.executions += 1;
         cur.inputTokens += Math.round(toNumber(r.ti ?? 0) * share);
         cur.outputTokens += Math.round(toNumber(r.to ?? 0) * share);
         cur.cachedInputTokens += Math.round(toNumber(r.ci ?? 0) * share);
         cur.totalTokens += Math.round(toNumber(r.tt ?? 0) * share);
         cur.costUsd += Number(r.cost ?? 0) * share;
         cur.llmCallCount += p.calls || 0;
-        cur.totalDurationMs += Math.round(toNumber(r.duration ?? 0) * share);
+        if (execution) cur.totalDurationMs += Math.round(toNumber(r.duration ?? 0) * share);
         agg.set(key, cur);
       }
     }
@@ -11446,11 +11448,11 @@ export class SqliteStore implements Store {
       execs: number; ti: number; to: number; ci: number; tt: number;
       cost: number; calls: number; avgd: number;
     }>(
-      `SELECT COUNT(*) AS execs,
+      `SELECT ${USAGE_EXECS} AS execs,
               SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
               SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
               SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-              AVG(duration_ms) AS avgd
+              ${USAGE_AVG_DURATION} AS avgd
        FROM usage_events WHERE ${filters.join(" AND ")}`,
       params
     );
@@ -11479,12 +11481,13 @@ export class SqliteStore implements Store {
     providers: Array<{ providerId: string; model: string; calls: number }>;
     createdAt: string;
   }>> {
-    const filters: string[] = [];
+    // Recent executions: a sub-workflow's own row is not one (its spend counts in the totals).
+    const filters: string[] = [USAGE_EXECUTION_ROW];
     const params: Array<string | number> = [];
     if (input.workflowId) { filters.push("workflow_id = ?"); params.push(input.workflowId); }
     if (input.userId) { filters.push("user_id = ?"); params.push(input.userId); }
     if (input.projectId) { filters.push("project_id = ?"); params.push(input.projectId); }
-    const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    const where = `WHERE ${filters.join(" AND ")}`;
     const limit = clampLimit(input.limit, { fallback: 50, max: LIMIT_MAX.usageEvents });
     const rows = this.queryAll<{
       id: string; execution_id: string; workflow_id: string; workflow_name: string | null;
