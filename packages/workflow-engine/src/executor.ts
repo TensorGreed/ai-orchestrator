@@ -188,6 +188,7 @@ import {
 } from "./destination-guard";
 import {
   builtInGuardProfile,
+  runVerdictMemoOf,
   createAgentGuardSession,
   GuardBlockedError,
   guardMayUseLabels,
@@ -3710,20 +3711,33 @@ function buildGraphIndexes(workflow: Workflow): GraphIndexes {
   };
 }
 
+/** Phase 12 coverage — the run's memo of clean checks (see `guardScopeFor`). */
+function guardRunMemo(context: Pick<NodeRuntimeContext, "nodeOutputs" | "globals">, dependencies: Pick<WorkflowExecutionDependencies, "guard">) {
+  return dependencies.guard ? runVerdictMemoOf(dependencies.guard) : runVerdictMemoOf(STANDALONE_GUARD, context.nodeOutputs ?? context.globals);
+}
+
 /** Phase 12.1 — without guard dependencies, guard nodes use the built-in default profile and agents run unguarded. */
 const STANDALONE_GUARD: GuardRuntimeDependencies = {
   resolveRun: () => ({ source: "none", stack: [], chain: [] }),
   loadProfile: (profileId) => (profileId === "default" ? builtInGuardProfile() : undefined)
 };
 
+/**
+ * Phase 12 coverage — `options.memo`: the scope reuses earlier clean checks of
+ * this run. With the standalone fallback (shared by every run in the process)
+ * the memo is kept on the run's own output map, so it never crosses runs.
+ */
 function guardScopeFor(
   node: WorkflowNode,
   context: NodeRuntimeContext,
   dependencies: WorkflowExecutionDependencies,
-  placement: GuardEvalScope["placement"]
+  placement: GuardEvalScope["placement"],
+  options: { memo?: boolean } = {}
 ): GuardEvalScope {
+  const guard = dependencies.guard ?? STANDALONE_GUARD;
   return {
-    guard: dependencies.guard ?? STANDALONE_GUARD,
+    guard,
+    ...(options.memo ? { memo: guardRunMemo(context, dependencies) } : {}),
     resolveSecret: dependencies.resolveSecret,
     executionId: typeof context.globals.execution_id === "string" ? context.globals.execution_id : "",
     workflowId: context.workflow.id,

@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { GuardRegistry, type GuardDetector } from "@ai-orchestrator/guard-sdk";
+import { createEgressGuardDetector, GuardRegistry, type GuardDetector } from "@ai-orchestrator/guard-sdk";
 import type { Workflow } from "@ai-orchestrator/shared";
 import {
   builtInGuardProfile,
@@ -169,5 +169,67 @@ describe("per-run verdict memo", () => {
     const b = setup({ memo: true });
     expect(runVerdictMemoOf(a.guard)).toBe(runVerdictMemoOf(a.guard));
     expect(runVerdictMemoOf(a.guard)).not.toBe(runVerdictMemoOf(b.guard));
+  });
+
+  it("a standalone run keys its memo on its own run object, so two runs never share one", () => {
+    const { guard } = setup({ memo: false });
+    const runA = new Map<string, unknown>();
+    const runB = new Map<string, unknown>();
+    expect(runVerdictMemoOf(guard, runA)).toBe(runVerdictMemoOf(guard, runA));
+    expect(runVerdictMemoOf(guard, runA)).not.toBe(runVerdictMemoOf(guard, runB));
+    expect(runVerdictMemoOf(guard, runA)).not.toBe(runVerdictMemoOf(guard));
+  });
+
+  it("stores nothing when the first check did not record (no recorder or no execution id)", async () => {
+    const { counter, scope, profiles } = setup({ memo: true });
+    const silent = { ...scope, executionId: "" };
+    await runGuardCheck(silent, profiles, { channel: "final_output", content: "all good" });
+    const second = await runGuardCheck(scope, profiles, { channel: "final_output", content: "all good" });
+    expect(second.memoHit).toBeUndefined();
+    expect(counter.calls).toBe(2);
+  });
+
+  it("never answers a tool-arguments check from the memo: a DNS change between two checks still blocks", async () => {
+    let address = "93.184.216.34";
+    const registry = new GuardRegistry().register(createEgressGuardDetector({ resolver: async () => [address] }));
+    const builtIn = builtInGuardProfile();
+    const profile = {
+      ...builtIn,
+      profile: {
+        ...builtIn.profile,
+        channels: { tool_arguments: { detectors: [{ id: "tool.egress", threshold: 0.5, options: {} }], actions: { egress: { action: "block" as const } }, defaultAction: { action: "block" as const } } }
+      }
+    };
+    const events: GuardVerdictEvent[] = [];
+    const guard: GuardRuntimeDependencies = { registry, resolveRun: () => ({ source: "none", stack: [], chain: [] }), loadProfile: () => undefined, onVerdict: (event) => void events.push(event) };
+    const scope: GuardEvalScope = { guard, resolveSecret: async () => undefined, executionId: "exec-dns", workflowId: "wf", nodeId: "agent", placement: "agent", memo: runVerdictMemoOf(guard) };
+    const input = { channel: "tool_arguments" as const, content: { url: "http://rebind.example.com/x" }, tool: { toolName: "fetch" } };
+    const first = await runGuardCheck(scope, [profile], input);
+    expect(first.action).toBe("allow");
+    address = "127.0.0.1";
+    const second = await runGuardCheck(scope, [profile], input);
+    expect(second.memoHit).toBeUndefined();
+    expect(second.action).toBe("block");
+    expect(events).toHaveLength(2);
+  });
+
+  it("never answers from the memo when the egress detector sits on a content channel", async () => {
+    let address = "93.184.216.34";
+    const registry = new GuardRegistry().register({ ...createEgressGuardDetector({ resolver: async () => [address] }), channels: ["tool_result"] });
+    const builtIn = builtInGuardProfile();
+    const profile = {
+      ...builtIn,
+      profile: {
+        ...builtIn.profile,
+        channels: { tool_result: { detectors: [{ id: "tool.egress", threshold: 0.5, options: {} }], actions: { egress: { action: "block" as const } }, defaultAction: { action: "block" as const } } }
+      }
+    };
+    const guard: GuardRuntimeDependencies = { registry, resolveRun: () => ({ source: "none", stack: [], chain: [] }), loadProfile: () => undefined, onVerdict: () => undefined };
+    const scope: GuardEvalScope = { guard, resolveSecret: async () => undefined, executionId: "exec-dns2", workflowId: "wf", nodeId: "n", placement: "node", memo: runVerdictMemoOf(guard) };
+    const input = { channel: "tool_result" as const, content: "see http://rebind.example.com/x" };
+    expect((await runGuardCheck(scope, [profile], input)).action).toBe("allow");
+    address = "127.0.0.1";
+    const second = await runGuardCheck(scope, [profile], input);
+    expect(second.memoHit).toBeUndefined();
   });
 });

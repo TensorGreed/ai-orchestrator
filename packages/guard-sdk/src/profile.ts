@@ -133,7 +133,10 @@ const idList = z.array(z.string().trim().min(1).max(200)).max(200);
  * Phase 12 coverage — a reveal rule: who may turn tokens of these data
  * classes back into values. Reveal is denied unless a rule matches, so a
  * rule must name at least one subject. `workflows` absent: any workflow.
- * `requireApproval`: a person approves each reveal first.
+ * `requireApproval`: a person approves each reveal first. Only an admin may
+ * save a rule set with reveal rules, and `roles` / `users` match only runs a
+ * signed-in person started (see `revealRuleMatchesSubject` in shared);
+ * `serviceAccounts` match explicitly.
  */
 export const revealRuleSchema = z
   .object({

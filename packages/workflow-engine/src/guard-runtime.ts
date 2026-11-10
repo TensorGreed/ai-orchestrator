@@ -16,6 +16,7 @@ import {
   DEFAULT_DATAMARK,
   evaluateGuardStack,
   generateCanaryToken,
+  guardCheckIsMemoisable,
   guardVerdictMemoKey,
   hashGuardProfile,
   isMemoisableVerdict,
@@ -228,18 +229,21 @@ export const systemDnsResolver = async (hostname: string): Promise<string[]> => 
 const resolutionCache = new WeakMap<GuardRuntimeDependencies, Promise<GuardRunResolution>>();
 const issuedCache = new WeakMap<GuardRuntimeDependencies, Set<string>>();
 const rowsCache = new WeakMap<GuardRuntimeDependencies, Promise<DataDestinationRow[]>>();
-const memoCache = new WeakMap<GuardRuntimeDependencies, GuardVerdictMemo<GuardCheckResult["verdicts"]>>();
+const memoCache = new WeakMap<object, GuardVerdictMemo<GuardCheckResult["verdicts"]>>();
 
 /**
- * Phase 12 coverage — the run's memo of clean checks, one per dependencies
- * object (one per run), never shared across runs. Pass it as a scope's
- * `memo` to let that checkpoint reuse an earlier clean check of the same text.
+ * Phase 12 coverage — the run's memo of clean checks, never shared across
+ * runs. It is kept per `run` object: the dependencies object by default (the
+ * API builds one per run), or an object that lives exactly as long as the
+ * run when the dependencies are shared between runs (the engine's
+ * standalone fallback). Pass it as a scope's `memo` only on content checks
+ * (`MEMOISABLE_CHANNELS`); `runGuardCheck` ignores it everywhere else.
  */
-export function runVerdictMemoOf(guard: GuardRuntimeDependencies): GuardVerdictMemo<GuardCheckResult["verdicts"]> {
-  let memo = memoCache.get(guard);
+export function runVerdictMemoOf(guard: GuardRuntimeDependencies, run: object = guard): GuardVerdictMemo<GuardCheckResult["verdicts"]> {
+  let memo = memoCache.get(run);
   if (!memo) {
     memo = createGuardVerdictMemo<GuardCheckResult["verdicts"]>();
-    memoCache.set(guard, memo);
+    memoCache.set(run, memo);
   }
   return memo;
 }
@@ -434,7 +438,11 @@ export async function runGuardCheck(
   const subject = scope.subject ? { role: scope.subject.role, ...(scope.subject.userId ? { userId: scope.subject.userId } : {}) } : undefined;
   const evaluated: GuardInput = { ...input, ...(subject && !input.subject ? { subject } : {}), ...(input.issuedSurrogates ? {} : { issuedSurrogates: issued }) };
   // Phase 12 coverage — the same clean check earlier in this run: reuse it, record nothing new.
-  const memoKey = scope.memo && profiles.length > 0 ? guardVerdictMemoKey(profiles.map((entry) => entry.hash), evaluated) : undefined;
+  // Only content checks: never tool arguments, outbound requests, destinations or detectors that read DNS or the filesystem.
+  const memoKey =
+    scope.memo && profiles.length > 0 && guardCheckIsMemoisable(evaluated, profiles.map((entry) => entry.profile), registry)
+      ? guardVerdictMemoKey(profiles.map((entry) => entry.hash), evaluated)
+      : undefined;
   if (memoKey && scope.memo) {
     const hit = scope.memo.get(memoKey);
     if (hit) return { action: "allow", content: input.content, transformed: false, verdicts: hit, memoHit: true };
@@ -451,7 +459,17 @@ export async function runGuardCheck(
     }
   }
   const verdicts = stack.verdicts.map((verdict, index) => ({ profile: guardProfileRef(profiles[index]!), summary: summarizeGuardVerdict(verdict) }));
-  if (memoKey && scope.memo && stack.action === "allow" && !stack.transformed && verdicts.length === profiles.length && verdicts.every((entry) => isMemoisableVerdict(entry.summary))) {
+  // Kept only when this check records its verdicts, so a later hit always has an earlier rule event behind it.
+  const records = Boolean(scope.guard.onVerdict && scope.executionId) && (!meta.onlyFindings || scope.guard.recordCleanOutbound === true);
+  if (
+    memoKey &&
+    scope.memo &&
+    records &&
+    stack.action === "allow" &&
+    !stack.transformed &&
+    verdicts.length === profiles.length &&
+    verdicts.every((entry) => isMemoisableVerdict(entry.summary))
+  ) {
     scope.memo.set(memoKey, verdicts);
   }
   const checkId = randomUUID();

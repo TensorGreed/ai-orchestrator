@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { contentText, stableStringify, type GuardInput } from "./types";
+import type { GuardProfile } from "./profile";
+import type { GuardRegistry } from "./registry";
+import { contentText, stableStringify, type GuardChannel, type GuardInput } from "./types";
 import type { GuardVerdictSummary } from "./wiring";
 
 /**
@@ -28,6 +30,31 @@ export interface GuardVerdictMemoOptions {
 }
 
 export const DEFAULT_VERDICT_MEMO_MAX_ENTRIES = 10_000;
+
+/**
+ * Channels whose checks may use a memo: content checks only. Tool arguments
+ * and outbound requests are judged against DNS answers, the filesystem and
+ * destinations, which can change between two checks of the same text.
+ */
+export const MEMOISABLE_CHANNELS: ReadonlySet<GuardChannel> = new Set(["prompt", "tool_result", "model_output", "final_output", "response"]);
+
+/**
+ * Whether a check may be answered from, or stored in, a memo: a content
+ * channel, no destination, redirect chain or destination-only pass, and no
+ * detector in the applied rule sets that depends on state outside the input
+ * (`memoisable: false`, or unknown to the registry).
+ */
+export function guardCheckIsMemoisable(input: GuardInput, profiles: readonly GuardProfile[], registry: Pick<GuardRegistry, "get">): boolean {
+  if (!MEMOISABLE_CHANNELS.has(input.channel)) return false;
+  if (input.destination || input.destinationOnly || (input.redirectChain && input.redirectChain.length > 0)) return false;
+  for (const profile of profiles) {
+    for (const entry of profile.channels[input.channel]?.detectors ?? []) {
+      const detector = registry.get(entry.id);
+      if (!detector || detector.memoisable === false) return false;
+    }
+  }
+  return true;
+}
 
 /** A bounded least-recently-used memo with an optional time limit. */
 export function createGuardVerdictMemo<T = unknown>(options: GuardVerdictMemoOptions = {}): GuardVerdictMemo<T> & { readonly size: number } {

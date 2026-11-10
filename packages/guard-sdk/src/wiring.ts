@@ -3,6 +3,7 @@ import { evaluateGuard, mostSevereAction, type EvaluateGuardOptions } from "./ev
 import { parseGuardProfile, type GuardProfile } from "./profile";
 import {
   GUARD_CHANNELS,
+  GuardProfileError,
   stableStringify,
   type AppliedAction,
   type DetectorTiming,
@@ -120,11 +121,15 @@ export async function evaluateGuardStack(
  * Apply an inline override to a stored profile: top-level fields replace,
  * `channels`, `shadow` and `protection.dataClasses` merge per key, and
  * `latencyBudget` merges per field. The result is validated again.
- * `reveal` always comes from the stored profile: an inline override on a
- * node can neither grant nor remove reveal rights.
+ * `reveal` always comes from the stored profile: an inline override that
+ * names it is refused, so a node can neither grant nor remove reveal rights.
  */
+/** Phase 12 coverage — why a node's inline override may not carry reveal rules. */
+export const INLINE_REVEAL_REFUSED_MESSAGE = "Reveal rules can only be set on a stored rule set, not in a node's inline override";
+
 export function mergeGuardProfileOverride(base: GuardProfile, override: Record<string, unknown> | undefined): GuardProfile {
   if (!override || Object.keys(override).length === 0) return base;
+  if (Object.prototype.hasOwnProperty.call(override, "reveal")) throw new GuardProfileError(INLINE_REVEAL_REFUSED_MESSAGE);
   const record = (value: unknown): Record<string, unknown> =>
     value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
   const protection = record(override.protection);

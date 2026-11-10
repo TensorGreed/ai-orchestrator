@@ -238,6 +238,13 @@ export interface GuardDetector {
   /** Channels the detector is meaningful on. Profiles may still list it elsewhere. */
   channels: readonly GuardChannel[];
   categories: readonly GuardCategory[];
+  /**
+   * Phase 12 coverage — `false` when the verdict depends on something outside
+   * the input (DNS answers, the filesystem), so a clean result must never be
+   * reused from a verdict memo. Absent: the detector is a pure function of
+   * its input and options.
+   */
+  memoisable?: false;
   detect(input: GuardInput, context: DetectorContext): GuardFinding[] | Promise<GuardFinding[]>;
   /**
    * For the `transform` action: return the content with the findings'

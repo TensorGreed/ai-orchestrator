@@ -17,8 +17,8 @@ import {
   serializeGuardProfile
 } from "./profile";
 import { GUARD_CHANNELS, GuardProfileError, OUTPUT_CHECK_CATEGORIES, PROFILE_ONLY_CHANNELS, type GuardInput } from "./types";
-import { createGuardVerdictMemo, guardVerdictMemoKey, isMemoisableVerdict } from "./verdict-memo";
-import { mergeGuardProfileOverride, summarizeGuardVerdict } from "./wiring";
+import { createGuardVerdictMemo, guardCheckIsMemoisable, guardVerdictMemoKey, isMemoisableVerdict, MEMOISABLE_CHANNELS } from "./verdict-memo";
+import { INLINE_REVEAL_REFUSED_MESSAGE, mergeGuardProfileOverride, summarizeGuardVerdict } from "./wiring";
 
 /**
  * A stored rule set written before the Phase 12 coverage fields existed, using
@@ -160,14 +160,14 @@ describe("reveal rules", () => {
     expect(() => parseGuardProfile({ id: "r", name: "R", version: "1", reveal: { rules: [{ dataClasses: ["email"], subjects: { roles: ["owner"] } }] } })).toThrow(GuardProfileError);
   });
 
-  it("an inline node override can neither grant nor remove reveal rights", () => {
+  it("an inline node override that names reveal is refused; one that does not keeps the stored rules", () => {
     const plain = parseGuardProfile({ id: "p", name: "P", version: "1" });
-    const granted = mergeGuardProfileOverride(plain, { reveal: { rules: [rule] } });
-    expect(granted.reveal).toBeUndefined();
+    expect(() => mergeGuardProfileOverride(plain, { reveal: { rules: [rule] } })).toThrow(INLINE_REVEAL_REFUSED_MESSAGE);
     const stored = parseGuardProfile({ id: "p", name: "P", version: "1", reveal: { rules: [rule] } });
-    const removed = mergeGuardProfileOverride(stored, { reveal: { rules: [] }, shadow: { block: true } });
-    expect(removed.reveal).toEqual(stored.reveal);
-    expect(removed.shadow.block).toBe(true);
+    expect(() => mergeGuardProfileOverride(stored, { reveal: { rules: [] }, shadow: { block: true } })).toThrow(GuardProfileError);
+    const tightened = mergeGuardProfileOverride(stored, { shadow: { block: true } });
+    expect(tightened.reveal).toEqual(stored.reveal);
+    expect(tightened.shadow.block).toBe(true);
   });
 });
 
@@ -261,5 +261,24 @@ describe("verdict memo", () => {
     expect(isMemoisableVerdict(rewritten)).toBe(false);
     expect(isMemoisableVerdict({ ...clean, budget: { ...clean.budget, skippedDetectors: ["x"] } })).toBe(false);
     expect(isMemoisableVerdict({ ...clean, actions: [{ detectorId: "d", category: "c", score: 1, requested: "block", effective: "block", shadow: true }] })).toBe(false);
+  });
+
+  it("is used only for content checks with no destination and no state-dependent detector", () => {
+    const registry = createDefaultGuardRegistry();
+    const profile = createDefaultGuardProfile();
+    expect([...MEMOISABLE_CHANNELS].sort()).toEqual(["final_output", "model_output", "prompt", "response", "tool_result"]);
+    expect(guardCheckIsMemoisable({ channel: "final_output", content: "x" }, [profile], registry)).toBe(true);
+    expect(guardCheckIsMemoisable({ channel: "tool_arguments", content: "x" }, [profile], registry)).toBe(false);
+    expect(guardCheckIsMemoisable({ channel: "egress", content: "x" }, [profile], registry)).toBe(false);
+    expect(guardCheckIsMemoisable({ channel: "trigger_input", content: "x" }, [profile], registry)).toBe(false);
+    expect(guardCheckIsMemoisable({ channel: "final_output", content: "x", redirectChain: ["http://a.example"] }, [profile], registry)).toBe(false);
+    expect(guardCheckIsMemoisable({ channel: "final_output", content: "x", destinationOnly: true }, [profile], registry)).toBe(false);
+    // A rule set that lists a DNS- or filesystem-dependent detector on a content channel, or an unknown one.
+    for (const id of ["tool.egress", "tool.path", "not.registered"]) {
+      const odd = parseGuardProfile({ id: "o", name: "O", version: "1", channels: { tool_result: { detectors: [{ id }] } } });
+      expect(guardCheckIsMemoisable({ channel: "tool_result", content: "x" }, [odd], registry), id).toBe(false);
+    }
+    expect(registry.get("tool.egress")?.memoisable).toBe(false);
+    expect(registry.get("tool.path")?.memoisable).toBe(false);
   });
 });
