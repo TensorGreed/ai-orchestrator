@@ -14884,6 +14884,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const auth = sessionService.getRequestAuth(request);
       return auth?.credential === "api_key" ? auth.keyScope : null;
     },
+    requestApiKeyId: (request) => {
+      const auth = sessionService.getRequestAuth(request);
+      return auth?.credential === "api_key" ? auth.apiKeyId : null;
+    },
     disconnectMcpOAuth: async (userId) => await mcpOAuthService.disconnectUserEverywhere(userId),
     requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
     keyMaxAgeDays: config.SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS ?? 0

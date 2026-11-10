@@ -42,7 +42,7 @@ the envelope `GET /api/executions` uses:
 - `POST /api/auth/invite/lookup` (public; `{ token }` → `{ email, role, expiresAt }`; `404` for a used, expired or unknown link; see [User invites](../security/auth-rbac.md#user-invites))
 - `POST /api/auth/invite/accept` (public; `{ token, password }` with a password of 8 characters or more → `{ ok, email }`; the invite is used up and the page signs in with the password next; `404` as above; audited as `user.invite.accept`)
 - `POST /api/auth/api-keys/:id/rotate` (builder, your own key; `{ graceHours?: 0-168 }`, default 24 → `{ key, record, previous }`, the new key once; the old key works until `previous.expiresAt`; `409 already_rotated` / `inactive`; step-up; audited as `api_key.rotate`; see [Rotating keys](../security/service-accounts.md#rotating-keys))
-- `POST /api/service-accounts/:id/keys/:keyId/rotate` (admin; the same body and answer, for a service account's key)
+- `POST /api/service-accounts/:id/keys/:keyId/rotate` (admin; the same body and answer, for a service account's key; a service account's own key is refused on its own account, and a key made with a key ends no later than it)
 
 ## Users and tags
 

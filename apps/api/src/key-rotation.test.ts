@@ -168,7 +168,7 @@ describe("personal API key rotation", () => {
     expect(body<{ code: string }>(revoked).code).toBe("inactive");
   });
 
-  it("keeps the key's lifetime and limits: an expiring key gets the same lifetime, never a longer one", async () => {
+  it("keeps the key's lifetime and limits: an expiring key gets the same lifetime again, counted from the rotation", async () => {
     const ctx = await boot();
     const ana = await signIn(ctx, "ana@example.com", "builder");
     const created = await createKey(ctx, ana.cookie, { name: "short", expiresInDays: 10, projects: ["default"] });
@@ -237,6 +237,30 @@ describe("personal API key rotation", () => {
     expect((await withKey(ctx, created.key, "GET", "/api/auth/me")).statusCode).toBe(200);
   });
 
+  it("revoking the replacement during the grace window also ends the old key, back along the chain", async () => {
+    const ctx = await boot();
+    const ana = await signIn(ctx, "ana@example.com", "builder");
+    const first = await createKey(ctx, ana.cookie, { name: "ci" });
+    const second = body<{ key: string; record: KeyRecord }>(await withCookie(ctx, ana.cookie, "POST", `/api/auth/api-keys/${first.record.id}/rotate`, {}));
+    const third = body<{ key: string; record: KeyRecord }>(await withCookie(ctx, ana.cookie, "POST", `/api/auth/api-keys/${second.record.id}/rotate`, {}));
+    // An unrelated key of the same owner is left alone.
+    const other = await createKey(ctx, ana.cookie, { name: "other" });
+    for (const key of [first.key, second.key, third.key]) expect((await withKey(ctx, key, "GET", "/api/auth/me")).statusCode).toBe(200);
+    expect((await withCookie(ctx, ana.cookie, "DELETE", `/api/auth/api-keys/${third.record.id}`)).statusCode).toBe(200);
+    for (const key of [first.key, second.key, third.key]) expect((await withKey(ctx, key, "GET", "/api/auth/me")).statusCode).toBe(401);
+    expect((await withKey(ctx, other.key, "GET", "/api/auth/me")).statusCode).toBe(200);
+  });
+
+  it("revoking the old key during the grace window leaves its replacement working", async () => {
+    const ctx = await boot();
+    const ana = await signIn(ctx, "ana@example.com", "builder");
+    const first = await createKey(ctx, ana.cookie, { name: "ci" });
+    const second = body<{ key: string; record: KeyRecord }>(await withCookie(ctx, ana.cookie, "POST", `/api/auth/api-keys/${first.record.id}/rotate`, {}));
+    expect((await withCookie(ctx, ana.cookie, "DELETE", `/api/auth/api-keys/${first.record.id}`)).statusCode).toBe(200);
+    expect((await withKey(ctx, first.key, "GET", "/api/auth/me")).statusCode).toBe(401);
+    expect((await withKey(ctx, second.key, "GET", "/api/auth/me")).statusCode).toBe(200);
+  });
+
   it("two rotations of one key at once: exactly one succeeds", async () => {
     const ctx = await boot();
     const ana = await signIn(ctx, "ana@example.com", "builder");
@@ -283,6 +307,58 @@ describe("service-account key rotation", () => {
     const personal = await createKey(ctx, ana.cookie, { name: "mine" });
     expect((await withCookie(ctx, admin.cookie, "POST", `/api/service-accounts/${accountId}/keys/${personal.record.id}/rotate`, {})).statusCode).toBe(404);
     expect((await withCookie(ctx, admin.cookie, "POST", `/api/service-accounts/${ana.id}/keys/${personal.record.id}/rotate`, {})).statusCode).toBe(404);
+  });
+
+  it("an admin service-account key cannot renew itself: keys of its own account are refused, even near expiry (step-up on)", async () => {
+    const ctx = await boot({ STEP_UP_MAX_AGE_MINUTES: "10" });
+    const { ApiKeyService } = await import("./services/api-key-service.js");
+    const admin = await signIn(ctx, "root@example.com", "admin");
+    const robot = (await ctx.store.createServiceAccount({ id: "usr_robot", email: "robot+x1@service.invalid", role: "admin", description: null, createdBy: admin.id }))!;
+    const issued = await new ApiKeyService(ctx.store).create({ userId: robot.id, name: "self", scopes: ["role:admin"], expiresInDays: 90 });
+    // The reviewer's probe: the key asks for a fresh 90 days for itself through the service-account routes.
+    const record = issued.record;
+    expect((await withKey(ctx, issued.plaintext, "GET", "/api/auth/me")).statusCode).toBe(200);
+    const self = await withKey(ctx, issued.plaintext, "POST", `/api/service-accounts/${robot.id}/keys/${record.id}/rotate`, {});
+    expect(self.statusCode).toBe(403);
+    const mint = await withKey(ctx, issued.plaintext, "POST", `/api/service-accounts/${robot.id}/keys`, { name: "fresh", expiresInDays: 90 });
+    expect(mint.statusCode).toBe(403);
+    expect((await ctx.store.listApiKeys(robot.id)).map((key) => key.id)).toEqual([record.id]);
+    expect(await auditOf(ctx, "api_key.rotate")).toHaveLength(0);
+  });
+
+  it("a key made or rotated with another account's admin key ends no later than the calling key", async () => {
+    const ctx = await boot({ STEP_UP_MAX_AGE_MINUTES: "10" });
+    const { ApiKeyService } = await import("./services/api-key-service.js");
+    const admin = await signIn(ctx, "root@example.com", "admin");
+    const robot = (await ctx.store.createServiceAccount({ id: "usr_robot", email: "robot+x1@service.invalid", role: "admin", description: null, createdBy: admin.id }))!;
+    const target = (await ctx.store.createServiceAccount({ id: "usr_ci", email: "ci+x2@service.invalid", role: "operator", description: null, createdBy: admin.id }))!;
+    const caller = await new ApiKeyService(ctx.store).create({ userId: robot.id, name: "ops", scopes: ["role:admin"], expiresInDays: 3 });
+    const made = await withKey(ctx, caller.plaintext, "POST", `/api/service-accounts/${target.id}/keys`, { name: "ci", role: "operator", expiresInDays: 365 });
+    expect(made.statusCode, made.body).toBe(201);
+    const madeBody = body<{ record: KeyRecord }>(made);
+    expect(Date.parse(madeBody.record.expiresAt!)).toBeLessThanOrEqual(Date.parse(caller.record.expiresAt!));
+    const [createEntry] = await auditOf(ctx, "api_key.create");
+    expect(createEntry!.metadata).toMatchObject({ createdWithApiKeyId: caller.record.id });
+
+    const unlimited = await new ApiKeyService(ctx.store).create({ userId: target.id, name: "long" });
+    const rotated = await withKey(ctx, caller.plaintext, "POST", `/api/service-accounts/${target.id}/keys/${unlimited.record.id}/rotate`, {});
+    expect(rotated.statusCode).toBe(200);
+    expect(Date.parse(body<{ record: KeyRecord }>(rotated).record.expiresAt!)).toBeLessThanOrEqual(Date.parse(caller.record.expiresAt!));
+    const [rotateEntry] = await auditOf(ctx, "api_key.rotate");
+    expect(rotateEntry!.metadata).toMatchObject({ rotatedWithApiKeyId: caller.record.id });
+  });
+
+  it("revoking a service account's replacement key in the window also ends the old key", async () => {
+    const ctx = await boot();
+    const admin = await signIn(ctx, "root@example.com", "admin");
+    const accountId = await serviceAccount(ctx, admin.cookie);
+    const created = body<{ key: string; record: KeyRecord }>(await withCookie(ctx, admin.cookie, "POST", `/api/service-accounts/${accountId}/keys`, { name: "ci" }));
+    const rotated = body<{ key: string; record: KeyRecord }>(
+      await withCookie(ctx, admin.cookie, "POST", `/api/service-accounts/${accountId}/keys/${created.record.id}/rotate`, {})
+    );
+    expect((await withCookie(ctx, admin.cookie, "DELETE", `/api/service-accounts/${accountId}/keys/${rotated.record.id}`)).statusCode).toBe(200);
+    expect((await withKey(ctx, created.key, "GET", "/api/auth/me")).statusCode).toBe(401);
+    expect((await withKey(ctx, rotated.key, "GET", "/api/auth/me")).statusCode).toBe(401);
   });
 
   it("SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS caps new and rotated keys; unset leaves keys without expiry", async () => {
@@ -369,6 +445,20 @@ describe("gateway client rotation", () => {
 
     const [entry] = await auditOf(ctx, "mcp_client.rotated");
     expect(entry!.metadata).toMatchObject({ previousTokenPrefix: client.tokenPrefix, tokenPrefix: result.client.tokenPrefix, graceHours: 1 });
+  });
+
+  it("the /v1 gateway accepts the old token in the window and refuses it after", async () => {
+    const ctx = await boot();
+    const { admin, client, token } = await fixture(ctx);
+    const models = (bearer: string) => ctx.app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${bearer}` } });
+    expect((await models(token)).statusCode).toBe(200);
+    const rotated = body<{ token: string }>(await withCookie(ctx, admin.cookie, "POST", `/api/mcp/clients/${client.id}/rotate`, { graceHours: 1 }));
+    expect((await models(token)).statusCode).toBe(200);
+    expect((await models(rotated.token)).statusCode).toBe(200);
+    const realNow = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 2 * HOUR);
+    expect((await models(token)).statusCode).toBe(401);
+    expect((await models(rotated.token)).statusCode).toBe(200);
   });
 
   it("graceHours 0 ends the old token at once; a second rotation in the window needs graceHours 0; revoked clients and builders are refused", async () => {

@@ -1669,8 +1669,7 @@ export async function rotateMcpClient(ctx: PgContext, ...[input]: Parameters<Sto
             previous_expires_at = $2,
             token_prefix = $3,
             token_hash = $4,
-            rotated_at = $5,
-            expiry_notified_at = NULL
+            rotated_at = $5
       WHERE id = $6 AND token_prefix = $7 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $5)
       RETURNING *`,
     [keepPrevious, tsOrNull(input.previousExpiresAt), input.tokenPrefix, input.tokenHash, input.now, input.id, input.expectedTokenPrefix]

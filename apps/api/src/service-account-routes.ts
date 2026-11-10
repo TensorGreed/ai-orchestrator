@@ -58,6 +58,8 @@ export interface ServiceAccountRoutesDeps {
   ) => Promise<void>;
   /** The scope of the API key the request was made with, when it was made with one. */
   requestKeyScope: (request: FastifyRequest) => KeyScope | null;
+  /** The id of the API key the request was made with, when it was made with one. */
+  requestApiKeyId?: (request: FastifyRequest) => string | null;
   /** Removes the account's own MCP OAuth connections (and their tokens), as deleting a person does. */
   disconnectMcpOAuth: (userId: string) => Promise<unknown>;
   /**
@@ -223,11 +225,34 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
     return { keys: await apiKeyService.list(account.id) };
   });
 
+  /**
+   * 13.2 — the API key a key request was made with: a service account's key cannot make or rotate keys of its own
+   * account (it would renew itself without a person), and a key made with a key ends no later than that key.
+   */
+  async function callingKey(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    user: SafeUser,
+    account: { id: string }
+  ): Promise<{ ok: true; key: { id: string; expiresAt: string | null } | null } | { ok: false }> {
+    const keyId = deps.requestApiKeyId?.(request) ?? null;
+    if (!keyId) return { ok: true, key: null };
+    if (user.id === account.id) {
+      reply.code(403);
+      reply.send({ error: "A service account's key cannot create or rotate keys of its own account; an admin does that" });
+      return { ok: false };
+    }
+    const key = await apiKeyService.get(keyId, user.id);
+    return { ok: true, key: key ? { id: key.id, expiresAt: key.expiresAt } : { id: keyId, expiresAt: new Date().toISOString() } };
+  }
+
   app.post<{ Params: { id: string }; Body: unknown }>("/api/service-accounts/:id/keys", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const account = await findAccount(request.params.id);
     if (!account) return notFound(reply);
+    const caller = await callingKey(request, reply, user, account);
+    if (!caller.ok) return reply;
     if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "api_key.create"))) return reply;
     const parsed = apiKeyCreateBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -249,6 +274,7 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
       name: parsed.data.name,
       scopes: scope.scopes,
       expiresInDays: parsed.data.expiresInDays ?? null,
+      notAfter: caller.key?.expiresAt ?? null,
       maxAgeDays: deps.keyMaxAgeDays ?? 0
     });
     await audit(request, user, {
@@ -257,7 +283,14 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
       action: "create",
       resourceType: "api_key",
       resourceId: record.id,
-      metadata: { name: record.name, scopes: record.scopes, keyPrefix: record.keyPrefix, ownerKind: "service", serviceAccountId: account.id }
+      metadata: {
+        name: record.name,
+        scopes: record.scopes,
+        keyPrefix: record.keyPrefix,
+        ownerKind: "service",
+        serviceAccountId: account.id,
+        ...(caller.key ? { createdWithApiKeyId: caller.key.id } : {})
+      }
     });
     reply.code(201);
     // The only response that carries the key.
@@ -275,8 +308,16 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
     }
     const account = await findAccount(request.params.id);
     if (!account) return notFound(reply);
+    const caller = await callingKey(request, reply, user, account);
+    if (!caller.ok) return reply;
     const graceHours = parsed.data.graceHours ?? KEY_ROTATION_GRACE_HOURS.default;
-    const rotated = await apiKeyService.rotate({ id: request.params.keyId, userId: account.id, graceHours, maxAgeDays: deps.keyMaxAgeDays ?? 0 });
+    const rotated = await apiKeyService.rotate({
+      id: request.params.keyId,
+      userId: account.id,
+      graceHours,
+      notAfter: caller.key?.expiresAt ?? null,
+      maxAgeDays: deps.keyMaxAgeDays ?? 0
+    });
     if (!rotated.ok) {
       const refusal = apiKeyRotationRefusal(rotated.reason);
       reply.code(refusal.status);
@@ -297,7 +338,8 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
         previousExpiresAt: rotated.previous.expiresAt,
         expiresAt: rotated.record.expiresAt,
         ownerKind: "service",
-        serviceAccountId: account.id
+        serviceAccountId: account.id,
+        ...(caller.key ? { rotatedWithApiKeyId: caller.key.id } : {})
       }
     });
     // The only response that carries the new key.

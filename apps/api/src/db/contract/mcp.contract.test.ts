@@ -537,6 +537,8 @@ describeStoreContract("store contract: MCP", (ctx) => {
     await store.createMcpClient({ id: "c1", name: "First", tokenPrefix: "pre1", tokenHash: "h", toolsetIds: [], role: "viewer", createdBy: null, createdByEmail: null, expiresAt: iso(86_400_000) });
     const day = 86_400_000;
     expect(await store.claimCredentialExpiryNotice("mcp_client", "c1", iso(0), iso(-day))).toBe(true);
+    // A rotation does not change the client's expiry, so it does not reopen today's notice.
+    expect((await store.rotateMcpClient({ id: "c1", expectedTokenPrefix: "pre1", tokenPrefix: "pre1b", tokenHash: "h2", previousExpiresAt: iso(7_200_000), now: iso(1_000) })).status).toBe("rotated");
     expect(await store.claimCredentialExpiryNotice("mcp_client", "c1", iso(3_600_000), iso(3_600_000 - day))).toBe(false);
     expect(await store.claimCredentialExpiryNotice("mcp_client", "c1", iso(day), iso(0))).toBe(true);
     expect(await store.claimCredentialExpiryNotice("mcp_client", "missing", iso(0), iso(-day))).toBe(false);

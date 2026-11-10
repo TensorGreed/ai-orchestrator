@@ -103,10 +103,12 @@ its record, and the old key's record with its new `expiresAt` and `supersededBy`
 row asks for the window.
 
 - **Same limits.** The new key has the old key's name and scope (role ceiling, project list, legacy strings), copied in
-  the same transaction that retires the old key, so a rotation can never widen a key. Its lifetime is the old key's:
-  a key that expired 90 days after it was made gets a new 90 days; a key without an expiry gets none, unless
-  `API_KEY_DEFAULT_EXPIRY_DAYS` (or `SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS`, below) is set. A key rotated with a key expires
-  no later than the calling key, as on create.
+  the same transaction that retires the old key, so a rotation can never widen a key.
+- **A fresh lifetime.** The new key gets the old key's lifetime again, counted from the rotation: a key made to last 90
+  days and rotated on day 89 lasts 90 more days. That is never more than its owner could create: a key without an
+  expiry gets none unless `API_KEY_DEFAULT_EXPIRY_DAYS` (or `SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS`, below) is set, and a
+  key rotated with a key expires no later than the calling key, as on create. A service account's key cannot create
+  or rotate keys of its own account (`403`): only a person, or another account's key, renews it.
 - **Once.** A rotated key cannot be rotated again (`409 { code: "already_rotated" }`); rotate its replacement. A
   revoked or expired key answers `409 { code: "inactive" }`. Two rotations of the same key at the same moment, on one
   instance or two, give one new key: the other request gets `already_rotated`.
@@ -119,7 +121,9 @@ row asks for the window.
   expiry, the owner's kind and, when a key made the request, `rotatedWithApiKeyId`. Never the key itself.
 
 Keep the grace window short: during it, both keys work, so a leaked old key stays useful until the window ends. If the
-old key leaked, rotate with `graceHours: 0`, or revoke it.
+old key leaked, rotate with `graceHours: 0`, or revoke it. Revoking the new key during the window also revokes the old
+keys still in their window (as revoking a gateway client ends both its tokens); revoking the old key leaves the new one
+working.
 
 ### Maximum age for service-account keys
 

@@ -101,10 +101,10 @@ export class ApiKeyService {
 
   /**
    * 13.2 — rotates the user's key `id`: a new key (returned once) with the same name and scopes, and the old key keeps
-   * working for `graceHours` (0 ends it now; never past its own expiry). The new key's lifetime is the old key's (an
-   * old key without an expiry gives one without, unless API_KEY_DEFAULT_EXPIRY_DAYS is set), capped by `notAfter` and
-   * by `maxAgeDays`, so a rotation never lengthens what the key was given. Refused for a revoked, expired or already
-   * rotated key, and for a key of another user (not_found).
+   * working for `graceHours` (0 ends it now; never past its own expiry). The new key gets the old key's lifetime again,
+   * counted from now (an old key without an expiry gives one without, unless API_KEY_DEFAULT_EXPIRY_DAYS is set), capped
+   * by `notAfter` and by `maxAgeDays`, so it never lasts longer than a key its owner could create. Refused for a revoked,
+   * expired or already rotated key, and for a key of another user (not_found).
    */
   async rotate(input: {
     id: string;

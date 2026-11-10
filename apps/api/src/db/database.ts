@@ -7521,7 +7521,21 @@ export class SqliteStore implements Store {
       ? this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ? AND user_id = ?`, [id, userId])
       : this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ?`, [id]);
     if (!existing) return false;
-    this.exec(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.exec(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, [now, id]);
+      // 13.2 — the keys this one replaced and that still work (a rotation's grace window) end with it, back along the chain.
+      let frontier = [id];
+      for (let depth = 0; frontier.length > 0 && depth < 64; depth += 1) {
+        const marks = frontier.map(() => "?").join(", ");
+        const live = this.queryAll<{ id: string }>(
+          `SELECT id FROM api_keys WHERE superseded_by IN (${marks}) AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at > ?`,
+          [...frontier, now]
+        ).map((row) => String(row.id));
+        for (const liveId of live) this.exec(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, [now, liveId]);
+        frontier = live;
+      }
+    }).immediate();
     this.persist();
     return true;
   }
@@ -13607,8 +13621,7 @@ export class SqliteStore implements Store {
                 previous_expires_at = ?,
                 token_prefix = ?,
                 token_hash = ?,
-                rotated_at = ?,
-                expiry_notified_at = NULL
+                rotated_at = ?
           WHERE id = ? AND token_prefix = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`
       )
       .run(

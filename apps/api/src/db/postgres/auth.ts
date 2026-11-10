@@ -634,10 +634,25 @@ export async function touchApiKey(ctx: PgContext, id: string): ReturnType<Store[
 
 export async function revokeApiKey(ctx: PgContext, id: string, userId?: string): ReturnType<Store["revokeApiKey"]> {
   // Like SQLite, a key that is already revoked is revoked again (true, with a new revoked_at).
-  const result = userId
-    ? await ctx.pool.query(`UPDATE api_keys SET revoked_at = $1 WHERE id = $2 AND user_id = $3`, [new Date().toISOString(), id, userId])
-    : await ctx.pool.query(`UPDATE api_keys SET revoked_at = $1 WHERE id = $2`, [new Date().toISOString(), id]);
-  return (result.rowCount ?? 0) > 0;
+  const now = new Date().toISOString();
+  return await ctx.withTransaction(async (client) => {
+    const result = userId
+      ? await client.query(`UPDATE api_keys SET revoked_at = $1 WHERE id = $2 AND user_id = $3`, [now, id, userId])
+      : await client.query(`UPDATE api_keys SET revoked_at = $1 WHERE id = $2`, [now, id]);
+    if ((result.rowCount ?? 0) === 0) return false;
+    // 13.2 — the keys this one replaced and that still work (a rotation's grace window) end with it, back along the chain.
+    let frontier = [id];
+    for (let depth = 0; frontier.length > 0 && depth < 64; depth += 1) {
+      const live = await client.query<{ id: string }>(
+        `UPDATE api_keys SET revoked_at = $1
+          WHERE superseded_by = ANY($2::text[]) AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at > $1
+          RETURNING id`,
+        [now, frontier]
+      );
+      frontier = live.rows.map((row) => String(row.id));
+    }
+    return true;
+  });
 }
 
 /** 13.2 (v64) — see Store.rotateApiKey. The old row is locked, so a second rotation waits and then reads it rotated. */
