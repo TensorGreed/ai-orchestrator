@@ -159,4 +159,26 @@ run("two instances on one Postgres schema", () => {
     const verified = await b.verifyAuditChain();
     expect(verified).toMatchObject({ ok: true, rowsChecked: 30 });
   }, 60_000);
+
+  it("13.2: two instances signing one user in at once under a limit of 1 leave exactly one live session", async () => {
+    const [a, b] = await open();
+    await a.saveUser({ id: "u1", email: "u1@example.com", passwordHash: "x", role: "admin" });
+    const future = "2099-01-01T00:00:00.000Z";
+    for (let round = 0; round < 10; round += 1) {
+      // Each instance saves its own new session, then applies the limit (what issueSession does under L1).
+      const signIn = async (store: Store, id: string) => {
+        await store.saveSession({ id, userId: "u1", expiresAt: future });
+        return store.revokeOldestUserSessions("u1", 1, "evicted");
+      };
+      const ended = await Promise.all([signIn(a, `a-${round}`), signIn(b, `b-${round}`)]);
+      const live = await a.listUserSessions("u1", { liveOnly: true });
+      expect(live).toHaveLength(1);
+      // Nothing is ended twice, and the survivor is the newest session.
+      expect(new Set(ended.flat()).size).toBe(ended.flat().length);
+      expect(live[0]!.id).toBe((await a.listUserSessions("u1"))[0]!.id);
+    }
+    const all = await b.listUserSessions("u1");
+    expect(all).toHaveLength(20);
+    expect(all.filter((session) => session.endedReason === "evicted")).toHaveLength(19);
+  }, 60_000);
 });
