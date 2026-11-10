@@ -5,6 +5,7 @@ import {
   actionLabel,
   channelLabel,
   extractGuardTrace,
+  placementLabel,
   traceFromEvents,
   type GuardTraceNode,
   type GuardTraceVerdict
@@ -55,7 +56,7 @@ export function GuardTracePanel({ executionId, nodeResults }: { executionId: str
         </span>
       </header>
       {nodes.map((node) => (
-        <GuardTraceNodeCard key={node.nodeId} node={node} />
+        <GuardTraceNodeCard key={`${node.nodeId}:${node.placement}`} node={node} />
       ))}
     </section>
   );
@@ -88,7 +89,7 @@ function GuardTraceNodeCard({ node }: { node: GuardTraceNode }) {
     <div className="guard-trace-node">
       <div className="guard-trace-node-head">
         <span className="mono-cell">{node.nodeId}</span>
-        <span className="guard-chip guard-chip-muted">{node.placement === "agent" ? "agent" : "Content Rules node"}</span>
+        <span className="guard-chip guard-chip-muted">{placementLabel(node.placement)}</span>
         {source && <span className="guard-chip guard-chip-muted">{source}</span>}
         {node.profiles.map((profile) => (
           <span

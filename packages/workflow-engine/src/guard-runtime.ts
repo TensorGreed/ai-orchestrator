@@ -152,6 +152,12 @@ export interface GuardRuntimeDependencies {
    */
   mayUseLabels?(): boolean | Promise<boolean>;
   /**
+   * Phase 12 coverage — a cheap check before a response or incoming-payload check resolves the run's profiles: false
+   * when no profile this run could resolve configures the channel, so the check is skipped without a resolution.
+   * Absent or failing: the check resolves (fail open to the full path, which itself fails closed).
+   */
+  mayCheckChannel?(channel: "response" | "trigger_input"): boolean | Promise<boolean>;
+  /**
    * Phase 16 — the deployment's data destination rows (admin
    * classifications), read once per run when a check needs them. Absent:
    * only the built-in rows apply.

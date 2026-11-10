@@ -527,6 +527,23 @@ export class GuardService {
   }
 
   /**
+   * Phase 12 coverage — false when no stored profile version configures this channel (`response`, `trigger_input`):
+   * webhook, chat and MCP trigger runs then skip the boundary check without resolving their profiles. Fails open
+   * like `mayUseLabels`: a store error answers true, and the check resolves (and fails closed if that fails too).
+   */
+  async mayCheckChannel(channel: "response" | "trigger_input"): Promise<boolean> {
+    try {
+      return await this.store.anyGuardProfileHasChannel(channel);
+    } catch (error) {
+      this.options.logger?.("Rule set channel check failed; resolving the run's rule sets instead", {
+        channel,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return true;
+    }
+  }
+
+  /**
    * Resolution order for agent traffic:
    *   1. the project's enforced profile, always first;
    *   2. the workflow override, else the project override;
@@ -865,6 +882,8 @@ export class GuardService {
       resolveRun: async () => await this.resolveRun(context),
       // Phase 16 — a simulation's unsaved document may opt in; stored versions are checked in one cached query.
       mayUseLabels: async () => (substitute ? profileUsesLabels(substitute.profile) : false) || await this.mayUseLabels(),
+      // Phase 12 coverage — the same for the response and incoming-payload channels.
+      mayCheckChannel: async (channel) => (substitute ? substitute.profile.channels[channel] !== undefined : false) || await this.mayCheckChannel(channel),
       // A guard port naming the candidate's profile gets the candidate's version too (and a simulation's profile its substitute).
       loadProfile: async (profileId) =>
         substitute && substitute.profileId === profileId

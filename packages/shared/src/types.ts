@@ -10,6 +10,7 @@ import type {
 import type { DataLabels, LabelEndorsement, NodeLabelMap, ProvenanceLabel } from "./data-labels";
 import type { McpToolCallLabels } from "./taint-policy";
 import type { GatewayGuardStack } from "./guard";
+import type { ResponseCheckSummary } from "./response-boundary";
 
 export const WORKFLOW_SCHEMA_VERSION = "1.0.0";
 export const MAX_SUB_WORKFLOW_DEPTH = 10;
@@ -477,6 +478,11 @@ export interface WorkflowExecutionResult {
     /** Which node raised the clarification. */
     nodeId: string;
   };
+  /**
+   * Phase 12 coverage — set when the run answered an external caller (a response boundary) and a rule set checked its
+   * output on the `response` channel. `output` is then the checked version (rewritten, or the withheld marker).
+   */
+  responseCheck?: ResponseCheckSummary;
 }
 
 export interface WorkflowExecutionState {

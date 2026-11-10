@@ -318,6 +318,36 @@ describe("Profile editor and bindings", () => {
     expect(await screen.findByText("channels.prompt.detectors.0.threshold")).toBeInTheDocument();
   });
 
+  it("adds response checks with the Check responses preset and saves them", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    vi.mocked(api.updateGuardProfile).mockResolvedValue({ changed: true, version: { ...versions[0]!, version: 3 } } as never);
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("tab", { name: /Response/ }));
+    expect(screen.getByRole("tab", { name: "Response (off)" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Check responses (copy the final answer rules)" }));
+    expect(screen.getByRole("tab", { name: "Response" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save new version" }));
+    expect(api.updateGuardProfile).toHaveBeenCalledWith(
+      "strict",
+      expect.objectContaining({
+        document: expect.objectContaining({
+          channels: expect.objectContaining({
+            prompt: strictDoc.channels.prompt,
+            response: expect.objectContaining({ detectors: [{ id: "dlp.patterns", threshold: 0.6 }], defaultAction: { action: "block" } })
+          })
+        })
+      })
+    );
+  });
+
+  it("lists response checks on the Security page under their own source", async () => {
+    vi.mocked(api.fetchGuardStats).mockResolvedValue({ stats: { total: 0, verdicts: [], detectors: [], daily: [] } } as never);
+    vi.mocked(api.fetchGuardEvents).mockResolvedValue({ events: [], total: 0 } as never);
+    render(<GuardSecurityPage projects={projects} workflows={workflows} />);
+    await userEvent.selectOptions(await screen.findByLabelText("Source"), "response");
+    await waitFor(() => expect(api.fetchGuardEvents).toHaveBeenLastCalledWith(expect.objectContaining({ placement: "response" })));
+  });
+
   it("keeps the built-in profile read-only", async () => {
     vi.mocked(api.fetchGuardProfile).mockResolvedValue({ profile: profiles[0]!, latest: { ...versions[1]!, profileId: "default", version: 1 }, bindings: [] });
     render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="admin" />);

@@ -80,6 +80,7 @@ import type {
   NodeActivity,
   NodeActivityEvent,
   NodeExecutionResult,
+  ResponseBoundary,
   SecretReference,
   Workflow,
   WorkflowExecutionResult,
@@ -160,6 +161,7 @@ import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCat
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
+import { checkRunResponse } from "./response-boundary";
 import {
   approvalGateOutcome,
   approvalGatePause,
@@ -549,6 +551,13 @@ export interface ExecuteWorkflowRequest {
   approvalDecision?: ApprovalDecisionInput;
   executionTimeoutMs?: number;
   maxConcurrency?: number;
+  /**
+   * Phase 12 coverage — the run answers an external caller (a webhook, `/api/chat`, an MCP trigger's invoke): its
+   * output is checked on the `response` channel at the end of the run (response-boundary.ts). Set by the API for
+   * those triggers only. A request, not a dependency, so sub-workflow runs (which build their own requests) and
+   * resumed runs (whose caller was answered when they paused) never check.
+   */
+  responseBoundary?: ResponseBoundary;
 }
 
 /**
@@ -9743,8 +9752,23 @@ async function executeWorkflowRun(
     ...(clarificationFromAgent ? { clarification: clarificationFromAgent } : {})
   };
   const finalLabels = labelState.outputNodeId ? labelState.get(labelState.outputNodeId) : undefined;
-  if (finalLabels) runOutputLabels.set(completedResult, finalLabels);
-  return completedResult;
+  // Phase 12 coverage — what an external caller receives is checked once, before the run is stored and answered.
+  const answered = request.responseBoundary && !request.resumeState
+    ? await checkRunResponse({
+        result: completedResult,
+        boundary: request.responseBoundary,
+        guard: dependencies.guard,
+        resolveSecret: dependencies.resolveSecret,
+        executionId: request.executionId ?? "",
+        workflowId: workflow.id,
+        nodeId: labelState.outputNodeId ?? nodeOrder[nodeOrder.length - 1] ?? workflow.id,
+        ...(toolPolicySubject ? { subject: toolPolicySubject } : {}),
+        ...(finalLabels ? { labels: finalLabels } : {}),
+        ...(dependencies.logger ? { logger: dependencies.logger } : {})
+      })
+    : completedResult;
+  if (finalLabels) runOutputLabels.set(answered, finalLabels);
+  return answered;
 }
 
 /**

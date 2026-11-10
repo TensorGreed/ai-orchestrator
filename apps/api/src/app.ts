@@ -94,6 +94,7 @@ import {
   convertExternalWorkflow,
   ExternalWorkflowImportError,
   outputLabelsOf,
+  checkTriggerInput,
   workflowDeclaresSensitiveSource,
   type ChunkOptions,
   type EmbeddingAdapter,
@@ -210,6 +211,15 @@ import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
+import {
+  CONTENT_FILTER_CODE,
+  RESPONSE_WITHHELD_MESSAGE,
+  RESPONSE_WITHHELD_STATUS,
+  TRIGGER_INPUT_REFUSED_MESSAGE,
+  contentFilterEnvelope,
+  responseBoundaryForTrigger,
+  responseWasWithheld
+} from "@ai-orchestrator/shared";
 import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
@@ -244,6 +254,7 @@ import {
   dispatchedPolicyActor,
   DispatchTimeoutError,
   QUEUE_DISPATCH_CAPABILITY,
+  RESPONSE_BOUNDARY_CAPABILITY,
   readDispatchedRunSpec,
   resultForQueue,
   RunDispatcher,
@@ -2277,7 +2288,9 @@ export async function createApp(
             source: "propagated"
           },
           // 12.2 — the trigger's verified auth or an admin's trust setting decided them: the trigger's result keeps them.
-          ...(input.recordInputLabels && input.inputLabels ? { recordInputLabels: true } : {})
+          ...(input.recordInputLabels && input.inputLabels ? { recordInputLabels: true } : {}),
+          // Phase 12 coverage — an external caller receives the output: checked on the `response` channel at the end.
+          ...(input.responseBoundary && !input.resumeState ? { responseBoundary: input.responseBoundary } : {})
         },
         {
           // Phase 15.3 — a recorded run records its model calls; a model replay answers them from the tape.
@@ -4550,7 +4563,7 @@ export async function createApp(
         concurrency: runsBackgroundWorkers && queueService ? queueService.concurrency() : null,
         // In cluster mode a queue consumer claims under heartbeat leases with fencing tokens.
         // ... and runs jobs another instance dispatched (EXECUTION_DISPATCH=queue checks every live consumer has this).
-        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY] : [])] : [],
+        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY, RESPONSE_BOUNDARY_CAPABILITY] : [])] : [],
         appVersion: config.OTEL_SERVICE_VERSION || process.env.npm_package_version || null,
         schemaVersion: Math.max(...MIGRATIONS.map((migration) => migration.version)),
         runtime: () => ({
@@ -11052,13 +11065,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             userPrompt: message || undefined,
             executionId,
             triggerType: "chat",
-            triggeredBy: "chat-client"
+            triggeredBy: "chat-client",
+            // Phase 12 coverage — the chat client receives the output.
+            responseBoundary: { surface: "chat" }
           },
           progress: { requestInput: body },
           history: { requestInput: body }
         },
         { pool: dispatchPoolOf(workflow) }
       );
+      // Phase 12 coverage (D7) — content rules withheld the response: the envelope in place of the output.
+      if (responseWasWithheld(result)) {
+        reply.code(RESPONSE_WITHHELD_STATUS);
+        return { ...contentFilterEnvelope(executionId), session_id: sessionId };
+      }
       return {
         ok: true,
         executionId,
@@ -11140,7 +11160,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             },
             executionId,
             triggerType: "mcp_server",
-            triggeredBy: "mcp-client"
+            triggeredBy: "mcp-client",
+            // Phase 12 coverage — the MCP client receives the output.
+            responseBoundary: { surface: "mcp_invoke" }
           },
           progress: { requestInput: body },
           history: { requestInput: body }
@@ -11150,6 +11172,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (result.status === "error") {
         reply.code(500);
         return { error: result.error ?? "mcp_server trigger execution failed" };
+      }
+      // Phase 12 coverage (D7) — content rules withheld the response: an MCP tool error result, never the output.
+      if (responseWasWithheld(result)) {
+        return {
+          ok: false,
+          executionId,
+          code: CONTENT_FILTER_CODE,
+          error: RESPONSE_WITHHELD_MESSAGE,
+          result: { isError: true, content: [{ type: "text", text: RESPONSE_WITHHELD_MESSAGE }] }
+        };
       }
       return {
         ok: true,
@@ -11563,13 +11595,41 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           return { error: authResult.message };
         }
 
-        const parsedInput = parseWebhookRunInput(request.body);
+        let parsedInput = parseWebhookRunInput(request.body);
 
         let idempotencyKey: string | undefined;
         let replayingExistingResult = false;
         // 12.6 (D8) — set when the budgets were checked before the idempotency key was reserved.
         let budgetAdmitted = false;
         const triggerType = isTestRoute ? "webhook_test" : "webhook";
+        const executionId = crypto.randomUUID();
+        // 12.2 — the input's provenance: an admin's trust setting on the trigger, else `user` when the auth above
+        // verified the caller, else outside content. Recorded on the trigger's result so replays keep it.
+        // A `user` setting whose trigger changed since an admin made it (type, auth mode, secret, path) is ignored; an
+        // `untrusted_external` one applies whatever changed (a reset only tightens).
+        const triggerNode = match.workflow.nodes.find((entry) => entry.id === match.endpoint.nodeId);
+        const triggerTrust = triggerNode ? effectiveTriggerTrust(triggerNode) : undefined;
+        const webhookInputLabels: DataLabels | undefined =
+          triggerTrust || authResult.verified
+            ? { provenance: [triggerInputProvenance({ verified: authResult.verified, ...(triggerTrust ? { trust: triggerTrust } : {}) })], dataClasses: [], source: "propagated" }
+            : undefined;
+        // Phase 12 coverage (D12) — opt-in: a rule set with a `trigger_input` channel checks the payload here, before
+        // anything is reserved or run. A refusal answers 400 content_filter and nothing runs; a rewrite is what runs.
+        const incoming = await checkTriggerInput({
+          payload: parsedInput.body,
+          guard: guardService.runtimeFor({ executionId, workflowId: match.workflow.id, projectId: match.workflow.projectId ?? DEFAULT_PROJECT_ID }),
+          resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+          executionId,
+          workflowId: match.workflow.id,
+          nodeId: match.endpoint.nodeId,
+          labels: webhookInputLabels?.provenance ?? [inputProvenance(triggerType, undefined)],
+          logger: (message, metadata) => app.log.warn({ workflowId: match.workflow.id, metadata }, message)
+        });
+        if (incoming?.refused) {
+          reply.code(400);
+          return { error: TRIGGER_INPUT_REFUSED_MESSAGE, code: CONTENT_FILTER_CODE };
+        }
+        if (incoming?.transformed) parsedInput = parseWebhookRunInput(incoming.payload);
         if (security.idempotencyEnabled) {
           await store.clearExpiredWebhookSecurityState();
           idempotencyKey = getHeaderValue(request.headers as Record<string, unknown>, security.idempotencyHeaderName);
@@ -11743,17 +11803,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           }
         }
 
-        const executionId = crypto.randomUUID();
-        // 12.2 — the input's provenance: an admin's trust setting on the trigger, else `user` when the auth above
-        // verified the caller, else outside content. Recorded on the trigger's result so replays keep it.
-        // A `user` setting whose trigger changed since an admin made it (type, auth mode, secret, path) is ignored; an
-        // `untrusted_external` one applies whatever changed (a reset only tightens).
-        const triggerNode = match.workflow.nodes.find((entry) => entry.id === match.endpoint.nodeId);
-        const triggerTrust = triggerNode ? effectiveTriggerTrust(triggerNode) : undefined;
-        const webhookInputLabels: DataLabels | undefined =
-          triggerTrust || authResult.verified
-            ? { provenance: [triggerInputProvenance({ verified: authResult.verified, ...(triggerTrust ? { trust: triggerTrust } : {}) })], dataClasses: [], source: "propagated" }
-            : undefined;
         const result = await runDispatcher.run(
           {
             v: DISPATCH_SPEC_VERSION,
@@ -11775,13 +11824,31 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               triggerType,
               triggeredBy: "webhook",
               channel: isTestRoute ? "draft" : "production",
-              ...(webhookInputLabels ? { inputLabels: webhookInputLabels, recordInputLabels: true } : {})
+              ...(webhookInputLabels ? { inputLabels: webhookInputLabels, recordInputLabels: true } : {}),
+              // Phase 12 coverage — the caller receives the output (the chat widget posts here too).
+              responseBoundary: { surface: "webhook" }
             },
             progress: { requestInput: parsedInput.body },
             history: { requestInput: parsedInput.body }
           },
           { pool: dispatchPoolOf(match.workflow), admitted: budgetAdmitted }
         );
+
+        // Phase 12 coverage (D7) — content rules withheld the response: 422 content_filter, and the same answer for a
+        // retry under the idempotency key. The run ended `success`; its stored output is the withheld marker.
+        if (responseWasWithheld(result)) {
+          const envelope = contentFilterEnvelope(executionId);
+          reply.code(RESPONSE_WITHHELD_STATUS);
+          if (security.idempotencyEnabled && idempotencyKey) {
+            await store.saveWebhookIdempotencyResult({
+              endpointKey,
+              idempotencyKey,
+              status: result.status,
+              result: { __webhookHttpResponse: { statusCode: RESPONSE_WITHHELD_STATUS, headers: {}, body: envelope } }
+            });
+          }
+          return envelope;
+        }
 
         const defaultResponsePayload = {
           output: result.output ?? null,
@@ -13419,6 +13486,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       await guardService.resolveProfileOverride(override, { workflowId: context.workflowId, projectId: context.projectId, isAdmin: context.actor?.role === "admin" }),
     execute: async (replay, actor) => {
       const storedInput = asRecord(replay.recording.input);
+      const replayBoundary = responseBoundaryForTrigger(replay.recording.sourceTriggerType);
       const executed = await runWorkflowExecution({
         // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
         channel: "draft",
@@ -13442,6 +13510,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ...(replay.guardSimulation ? { guardSimulation: replay.guardSimulation } : {}),
         // 12.6 — a golden run an MCP gateway call started: its toolset/client Guard stack, as in production.
         ...(replay.gatewayGuard ? { gatewayGuard: replay.gatewayGuard } : {}),
+        // Phase 12 coverage — a golden run that answered an external caller: its output is checked as in production,
+        // so the replay's output compares with the golden run's (and a candidate's response rules can be tried).
+        ...(replayBoundary ? { responseBoundary: replayBoundary } : {}),
         policyActor: actor,
         workflow: replay.workflow,
         customData: replay.customData,

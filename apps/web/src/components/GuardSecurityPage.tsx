@@ -82,8 +82,8 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
   const [projectId, setProjectId] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [profileId, setProfileId] = useState("");
-  // 12.6 — "gateway": MCP gateway server tool calls; "run": workflow runs.
-  const [placement, setPlacement] = useState<"" | "gateway" | "run">("");
+  // 12.6 — "gateway": MCP gateway server tool calls; "run": workflow runs. Phase 12 coverage — "response": what callers received.
+  const [placement, setPlacement] = useState<"" | "gateway" | "run" | "response">("");
   // 12.7 — eval runs and replay jobs (red-team suites among them) are left out unless asked for.
   const [includeEval, setIncludeEval] = useState(false);
   const [profiles, setProfiles] = useState<GuardProfileSummary[]>([]);
@@ -175,9 +175,10 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
         </label>
         <label>
           <span>Source</span>
-          <select value={placement} onChange={(event) => setPlacement(event.target.value as "" | "gateway" | "run")}>
+          <select value={placement} onChange={(event) => setPlacement(event.target.value as "" | "gateway" | "run" | "response")}>
             <option value="">Runs and gateway</option>
             <option value="run">Workflow runs</option>
+            <option value="response">Responses to callers</option>
             <option value="gateway">MCP gateway calls</option>
           </select>
         </label>

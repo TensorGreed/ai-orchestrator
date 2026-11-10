@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GuardEventView } from "@ai-orchestrator/shared";
-import { dailySeries, displayRuleSetName, extractGuardTrace, guardMarkerFor, mostSevere, traceFromEvents } from "./guard-trace";
+import { dailySeries, displayRuleSetName, extractGuardTrace, guardMarkerFor, mostSevere, placementLabel, traceFromEvents } from "./guard-trace";
 
 const summary = (overrides: Record<string, unknown> = {}) => ({
   action: "allow",
@@ -196,6 +196,19 @@ describe("guard trace", () => {
     expect(nodes.map((node) => node.nodeId)).toEqual(["failed-agent"]);
     expect(nodes[0]!.verdicts[0]).toMatchObject({ channel: "final_output", action: "block", iteration: 2 });
     expect(nodes[0]!.verdicts[0]!.findings[0]!.evidence).toBe("L2M-****");
+
+    // Phase 12 coverage — the run-end response check is never in a node's output: its own card, even beside a known node.
+    const response = { ...base, id: "e3", verdictId: "v3", nodeId: "known", placement: "response", channel: "response" } as GuardEventView;
+    const withResponse = traceFromEvents([base, { ...base, id: "e2", nodeId: "known" }, response], new Set(["known"]));
+    expect(withResponse.map((node) => [node.nodeId, node.placement])).toEqual([
+      ["failed-agent", "agent"],
+      ["known", "response"]
+    ]);
+    expect(withResponse[1]!.verdicts[0]).toMatchObject({ channel: "response", placement: "response" });
+    expect(placementLabel("response")).toBe("response check");
+    expect(placementLabel("agent")).toBe("agent");
+    expect(placementLabel("node")).toBe("Content Rules node");
+    expect(placementLabel("unknown")).toBe("Content Rules node");
   });
 
   it("marks run tape lanes by the most severe outcome", () => {

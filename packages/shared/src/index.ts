@@ -7,6 +7,7 @@ export * from "./mcp-runtime-safety";
 export * from "./data-labels";
 export * from "./data-label-provenance";
 export * from "./guard";
+export * from "./response-boundary";
 export * from "./data-destinations";
 export * from "./network-controls";
 export * from "./destination-rules";

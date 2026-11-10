@@ -97,7 +97,7 @@ export function createExfiltrationDetector(): GuardDetector {
     id: EXFILTRATION_DETECTOR_ID,
     tier: "rule",
     description: "Markdown images and links whose URLs carry data, and unexpected outbound URLs in tool arguments.",
-    channels: ["model_output", "final_output", "tool_arguments", "tool_result"],
+    channels: ["model_output", "final_output", "tool_arguments", "tool_result", "response"],
     categories: ["exfiltration"],
     detect(input: GuardInput, context: DetectorContext) {
       const text = context.text;

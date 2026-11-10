@@ -11,6 +11,7 @@ import type {
   McpToolProgressEvent,
   NodeActivityEvent,
   ReleaseChannel,
+  ResponseBoundary,
   Workflow,
   WorkflowExecutionState
 } from "@ai-orchestrator/shared";
@@ -159,4 +160,11 @@ export interface RunWorkflowExecutionInput {
    * name or a request body.
    */
   guardRunSource?: "eval";
+  /**
+   * Phase 12 coverage — the run answers an external caller (a webhook or chat widget, `/api/chat`, an MCP trigger's
+   * invoke): the engine checks its output on the `response` channel at the end of the run. Set by those routes (and by
+   * replays of their runs) only, never from a request body. Crosses the queue with the spec; a queued run goes only to
+   * workers that advertise RESPONSE_BOUNDARY_CAPABILITY.
+   */
+  responseBoundary?: ResponseBoundary;
 }

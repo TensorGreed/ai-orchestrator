@@ -3920,7 +3920,7 @@ export interface GuardEventFilter {
   days?: number;
   findings?: boolean;
   /** 12.6 — `gateway`: MCP gateway server tool calls only; `run`: workflow runs only. */
-  placement?: "gateway" | "run";
+  placement?: "gateway" | "run" | "response";
   /** 12.7 — include verdicts eval runs and replay jobs recorded (left out by default). */
   includeEval?: boolean;
   limit?: number;

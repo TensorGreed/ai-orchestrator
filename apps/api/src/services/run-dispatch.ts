@@ -26,6 +26,18 @@ export type ExecutionDispatchMode = "inline" | "queue";
 
 /** What a queue consumer advertises when it runs dispatched jobs (the instance registry's capabilities). */
 export const QUEUE_DISPATCH_CAPABILITY = "queue-dispatch-v1";
+/**
+ * Phase 12 coverage — a worker that checks a run's response boundary (`run.responseBoundary`). A job that carries one
+ * is dispatched only while every live consumer of its pool advertises this too: an older worker would ignore the field
+ * and answer the caller with an unchecked output. Until then such runs go inline.
+ */
+export const RESPONSE_BOUNDARY_CAPABILITY = "content-rules-response-v1";
+
+/** The capabilities a worker needs, besides QUEUE_DISPATCH_CAPABILITY, to run this spec. */
+export function capabilitiesFor(spec: DispatchedRunSpec): string[] {
+  return spec.run.responseBoundary ? [RESPONSE_BOUNDARY_CAPABILITY] : [];
+}
+
 /** The DispatchedRunSpec format this build writes and reads. */
 export const DISPATCH_SPEC_VERSION = 1;
 
@@ -165,22 +177,26 @@ export class DispatchGate {
     return this.options.mode;
   }
 
-  /** Whether a run for `pool` goes on the queue now. Always false with `inline`. */
-  async useQueue(pool: string): Promise<boolean> {
+  /**
+   * Whether a run for `pool` goes on the queue now. Always false with `inline`. `required`: capabilities every live
+   * consumer of the pool must also advertise (see capabilitiesFor).
+   */
+  async useQueue(pool: string, required: readonly string[] = []): Promise<boolean> {
     if (this.options.mode !== "queue") return false;
     const now = (this.options.now ?? Date.now)();
-    const cached = this.cache.get(pool);
+    const cacheKey = required.length > 0 ? `${pool}\u0000${[...required].sort().join(",")}` : pool;
+    const cached = this.cache.get(cacheKey);
     if (cached && now - cached.atMs < (this.options.cacheMs ?? DISPATCH_GATE_CACHE_MS)) {
       this.record(!cached.queue, cached.reason);
       return cached.queue;
     }
     let decision: { queue: boolean; reason: string | null };
     try {
-      decision = decideDispatch(await this.options.listInstances(), pool);
+      decision = decideDispatch(await this.options.listInstances(), pool, required);
     } catch (error) {
       decision = { queue: false, reason: `the instance registry could not be read (${error instanceof Error ? error.message : String(error)})` };
     }
-    this.cache.set(pool, { ...decision, atMs: now });
+    this.cache.set(cacheKey, { ...decision, atMs: now });
     this.record(!decision.queue, decision.reason);
     return decision.queue;
   }
@@ -197,7 +213,7 @@ export class DispatchGate {
 }
 
 /** The gate's rule over the registry's rows (exported for tests). */
-export function decideDispatch(instances: ClusterInstanceRecord[], pool: string): { queue: boolean; reason: string | null } {
+export function decideDispatch(instances: ClusterInstanceRecord[], pool: string, required: readonly string[] = []): { queue: boolean; reason: string | null } {
   const consumers = instances.filter(
     (instance) => instance.live && (instance.workerMode === "all" || instance.workerMode === "worker") && instance.pools.includes(pool)
   );
@@ -208,6 +224,13 @@ export function decideDispatch(instances: ClusterInstanceRecord[], pool: string)
   if (old.length > 0) {
     const names = old.slice(0, 3).map((instance) => `${instance.id}${instance.appVersion ? ` (${instance.appVersion})` : ""}`).join(", ");
     return { queue: false, reason: `queue consumers of pool "${pool}" without ${QUEUE_DISPATCH_CAPABILITY}: ${names}${old.length > 3 ? ", ..." : ""}` };
+  }
+  for (const capability of required) {
+    const lacking = consumers.filter((instance) => !instance.capabilities.includes(capability));
+    if (lacking.length > 0) {
+      const names = lacking.slice(0, 3).map((instance) => `${instance.id}${instance.appVersion ? ` (${instance.appVersion})` : ""}`).join(", ");
+      return { queue: false, reason: `queue consumers of pool "${pool}" without ${capability}: ${names}${lacking.length > 3 ? ", ..." : ""}` };
+    }
   }
   return { queue: true, reason: null };
 }
@@ -335,7 +358,7 @@ export class RunDispatcher {
     options: { pool: string; passthrough?: WorkflowExecutionEventHooks; enforceBackpressure?: boolean; closed?: Promise<void>; local?: LocalRunParts; admitted?: boolean }
   ): Promise<WorkflowExecutionResult> {
     if (!options.admitted) await this.deps.admit?.(spec);
-    if (!(await this.deps.gate.useQueue(options.pool))) {
+    if (!(await this.deps.gate.useQueue(options.pool, capabilitiesFor(spec)))) {
       return await this.deps.executeLocally(spec, options.passthrough, options.local);
     }
     if (this.waiting >= this.deps.maxWaiting) throw new DispatchBusyError(this.deps.maxWaiting);
@@ -388,7 +411,7 @@ export class RunDispatcher {
       if (!(error instanceof BudgetExceededError) || !this.deps.recordRefused) throw error;
       return { queued: false, result: await this.deps.recordRefused(spec, error), refused: error };
     }
-    if (!(await this.deps.gate.useQueue(options.pool))) {
+    if (!(await this.deps.gate.useQueue(options.pool, capabilitiesFor(spec)))) {
       return { queued: false, result: await this.deps.executeLocally(spec) };
     }
     const added = await this.deps.enqueue(spec, {

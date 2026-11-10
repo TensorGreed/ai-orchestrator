@@ -758,6 +758,13 @@ export interface Store extends AiGatewayStore {
    */
   anyGuardProfileUsesLabels(): Promise<boolean>;
   /**
+   * Phase 12 coverage — whether any stored version of any rule set configures this channel (`response`: the
+   * run-end check of what external callers receive; `trigger_input`: the webhook route's check of incoming payloads).
+   * Read from the stored JSON and cached per rule set revision like `anyGuardProfileUsesLabels`, so a webhook
+   * request in a deployment with no such rule set pays one primary-key read.
+   */
+  anyGuardProfileHasChannel(channel: "response" | "trigger_input"): Promise<boolean>;
+  /**
    * Phase 16 — observed destination verdicts that would have stopped content:
    * verdicts since `since` with a shadow destination-rule finding of this
    * profile whose action blocks, waits for review or for approval. One per
