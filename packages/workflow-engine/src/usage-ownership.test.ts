@@ -142,6 +142,23 @@ describe("model usage is counted on the node that made the call", () => {
     expect(usageBlobs(result).map((entry) => entry.nodeId)).toEqual(["model"]);
   });
 
+  it("a replay counts the same calls as the live run: a pass-through stub drops its parent's usage, a recorded output keeps its own", async () => {
+    const workflow = chain([node("start", "manual_trigger"), model("model"), node("wait", "wait_node", { delayMs: 1 }), model("recorded"), node("out", "output")]);
+    const live = await executeWorkflow({ workflow }, deps());
+    expect(live.error ?? live.status).toBe("success");
+    const recordedOutput = live.nodeResults.find((entry) => entry.nodeId === "recorded")!.output;
+    const replayed = await executeWorkflow(
+      { workflow },
+      deps({
+        replayNodeHook: (target) =>
+          target.id === "wait" ? { kind: "pass_through" } : target.id === "recorded" ? { kind: "output", output: recordedOutput } : null
+      })
+    );
+    expect(replayed.error ?? replayed.status).toBe("success");
+    expect(usageBlobs(replayed).map((entry) => entry.nodeId)).toEqual(usageBlobs(live).map((entry) => entry.nodeId));
+    expect(usageBlobs(replayed).map((entry) => entry.nodeId)).toEqual(["model", "recorded"]);
+  });
+
   it("keeps two model calls that made identical usage", async () => {
     const result = await executeWorkflow({ workflow: chain([node("start", "manual_trigger"), model("first"), model("second"), node("out", "output")]) }, deps());
     expect(result.status).toBe("success");
@@ -205,6 +222,28 @@ describe("a streamed LLM Call that does not finish", () => {
     expect(result.status).not.toBe("success");
     expect(reported).toHaveLength(1);
     expect((reported[0] as { usage: { inputTokens: number } }).usage.inputTokens).toBeGreaterThan(0);
+  });
+
+  it("reports nothing when the run is stopped before the provider started answering", async () => {
+    const run = new AbortController();
+    const reported: Array<Record<string, unknown>> = [];
+    const stopping: LLMProviderAdapter = {
+      definition: { id: "streaming", label: "Streaming", supportsTools: false, configSchema: {} },
+      generate: async () => ({ content: "unused", toolCalls: [] }),
+      // eslint-disable-next-line require-yield
+      async *generateStream() {
+        // Still connecting, or waiting to retry after a 429, when the run is stopped.
+        run.abort(new Error("Stopped by a person."));
+        throw new Error("aborted");
+      }
+    } as LLMProviderAdapter;
+    const result = await executeWorkflow(
+      { workflow: chain([node("start", "manual_trigger"), model("model", "streaming"), node("out", "output")]) },
+      deps({ onLLMDelta: async () => undefined, onUnrecordedModelUsage: (telemetry) => void reported.push(telemetry), abortSignal: run.signal }, stopping)
+    );
+    expect(result.status).not.toBe("success");
+    expect(run.signal.aborted).toBe(true);
+    expect(reported).toEqual([]);
   });
 
   it("reports nothing for a request the provider refused before answering", async () => {

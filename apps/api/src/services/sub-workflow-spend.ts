@@ -25,7 +25,9 @@
  * children admitted at the same time each see the others. This holds within one process, which is where all of a
  * segment's children run; separate runs (and segments on separate instances) are matched only through recorded usage.
  * A check that takes longer than SUB_WORKFLOW_BUDGET_CHECK_TIMEOUT_MS (a budget read that hangs) refuses that child
- * and lets the next check go on, so a stuck read cannot stall the run's other children.
+ * and lets the next check go on, so a stuck read cannot stall the run's other children. While that read is still
+ * unanswered, the execution's later checks are refused at once instead of starting more reads; a check waiting its
+ * turn stops when the run is stopped.
  *
  * The same record holds a streamed model call of the run (or of one of its children) that failed, was cancelled or
  * timed out (`reportModelUsage`): no node output carries it, so it joins the run's row, or a row of its own, the same
@@ -123,14 +125,34 @@ class ChildAdmission implements SubWorkflowAdmission {
 class ExecutionSpend {
   readonly runs = new Set<RunSubWorkflowSpend>();
   largest: Spend = ZERO;
+  /** A budget check that timed out and has not answered yet: later checks are refused until it does. */
+  hungCheck: Promise<unknown> | undefined;
   private tail: Promise<unknown> = Promise.resolve();
 
-  /** Runs `step` once the steps queued before it have finished (in this process). */
-  exclusive<T>(step: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(step);
-    this.tail = result.catch(() => undefined);
+  /**
+   * Runs `step` once the steps queued before it have finished (in this process). A step whose `signal` aborts while it
+   * waits its turn does not run (it rejects with the signal's reason); the steps after it still wait for those before.
+   */
+  exclusive<T>(step: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const previous = this.tail;
+    const result = (signal ? untilAborted(previous, signal) : previous).then(() => {
+      signal?.throwIfAborted();
+      return step();
+    });
+    this.tail = Promise.all([previous, result.catch(() => undefined)]);
     return result;
   }
+}
+
+/** `waiting`, or a rejection with the signal's reason as soon as it aborts first. */
+function untilAborted(waiting: Promise<unknown>, signal: AbortSignal): Promise<unknown> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return Promise.race([waiting, aborted]).finally(() => signal.removeEventListener("abort", onAbort!));
 }
 
 export class RunSubWorkflowSpend {
@@ -176,12 +198,40 @@ export class RunSubWorkflowSpend {
    * reservations) and says whether the child may start; it is admitted, and reserved for the next check, before any
    * other check of the execution runs. Undefined when it does not fit.
    */
-  async admitIf(request: SubWorkflowAdmissionRequest, fits: (pending: () => Spend) => Promise<boolean>): Promise<SubWorkflowAdmission | undefined> {
+  async admitIf(
+    request: SubWorkflowAdmissionRequest,
+    fits: (pending: () => Spend) => Promise<boolean>,
+    signal?: AbortSignal
+  ): Promise<SubWorkflowAdmission | undefined> {
     this.rejoin();
     const timeoutMs = this.owner.checkTimeoutMs;
-    return await this.execution.exclusive(async () =>
-      (await withinBudgetCheckTime(fits(() => this.pending(request)), timeoutMs)) ? this.admit(request) : undefined
-    );
+    const execution = this.execution;
+    try {
+      const admission = await execution.exclusive(async () => {
+        // One unanswered read at a time: a store that hangs is not sent another read per child.
+        if (execution.hungCheck) throw new BudgetCheckTimeoutError(timeoutMs);
+        const check = fits(() => this.pending(request));
+        try {
+          return (await withinBudgetCheckTime(check, timeoutMs)) ? this.admit(request) : undefined;
+        } catch (error) {
+          if (error instanceof BudgetCheckTimeoutError) {
+            execution.hungCheck = check;
+            const answered = () => {
+              // promise-ok: identity check: only the read that timed out clears its own mark
+              if (execution.hungCheck === check) execution.hungCheck = undefined;
+            };
+            check.then(answered, answered);
+          }
+          throw error;
+        }
+      }, signal);
+      // A refused child: a closed segment that joined only for this check leaves again.
+      if (!admission) this.leaveWhenDone();
+      return admission;
+    } catch (error) {
+      this.leaveWhenDone();
+      throw error;
+    }
   }
 
   release(admission: ChildAdmission): void {

@@ -221,15 +221,52 @@ describe("SubWorkflowSpendTracker", () => {
     expect(retry.concurrentRunning({ mode: "async" })).toBe(2);
   });
 
-  it("refuses a child whose budget check hangs, and lets the next check go on", async () => {
+  it("refuses a child whose budget check hangs, and does not hold the next check behind it", async () => {
     const { tracker } = fixture(undefined, 30);
     const spend = tracker.start(attribution);
     const hung = spend.admitIf({ mode: "async" }, () => new Promise<boolean>(() => undefined));
     const next = spend.admitIf({ mode: "async" }, async () => true);
     await expect(hung).rejects.toBeInstanceOf(BudgetCheckTimeoutError);
     await expect(hung).rejects.toThrow("The budgets could not be read within");
-    expect(await next).toBeDefined();
-    expect(spend.concurrentRunning({ mode: "async" })).toBe(1);
+    // The next check runs as soon as the first times out; the read is still unanswered, so it is refused too.
+    await expect(next).rejects.toBeInstanceOf(BudgetCheckTimeoutError);
+    expect(spend.concurrentRunning({ mode: "async" })).toBe(0);
+  });
+
+  it("does not start another budget read while a timed-out one is unanswered, and stops a waiting check when the run stops", async () => {
+    const { tracker } = fixture(undefined, 30);
+    const spend = tracker.start(attribution);
+    let answer: (value: boolean) => void = () => undefined;
+    let reads = 0;
+    const read = () => {
+      reads += 1;
+      return new Promise<boolean>((resolve) => (answer = resolve));
+    };
+    await expect(spend.admitIf({ mode: "async" }, read)).rejects.toBeInstanceOf(BudgetCheckTimeoutError);
+    // The store still has not answered: refused at once, with no new read.
+    await expect(spend.admitIf({ mode: "async" }, read)).rejects.toBeInstanceOf(BudgetCheckTimeoutError);
+    expect(reads).toBe(1);
+    answer(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await spend.admitIf({ mode: "async" }, async () => true)).toBeDefined();
+
+    // A check waiting behind a slow one stops when the run is stopped, without waiting its turn.
+    const stop = new AbortController();
+    const slow = spend.admitIf({ mode: "async" }, () => new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 20)));
+    const waiting = spend.admitIf({ mode: "async" }, async () => true, stop.signal);
+    stop.abort(new Error("Stopped by a person."));
+    await expect(waiting).rejects.toThrow("Stopped by a person.");
+    expect(await slow).toBeDefined();
+  });
+
+  it("does not keep tracking a closed segment that joined again for a check that refused its child", async () => {
+    const { tracker } = fixture(1);
+    const live = tracker.start({ ...attribution, executionId: "live" });
+    tracker.start({ ...attribution, executionId: "other" });
+    expect(tracker.trackedExecutions).toBe(1);
+    expect(await live.admitIf({ mode: "async" }, async () => false)).toBeUndefined();
+    await expect(live.admitIf({ mode: "async" }, async () => { throw new Error("budgets unreadable"); })).rejects.toThrow("budgets unreadable");
+    expect(tracker.trackedExecutions).toBe(1);
   });
 
   it("closes only the stopped attempt's record: a retry of the execution keeps its own for its row", async () => {

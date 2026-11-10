@@ -3748,10 +3748,10 @@ async function runLlmCall(
         }
       }
     } catch (error) {
-      // The one place every failed, cancelled or timed-out stream passes: once the provider took the request (it
-      // started answering, or the run stopped it in flight) the call is charged, though the node gets no output.
-      // A request refused before any answer (an HTTP error) costs nothing and is not charged.
-      if (answering || input.dependencies.abortSignal?.aborted) {
+      // The one place every failed, cancelled or timed-out stream passes: once the provider started answering, the
+      // call is charged, though the node gets no output. A request refused or stopped before any answer (an HTTP
+      // error, a retry wait, a cancel while connecting) is not charged.
+      if (answering) {
         await reportUnrecordedUsage(input.dependencies, {
           providerId: input.provider.providerId,
           model: input.provider.model,
@@ -4220,7 +4220,8 @@ function replayStubFor(node: WorkflowNode, dependencies: WorkflowExecutionDepend
 
 function resolveReplayStub(stub: ReplayNodeStub, context: NodeRuntimeContext): unknown {
   if (stub.kind === "pass_through") {
-    return mergeParentOutputs(context.parentOutputs);
+    // Passes its input on, as the live node did: the parents' model usage stays theirs (usage-ownership.ts).
+    return withoutUsage(mergeParentOutputs(context.parentOutputs));
   }
   if (stub.kind === "error") {
     throw new Error(`Replayed from the recording: ${stub.message}`);
@@ -8852,7 +8853,8 @@ async function executeWorkflowRun(
       pendingResumeDecision = { ...request.approvalDecision, nodeId: waitingNode.id, decidedAt, handoff };
       handledByHandoff = true;
     } else if (handoff?.kind === "route") {
-      const routed = approved ? handoff.onApprove : handoff.onReject;
+      // A Content Rules node passes its input on: the usage of the model call before it stays on that node.
+      const routed = withoutUsage(approved ? handoff.onApprove : handoff.onReject);
       nodeOutputs.set(waitingNode.id, routed);
       // Phase 16 — the paused node's labels were saved with the run; the decision comes from a person; the routed
       // output is scanned like any output.

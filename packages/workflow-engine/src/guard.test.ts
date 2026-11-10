@@ -266,6 +266,39 @@ describe("guard node on DAG edges", () => {
     expect(statusOf(rejected, "on_pass")?.status).toBe("skipped");
   });
 
+  it("does not repeat the usage of the model call before it once an approval resumes the run", async () => {
+    const { guard } = guardDeps();
+    const paused: WorkflowExecutionState[] = [];
+    const metered: LLMProviderAdapter = {
+      definition: { id: "metered", label: "Metered", supportsTools: false, configSchema: {} },
+      generate: async () => ({ content: "Drafted.", toolCalls: [], usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 } })
+    } as LLMProviderAdapter;
+    const wf = workflow(
+      [
+        node("in", "webhook_input"),
+        node("model", "llm_call", { provider: { providerId: "metered", model: "m" }, userPromptTemplate: "Draft a reply", retry: { enabled: false, maxAttempts: 1, delayMs: 1 } }),
+        node("guard", "guard", { profileId: "email-approval" }, "Prompt guard"),
+        node("on_pass", "output"),
+        node("on_blocked", "output")
+      ],
+      [
+        { source: "in", target: "model" },
+        { source: "model", target: "guard" },
+        { source: "guard", sourceHandle: "pass", target: "on_pass" },
+        { source: "guard", sourceHandle: "blocked", target: "on_blocked" }
+      ]
+    );
+    const withUsage = (result: Awaited<ReturnType<typeof executeWorkflow>>) =>
+      result.nodeResults.filter((entry) => (entry.output as Record<string, unknown> | undefined)?._telemetry !== undefined).map((entry) => entry.nodeId);
+    const first = await executeWorkflow({ workflow: wf, executionId: "exec-usage", webhookPayload: { user_prompt: `Mail ${EMAIL}` } }, deps({ provider: metered, guard, paused }));
+    expect(first.status).toBe("waiting_approval");
+    const approved = await resumeWorkflowExecution({ executionId: "exec-usage", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps({ provider: metered, guard }));
+    expect(approved.status).toBe("success");
+    expect(statusOf(approved, "on_pass")?.status).toBe("success");
+    expect(withUsage(approved)).toEqual(["model"]);
+    expect((statusOf(approved, "guard")?.output as Record<string, unknown>).answer).toBe("Drafted.");
+  });
+
   it("validates guard and protection configuration and placement", () => {
     const bad = workflow(
       [node("a", "agent_orchestrator", { maxIterations: 2 }), node("m", "llm_call", { provider: { providerId: "x", model: "m" } }), node("g", "guard", { channel: "nowhere" }), node("p", "guard_protection", { providerId: "aes_gcm", dataClasses: ["email"] }), node("o", "noop_node")],

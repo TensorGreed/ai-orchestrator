@@ -2328,7 +2328,7 @@ export async function createApp(
             ? {}
             : {
                 admitSubWorkflow: async (child: Workflow, request: SubWorkflowAdmissionRequest) =>
-                  await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend)
+                  await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend, runController.signal)
               }),
           ...(runSubWorkflowSpend
             ? {
@@ -3422,7 +3422,9 @@ export async function createApp(
     run: Pick<RunWorkflowExecutionInput, "workflow" | "triggerType" | "triggeredBy" | "policyActor" | "gatewayUsage" | "guardRunSource" | "budgetSubject">,
     child: Workflow,
     request: SubWorkflowAdmissionRequest,
-    spend: RunSubWorkflowSpend | undefined
+    spend: RunSubWorkflowSpend | undefined,
+    /** The run's signal: a check still waiting its turn stops when the run is stopped. */
+    signal?: AbortSignal
   ): Promise<SubWorkflowAdmission | void> => {
     const exempt = Boolean(run.triggerType && (BUDGET_EXEMPT_TRIGGER_TYPES.has(run.triggerType) || run.triggerType === "eval")) || run.guardRunSource === "eval";
     if (!exempt) {
@@ -3436,7 +3438,7 @@ export async function createApp(
       };
       let admission: SubWorkflowAdmission | undefined;
       try {
-        if (spend) admission = await spend.admitIf(request, fits);
+        if (spend) admission = await spend.admitIf(request, fits, signal);
         else await withinBudgetCheckTime(fits(), subWorkflowSpend.checkTimeoutMs);
       } catch (error) {
         throw notStarted(error instanceof Error ? error.message : String(error));
