@@ -279,8 +279,29 @@ describe("NodeInspector", () => {
     expect(screen.getByText("LLM latency").nextElementSibling).toHaveTextContent("980 ms");
     expect(screen.getByText("LLM calls").nextElementSibling).toHaveTextContent("3");
     expect(screen.getByText("Model").nextElementSibling).toHaveTextContent("gpt-4o-mini");
+    // Counts the provider reported are shown as they are, with no estimate note.
+    expect(screen.queryByText("Token counts")).not.toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Rate limit exceeded");
     expect(screen.getByText("Wait a moment and retry, or lower the concurrency.")).toBeInTheDocument();
+  });
+
+  it("says when the token counts are an estimate", async () => {
+    const user = userEvent.setup();
+    render(
+      <NodeInspector
+        {...makeProps({
+          trace: {
+            status: "success",
+            durationMs: 400,
+            telemetry: { providerId: "openai_compatible", model: "local", inputTokens: 12, outputTokens: 4, totalTokens: 16, usageEstimated: true }
+          }
+        })}
+      />
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Trace" }));
+    expect(screen.getByText("Tokens out").nextElementSibling).toHaveTextContent("4");
+    expect(screen.getByText("Token counts").nextElementSibling).toHaveTextContent("Estimated (the provider reported no usage, or only part)");
   });
 
   it("falls back to the execution result for the Trace tab when no trace prop is given", async () => {

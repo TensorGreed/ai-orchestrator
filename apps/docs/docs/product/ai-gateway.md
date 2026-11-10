@@ -124,6 +124,7 @@ Every request that reaches the provider writes a usage row (tokens, estimated co
 
 - A caller that disconnects, or a stream cut by a content rule, is charged the request, the output received so far, and an allowance for output the provider may have produced but the gateway never read.
 - A server that sends no usage is charged the request and the output received. This is every stream on a route with `extra.streamUsage: false`, and any compatible server that ignores `stream_options`, so set that option only for a server that refuses it, and expect those numbers to be estimates.
+- A provider that reports only a total keeps that total; its split between input and output is a guess, so the row is marked `usageEstimated`.
 - A failed provider call is charged the request's input, because the gateway cannot tell whether it was billed. A provider that refuses a request therefore still counts toward budgets, a little.
 
 Estimates lean high: about three bytes of text a token, and a flat amount for each image. They are not provider billing figures.

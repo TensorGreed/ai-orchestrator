@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import type { Project } from "@ai-orchestrator/shared";
+import { NOTIFICATION_EVENT_LABELS, NOTIFICATION_EVENT_TYPES, type Project } from "@ai-orchestrator/shared";
 import {
   activateMfa,
   addProjectMember,
@@ -3047,11 +3047,7 @@ const NOTIFICATION_CHANNELS = [
   { value: "teams" as const, label: "Teams" }
 ];
 
-const NOTIFICATION_EVENTS = [
-  { value: "workflow_failure", label: "Workflow Failure" },
-  { value: "workflow_success", label: "Workflow Success" },
-  { value: "network.break_glass_used", label: "Break-glass access used" }
-];
+export const NOTIFICATION_EVENTS = NOTIFICATION_EVENT_TYPES.map((value) => ({ value: value as string, label: NOTIFICATION_EVENT_LABELS[value] }));
 
 function NotificationsTab() {
   const [configs, setConfigs] = useState<NotificationConfig[]>([]);
@@ -3065,7 +3061,7 @@ function NotificationsTab() {
   // form state
   const [formChannel, setFormChannel] = useState<"email" | "slack" | "teams">("email");
   const [formEnabled, setFormEnabled] = useState(true);
-  const [formEvents, setFormEvents] = useState<string[]>(["workflow_failure"]);
+  const [formEvents, setFormEvents] = useState<string[]>(["execution.failure"]);
 
   // email fields
   const [smtpHost, setSmtpHost] = useState("");
@@ -3099,7 +3095,7 @@ function NotificationsTab() {
   function resetForm() {
     setFormChannel("email");
     setFormEnabled(true);
-    setFormEvents(["workflow_failure"]);
+    setFormEvents(["execution.failure"]);
     setSmtpHost("");
     setSmtpPort("587");
     setSmtpSecure(false);

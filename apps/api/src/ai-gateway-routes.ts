@@ -17,12 +17,18 @@ import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   LLMProviderError,
+  chargedUsage,
+  estimateAnswerTokens,
+  estimateRequestTokens,
   isModelNotAllowedError,
   providerCallOptionSupport,
+  ToolCallAssembler,
+  unseenOutputTokens,
   type EmbeddingProviderRegistry,
   type LLMStreamChunk,
   type ProviderExecutionContext,
-  type ProviderRegistry
+  type ProviderRegistry,
+  type UsageEstimate
 } from "@ai-orchestrator/provider-sdk";
 import {
   effectiveGatewayRateLimit,
@@ -70,7 +76,6 @@ import {
   type AiGatewayStreamRelease,
   type OutboundTextOptions
 } from "./services/ai-gateway-guard.js";
-import { chargedUsage, estimateAnswerTokens, estimateRequestTokens, unseenOutputTokens, type UsageEstimate } from "./services/ai-gateway-usage.js";
 import {
   AiGatewayHttpError,
   aiGatewayErrors,
@@ -165,29 +170,23 @@ function zodError(error: z.ZodError): AiGatewayHttpError {
   return aiGatewayErrors.invalidRequest(issue ? `${param ? `${param}: ` : ""}${issue.message}` : "Invalid request body.", param);
 }
 
-/** Collects streamed tool-call deltas into whole calls, by index (OpenAI family) or id. */
+/** Collects streamed tool-call deltas into whole calls with the provider SDK's rules (index, else id, else the call before). */
 class ToolCallCollector {
-  readonly calls: Array<{ id: string; name: string; arguments: string }> = [];
-  private last = -1;
+  private readonly assembler = new ToolCallAssembler({ idPrefix: "call_", blankName: true });
 
-  /** Adds a delta; returns the index it belongs to. */
-  add(chunk: Extract<LLMStreamChunk, { type: "tool_call_delta" }>): number {
-    let index = chunk.index;
-    if (index === undefined) {
-      const byId = chunk.toolCallId ? this.calls.findIndex((call) => call.id === chunk.toolCallId) : -1;
-      index = byId >= 0 ? byId : chunk.toolCallId || this.last < 0 ? this.calls.length : this.last;
-    }
-    while (this.calls.length <= index) this.calls.push({ id: "", name: "", arguments: "" });
-    const call = this.calls[index]!;
-    if (chunk.toolCallId) call.id = chunk.toolCallId;
-    if (chunk.name) call.name = chunk.name;
-    if (chunk.argumentsDelta) call.arguments += chunk.argumentsDelta;
-    this.last = index;
-    return index;
+  get calls(): Array<{ id: string; name: string; arguments: string }> {
+    return this.assembler.calls().map((call) => ({ id: call.id, name: call.name, arguments: call.argumentsText }));
+  }
+
+  /** Adds a delta; returns the position of the call it belongs to and whether that call began with this delta. */
+  add(chunk: Extract<LLMStreamChunk, { type: "tool_call_delta" }>): { index: number; started: boolean } {
+    const before = this.assembler.size;
+    const index = this.assembler.add(chunk);
+    return { index, started: index >= before };
   }
 
   complete(): Array<{ id: string; name: string; arguments: string }> {
-    return this.calls.map((call, index) => ({ id: call.id || `call_${index}`, name: call.name, arguments: call.arguments || "{}" }));
+    return this.calls.map((call) => ({ ...call, arguments: call.arguments || "{}" }));
   }
 }
 
@@ -793,15 +792,16 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
             }
           }
         } else if (chunk.type === "tool_call_delta") {
-          const index = collector.add(chunk);
+          const { index, started } = collector.add(chunk);
           if (guarded) continue;
+          const startedId = started && !chunk.toolCallId ? collector.calls[index]?.id : undefined;
           opening();
           writer.data(
             chatChunk(base, {
               tool_calls: [
                 {
                   index,
-                  ...(chunk.toolCallId ? { id: chunk.toolCallId, type: "function" } : {}),
+                  ...(chunk.toolCallId || startedId ? { id: chunk.toolCallId || startedId, type: "function" } : {}),
                   function: { ...(chunk.name ? { name: chunk.name } : {}), ...(chunk.argumentsDelta !== undefined ? { arguments: chunk.argumentsDelta } : {}) }
                 }
               ]
