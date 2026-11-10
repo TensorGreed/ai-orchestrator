@@ -13,6 +13,7 @@ The [content rules engine](./content-rules-engine.md) checks content against a r
 | **Content Rules node** on a DAG edge | One field of the incoming item, on the channel you choose | Routes the item to `pass`, `blocked` or `review` instead of failing the run |
 | **Rules port** on an Agent or Supervisor | The agent loop: the prompt, every tool call's arguments, every tool result, the final answer | Blocks, rewrites or pauses at that point of the loop |
 | **Automatic rule set** bound to a project or workflow | The same agent loop, for every agent without a rules port | Same as the rules port |
+| **Model boundary** on LLM Call nodes, chat model nodes, the chains, agents and Supervisors | Each part of a prompt that comes from outside content (retrieved documents, connector, HTTP and web page data, webhook payloads from callers the run does not trust), before the model call | Fails the node, or withholds that part; see [Outside content at the model boundary](#outside-content-at-the-model-boundary) |
 
 An enforced project rule set (see [Bindings](#bindings)) runs in every placement, before anything else.
 
@@ -60,6 +61,26 @@ A Content Rules node attached to a port does not run as a workflow step and cann
 Agents without a rules port use the rule sets their project and workflow resolve to. Unbound projects use the built-in **Default rule set** unless `GUARD_AUTO_APPLY=false`, in which case only explicit bindings and rules ports apply.
 
 The Trace tab names the source of each agent's rule sets: rules port, enforced by project, workflow binding, project binding or instance default.
+
+### Outside content at the model boundary
+
+Before a model call, every part of the system and user prompt that came from outside content is checked on the `tool_result` channel with the `untrusted_external` label. The parts are found from the prompt's template values and the provenance labels the run already computes, so the template's own text is never checked, and the question a signed-in person typed is not outside content. Values that an earlier **Prompt Template** rendered, or the numbered `context` of a **RAG Retrieve** or **Rerank** node, are split again into their parts, so each retrieved document is checked on its own. The same text is checked once per run. Rule events from this check have the placement `retrieval`.
+
+| Where | Rule sets | What a finding does |
+|---|---|---|
+| LLM Call, chat model nodes and the chains (Basic LLM Chain, Q&A, Summarization, Information Extractor, Text Classifier, Sentiment Analysis, AI Transform) | The run's rule sets | A block fails the node; a rewrite changes that part of the prompt; a review or approval pauses the run and re-runs the node once approved. Under the built-in **Default rule set** applied automatically, the check only records what it would have done (shadow) for now. |
+| Agents and Supervisors | The rules port, or the run's rule sets | Same, enforced. Under the built-in rule set applied automatically, parts that came straight from the run's input are only recorded, since the agent's own prompt check already acts on them; parts from retrieval and other steps are enforced. |
+
+Two optional settings on a rule set change this:
+
+```json
+{ "retrieval": { "onBlock": "withhold", "perDocument": true } }
+```
+
+- `onBlock: "withhold"` replaces a blocked part with `[content withheld by content rules]` and lets the model call go ahead. When several rule sets apply, an explicit `onBlock: "fail"` in any of them wins.
+- `perDocument: true` makes RAG Retrieve and Rerank check each document as it is retrieved. A blocked document, or one that would need a review, is dropped; rewrites apply to the document text. The `context` is rebuilt and numbered from what is left, and the node output gains `contentRules: { dropped, redacted }`. When every document is dropped, the node returns an empty context. The model boundary then reuses these checks for the documents that reach the prompt unchanged.
+
+Nothing here runs without content rules: with `GUARD_AUTO_APPLY=false` and no bindings, or when no rule set has a `tool_result` channel, prompts reach the model as before.
 
 ## Rule sets
 
@@ -124,7 +145,7 @@ If a finding should be protected but no provider covers its class, the key is mi
 
 Every check writes rows to `guard_events`: one per applied action, or one row for a clean verdict. A row holds:
 
-- the run, workflow, project and node, the placement (`node`, `agent`, or `gateway` for an [MCP gateway call](./mcp-gateway.md#content-rules-on-the-gateway)), the agent step and the tool name;
+- the run, workflow, project and node, the placement (`node`, `agent`, `retrieval` for the [model boundary](#outside-content-at-the-model-boundary), or `gateway` for an [MCP gateway call](./mcp-gateway.md#content-rules-on-the-gateway)), the agent step and the tool name;
 - the channel, detector, category, data class and score;
 - the requested action, the action that applied, the verdict's overall action, and whether the rule was in shadow mode;
 - masked evidence (for example `j•••@e••••••.com`) and the detector's message;
