@@ -644,14 +644,14 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   // ---------------------------------------------------------------------------
 
   /**
-   * The Guard stack for one call: undefined when neither the toolset nor the client has a binding, so the call runs
-   * exactly as before (no Guard). One store read when there is no binding. A failed read throws: the caller refuses
-   * the call (fail closed) rather than guess whether a binding applies.
+   * The content rules stack for one call: undefined when nothing applies (no toolset, client or enforced project
+   * binding, and no deployment destination rules), so the call runs exactly as before. A failed read throws: the caller
+   * refuses the call (fail closed) rather than guess whether a binding applies.
    */
   const guardStackFor = async (auth: AuthenticatedClient, toolset: McpToolset): Promise<GatewayGuardStackForCall | undefined> => {
     if (!deps.guard) return undefined;
     const { resolution, refs } = await deps.guard.resolveGateway({ toolsetId: toolset.id, clientId: auth.client.id, projectId: toolset.projectId });
-    return refs.length > 0 ? { resolution, refs } : undefined;
+    return resolution.stack.length > 0 ? { resolution, refs } : undefined;
   };
 
   interface GuardCallScope {
@@ -1050,7 +1050,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           client: auth.client,
           ...(sessionLabels && (sessionLabels.provenance.length > 0 || sessionLabels.dataClasses.length > 0) ? { sessionLabels } : {}),
           ...(callLabels ? { tracksLabels: true } : {}),
-          ...(guardStack ? { gatewayGuard: { toolsetId: toolset.id, clientId: auth.client.id, profiles: guardStack.refs } } : {}),
+          ...(guardStack && guardStack.refs.length > 0 ? { gatewayGuard: { toolsetId: toolset.id, clientId: auth.client.id, profiles: guardStack.refs } } : {}),
           toolset,
           onNodeComplete: (event) => {
             done = Math.min(total, done + 1);

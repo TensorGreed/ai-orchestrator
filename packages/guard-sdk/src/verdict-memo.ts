@@ -109,7 +109,8 @@ export function guardVerdictMemoKey(profileHashes: readonly string[], input: Gua
     subject: input.subject,
     ignoredValues: input.ignoredValues ? [...input.ignoredValues].sort() : undefined,
     destinationOnly: input.destinationOnly,
-    sources: input.sources
+    sources: input.sources,
+    streamWindow: input.streamWindow
   };
   return [
     "v1",

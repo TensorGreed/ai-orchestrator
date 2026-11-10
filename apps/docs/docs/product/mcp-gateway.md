@@ -119,12 +119,12 @@ If you turn tracking on while sessions are open, a session that already made cal
 
 ### Content rules on the gateway
 
-[Content rules](./content-rules.md) can check gateway calls too. They are off until you pick a rule set: with no rule set on a toolset or client, the gateway works exactly as before.
+[Content rules](./content-rules.md) can check gateway calls too. They are off until you pick a rule set, enforce one on the project or set up destination rules: with none of those, the gateway works exactly as before.
 
 - **Toolset.** In a toolset's detail, under **Content rules**, an admin picks a rule set. It checks every client's calls to that toolset's tools.
 - **Client.** In the **Clients** view, a client's **Governance** section has its own **Content rules** picker. It checks that client's calls on all its toolsets, on top of the toolset's rule set.
-- **Stacking.** When either is set, the rule sets run in this order: the toolset project's enforced rule set, the toolset's rule set, the client's rule set, then the deployment's [destination rules](./data-labels-and-destinations.md). All of them run and the strictest action wins, so a client's rule set can add checks but never loosen the toolset's. The instance default rule set (`GUARD_AUTO_APPLY`) does not apply to gateway calls.
-- **The project's enforced rule set** joins only once the toolset or the client has a rule set. On its own it does not reach gateway calls, so turning it on changes nothing for a gateway without a rule set.
+- **Stacking.** The rule sets run in this order: the toolset project's enforced rule set, the toolset's rule set, the client's rule set, then the deployment's [destination rules](./data-labels-and-destinations.md). All of them run and the strictest action wins, so a client's rule set can add checks but never loosen the toolset's. The instance default rule set (`GUARD_AUTO_APPLY`) does not apply to gateway calls.
+- **The project's enforced rule set and the deployment's destination rules** apply to gateway calls on their own, with no toolset or client rule set. An admin who enforces a rule set on a project gets it on that project's toolsets too. (Before this release, both applied only once the toolset or the client had a rule set.)
 
 Each tool call, server or workflow tool, is checked twice:
 

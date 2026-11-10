@@ -200,6 +200,16 @@ export interface GuardInput {
   sources?: GuardSource[];
   /** Phase 12 coverage — templated pieces of the content and their provenance (metadata only). */
   pieces?: GuardContentPiece[];
+  /**
+   * Phase 12 coverage — the part of a streamed answer that may be released now (text content only; ignored for
+   * JSON). The text before `start` was sent already: detectors read it for context, but a finding that lies wholly
+   * inside it is dropped and nothing there is rewritten (a span that began there is rewritten from `start` on). The text
+   * from `end` on is still held back: findings there count toward the verdict (a block cuts early), but nothing there is
+   * rewritten until a later window releases it. A rewrite finding that runs past `end` moves the window's end back to
+   * where that finding starts, so a value is never sent in two pieces. The verdict's `window` says where the window
+   * ended, in the coordinates of the verdict's content.
+   */
+  streamWindow?: GuardSpan;
 }
 
 /** Half-open character range in the inspected text (`contentText`). */
@@ -249,7 +259,9 @@ export interface GuardDetector {
   /**
    * For the `transform` action: return the content with the findings'
    * payloads removed or rewritten. Detectors without a transform are blocked
-   * instead when a profile asks for `transform`.
+   * instead when a profile asks for `transform`. It must act on characters
+   * locally: a streamed answer's check applies it to the released slice of
+   * the text only (`GuardInput.streamWindow`).
    */
   transform?(text: string, findings: GuardFinding[], context: DetectorContext): string;
 }
@@ -321,6 +333,11 @@ export interface GuardVerdict {
   channel: GuardChannel;
   /** Phase 16 — where the content was going, when the profile's destination rules were evaluated. */
   destination?: GuardDestinationSummary;
+  /**
+   * Phase 12 coverage — with `GuardInput.streamWindow`: the released part in the coordinates of `content`. Text before
+   * `start` and from `end` on is exactly as it came in.
+   */
+  window?: GuardSpan;
 }
 
 export class GuardError extends Error {

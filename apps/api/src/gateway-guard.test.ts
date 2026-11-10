@@ -1,8 +1,9 @@
 /**
  * 12.6 — Guard on the MCP gateway. A toolset's or client's Guard binding checks server tool calls through the
  * gateway (`tool_arguments` before the server sees them, `tool_result` on what it answered), records the verdicts
- * under the call's `mcpgw_*` id, and travels with a workflow tool's run, tighten-only. With neither binding the
- * gateway behaves as before. Rules can also be scoped to gateway toolsets (`toolsetIds`).
+ * under the call's `mcpgw_*` id, and travels with a workflow tool's run, tighten-only. With neither binding, the
+ * project's enforced rule set and the deployment's destination rules still apply (Phase 12 coverage, D13); with none
+ * of those the gateway behaves as before. Rules can also be scoped to gateway toolsets (`toolsetIds`).
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -412,11 +413,10 @@ describe("migration v53", () => {
 });
 
 describe("gateway server calls with no toolset or client binding", () => {
-  it("run no Guard: the same answers and rows as before, no events, no Guard audit; the row names its toolset", async () => {
-    // A project-enforced profile and instance auto-apply do not reach the gateway until a binding exists.
+  it("run no content rules without an enforced project rule set: the same answers and rows as before, no events, no audit", async () => {
+    // Instance auto-apply (on by default) never reaches the gateway.
     const fixture = await setup();
     const call = caller(fixture.context);
-    expect((await call(fixture.admin, "PUT", "/api/guard/bindings/projects/default", { mode: "enforced", profileId: "gw-strict" })).statusCode).toBe(200);
     const tool = toolCaller(fixture);
     const injected = await tool("lookup_kb", { topic: INJECTION });
     expect(injected.outcome).toBe("ok");
@@ -435,9 +435,7 @@ describe("gateway server calls with no toolset or client binding", () => {
     const called = await auditEvents(fixture.context.store, "mcp_gateway.tool_called");
     expect(called.every((event) => (event.metadata as Record<string, unknown>).guard === undefined)).toBe(true);
 
-    // The same calls on a toolset bound to a profile that checks nothing answer and record the same. (With the
-    // project's enforced profile still set, a toolset binding would bring it in as the floor.)
-    expect((await call(fixture.admin, "PUT", "/api/guard/bindings/projects/default", { mode: "inherit" })).statusCode).toBe(200);
+    // The same calls on a toolset bound to a profile that checks nothing answer and record the same.
     await bind(fixture, "toolsets", fixture.toolset.id, "gw-allow");
     const bound = toolCaller(fixture);
     const again = [await bound("lookup_kb", { topic: INJECTION }), await bound("lookup_kb", { topic: "planted" }), await bound("lookup_kb", { topic: "contact" })];
@@ -446,6 +444,29 @@ describe("gateway server calls with no toolset or client binding", () => {
     expect(all.slice(3).map(stableRow)).toEqual(rows.map(stableRow));
     const sessions = (await call(fixture.admin, "GET", `/api/mcp/clients/${fixture.client.id}/sessions`)).json<{ sessions: McpGatewaySessionView[] }>().sessions;
     expect(sessions.every((session) => session.guard.blocks === 0 && session.guard.lastBlock === null)).toBe(true);
+  });
+});
+
+describe("a project's enforced rule set with no toolset or client binding (D13)", () => {
+  it("checks gateway server calls on its own: injected arguments are blocked and recorded, a result is redacted", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    expect((await call(fixture.admin, "PUT", "/api/guard/bindings/projects/default", { mode: "enforced", profileId: "gw-strict" })).statusCode).toBe(200);
+    const invoke = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool");
+    const tool = toolCaller(fixture);
+    const injected = await tool("lookup_kb", { topic: INJECTION });
+    expect(injected.outcome).toBe("tool_error");
+    expect(invoke).not.toHaveBeenCalled();
+    const contact = await tool("lookup_kb", { topic: "contact" });
+    expect(contact.text).not.toContain(EMAIL);
+    expect(contact.text).toContain("[REDACTED:email]");
+    const events = await guardEvents(fixture);
+    expect(events.some((event) => event.channel === "tool_arguments" && event.effectiveAction === "block" && event.placement === "gateway")).toBe(true);
+    expect((await auditEvents(fixture.context.store, "mcp_gateway.guard_blocked")).length).toBe(1);
+
+    // Back to inherit: the gateway runs no content rules again.
+    expect((await call(fixture.admin, "PUT", "/api/guard/bindings/projects/default", { mode: "inherit" })).statusCode).toBe(200);
+    expect((await tool("lookup_kb", { topic: "contact" })).text).toContain(EMAIL);
   });
 });
 
@@ -1009,14 +1030,15 @@ describe("a Guard-blocked call held for approval", () => {
 });
 
 describe("Guard binding reads on a gateway call", () => {
-  it("take one store read with no binding, and refuse the call when the read fails", async () => {
+  it("take one read of the gateway bindings and one of the project's with no binding, and refuse the call when a read fails", async () => {
     const fixture = await setup();
     const reads = vi.spyOn(fixture.context.store, "getGatewayGuardBindings");
     const single = vi.spyOn(fixture.context.store, "getGuardBinding");
     const tool = toolCaller(fixture);
     expect((await tool("get_current_time", { tz: "UTC" })).outcome).toBe("ok");
     expect(reads).toHaveBeenCalledTimes(1);
-    expect(single).not.toHaveBeenCalled();
+    expect(single).toHaveBeenCalledTimes(1);
+    expect(single).toHaveBeenCalledWith("project", fixture.toolset.projectId);
 
     reads.mockRejectedValueOnce(new Error("database is locked"));
     const invoke = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool");

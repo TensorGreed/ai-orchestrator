@@ -5,17 +5,34 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LLMProviderConfig } from "@ai-orchestrator/shared";
 
-const checks = vi.hoisted(() => [] as Array<{ content: unknown; labels: unknown }>);
+const checks = vi.hoisted(() => [] as Array<{ content: unknown; labels: unknown; streamWindow?: unknown }>);
+/** What the next checks answer (first in, first out); the default allows. */
+const answers = vi.hoisted(() => [] as Array<(input: { content: unknown; streamWindow?: { start: number; end: number } }) => unknown>);
 
 vi.mock("@ai-orchestrator/workflow-engine", async (original) => ({
   ...(await original<typeof import("@ai-orchestrator/workflow-engine")>()),
-  runGuardCheck: vi.fn(async (_scope: unknown, _profiles: unknown, input: { content: unknown; labels: unknown }) => {
-    checks.push({ content: input.content, labels: input.labels });
-    return { action: "allow", content: input.content, transformed: false, verdicts: [] };
+  runGuardCheck: vi.fn(async (_scope: unknown, _profiles: unknown, input: { content: unknown; labels: unknown; streamWindow?: { start: number; end: number } }) => {
+    checks.push({ content: input.content, labels: input.labels, ...(input.streamWindow ? { streamWindow: input.streamWindow } : {}) });
+    const answer = answers.shift();
+    if (answer) return answer(input);
+    return { action: "allow", content: input.content, transformed: false, verdicts: [], ...(input.streamWindow ? { window: input.streamWindow } : {}) };
   })
 }));
 
-import { checkAiGatewayRequest, outboundTextSlots, STREAM_HOLD_CHARS, streamCheckDue, streamReleaseLength, type AiGatewayGuardScope } from "./ai-gateway-guard.js";
+import type { ResolvedGuardProfile } from "@ai-orchestrator/workflow-engine";
+import { createDefaultGuardProfile, parseGuardProfile } from "@ai-orchestrator/guard-sdk";
+import {
+  checkAiGatewayRequest,
+  checkAiGatewayStreamWindow,
+  createAiGatewayHistoryMemo,
+  outboundTextSlots,
+  outputGuardMode,
+  STREAM_HOLD_CHARS,
+  streamCheckDue,
+  streamReleaseLength,
+  type AiGatewayGuardScope
+} from "./ai-gateway-guard.js";
+import { toChatMessages } from "./ai-gateway-wire.js";
 
 const provider: LLMProviderConfig = { providerId: "openai", model: "route-model", baseUrl: "https://route.example", extra: { note: "route text" } };
 
@@ -33,6 +50,7 @@ const scope = {
 
 beforeEach(() => {
   checks.length = 0;
+  answers.length = 0;
 });
 
 describe("outboundTextSlots", () => {
@@ -65,6 +83,135 @@ describe("outboundTextSlots", () => {
   it("marks only tool results as outside content", () => {
     const { slots } = outboundTextSlots({ provider, messages: [{ role: "tool" as const, content: "result", toolCallId: "c1" }, { role: "user" as const, content: "hello" }] });
     expect(slots.filter((slot) => slot.untrusted).map((slot) => slot.text)).toEqual(["result"]);
+  });
+
+  it("marks the content of user messages the caller marked untrusted as outside content too (D17)", () => {
+    const messages = [
+      { role: "user" as const, content: "my question" },
+      { role: "user" as const, content: "retrieved page" }
+    ];
+    const { slots } = outboundTextSlots({ provider, messages }, { untrustedMessages: new Set([1]) });
+    expect(slots.filter((slot) => slot.untrusted).map((slot) => slot.text)).toEqual(["retrieved page"]);
+  });
+});
+
+describe("the history memo (D16)", () => {
+  const clean = { action: "allow", findings: [], actions: [], transformed: false, protectedCount: 0, budget: { exceeded: false, skippedDetectors: [] } };
+  const allowClean = (input: { content: unknown }) => ({ action: "allow", content: input.content, transformed: false, verdicts: [{ profile: { profileId: "p", version: 1 }, summary: clean }] });
+  const memoScope = (overrides: Partial<AiGatewayGuardScope> = {}) =>
+    ({ ...scope, resolution: { stack: [{ profile: createDefaultGuardProfile(), hash: "h1" }] }, historyMemo: sharedMemo, ...overrides }) as AiGatewayGuardScope;
+  let sharedMemo = createAiGatewayHistoryMemo();
+  beforeEach(() => {
+    sharedMemo = createAiGatewayHistoryMemo();
+  });
+  const request = (...texts: string[]) => ({ provider, messages: texts.map((content) => ({ role: "user" as const, content })) });
+
+  it("checks only text it has not seen pass cleanly, and skips the check when nothing is new", async () => {
+    answers.push(allowClean);
+    await checkAiGatewayRequest(memoScope(), request("first question"));
+    expect(checks).toHaveLength(1);
+    expect(checks[0]!.content).toContain("first question");
+    await checkAiGatewayRequest(memoScope(), request("first question"));
+    expect(checks).toHaveLength(1);
+    answers.push(allowClean);
+    await checkAiGatewayRequest(memoScope(), request("first question", "second question"));
+    expect(checks).toHaveLength(2);
+    expect(checks[1]!.content).toEqual(["second question"]);
+  });
+
+  it("maps a rewrite of the new text back to its place", async () => {
+    answers.push(allowClean);
+    await checkAiGatewayRequest(memoScope(), request("hello"));
+    answers.push((input) => ({ action: "redact", content: (input.content as string[]).map((text) => text.replace("secret", "[R]")), transformed: true, verdicts: [] }));
+    const outcome = await checkAiGatewayRequest(memoScope(), request("hello", "my secret"));
+    expect(outcome).toMatchObject({ action: "rewrite" });
+    const messages = (outcome as { content: { messages: Array<{ content: string }> } }).content.messages;
+    expect(messages.map((message) => message.content)).toEqual(["hello", "my [R]"]);
+  });
+
+  it("keeps nothing that was not clean, and nothing across clients or projects", async () => {
+    answers.push((input) => ({ action: "allow", content: input.content, transformed: false, verdicts: [{ profile: { profileId: "p", version: 1 }, summary: { ...clean, findings: [{}] } }] }));
+    await checkAiGatewayRequest(memoScope(), request("flagged in shadow"));
+    await checkAiGatewayRequest(memoScope(), request("flagged in shadow"));
+    expect(checks).toHaveLength(2);
+    answers.push(allowClean);
+    await checkAiGatewayRequest(memoScope(), request("shared text"));
+    await checkAiGatewayRequest(memoScope({ clientId: "other-client" }), request("shared text"));
+    await checkAiGatewayRequest(memoScope({ projectId: "other-project" }), request("shared text"));
+    expect(checks).toHaveLength(5);
+  });
+
+  it("is not used when destination rules apply to the request", async () => {
+    const withRules = parseGuardProfile({
+      ...createDefaultGuardProfile(),
+      id: "dest",
+      destinations: { rules: [{ when: { dataClasses: ["email"] }, allow: { maxTier: "private" }, action: "block", name: "In-house" }] }
+    });
+    const destScope = memoScope({ resolution: { stack: [{ profile: withRules, hash: "h2" }] } as unknown as AiGatewayGuardScope["resolution"] });
+    answers.push(allowClean, allowClean);
+    await checkAiGatewayRequest(destScope, request("same text"));
+    await checkAiGatewayRequest(destScope, request("same text"));
+    expect(checks).toHaveLength(2);
+    expect(sharedMemo.size).toBe(0);
+  });
+});
+
+describe("toChatMessages", () => {
+  it("lists user messages marked l2m.untrusted and sends the mark nowhere", () => {
+    const mapped = toChatMessages([
+      { role: "system", content: "sys", l2m: { untrusted: true } },
+      { role: "user", content: "mine" },
+      { role: "user", content: "theirs", l2m: { untrusted: true } },
+      { role: "user", content: "odd", l2m: { untrusted: "yes" } }
+    ] as unknown as Parameters<typeof toChatMessages>[0]);
+    expect(mapped.untrusted).toEqual([2]);
+    expect(JSON.stringify(mapped.messages)).not.toContain("l2m");
+  });
+});
+
+describe("outputGuardMode", () => {
+  const resolved = (finalOutput: Record<string, unknown> | undefined) =>
+    ({ profile: { ...createDefaultGuardProfile(), channels: finalOutput ? { final_output: finalOutput } : {} } }) as unknown as ResolvedGuardProfile;
+
+  it("streams a rule set that rewrites (a copy of the built-in one), and buffers only on request", () => {
+    expect(outputGuardMode([{ profile: createDefaultGuardProfile() } as unknown as ResolvedGuardProfile])).toBe("chunked");
+    expect(outputGuardMode([resolved({ detectors: [], actions: { email: { action: "redact" } }, defaultAction: { action: "allow" } })])).toBe("chunked");
+    expect(outputGuardMode([resolved({ detectors: [], actions: { email: { action: "redact", stream: "buffer" } }, defaultAction: { action: "allow" } })])).toBe("buffered");
+    expect(outputGuardMode([resolved({ detectors: [], actions: {}, defaultAction: { action: "block", stream: "buffer" } })])).toBe("buffered");
+    expect(outputGuardMode([resolved(undefined)])).toBe("none");
+    expect(outputGuardMode([])).toBe("none");
+  });
+});
+
+describe("checkAiGatewayStreamWindow", () => {
+  it("checks the context and the pending text, with the window on the part to release", async () => {
+    const release = await checkAiGatewayStreamWindow(scope, { context: "sent ", pending: "new text held", release: 9 });
+    expect(checks[0]).toMatchObject({ content: "sent new text held", streamWindow: { start: 5, end: 14 } });
+    expect(release).toEqual({ action: "release", text: "new text ", consumed: 9, rewritten: false });
+  });
+
+  it("releases less when the window ended early", async () => {
+    answers.push((input) => ({ action: "allow", content: input.content, transformed: false, verdicts: [], window: { start: 5, end: 9 } }));
+    expect(await checkAiGatewayStreamWindow(scope, { context: "sent ", pending: "new text held", release: 9 })).toEqual({ action: "release", text: "new ", consumed: 4, rewritten: false });
+  });
+
+  it("releases the rewritten part in place of the raw characters it covers", async () => {
+    answers.push(() => ({ action: "redact", content: "sent [X] text held", transformed: true, verdicts: [], window: { start: 5, end: 14 } }));
+    expect(await checkAiGatewayStreamWindow(scope, { context: "sent ", pending: "new text held", release: 9 })).toEqual({ action: "release", text: "[X] text ", consumed: 9, rewritten: true });
+  });
+
+  it("releases nothing when the rewrite cannot be placed exactly", async () => {
+    // A later rule set rewrote text the window then left held: the held text is no longer the raw text.
+    answers.push(() => ({ action: "redact", content: "sent [X] text [Y]", transformed: true, verdicts: [], window: { start: 5, end: 9 } }));
+    expect(await checkAiGatewayStreamWindow(scope, { context: "sent ", pending: "new text held", release: 9 })).toMatchObject({ action: "release", text: "", consumed: 0 });
+    // The text already sent changed.
+    answers.push(() => ({ action: "redact", content: "SENT [X] text held", transformed: true, verdicts: [], window: { start: 5, end: 14 } }));
+    expect(await checkAiGatewayStreamWindow(scope, { context: "sent ", pending: "new text held", release: 9 })).toMatchObject({ consumed: 0 });
+  });
+
+  it("passes a block through", async () => {
+    answers.push(() => ({ action: "block", content: "", transformed: false, verdicts: [{ profile: { profileId: "p", version: 1 }, summary: { findings: [], actions: [], action: "block" } }] }));
+    expect(await checkAiGatewayStreamWindow(scope, { context: "", pending: "x", release: 1 })).toMatchObject({ action: "block" });
   });
 });
 

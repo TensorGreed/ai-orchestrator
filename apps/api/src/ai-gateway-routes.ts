@@ -56,12 +56,19 @@ import { retryAfterSeconds } from "./run-helpers.js";
 import {
   checkAiGatewayAnswer,
   checkAiGatewayRequest,
+  checkAiGatewayStreamWindow,
+  createAiGatewayHistoryMemo,
   outputGuardMode,
+  STREAM_MAX_VALUE_CHARS,
+  STREAM_OVERLAP_CHARS,
   streamCheckDue,
   streamReleaseLength,
   type AiGatewayAnswer,
   type AiGatewayGuardScope,
-  type AiGatewayOutputMode
+  type AiGatewayHistoryMemo,
+  type AiGatewayOutputMode,
+  type AiGatewayStreamRelease,
+  type OutboundTextOptions
 } from "./services/ai-gateway-guard.js";
 import { chargedUsage, estimateAnswerTokens, estimateRequestTokens, unseenOutputTokens, type UsageEstimate } from "./services/ai-gateway-usage.js";
 import {
@@ -113,6 +120,8 @@ export interface AiGatewayDeps {
   checkModel?: AiGatewayModelCheck;
   /** Boundary and held-back tail sizes for streamed content rule checks (tests). */
   streamCheck?: { minChars?: number; maxChars?: number; holdChars?: number };
+  /** D16 — the memo of prompt text that passed cleanly. Absent: one per app, in this process (10 000 entries, 10 minutes). */
+  historyMemo?: AiGatewayHistoryMemo;
 }
 
 interface Admitted {
@@ -240,6 +249,8 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
   const clientService = new McpClientService(store);
   const limiter = deps.limiter ?? new GatewayClientLimiter();
   const refusalAuditedAt = new Map<string, number>();
+  // Process-local by design: each replica remembers only what it checked itself.
+  const historyMemo = deps.historyMemo ?? createAiGatewayHistoryMemo();
 
   const audit = async (event: AuditEventInput) => {
     try {
@@ -399,7 +410,8 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
             alias: route.alias,
             subject,
             resolveSecret: deps.resolveSecret,
-            logger: (message, metadata) => app.log.warn({ metadata }, message)
+            logger: (message, metadata) => app.log.warn({ metadata }, message),
+            historyMemo
           };
           outputMode = outputGuardMode(resolution.stack);
         }
@@ -553,9 +565,15 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
   };
 
   /** Content rules on the provider request, built and ready to send. Returns the request to send. */
-  const guardRequest = async <T extends { provider: LLMProviderConfig }>(admitted: Admitted, kind: "chat" | "embedding", stream: boolean, providerRequest: T): Promise<{ request: T; outcome: RecordedGuardOutcome }> => {
+  const guardRequest = async <T extends { provider: LLMProviderConfig }>(
+    admitted: Admitted,
+    kind: "chat" | "embedding",
+    stream: boolean,
+    providerRequest: T,
+    options: OutboundTextOptions = {}
+  ): Promise<{ request: T; outcome: RecordedGuardOutcome }> => {
     if (!admitted.guard) return { request: providerRequest, outcome: "none" };
-    const verdict = await checkAiGatewayRequest(admitted.guard, providerRequest);
+    const verdict = await checkAiGatewayRequest(admitted.guard, providerRequest, options);
     if (verdict.action === "block") {
       await auditGuardBlock(admitted, "prompt", verdict);
       await record(admitted, { kind, stream, status: "blocked_prompt", httpStatus: 400, guardOutcome: "block", errorCode: "content_filter" });
@@ -589,14 +607,21 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       const { options, temperature, maxTokens } = toCallOptions(body, admitted.route, { hasImages: mapped.hasImages, streamUsage });
       const provider = providerConfig(admitted.route, { ...(temperature !== undefined ? { temperature } : {}), ...(maxTokens !== undefined ? { maxTokens } : {}) });
       const tools = toToolDefinitions(body);
-      const { request: callRequest, outcome: promptOutcome } = await guardRequest(admitted, "chat", wantsStream, { provider, messages: mapped.messages, ...(tools ? { tools } : {}), options });
+      const { request: callRequest, outcome: promptOutcome } = await guardRequest(
+        admitted,
+        "chat",
+        wantsStream,
+        { provider, messages: mapped.messages, ...(tools ? { tools } : {}), options },
+        { untrustedMessages: new Set(mapped.untrusted) }
+      );
       const context = executionContext(admitted);
       const base = { id: `chatcmpl-${admitted.requestId.slice(5)}`, created: Math.floor(admitted.startedAt / 1000), model: admitted.route.alias };
+      // Rule sets that rewrite still stream: the rewrite applies to each released part. Only `stream: "buffer"` waits.
       const streamsForReal = wantsStream && support.streaming && typeof adapter.generateStream === "function" && admitted.outputMode !== "buffered";
       const inputTokens = () => estimateRequestTokens(callRequest);
 
       if (!streamsForReal) {
-        // One answer: a non-stream request, a provider without streaming, or set of rule sets that may rewrite the answer.
+        // One answer: a non-stream request, a provider without streaming, or a rule set that asks for buffering.
         let answer;
         try {
           answer = await adapter.generate(callRequest, context);
@@ -686,7 +711,8 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     const writer = new OpenAiSseWriter(request, reply, deps.config.SSE_HEARTBEAT_INTERVAL_MS);
     const guarded = admitted.guard !== null && admitted.outputMode === "chunked";
     const collector = new ToolCallCollector();
-    let sentText = "";
+    /** The raw answer text released so far: the audit check reads it, and the boundary checks read its end for context. */
+    let releasedText = "";
     let pendingText = "";
     /** How much of the end of `pendingText` no check has seen yet. */
     let uncheckedChars = 0;
@@ -698,28 +724,35 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     const opening = () => {
       if (!writer.isStarted) writer.data(chatChunk(base, { role: "assistant", content: "", refusal: null }));
     };
-    const sendText = (length: number) => {
-      if (length <= 0) return;
-      const text = pendingText.slice(0, length);
+    /** Whether a boundary check rewrote part of the answer. */
+    let answerRewritten = false;
+    /** Sends `text` (the checked, possibly rewritten, form) in place of the first `consumed` pending characters. */
+    const sendRelease = (release: Extract<AiGatewayStreamRelease, { action: "release" }>) => {
+      if (release.consumed <= 0) return;
+      releasedText += pendingText.slice(0, release.consumed);
+      pendingText = pendingText.slice(release.consumed);
+      if (release.rewritten) answerRewritten = true;
+      if (!release.text) return;
       opening();
-      writer.data(chatChunk(base, { content: text }));
-      sentText += text;
-      pendingText = pendingText.slice(length);
+      writer.data(chatChunk(base, { content: release.text }));
     };
-    /** A boundary check of the text so far (records nothing). False when it blocks: the stream is cut. */
-    const passes = async (): Promise<boolean> => {
-      const verdict = await checkAiGatewayAnswer(admitted.guard!, { content: sentText + pendingText, toolCalls: [] }, false);
-      // A rewrite cannot be applied to a streamed answer: it stops the stream like a block (buffered mode avoids it).
-      if (verdict.action === "allow") return true;
-      cut = verdict.action === "block" ? verdict : { reason: "Blocked by content rules: the answer would have been rewritten", categories: [], profiles: [] };
-      return false;
+    const holdChars = deps.streamCheck?.holdChars;
+    const overlapChars = holdChars === undefined ? STREAM_OVERLAP_CHARS : holdChars + STREAM_MAX_VALUE_CHARS;
+    /**
+     * A boundary check (records nothing) of the pending text, with the end of the released text in front of it. `final`:
+     * all of it may go (the answer is complete); otherwise all but the held-back tail. Null when nothing could be released.
+     */
+    const windowCheck = async (final: boolean): Promise<AiGatewayStreamRelease | null> => {
+      const release = final ? pendingText.length : streamReleaseLength(pendingText, holdChars);
+      if (release <= 0) return null;
+      return await checkAiGatewayStreamWindow(admitted.guard!, { context: releasedText.slice(-overlapChars), pending: pendingText, release });
     };
 
     /** When output last arrived: how long the provider may have been producing what the gateway never read. */
     let lastOutputAt = admitted.startedAt;
     /** What to charge if usage is missing. `stoppedEarly`: the gateway stopped reading before the provider finished. */
     const spend = (stoppedEarly: boolean) => (): UsageEstimate => {
-      const seenTokens = estimateAnswerTokens(sentText + pendingText, collector.calls);
+      const seenTokens = estimateAnswerTokens(releasedText + pendingText, collector.calls);
       const unseen = stoppedEarly ? unseenOutputTokens({ quietMs: Date.now() - lastOutputAt, seenTokens, maxTokens: input.callRequest.provider.maxTokens }) : 0;
       return { input: input.inputTokens(), output: seenTokens + unseen };
     };
@@ -735,24 +768,29 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
           if (!guarded) {
             opening();
             writer.data(chatChunk(base, { content: chunk.textDelta }));
-            sentText += chunk.textDelta;
+            releasedText += chunk.textDelta;
             continue;
           }
           pendingText += chunk.textDelta;
           uncheckedChars += chunk.textDelta.length;
           if (streamCheckDue(pendingText.slice(-uncheckedChars), deps.streamCheck)) {
-            let passed: boolean;
+            let verdict: AiGatewayStreamRelease | null;
             try {
-              passed = await passes();
+              // The end of the pending text may be the start of a match: that part waits for the text after it.
+              verdict = await windowCheck(false);
             } catch (error) {
               // The check failed, not the provider: kept apart from `upstreamError`, which blames the provider.
               checkFailure = error;
               break;
             }
-            if (!passed) break;
-            uncheckedChars = 0;
-            // All of it passed, but its end may be the start of a match: that part waits for the text after it.
-            sendText(streamReleaseLength(pendingText, deps.streamCheck?.holdChars));
+            if (verdict?.action === "block") {
+              cut = verdict;
+              break;
+            }
+            if (verdict) {
+              uncheckedChars = 0;
+              sendRelease(verdict);
+            }
           }
         } else if (chunk.type === "tool_call_delta") {
           const index = collector.add(chunk);
@@ -808,11 +846,15 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     const toolCalls = collector.complete();
     // A cut breaks out of the read: the provider was still producing.
     const estimate = spend(cut !== null && !providerFinished);
+    let sendToolCalls = toolCalls;
     if (guarded) {
-      // The audit check: the whole answer (also after a cut), recorded.
+      // The rest of the text, checked as the last window (records nothing), then the audit check: the whole raw answer
+      // (also after a cut), recorded. The rest goes out only when both pass.
+      let tail: AiGatewayStreamRelease | null = null;
       let verdict;
       try {
-        verdict = await checkAiGatewayAnswer(admitted.guard!, { content: sentText + pendingText, toolCalls });
+        if (!cut) tail = await windowCheck(true);
+        verdict = await checkAiGatewayAnswer(admitted.guard!, { content: releasedText + pendingText, toolCalls });
       } catch (error) {
         // The provider was paid for: the row is written, and what was held back stays unsent.
         await record(admitted, { kind: "chat", stream: true, status: "error", httpStatus: writer.isStarted ? 200 : 500, finishReason, ...(usage ? { usage } : {}), estimate, guardOutcome, errorCode: "internal_error" });
@@ -822,14 +864,21 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
         writer.end();
         return reply;
       }
-      if (!cut && verdict.action !== "allow") {
-        cut = verdict.action === "block" ? verdict : { reason: "Blocked by content rules: the answer would have been rewritten", categories: [], profiles: [] };
+      if (!cut && tail?.action === "block") cut = tail;
+      if (!cut && verdict.action === "block") cut = verdict;
+      if (!cut && tail?.action === "release" && tail.consumed < pendingText.length) {
+        cut = { reason: "Blocked by content rules: the end of the answer could not be checked", categories: [], profiles: [] };
       }
       if (!cut) {
-        sendText(pendingText.length);
-        if (toolCalls.length > 0) {
+        if (tail?.action === "release") sendRelease(tail);
+        if (verdict.action === "rewrite") {
+          sendToolCalls = verdict.content.toolCalls;
+          answerRewritten = true;
+        }
+        if (answerRewritten) guardOutcome = "rewrite";
+        if (sendToolCalls.length > 0) {
           opening();
-          writer.data(chatChunk(base, { tool_calls: openAiToolCalls(toolCalls).map((call, index) => ({ index, ...call })) }));
+          writer.data(chatChunk(base, { tool_calls: openAiToolCalls(sendToolCalls).map((call, index) => ({ index, ...call })) }));
         }
       }
     }
@@ -841,7 +890,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       guardOutcome = "block";
       status = "blocked_output";
     }
-    const finish: LLMFinishReason = finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop");
+    const finish: LLMFinishReason = finishReason ?? (sendToolCalls.length > 0 ? "tool_calls" : "stop");
     await record(admitted, { kind: "chat", stream: true, status, httpStatus: 200, finishReason: finish, ...(usage ? { usage } : {}), estimate, guardOutcome });
     opening();
     writer.data(chatChunk(base, {}, finish));

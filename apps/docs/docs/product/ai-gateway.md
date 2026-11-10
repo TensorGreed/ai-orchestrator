@@ -88,15 +88,21 @@ A provider without streaming answers in one piece, sent as a stream of the same 
 
 ## Content rules
 
-A route set's rule set (and the client's, and the project's enforced rule set) checks each request. Rule sets run only when one is bound to the route set or to the client: a project's enforced rule set applies on top of a bound one, and does not apply on its own. Destination rules need the same binding.
+A route set's rule set, the client's, the project's enforced rule set and the deployment's destination rules check each request. The project's enforced rule set and the destination rules apply on their own too, with nothing bound to the route set or the client. (Before this release, both applied only once a rule set was bound there.) The instance default rule set (`GUARD_AUTO_APPLY`) never applies to `/v1`: with none of these, requests are not checked.
 
 
 - **Prompt.** The request before it goes to the provider, as described below. Tool results the caller sends back (`tool` messages) are checked as outside content. The deployment's destination rules apply to the route's provider. A blocked prompt answers `400` with code `content_filter`, and the provider is never called.
-- **Answer.** The answer's text and the arguments of any tool calls. A blocked answer has `finish_reason: "content_filter"`.
+- **Answer.** The answer's text and the arguments of any tool calls, on the `final_output` channel. `/v1` has no separate `model_output` check: the answer is what the caller receives. A blocked answer has `finish_reason: "content_filter"`.
 
-On the way in, rule sets read the text the request sends to the provider: message text, tool results (labelled as outside content), the arguments of earlier tool calls, tool names, descriptions and schemas, `response_format`, `stop` and `user`, and for embeddings the inputs and `user`. A rewrite is applied in place. Restricted text in a name or key the rest of the request depends on, such as a tool name or a schema property, blocks the request instead. Images are not read: a rule set does not see what an image contains. Numeric fields (`seed`, `max_tokens` and the like) are not read either.
+On the way in, rule sets read the text the request sends to the provider: message text, tool results (labelled as outside content), the arguments of earlier tool calls, tool names, descriptions and schemas, `response_format`, `stop` and `user`, and for embeddings the inputs and `user`. A rewrite is applied in place. Restricted text in a name or key the rest of the request depends on, such as a tool name or a schema property, blocks the request instead. Images are not read: the gateway takes images only as data URLs, and a rule set does not see what an image contains. Numeric fields (`seed`, `max_tokens` and the like) are not read either.
 
-When streaming, the text so far is checked at sentence boundaries and every few hundred characters. Text that passed is released except for its last 256 characters, and further back when that point falls inside an unbroken value such as an address, a key or a URL, so a match still arriving is not sent in part. The tail goes out after the last check of the whole answer, which adds about a second before the first text of a long answer; a short answer arrives in one piece. A block cuts the stream: the last chunk has `finish_reason: "content_filter"`, an error event with code `content_filter` follows, then `[DONE]`. A rule set that redacts, masks or transforms answers makes the stream buffered: the whole answer is generated and checked first, then streamed. Review and approval actions block, because nobody waits on an API call.
+If your application puts outside text into a `user` message, such as passages from its own search, mark the message with `"l2m": {"untrusted": true}`. Its text is then checked as outside content, like a tool result, so rules for planted instructions apply to it. The mark is never sent to the provider.
+
+In a conversation, each request carries the earlier turns again. Text that passed every rule cleanly (nothing found, nothing changed) is remembered for ten minutes, per client, so the next request checks only what is new and records rule events only for that. The gateway keeps no text for this, only a hash, and each instance remembers only what it checked itself. It is not used when destination rules apply to the request.
+
+When streaming, new text is checked at sentence boundaries and every few hundred characters, together with the last few thousand characters already sent, for context. Text that passed is released except for its last 256 characters, and further back when that point falls inside an unbroken value such as an address, a key or a URL, so a match still arriving is not sent in part. Redact, mask, protect and the hidden-character transform apply to each part as it is released, and a value that runs past the release point waits for the next one, so it is never sent in two pieces. The tail goes out after the last check of the whole answer, which adds about a second before the first text of a long answer; a short answer arrives in one piece. A block cuts the stream: the last chunk has `finish_reason: "content_filter"`, an error event with code `content_filter` follows, then `[DONE]`. Review and approval actions block, because nobody waits on an API call.
+
+A rule set copied from the built-in one streams. To have the whole answer generated and checked before any of it is sent, set `"stream": "buffer"` on a `final_output` rule (or its default action): a stream through that rule set is then buffered.
 
 The held-back tail has limits. It works for values that can be recognised within their own length. Text that was released cannot be recalled, so part of a match can still reach the caller when:
 
@@ -104,7 +110,7 @@ The held-back tail has limits. It works for values that can be recognised within
 - an unbroken value runs past 4096 characters;
 - a rule only fires on what comes later, such as a phrase that makes earlier text sensitive, or a score that builds up over the whole answer.
 
-When a rule set must see the whole answer before any of it is sent, use a rule set that may rewrite answers, which makes the stream buffered, or call without streaming.
+When a rule set must see the whole answer before any of it is sent, set `"stream": "buffer"` on one of its `final_output` rules, or call without streaming.
 
 Send the output limit as `max_tokens` or `max_completion_tokens`. On an `openai` route the name you use is the name sent; other providers get `max_tokens`. With `stream_options: {"include_usage": true}` the final usage chunk carries the provider's own numbers; a provider that sent none gets no usage chunk (the usage row still carries an estimate).
 

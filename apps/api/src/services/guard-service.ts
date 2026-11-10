@@ -687,9 +687,11 @@ export class GuardService {
    *   4. the deployment's destination rules, last.
    * Stacked like a run's: the most severe action wins, so each later profile only tightens.
    *
-   * Only a toolset or client binding turns this on: with neither, `refs` is empty and the gateway runs no Guard at
-   * all, exactly as before (a project's enforced profile or GUARD_AUTO_APPLY alone never start checking gateway
-   * calls). `refs`: the profiles a workflow tool's run carries (pinned; the deployment's rules apply to runs anyway).
+   * With neither a toolset nor a client binding, the project's enforced rule set and the deployment's destination
+   * rules still apply (Phase 12 coverage, D13: an admin who enforces a rule set on a project expects its gateways
+   * covered too). With none of the four, the stack is empty and the gateway runs no content rules, exactly as before.
+   * GUARD_AUTO_APPLY and the built-in rule set never apply to gateway calls. `refs`: the profiles a workflow tool's run
+   * carries (pinned; the deployment's rules apply to runs anyway).
    */
   async resolveGateway(context: {
     toolsetId: string;
@@ -698,7 +700,7 @@ export class GuardService {
     /** 12.6b — `ai_route_set`: `toolsetId` is an AI gateway route set, whose binding stands where a toolset's does. */
     setScope?: "toolset" | "ai_route_set";
   }): Promise<{ resolution: GuardRunResolution; refs: GatewayGuardProfileRef[] }> {
-    // One read for both bindings: a deployment with no gateway binding pays one indexed lookup per call, no more.
+    // One read for both bindings; then the project's binding and the deployment's destination rules (D13).
     const bindings = await this.store.getGatewayGuardBindings(context.toolsetId, context.clientId, context.setScope ?? "toolset");
     const asBinding = (record: GuardBindingRecord | null) =>
       record ? { mode: record.mode as GuardBindingMode, profileId: record.profileId } : { mode: "inherit" as GuardBindingMode, profileId: null };
@@ -708,14 +710,15 @@ export class GuardService {
     const clientProfile = client.mode === "override" && client.profileId ? await this.loadProfile(client.profileId) : undefined;
     const chain: GuardBindingLevel[] = [];
     const level = (entry: GuardBindingLevel, resolved?: ResolvedGuardProfile) => chain.push({ ...entry, ...(resolved ? { version: resolved.version } : {}) });
-    if (!toolsetProfile && !clientProfile) {
+    // A toolset without a project has no project floor (its tool rules see no project either).
+    const project = context.projectId ? await this.getBinding("project", context.projectId) : null;
+    const enforced = project?.mode === "enforced" && project.profileId ? await this.loadProfile(project.profileId) : undefined;
+    const deployment = await this.deploymentProfile();
+    if (!toolsetProfile && !clientProfile && !enforced && !deployment) {
       level({ level: "toolset", mode: toolset.mode, profileId: toolset.profileId });
       level({ level: "mcp_client", mode: client.mode, profileId: client.profileId });
       return { resolution: { source: "none", stack: [], chain }, refs: [] };
     }
-    // A toolset without a project has no project floor (its tool rules see no project either).
-    const project = context.projectId ? await this.getBinding("project", context.projectId) : null;
-    const enforced = project?.mode === "enforced" && project.profileId ? await this.loadProfile(project.profileId) : undefined;
     if (project) level({ level: "project", mode: project.mode === "enforced" ? "enforced" : "inherit", profileId: project.mode === "enforced" ? project.profileId : null }, enforced);
     level({ level: "toolset", mode: toolset.mode, profileId: toolset.profileId }, toolsetProfile);
     level({ level: "mcp_client", mode: client.mode, profileId: client.profileId }, clientProfile);
@@ -727,8 +730,8 @@ export class GuardService {
       stack.push(entry);
       refs.push({ profileId: entry.profileId, version: entry.version, level: at });
     }
-    const source: GuardRunResolution["source"] = enforced ? "enforced" : toolsetProfile ? "toolset" : "mcp_client";
-    return { resolution: GuardService.withDeployment({ source, ...(enforced ? { enforced } : {}), stack, chain }, await this.deploymentProfile()), refs };
+    const source: GuardRunResolution["source"] = enforced ? "enforced" : toolsetProfile ? "toolset" : clientProfile ? "mcp_client" : "none";
+    return { resolution: GuardService.withDeployment({ source, ...(enforced ? { enforced } : {}), stack, chain }, deployment), refs };
   }
 
   /** 12.6 — the engine's Guard dependencies for one gateway server tool call, for a resolution from `resolveGateway`. */
