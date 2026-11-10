@@ -27,8 +27,8 @@ import {
   parseMcpRuntimeRejection,
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
-import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { providerDestinationRef } from "@ai-orchestrator/provider-sdk";
+import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
+import { chargedUsage, estimateAnswerTokens, estimateRequestTokens, isStreamUsageRefusal, providerDestinationRef } from "@ai-orchestrator/provider-sdk";
 import {
   GUARD_EFFECTIVE_PROFILE_REF,
   NODE_ACTIVITY_LIMIT,
@@ -3495,6 +3495,85 @@ async function runLlmNode(input: {
   }
 }
 
+/**
+ * Providers whose streamed calls ask for the final usage frame (`stream_options.include_usage`) unless the model sets
+ * `extra.streamUsage: false`. OpenAI-compatible servers and Ollama differ in whether they accept the field, so they
+ * leave it out unless the model sets `extra.streamUsage: true`; their streamed usage is otherwise estimated.
+ */
+const STREAM_USAGE_BY_DEFAULT = new Set(["openai", "azure_openai"]);
+
+/** Endpoints and models that refused `stream_options` in this process: their streamed calls leave it out. */
+const streamUsageRefused = new Set<string>();
+const STREAM_USAGE_REFUSED_MAX = 1000;
+
+function streamUsageKey(provider: LLMProviderConfig): string {
+  const extra = provider.extra ?? {};
+  return JSON.stringify([
+    String(provider.providerId),
+    provider.baseUrl ?? "",
+    typeof extra.endpoint === "string" ? extra.endpoint : "",
+    typeof extra.apiVersion === "string" ? extra.apiVersion : "",
+    typeof extra.deployment === "string" ? extra.deployment : "",
+    provider.model ?? ""
+  ]);
+}
+
+function wantsStreamUsage(provider: LLMProviderConfig): boolean {
+  const setting = provider.extra?.streamUsage;
+  if (setting === false) return false;
+  if (setting !== true && !STREAM_USAGE_BY_DEFAULT.has(String(provider.providerId))) return false;
+  return !streamUsageRefused.has(streamUsageKey(provider));
+}
+
+/**
+ * The model's stream. When it was asked for the usage frame and the provider refuses the request because of that
+ * option (400 or 422 naming `stream_options`, see `isStreamUsageRefusal`) before sending anything, it is asked once
+ * more without it, and the endpoint is remembered so later calls leave the field out: a workflow that streamed before
+ * never fails because usage was requested. The usage of such a call is estimated. A model tape records only the retry.
+ */
+async function* streamWithUsageFallback(
+  adapter: ReturnType<ProviderRegistry["get"]>,
+  request: ProviderCallRequest,
+  context: ProviderExecutionContext,
+  warn: (message: string, metadata: Record<string, unknown>) => void
+): AsyncGenerator<LLMStreamChunk> {
+  const generateStream = adapter.generateStream!.bind(adapter);
+  let started = false;
+  try {
+    for await (const chunk of generateStream(request, context)) {
+      started = true;
+      yield chunk;
+    }
+    return;
+  } catch (error) {
+    // Only a refusal that names the option is retried; any other 400 or 422 is the request's own error.
+    if (started || request.options?.streamUsage !== true || !isStreamUsageRefusal(error)) throw error;
+    warn("The model refused the streamed request with the usage option (stream_options); retrying without it, and its usage is estimated", {
+      providerId: String(request.provider.providerId),
+      model: request.provider.model,
+      status: (error as { statusCode?: number }).statusCode,
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 300)
+    });
+  }
+  throwIfAborted(context.signal);
+  const { options: _usageOption, ...withoutUsage } = request;
+  // Remembered once the request without the field is accepted (its first chunk, or an empty end): the field was the
+  // cause. A retry that fails the same way leaves nothing remembered.
+  const remember = () => {
+    if (streamUsageRefused.size >= STREAM_USAGE_REFUSED_MAX) streamUsageRefused.clear();
+    streamUsageRefused.add(streamUsageKey(request.provider));
+  };
+  let accepted = false;
+  for await (const chunk of generateStream(withoutUsage, context)) {
+    if (!accepted) {
+      accepted = true;
+      remember();
+    }
+    yield chunk;
+  }
+  if (!accepted) remember();
+}
+
 async function runLlmCall(
   input: {
     nodeId: string;
@@ -3508,17 +3587,26 @@ async function runLlmCall(
     let streamedText = "";
     const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
     let llmDeltaIndex = 0;
+    let reportedUsage: Extract<LLMStreamChunk, { type: "usage" }>["usage"] | undefined;
+    const streamRequest: ProviderCallRequest = {
+      provider: input.provider,
+      messages,
+      // Ask for the final usage frame where the provider takes it (see STREAM_USAGE_BY_DEFAULT); without one the usage
+      // is estimated below.
+      ...(wantsStreamUsage(input.provider) ? { options: { streamUsage: true } } : {})
+    };
+    const warn = (message: string, metadata: Record<string, unknown>) => {
+      if (input.dependencies.logger) input.dependencies.logger(message, { nodeId: input.nodeId, ...metadata });
+      else console.warn(`[llm_call ${input.nodeId}] ${message}`, metadata);
+    };
+    const streamStartedMs = Date.now();
 
     throwIfAborted(input.dependencies.abortSignal);
-    for await (const chunk of providerAdapter.generateStream(
-      {
-        provider: input.provider,
-        messages
-      },
-      providerCallContext(input.dependencies, input.nodeId)
-    )) {
+    for await (const chunk of streamWithUsageFallback(providerAdapter, streamRequest, providerCallContext(input.dependencies, input.nodeId), warn)) {
       throwIfAborted(input.dependencies.abortSignal);
-      if (chunk.type === "text_delta" && chunk.textDelta) {
+      if (chunk.type === "usage") {
+        reportedUsage = chunk.usage;
+      } else if (chunk.type === "text_delta" && chunk.textDelta) {
         streamedText += chunk.textDelta;
         await input.dependencies.onLLMDelta({
           nodeId: input.nodeId,
@@ -3557,6 +3645,16 @@ async function runLlmCall(
       };
     });
 
+    // Budgets and spend read `_telemetry`: a stream whose provider sent no usage frame is charged an estimate of the
+    // request and the answer received (the same estimate as the /v1 gateway), never zero.
+    const charged = chargedUsage(reportedUsage, () => ({
+      input: estimateRequestTokens(streamRequest),
+      output: estimateAnswerTokens(
+        streamedText,
+        [...toolCallById.values()].map((entry) => ({ name: entry.name, arguments: entry.argumentsText }))
+      )
+    }));
+
     return {
       text: streamedText,
       answer: streamedText,
@@ -3564,18 +3662,28 @@ async function runLlmCall(
       raw: {
         streamed: true
       },
-      _provider: input.provider
+      _provider: input.provider,
+      _telemetry: {
+        providerId: input.provider.providerId,
+        model: input.provider.model,
+        usage: charged.usage,
+        ...(charged.estimated ? { usageEstimated: true } : {}),
+        latencyMs: Math.max(0, Date.now() - streamStartedMs)
+      }
     };
   }
 
-  const response = await providerAdapter.generate(
-    {
-      provider: input.provider,
-      messages
-    },
-    providerCallContext(input.dependencies, input.nodeId)
-  );
+  const request: ProviderCallRequest = { provider: input.provider, messages };
+  const response = await providerAdapter.generate(request, providerCallContext(input.dependencies, input.nodeId));
   throwIfAborted(input.dependencies.abortSignal);
+  // A provider that reports no usage (some compatible servers) is charged an estimate, as a stream is.
+  const charged = chargedUsage(response.usage, () => ({
+    input: estimateRequestTokens(request),
+    output: estimateAnswerTokens(
+      response.content ?? "",
+      (response.toolCalls ?? []).map((call) => ({ name: call.name, arguments: JSON.stringify(call.arguments ?? {}) }))
+    )
+  }));
 
   return {
     text: response.content,
@@ -3589,7 +3697,8 @@ async function runLlmCall(
     _telemetry: {
       providerId: input.provider.providerId,
       model: input.provider.model,
-      usage: response.usage,
+      usage: charged.usage,
+      ...(charged.estimated ? { usageEstimated: true } : {}),
       latencyMs: response.latencyMs
     }
   };

@@ -18,6 +18,12 @@ A budget caps the model spend (USD) or the tokens used in a period: a day, a wee
 
 Usage is what the usage records hold: the tokens and the estimated cost of each run's model calls, priced with the model prices (`LLM_PRICING_OVERRIDES_JSON` adds or changes prices). A model without a known price counts its tokens, at no cost.
 
+A model call that ends normally but whose provider reports no token usage (or only part of it) is counted with an estimate, not as zero. The estimate counts about three bytes of text a token, so it leans high, and the node's **Trace** tab marks the counts as estimated (`usageEstimated` in the node's `_telemetry`).
+
+- Streamed runs (from the editor or `/execute/stream`) ask OpenAI and Azure OpenAI for their usage frame. If the provider refuses that option (HTTP 400 or 422 naming `stream_options`, for example an Azure resource on an older API version), the call is sent again once without it, its usage is estimated, a warning is logged, and later calls to that model leave the option out until the API restarts. Any other 400 or 422 fails the call as before. A model tape records only the second request, so the run replays. `extra.streamUsage: false` on the model never asks.
+- OpenAI-compatible servers and Ollama are not asked by default, since servers differ in whether they accept the option, so their streamed usage is estimated. `extra.streamUsage: true` on the model asks for it.
+- A call that does not end normally records no usage: a stream that fails part way, a run that is cancelled, and a run that times out are not counted, even for the tokens the provider already produced.
+
 ## Actions
 
 - **Warn** never stops anything. When usage crosses the warn threshold (80% by default) or the cap, an alert is recorded, once per budget, period and level, and sent to the budget's notify webhook if it has one.
