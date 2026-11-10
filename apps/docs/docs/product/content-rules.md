@@ -69,7 +69,13 @@ Before a model call, every part of the system and user prompt that came from out
 | Where | Rule sets | What a finding does |
 |---|---|---|
 | LLM Call, chat model nodes and the chains (Basic LLM Chain, Q&A, Summarization, Information Extractor, Text Classifier, Sentiment Analysis, AI Transform) | The run's rule sets | A block fails the node; a rewrite changes that part of the prompt; a review or approval pauses the run and re-runs the node once approved. Under the built-in **Default rule set** applied automatically, the check only records what it would have done (shadow) for now. |
-| Agents and Supervisors | The rules port, or the run's rule sets | Same, enforced. Under the built-in rule set applied automatically, parts that came straight from the run's input are only recorded, since the agent's own prompt check already acts on them; parts from retrieval and other steps are enforced. |
+| Agents and Supervisors | The rules port, or the run's rule sets | Same, enforced. Under the built-in rule set applied automatically, the caller's own words are only recorded, since the agent's own prompt check already acts on them; everything else is enforced (see below). |
+
+Shadow applies when the run uses the instance's automatic rule set (the Trace tab shows "instance default"), not when someone bound the built-in rule set to the workflow or project. Shadow checks record only what they found: a clean part writes no rule event. The shadow period ends in a later release, announced one release ahead.
+
+**The caller's own words.** At an agent under the automatic built-in rule set, a part counts as the caller's own words when the run was started by a webhook, an API call, a chat, a form or an MCP server call, and the part comes from the run's input either directly or only through steps that reshape it (Set, Edit Fields, Rename Keys, Merge, Code, Prompt Template, If, Switch, Filter, Loop, Sort, Limit, Aggregate, Split Out, Remove Duplicates, Date & Time, Input Validator, Try/Catch). Any other step in the chain (retrieval, a connector, an HTTP request, a model, an agent, a sub-workflow) makes the part outside content. Runs started by email, feeds, files, chat apps, queues, schedules or another workflow carry third-party content, so their input is outside content too.
+
+**Not covered yet.** The retry calls of the Output Parser and Output Guardrail nodes, and earlier turns an agent replays from Simple Memory, reach the model with destination rules only. Tool results stored in memory were checked when they arrived.
 
 Two optional settings on a rule set change this:
 
@@ -78,7 +84,7 @@ Two optional settings on a rule set change this:
 ```
 
 - `onBlock: "withhold"` replaces a blocked part with `[content withheld by content rules]` and lets the model call go ahead. When several rule sets apply, an explicit `onBlock: "fail"` in any of them wins.
-- `perDocument: true` makes RAG Retrieve and Rerank check each document as it is retrieved. A blocked document, or one that would need a review, is dropped; rewrites apply to the document text. The `context` is rebuilt and numbered from what is left, and the node output gains `contentRules: { dropped, redacted }`. When every document is dropped, the node returns an empty context. The model boundary then reuses these checks for the documents that reach the prompt unchanged.
+- `perDocument: true` makes RAG Retrieve and Rerank check each document as it is retrieved. A blocked document, or one that would need a review, is dropped; rewrites apply to the document text. The `context` is rebuilt and numbered from what is left, and the node output gains `contentRules: { dropped, redacted }`. When every document is dropped, the node returns an empty context. If the rule sets cannot be loaded, the node skips these checks and returns its documents; the model boundary downstream then fails the model call. The model boundary reuses these checks for the documents that reach the prompt unchanged.
 
 Nothing here runs without content rules: with `GUARD_AUTO_APPLY=false` and no bindings, or when no rule set has a `tool_result` channel, prompts reach the model as before.
 

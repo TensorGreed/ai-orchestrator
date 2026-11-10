@@ -2289,6 +2289,7 @@ export async function createApp(
           customData: input.customData,
           executionTimeoutMs,
           triggerType: input.triggerType,
+          ...(input.inputTriggerType ? { inputTriggerType: input.inputTriggerType } : {}),
           triggeredBy: input.triggeredBy,
           toolPolicySubject: input.policySubject ?? await resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
@@ -13561,6 +13562,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
         channel: "draft",
         ...replayRunInputFor(replay.recording.sourceTriggerType, storedInput),
+        // Phase 12 coverage — whether the recorded input was a caller's own words is decided by the recording's trigger
+        // (never an imported file's claim of one).
+        ...(replay.recording.sourceTriggerType && replay.recording.capabilities.origin !== "imported"
+          ? { inputTriggerType: replay.recording.sourceTriggerType }
+          : {}),
         // Phase 16 (Q7) — the recording's input origin (replays, gate cases and simulations alike), not the starter's.
         // A golden run imported from a file always counts as outside content as well (its trigger is the file's claim).
         inputLabels: recordedInputLabels({

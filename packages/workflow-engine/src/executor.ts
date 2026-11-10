@@ -202,11 +202,15 @@ import {
 import { profileUsesLabels, type GuardDictionary } from "@ai-orchestrator/guard-sdk";
 import {
   boundaryProfiles,
+  callerInputCheck,
   checkModelBoundary,
   checkRetrievedDocuments,
+  exportCallerInput,
   exportRenderings,
   hasUntrustedPiece,
+  importCallerInput,
   importRenderings,
+  isCallerInputRun,
   joinPromptParts,
   numberedContextPieces,
   promptPartPieces,
@@ -620,6 +624,11 @@ export interface ExecuteWorkflowRequest {
   executionId?: string;
   customData?: Record<string, unknown>;
   triggerType?: string;
+  /**
+   * Phase 12 coverage — the trigger that produced the run's input when it is not `triggerType` (a replay of a
+   * recorded run gives the recording's trigger). Decides whether the input is a caller's own words at the model boundary.
+   */
+  inputTriggerType?: string;
   triggeredBy?: string;
   /**
    * Phase 10.2 — whose role the MCP tool policy is evaluated with. Absent →
@@ -3559,10 +3568,7 @@ function boundarySources(context: NodeRuntimeContext): PieceSources | undefined 
     scope: context.labelScope,
     ...(context.nodeOutputs ? { run: context.nodeOutputs } : {}),
     parentOutputs: context.parentOutputs,
-    isInputNode: (nodeId) => {
-      const type = context.nodeById.get(nodeId)?.type;
-      return type !== undefined && nodeContentSource(type) === "input";
-    }
+    ...(isCallerInputRun(context.globals.input_trigger_type ?? context.globals.trigger_type) ? { callerInput: callerInputCheck(context.labelScope.run) } : {})
   };
 }
 
@@ -3653,7 +3659,7 @@ async function guardAgentModelBoundary(
     ...(session.trace().source === "instance" ? { shadowInputUnderBuiltin: true } : {})
   });
   for (const check of outcome.checks) {
-    session.note({ iteration: 0, channel: "tool_result", action: check.action, verdicts: check.verdicts, ...(check.approved ? { approved: true } : {}) });
+    session.note({ iteration: 0, channel: "tool_result", placement: "retrieval", action: check.action, verdicts: check.verdicts, ...(check.approved ? { approved: true } : {}) });
   }
   const [system, user] = outcome.fields;
   if (!system!.changed && !user!.changed) return undefined;
@@ -3679,8 +3685,10 @@ async function retrievalOutput<T extends { text: string }>(
   let kept = documents;
   let contentRules: { dropped: number; redacted: number } | undefined;
   if (dependencies.guard && documents.length > 0) {
-    const profiles = boundaryProfiles((await resolveGuardRun(dependencies.guard)).stack);
-    if (stackChecksPerDocument(profiles)) {
+    // A rule set that cannot be loaded skips the per-document checks: the model boundary downstream fails closed on it.
+    const resolution = await resolveGuardRun(dependencies.guard).catch(() => undefined);
+    const profiles = resolution ? boundaryProfiles(resolution.stack) : [];
+    if (profiles.length > 0 && stackChecksPerDocument(profiles)) {
       const checked = await checkRetrievedDocuments({ scope: guardScopeFor(node, context, dependencies, "retrieval", { memo: true }), profiles, documents });
       kept = checked.documents;
       contentRules = { dropped: checked.dropped, redacted: checked.redacted };
@@ -8702,6 +8710,7 @@ async function executeWorkflowRun(
           (typeof request.webhookPayload?.session_id === "string" ? request.webhookPayload.session_id : undefined),
         images: Array.isArray(request.webhookPayload?.images) ? request.webhookPayload.images : undefined,
         trigger_type: request.triggerType ?? "manual",
+        input_trigger_type: request.inputTriggerType,
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
   const approvedHandoffKeys = approvedHandoffKeysFromState(request.resumeState);
@@ -8741,6 +8750,7 @@ async function executeWorkflowRun(
   // Phase 16 — labels beside the outputs. Outputs seeded by the editor and pinned data were given by a user,
   // and keep the origin of the node type that usually produces them (a pinned HTTP result was fetched from outside).
   const labelState = await initRunLabels(request, workflow, dependencies, (nodeId) => descendantCache.getDescendants(nodeId));
+  if (request.resumeState?.boundaryCallerInput) importCallerInput(labelState, request.resumeState.boundaryCallerInput);
   const workflowNodeTypes = new Map(workflow.nodes.map((entry) => [entry.id, entry.type]));
   const givenLabels = (nodeId: string): DataLabels => {
     const source = nodeContentSource(workflowNodeTypes.get(nodeId) ?? "");
@@ -9247,6 +9257,7 @@ async function executeWorkflowRun(
     // The paused state is saved now and resumed later, so it must carry the activity recorded so far.
     attachNodeActivity(nodeResults, dependencies.activityRecorder);
     const boundaryRenderings = exportRenderings(nodeOutputs);
+    const boundaryCallerInput = dependencies.guard && isCallerInputRun(globals.input_trigger_type ?? globals.trigger_type) ? exportCallerInput(labelState) : undefined;
     const stateSnapshot: WorkflowExecutionState = {
       workflow,
       nodeOrder,
@@ -9269,7 +9280,8 @@ async function executeWorkflowRun(
       // otherwise nothing new is stored.
       ...(labelState.persists ? { dataLabels: labelState.toState() } : {}),
       // Phase 12 coverage — so the resumed run's model boundary splits earlier renderings as this part did.
-      ...(boundaryRenderings ? { boundaryRenderings } : {})
+      ...(boundaryRenderings ? { boundaryRenderings } : {}),
+      ...(boundaryCallerInput ? { boundaryCallerInput } : {})
     };
 
     if (dependencies.persistPausedExecution) {
@@ -9534,6 +9546,7 @@ async function executeWorkflowRun(
       nodeId: node.id,
       nodeType: node.type,
       parents: Object.keys(parentOutputs).map((parentId) => labelState.getFor(node.id, parentId)),
+      parentIds: Object.keys(parentOutputs),
       merged,
       globals
     });
@@ -9667,6 +9680,7 @@ async function executeWorkflowRun(
               nodeId: childNode.id,
               nodeType: childNode.type,
               parents: Object.keys(childParentOutputs).map((parentId) => (parentId === node.id ? itemLabels : labelState.getFor(childNode.id, parentId))),
+              parentIds: Object.keys(childParentOutputs),
               merged: childMerged,
               globals: iterationGlobals
             });

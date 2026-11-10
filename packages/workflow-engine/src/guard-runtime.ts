@@ -619,6 +619,8 @@ export function needsApproval(action: GuardAction): boolean {
 export interface AgentGuardTraceEntry {
   iteration: number;
   channel: GuardChannel;
+  /** Phase 12 coverage — `retrieval` for checks on outside content in the prompts before the first model call. */
+  placement?: "retrieval";
   toolName?: string;
   action: GuardAction;
   approved?: boolean;

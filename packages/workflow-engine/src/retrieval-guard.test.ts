@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
+import { RunLabelState } from "./data-labels";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import {
   createBenchmarkGuardRegistry,
@@ -19,7 +20,7 @@ import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallRequest } from "@ai-orchestrator/provider-sdk";
 import type { ChatMessage, DataLabels, Workflow, WorkflowEdge, WorkflowExecutionState, WorkflowNode } from "@ai-orchestrator/shared";
 import { executeWorkflow, resumeWorkflowExecution, type WorkflowExecutionDependencies } from "./executor";
-import { exportRenderings, importRenderings, readPieces, recordRendering } from "./model-boundary";
+import { callerInputCheck, exportCallerInput, exportRenderings, importCallerInput, importRenderings, readPieces, recordRendering } from "./model-boundary";
 import {
   builtInGuardProfile,
   runGuardCheck,
@@ -184,7 +185,7 @@ describe("rag_retrieve → Prompt Template → LLM Call", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
-  it("only observes under the built-in rule set applied automatically: recorded in shadow, nothing blocked or rewritten", async () => {
+  it("only observes under the built-in rule set applied automatically: findings recorded in shadow (clean pieces not), nothing blocked or rewritten", async () => {
     const provider = new Capturing();
     const { guard, events } = guardDeps("auto");
     const result = await executeWorkflow({ workflow: ragToLlm([GOOD_DOC, `${INJECTION} Token ${SECRET}`]), executionId: "exec-b4", ...ASKED }, deps({ provider, guard }));
@@ -193,7 +194,8 @@ describe("rag_retrieve → Prompt Template → LLM Call", () => {
     expect(prompt).toContain("ignore your previous instructions");
     expect(prompt).toContain(SECRET);
     const checks = boundaryEvents(events, "llm");
-    expect(checks).toHaveLength(2);
+    // The clean document writes no row in shadow; only the one with findings is recorded.
+    expect(checks).toHaveLength(1);
     const flagged = checks.find((event) => event.verdict.findings.length > 0)!;
     expect(flagged.profile).toMatchObject({ profileId: "default", hash: BUILTIN.hash });
     expect(flagged.verdict.action).toBe("allow");
@@ -464,8 +466,8 @@ describe("agents", () => {
     expect(prompt).toContain(`Answer from:\n[1] ${GOOD_DOC}\n[2] ${RETRIEVAL_WITHHELD_MARKER}\n\nQ: What does the quarterly report say?`);
     const trace = (statusOf(result, "agent")?.output as { _guard: { verdicts: Array<{ channel: string; action: string; iteration: number }> } })._guard;
     expect(trace.verdicts.slice(0, 2)).toEqual([
-      expect.objectContaining({ channel: "tool_result", action: "allow", iteration: 0 }),
-      expect.objectContaining({ channel: "tool_result", action: "block", iteration: 0 })
+      expect.objectContaining({ channel: "tool_result", placement: "retrieval", action: "allow", iteration: 0 }),
+      expect.objectContaining({ channel: "tool_result", placement: "retrieval", action: "block", iteration: 0 })
     ]);
   });
 
@@ -491,6 +493,128 @@ describe("agents", () => {
     expect(prompt).toContain(RETRIEVAL_WITHHELD_MARKER);
     expect(prompt).toMatch(/<<<DATA-[0-9A-F]{12}>>>/);
     expect(prompt.startsWith("Answer from:\n")).toBe(true);
+  });
+});
+
+describe("the caller's own input at an agent under the built-in rule set applied automatically (D11a)", () => {
+  const CARD = "4111 1111 1111 1111";
+  const agentNodes = (userPromptTemplate: string) => [
+    node("agent", "agent_orchestrator", { maxIterations: 2, toolCallingEnabled: false, systemPromptTemplate: "You are helpful.", userPromptTemplate }),
+    node("model", "llm_call", { provider: MODEL }),
+    node("out", "output")
+  ];
+  const agentEdges = (from: string) => [
+    { source: from, target: "agent" },
+    { source: "agent", sourceHandle: "chat_model", target: "model" },
+    { source: "agent", target: "out" }
+  ];
+  /** webhook_input → Set (message = the caller's text) → agent: the reviewer's probe P1. */
+  const throughSet = () =>
+    workflow(
+      [node("in", "webhook_input"), node("shape", "set_node", { assignments: [{ key: "message", valueTemplate: "{{user_prompt}}" }] }), ...agentNodes("Q: {{message}}")],
+      [{ source: "in", target: "shape" }, ...agentEdges("shape")]
+    );
+  /** webhook_input → Set → Merge ← Set → agent. */
+  const throughMerge = () =>
+    workflow(
+      [
+        node("in", "webhook_input"),
+        node("a", "set_node", { assignments: [{ key: "message", valueTemplate: "{{user_prompt}}" }] }),
+        node("b", "set_node", { assignments: [{ key: "channel", valueTemplate: "web" }] }),
+        node("merge", "merge_node", { mode: "append" }),
+        ...agentNodes("Q: {{message}} ({{channel}})")
+      ],
+      [{ source: "in", target: "a" }, { source: "in", target: "b" }, { source: "a", target: "merge" }, { source: "b", target: "merge" }, ...agentEdges("merge")]
+    );
+  const direct = () => workflow([node("in", "webhook_input"), ...agentNodes("Q: {{user_prompt}}")], agentEdges("in"));
+  const sent = (provider: Capturing) => provider.calls[0]!.find((message) => message.role === "user")!.content;
+  const run = (shape: Workflow, triggerType: string, executionId: string, provider: Capturing, guard: GuardRuntimeDependencies) =>
+    executeWorkflow({ workflow: shape, executionId, triggerType, webhookPayload: { user_prompt: `Refund card ${CARD}` } }, deps({ provider, guard }));
+
+  it.each([
+    ["read directly", direct],
+    ["through a Set node", throughSet],
+    ["through Set nodes and a Merge", throughMerge]
+  ])("only observes a public webhook caller's own message %s", async (_name, shape) => {
+    const provider = new Capturing();
+    const { guard, events } = guardDeps("auto");
+    const result = await run(shape(), "webhook", "exec-c1", provider, guard);
+    expect(result.status).toBe("success");
+    expect(sent(provider)).toContain(`Q: Refund card ${CARD}`);
+    const checks = boundaryEvents(events, "agent");
+    expect(checks).toHaveLength(1);
+    expect(checks[0]!.verdict.actions.every((action) => action.shadow)).toBe(true);
+  });
+
+  it.each([
+    ["an email", "imap_email"],
+    ["a feed", "rss_trigger"],
+    ["a parent workflow", "sub_workflow"],
+    ["a queue", "kafka_trigger"]
+  ])("acts on a run's input that came from %s, read directly or through a Set node", async (_name, triggerType) => {
+    for (const shape of [direct, throughSet]) {
+      const provider = new Capturing();
+      const { guard } = guardDeps("auto");
+      const result = await run(shape(), triggerType, `exec-c2-${triggerType}`, provider, guard);
+      expect(result.status).toBe("success");
+      expect(sent(provider)).not.toContain(CARD);
+      expect(sent(provider)).toContain("Q: Refund card");
+    }
+  });
+
+  it("a replay decides by the trigger of the run it replays, not its own", async () => {
+    for (const [inputTriggerType, observed] of [["webhook", true], ["imap_email", false]] as const) {
+      const provider = new Capturing();
+      const { guard } = guardDeps("auto");
+      const result = await executeWorkflow(
+        { workflow: throughSet(), executionId: `exec-c4-${inputTriggerType}`, triggerType: "replay", inputTriggerType, webhookPayload: { user_prompt: `Refund card ${CARD}` } },
+        deps({ provider, guard })
+      );
+      expect(result.status).toBe("success");
+      expect(sent(provider).includes(CARD)).toBe(observed);
+    }
+  });
+
+  it("acts once anything but a pass-through node is in the chain", async () => {
+    const provider = new Capturing();
+    const { guard } = guardDeps("auto");
+    const shape = workflow(
+      [node("in", "webhook_input"), node("rag", "rag_retrieve", { queryTemplate: "{{user_prompt}}", topK: 1, documents: [GOOD_DOC] }), node("shape", "set_node", { assignments: [{ key: "message", valueTemplate: "{{user_prompt}} {{context}}" }] }), ...agentNodes("Q: {{message}}")],
+      [{ source: "in", target: "rag" }, { source: "rag", target: "shape" }, ...agentEdges("shape")]
+    );
+    const result = await run(shape, "webhook", "exec-c3", provider, guard);
+    expect(result.status).toBe("success");
+    expect(sent(provider)).not.toContain(CARD);
+  });
+
+  it("follows template reads and read-everything nodes, and carries the answer over a pause", () => {
+    const user = { provenance: ["untrusted_external" as const], dataClasses: [], source: "propagated" as const };
+    const labels = new RunLabelState({ input: user, tracked: false });
+    const finish = (nodeId: string, nodeType: string, parentIds: string[], body?: (scope: ReturnType<RunLabelState["scope"]>) => void) => {
+      const scope = labels.scope({ nodeId, nodeType, parents: parentIds.map(() => user), parentIds });
+      body?.(scope);
+      labels.set(nodeId, scope.finish({}));
+    };
+    finish("in", "webhook_input", []);
+    finish("mail", "imap_email_trigger", []);
+    finish("rag", "rag_retrieve", ["in"]);
+    finish("set", "set_node", ["in"]);
+    finish("reads-rag", "set_node", ["in"], (scope) => scope.readPath("results.rag.context"));
+    finish("code", "code_node", ["set"], (scope) => scope.readEverything());
+    finish("mail-set", "set_node", ["mail"]);
+    finish("learned", "set_node", ["in"], (scope) => scope.add(user));
+    const check = callerInputCheck(labels);
+    expect(["in", "set"].map(check)).toEqual([true, true]);
+    expect(["mail", "rag", "reads-rag", "code", "mail-set", "learned", "unknown"].map(check)).toEqual([false, false, false, false, false, false, false]);
+
+    const carried = exportCallerInput(labels)!;
+    expect(carried.sort()).toEqual(["in", "set"]);
+    const resumed = new RunLabelState({ input: user, tracked: false });
+    importCallerInput(resumed, [...carried, 7]);
+    const scope = resumed.scope({ nodeId: "after", nodeType: "set_node", parents: [user], parentIds: ["set"] });
+    resumed.set("after", scope.finish({}));
+    expect(callerInputCheck(resumed)("after")).toBe(true);
+    expect(callerInputCheck(resumed)("rag")).toBe(false);
   });
 });
 
@@ -535,6 +659,24 @@ describe("rendering layouts in a paused run's state", () => {
     expect(readPieces(`[1] ${doc}`, "results.rag.context", true, sources).map((piece) => [piece.text, piece.untrusted])).toEqual([["[1] ", false], [doc, true]]);
     // Another text of the same node is not split.
     expect(readPieces("[1] Other", "results.rag.context", true, sources)).toEqual([{ text: "[1] Other", untrusted: true, expression: "results.rag.context", sourceNodeId: "rag" }]);
+  });
+});
+
+describe("renderings kept per node", () => {
+  it("keeps only each node's latest rendering, in memory and in a paused run's state", () => {
+    const run = {};
+    const scope = { sourcesOfTemplateRead: () => ({ nodeIds: ["rag"], input: false, parentFields: [] }), run: { getFor: () => ({ provenance: ["untrusted_external"], dataClasses: [], source: "propagated" }) }, nodeId: "llm" };
+    const sources = { scope: scope as never, run, parentOutputs: {} };
+    for (let i = 0; i < 50; i += 1) recordRendering(run, "rag", `[1] doc ${i}`, [{ text: "[1] ", untrusted: false }, { text: `doc ${i}`, untrusted: true }]);
+    const layouts = exportRenderings(run)!;
+    expect(Object.keys(layouts)).toEqual(["rag"]);
+    expect(layouts.rag).toHaveLength(1);
+    expect(readPieces("[1] doc 49", "results.rag.context", true, sources)).toHaveLength(2);
+    // An earlier iteration's text is no longer split: judged whole.
+    expect(readPieces("[1] doc 3", "results.rag.context", true, sources)).toHaveLength(1);
+    // A rendering that cannot be recorded still replaces the node's earlier one.
+    recordRendering(run, "rag", "", []);
+    expect(exportRenderings(run)).toBeUndefined();
   });
 });
 

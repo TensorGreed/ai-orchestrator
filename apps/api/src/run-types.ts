@@ -60,6 +60,8 @@ export interface RunWorkflowExecutionInput {
   directInput?: Record<string, unknown>;
   executionId?: string;
   triggerType?: string;
+  /** Phase 12 coverage — the trigger that produced the input (a replay's recording), when it differs from `triggerType`. */
+  inputTriggerType?: string;
   triggeredBy?: string;
   /**
    * Phase 10.2 — the signed-in user who started this run. Set only by

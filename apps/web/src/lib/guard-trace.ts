@@ -292,7 +292,8 @@ export function extractGuardTrace(nodeResults: unknown[]): GuardTraceNode[] {
             verdictFromSummaries({
               key: `${nodeId}-${index}`,
               nodeId,
-              placement: "agent",
+              // Phase 12 coverage — the model boundary's checks on outside content in the prompts.
+              placement: text(v.placement) === "retrieval" ? "retrieval" : "agent",
               iteration: num(v.iteration, 0),
               channel: text(v.channel) ?? "prompt",
               ...(text(v.toolName) ? { toolName: text(v.toolName) } : {}),

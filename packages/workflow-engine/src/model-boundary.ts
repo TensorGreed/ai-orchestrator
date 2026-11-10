@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { RETRIEVAL_WITHHELD_MARKER, type GuardContentPiece } from "@ai-orchestrator/guard-sdk";
 import { APPROVAL_DEFAULT_TIMEOUT_MINUTES, type DataLabels, type ModelBoundaryRenderings } from "@ai-orchestrator/shared";
 import { ApprovalHandoffSignal } from "./approval-handoff";
-import { unionLabels, type NodeLabelScope } from "./data-labels";
+import { unionLabels, type NodeLabelScope, type RunLabelState } from "./data-labels";
 import {
   describeGuardVerdict,
   GuardBlockedError,
@@ -54,10 +54,14 @@ const UNTRUSTED = ["untrusted_external"] as const;
 
 type Layout = ModelBoundaryRenderings[string][number]["pieces"];
 
-/** One run's renderings: node id → rendered text → its pieces; and layouts a paused run carried over, by text hash. */
+/**
+ * One run's renderings: node id → its latest rendered text and pieces; and layouts a paused run carried over,
+ * by text hash. Only the latest rendering of a node is kept: readers only ever read a node's current output,
+ * and a lookup that misses judges the whole value (the conservative result).
+ */
 interface RunRenderings {
-  byNode: Map<string, Map<string, BoundaryPiece[]>>;
-  carried: Map<string, Map<string, Layout>>;
+  byNode: Map<string, { text: string; pieces: BoundaryPiece[] }>;
+  carried: Map<string, { sha256: string; pieces: Layout }>;
 }
 
 /** Per run, keyed by an object that lives exactly as long as the run (its node output map). */
@@ -74,29 +78,31 @@ function renderingsOf(run: object): RunRenderings {
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
-/** Remember how a node's rendered text is made up, for the model boundary of the nodes that read it. */
+/** Remember how a node's rendered text is made up, for the model boundary of the nodes that read it. Replaces the node's earlier rendering. */
 export function recordRendering(run: object, nodeId: string, text: string, pieces: readonly BoundaryPiece[]): void {
+  const entry = renderingsOf(run);
+  // A newer rendering always replaces what the node had, even one that cannot be recorded.
+  entry.byNode.delete(nodeId);
+  entry.carried.delete(nodeId);
   if (text.length === 0 || pieces.length === 0) return;
   if (pieces.map((piece) => piece.text).join("") !== text) return;
-  const { byNode } = renderingsOf(run);
-  let byText = byNode.get(nodeId);
-  if (!byText) {
-    byText = new Map();
-    byNode.set(nodeId, byText);
-  }
-  byText.set(text, pieces.map(({ origin: _origin, ...piece }) => ({ ...piece, sourceNodeId: piece.sourceNodeId ?? nodeId })));
+  entry.byNode.set(nodeId, {
+    text,
+    pieces: pieces.map(({ origin: _origin, ...piece }) => ({ ...piece, sourceNodeId: piece.sourceNodeId ?? nodeId }))
+  });
 }
 
 function renderingOf(run: object | undefined, nodeId: string, text: string): BoundaryPiece[] | undefined {
   if (!run) return undefined;
   const entry = renderingsByRun.get(run);
   if (!entry) return undefined;
-  const recorded = entry.byNode.get(nodeId)?.get(text);
-  if (recorded) return recorded;
-  const layout = entry.carried.get(nodeId)?.get(sha256(text));
-  if (!layout || layout.reduce((sum, piece) => sum + piece.length, 0) !== text.length) return undefined;
+  const recorded = entry.byNode.get(nodeId);
+  if (recorded) return recorded.text === text ? recorded.pieces : undefined;
+  const carried = entry.carried.get(nodeId);
+  if (!carried || carried.pieces.reduce((sum, piece) => sum + piece.length, 0) !== text.length) return undefined;
+  if (carried.sha256 !== sha256(text)) return undefined;
   let at = 0;
-  const pieces = layout.map((piece) => {
+  return carried.pieces.map((piece) => {
     const slice = text.slice(at, (at += piece.length));
     return {
       text: slice,
@@ -106,25 +112,20 @@ function renderingOf(run: object | undefined, nodeId: string, text: string): Bou
       ...(piece.sourceNodeId ? { sourceNodeId: piece.sourceNodeId } : {})
     };
   });
-  entry.byNode.get(nodeId)?.set(text, pieces) ?? entry.byNode.set(nodeId, new Map([[text, pieces]]));
-  return pieces;
 }
 
-/** The run's renderings as layouts for a paused run's state: lengths, trust and provenance, never text. Undefined when none. */
+/** The run's renderings as layouts for a paused run's state: lengths, trust and provenance, never text. One per node; undefined when none. */
 export function exportRenderings(run: object): ModelBoundaryRenderings | undefined {
   const entry = renderingsByRun.get(run);
   if (!entry) return undefined;
   const out: ModelBoundaryRenderings = {};
-  for (const [nodeId, layouts] of entry.carried) {
-    out[nodeId] = [...layouts].map(([hash, pieces]) => ({ sha256: hash, pieces }));
+  for (const [nodeId, carried] of entry.carried) {
+    out[nodeId] = [{ sha256: carried.sha256, pieces: carried.pieces }];
   }
-  for (const [nodeId, byText] of entry.byNode) {
-    const list = out[nodeId] ?? (out[nodeId] = []);
-    for (const [text, pieces] of byText) {
-      const hash = sha256(text);
-      if (list.some((layout) => layout.sha256 === hash)) continue;
-      list.push({
-        sha256: hash,
+  for (const [nodeId, { text, pieces }] of entry.byNode) {
+    out[nodeId] = [
+      {
+        sha256: sha256(text),
         pieces: pieces.map((piece) => ({
           length: piece.text.length,
           ...(piece.untrusted ? { untrusted: true as const } : {}),
@@ -132,8 +133,8 @@ export function exportRenderings(run: object): ModelBoundaryRenderings | undefin
           ...(piece.expression ? { expression: piece.expression } : {}),
           ...(piece.sourceNodeId ? { sourceNodeId: piece.sourceNodeId } : {})
         }))
-      });
-    }
+      }
+    ];
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -163,9 +164,8 @@ export function importRenderings(run: object, layouts: unknown): void {
         });
       }
       if (!valid) continue;
-      let byHash = carried.get(nodeId);
-      if (!byHash) carried.set(nodeId, (byHash = new Map()));
-      byHash.set(record.sha256, pieces);
+      // One layout per node: the latest (the last valid entry).
+      carried.set(nodeId, { sha256: record.sha256, pieces });
     }
   }
 }
@@ -190,8 +190,94 @@ export interface PieceSources {
   run?: object;
   /** The node's parents' outputs, to tell which parent a field read comes from. */
   parentOutputs: Record<string, unknown>;
-  /** True for nodes that carry the run's input (trigger and input nodes). */
-  isInputNode?(nodeId: string): boolean;
+  /**
+   * True for nodes whose output is only the caller's own input (see
+   * `callerInputCheck`); absent when the run's input is not a caller's own words.
+   */
+  callerInput?(nodeId: string): boolean;
+}
+
+// ---------------------------------------------------------------------------
+// The caller's own input (D11a)
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs whose input is the caller's own words: webhooks, API calls, chat,
+ * forms and MCP server calls. Runs started by email, feeds, files, chat apps,
+ * queues, other workflows and the rest carry third-party content.
+ */
+const CALLER_INPUT_TRIGGERS = new Set(["webhook", "webhook_test", "webhook_api", "webhook_api_stream", "api_queue", "chat", "form", "mcp_server"]);
+
+/** Nodes that hand on the run's input as the caller sent it. Content triggers (email, feeds, files, chat apps, queues, sub-workflows) are not here. */
+const CALLER_INPUT_NODES = new Set(["webhook_input", "chat_trigger", "form_trigger", "mcp_server_trigger", "manual_trigger", "text_input", "user_prompt", "system_prompt"]);
+
+/** Nodes that only reshape what they read: their output is the caller's input when everything they read is. */
+const PASS_THROUGH_NODES = new Set([
+  "set_node",
+  "edit_fields_node",
+  "rename_keys_node",
+  "merge_node",
+  "code_node",
+  "prompt_template",
+  "if_node",
+  "switch_node",
+  "filter_node",
+  "noop_node",
+  "loop_node",
+  "limit_node",
+  "sort_node",
+  "aggregate_node",
+  "split_out_node",
+  "remove_duplicates_node",
+  "date_time_node",
+  "input_validator",
+  "try_catch"
+]);
+
+/** Node ids a paused run's state carried as caller input, per resumed run. */
+const carriedCallerInput = new WeakMap<RunLabelState, ReadonlySet<string>>();
+
+/** True when a run started by this trigger has the caller's own words as its input. */
+export function isCallerInputRun(triggerType: unknown): boolean {
+  return typeof triggerType === "string" && CALLER_INPUT_TRIGGERS.has(triggerType.trim().toLowerCase());
+}
+
+function isCallerInputNode(run: RunLabelState, nodeId: string, visiting: Set<string>): boolean {
+  const derivation = run.derivationOf(nodeId);
+  if (!derivation) return carriedCallerInput.get(run)?.has(nodeId) === true;
+  if (CALLER_INPUT_NODES.has(derivation.nodeType)) return !derivation.other;
+  if (!PASS_THROUGH_NODES.has(derivation.nodeType) || derivation.other) return false;
+  if (visiting.has(nodeId)) return false;
+  visiting.add(nodeId);
+  const sources = [...new Set([...derivation.parentIds, ...derivation.nodeIds])];
+  const result = (sources.length > 0 || derivation.input) && sources.every((sourceId) => isCallerInputNode(run, sourceId, visiting));
+  visiting.delete(nodeId);
+  return result;
+}
+
+/**
+ * D11a — whether a node's output is only the caller's own input: a caller
+ * input node, or a pass-through node all of whose sources (DAG parents and
+ * template reads, everything that had run when it read everything) are. Any
+ * other node (a connector, retrieval, a model, an agent, a sub-workflow, a
+ * node whose handler took content from elsewhere) breaks the chain.
+ */
+export function callerInputCheck(run: RunLabelState): (nodeId: string) => boolean {
+  return (nodeId) => isCallerInputNode(run, nodeId, new Set());
+}
+
+/** The finished nodes whose output is only the caller's own input, for a paused run's state. Undefined when none. */
+export function exportCallerInput(run: RunLabelState): string[] | undefined {
+  const check = callerInputCheck(run);
+  const ids = [...new Set([...run.nodeIds(), ...(carriedCallerInput.get(run) ?? [])])].filter(check);
+  return ids.length > 0 ? ids : undefined;
+}
+
+/** A resumed run takes over the caller-input nodes its paused state carried (nodes that finished before the pause). */
+export function importCallerInput(run: RunLabelState, ids: unknown): void {
+  if (!Array.isArray(ids)) return;
+  const valid = ids.filter((id): id is string => typeof id === "string");
+  if (valid.length > 0) carriedCallerInput.set(run, new Set(valid));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -229,8 +315,8 @@ export function readPieces(text: string, body: string, simplePath: boolean, sour
     const rendering = renderingOf(sources.run, nodeId, text);
     if (rendering) return rendering.map((piece) => ({ ...piece, ...at }));
   }
-  const isInput = sources.isInputNode;
-  const fromInput = !unheld && (read.input || candidates.length > 0) && Boolean(isInput) && candidates.every((nodeId) => isInput!(nodeId));
+  const callerInput = sources.callerInput;
+  const fromInput = !unheld && callerInput !== undefined && (read.input || candidates.length > 0) && candidates.every((nodeId) => callerInput(nodeId));
   return [
     { text, untrusted: true, expression: body, ...(candidates.length === 1 ? { sourceNodeId: candidates[0] } : {}), ...(fromInput ? { fromInput: true as const } : {}), ...at }
   ];
@@ -380,7 +466,13 @@ async function judgePiece(
     ...(piece.sourceNodeId ? { sourceNodeId: piece.sourceNodeId } : {})
   };
   const scope = piece.fromInput && request.shadowInputUnderBuiltin ? { ...request.scope, shadowUnderBuiltin: true } : request.scope;
-  const result = await runGuardCheck(scope, request.profiles, { content: piece.text, channel: "tool_result", labels: [...UNTRUSTED], pieces: [meta] });
+  // Shadow checks record findings only: clean rows would be noise until the shadow period ends.
+  const result = await runGuardCheck(
+    scope,
+    request.profiles,
+    { content: piece.text, channel: "tool_result", labels: [...UNTRUSTED], pieces: [meta] },
+    scope.shadowUnderBuiltin ? { onlyFindings: true } : {}
+  );
   const entry: BoundaryCheckEntry = { field, action: result.action, verdicts: result.verdicts };
   checks.push(entry);
   const where = `outside content in its ${FIELD_WORDS[field]}${piece.sourceNodeId ? ` (from ${piece.sourceNodeId})` : ""}`;

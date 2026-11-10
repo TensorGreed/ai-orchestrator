@@ -535,6 +535,12 @@ export interface WorkflowExecutionState {
    */
   boundaryRenderings?: ModelBoundaryRenderings;
   /**
+   * Phase 12 coverage — nodes finished before the pause whose output is only the caller's own input (webhook,
+   * API, chat, form and MCP server runs), so the resumed run's model boundary treats their reads as before.
+   * Written and read only by the engine.
+   */
+  boundaryCallerInput?: string[];
+  /**
    * Phase 15.4 — the release channel the run started on. A resumed
    * production run keeps calling the published versions of its
    * sub-workflows. Written and read only by the API; absent means draft.
