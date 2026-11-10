@@ -311,6 +311,64 @@ function runTelemetryBlobs(result: WorkflowExecutionResult): Record<string, unkn
   }
   return out;
 }
+
+/** A finished child's model usage, for `WorkflowExecutionDependencies.onSubWorkflowUsage`. */
+export interface SubWorkflowUsage {
+  workflowId: string;
+  status: WorkflowExecutionResult["status"];
+  mode: "sync" | "async" | "tool";
+  durationMs: number;
+  telemetry: Record<string, unknown>[];
+}
+
+/**
+ * What `admitSubWorkflow` is told about a child it is asked to start: how it runs (`async` children run beside their
+ * caller; sync and tool children one at a time) and the admission of the child it runs inside, if any.
+ */
+export interface SubWorkflowAdmissionRequest {
+  mode: SubWorkflowUsage["mode"];
+  parent?: SubWorkflowAdmission;
+}
+
+/** A started child, as the host admitted it: told when the child stops running. */
+export interface SubWorkflowAdmission {
+  /** The child stopped running (finished, failed or paused); its usage, if any, was reported first. */
+  settle(): void;
+  /** A Workflow Tool's child keeps running after its call timed out, beside its caller. */
+  detach?(): void;
+}
+
+/**
+ * Hands a finished child's model usage to the run (nothing when it made no model call); never fails the caller.
+ * `keepsPaused`: a paused child that will not resume (a Workflow Tool's) is reported as it is.
+ */
+async function reportSubWorkflowUsage(
+  dependencies: WorkflowExecutionDependencies,
+  result: WorkflowExecutionResult,
+  mode: SubWorkflowUsage["mode"],
+  keepsPaused = false
+): Promise<void> {
+  // A paused child's usage so far comes back with its result after the resume.
+  if (!dependencies.onSubWorkflowUsage || (result.status === "waiting_approval" && !keepsPaused)) return;
+  const telemetry = runTelemetryBlobs(result);
+  if (telemetry.length === 0) return;
+  const durationMs = result.completedAt ? Math.max(0, Date.parse(result.completedAt) - Date.parse(result.startedAt)) : 0;
+  try {
+    await dependencies.onSubWorkflowUsage({ workflowId: result.workflowId, status: result.status, mode, durationMs: Number.isFinite(durationMs) ? durationMs : 0, telemetry });
+  } catch {
+    // Recording usage never changes how the run goes.
+  }
+}
+
+/** Tells the host a child stopped running; never fails the caller. */
+function settleSubWorkflow(admission: SubWorkflowAdmission | void): void {
+  try {
+    admission?.settle();
+  } catch {
+    // Bookkeeping only.
+  }
+}
+
 /** Phase 16 — label segments of an agent node: its user prompt's reads, and reads made while its loop runs. */
 const AGENT_USER_PROMPT_SEGMENT = "user_prompt";
 const AGENT_RUN_SEGMENT = "agent_run";
@@ -352,6 +410,24 @@ export interface WorkflowExecutionDependencies {
    * on top of the parent's dependencies when an Execute Workflow node runs.
    */
   scopeSubWorkflow?: (workflow: Workflow) => Partial<WorkflowExecutionDependencies>;
+  /**
+   * Asked before an Execute Workflow node or a Workflow Tool starts a child (sync or async; not when a paused child
+   * resumes). Throws to refuse it, for example when a used-up budget applies to the run; the node (or the tool call)
+   * fails with the error's message. May return an admission, which is settled when the child stops running (after its
+   * usage was reported). Absent: every child starts.
+   */
+  admitSubWorkflow?: (workflow: Workflow, request: SubWorkflowAdmissionRequest) => Promise<SubWorkflowAdmission | void>;
+  /** The admission of the child these dependencies run (set by the engine for a child's run). */
+  subWorkflowAdmission?: SubWorkflowAdmission;
+  /**
+   * The model usage of a child an Execute Workflow node or a Workflow Tool ran, once the child has stopped (also when
+   * it failed, for an async child whenever it ends, and for a Workflow Tool's child that ended after its call timed
+   * out): its own nodes' `_telemetry` blobs and those of the workflows its agents called as tools. A grandchild
+   * reports itself through the same hook (children inherit it), so each run is reported once. A paused Execute
+   * Workflow child is reported when it finishes after the resume. With this hook a Workflow Tool's child is reported
+   * here and not added to its agent node's `_childTelemetry`.
+   */
+  onSubWorkflowUsage?: (usage: SubWorkflowUsage) => void | Promise<void>;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   /**
    * 12.2 — secrets flagged "sensitive output": a node whose config references one of them produces sensitive output
@@ -4618,10 +4694,12 @@ async function executeNodeHandler(
       // Phase 6.4 — inside a Workflow Tool's child, the calling agent's write controls reach this workflow too (tighten-only).
       const targetWorkflow = dependencies.callerWriteControls ? withCallerWriteControls(loadedTarget, dependencies.callerWriteControls) : loadedTarget;
 
-      const childDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
+      const scopedChildDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
         ? { ...dependencies, ...dependencies.scopeSubWorkflow(targetWorkflow) }
         : dependencies;
       const mode = config.mode === "async" ? "async" : "sync";
+      const resume = context.resumeDecision;
+      const resumingChild = resume && resume.nodeId === node.id && resume.handoff.kind === "sub_workflow" ? resume.handoff : undefined;
       const inputMapping = toRecord(config.inputMapping);
       const mappedInput: Record<string, unknown> = {};
       for (const [parentKey, childKeyValue] of Object.entries(inputMapping)) {
@@ -4642,6 +4720,9 @@ async function executeNodeHandler(
       // Phase 16 — the child's trigger takes this node's input labels.
       const childInputLabels = context.labelScope?.inputLabels();
       if (mode === "async") {
+        // A new child may be refused (a used-up budget of the run, counting the children still running).
+        const asyncAdmission = await dependencies.admitSubWorkflow?.(targetWorkflow, { mode: "async", ...(dependencies.subWorkflowAdmission ? { parent: dependencies.subWorkflowAdmission } : {}) });
+        const childDependencies: WorkflowExecutionDependencies = asyncAdmission ? { ...scopedChildDependencies, subWorkflowAdmission: asyncAdmission } : scopedChildDependencies;
         // Fire-and-forget
         executeWorkflow(
           {
@@ -4654,60 +4735,74 @@ async function executeNodeHandler(
             callStack: [...context.callStack]
           },
           childDependencies
-        ).catch(() => {
-          // Intentionally ignored — async sub-workflow errors do not propagate
-        });
+        )
+          .then(
+            async (asyncResult) => await reportSubWorkflowUsage(dependencies, asyncResult, "async"),
+            () => {
+              // Intentionally ignored — async sub-workflow errors do not propagate
+            }
+          )
+          .finally(() => settleSubWorkflow(asyncAdmission));
         return { async: true, workflowId, status: "enqueued" };
       }
 
       // Phase 11.2 — a paused child is not saved on its own: its paused state
       // travels in this run's hand-off, and the parent pauses at this node.
       let childPause: Parameters<NonNullable<WorkflowExecutionDependencies["persistPausedExecution"]>>[0] | undefined;
-      const pauseCapturingDependencies: WorkflowExecutionDependencies = {
-        ...childDependencies,
-        persistPausedExecution: async (paused) => {
-          childPause = paused;
-        }
-      };
-      const resume = context.resumeDecision;
-      const resumingChild = resume && resume.nodeId === node.id && resume.handoff.kind === "sub_workflow" ? resume.handoff : undefined;
       // The child resumes under the scope of the workflow this node calls
       // now (checked by loadWorkflow above), never a stored one of another id.
       if (resumingChild && resumingChild.childState.workflow?.id !== targetWorkflow.id) {
         throw new Error(`The paused sub-workflow does not match '${workflowId}', so this run cannot resume it.`);
       }
-      const childResult = resumingChild
-        ? await executeWorkflow(
-            {
-              workflow: resumingChild.childState.workflow,
-              triggerType: "sub_workflow",
-              triggeredBy: context.workflow.id,
-              toolPolicySubject: context.toolPolicySubject,
-              callStack: [...context.callStack],
-              resumeState: resumingChild.childState,
-              approvalDecision: {
-                decision: resume!.decision,
-                ...(resume!.actedBy ? { actedBy: resume!.actedBy } : {}),
-                ...(resume!.reason ? { reason: resume!.reason } : {}),
-                ...(resume!.edits ? { edits: resume!.edits } : {}),
-                ...(resume!.editedFields ? { editedFields: resume!.editedFields } : {}),
-                ...(resume!.requestId ? { requestId: resume!.requestId } : {})
-              }
-            },
-            pauseCapturingDependencies
-          )
-        : await executeWorkflow(
-            {
-              workflow: targetWorkflow,
-              input: mappedInput,
-              ...(childInputLabels ? { inputLabels: childInputLabels } : {}),
-              triggerType: "sub_workflow",
-              triggeredBy: context.workflow.id,
-              toolPolicySubject: context.toolPolicySubject,
-              callStack: [...context.callStack]
-            },
-            pauseCapturingDependencies
-          );
+      // A new child may be refused (a used-up budget of the run); a paused one that resumes has started already.
+      const syncAdmission = resumingChild
+        ? undefined
+        : await dependencies.admitSubWorkflow?.(targetWorkflow, { mode: "sync", ...(dependencies.subWorkflowAdmission ? { parent: dependencies.subWorkflowAdmission } : {}) });
+      const pauseCapturingDependencies: WorkflowExecutionDependencies = {
+        ...scopedChildDependencies,
+        ...(syncAdmission ? { subWorkflowAdmission: syncAdmission } : {}),
+        persistPausedExecution: async (paused) => {
+          childPause = paused;
+        }
+      };
+      let childResult: WorkflowExecutionResult;
+      try {
+        childResult = resumingChild
+          ? await executeWorkflow(
+              {
+                workflow: resumingChild.childState.workflow,
+                triggerType: "sub_workflow",
+                triggeredBy: context.workflow.id,
+                toolPolicySubject: context.toolPolicySubject,
+                callStack: [...context.callStack],
+                resumeState: resumingChild.childState,
+                approvalDecision: {
+                  decision: resume!.decision,
+                  ...(resume!.actedBy ? { actedBy: resume!.actedBy } : {}),
+                  ...(resume!.reason ? { reason: resume!.reason } : {}),
+                  ...(resume!.edits ? { edits: resume!.edits } : {}),
+                  ...(resume!.editedFields ? { editedFields: resume!.editedFields } : {}),
+                  ...(resume!.requestId ? { requestId: resume!.requestId } : {})
+                }
+              },
+              pauseCapturingDependencies
+            )
+          : await executeWorkflow(
+              {
+                workflow: targetWorkflow,
+                input: mappedInput,
+                ...(childInputLabels ? { inputLabels: childInputLabels } : {}),
+                triggerType: "sub_workflow",
+                triggeredBy: context.workflow.id,
+                toolPolicySubject: context.toolPolicySubject,
+                callStack: [...context.callStack]
+              },
+              pauseCapturingDependencies
+            );
+        await reportSubWorkflowUsage(dependencies, childResult, "sync");
+      } finally {
+        settleSubWorkflow(syncAdmission);
+      }
 
       if (childResult.status === "error") {
         throw new Error(childResult.error ?? `Sub-workflow '${workflowId}' execution failed.`);
@@ -6344,7 +6439,8 @@ async function executeNodeHandler(
       let activeToolCall: { toolName: string; toolCallId?: string; labels?: DataLabels } | undefined;
       const workflowToolResultLabels = new Map<string, DataLabels>();
       const workflowToolResultKey = (toolName: string, toolCallId: string | undefined) => `${toolName}\u0000${toolCallId ?? ""}`;
-      // Phase 6.4 — the children's model usage, counted in this node's usage (and so in the run's spend and budgets).
+      // Phase 6.4 — the children's model usage, counted in this node's usage (and so in the run's spend and budgets),
+      // when the host does not take it through onSubWorkflowUsage.
       const childTelemetry: Record<string, unknown>[] = [];
       if (workflowToolConfigs.length > 0) {
         const runWorkflowTool: WorkflowToolRunner = async (call) => {
@@ -6363,15 +6459,31 @@ async function executeNodeHandler(
             return failure(error instanceof Error ? error.message : String(error));
           }
           if (!child) return failure(`Workflow '${call.workflowId}' was not found.`);
+          // A new child may be refused (a used-up budget of the run, counting the children it ran before).
+          let admission: SubWorkflowAdmission | void;
+          try {
+            admission = await dependencies.admitSubWorkflow?.(child, { mode: "tool", ...(dependencies.subWorkflowAdmission ? { parent: dependencies.subWorkflowAdmission } : {}) });
+          } catch (error) {
+            return failure(error instanceof Error ? error.message : String(error));
+          }
           // A per-call limit from the node; without one the call is bounded by the run's own timeout.
           const timeoutMs = call.nodeId ? workflowToolTimeouts.get(call.nodeId) : undefined;
           const callAbort = new AbortController();
           const abortFromRun = () => callAbort.abort(dependencies.abortSignal?.reason);
           if (dependencies.abortSignal?.aborted) abortFromRun();
           else dependencies.abortSignal?.addEventListener("abort", abortFromRun, { once: true });
+          let scoped: WorkflowExecutionDependencies;
+          try {
+            scoped = dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies;
+          } catch (error) {
+            dependencies.abortSignal?.removeEventListener("abort", abortFromRun);
+            settleSubWorkflow(admission);
+            return failure(error instanceof Error ? error.message : String(error));
+          }
           const childDependencies: WorkflowExecutionDependencies = {
-            ...(dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies),
+            ...scoped,
             abortSignal: callAbort.signal,
+            ...(admission ? { subWorkflowAdmission: admission } : {}),
             ...(context.workflow.settings ? { callerWriteControls: context.workflow.settings } : {}),
             // v1: a child that stops for an approval is not kept; the call fails and says why.
             persistPausedExecution: async () => undefined
@@ -6407,18 +6519,32 @@ async function executeNodeHandler(
                 })
               : undefined;
           let childResult: WorkflowExecutionResult;
+          let detached = false;
           try {
             const settled = limit ? await Promise.race([childRun, limit]) : await childRun;
             if (settled === "timed_out") {
-              childRun.catch(() => undefined);
+              // It runs on beside the agent: its spend is recorded for the run when it stops.
+              detached = true;
+              try {
+                admission?.detach?.();
+              } catch {
+                // Bookkeeping only.
+              }
+              childRun
+                .then(async (late) => await reportSubWorkflowUsage(dependencies, late, "tool", true), () => undefined)
+                .finally(() => settleSubWorkflow(admission));
               return failure(`The workflow '${child.name}' did not finish within this tool's ${timeoutMs} ms limit.`);
             }
             childResult = settled;
+            // The run's host counts it at once (so the next call's check sees it, and it survives this node failing);
+            // without that hook it counts in this node's usage.
+            if (dependencies.onSubWorkflowUsage) await reportSubWorkflowUsage(dependencies, childResult, "tool", true);
+            else childTelemetry.push(...runTelemetryBlobs(childResult));
           } finally {
             if (timer) clearTimeout(timer);
             dependencies.abortSignal?.removeEventListener("abort", abortFromRun);
+            if (!detached) settleSubWorkflow(admission);
           }
-          childTelemetry.push(...runTelemetryBlobs(childResult));
           // The child's output labels, or on failure what its failed node read: its error text can quote that.
           const outputLabels = runOutputLabels.get(childResult);
           if (outputLabels && active) workflowToolResultLabels.set(workflowToolResultKey(active.toolName, active.toolCallId), outputLabels);

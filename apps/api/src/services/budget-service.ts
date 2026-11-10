@@ -33,6 +33,9 @@
  *   - every gateway `tools/call`, before the tool policy (`checkBlock` with
  *     the client and the toolset's project, and for a workflow tool its
  *     workflow and project: its run is not checked again).
+ *   - every sub-workflow a run starts (Execute Workflow, Workflow Tool), with
+ *     the run's context, and as `pending` its earlier children's unrecorded
+ *     spend plus a reservation per child still running (sub-workflow-spend.ts).
  *   A run or call that starts while usage is under the cap may take it over;
  *   calls of one gateway batch are checked together, so a batch may overshoot
  *   by one batch. The next one is refused.
@@ -242,9 +245,13 @@ export class BudgetService {
    * 12.6 — the first matching `block` budget whose cap the current period's usage meets, or null. With no matching
    * block budget in the snapshot nothing is read from the store. Throws BudgetUnavailableError when the budgets or
    * a block budget's usage cannot be read.
+   *
+   * `pending`: usage of the run being checked that is not recorded yet (its finished sub-workflows), added to what
+   * the store holds; asked only when a block budget applies.
    */
-  async checkBlock(ctx: BudgetCheckContext): Promise<BudgetExceededError | null> {
+  async checkBlock(ctx: BudgetCheckContext, pending?: () => { costUsd: number; totalTokens: number }): Promise<BudgetExceededError | null> {
     const blocking = matchBudgets(await this.enabledBudgets(), ctx).filter((budget) => budget.action === "block");
+    let unrecorded: { costUsd: number; totalTokens: number } | undefined;
     for (const budget of blocking) {
       const periodStart = currentPeriodStart(budget.period);
       let current: number;
@@ -253,9 +260,18 @@ export class BudgetService {
       } catch (error) {
         throw new BudgetUnavailableError(error);
       }
+      if (pending) {
+        unrecorded ??= pending();
+        current += budget.limitType === "usd" ? unrecorded.costUsd : unrecorded.totalTokens;
+      }
       if (current >= budget.limitValue) return new BudgetExceededError(budget, current, budget.limitValue, periodStart);
     }
     return null;
+  }
+
+  /** Whether an enabled `block` budget applies to the context (from the snapshot; nothing else is read). */
+  async appliesBlock(ctx: BudgetCheckContext): Promise<boolean> {
+    return matchBudgets(await this.enabledBudgets(), ctx).some((budget) => budget.action === "block");
   }
 
   /** Throws the BudgetExceededError of `checkBlock`, if any. */
