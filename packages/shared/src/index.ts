@@ -34,3 +34,4 @@ export * from "./model-allowlist";
 export * from "./agent-tools";
 export * from "./guard-benchmark";
 export * from "./ai-gateway";
+export * from "./retention";

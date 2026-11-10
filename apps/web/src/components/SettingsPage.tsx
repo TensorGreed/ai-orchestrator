@@ -129,6 +129,7 @@ import {
 import { BREAK_GLASS_NOTIFICATION_OPTIONS } from "@ai-orchestrator/shared";
 import { AuditSigningKeysSection } from "./AuditSigningKeysSection";
 import { NetworkSettingsTab } from "./NetworkSettingsTab";
+import { DataProtectionTab } from "./DataProtectionTab";
 import { ServiceAccountsTab } from "./ServiceAccountsTab";
 import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
 import { describeKeyScopes } from "../lib/key-scopes";
@@ -145,6 +146,7 @@ type SettingsTab =
   | "external-secrets"
   | "network"
   | "service-accounts"
+  | "data-protection"
   | "audit-log"
   | "audit-signing"
   | "log-streams"
@@ -216,7 +218,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
         { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
         { id: "network", label: "Network", restricted: !isAdmin },
-        { id: "service-accounts", label: "Service Accounts", restricted: !isAdmin }
+        { id: "service-accounts", label: "Service Accounts", restricted: !isAdmin },
+        { id: "data-protection", label: "Data protection", restricted: !isAdmin }
       ]
     },
     {
@@ -305,6 +308,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         )}
         {tab === "network" && isAdmin && <NetworkSettingsTab />}
         {tab === "service-accounts" && isAdmin && <ServiceAccountsTab projects={projects} />}
+        {tab === "data-protection" && isAdmin && <DataProtectionTab />}
         {tab === "audit-log" && isAdmin && <AuditLogTab />}
         {tab === "audit-signing" && isAdmin && <AuditSigningKeysSection />}
         {tab === "log-streams" && isAdmin && <LogStreamsTab />}

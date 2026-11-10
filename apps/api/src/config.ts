@@ -96,6 +96,17 @@ const envSchema = z.object({
   SSE_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().max(30000).default(15000),
   EXECUTION_HISTORY_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(30),
   EXECUTION_HISTORY_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000),
+  // 13.3 — retention. Every setting is optional; unset keeps today's behaviour (see docs/operations/data-retention.md).
+  /** Rows one purge deletes at most per table (default 50 000); the rest go on the next purge. */
+  RETENTION_MAX_ROWS_PER_TICK: optionalIntFromEnv(1000, 10_000_000),
+  /** The shortest retention a project may set, in days (default 1). */
+  RETENTION_MIN_DAYS: optionalIntFromEnv(1, 36_500),
+  /** The longest retention a project may set, in days (unset: no limit, and a project may keep forever). */
+  RETENTION_MAX_DAYS: optionalIntFromEnv(1, 36_500),
+  /** /v1 AI gateway request metadata (ai_gateway_requests), in days. Unset or 0 keeps it forever. */
+  AI_GATEWAY_REQUEST_RETENTION_DAYS: optionalIntFromEnv(0, 36_500),
+  /** Agent memory (Simple Memory sessions, agent artifacts, the session tool cache) by last update, in days. Unset or 0 keeps it. */
+  AGENT_MEMORY_RETENTION_DAYS: optionalIntFromEnv(0, 36_500),
   SEED_SAMPLE_WORKFLOWS: booleanFromEnv.default(false),
   SECRET_MASTER_KEY_BASE64: z.string().min(1).optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("ao_session"),
@@ -542,8 +553,11 @@ const envSchema = z.object({
   // shape: `{ providerId: { model: { inputUsdPer1M, outputUsdPer1M, cachedInputUsdPer1M? } } }`.
   // Operators with negotiated rates / self-hosted GPU costs override here.
   LLM_PRICING_OVERRIDES_JSON: z.string().default(""),
-  /** Retention for usage_events rows. 0 disables pruning. */
-  USAGE_EVENTS_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(365),
+  /**
+   * 13.3 — usage_events rows older than this many days are deleted. 0 (the default) keeps them: an upgrade deletes no
+   * chargeback history. `.env.example` suggests 365 for new installs.
+   */
+  USAGE_EVENTS_RETENTION_DAYS: z.coerce.number().int().nonnegative().max(36_500).default(0),
 
   // Phase 7.1 — Deployment & HA
   WORKER_MODE: z.enum(["all", "api", "webhook", "worker"]).default("all"),
@@ -653,12 +667,60 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   parseSessionPolicy(parsed.data);
   // Phase 13.2 — a bad address list refuses to start, naming the setting and the entry.
   resolveNetworkSettings(parsed.data);
+  // 13.3 — retention bounds that contradict each other refuse to start.
+  resolveRetentionSettings(parsed.data);
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.
   resolveQueueSettings(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
   checkClusterTimings(parsed.data, env.DB_TYPE);
   resolveExecutionDispatch(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
 
   return parsed.data;
+}
+
+// ---------------------------------------------------------------------------
+// 13.3 — retention. Unset values keep today's behaviour: nothing new is deleted.
+// ---------------------------------------------------------------------------
+
+export const RETENTION_DEFAULTS = {
+  maxRowsPerTick: 50_000,
+  minDays: 1
+} as const;
+
+export interface RetentionSettings {
+  maxRowsPerTick: number;
+  /** The range a project's own retention must fall in (per-project retention); maxDays null = no upper limit. */
+  minDays: number;
+  maxDays: number | null;
+  /** Days per deployment-wide class; 0 = kept forever. */
+  agentMemoryDays: number;
+  aiGatewayRequestDays: number;
+  usageEventDays: number;
+}
+
+export function resolveRetentionSettings(
+  config: Pick<
+    AppConfig,
+    | "RETENTION_MAX_ROWS_PER_TICK"
+    | "RETENTION_MIN_DAYS"
+    | "RETENTION_MAX_DAYS"
+    | "AGENT_MEMORY_RETENTION_DAYS"
+    | "AI_GATEWAY_REQUEST_RETENTION_DAYS"
+    | "USAGE_EVENTS_RETENTION_DAYS"
+  >
+): RetentionSettings {
+  const minDays = config.RETENTION_MIN_DAYS ?? RETENTION_DEFAULTS.minDays;
+  const maxDays = config.RETENTION_MAX_DAYS ?? null;
+  if (maxDays !== null && maxDays < minDays) {
+    throw new Error(`Invalid environment configuration: RETENTION_MAX_DAYS (${maxDays}) is below RETENTION_MIN_DAYS (${minDays}).`);
+  }
+  return {
+    maxRowsPerTick: config.RETENTION_MAX_ROWS_PER_TICK ?? RETENTION_DEFAULTS.maxRowsPerTick,
+    minDays,
+    maxDays,
+    agentMemoryDays: config.AGENT_MEMORY_RETENTION_DAYS ?? 0,
+    aiGatewayRequestDays: config.AI_GATEWAY_REQUEST_RETENTION_DAYS ?? 0,
+    usageEventDays: config.USAGE_EVENTS_RETENTION_DAYS ?? 0
+  };
 }
 
 // ---------------------------------------------------------------------------

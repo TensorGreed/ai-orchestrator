@@ -105,6 +105,8 @@ import type {
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
+import type { RetentionRunView } from "@ai-orchestrator/shared";
+import type { RetentionScope, RetentionTable } from "./retention-tables.js";
 
 /** The decision `decideApprovalRequest` records. */
 export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0];
@@ -2005,7 +2007,24 @@ export interface Store extends AiGatewayStore {
     deletePausedState?: boolean;
     cancelClaimed?: boolean;
   }): Promise<CancelExecutionResult>;
+  /**
+   * The whole history retention in one call, without a row cap: history, tool calls, cassettes, rule events, decided
+   * approvals, gateway approvals and finished queue rows before the cut-off. The retention service prunes the same rows
+   * table by table (pruneRetentionTable); this stays as the reference its equivalence test compares against.
+   */
   pruneExecutionHistory(input: { before: string }): Promise<number>;
+  /**
+   * 13.3 — deletes `table`'s rows aged before `scope.before` (see RETENTION_TABLES), at most `scope.limit` of them, in
+   * batches of RETENTION_BATCH_ROWS; returns how many it deleted. SQLite yields to the event loop between batches, so a
+   * large purge never blocks it for long; Postgres skips rows another transaction holds (postgres/prune.ts).
+   */
+  pruneRetentionTable(table: RetentionTable, scope: RetentionScope): Promise<number>;
+  /** 13.3 — `table`'s rows aged before `before`, counted up to `cap` (the admin page's backlog). */
+  countRetentionDue(table: RetentionTable, input: { before: string; cap: number }): Promise<number>;
+  /** 13.3 — records one retention purge (counts only). */
+  saveRetentionRun(run: RetentionRunView): Promise<void>;
+  /** 13.3 — the latest retention purges, newest first. */
+  listRetentionRuns(limit: number): Promise<RetentionRunView[]>;
   saveWorkflowExecutionState(input: {
     id: string;
     workflowId: string;

@@ -108,6 +108,14 @@ gateway (`MCP_GATEWAY_CLIENT_CERT_HEADER`, `MCP_GATEWAY_CLIENT_CERT_PROXIES`). A
 open. They are checked against the client address above, and refused with `TRUST_PROXY=true`. See
 [Network controls](../security/network-controls.md).
 
+## Data retention (optional)
+
+How long each kind of data is kept: `EXECUTION_HISTORY_RETENTION_DAYS` (30), `EVAL_RUN_RETENTION_DAYS` (90),
+`AUDIT_LOG_RETENTION_DAYS` (365), and, kept forever unless set, `USAGE_EVENTS_RETENTION_DAYS`,
+`AGENT_MEMORY_RETENTION_DAYS` and `AI_GATEWAY_REQUEST_RETENTION_DAYS`. `RETENTION_MAX_ROWS_PER_TICK` (50 000) caps the
+rows one purge deletes per table. See [Data retention](../operations/data-retention.md) for every setting and what it
+deletes.
+
 ## MCP server registry probes (optional)
 
 - `MCP_PROBE_INTERVAL_MS` (default `300000`; `0` turns scheduled probes off)

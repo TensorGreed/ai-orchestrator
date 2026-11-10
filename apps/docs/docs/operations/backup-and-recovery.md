@@ -354,7 +354,8 @@ What moves the numbers:
   and hold the data in memory, so they slow down and need more memory as the database grows.
 - **Backup interval.** The RPO of every scheduled method is its interval. Only WAL archiving gets below minutes.
 - **Run history and the audit log** are usually the largest tables. `EXECUTION_HISTORY_RETENTION_DAYS` and
-  `AUDIT_LOG_RETENTION_DAYS` bound them; `db:export --exclude-history` leaves them out.
+  `AUDIT_LOG_RETENTION_DAYS` bound them; `db:export --exclude-history` leaves them out. Every retention setting is
+  listed in [Data retention](./data-retention.md).
 - **Where the backup lives.** Fetching it from another region or from cold storage adds to the RTO.
 
 ## The restore drill
