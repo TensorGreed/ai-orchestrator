@@ -27,7 +27,7 @@ function workflowFor(provider: LLMProviderConfig): Workflow {
   };
 }
 
-type Delta = { index: number; id?: string; name?: string; args?: string };
+type Delta = { index?: number; id?: string; name?: string; args?: string };
 
 /** One SSE frame carrying the given tool-call deltas, the way an OpenAI-family server writes them. */
 function frame(...deltas: Delta[]): string {
@@ -36,7 +36,7 @@ function frame(...deltas: Delta[]): string {
       {
         delta: {
           tool_calls: deltas.map((delta) => ({
-            index: delta.index,
+            ...(delta.index !== undefined ? { index: delta.index } : {}),
             ...(delta.id ? { id: delta.id, type: "function" } : {}),
             function: { ...(delta.name ? { name: delta.name } : {}), ...(delta.args !== undefined ? { arguments: delta.args } : {}) }
           }))
@@ -116,6 +116,50 @@ describe.each(PROVIDERS)("streamed tool calls through $label", ({ provider }) =>
     expect(calls).toEqual([
       { id: "call_a", name: "lookup", arguments: { q: "x" } },
       { id: "call_b", name: "weather", arguments: { city: "Oslo" } }
+    ]);
+  });
+
+  it("keeps calls apart when the server sends no index, only ids", async () => {
+    const calls = await toolCallsOf(provider, [
+      frame({ id: "call_a", name: "lookup", args: '{"q":' }),
+      frame({ id: "call_b", name: "weather", args: '{"city":' }),
+      frame({ id: "call_a", args: '"x"}' }),
+      frame({ id: "call_b", args: '"Oslo"}' })
+    ]);
+    expect(calls).toEqual([
+      { id: "call_a", name: "lookup", arguments: { q: "x" } },
+      { id: "call_b", name: "weather", arguments: { city: "Oslo" } }
+    ]);
+  });
+
+  it("keeps calls apart when the server sends no index and no ids", async () => {
+    const calls = await toolCallsOf(provider, [
+      frame({ name: "lookup", args: '{"q":1}' }),
+      frame({ name: "weather", args: '{"c":2}' })
+    ]);
+    expect(calls.map((call) => (call as { name: string; arguments: unknown }).name)).toEqual(["lookup", "weather"]);
+    expect(calls.map((call) => (call as { arguments: unknown }).arguments)).toEqual([{ q: 1 }, { c: 2 }]);
+  });
+
+  it("keeps calls apart when the server reuses index 0 and sends no ids", async () => {
+    const calls = (await toolCallsOf(provider, [
+      frame({ index: 0, name: "lookup", args: '{"q":1}' }),
+      frame({ index: 0, name: "weather", args: '{"c":2}' })
+    ])) as Array<{ name: string; arguments: unknown }>;
+    expect(calls.map((call) => [call.name, call.arguments])).toEqual([
+      ["lookup", { q: 1 }],
+      ["weather", { c: 2 }]
+    ]);
+  });
+
+  it("keeps calls apart when the server reuses index 0 with a different id each time", async () => {
+    const calls = await toolCallsOf(provider, [
+      frame({ index: 0, id: "call_a", name: "lookup", args: '{"q":1}' }),
+      frame({ index: 0, id: "call_b", name: "weather", args: '{"c":2}' })
+    ]);
+    expect(calls).toEqual([
+      { id: "call_a", name: "lookup", arguments: { q: 1 } },
+      { id: "call_b", name: "weather", arguments: { c: 2 } }
     ]);
   });
 });

@@ -465,8 +465,8 @@ function replayProviderAdapter(definition: ProviderDefinition, player: ModelTape
     generateStream: async function* (request, context) {
       const { response } = await player.answer(request, context);
       if (response.content) yield { type: "text_delta", textDelta: response.content };
-      for (const call of response.toolCalls ?? []) {
-        yield { type: "tool_call_delta", toolCallId: call.id, name: call.name, argumentsDelta: JSON.stringify(call.arguments ?? {}) };
+      for (const [index, call] of (response.toolCalls ?? []).entries()) {
+        yield { type: "tool_call_delta", index, toolCallId: call.id, name: call.name, argumentsDelta: JSON.stringify(call.arguments ?? {}) };
       }
       // The recorded usage, so a replayed stream reports what the original reported and is not estimated afresh.
       if (response.usage) yield { type: "usage", usage: response.usage };
