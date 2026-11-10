@@ -2,8 +2,8 @@
 #
 # Multi-stage build for the L2M API.
 #
-# - toolchain stage: node:24-alpine with the build tools better-sqlite3 needs
-#   (it has no prebuilt binary for Node 24 on musl and compiles from source),
+# - toolchain stage: node:26-alpine with the build tools better-sqlite3 needs
+#   (it has no prebuilt binary for Node 26 on musl and compiles from source),
 #   plus the workspace manifests and the lockfile.
 # - deps stage installs every dependency, dev tools included, for the build.
 # - build stage runs `pnpm --filter api build` (tsc --noEmit) so a TS error
@@ -14,7 +14,7 @@
 #   no test or build tool (vitest, vite, typescript, concurrently, ...) reaches
 #   the image. tsx is a production dependency: the api runs its TS source
 #   through it.
-# - runtime stage is a slim node:24-alpine that runs as a non-root user,
+# - runtime stage is a slim node:26-alpine that runs as a non-root user,
 #   includes a /health HEALTHCHECK, and carries the production node_modules and
 #   the sources of the api and workspace packages (no apps/web, apps/docs or
 #   apps/vscode-l2m-agent), at the same /app/apps/api path as before.
@@ -32,9 +32,10 @@
 # builds use the same release), keeping release builds reproducible;
 # Dependabot (.github/dependabot.yml) proposes digest updates weekly.
 
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS toolchain
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS toolchain
 WORKDIR /app
-RUN corepack enable \
+RUN npm install --global corepack@0.36.0 \
+    && corepack enable \
     && apk add --no-cache python3 make g++ libc6-compat
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/api/package.json apps/api/
@@ -63,13 +64,15 @@ FROM toolchain AS prod-deps
 RUN pnpm install --prod --frozen-lockfile --filter "@ai-orchestrator/api..."
 
 # ---------- runtime stage ----------
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS runtime
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
+# The node:26 image ships no corepack, so it is installed from npm (pinned) before `corepack enable`.
 # zlib from the Alpine repository: the base image ships 1.3.2-r1, affected by
 # CVE-2026-4738 (critical, fixed in 1.4-r0). Drop once the pinned base has it.
 RUN apk upgrade --no-cache zlib \
     && apk add --no-cache wget tini \
+    && npm install --global corepack@0.36.0 \
     && corepack enable \
     && addgroup -S nodeuser \
     && adduser -S nodeuser -G nodeuser
