@@ -25,6 +25,7 @@ import { AuthService } from "./services/auth-service.js";
 import { KEY_PROJECT_ROUTES } from "./services/key-scopes.js";
 import { QueueService } from "./services/queue-service.js";
 import { SecretService } from "./services/secret-service.js";
+import { WorkflowVersionService } from "./services/workflow-version-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
 const SCOPED_KEY_REFUSAL = "This API key is limited to projects and cannot call this route";
@@ -77,6 +78,8 @@ interface Ctx {
   adminCookie: string;
   key: string;
   approvalIds: { alpha: string; beta: string };
+  /** Version numbers of the release workflows (v1, v2 each). */
+  versions: Record<string, [number, number]>;
 }
 
 let ctx: Ctx;
@@ -157,6 +160,30 @@ beforeAll(async () => {
     approvalIds[project] = run.executionId;
   }
 
+  // Release workflows, each with two saved versions:
+  //   wf-pub-*: nothing published;  wf-rel-*: v1 then v2 published (v2 live);
+  //   wf-enf-a: as wf-rel-a, then a release gate turned on and enforced (no replay job has run).
+  const versionService = new WorkflowVersionService(store);
+  const versions: Record<string, [number, number]> = {};
+  const adminCall = (method: string, url: string, payload?: unknown) =>
+    app.inject({ method: method as "GET", url, headers: { cookie: adminCookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  for (const [id, projectId] of [["wf-pub-a", "alpha"], ["wf-pub-b", "beta"], ["wf-rel-a", "alpha"], ["wf-rel-b", "beta"], ["wf-enf-a", "alpha"]] as const) {
+    const saved: number[] = [];
+    for (const name of ["one", "two"]) {
+      const stored = await store.upsertWorkflow({ ...workflow(id, projectId), name: `${id} ${name}` });
+      saved.push((await versionService.snapshot({ workflow: stored, changeNote: name })).version);
+    }
+    versions[id] = [saved[0]!, saved[1]!];
+    if (id.startsWith("wf-pub-")) continue;
+    for (const version of saved) {
+      const published = await adminCall("POST", `/api/workflows/${id}/publish`, { version });
+      expect(published.statusCode, published.body).toBe(200);
+    }
+  }
+  await store.createEvalDataset({ id: "set-wf-enf-a", name: "Golden wf-enf-a", workflowId: "wf-enf-a" });
+  const gate = await adminCall("PUT", "/api/workflows/wf-enf-a/release-gate", { enabled: true, enforced: true, datasetIds: ["set-wf-enf-a"] });
+  expect(gate.statusCode, gate.body).toBe(200);
+
   // An admin service account, member of both projects, with a key limited to alpha.
   const account = await app.inject({ method: "POST", url: "/api/service-accounts", headers: { cookie: adminCookie }, payload: { name: "deployer", role: "admin" } });
   expect(account.statusCode).toBe(201);
@@ -171,7 +198,7 @@ beforeAll(async () => {
     payload: { name: "ci", projects: ["alpha"] }
   });
   expect(created.statusCode).toBe(201);
-  ctx = { app, store, config, tempDir, adminCookie, key: json<{ key: string }>(created).key, approvalIds };
+  ctx = { app, store, config, tempDir, adminCookie, key: json<{ key: string }>(created).key, approvalIds, versions };
 });
 
 afterAll(async () => {
@@ -209,9 +236,9 @@ const ROUTE_TABLE: Record<string, () => Promise<void>> = {
   },
   "GET /api/workflows": async () => {
     const ids = json<Array<{ id: string }>>(await withKey("GET", "/api/workflows")).map((w) => w.id).sort();
-    expect(ids).toEqual(["wf-a", "wf-gate-a"]);
+    expect(ids).toEqual(["wf-a", "wf-enf-a", "wf-gate-a", "wf-pub-a", "wf-rel-a"]);
     const paged = json<{ items: Array<{ id: string }>; total: number }>(await withKey("GET", "/api/workflows?page=1&pageSize=50"));
-    expect(paged.total).toBe(2);
+    expect(paged.total).toBe(5);
     expect(json<Array<{ id: string }>>(await withKey("GET", "/api/workflows?projectId=beta"))).toEqual([]);
   },
   "POST /api/workflows": async () => {
@@ -237,6 +264,66 @@ const ROUTE_TABLE: Record<string, () => Promise<void>> = {
   },
   "POST /api/workflows/:id/execute/stream": async () => {
     refused(await withKey("POST", "/api/workflows/wf-b/execute/stream", {}));
+  },
+  "POST /api/workflows/:id/publish": async () => {
+    const [, pubB2] = ctx.versions["wf-pub-b"]!;
+    refused(await withKey("POST", "/api/workflows/wf-pub-b/publish", { version: pubB2 }));
+    expect(await ctx.store.getPublishedVersion("wf-pub-b")).toBeNull();
+    // The key acts as a builder, though its owner is an admin: no override of the gate.
+    const [enf1] = ctx.versions["wf-enf-a"]!;
+    const override = await withKey("POST", "/api/workflows/wf-enf-a/publish", { version: enf1, override: { reason: "ship it" } });
+    expect(override.statusCode, override.body).toBe(403);
+    expect(json<{ error: string }>(override).error).toBe("Only admins can override the release gate");
+    // A gated publish judges the replay jobs already run and starts none: with none, it is blocked.
+    const runsBefore = (await ctx.store.listEvalRuns({ workflowId: "wf-enf-a" })).length;
+    const gated = await withKey("POST", "/api/workflows/wf-enf-a/publish", { version: enf1 });
+    expect(gated.statusCode, gated.body).toBe(409);
+    expect((await ctx.store.listEvalRuns({ workflowId: "wf-enf-a" })).length).toBe(runsBefore);
+    expect(await ctx.store.getPublishedVersion("wf-enf-a")).toBe(ctx.versions["wf-enf-a"]![1]);
+
+    const [, pubA2] = ctx.versions["wf-pub-a"]!;
+    const published = await withKey("POST", "/api/workflows/wf-pub-a/publish", { version: pubA2 });
+    expect(published.statusCode, published.body).toBe(200);
+    expect(await ctx.store.getPublishedVersion("wf-pub-a")).toBe(pubA2);
+    const [entry] = (await ctx.store.listAuditLogs({ eventType: "release.published", resourceId: "wf-pub-a", pageSize: 5 })).items;
+    expect(entry?.actorType).toBe("api_key");
+    expect(entry?.metadata).toMatchObject({ actorServiceAccount: true });
+    expect((entry?.metadata as { actorApiKeyId?: string }).actorApiKeyId).toBeTruthy();
+  },
+  "GET /api/workflows/:id/releases": async () => {
+    refused(await withKey("GET", "/api/workflows/wf-rel-b/releases"));
+    const view = json<{ releases: Array<{ version: number }>; publishedVersion: number }>(await withKey("GET", "/api/workflows/wf-rel-a/releases"));
+    expect(view.releases.length).toBeGreaterThanOrEqual(2);
+    expect(view.publishedVersion).toBe(ctx.versions["wf-rel-a"]![1]);
+  },
+  "GET /api/workflows/:id/release-state": async () => {
+    refused(await withKey("GET", "/api/workflows/wf-rel-b/release-state"));
+    const state = json<{ state: { publishedVersion: number; canPublish: boolean; canEditGate: boolean } }>(await withKey("GET", "/api/workflows/wf-rel-a/release-state")).state;
+    expect(state.publishedVersion).toBe(ctx.versions["wf-rel-a"]![1]);
+    expect(state.canPublish).toBe(true);
+    // The key cannot call the gate settings route, so it is not offered.
+    expect(state.canEditGate).toBe(false);
+  },
+  "GET /api/workflows/:id/publish-preview": async () => {
+    refused(await withKey("GET", `/api/workflows/wf-rel-b/publish-preview?version=${ctx.versions["wf-rel-b"]![0]}`));
+    const preview = json<{ preview: { version: number; verdict: string } }>(await withKey("GET", `/api/workflows/wf-enf-a/publish-preview?version=${ctx.versions["wf-enf-a"]![0]}`)).preview;
+    expect(preview.version).toBe(ctx.versions["wf-enf-a"]![0]);
+    expect(preview.verdict).toBe("blocked");
+  },
+  "POST /api/workflows/:id/rollback": async () => {
+    const [relB1, relB2] = ctx.versions["wf-rel-b"]!;
+    refused(await withKey("POST", "/api/workflows/wf-rel-b/rollback", { version: relB1, reason: "back" }));
+    expect(await ctx.store.getPublishedVersion("wf-rel-b")).toBe(relB2);
+    // On an enforced gate only an admin may roll back, and the key is capped at builder.
+    const [enf1, enf2] = ctx.versions["wf-enf-a"]!;
+    const enforced = await withKey("POST", "/api/workflows/wf-enf-a/rollback", { version: enf1, reason: "back" });
+    expect(enforced.statusCode, enforced.body).toBe(403);
+    expect(json<{ error: string }>(enforced).error).toMatch(/release gate is enforced: only an admin can roll back/);
+    expect(await ctx.store.getPublishedVersion("wf-enf-a")).toBe(enf2);
+
+    const [relA1] = ctx.versions["wf-rel-a"]!;
+    ok(await withKey("POST", "/api/workflows/wf-rel-a/rollback", { version: relA1, reason: "back" }));
+    expect(await ctx.store.getPublishedVersion("wf-rel-a")).toBe(relA1);
   },
   "GET /api/executions": async () => {
     const items = json<{ items: Array<{ workflowId: string }> }>(await withKey("GET", "/api/executions?pageSize=100")).items;

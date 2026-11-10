@@ -147,6 +147,13 @@ export const KEY_PROJECT_ROUTES: ReadonlySet<string> = new Set([
   "PUT /api/workflows/:id",
   "POST /api/workflows/:id/execute",
   "POST /api/workflows/:id/execute/stream",
+  // Releases: publish judges replay jobs already run (it starts none), rollback is admin-only on an enforced gate, and
+  // an override is admin-only, so the key's builder cap holds. Unpublish and the gate settings stay out.
+  "POST /api/workflows/:id/publish",
+  "GET /api/workflows/:id/releases",
+  "GET /api/workflows/:id/release-state",
+  "GET /api/workflows/:id/publish-preview",
+  "POST /api/workflows/:id/rollback",
   "GET /api/executions",
   "GET /api/executions/:id",
   "GET /api/executions/:id/events",
