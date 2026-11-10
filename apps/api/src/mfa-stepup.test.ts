@@ -354,7 +354,9 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "POST", url: `/api/users/${other.id}/sessions/revoke`, payload: {} },
       { method: "POST", url: `/api/service-accounts/${account.id}/keys`, payload: { name: "ci" } },
       { method: "PATCH", url: `/api/service-accounts/${account.id}`, payload: { role: "operator" } },
-      { method: "DELETE", url: `/api/service-accounts/${account.id}` }
+      { method: "DELETE", url: `/api/service-accounts/${account.id}` },
+      { method: "POST", url: "/api/legal-holds", payload: { name: "Matter", reason: "r", scopeType: "project", scopeId: project.id } },
+      { method: "POST", url: "/api/legal-holds/lh_x/release", payload: { reason: "r" } }
     ];
     const seen = new Set<string>();
     for (const route of routes) {
