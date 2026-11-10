@@ -19,6 +19,7 @@ import {
   disableMfa,
   disconnectGit,
   enrollMfa,
+  mfaReauthFromError,
   fetchApiKeys,
   fetchAuditLogs,
   fetchCustomRoles,
@@ -28,10 +29,7 @@ import {
   fetchMcpPresets,
   fetchObservability,
   fetchRecentTraces,
-  fetchDeploymentUsers,
   inBackground,
-  revokeUserSessions,
-  type DeploymentUserView,
   fetchLogStreamDestinations,
   fetchMfaStatus,
   fetchProjectMembers,
@@ -134,6 +132,7 @@ import { ServiceAccountsTab } from "./ServiceAccountsTab";
 import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
 import { describeKeyScopes } from "../lib/key-scopes";
 import { SignedInSessionsCard } from "./SignedInSessionsCard";
+import { UsersAdminTab } from "./UsersAdminTab";
 
 type SettingsTab =
   | "security"
@@ -289,7 +288,6 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
             <SignedInSessionsCard />
           </>
         )}
-        {tab === "users" && isAdmin && <UsersTab currentUserId={authUser.id} />}
         {tab === "api-keys" && <ApiKeysTab isAdmin={isAdmin} ownerRole={authUser.role} projects={projects} />}
         {tab === "members" && (
           <ProjectMembersTab
@@ -298,6 +296,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
             currentUserRole={authUser.role}
           />
         )}
+        {tab === "users" && isAdmin && <UsersAdminTab currentUserId={authUser.id} />}
         {tab === "roles" && isAdmin && <CustomRolesTab projects={projects} initialProjectId={activeProjectId} />}
         {tab === "sso" && isAdmin && <SsoMappingsTab projects={projects} />}
         {tab === "external-secrets" && isAdmin && (
@@ -337,6 +336,8 @@ function SecurityTab() {
   } | null>(null);
   const [activationCode, setActivationCode] = useState("");
   const [disableCode, setDisableCode] = useState("");
+  const [reauth, setReauth] = useState<"password" | "sso" | null>(null);
+  const [reauthPassword, setReauthPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -360,9 +361,13 @@ function SecurityTab() {
     setError(null);
     setBusy(true);
     try {
-      const response = await enrollMfa();
+      const response = await enrollMfa(reauth === "password" ? { password: reauthPassword } : {});
       setEnrollment(response);
+      setReauth(null);
+      setReauthPassword("");
     } catch (err) {
+      const needed = mfaReauthFromError(err);
+      if (needed) setReauth(needed);
       setError(formatError(err));
     } finally {
       setBusy(false);
@@ -411,6 +416,15 @@ function SecurityTab() {
         apps. Enrolling MFA adds a second step to every future login.
       </p>
       {error && <div className="settings-error">{error}</div>}
+      {status?.requiredForRole && (
+        <p className="settings-help">Your role requires MFA, so it cannot stay off: after turning it off, set it up again.</p>
+      )}
+      {status?.stepUpMaxAgeMinutes ? (
+        <p className="settings-help">
+          Security actions (changing roles, keys, secrets, SSO mappings and similar) ask for a code when your last one is
+          older than {status.stepUpMaxAgeMinutes} minutes.
+        </p>
+      ) : null}
 
       {status?.enabled ? (
         <div className="settings-card">
@@ -483,119 +497,23 @@ function SecurityTab() {
       ) : (
         <div className="settings-card">
           <p>MFA is not enrolled. Click below to generate a secret and backup codes.</p>
+          {reauth === "password" && (
+            <>
+              <label htmlFor="mfa-enroll-password">Your password (needed more than 10 minutes after signing in)</label>
+              <input
+                id="mfa-enroll-password"
+                type="password"
+                autoComplete="current-password"
+                value={reauthPassword}
+                onChange={(event) => setReauthPassword(event.target.value)}
+              />
+            </>
+          )}
           <div className="settings-actions">
-            <button className="header-btn" onClick={handleEnroll} disabled={busy}>
+            <button className="header-btn" onClick={handleEnroll} disabled={busy || reauth === "sso" || (reauth === "password" && !reauthPassword)}>
               Enrol in MFA
             </button>
           </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Users (admin) — Phase 13.2: end a user's sessions everywhere
-// ---------------------------------------------------------------------------
-
-function UsersTab({ currentUserId }: { currentUserId: string }) {
-  const [users, setUsers] = useState<DeploymentUserView[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [busyUserId, setBusyUserId] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchDeploymentUsers()
-      .then((response) => {
-        if (!cancelled) setUsers(response.users);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(formatError(err));
-      })
-      .finally(() => {
-        if (!cancelled) setLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const signOutEverywhere = async (user: DeploymentUserView) => {
-    const self = user.id === currentUserId;
-    const prompt = self
-      ? "Sign yourself out on every other device and browser? This session stays signed in."
-      : `Sign ${user.email} out everywhere? They will need to sign in again.`;
-    if (!window.confirm(prompt)) return;
-    setBusyUserId(user.id);
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await revokeUserSessions(user.id);
-      const count = result.revoked === 1 ? "1 session" : `${result.revoked} sessions`;
-      setNotice(`Ended ${count} for ${user.email}.`);
-    } catch (err) {
-      setError(formatError(err));
-    } finally {
-      setBusyUserId(null);
-    }
-  };
-
-  return (
-    <div className="settings-section">
-      <h3>Users</h3>
-      <p className="settings-help">Everyone with an account on this deployment. Signing a user out everywhere ends all of their live sessions.</p>
-      {error && <div className="settings-error">{error}</div>}
-      {notice && (
-        <div className="info-banner" role="status">
-          {notice}
-        </div>
-      )}
-      {!loaded ? (
-        <div className="settings-loading">Loading users…</div>
-      ) : (
-        <div className="settings-card">
-          {users.length === 0 ? (
-            <p className="settings-muted">No users.</p>
-          ) : (
-            <table className="settings-table">
-              <thead>
-                <tr>
-                  <th>Email</th>
-                  <th>Role</th>
-                  <th>Created</th>
-                  <th>
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((user) => (
-                  <tr key={user.id}>
-                    <td>
-                      {user.email}
-                      {user.id === currentUserId && <span className="settings-chip">You</span>}
-                      {user.pending && <span className="settings-chip">Invited</span>}
-                    </td>
-                    <td>{user.role}</td>
-                    <td>{formatDate(user.createdAt)}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="mini-btn"
-                        onClick={() => void signOutEverywhere(user)}
-                        disabled={busyUserId !== null}
-                        aria-label={`Sign ${user.email} out everywhere`}
-                      >
-                        Sign out everywhere
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
         </div>
       )}
     </div>

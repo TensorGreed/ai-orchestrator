@@ -283,6 +283,23 @@ export const openApiSpec = {
         responses: { "200": { description: "MFA disabled" } }
       }
     },
+    "/api/auth/step-up": {
+      post: {
+        tags: ["Auth"],
+        summary:
+          "Step-up: verify a TOTP or backup code to refresh the session's MFA check (STEP_UP_MAX_AGE_MINUTES), or to lift a session restricted by MFA_REQUIRED_ROLES",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["code"], properties: { code: { type: "string" } } } } }
+        },
+        responses: {
+          "200": { description: "{ ok, mfaVerifiedAt, stepUpMaxAgeMinutes }" },
+          "400": { description: "No code, or not a browser session" },
+          "403": { description: "Invalid code (code: mfa_code_invalid)" },
+          "409": { description: "No authenticator set up (code: mfa_not_enrolled)" }
+        }
+      }
+    },
     "/api/auth/api-keys": {
       get: {
         tags: ["Auth"],
@@ -527,7 +544,25 @@ export const openApiSpec = {
           required: false,
           content: { "application/json": { schema: { type: "object", additionalProperties: false, properties: { handle: { type: "string" } } } } }
         },
-        responses: { "200": { description: "{ revoked: number }" }, "404": { description: "User or session not found" } }
+        responses: {
+          "200": { description: "{ revoked: number }" },
+          "403": { description: "Not an admin, or step-up required for another user's sessions (code: step_up_required)" },
+          "404": { description: "User or session not found" }
+        }
+      }
+    },
+    "/api/users/{id}/mfa/reset": {
+      post: {
+        tags: ["Users"],
+        summary:
+          "Reset a user's MFA (admin, step-up): deletes the authenticator and backup codes and ends the user's sessions. Not on yourself outside a break-glass session.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ ok, userId, hadMfa, sessionsEnded }" },
+          "400": { description: "Your own account" },
+          "403": { description: "Not an admin, or step-up required (code: step_up_required)" },
+          "404": { description: "User not found" }
+        }
       }
     },
     "/api/users/invite": {

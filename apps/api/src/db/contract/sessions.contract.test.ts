@@ -69,6 +69,10 @@ describeStoreContract("store contract: sessions, webhooks and triggers", (ctx) =
     expect(await mark("s1", "u2", "2026-11-09T11:00:00.000Z")).toBe(false);
     expect(await mark("s1", "u1", "2026-11-09T11:30:00.000Z")).toBe(true);
     expect((await store.getSession("s1"))?.mfaVerifiedAt).toBe("2026-11-09T11:30:00.000Z");
+    expect(await store.clearSessionMfaVerified("s1")).toBe(true);
+    expect((await store.getSession("s1"))?.mfaVerifiedAt).toBeNull();
+    expect(await store.clearSessionMfaVerified("missing")).toBe(false);
+    expect(await mark("s1", "u1", "2026-11-09T11:30:00.000Z")).toBe(true);
     await store.saveSession({ id: "s-expired", userId: "u1", expiresAt: "2000-01-01T00:00:00.000Z" });
     expect(await mark("s-expired", "u1", "2026-11-09T11:30:00.000Z")).toBe(false);
     expect((await store.getSession("s-expired"))?.mfaVerifiedAt).toBeNull();

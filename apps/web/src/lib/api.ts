@@ -227,7 +227,64 @@ export function notifySessionEnded(reason: SessionEndReason): void {
   for (const listener of [...sessionEndedListeners]) listener(reason);
 }
 
-async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+
+// ---------------------------------------------------------------------------
+// 13.2 — MFA required per role and step-up. The API answers 403 with a `code` the studio acts on:
+// `mfa_enrollment_required` / `mfa_verification_required` (the session may only set up or verify MFA) and
+// `step_up_required` (a security-admin action needs a fresh code). The app registers handlers here; every request
+// below goes through them, so no call site needs to know.
+// ---------------------------------------------------------------------------
+
+/** What a session restricted by MFA_REQUIRED_ROLES still has to do. */
+export type MfaGate = "enroll" | "verify";
+
+/** The `stepUp` part of a 403 `step_up_required` answer. */
+export interface StepUpChallenge {
+  action?: string;
+  method?: "totp";
+  enrolled?: boolean;
+  maxAgeMinutes?: number;
+  /** `api_key` when a key made the request (it cannot step up). */
+  credential?: "api_key";
+  message: string;
+}
+
+export interface AuthChallengeHandlers {
+  /** Ask for a code; resolve true once POST /api/auth/step-up succeeded (the request is then retried once). */
+  onStepUp?: (challenge: StepUpChallenge) => Promise<boolean>;
+  /** The session turned out to be restricted: show the enrolment or verification screen. */
+  onMfaGate?: (gate: MfaGate) => void;
+}
+
+let authChallengeHandlers: AuthChallengeHandlers = {};
+
+/** Sets the app's handlers for step-up and MFA-restricted sessions; a key given as undefined clears that handler. */
+export function setAuthChallengeHandlers(handlers: AuthChallengeHandlers): void {
+  authChallengeHandlers = { ...authChallengeHandlers, ...handlers };
+}
+
+/** The MFA gate a 403 answer names, or null. */
+export function mfaGateFromPayload(payload: Record<string, unknown> | undefined): MfaGate | null {
+  if (payload?.code === "mfa_enrollment_required") return "enroll";
+  if (payload?.code === "mfa_verification_required") return "verify";
+  return null;
+}
+
+/** The step-up challenge a 403 answer carries, or null. */
+export function stepUpFromPayload(payload: Record<string, unknown> | undefined): StepUpChallenge | null {
+  if (payload?.code !== "step_up_required") return null;
+  const raw = payload.stepUp && typeof payload.stepUp === "object" ? (payload.stepUp as Record<string, unknown>) : {};
+  return {
+    ...(typeof raw.action === "string" ? { action: raw.action } : {}),
+    ...(raw.method === "totp" ? { method: "totp" as const } : {}),
+    ...(typeof raw.enrolled === "boolean" ? { enrolled: raw.enrolled } : {}),
+    ...(typeof raw.maxAgeMinutes === "number" ? { maxAgeMinutes: raw.maxAgeMinutes } : {}),
+    ...(raw.credential === "api_key" ? { credential: "api_key" as const } : {}),
+    message: String(payload.error ?? "This action needs a recent MFA check")
+  };
+}
+
+async function apiRequest<T>(path: string, init?: RequestInit, retried = false): Promise<T> {
   const headers = new Headers(init?.headers);
   const body = init?.body;
   if (body !== undefined && body !== null && !(body instanceof FormData) && !headers.has("content-type")) {
@@ -257,6 +314,15 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     if (response.status === 401) {
       const reason = sessionEndReasonOf(payload);
       if (reason) notifySessionEnded(reason);
+    }
+    if (response.status === 403) {
+      const stepUp = stepUpFromPayload(payload);
+      // A session can answer with a code and retry once; an API key cannot.
+      if (stepUp && !retried && stepUp.credential !== "api_key" && stepUp.enrolled !== false && authChallengeHandlers.onStepUp) {
+        if (await authChallengeHandlers.onStepUp(stepUp)) return await apiRequest<T>(path, init, true);
+      }
+      const gate = mfaGateFromPayload(payload);
+      if (gate) authChallengeHandlers.onMfaGate?.(gate);
     }
     throw new ApiError(String(payload.error ?? "API request failed"), response.status, payload);
   }
@@ -306,7 +372,24 @@ export interface SessionInfo {
 }
 
 export async function fetchAuthMe() {
-  return apiRequest<{ user: AuthUser; session?: SessionInfo | null }>("/api/auth/me");
+  return apiRequest<{ user: AuthUser; session?: SessionInfo | null; mfaEnrollmentRequired?: boolean; mfaVerificationRequired?: boolean }>(
+    "/api/auth/me"
+  );
+}
+
+/** The MFA gate /api/auth/me reports for this session, or null. */
+export function mfaGateFromMe(me: { mfaEnrollmentRequired?: boolean; mfaVerificationRequired?: boolean }): MfaGate | null {
+  if (me.mfaEnrollmentRequired) return "enroll";
+  if (me.mfaVerificationRequired) return "verify";
+  return null;
+}
+
+/** 13.2 — verifies a TOTP or backup code for this session (step-up, or lifting a verification-only session). */
+export async function stepUpSession(payload: { code: string }) {
+  return apiRequest<{ ok: true; mfaVerifiedAt: string; stepUpMaxAgeMinutes: number }>("/api/auth/step-up", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  }, true);
 }
 
 export type SessionAuthMethod = "password" | "oidc" | "saml" | "ldap" | "break_glass";
@@ -368,9 +451,17 @@ export interface DeploymentUserView {
   inviteExpiresAt?: string;
 }
 
-/** Admin: every user in the deployment. */
+/** Admin: the people on the deployment (service accounts are listed by fetchServiceAccounts). */
 export async function fetchDeploymentUsers() {
   return apiRequest<{ users: DeploymentUserView[] }>("/api/users");
+}
+
+/** Admin: resets a user's MFA (authenticator and backup codes deleted, sessions ended). */
+export async function resetUserMfa(userId: string) {
+  return apiRequest<{ ok: true; userId: string; hadMfa: boolean; sessionsEnded: number }>(
+    `/api/users/${encodeURIComponent(userId)}/mfa/reset`,
+    { method: "POST" }
+  );
 }
 
 /**
@@ -1376,17 +1467,31 @@ export interface MfaStatus {
   pending: boolean;
   activatedAt: string | null;
   remainingBackupCodes: number;
+  /** 13.2 — the user's role requires MFA (MFA_REQUIRED_ROLES). */
+  requiredForRole?: boolean;
+  /** 13.2 — minutes a code counts for security-admin actions; 0 = step-up off. */
+  stepUpMaxAgeMinutes?: number;
 }
 
 export async function fetchMfaStatus() {
   return apiRequest<MfaStatus>("/api/auth/mfa/status");
 }
 
-export async function enrollMfa() {
-  return apiRequest<{ secret: string; otpauthUrl: string; backupCodes: string[] }>(
-    "/api/auth/mfa/enroll",
-    { method: "POST" }
-  );
+/**
+ * Sets up an authenticator. Outside the first 10 minutes after signing in, the API asks for the password again
+ * (403 `mfa_reauth_required`); an SSO account signs in again instead.
+ */
+export async function enrollMfa(payload: { password?: string } = {}) {
+  return apiRequest<{ secret: string; otpauthUrl: string; backupCodes: string[] }>("/api/auth/mfa/enroll", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+/** 13.2 — what an MFA setup refusal asks for: the password again, or (SSO) a fresh sign-in; null for other errors. */
+export function mfaReauthFromError(error: unknown): "password" | "sso" | null {
+  if (!(error instanceof ApiError) || error.payload?.code !== "mfa_reauth_required") return null;
+  return error.payload.sso === true ? "sso" : "password";
 }
 
 export async function activateMfa(payload: { code: string }) {

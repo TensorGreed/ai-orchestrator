@@ -404,8 +404,14 @@ export class PostgresStore implements Store {
   async updateUserRole(...args: Parameters<Store["updateUserRole"]>): ReturnType<Store["updateUserRole"]> {
     return auth.updateUserRole(this.ctx, ...args);
   }
+  async updateUserRoleKeepingAdmin(...args: Parameters<Store["updateUserRoleKeepingAdmin"]>): ReturnType<Store["updateUserRoleKeepingAdmin"]> {
+    return auth.updateUserRoleKeepingAdmin(this.ctx, ...args);
+  }
   async deleteUser(...args: Parameters<Store["deleteUser"]>): ReturnType<Store["deleteUser"]> {
     return auth.deleteUser(this.ctx, ...args);
+  }
+  async deleteUserKeepingAdmin(...args: Parameters<Store["deleteUserKeepingAdmin"]>): ReturnType<Store["deleteUserKeepingAdmin"]> {
+    return auth.deleteUserKeepingAdmin(this.ctx, ...args);
   }
   async getSession(...args: Parameters<Store["getSession"]>): ReturnType<Store["getSession"]> {
     return sessions.getSession(this.ctx, ...args);
@@ -430,6 +436,9 @@ export class PostgresStore implements Store {
   }
   async markSessionMfaVerified(...args: Parameters<Store["markSessionMfaVerified"]>): ReturnType<Store["markSessionMfaVerified"]> {
     return sessions.markSessionMfaVerified(this.ctx, ...args);
+  }
+  async clearSessionMfaVerified(...args: Parameters<Store["clearSessionMfaVerified"]>): ReturnType<Store["clearSessionMfaVerified"]> {
+    return sessions.clearSessionMfaVerified(this.ctx, ...args);
   }
   async purgeEndedSessions(...args: Parameters<Store["purgeEndedSessions"]>): ReturnType<Store["purgeEndedSessions"]> {
     return sessions.purgeEndedSessions(this.ctx, ...args);
@@ -1409,6 +1418,9 @@ export class PostgresStore implements Store {
   }
   async replaceMfaBackupCodes(...args: Parameters<Store["replaceMfaBackupCodes"]>): ReturnType<Store["replaceMfaBackupCodes"]> {
     return auth.replaceMfaBackupCodes(this.ctx, ...args);
+  }
+  async markTotpStepUsed(...args: Parameters<Store["markTotpStepUsed"]>): ReturnType<Store["markTotpStepUsed"]> {
+    return auth.markTotpStepUsed(this.ctx, ...args);
   }
   async deleteMfaSecret(...args: Parameters<Store["deleteMfaSecret"]>): ReturnType<Store["deleteMfaSecret"]> {
     return auth.deleteMfaSecret(this.ctx, ...args);

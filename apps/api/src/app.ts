@@ -111,6 +111,7 @@ import {
   toFastifyTrustProxy,
   resolveNetworkSettings,
   resolveSsoMfaSettings,
+  resolveMfaPolicy,
   resolveQueueSettings,
   resolveExecutionDispatch,
   ssoPostLoginUrl,
@@ -151,6 +152,18 @@ import {
   type SamlClientFactory
 } from "./services/saml-service.js";
 import { decideSsoMfa, evaluateOidcMfa, evaluateSamlMfa, projectSsoRole, type SsoMfaEvidence } from "./services/sso-policy.js";
+import {
+  MFA_GATE_ERRORS,
+  STEP_UP_ACTIONS,
+  decideStepUp,
+  mfaGateAllows,
+  mfaRequiredFor,
+  sessionMfaGate,
+  sessionOwesMfa,
+  type SessionMfaGate,
+  type StepUpAction
+} from "./services/mfa-policy.js";
+import type { LoginSession } from "./services/session-service.js";
 import { LdapService } from "./services/ldap-service";
 import {
   OIDC_FLOW_COOKIE_NAME,
@@ -1430,6 +1443,11 @@ interface PendingMfaChallenge {
   userId: string;
   createdAt: number;
   sso?: PendingSsoLogin;
+  /**
+   * 13.2 — an LDAP sign-in waiting for the TOTP step: the account is provisioned (group mappings applied) only once
+   * the code passes, and the session records method `ldap`.
+   */
+  ldap?: SsoProvisionInput;
 }
 
 function safeUserRole(role: string): UserRole {
@@ -3476,7 +3494,10 @@ export async function createApp(
   const requestIsAdmin = async (request: FastifyRequest): Promise<boolean> => {
     try {
       // 13.2 — the shared credential path: an API key acts with its capped role (a key limited to projects is never admin).
-      return (await resolveRequestAuth(request))?.user.role === "admin";
+      const auth = await resolveRequestAuth(request);
+      if (auth?.user.role !== "admin") return false;
+      // A session restricted by MFA_REQUIRED_ROLES (MFA not passed yet) is not treated as an admin here either.
+      return auth.credential !== "session" || (await sessionMfaGateFor(auth.user, auth.session)) === "none";
     } catch {
       return false;
     }
@@ -5458,6 +5479,19 @@ export async function createApp(
   };
   // Phase 13.2 — MFA on SSO (SSO_MFA, `off` unless set) and the optional SAML issuer pin / allow-lists.
   const ssoMfaSettings = resolveSsoMfaSettings(config);
+  // 13.2 — MFA required per role (MFA_REQUIRED_ROLES; MFA_ENFORCE=true adds admin) and step-up (STEP_UP_MAX_AGE_MINUTES).
+  const mfaPolicy = resolveMfaPolicy(config);
+  for (const note of mfaPolicy.notes) app.log.warn({}, note);
+  const ssoEnabled = config.OIDC_ENABLED === true || config.SAML_ENABLED === true;
+  // With a role list, SSO sign-ins of those roles need MFA even when SSO_MFA is off (they run as idp_or_local), so the
+  // IdP's MFA claims are read whenever either is set.
+  const ssoMfaChecked = ssoMfaSettings.mode !== "off" || mfaPolicy.requiredRoles.length > 0;
+  if (ssoEnabled && ssoMfaSettings.mode === "off" && mfaPolicy.requiredRoles.length > 0) {
+    app.log.warn(
+      { requiredRoles: mfaPolicy.requiredRoles },
+      "SSO_MFA is off, but MFA_REQUIRED_ROLES is set: SSO sign-ins of those roles need IdP-asserted MFA or the local TOTP step, else they get a session that can only set up MFA"
+    );
+  }
   const samlSettings = resolveSamlSettings(config);
   const samlService = new SamlService(
     store,
@@ -5471,7 +5505,7 @@ export async function createApp(
       idpIssuer: samlSettings?.idpIssuer,
       allowedEmailDomains: samlSettings?.allowedEmailDomains,
       allowedGroups: samlSettings?.allowedGroups,
-      reportActualAuthnContext: ssoMfaSettings.mode !== "off",
+      reportActualAuthnContext: ssoMfaChecked,
       requireInResponseTo: samlSettings?.requireInResponseTo ?? false,
       requestCookieKey: deriveSamlRequestKey(config.SECRET_MASTER_KEY_BASE64)
     },
@@ -5500,13 +5534,13 @@ export async function createApp(
   // An SSO login that ends in the TOTP step carries what it still has to do once the code passes (link the identity,
   // apply group mappings, audit). It holds no token or assertion. Phase 13.1 — kept in the challenge store: in this
   // process outside cluster mode, in the database (sealed, id hashed) in cluster mode.
-  const issueMfaChallenge = async (userId: string, sso?: PendingSsoLogin): Promise<string> => {
+  const issueMfaChallenge = async (userId: string, sso?: PendingSsoLogin, ldap?: SsoProvisionInput): Promise<string> => {
     const challengeId = `mfa_${crypto.randomUUID()}`;
     await challengeStore.issue<PendingMfaChallenge>({
       kind: sso ? "sso_mfa" : "mfa_login",
       id: challengeId,
       userId,
-      payload: { userId, createdAt: Date.now(), ...(sso ? { sso } : {}) },
+      payload: { userId, createdAt: Date.now(), ...(sso ? { sso } : {}), ...(ldap ? { ldap } : {}) },
       ttlMs: MFA_CHALLENGE_TTL_MS
     });
     return challengeId;
@@ -5675,6 +5709,30 @@ export async function createApp(
       return null;
     }
 
+    // 13.2 — a personal key of an owner whose role requires MFA works only while the owner has MFA set up (the owner's
+    // own role counts, not the key's ceiling). A service-account key is not a person's key.
+    if (auth.credential === "api_key" && !auth.serviceAccount && mfaPolicy.requiredRoles.length > 0) {
+      const owner = await store.getUserById(auth.user.id);
+      const ownerRole = owner ? safeUserRole(owner.role) : auth.user.role;
+      if (mfaRequiredFor(mfaPolicy, ownerRole) && !(await mfaService.status(auth.user.id)).enabled) {
+        reply.code(403).send({
+          code: "mfa_enrollment_required",
+          error: "Your role requires multi-factor authentication: your API keys work again once you set up an authenticator app."
+        });
+        return null;
+      }
+    }
+
+    // 13.2 — a role that requires MFA, on a session that has not passed it, may only set up or verify MFA. A
+    // break-glass session is exempt (sessionOwesMfa), never from its expiry, which resolveSession already applied.
+    if (auth.credential === "session") {
+      const gate = await sessionMfaGateFor(auth.user, auth.session);
+      if (gate !== "none" && !mfaGateAllows(gate, requestMethodOf(request), requestRouteOf(request))) {
+        reply.code(403).send(MFA_GATE_ERRORS[gate]);
+        return null;
+      }
+    }
+
     if (!hasRequiredRole(auth.user, allowedRoles)) {
       deny(reply, 403, "Insufficient permissions");
       return null;
@@ -5699,6 +5757,143 @@ export async function createApp(
       },
       onEnded
     };
+  };
+
+  /** The route pattern a request matched (`/api/users/:id`), else its path without the query. */
+  const requestRouteOf = (request: object): string => {
+    const routed = (request as { routeOptions?: { url?: string } }).routeOptions?.url;
+    if (typeof routed === "string" && routed) return routed;
+    const raw = (request as { url?: string }).url ?? "";
+    return raw.split("?")[0] ?? "";
+  };
+  const requestMethodOf = (request: object): string => String((request as { method?: string }).method ?? "GET");
+
+  /**
+   * 13.2 — what a session may do under MFA_REQUIRED_ROLES: `none`, or restricted to setting up (no TOTP yet) or
+   * verifying (TOTP enrolled) MFA. The enrolment is looked up only for a listed role on a session without an MFA check.
+   */
+  const sessionMfaGateFor = async (user: SafeUser, session: LoginSession): Promise<SessionMfaGate> => {
+    const owes = sessionOwesMfa(mfaPolicy, user.role, session);
+    if (!owes) return "none";
+    return sessionMfaGate(true, (await mfaService.status(user.id)).enabled);
+  };
+
+  /**
+   * The user of a request's browser session, for routes that also serve signed-out callers (public registration), or
+   * null; records the request context like requireRole. API keys never count here, and a session restricted by
+   * MFA_REQUIRED_ROLES counts as signed out.
+   */
+  const unrestrictedSessionUser = async (request: FastifyRequest): Promise<SafeUser | null> => {
+    const sessionId = getSessionIdFromRequest(request);
+    if (!sessionId) return null;
+    const resolved = await authService.getSessionAuth(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
+    if (!resolved) return null;
+    if ((await sessionMfaGateFor(resolved.user, resolved.session)) !== "none") return null;
+    sessionService.setRequestAuth(request, { credential: "session", user: resolved.user, session: resolved.session });
+    return resolved.user;
+  };
+
+  /**
+   * 13.2 — step-up (STEP_UP_MAX_AGE_MINUTES) for a security-admin action, after requireRole passed. Off: always true.
+   * On: a session needs an MFA check within the window (else 403 `step_up_required`, and the studio asks for a code
+   * and retries); a personal API key is refused; a service-account key with `role:admin` passes; break-glass passes.
+   */
+  const requireStepUp = async (
+    request: object,
+    reply: FastifyReply,
+    action: StepUpAction,
+    options: { maxAgeMinutes?: number; targetUserId?: string } = {}
+  ): Promise<boolean> => {
+    const context = sessionService.getRequestAuth(request);
+    const maxAgeMinutes = options.maxAgeMinutes ?? mfaPolicy.stepUpMaxAgeMinutes;
+    // 13.2 — an action on a person's account needs a person: a service-account key is refused there even with an
+    // admin ceiling. The target is looked up only when it can matter.
+    const targetsPerson =
+      maxAgeMinutes > 0 && context?.credential === "api_key" && context.serviceAccount && options.targetUserId
+        ? (await store.getUserById(options.targetUserId))?.kind === "human"
+        : false;
+    const decision = decideStepUp({ maxAgeMinutes, context, now: Date.now(), targetsPerson });
+    if (decision.kind === "allow") return true;
+    if (decision.kind === "unauthenticated") {
+      deny(reply, 401, "Authentication required");
+      return false;
+    }
+    if (decision.kind === "key_refused" && decision.reason === "person_target") {
+      reply.code(403).send({
+        error: `${STEP_UP_ACTIONS[action]} on a person's account needs a person who has passed a second factor; a service account's key cannot do it. Use a signed-in session.`,
+        code: "step_up_required",
+        stepUp: { required: true, action, credential: "api_key", target: "person" }
+      });
+      return false;
+    }
+    if (decision.kind === "key_refused") {
+      reply.code(403).send({
+        error: `${STEP_UP_ACTIONS[action]} needs a recent MFA check, which a personal API key cannot give. Use a signed-in session.`,
+        code: "step_up_required",
+        stepUp: { required: true, action, credential: "api_key" }
+      });
+      return false;
+    }
+    const enrolled = context ? (await mfaService.status(context.user.id)).enabled : false;
+    reply.code(403).send({
+      error: enrolled
+        ? `${STEP_UP_ACTIONS[action]} needs a recent MFA check. Enter a code from your authenticator app.`
+        : `${STEP_UP_ACTIONS[action]} needs a recent MFA check. Set up an authenticator app in Settings > Security first.`,
+      code: "step_up_required",
+      stepUp: { required: true, action, method: "totp", enrolled, maxAgeMinutes }
+    });
+    return false;
+  };
+
+  // 13.2 — MFA code guessing: MFA_FAILURE_LIMIT wrong codes for one user within MFA_LOCK_MINUTES lock step-up and
+  // the sign-in code step for that user until the window passes. Counted from the audit log (`mfa.code_failed`), so
+  // the count holds across instances and restarts.
+  const MFA_FAILURE_LIMIT = 5;
+  /** 13.2 — how recent an MFA check must be for a role that requires MFA to create an API key, when step-up is off. */
+  const LISTED_ROLE_KEY_MFA_MINUTES = 15;
+  const MFA_LOCK_MINUTES = 15;
+
+  /** When the user's MFA lock ends, or null when they are not locked. */
+  const mfaLockedUntil = async (userId: string): Promise<string | null> => {
+    const windowMs = MFA_LOCK_MINUTES * 60_000;
+    const from = new Date(Date.now() - windowMs).toISOString();
+    const { items } = await store.listAuditLogs({
+      eventType: "mfa.code_failed",
+      resourceType: "user",
+      resourceId: userId,
+      from,
+      page: 1,
+      pageSize: MFA_FAILURE_LIMIT
+    });
+    if (items.length < MFA_FAILURE_LIMIT) return null;
+    const oldestCounted = Math.min(...items.map((item) => Date.parse(item.createdAt)));
+    return new Date(oldestCounted + windowMs).toISOString();
+  };
+
+  const mfaLockedAnswer = (reply: FastifyReply, lockedUntil: string) => {
+    reply.code(429);
+    reply.header("retry-after", String(Math.max(1, Math.ceil((Date.parse(lockedUntil) - Date.now()) / 1000))));
+    return {
+      error: `Too many wrong codes. Multi-factor verification for this account is locked until ${lockedUntil}.`,
+      code: "mfa_locked",
+      lockedUntil
+    };
+  };
+
+  /** Records a wrong MFA code for the user; true when this failure locked them (then `mfa.locked` is audited). */
+  const recordMfaFailure = async (request: FastifyRequest, user: SafeUser | null, userId: string, via: string): Promise<boolean> => {
+    const target = { category: "mfa" as const, resourceType: "user", resourceId: userId };
+    await audit(request, user, { ...target, eventType: "mfa.code_failed", action: "verify", outcome: "failure", metadata: { via } });
+    const lockedUntil = await mfaLockedUntil(userId);
+    if (!lockedUntil) return false;
+    await audit(request, user, {
+      ...target,
+      eventType: "mfa.locked",
+      action: "lock",
+      outcome: "failure",
+      metadata: { via, failures: MFA_FAILURE_LIMIT, minutes: MFA_LOCK_MINUTES, lockedUntil }
+    });
+    return true;
   };
 
   const requirePermission = async (
@@ -5962,7 +6157,7 @@ export async function createApp(
     }
   ): Promise<SsoLoginOutcome> => {
     const firstLink = !input.provision.userId;
-    if (ssoMfaSettings.mode === "off" || input.evidence) {
+    const signInNow = async (): Promise<SsoLoginOutcome> => {
       const session = await completeSsoSession(request, reply, {
         method: input.method,
         provision: input.provision,
@@ -5970,20 +6165,24 @@ export async function createApp(
         mfa: input.evidence ? { evidence: input.evidence } : null
       });
       return { kind: "session", ...session };
-    }
+    };
+    if (input.evidence || !ssoMfaChecked) return await signInNow();
     // No IdP MFA. The account the login resolves to: the linked user, else the one its email would link to.
     const target = input.provision.userId
       ? await store.getUserById(input.provision.userId)
       : await store.getUserByEmail(input.provision.email.trim().toLowerCase());
-    const localTotp = target ? (await mfaService.status(target.id)).enabled : false;
     const ssoRoles = input.method === "saml" ? samlService : oidcService;
     const projectedRole = projectSsoRole(target ? safeUserRole(target.role) : null, await ssoRoles.resolveGlobalRole(input.provision.groups));
+    // 13.2 (D6) — with SSO_MFA off, a role listed in MFA_REQUIRED_ROLES signs in as under idp_or_local; others as before.
+    const roleRequiresMfa = mfaRequiredFor(mfaPolicy, projectedRole);
+    if (ssoMfaSettings.mode === "off" && !roleRequiresMfa) return await signInNow();
+    const localTotp = target ? (await mfaService.status(target.id)).enabled : false;
     const decision = decideSsoMfa({
-      mode: ssoMfaSettings.mode,
+      mode: ssoMfaSettings.mode === "off" ? "idp_or_local" : ssoMfaSettings.mode,
       evidence: null,
       localTotp,
-      // The password login's rule: MFA_ENFORCE applies to admins.
-      mfaEnforcedForRole: config.MFA_ENFORCE && projectedRole === "admin"
+      // The password login's rule: MFA is required for the role the login ends up with.
+      mfaEnforcedForRole: roleRequiresMfa
     });
     if (decision.kind === "local_totp" && target) {
       const challengeId = await issueMfaChallenge(target.id, {
@@ -6174,8 +6373,10 @@ export async function createApp(
       "/api/auth/ldap/login",
       "/api/auth/oidc/login",
       "/api/auth/oidc/callback",
+      "/api/auth/mfa/enroll",
       "/api/auth/mfa/activate",
-      "/api/auth/mfa/disable"
+      "/api/auth/mfa/disable",
+      "/api/auth/step-up"
     ];
     const WEBHOOK_PREFIXES = ["/webhook/", "/webhook-test/", "/api/webhooks/"];
     const PROBE_URLS = new Set(["/health", "/ready", "/metrics"]);
@@ -6653,6 +6854,7 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/audit-export/destinations", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const body = request.body as Partial<{
       name: string;
       kind: "http" | "file";
@@ -6706,6 +6908,7 @@ export async function createApp(
   app.put<{ Params: { id: string }; Body: unknown }>("/api/audit-export/destinations/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const existing = await store.getAuditExportDestination(request.params.id);
     if (!existing) {
       reply.code(404);
@@ -6738,6 +6941,7 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/audit-export/destinations/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const existing = await store.getAuditExportDestination(request.params.id);
     if (!existing) {
       reply.code(404);
@@ -7488,11 +7692,15 @@ export async function createApp(
       if (!actor) {
         return;
       }
+      if (!await requireStepUp(request, reply, "user.create")) return;
     } else if (existingUsers > 0 && config.AUTH_ALLOW_PUBLIC_REGISTER) {
-      actor = await authService.getSessionUser(getSessionIdFromRequest(request));
+      // 13.2 — a session restricted by MFA_REQUIRED_ROLES registers as anyone else would (as a viewer).
+      actor = await unrestrictedSessionUser(request);
     }
 
     const requestedRole: UserRole = parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer");
+    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action.
+    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
     let role: UserRole = requestedRole;
     if (existingUsers === 0) {
       role = parsed.data.role ?? "admin";
@@ -7551,14 +7759,14 @@ export async function createApp(
 
     try {
       const user = await authService.verifyCredentials(parsed.data.email, parsed.data.password);
-      // MFA gate: if the user has MFA enabled (or MFA_ENFORCE is on for admin), require a challenge step.
-      // 13.2 — a session is issued only once no MFA step is pending, so a password alone never creates one.
+      // MFA gate: if the user has MFA enabled (or their role requires it, MFA_REQUIRED_ROLES / MFA_ENFORCE), require a
+      // challenge step. 13.2 — a session is issued only once no MFA step is pending, so a password alone never creates one.
       const mfaStatus = await mfaService.status(user.id);
-      const mustProvideMfa = mfaStatus.enabled || (config.MFA_ENFORCE && user.role === "admin");
+      const mustProvideMfa = mfaStatus.enabled || mfaRequiredFor(mfaPolicy, user.role);
       if (mustProvideMfa) {
         if (!mfaStatus.enabled) {
-          // MFA enforced but not enrolled — still issue the session so user can enrol immediately,
-          // but flag it so the UI can redirect to the MFA enrolment flow.
+          // MFA required but not enrolled: the session can only set up MFA until the code is activated (requireRole
+          // enforces it); the flag sends the studio to the enrolment screen.
           const result = await issuePasswordSession(request, reply, user);
           await audit(request, result.user, {
             category: "auth",
@@ -7635,7 +7843,11 @@ export async function createApp(
       return { error: "MFA challenge expired or invalid" };
     }
     const userId = challenge.userId;
+    // 13.2 — too many wrong codes for this user lately: no more guesses until the lock ends.
+    const lockedUntil = await mfaLockedUntil(userId);
+    if (lockedUntil) return mfaLockedAnswer(reply, lockedUntil);
     if (!await mfaService.verify(userId, code)) {
+      await recordMfaFailure(request, null, userId, "sign_in");
       if (challenge.sso) {
         await audit(request, null, {
           category: "auth",
@@ -7662,6 +7874,19 @@ export async function createApp(
         return { user, expiresAt };
       } catch (error) {
         request.log.warn({ reason: error instanceof Error ? error.message : "unknown" }, "SSO sign-in failed after the MFA step");
+        reply.code(401);
+        return { error: "Sign-in could not be completed. Try again." };
+      }
+    }
+    if (challenge.ldap) {
+      // The LDAP sign-in passed its TOTP step: only now are the account and its group mappings updated.
+      try {
+        const { user } = await provisionSsoUser(challenge.ldap);
+        if (user.id !== userId) throw new Error("The LDAP account resolved to another user than the one that passed the code step");
+        const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: true });
+        return { user, expiresAt };
+      } catch (error) {
+        request.log.warn({ reason: error instanceof Error ? error.message : "unknown" }, "LDAP sign-in failed after the MFA step");
         reply.code(401);
         return { error: "Sign-in could not be completed. Try again." };
       }
@@ -7731,7 +7956,16 @@ export async function createApp(
             breakGlass: context.session.breakGlass
           }
         : null;
-    return { user, mfa, memberships, session };
+    // 13.2 — a session restricted by MFA_REQUIRED_ROLES says which step it needs, so the studio can open it.
+    const gate = context?.credential === "session" ? sessionMfaGate(sessionOwesMfa(mfaPolicy, user.role, context.session), mfa.enabled) : "none";
+    return {
+      user,
+      mfa,
+      memberships,
+      session,
+      ...(gate === "enrollment_required" ? { mfaEnrollmentRequired: true } : {}),
+      ...(gate === "verification_required" ? { mfaVerificationRequired: true } : {})
+    };
   });
 
   // 13.2 — signed-in sessions (own, and an admin's view of another user's).
@@ -7741,7 +7975,8 @@ export async function createApp(
     sessions: sessionService,
     requireRole: async (request, reply, roles) => await requireRole(request, reply, roles),
     audit: async (request, user, event) => await audit(request, user, event),
-    clearSessionCookie
+    clearSessionCookie,
+    requireStepUp: async (request, reply, action, targetUserId) => await requireStepUp(request, reply, action, { targetUserId })
   });
 
   // ---------------------------------------------------------------------------
@@ -7751,16 +7986,64 @@ export async function createApp(
   app.get("/api/auth/mfa/status", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    return await mfaService.status(user.id);
+    // 13.2 — whether the user's role requires MFA, and the step-up window (0 = off), for Settings > Security.
+    return {
+      ...(await mfaService.status(user.id)),
+      requiredForRole: mfaRequiredFor(mfaPolicy, user.role),
+      stepUpMaxAgeMinutes: mfaPolicy.stepUpMaxAgeMinutes
+    };
   });
 
-  app.post("/api/auth/mfa/enroll", async (request, reply) => {
+  // 13.2 — setting up an authenticator binds the account's second factor, so a stolen session cookie must not be
+  // enough: it needs a sign-in within MFA_ENROLL_FRESH_MINUTES, or the account password again. An SSO account (no
+  // local password) signs in again through its identity provider instead.
+  const MFA_ENROLL_FRESH_MINUTES = 10;
+
+  app.post<{ Body: unknown }>("/api/auth/mfa/enroll", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    const context = sessionService.getRequestAuth(request);
+    if (context?.credential !== "session") {
+      reply.code(400);
+      return { error: "Set up MFA from a signed-in browser session, not with an API key" };
+    }
     const existing = await mfaService.status(user.id);
     if (existing.enabled) {
       reply.code(409);
       return { error: "MFA is already enabled for this account. Disable it first to re-enrol." };
+    }
+    const signedInAt = Date.parse(context.session.createdAt);
+    const fresh = isPolicyExempt(context.session) || (Number.isFinite(signedInAt) && Date.now() - signedInAt <= MFA_ENROLL_FRESH_MINUTES * 60_000);
+    if (!fresh) {
+      const password = typeof asRecord(request.body).password === "string" ? String(asRecord(request.body).password) : "";
+      const passwordOk = password
+        ? await authService.verifyCredentials(user.email, password).then(
+            (checked) => checked.id === user.id,
+            () => false
+          )
+        : false;
+      if (!passwordOk) {
+        const sso = context.session.authMethod === "oidc" || context.session.authMethod === "saml";
+        await audit(request, user, {
+          category: "mfa",
+          eventType: "mfa.enroll",
+          action: "enroll",
+          outcome: "failure",
+          resourceType: "user",
+          resourceId: user.id,
+          metadata: { reason: password ? "password_invalid" : "reauth_required" }
+        });
+        reply.code(403);
+        return {
+          code: "mfa_reauth_required",
+          sso,
+          error: sso
+            ? "To set up MFA, sign out and sign in again through your identity provider, then set it up within 10 minutes."
+            : password
+              ? "That password is not correct."
+              : "To set up MFA, enter your password again (or sign in again and set it up within 10 minutes)."
+        };
+      }
     }
     const enrollment = await mfaService.enroll(user.id, user.email);
     await audit(request, user, {
@@ -7799,6 +8082,8 @@ export async function createApp(
       reply.code(401);
       return { error: "Invalid activation code" };
     }
+    // 13.2 — activating with a valid code is an MFA check: it lifts an enrolment-only restriction on this session.
+    await markRequestSessionMfaVerified(request, user);
     await audit(request, user, {
       category: "mfa",
       eventType: "mfa.activate",
@@ -7812,24 +8097,99 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/auth/mfa/disable", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    const context = sessionService.getRequestAuth(request);
+    const breakGlass = context?.credential === "session" && isPolicyExempt(context.session);
+    // 13.2 — a role that requires MFA cannot turn it off (a lost device goes through an admin's MFA reset).
+    if (mfaRequiredFor(mfaPolicy, user.role) && !breakGlass) {
+      reply.code(409);
+      return {
+        error: "Your role requires MFA, so it cannot be turned off. If you lost your authenticator, ask an admin to reset your MFA.",
+        code: "mfa_required_for_role"
+      };
+    }
+    if (!await requireStepUp(request, reply, "mfa.disable")) return;
     const body = asRecord(request.body);
     const code = typeof body.code === "string" ? body.code.trim() : "";
     const status = await mfaService.status(user.id);
     if (status.enabled) {
+      const lockedUntil = await mfaLockedUntil(user.id);
+      if (lockedUntil) return mfaLockedAnswer(reply, lockedUntil);
       if (!code || !await mfaService.verify(user.id, code)) {
+        if (code) await recordMfaFailure(request, user, user.id, "disable");
         reply.code(401);
         return { error: "A valid MFA code is required to disable MFA" };
       }
     }
     await mfaService.disable(user.id);
+    // 13.2 — the current session loses its MFA check at once, and the user's other sessions end.
+    const currentSessionId = context?.credential === "session" ? context.session.id : undefined;
+    if (currentSessionId) await store.clearSessionMfaVerified(currentSessionId);
+    const sessionsEnded = await store.revokeUserSessions(user.id, { reason: "policy", ...(currentSessionId ? { exceptId: currentSessionId } : {}) });
     await audit(request, user, {
       category: "mfa",
       eventType: "mfa.disable",
       action: "disable",
       resourceType: "user",
+      resourceId: user.id,
+      metadata: { sessionsEnded }
+    });
+    return { ok: true, sessionsEnded };
+  });
+
+  /** 13.2 — records an MFA check on the request's session (no-op for an API key). */
+  const markRequestSessionMfaVerified = async (request: object, user: SafeUser): Promise<string | null> => {
+    const context = sessionService.getRequestAuth(request);
+    if (context?.credential !== "session") return null;
+    const at = new Date().toISOString();
+    return (await store.markSessionMfaVerified(context.session.id, { userId: user.id, at })) ? at : null;
+  };
+
+  // 13.2 — step-up: a TOTP (or backup) code refreshes the session's MFA check. Also the way a session restricted to
+  // verification (MFA_REQUIRED_ROLES, TOTP already enrolled) is lifted.
+  app.post<{ Body: unknown }>("/api/auth/step-up", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    if (sessionService.getRequestAuth(request)?.credential !== "session") {
+      reply.code(400);
+      return { error: "Step-up applies to a signed-in browser session, not an API key" };
+    }
+    const body = asRecord(request.body);
+    const code = typeof body.code === "string" ? body.code.trim() : "";
+    if (!code) {
+      reply.code(400);
+      return { error: "code is required" };
+    }
+    if (!(await mfaService.status(user.id)).enabled) {
+      reply.code(409);
+      return { error: "Set up an authenticator app in Settings > Security first", code: "mfa_not_enrolled" };
+    }
+    const lockedUntil = await mfaLockedUntil(user.id);
+    if (lockedUntil) return mfaLockedAnswer(reply, lockedUntil);
+    if (!await mfaService.verify(user.id, code)) {
+      if (await recordMfaFailure(request, user, user.id, "step_up")) {
+        // The guesses that reached the limit came through this session: end it, as a stolen cookie would.
+        const context = sessionService.getRequestAuth(request);
+        if (context?.credential === "session") await sessionService.endSession(context.session.id, "policy");
+        clearSessionCookie(reply);
+        return mfaLockedAnswer(reply, (await mfaLockedUntil(user.id)) ?? new Date(Date.now() + MFA_LOCK_MINUTES * 60_000).toISOString());
+      }
+      // 403, not 401: the session is still signed in.
+      reply.code(403);
+      return { error: "Invalid MFA code", code: "mfa_code_invalid" };
+    }
+    const verifiedAt = await markRequestSessionMfaVerified(request, user);
+    if (!verifiedAt) {
+      deny(reply, 401, "Session expired or invalid");
+      return;
+    }
+    await audit(request, user, {
+      category: "mfa",
+      eventType: "mfa.step_up",
+      action: "verify",
+      resourceType: "user",
       resourceId: user.id
     });
-    return { ok: true };
+    return { ok: true, mfaVerifiedAt: verifiedAt, stepUpMaxAgeMinutes: mfaPolicy.stepUpMaxAgeMinutes };
   });
 
   // ---------------------------------------------------------------------------
@@ -7850,25 +8210,31 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/auth/api-keys", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const parsed = apiKeyCreateSchema.safeParse(request.body);
-    if (!parsed.success) {
-      reply.code(400);
-      return { error: "Invalid API key payload", details: parsed.error.issues };
-    }
-    // 13.2 — the ceiling may not exceed the owner's role, and a key made with a scoped key reaches no further than it.
     const owner = await store.getUserById(user.id);
-    const auth = sessionService.getRequestAuth(request);
     // 13.2 — a service account's keys come only from the admin route (POST /api/service-accounts/:id/keys), so an
     // admin decides each one and its expiry; its own keys cannot mint more.
     if (owner?.kind === "service" || user.serviceAccount) {
       reply.code(403);
       return { error: "A service account's API keys are created by an admin under Settings > Service Accounts, not with its own key" };
     }
+    // 13.2 — for an owner whose role requires MFA (the owner's own role, not a calling key's ceiling), a new key always
+    // needs a recent MFA check (the step-up window, or LISTED_ROLE_KEY_MFA_MINUTES when step-up is off), since the key
+    // then works without one.
+    const ownerRole = safeUserRole(owner?.role ?? user.role);
+    const keyStepUp = mfaRequiredFor(mfaPolicy, ownerRole) ? mfaPolicy.stepUpMaxAgeMinutes || LISTED_ROLE_KEY_MFA_MINUTES : undefined;
+    if (!await requireStepUp(request, reply, "api_key.create", keyStepUp === undefined ? {} : { maxAgeMinutes: keyStepUp })) return;
+    const parsed = apiKeyCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid API key payload", details: parsed.error.issues };
+    }
+    // 13.2 — the ceiling may not exceed the owner's role, and a key made with a scoped key reaches no further than it.
+    const auth = sessionService.getRequestAuth(request);
     // 13.2 — a key made with another key ends no later than the calling key.
     const callerKey =
       auth?.credential === "api_key" ? (await apiKeyService.list(user.id)).find((entry) => entry.id === auth.apiKeyId) ?? null : null;
     const scope = await resolveNewKeyScope(parsed.data, {
-      ownerRole: safeUserRole(owner?.role ?? user.role),
+      ownerRole,
       callerRole: user.role,
       callerScope: auth?.credential === "api_key" ? auth.keyScope : null,
       projectExists: async (projectId) => projectId === DEFAULT_PROJECT_ID || Boolean(await store.getProject(projectId))
@@ -8030,7 +8396,7 @@ export async function createApp(
               ...(linkedUser && identity?.legacySubject ? { legacySubject: identity.legacySubject } : {})
             }
           },
-          evidence: ssoMfaSettings.mode === "off" ? null : evaluateSamlMfa(profile.authnContexts, ssoMfaSettings),
+          evidence: ssoMfaChecked ? evaluateSamlMfa(profile.authnContexts, ssoMfaSettings) : null,
           refusalDetails: { identityKey, authnContext: profile.authnContexts.join(" ") }
         });
         if (outcome.kind === "challenge") {
@@ -8103,14 +8469,36 @@ export async function createApp(
     }
     try {
       const profile = await ldapService.authenticate(email, password);
-      const { user, created } = await provisionSsoUser({
+      const provision: SsoProvisionInput = {
         provider: "ldap",
         subject: profile.dn || profile.email,
         email: profile.email,
         groups: profile.groups
-      });
+      };
+      // 13.2 — the password login's MFA rules apply: a user with TOTP gets the code step (completed at
+      // /api/auth/login/mfa), and nothing about the account changes until it passes; a role that requires MFA
+      // without TOTP gets a session that can only set it up.
+      const existing = await store.getUserByEmail(profile.email.trim().toLowerCase());
+      if (existing && (await mfaService.status(existing.id)).enabled) {
+        const challengeId = await issueMfaChallenge(existing.id, undefined, provision);
+        await audit(request, { id: existing.id, email: existing.email, role: safeUserRole(existing.role) }, {
+          category: "auth",
+          eventType: "user.login.mfa_challenge",
+          action: "login",
+          resourceType: "user",
+          resourceId: existing.id,
+          metadata: { method: "ldap", mfaChallengeIssued: true }
+        });
+        return { mfaChallenge: challengeId, expiresInSeconds: Math.floor(MFA_CHALLENGE_TTL_MS / 1000) };
+      }
+      const { user, created } = await provisionSsoUser(provision);
       const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: false });
-      return { user, expiresAt, provisioned: created };
+      return {
+        user,
+        expiresAt,
+        provisioned: created,
+        ...(mfaRequiredFor(mfaPolicy, user.role) ? { mfaEnrollmentRequired: true } : {})
+      };
     } catch (error) {
       const err = error as Error & { code?: string };
       reply.code(err.code === "CONFIGURATION_ERROR" ? 503 : 401);
@@ -8216,7 +8604,7 @@ export async function createApp(
           userId: linkedUser?.id,
           oidc: { issuer: profile.issuer, sub: profile.subject }
         },
-        evidence: ssoMfaSettings.mode === "off" ? null : evaluateOidcMfa(profile, ssoMfaSettings),
+        evidence: ssoMfaChecked ? evaluateOidcMfa(profile, ssoMfaSettings) : null,
         refusalDetails: {
           identityKey: profile.identityKey,
           amr: profile.amr.join(" "),
@@ -8269,6 +8657,7 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/auth/sso/mappings", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "sso_mapping.change")) return;
     const parsed = ssoMappingSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -8287,6 +8676,7 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/auth/sso/mappings/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "sso_mapping.change")) return;
     const ok = await rbacService.deleteSsoGroupMapping(request.params.id);
     if (!ok) {
       reply.code(404);
@@ -8555,6 +8945,7 @@ export async function createApp(
   app.post("/api/log-streams", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const parsed = logStreamCreateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -8583,6 +8974,7 @@ export async function createApp(
   app.put<{ Params: { id: string }; Body: unknown }>("/api/log-streams/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const parsed = logStreamUpdateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -8612,6 +9004,7 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/log-streams/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const existing = await logStreamingService.getDestination(request.params.id);
     if (!existing) {
       reply.code(404);
@@ -9045,6 +9438,7 @@ export async function createApp(
       reply.code(403);
       return { error: "Insufficient permissions to manage members" };
     }
+    if (!await requireStepUp(request, reply, "project_member.change")) return;
     const parsed = projectMemberSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -9104,6 +9498,7 @@ export async function createApp(
         reply.code(403);
         return { error: "Insufficient permissions to remove members" };
       }
+      if (!await requireStepUp(request, reply, "project_member.change")) return;
       const ok = await rbacService.removeMember(request.params.userId, project.id);
       if (!ok) {
         reply.code(404);
@@ -9152,6 +9547,7 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/custom-roles", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "custom_role.change")) return;
     const parsed = customRoleSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -9179,6 +9575,7 @@ export async function createApp(
   app.put<{ Params: { id: string }; Body: unknown }>("/api/custom-roles/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "custom_role.change")) return;
     const parsed = customRoleSchema.partial().safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -9200,6 +9597,7 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/custom-roles/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "custom_role.change")) return;
     const ok = await rbacService.deleteCustomRole(request.params.id);
     if (!ok) {
       reply.code(404);
@@ -9354,6 +9752,7 @@ export async function createApp(
   app.post<{ Params: { id: string }; Body: unknown }>("/api/secrets/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "secret.update")) return;
     const secret = await shareableSecret(request.params.id);
     if (!secret) {
       reply.code(404);
@@ -9391,6 +9790,7 @@ export async function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
+      if (!await requireStepUp(request, reply, "secret.update")) return;
       const secret = await shareableSecret(request.params.id);
       if (!secret) {
         reply.code(404);
@@ -11481,6 +11881,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     redact: (value) => String(secretService.redact(value)),
     resolveRegisteredMcpServer,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
     auditUser: async (request, user, event) => await audit(request, user, event),
     auditRaw: async (event) => {
       await auditService.record(event);
@@ -12161,6 +12562,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!user) {
       return;
     }
+    if (!await requireStepUp(request, reply, "secret.create")) return;
 
     const parsed = secretCreateSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -12256,6 +12658,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.put<{ Params: { id: string }; Body: unknown }>("/api/secrets/:id/sensitive-output", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "secret.update")) return;
     const parsed = z.object({ sensitiveOutput: z.boolean() }).strict().safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
@@ -12292,6 +12695,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/secrets/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "secret.delete")) return;
     const row = await store.getSecret(request.params.id);
     if (!row || isInternalSecretProvider(row.provider)) {
       // Phase 10.5 — MCP OAuth secrets are managed from the MCP servers page only.
@@ -13621,6 +14025,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     store,
     mcpRegistry,
     catalog: mcpCatalogService,
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
     createSecret: async (input) => await secretService.createSecret(input),
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
     redact: (value) => String(secretService.redact(value)),
@@ -14470,13 +14875,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const auth = sessionService.getRequestAuth(request);
       return auth?.credential === "api_key" ? auth.keyScope : null;
     },
-    disconnectMcpOAuth: async (userId) => await mcpOAuthService.disconnectUserEverywhere(userId)
+    disconnectMcpOAuth: async (userId) => await mcpOAuthService.disconnectUserEverywhere(userId),
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action)
   });
 
   registerUserInviteRoutes({
     app,
     store,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
     audit: async (request, user, event) => await audit(request, user, event),
     webBaseUrl: config.APP_PUBLIC_URL || ssoPostLoginUrl(config.WEB_ORIGIN),
     sendEmail: async (message) => await notificationService.sendDirectEmail(message)
@@ -14505,6 +14912,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.put<{ Params: { id: string }; Body: unknown }>("/api/users/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "user.role_change", { targetUserId: request.params.id })) return;
     const schema = z.object({ role: z.enum(["admin", "builder", "operator", "viewer"]) });
     const parsed = schema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -14516,10 +14924,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(404);
       return { error: "User not found" };
     }
-    const updated = await store.updateUserRole(request.params.id, parsed.data.role);
-    if (!updated) {
-      reply.code(500);
-      return { error: "Failed to update user" };
+    // 13.2 — never leave the workspace without an accepted admin (counted and written in one transaction).
+    const outcome = await store.updateUserRoleKeepingAdmin(request.params.id, parsed.data.role);
+    if (outcome === "not_found") {
+      reply.code(404);
+      return { error: "User not found" };
+    }
+    if (outcome === "last_admin") {
+      reply.code(409);
+      return { error: "This is the only admin. Make another user an admin first.", code: "last_admin" };
     }
     await audit(request, user, {
       category: "auth",
@@ -14535,6 +14948,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/users/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "user.delete", { targetUserId: request.params.id })) return;
     if (user.id === request.params.id) {
       reply.code(400);
       return { error: "Cannot delete your own account" };
@@ -14544,12 +14958,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(404);
       return { error: "User not found" };
     }
+    // 13.2 — never remove the last person who is an admin (a service account never counts). The store counts and
+    // deletes in one transaction; this early look only keeps a refused delete from dropping the MCP connections.
+    const lastAdminAnswer = (reply: FastifyReply) => {
+      reply.code(409);
+      return { error: "This is the only admin who can sign in. Make another person an admin first.", code: "last_admin" };
+    };
+    if (targetUser.role === "admin" && targetUser.kind === "human") {
+      const pending = new Set((await store.listOpenUserInvites()).map((invite) => invite.userId));
+      const otherAdmins = (await store.listUsers({ kind: "human" })).filter((u) => u.role === "admin" && u.id !== targetUser.id && !pending.has(u.id));
+      if (!pending.has(targetUser.id) && otherAdmins.length === 0) return lastAdminAnswer(reply);
+    }
     // Phase 10.7 — a deleted user's own MCP connections (and their tokens) go with them.
     await mcpOAuthService.disconnectUserEverywhere(request.params.id);
-    const deleted = await store.deleteUser(request.params.id);
-    if (!deleted) {
-      reply.code(500);
-      return { error: "Failed to delete user" };
+    const deleted = await store.deleteUserKeepingAdmin(request.params.id);
+    if (deleted === "last_admin") return lastAdminAnswer(reply);
+    if (deleted === "not_found") {
+      reply.code(404);
+      return { error: "User not found" };
     }
     await audit(request, user, {
       category: "auth",
@@ -14560,6 +14986,39 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       metadata: { email: targetUser.email }
     });
     return { ok: true, userId: request.params.id };
+  });
+
+  // 13.2 — an admin resets another user's MFA (a lost authenticator): the TOTP secret and backup codes are deleted and
+  // the user's sessions end, so the next sign-in sets MFA up again (enrolment-only if the role requires it). Not on
+  // yourself, except from a break-glass session.
+  app.post<{ Params: { id: string } }>("/api/users/:id/mfa/reset", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    if (!await requireStepUp(request, reply, "user.mfa_reset", { targetUserId: request.params.id })) return;
+    const context = sessionService.getRequestAuth(request);
+    if (user.id === request.params.id && !(context?.credential === "session" && isPolicyExempt(context.session))) {
+      reply.code(400);
+      return { error: "You cannot reset your own MFA. Ask another admin, or use a break-glass sign-in." };
+    }
+    const targetUser = await store.getUserById(request.params.id);
+    if (!targetUser) {
+      reply.code(404);
+      return { error: "User not found" };
+    }
+    const hadMfa = await mfaService.disable(targetUser.id);
+    const sessionsEnded = await store.revokeUserSessions(targetUser.id, {
+      reason: "admin",
+      ...(context?.credential === "session" && user.id === targetUser.id ? { exceptId: context.session.id } : {})
+    });
+    await audit(request, user, {
+      category: "mfa",
+      eventType: "mfa.reset",
+      action: "reset",
+      resourceType: "user",
+      resourceId: targetUser.id,
+      metadata: { email: targetUser.email, role: targetUser.role, hadMfa, sessionsEnded }
+    });
+    return { ok: true, userId: targetUser.id, hadMfa, sessionsEnded };
   });
 
   // ── Phase 7.4: Workflow Templates & Sharing ───────────────────────────
@@ -14814,6 +15273,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post("/api/notifications", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "notification_channel.change")) return;
     const body = request.body as Record<string, unknown> | null;
     if (!body) { reply.code(400); return { error: "Missing body" }; }
     const id = typeof body.id === "string" && body.id ? body.id : crypto.randomUUID();
@@ -14842,6 +15302,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/notifications/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "notification_channel.change")) return;
     const deleted = await store.deleteNotificationConfig(request.params.id);
     if (!deleted) { reply.code(404); return { error: "Notification config not found" }; }
     await notificationService.reload();

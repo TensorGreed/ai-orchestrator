@@ -4269,6 +4269,8 @@ export class SqliteStore implements Store {
     this.ensureColumn("users", "description", "TEXT");
     this.ensureColumn("users", "created_by", "TEXT");
     this.exec(`CREATE INDEX IF NOT EXISTS idx_users_kind ON users(kind)`);
+    // 13.2 (v63) — the last TOTP time step accepted per user, so a code is accepted once.
+    this.ensureColumn("mfa_secrets", "last_totp_step", "INTEGER");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -4972,6 +4974,52 @@ export class SqliteStore implements Store {
     };
   }
 
+  /**
+   * 13.2 — true when `id` is the only accepted admin who is a person: the one who could still sign in (or get a
+   * break-glass link) to run the deployment. Only people count: a service account can never sign in. Call it inside
+   * an IMMEDIATE transaction, so two changes cannot both see two admins.
+   */
+  private isLastHumanAdminSync(target: { role: unknown; kind: unknown }, id: string): boolean {
+    if (toString(target.role) !== "admin" || toString(target.kind) !== "human") return false;
+    const accepted = (column: string) =>
+      `(NOT EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NULL)
+        OR EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NOT NULL))`;
+    const targetAccepted = this.queryOne<{ ok: number }>(`SELECT ${accepted("?")} AS ok`, [id, id]);
+    if (toNumber(targetAccepted?.ok ?? 0) !== 1) return false;
+    const others = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM users u WHERE u.role = 'admin' AND u.kind = 'human' AND u.id <> ? AND ${accepted("u.id")}`,
+      [id]
+    );
+    return toNumber(others?.count ?? 0) === 0;
+  }
+
+  async updateUserRoleKeepingAdmin(id: string, role: string): Promise<"updated" | "not_found" | "last_admin"> {
+    // IMMEDIATE takes the write lock before the count, so two demotions cannot both see two admins.
+    return this.db
+      .transaction((): "updated" | "not_found" | "last_admin" => {
+        const target = this.queryOne<{ role: string; kind: string | null }>(`SELECT role, kind FROM users WHERE id = ?`, [id]);
+        if (!target) return "not_found";
+        if (role !== "admin" && this.isLastHumanAdminSync(target, id)) return "last_admin";
+        this.db.prepare(`UPDATE users SET role = ?, updated_at = ? WHERE id = ?`).run(role, new Date().toISOString(), id);
+        return "updated";
+      })
+      .immediate();
+  }
+
+  async deleteUserKeepingAdmin(id: string): Promise<"deleted" | "not_found" | "last_admin"> {
+    // IMMEDIATE: the count and the delete happen under the write lock, so two deletes cannot both see two admins.
+    const outcome = this.db
+      .transaction((): "deleted" | "not_found" | "last_admin" => {
+        const target = this.queryOne<{ role: string; kind: string | null }>(`SELECT role, kind FROM users WHERE id = ?`, [id]);
+        if (!target) return "not_found";
+        if (this.isLastHumanAdminSync(target, id)) return "last_admin";
+        return this.deleteUserRowsSync(id) ? "deleted" : "not_found";
+      })
+      .immediate();
+    if (outcome === "deleted") this.persist();
+    return outcome;
+  }
+
   async updateUserRole(id: string, role: string): Promise<boolean> {
     const existing = this.getUserByIdSync(id);
     if (!existing) return false;
@@ -4988,16 +5036,19 @@ export class SqliteStore implements Store {
    * Phase 13.1 — removes the user with its sessions, API keys, MFA secret, SSO identities and project roles in one
    * transaction (Postgres keeps foreign keys on those rows, so both stores remove them explicitly).
    */
+  /** The user row and everything that belongs to it; call inside a transaction. */
+  private deleteUserRowsSync(id: string): boolean {
+    this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM api_keys WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM sso_identities WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM user_project_roles WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM user_invites WHERE user_id = ?`, [id]);
+    return this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id).changes > 0;
+  }
+
   async deleteUser(id: string): Promise<boolean> {
-    const changed = this.db.transaction(() => {
-      this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM api_keys WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM sso_identities WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM user_project_roles WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM user_invites WHERE user_id = ?`, [id]);
-      return this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id).changes > 0;
-    })();
+    const changed = this.db.transaction(() => this.deleteUserRowsSync(id))();
     this.persist();
     return changed;
   }
@@ -5108,6 +5159,10 @@ export class SqliteStore implements Store {
       )
       .run(input.at, sessionId, input.userId, new Date().toISOString());
     return result.changes > 0;
+  }
+
+  async clearSessionMfaVerified(sessionId: string): Promise<boolean> {
+    return this.db.prepare(`UPDATE sessions SET mfa_verified_at = NULL WHERE id = ?`).run(sessionId).changes > 0;
   }
 
   async purgeEndedSessions(before: string): Promise<number> {
@@ -7589,6 +7644,13 @@ export class SqliteStore implements Store {
       .prepare(`UPDATE mfa_secrets SET backup_codes_json = ?, updated_at = ? WHERE user_id = ? AND backup_codes_json = ?`)
       .run(JSON.stringify(input.next), new Date().toISOString(), input.userId, JSON.stringify(input.expected));
     this.persist();
+    return result.changes > 0;
+  }
+
+  async markTotpStepUsed(userId: string, step: number): Promise<boolean> {
+    const result = this.db
+      .prepare(`UPDATE mfa_secrets SET last_totp_step = ? WHERE user_id = ? AND (last_totp_step IS NULL OR last_totp_step < ?)`)
+      .run(step, userId, step);
     return result.changes > 0;
   }
 

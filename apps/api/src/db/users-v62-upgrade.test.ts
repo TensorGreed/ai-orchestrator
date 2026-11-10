@@ -122,6 +122,10 @@ describe.skipIf(!postgresUrl)("v62 on Postgres", () => {
     const setRolledBack = async (version: number) => {
       await pool.query(`DELETE FROM schema_migrations WHERE version > $1`, [version]);
     };
+    const mfaColumns = async () =>
+      (await pool.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'mfa_secrets'`, [schema])).rows.map(
+        (row) => row.column_name
+      );
     const userColumns = async () =>
       (await pool.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'users'`, [schema])).rows.map(
         (row) => row.column_name
@@ -136,11 +140,14 @@ describe.skipIf(!postgresUrl)("v62 on Postgres", () => {
       await rollbackMigrations(run, current, setRolledBack, 61);
       expect(await chainVersion(pool)).toBe(61);
       expect(await userColumns()).not.toContain("kind");
+      // v63 went back too: the TOTP step column is gone, and the next boot adds it again.
+      expect(await mfaColumns()).not.toContain("last_totp_step");
 
       const store = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
       try {
         expect(await chainVersion(pool)).toBe(Math.max(...MIGRATIONS.map((m) => m.version)));
         expect(await userColumns()).toEqual(expect.arrayContaining(V62_COLUMNS));
+        expect(await mfaColumns()).toContain("last_totp_step");
         await expectPreUpgradeRowsWork(store, key);
         // A kind other than human or service is refused.
         await expect(pool.query(`UPDATE users SET kind = 'svc' WHERE id = 'svc1'`)).rejects.toThrow();
@@ -162,6 +169,7 @@ describe.skipIf(!postgresUrl)("v62 on Postgres", () => {
 
       await rollbackMigrations(run, current, setRolledBack, 61);
       expect((await userColumns()).filter((column) => V62_COLUMNS.includes(column))).toEqual([]);
+      expect(await mfaColumns()).not.toContain("last_totp_step");
       expect((await approvalColumns()).filter((column) => V62_APPROVAL_COLUMNS.includes(column))).toEqual([]);
       expect((await pool.query(`SELECT COUNT(*)::int AS n FROM users`)).rows[0].n).toBe(2);
       // Nothing is widened on the older build: the service account is disabled, and every key it or a scope limited is revoked.

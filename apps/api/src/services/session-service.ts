@@ -103,7 +103,7 @@ export type RequestAuthContext =
       keyScopes: string[];
       /** 13.2 — the parsed scope (key-scopes.ts). */
       keyScope: KeyScope;
-      /** 13.2 — the key belongs to a service account. */
+      /** 13.2 — the key belongs to a service account (step-up lets such a key with a `role:admin` ceiling through). */
       serviceAccount: boolean;
     };
 
