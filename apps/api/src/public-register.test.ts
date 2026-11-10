@@ -270,3 +270,26 @@ describe("the first user", () => {
     });
   }
 });
+
+describe("public registration on, with step-up on", () => {
+  it("a role above the caller's own is refused and audited before step-up is asked for", async () => {
+    const ctx = await createReleaseTestContext({ env: { AUTH_ALLOW_PUBLIC_REGISTER: "true", STEP_UP_MAX_AGE_MINUTES: "10" } });
+    contexts.push(ctx);
+    await loginAs(ctx, "admin");
+    const viewer = await loginAs(ctx, "viewer");
+    const email = newEmail();
+    const response = await register(ctx, { email, role: "builder" }, { cookie: viewer.cookie });
+    expect(response.statusCode, response.body).toBe(403);
+    expect(response.json<{ error: string }>().error).toBe("Your role (viewer) cannot create a user with the builder role");
+    expect(await registerAudits(ctx, email)).toMatchObject([{ outcome: "denied", metadata: { reason: "role_above_actor" } }]);
+  });
+
+  it("an allowed grant above viewer still needs step-up", async () => {
+    const ctx = await createReleaseTestContext({ env: { AUTH_ALLOW_PUBLIC_REGISTER: "true", STEP_UP_MAX_AGE_MINUTES: "10" } });
+    contexts.push(ctx);
+    const builder = await loginAs(ctx, "builder");
+    const response = await register(ctx, { email: newEmail(), role: "builder" }, { cookie: builder.cookie });
+    expect(response.statusCode, response.body).toBe(403);
+    expect(response.json<{ code?: string }>().code).toBe("step_up_required");
+  });
+});

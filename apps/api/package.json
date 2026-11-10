@@ -13,7 +13,8 @@
     "db:rollback": "tsx src/scripts/db-rollback.ts",
     "db:export": "tsx src/scripts/db-export.ts",
     "db:import": "tsx src/scripts/db-import.ts",
-    "db:copy": "tsx src/scripts/db-copy.ts"
+    "db:copy": "tsx src/scripts/db-copy.ts",
+    "admin:break-glass": "tsx src/scripts/admin-break-glass.ts"
   },
   "dependencies": {
     "@ai-orchestrator/agent-runtime": "workspace:*",

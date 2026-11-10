@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import { z } from "zod";
+import { parseSessionPolicy } from "./services/session-policy.js";
 import {
   NETWORK_SCOPES,
   NETWORK_SCOPE_ENV,
@@ -99,6 +100,11 @@ const envSchema = z.object({
   SECRET_MASTER_KEY_BASE64: z.string().min(1).optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("ao_session"),
   SESSION_TTL_HOURS: z.coerce.number().int().positive().default(168),
+  // 13.2 — session policy, each `<global>[,role:value]*` (checked by parseSessionPolicy). Unset: no idle timeout,
+  // sessions live SESSION_TTL_HOURS, no limit on sessions per user.
+  SESSION_IDLE_TIMEOUT_MINUTES: z.string().optional(),
+  SESSION_ABSOLUTE_TIMEOUT_HOURS: z.string().optional(),
+  SESSION_MAX_PER_USER: z.string().optional(),
   COOKIE_SECURE: booleanFromEnv.default(false),
   AUTH_ALLOW_PUBLIC_REGISTER: booleanFromEnv.default(false),
   // How a non-admin with no membership in a project is treated there:
@@ -115,8 +121,16 @@ const envSchema = z.object({
 
   // Phase 5.1 — Authentication enhancements
   API_KEY_DEFAULT_EXPIRY_DAYS: z.coerce.number().int().nonnegative().default(0),
+  // MFA_ENABLED has no effect (TOTP is always available); a boot note says so when it is set.
   MFA_ENABLED: booleanFromEnv.default(false),
+  // 13.2 — MFA_ENFORCE=true is an alias for MFA_REQUIRED_ROLES=admin (see resolveMfaPolicy).
   MFA_ENFORCE: booleanFromEnv.default(false),
+  // 13.2 — roles that must use MFA (comma list of admin, builder, operator, viewer). Unset = only users who enrolled are
+  // asked for a code. No zod defaults, so hand-built AppConfig objects keep typechecking.
+  MFA_REQUIRED_ROLES: z.string().optional(),
+  // 13.2 — step-up: a fresh MFA check before security-admin actions when the session's last one is older than this
+  // many minutes. 0 or unset = off.
+  STEP_UP_MAX_AGE_MINUTES: optionalIntFromEnv(0, 1440),
   MFA_ISSUER: z.string().min(1).default("ai-orchestrator"),
   SAML_ENABLED: booleanFromEnv.default(false),
   SAML_ENTRY_POINT: z.string().optional(),
@@ -632,7 +646,11 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   // Phase 13.2 — the SAML allow-lists / IdP issuer and SSO_MFA settings are checked only when SSO is on.
   resolveSamlSettings(parsed.data);
   resolveSsoMfaSettings(parsed.data);
+  // 13.2 — a role name MFA_REQUIRED_ROLES does not know refuses to start.
+  resolveMfaPolicy(parsed.data);
   parseTrustProxy(parsed.data.TRUST_PROXY);
+  // 13.2 — a malformed session policy refuses to start, naming the setting and the entry.
+  parseSessionPolicy(parsed.data);
   // Phase 13.2 — a bad address list refuses to start, naming the setting and the entry.
   resolveNetworkSettings(parsed.data);
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.
@@ -1401,5 +1419,55 @@ export function resolveSsoMfaSettings(config: SsoMfaConfigInput): SsoMfaSettings
       /^[A-Za-z][A-Za-z0-9+.-]*:[\x21-\x7e]{1,512}$/,
       "AuthnContextClassRef URIs"
     )
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 13.2 — MFA required per role and step-up. Unset keeps today's behaviour: only users who enrolled TOTP are asked
+// for a code, and no action asks for a fresh one.
+// ---------------------------------------------------------------------------
+
+export type MfaPolicyRole = "admin" | "builder" | "operator" | "viewer";
+
+const MFA_POLICY_ROLES: readonly MfaPolicyRole[] = ["admin", "builder", "operator", "viewer"];
+
+export interface MfaPolicySettings {
+  /** Roles whose users must use MFA: an unenrolled one gets a session that can only set up MFA. */
+  requiredRoles: MfaPolicyRole[];
+  /** Minutes a session's last MFA check counts for security-admin actions; 0 = step-up off. */
+  stepUpMaxAgeMinutes: number;
+  /** Boot notes (deprecated or overlapping settings), logged once at startup. */
+  notes: string[];
+}
+
+type MfaPolicyConfigInput = Partial<Pick<AppConfig, "MFA_REQUIRED_ROLES" | "MFA_ENFORCE" | "MFA_ENABLED" | "STEP_UP_MAX_AGE_MINUTES">>;
+
+/**
+ * Resolves MFA_REQUIRED_ROLES (MFA_ENFORCE=true adds `admin`) and STEP_UP_MAX_AGE_MINUTES. An unknown role name throws,
+ * so a typo refuses to start instead of silently leaving a role without MFA.
+ */
+export function resolveMfaPolicy(config: MfaPolicyConfigInput): MfaPolicySettings {
+  const roles = new Set<MfaPolicyRole>();
+  for (const entry of splitList(config.MFA_REQUIRED_ROLES)) {
+    const role = entry.toLowerCase();
+    if (!MFA_POLICY_ROLES.includes(role as MfaPolicyRole)) {
+      throw new Error(`Invalid MFA configuration: MFA_REQUIRED_ROLES has "${entry}"; use a comma list of admin, builder, operator, viewer`);
+    }
+    roles.add(role as MfaPolicyRole);
+  }
+  const notes: string[] = [];
+  if (config.MFA_ENFORCE === true) {
+    if (!roles.has("admin") && roles.size > 0) {
+      notes.push("MFA_ENFORCE=true adds admin to MFA_REQUIRED_ROLES");
+    }
+    roles.add("admin");
+  }
+  if (config.MFA_ENABLED === true) {
+    notes.push("MFA_ENABLED has no effect: TOTP is always available; use MFA_REQUIRED_ROLES to require it");
+  }
+  return {
+    requiredRoles: MFA_POLICY_ROLES.filter((role) => roles.has(role)),
+    stepUpMaxAgeMinutes: config.STEP_UP_MAX_AGE_MINUTES ?? 0,
+    notes
   };
 }

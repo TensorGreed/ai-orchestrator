@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import type { Project } from "@ai-orchestrator/shared";
+import { NOTIFICATION_EVENT_LABELS, NOTIFICATION_EVENT_TYPES, type Project } from "@ai-orchestrator/shared";
 import {
   activateMfa,
   addProjectMember,
@@ -19,6 +19,7 @@ import {
   disableMfa,
   disconnectGit,
   enrollMfa,
+  mfaReauthFromError,
   fetchApiKeys,
   fetchAuditLogs,
   fetchCustomRoles,
@@ -28,6 +29,7 @@ import {
   fetchMcpPresets,
   fetchObservability,
   fetchRecentTraces,
+  inBackground,
   fetchLogStreamDestinations,
   fetchMfaStatus,
   fetchProjectMembers,
@@ -126,15 +128,22 @@ import {
 } from "../lib/api";
 import { AuditSigningKeysSection } from "./AuditSigningKeysSection";
 import { NetworkSettingsTab } from "./NetworkSettingsTab";
+import { ServiceAccountsTab } from "./ServiceAccountsTab";
+import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
+import { describeKeyScopes } from "../lib/key-scopes";
+import { SignedInSessionsCard } from "./SignedInSessionsCard";
+import { UsersAdminTab } from "./UsersAdminTab";
 
 type SettingsTab =
   | "security"
+  | "users"
   | "api-keys"
   | "members"
   | "roles"
   | "sso"
   | "external-secrets"
   | "network"
+  | "service-accounts"
   | "audit-log"
   | "audit-signing"
   | "log-streams"
@@ -186,7 +195,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     {
       label: "Account",
       tabs: [
-        { id: "security", label: "Security (MFA)" },
+        { id: "security", label: "Security" },
         { id: "api-keys", label: "API Keys" }
       ]
     },
@@ -201,10 +210,12 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     {
       label: "Access control",
       tabs: [
+        { id: "users", label: "Users", restricted: !isAdmin },
         { id: "roles", label: "Custom Roles", restricted: !isAdmin },
         { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
         { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
-        { id: "network", label: "Network", restricted: !isAdmin }
+        { id: "network", label: "Network", restricted: !isAdmin },
+        { id: "service-accounts", label: "Service Accounts", restricted: !isAdmin }
       ]
     },
     {
@@ -271,8 +282,13 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         </nav>
 
         <div className="settings-body">
-        {tab === "security" && <SecurityTab />}
-        {tab === "api-keys" && <ApiKeysTab isAdmin={isAdmin} />}
+        {tab === "security" && (
+          <>
+            <SecurityTab />
+            <SignedInSessionsCard />
+          </>
+        )}
+        {tab === "api-keys" && <ApiKeysTab isAdmin={isAdmin} ownerRole={authUser.role} projects={projects} />}
         {tab === "members" && (
           <ProjectMembersTab
             projects={projects}
@@ -280,12 +296,14 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
             currentUserRole={authUser.role}
           />
         )}
+        {tab === "users" && isAdmin && <UsersAdminTab currentUserId={authUser.id} />}
         {tab === "roles" && isAdmin && <CustomRolesTab projects={projects} initialProjectId={activeProjectId} />}
         {tab === "sso" && isAdmin && <SsoMappingsTab projects={projects} />}
         {tab === "external-secrets" && isAdmin && (
           <ExternalSecretsTab activeProjectId={activeProjectId} />
         )}
         {tab === "network" && isAdmin && <NetworkSettingsTab />}
+        {tab === "service-accounts" && isAdmin && <ServiceAccountsTab projects={projects} />}
         {tab === "audit-log" && isAdmin && <AuditLogTab />}
         {tab === "audit-signing" && isAdmin && <AuditSigningKeysSection />}
         {tab === "log-streams" && isAdmin && <LogStreamsTab />}
@@ -318,6 +336,8 @@ function SecurityTab() {
   } | null>(null);
   const [activationCode, setActivationCode] = useState("");
   const [disableCode, setDisableCode] = useState("");
+  const [reauth, setReauth] = useState<"password" | "sso" | null>(null);
+  const [reauthPassword, setReauthPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -341,9 +361,13 @@ function SecurityTab() {
     setError(null);
     setBusy(true);
     try {
-      const response = await enrollMfa();
+      const response = await enrollMfa(reauth === "password" ? { password: reauthPassword } : {});
       setEnrollment(response);
+      setReauth(null);
+      setReauthPassword("");
     } catch (err) {
+      const needed = mfaReauthFromError(err);
+      if (needed) setReauth(needed);
       setError(formatError(err));
     } finally {
       setBusy(false);
@@ -392,6 +416,15 @@ function SecurityTab() {
         apps. Enrolling MFA adds a second step to every future login.
       </p>
       {error && <div className="settings-error">{error}</div>}
+      {status?.requiredForRole && (
+        <p className="settings-help">Your role requires MFA, so it cannot stay off: after turning it off, set it up again.</p>
+      )}
+      {status?.stepUpMaxAgeMinutes ? (
+        <p className="settings-help">
+          Security actions (changing roles, keys, secrets, SSO mappings and similar) ask for a code when your last one is
+          older than {status.stepUpMaxAgeMinutes} minutes.
+        </p>
+      ) : null}
 
       {status?.enabled ? (
         <div className="settings-card">
@@ -464,8 +497,20 @@ function SecurityTab() {
       ) : (
         <div className="settings-card">
           <p>MFA is not enrolled. Click below to generate a secret and backup codes.</p>
+          {reauth === "password" && (
+            <>
+              <label htmlFor="mfa-enroll-password">Your password (needed more than 10 minutes after signing in)</label>
+              <input
+                id="mfa-enroll-password"
+                type="password"
+                autoComplete="current-password"
+                value={reauthPassword}
+                onChange={(event) => setReauthPassword(event.target.value)}
+              />
+            </>
+          )}
           <div className="settings-actions">
-            <button className="header-btn" onClick={handleEnroll} disabled={busy}>
+            <button className="header-btn" onClick={handleEnroll} disabled={busy || reauth === "sso" || (reauth === "password" && !reauthPassword)}>
               Enrol in MFA
             </button>
           </div>
@@ -479,11 +524,11 @@ function SecurityTab() {
 // API keys
 // ---------------------------------------------------------------------------
 
-function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
+function ApiKeysTab({ isAdmin, ownerRole, projects }: { isAdmin: boolean; ownerRole: AuthUser["role"]; projects: Project[] }) {
   const [keys, setKeys] = useState<ApiKeyRecord[]>([]);
   const [name, setName] = useState("");
   const [expiresInDays, setExpiresInDays] = useState("");
-  const [scopes, setScopes] = useState("");
+  const [scope, setScope] = useState<KeyScopeValue>(EMPTY_KEY_SCOPE);
   const [plaintext, setPlaintext] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -509,19 +554,15 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
     setError(null);
     setBusy(true);
     try {
-      const parsedScopes = scopes
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
       const parsedDays = expiresInDays.trim() ? Number(expiresInDays.trim()) : undefined;
       const response = await createApiKey({
         name: name.trim(),
-        scopes: parsedScopes.length ? parsedScopes : undefined,
+        ...keyScopePayload(scope),
         expiresInDays: parsedDays && Number.isFinite(parsedDays) ? parsedDays : undefined
       });
       setPlaintext(response.key);
       setName("");
-      setScopes("");
+      setScope(EMPTY_KEY_SCOPE);
       setExpiresInDays("");
       await refresh();
     } catch (err) {
@@ -548,9 +589,10 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
     <div className="settings-section">
       <h3>API keys</h3>
       <p className="settings-help">
-        Use an API key as <code>Authorization: Bearer &lt;key&gt;</code> on any API call. Keys inherit your user role;
-        scopes are informational today and reserved for finer-grained enforcement later. Keys are only shown once on
-        creation.
+        Use an API key as <code>Authorization: Bearer &lt;key&gt;</code> on any API call. A key acts with your role in
+        every project you can reach, unless you give it a role ceiling or limit it to projects (a key limited to
+        projects acts as builder at most and can call only the workflow, run and approval routes). Keys are only shown
+        once on creation.
       </p>
       {error && <div className="settings-error">{error}</div>}
 
@@ -563,13 +605,7 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
           onChange={(event) => setName(event.target.value)}
           placeholder="ci-pipeline"
         />
-        <label htmlFor="api-key-scopes">Scopes (comma-separated, optional)</label>
-        <input
-          id="api-key-scopes"
-          value={scopes}
-          onChange={(event) => setScopes(event.target.value)}
-          placeholder="workflow:read,workflow:execute"
-        />
+        <KeyScopeFields idPrefix="api-key" ownerRole={ownerRole} projects={projects} value={scope} onChange={setScope} />
         <label htmlFor="api-key-expiry">Expires in N days (leave empty for no expiry)</label>
         <input
           id="api-key-expiry"
@@ -602,6 +638,7 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
                 <th>Name</th>
                 <th>Prefix</th>
                 {isAdmin && <th>User</th>}
+                <th>Scope</th>
                 <th>Last used</th>
                 <th>Expires</th>
                 <th></th>
@@ -615,6 +652,7 @@ function ApiKeysTab({ isAdmin }: { isAdmin: boolean }) {
                     <code>{key.keyPrefix}</code>
                   </td>
                   {isAdmin && <td>{key.userId}</td>}
+                  <td>{describeKeyScopes(key.scopes, (id) => projects.find((project) => project.id === id)?.name ?? id)}</td>
                   <td>{formatDate(key.lastUsedAt)}</td>
                   <td>{key.expiresAt ? formatDate(key.expiresAt) : "never"}</td>
                   <td>
@@ -2874,7 +2912,7 @@ function ObservabilityTab() {
 
   useEffect(() => {
     refresh();
-    const interval = window.setInterval(refresh, 10000);
+    const interval = window.setInterval(() => void inBackground(refresh), 10000);
     return () => window.clearInterval(interval);
   }, [refresh]);
 
@@ -3047,11 +3085,7 @@ const NOTIFICATION_CHANNELS = [
   { value: "teams" as const, label: "Teams" }
 ];
 
-const NOTIFICATION_EVENTS = [
-  { value: "workflow_failure", label: "Workflow Failure" },
-  { value: "workflow_success", label: "Workflow Success" },
-  { value: "network.break_glass_used", label: "Break-glass access used" }
-];
+export const NOTIFICATION_EVENTS = NOTIFICATION_EVENT_TYPES.map((value) => ({ value: value as string, label: NOTIFICATION_EVENT_LABELS[value] }));
 
 function NotificationsTab() {
   const [configs, setConfigs] = useState<NotificationConfig[]>([]);
@@ -3065,7 +3099,7 @@ function NotificationsTab() {
   // form state
   const [formChannel, setFormChannel] = useState<"email" | "slack" | "teams">("email");
   const [formEnabled, setFormEnabled] = useState(true);
-  const [formEvents, setFormEvents] = useState<string[]>(["workflow_failure"]);
+  const [formEvents, setFormEvents] = useState<string[]>(["execution.failure"]);
 
   // email fields
   const [smtpHost, setSmtpHost] = useState("");
@@ -3099,7 +3133,7 @@ function NotificationsTab() {
   function resetForm() {
     setFormChannel("email");
     setFormEnabled(true);
-    setFormEvents(["workflow_failure"]);
+    setFormEvents(["execution.failure"]);
     setSmtpHost("");
     setSmtpPort("587");
     setSmtpSecure(false);

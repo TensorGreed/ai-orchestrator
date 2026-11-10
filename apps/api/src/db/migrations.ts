@@ -2574,6 +2574,83 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS ai_gateway_routes;
       DROP TABLE IF EXISTS ai_gateway_route_sets;
     `
+  },
+  {
+    version: 61,
+    description: "13.2 — sign-in sessions record how they were issued, their MFA time, a break-glass flag and why they ended",
+    // Every column is nullable or has a default, so sessions issued before the upgrade stay valid (no backfill).
+    // auth_method: password | oidc | saml | ldap | break_glass. ended_reason: logout | expired | idle | evicted |
+    // admin | policy. idx_sessions_user_live serves the per-user session list and the concurrent-session limit.
+    up: `
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_method TEXT;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ip_address TEXT;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS mfa_verified_at TIMESTAMPTZ NULL;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS break_glass INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ended_reason TEXT;
+      CREATE INDEX IF NOT EXISTS idx_sessions_user_live ON sessions(user_id, revoked_at, expires_at);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_sessions_user_live;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS ended_reason;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS break_glass;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS mfa_verified_at;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS user_agent;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS ip_address;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS auth_method;
+    `
+  },
+  {
+    version: 62,
+    description: "13.2 — service accounts (users.kind, description, created_by) and the API key behind an approval decision",
+    // Existing users are people (kind defaults to 'human'; any other value is refused, and the code reads anything but
+    // 'human' as a service account). created_by is plain text, not a foreign key: deleting the admin who created a
+    // service account leaves the account working. Key scopes stay in api_keys.scopes_json. approval_requests records
+    // the API key that decided a request, or that started the run that asked, so the resumed run keeps that key's limits.
+    up: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'human';
+      ALTER TABLE users DROP CONSTRAINT IF EXISTS users_kind_check;
+      ALTER TABLE users ADD CONSTRAINT users_kind_check CHECK (kind IN ('human', 'service'));
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS description TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS created_by TEXT;
+      CREATE INDEX IF NOT EXISTS idx_users_kind ON users(kind);
+      ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS requested_by_api_key_id TEXT;
+      ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS decided_by_api_key_id TEXT;
+    `,
+    // A build before v62 reads every key scope as free text and every user as a person, so rolling back would widen
+    // limited keys to their owner's full role and leave service accounts usable. The down migration closes that first:
+    // it revokes every key of a service account and every key whose scopes name a role ceiling or a project, then
+    // disables each service account (viewer role, no project roles, no usable password, an email no sign-in can name)
+    // before it drops the columns. Nothing is widened; revoked keys have to be issued again.
+    down: `
+      UPDATE api_keys SET revoked_at = NOW()
+        WHERE revoked_at IS NULL
+          AND (user_id IN (SELECT id FROM users WHERE kind <> 'human')
+               OR scopes_json LIKE '%"role:%'
+               OR scopes_json LIKE '%"project:%');
+      DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE kind <> 'human');
+      DELETE FROM user_project_roles WHERE user_id IN (SELECT id FROM users WHERE kind <> 'human');
+      UPDATE users SET email = id || '@disabled.invalid', password_hash = '!', role = 'viewer', updated_at = NOW()
+        WHERE kind <> 'human';
+      ALTER TABLE approval_requests DROP COLUMN IF EXISTS decided_by_api_key_id;
+      ALTER TABLE approval_requests DROP COLUMN IF EXISTS requested_by_api_key_id;
+      DROP INDEX IF EXISTS idx_users_kind;
+      ALTER TABLE users DROP COLUMN IF EXISTS created_by;
+      ALTER TABLE users DROP COLUMN IF EXISTS description;
+      ALTER TABLE users DROP CONSTRAINT IF EXISTS users_kind_check;
+      ALTER TABLE users DROP COLUMN IF EXISTS kind;
+    `
+  },
+  {
+    version: 63,
+    description: "13.2 — the last TOTP time step accepted per user, so a code is accepted once",
+    // Nullable: an authenticator set up before the upgrade has no step recorded, and its next code is accepted as before.
+    up: `
+      ALTER TABLE mfa_secrets ADD COLUMN IF NOT EXISTS last_totp_step INTEGER;
+    `,
+    down: `
+      ALTER TABLE mfa_secrets DROP COLUMN IF EXISTS last_totp_step;
+    `
   }
 ];
 

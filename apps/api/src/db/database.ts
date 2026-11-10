@@ -1,3 +1,4 @@
+import { SUB_WORKFLOW_USAGE_TRIGGER, USAGE_AVG_DURATION, USAGE_EXECS, USAGE_EXECUTION_ROW } from "./usage-sql.js";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -90,7 +91,8 @@ import { gatewayGuardField, parseRecordedCallLabels } from "@ai-orchestrator/sha
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, McpPolicyEnforceRefusedError, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
-import { mcpGatewayApprovalRetentionCutoff } from "./store.js";
+import { mcpGatewayApprovalRetentionCutoff, userKindWhere } from "./store.js";
+import { sessionsToEvict } from "./session-eviction.js";
 import {
   auditEntryHash,
   type AuditChainResult,
@@ -105,8 +107,11 @@ import type {
   ClusterInstanceHeartbeat,
   ClusterInstanceRecord,
   ConsumedPendingChallenge,
+  PendingChallengeRow,
   PendingChallengeInput,
   ReleaseApprovalDecisionInput,
+  LoginSession,
+  LoginSessionInput,
   ReleaseGateCasesChange,
   ReplayRecordingLimits,
   QueueClaimedItem,
@@ -120,7 +125,13 @@ import type {
   McpPolicySuggestionWrite,
   McpToolCallScanFilter,
   McpToolPolicyPatch,
+  ServiceAccountCreate,
+  SessionAuthMethod,
+  SessionEndReason,
   Store,
+  StoredUser,
+  StoredUserKind,
+  StoredUserSummary,
   UserInviteCreate,
   UserInviteRecord
 } from "./store.js";
@@ -313,8 +324,33 @@ interface UserRow {
   email: string;
   password_hash: string;
   role: string;
+  kind?: string | null;
+  description?: string | null;
+  created_by?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+const USER_COLUMNS = "id, email, password_hash, role, kind, description, created_by, created_at, updated_at";
+
+function storedUserFromRow(row: UserRow): StoredUser {
+  return {
+    id: toString(row.id),
+    email: toString(row.email),
+    passwordHash: toString(row.password_hash),
+    role: toString(row.role),
+    // Fails closed: only 'human' is a person; any other value (a typo, a manual fix) is a service account, which cannot sign in.
+    kind: row.kind === "human" ? "human" : "service",
+    description: row.description ? toString(row.description) : null,
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
+function userSummaryFromRow(row: UserRow): StoredUserSummary {
+  const { passwordHash: _hash, ...summary } = storedUserFromRow(row);
+  return summary;
 }
 
 interface SessionRow {
@@ -324,6 +360,32 @@ interface SessionRow {
   created_at: string;
   last_seen_at: string;
   revoked_at: string | null;
+  auth_method: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  mfa_verified_at: string | null;
+  break_glass: number | null;
+  ended_reason: string | null;
+}
+
+const SESSION_COLUMNS =
+  "id, user_id, expires_at, created_at, last_seen_at, revoked_at, auth_method, ip_address, user_agent, mfa_verified_at, break_glass, ended_reason";
+
+function sessionFromRow(row: SessionRow): LoginSession {
+  return {
+    id: toString(row.id),
+    userId: toString(row.user_id),
+    expiresAt: toString(row.expires_at),
+    createdAt: toString(row.created_at),
+    lastSeenAt: toString(row.last_seen_at),
+    revokedAt: row.revoked_at ? toString(row.revoked_at) : null,
+    authMethod: row.auth_method ? (toString(row.auth_method) as SessionAuthMethod) : null,
+    ipAddress: row.ip_address ? toString(row.ip_address) : null,
+    userAgent: row.user_agent ? toString(row.user_agent) : null,
+    mfaVerifiedAt: row.mfa_verified_at ? toString(row.mfa_verified_at) : null,
+    breakGlass: Number(row.break_glass ?? 0) === 1,
+    endedReason: row.ended_reason ? (toString(row.ended_reason) as SessionEndReason) : null
+  };
 }
 
 interface WebhookReplayRow {
@@ -1963,6 +2025,10 @@ export interface ApprovalRequestRecord {
   decidedByUserId: string | null;
   decidedBy: string | null;
   decidedAt: string | null;
+  /** 13.2 (v62) — the API key that decided, when one did: the resumed run keeps that key's limits. */
+  decidedByApiKeyId: string | null;
+  /** 13.2 (v62) — the API key that started the run that asked, when one did (a timeout resumes with its limits). */
+  requestedByApiKeyId: string | null;
   reason: string | null;
   edits: Record<string, unknown> | null;
   editedFields: string[];
@@ -1991,6 +2057,7 @@ export interface ApprovalRequestInsert {
   details?: Record<string, unknown> | null;
   requestedByUserId?: string | null;
   requestedBy?: string | null;
+  requestedByApiKeyId?: string | null;
   timeoutMinutes?: number | null;
   expiresAt?: string | null;
   askingWorkflowId?: string | null;
@@ -2266,6 +2333,8 @@ function mapApprovalRequestRow(row: ApprovalRequestRow): ApprovalRequestRecord {
     decidedByUserId: nullableText(row.decided_by_user_id),
     decidedBy: nullableText(row.decided_by),
     decidedAt: nullableText(row.decided_at),
+    decidedByApiKeyId: nullableText(row.decided_by_api_key_id),
+    requestedByApiKeyId: nullableText(row.requested_by_api_key_id),
     reason: nullableText(row.reason),
     edits: edits && typeof edits === "object" && !Array.isArray(edits) ? (edits as Record<string, unknown>) : null,
     editedFields: parseJsonArray(row.edited_fields_json),
@@ -2498,10 +2567,14 @@ export class SqliteStore implements Store {
     return this.db.name;
   }
 
-  static async create(dbFilePath: string): Promise<SqliteStore> {
+  /**
+   * Opens (creating if needed) and migrates the file. `busyTimeoutMs` is how long a statement waits for another
+   * process's write lock (better-sqlite3's default is 5 s); a CLI next to a running API passes a longer wait.
+   */
+  static async create(dbFilePath: string, options: { busyTimeoutMs?: number } = {}): Promise<SqliteStore> {
     const absolutePath = path.resolve(dbFilePath);
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-    const db = new Database(absolutePath);
+    const db = new Database(absolutePath, options.busyTimeoutMs === undefined ? {} : { timeout: options.busyTimeoutMs });
     return new SqliteStore(db);
   }
 
@@ -3663,6 +3736,9 @@ export class SqliteStore implements Store {
     this.ensureColumn("approval_requests", "asking_workflow_id", "TEXT");
     this.ensureColumn("approval_requests", "edits_salt", "TEXT");
     this.ensureColumn("approval_requests", "workflow_deleted_at", "TEXT");
+    // 13.2 (v62) — the API key behind a decision, or behind the run that asked.
+    this.ensureColumn("approval_requests", "requested_by_api_key_id", "TEXT");
+    this.ensureColumn("approval_requests", "decided_by_api_key_id", "TEXT");
     // When approval requests (migration 32) first came up: runs paused before it get one full timeout from here.
     this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES ('approval_requests', ?)`, [new Date().toISOString()]);
 
@@ -4185,6 +4261,21 @@ export class SqliteStore implements Store {
     this.ensureColumn("guard_events", "run_source", "TEXT");
     // 12.6b (v60) — the /v1 AI gateway: route sets, routes, client grants and per-request usage.
     ensureAiGatewaySchema(this.db);
+    // 13.2 (v61) — how each sign-in session was issued, its MFA time, break-glass flag and why it ended.
+    this.ensureColumn("sessions", "auth_method", "TEXT");
+    this.ensureColumn("sessions", "ip_address", "TEXT");
+    this.ensureColumn("sessions", "user_agent", "TEXT");
+    this.ensureColumn("sessions", "mfa_verified_at", "TEXT");
+    this.ensureColumn("sessions", "break_glass", "INTEGER NOT NULL", "0");
+    this.ensureColumn("sessions", "ended_reason", "TEXT");
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user_live ON sessions(user_id, revoked_at, expires_at)`);
+    // 13.2 (v62) — service accounts: users.kind, a description and the creating admin.
+    this.ensureColumn("users", "kind", "TEXT NOT NULL", "'human'");
+    this.ensureColumn("users", "description", "TEXT");
+    this.ensureColumn("users", "created_by", "TEXT");
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_users_kind ON users(kind)`);
+    // 13.2 (v63) — the last TOTP time step accepted per user, so a code is accepted once.
+    this.ensureColumn("mfa_secrets", "last_totp_step", "INTEGER");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -4707,73 +4798,18 @@ export class SqliteStore implements Store {
     return row ? toNumber(row.count) : 0;
   }
 
-  async getUserByEmail(email: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null> {
-    const row = this.queryOne<UserRow>(
-      `SELECT id, email, password_hash, role, created_at, updated_at
-       FROM users
-       WHERE lower(email) = lower(?)`,
-      [email]
-    );
-
-    if (!row) {
-      return null;
-    }
-
-    return {
-      id: toString(row.id),
-      email: toString(row.email),
-      passwordHash: toString(row.password_hash),
-      role: toString(row.role),
-      createdAt: toString(row.created_at),
-      updatedAt: toString(row.updated_at)
-    };
+  async getUserByEmail(email: string): Promise<StoredUser | null> {
+    const row = this.queryOne<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE lower(email) = lower(?)`, [email]);
+    return row ? storedUserFromRow(row) : null;
   }
 
-  async getUserById(id: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null> {
+  async getUserById(id: string): Promise<StoredUser | null> {
     return this.getUserByIdSync(id);
   }
 
-  private getUserByIdSync(id: string): {
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null {
-    const row = this.queryOne<UserRow>(
-      `SELECT id, email, password_hash, role, created_at, updated_at
-       FROM users
-       WHERE id = ?`,
-      [id]
-    );
-
-    if (!row) {
-      return null;
-    }
-
-    return {
-      id: toString(row.id),
-      email: toString(row.email),
-      passwordHash: toString(row.password_hash),
-      role: toString(row.role),
-      createdAt: toString(row.created_at),
-      updatedAt: toString(row.updated_at)
-    };
+  private getUserByIdSync(id: string): StoredUser | null {
+    const row = this.queryOne<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`, [id]);
+    return row ? storedUserFromRow(row) : null;
   }
 
   async saveUser(input: {
@@ -4813,23 +4849,44 @@ export class SqliteStore implements Store {
     };
   }
 
-  async listUsers(): Promise<Array<{
-    id: string;
-    email: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  }>> {
-    const rows = this.queryAll<UserRow>(
-      `SELECT id, email, password_hash, role, created_at, updated_at FROM users ORDER BY created_at DESC`
-    );
-    return rows.map((row) => ({
-      id: toString(row.id),
-      email: toString(row.email),
-      role: toString(row.role),
-      createdAt: toString(row.created_at),
-      updatedAt: toString(row.updated_at)
-    }));
+  async listUsers(options: { kind?: StoredUserKind } = {}): Promise<StoredUserSummary[]> {
+    const where = userKindWhere(options.kind);
+    const rows = this.queryAll<UserRow>(`SELECT ${USER_COLUMNS} FROM users ${where} ORDER BY created_at DESC`);
+    return rows.map(userSummaryFromRow);
+  }
+
+  async createServiceAccount(input: ServiceAccountCreate): Promise<StoredUserSummary | null> {
+    const now = new Date().toISOString();
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO users (id, email, password_hash, role, kind, description, created_by, created_at, updated_at)
+         VALUES (?, ?, '!', ?, 'service', ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`
+      )
+      .run(input.id, input.email.toLowerCase(), input.role, input.description, input.createdBy, now, now);
+    if (inserted.changes === 0) return null;
+    this.persist();
+    const row = this.getUserByIdSync(input.id);
+    if (!row) return null;
+    const { passwordHash: _hash, ...summary } = row;
+    return summary;
+  }
+
+  async updateServiceAccount(id: string, patch: { role?: string; description?: string | null }): Promise<StoredUserSummary | null> {
+    const existing = this.getUserByIdSync(id);
+    if (!existing || existing.kind !== "service") return null;
+    const now = new Date().toISOString();
+    this.exec(`UPDATE users SET role = ?, description = ?, updated_at = ? WHERE id = ? AND kind = 'service'`, [
+      patch.role ?? existing.role,
+      patch.description === undefined ? existing.description : patch.description,
+      now,
+      id
+    ]);
+    this.persist();
+    const row = this.getUserByIdSync(id);
+    if (!row) return null;
+    const { passwordHash: _hash, ...summary } = row;
+    return summary;
   }
 
   async createUserInvite(input: UserInviteCreate): ReturnType<Store["createUserInvite"]> {
@@ -4910,21 +4967,62 @@ export class SqliteStore implements Store {
   }
 
   async listUsersPage(options: Parameters<Store["listUsersPage"]>[0]): ReturnType<Store["listUsersPage"]> {
-    const count = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM users`);
+    const where = userKindWhere(options.kind);
+    const count = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM users ${where}`);
     const rows = this.queryAll<UserRow>(
-      `SELECT id, email, password_hash, role, created_at, updated_at FROM users ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?`,
+      `SELECT ${USER_COLUMNS} FROM users ${where} ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?`,
       [options.limit, options.offset]
     );
     return {
-      items: rows.map((row) => ({
-        id: toString(row.id),
-        email: toString(row.email),
-        role: toString(row.role),
-        createdAt: toString(row.created_at),
-        updatedAt: toString(row.updated_at)
-      })),
+      items: rows.map(userSummaryFromRow),
       total: toNumber(count?.count ?? 0)
     };
+  }
+
+  /**
+   * 13.2 — true when `id` is the only accepted admin who is a person: the one who could still sign in (or get a
+   * break-glass link) to run the deployment. Only people count: a service account can never sign in. Call it inside
+   * an IMMEDIATE transaction, so two changes cannot both see two admins.
+   */
+  private isLastHumanAdminSync(target: { role: unknown; kind: unknown }, id: string): boolean {
+    if (toString(target.role) !== "admin" || toString(target.kind) !== "human") return false;
+    const accepted = (column: string) =>
+      `(NOT EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NULL)
+        OR EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NOT NULL))`;
+    const targetAccepted = this.queryOne<{ ok: number }>(`SELECT ${accepted("?")} AS ok`, [id, id]);
+    if (toNumber(targetAccepted?.ok ?? 0) !== 1) return false;
+    const others = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM users u WHERE u.role = 'admin' AND u.kind = 'human' AND u.id <> ? AND ${accepted("u.id")}`,
+      [id]
+    );
+    return toNumber(others?.count ?? 0) === 0;
+  }
+
+  async updateUserRoleKeepingAdmin(id: string, role: string): Promise<"updated" | "not_found" | "last_admin"> {
+    // IMMEDIATE takes the write lock before the count, so two demotions cannot both see two admins.
+    return this.db
+      .transaction((): "updated" | "not_found" | "last_admin" => {
+        const target = this.queryOne<{ role: string; kind: string | null }>(`SELECT role, kind FROM users WHERE id = ?`, [id]);
+        if (!target) return "not_found";
+        if (role !== "admin" && this.isLastHumanAdminSync(target, id)) return "last_admin";
+        this.db.prepare(`UPDATE users SET role = ?, updated_at = ? WHERE id = ?`).run(role, new Date().toISOString(), id);
+        return "updated";
+      })
+      .immediate();
+  }
+
+  async deleteUserKeepingAdmin(id: string): Promise<"deleted" | "not_found" | "last_admin"> {
+    // IMMEDIATE: the count and the delete happen under the write lock, so two deletes cannot both see two admins.
+    const outcome = this.db
+      .transaction((): "deleted" | "not_found" | "last_admin" => {
+        const target = this.queryOne<{ role: string; kind: string | null }>(`SELECT role, kind FROM users WHERE id = ?`, [id]);
+        if (!target) return "not_found";
+        if (this.isLastHumanAdminSync(target, id)) return "last_admin";
+        return this.deleteUserRowsSync(id) ? "deleted" : "not_found";
+      })
+      .immediate();
+    if (outcome === "deleted") this.persist();
+    return outcome;
   }
 
   async updateUserRole(id: string, role: string): Promise<boolean> {
@@ -4943,66 +5041,61 @@ export class SqliteStore implements Store {
    * Phase 13.1 — removes the user with its sessions, API keys, MFA secret, SSO identities and project roles in one
    * transaction (Postgres keeps foreign keys on those rows, so both stores remove them explicitly).
    */
+  /** The user row and everything that belongs to it; call inside a transaction. */
+  private deleteUserRowsSync(id: string): boolean {
+    this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM api_keys WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM sso_identities WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM user_project_roles WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM user_invites WHERE user_id = ?`, [id]);
+    return this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id).changes > 0;
+  }
+
   async deleteUser(id: string): Promise<boolean> {
-    const changed = this.db.transaction(() => {
-      this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM api_keys WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM sso_identities WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM user_project_roles WHERE user_id = ?`, [id]);
-      this.exec(`DELETE FROM user_invites WHERE user_id = ?`, [id]);
-      return this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id).changes > 0;
-    })();
+    const changed = this.db.transaction(() => this.deleteUserRowsSync(id))();
     this.persist();
     return changed;
   }
 
-  async getSession(sessionId: string): Promise<{
-    id: string;
-    userId: string;
-    expiresAt: string;
-    createdAt: string;
-    lastSeenAt: string;
-    revokedAt: string | null;
-  } | null> {
-    const row = this.queryOne<SessionRow>(
-      `SELECT id, user_id, expires_at, created_at, last_seen_at, revoked_at
-       FROM sessions
-       WHERE id = ?`,
-      [sessionId]
-    );
-    if (!row) {
-      return null;
-    }
-
-    return {
-      id: toString(row.id),
-      userId: toString(row.user_id),
-      expiresAt: toString(row.expires_at),
-      createdAt: toString(row.created_at),
-      lastSeenAt: toString(row.last_seen_at),
-      revokedAt: row.revoked_at ? toString(row.revoked_at) : null
-    };
+  async getSession(sessionId: string): Promise<LoginSession | null> {
+    const row = this.queryOne<SessionRow>(`SELECT ${SESSION_COLUMNS} FROM sessions WHERE id = ?`, [sessionId]);
+    return row ? sessionFromRow(row) : null;
   }
 
-  async saveSession(input: {
-    id: string;
-    userId: string;
-    expiresAt: string;
-  }): Promise<{
-    id: string;
-    userId: string;
-    expiresAt: string;
-    createdAt: string;
-    lastSeenAt: string;
-  }> {
+  async saveSession(input: LoginSessionInput): Promise<LoginSession> {
     const now = new Date().toISOString();
+    const session: LoginSession = {
+      id: input.id,
+      userId: input.userId,
+      expiresAt: input.expiresAt,
+      createdAt: now,
+      lastSeenAt: now,
+      revokedAt: null,
+      authMethod: input.authMethod ?? null,
+      ipAddress: input.ipAddress ?? null,
+      userAgent: input.userAgent ?? null,
+      mfaVerifiedAt: input.mfaVerifiedAt ?? null,
+      breakGlass: input.breakGlass === true,
+      endedReason: null
+    };
 
     try {
       this.exec(
-        `INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at, revoked_at)
-         VALUES (?, ?, ?, ?, ?, NULL)`,
-        [input.id, input.userId, input.expiresAt, now, now]
+        `INSERT INTO sessions (${SESSION_COLUMNS})
+         VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL)`,
+        [
+          session.id,
+          session.userId,
+          session.expiresAt,
+          now,
+          now,
+          session.authMethod,
+          session.ipAddress,
+          session.userAgent,
+          session.mfaVerifiedAt,
+          session.breakGlass ? 1 : 0
+        ]
       );
     } catch (error) {
       // The sessions table declares its user key, so SQLite refuses a session for a user deleted meanwhile.
@@ -5011,13 +5104,7 @@ export class SqliteStore implements Store {
     }
 
     this.persist();
-    return {
-      id: input.id,
-      userId: input.userId,
-      expiresAt: input.expiresAt,
-      createdAt: now,
-      lastSeenAt: now
-    };
+    return session;
   }
 
   async touchSession(sessionId: string): Promise<void> {
@@ -5030,24 +5117,92 @@ export class SqliteStore implements Store {
     this.persist();
   }
 
-  async revokeSession(sessionId: string): Promise<void> {
+  async revokeSession(sessionId: string, reason?: SessionEndReason): Promise<boolean> {
+    const result = this.db
+      .prepare(`UPDATE sessions SET revoked_at = ?, ip_address = NULL, user_agent = NULL, ended_reason = ? WHERE id = ? AND revoked_at IS NULL`)
+      .run(new Date().toISOString(), reason ?? null, sessionId);
+    return result.changes > 0;
+  }
+
+  async revokeExpiredSessions(): Promise<void> {
+    const now = new Date().toISOString();
     this.exec(
       `UPDATE sessions
-       SET revoked_at = ?
-       WHERE id = ? AND revoked_at IS NULL`,
-      [new Date().toISOString(), sessionId]
+       SET revoked_at = ?, ip_address = NULL, user_agent = NULL, ended_reason = 'expired'
+       WHERE revoked_at IS NULL AND expires_at <= ?`,
+      [now, now]
     );
     this.persist();
   }
 
-  async revokeExpiredSessions(): Promise<void> {
-    this.exec(
-      `UPDATE sessions
-       SET revoked_at = ?
-       WHERE revoked_at IS NULL AND expires_at <= ?`,
-      [new Date().toISOString(), new Date().toISOString()]
+  async listUserSessions(userId: string, options: { liveOnly?: boolean; now?: string } = {}): Promise<LoginSession[]> {
+    const live = options.liveOnly === true;
+    const rows = this.queryAll<SessionRow>(
+      `SELECT ${SESSION_COLUMNS} FROM sessions
+       WHERE user_id = ?${live ? " AND revoked_at IS NULL AND expires_at > ?" : ""}
+       ORDER BY created_at DESC, id DESC`,
+      live ? [userId, options.now ?? new Date().toISOString()] : [userId]
     );
-    this.persist();
+    return rows.map(sessionFromRow);
+  }
+
+  async revokeUserSessions(userId: string, options: { exceptId?: string; reason: SessionEndReason }): Promise<number> {
+    const result = this.db
+      .prepare(
+        `UPDATE sessions SET revoked_at = ?, ip_address = NULL, user_agent = NULL, ended_reason = ?
+         WHERE user_id = ? AND revoked_at IS NULL AND id <> ?`
+      )
+      .run(new Date().toISOString(), options.reason, userId, options.exceptId ?? "");
+    return result.changes;
+  }
+
+  async markSessionMfaVerified(sessionId: string, input: { userId: string; at: string }): Promise<boolean> {
+    const result = this.db
+      .prepare(
+        `UPDATE sessions SET mfa_verified_at = ?
+         WHERE id = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > ?`
+      )
+      .run(input.at, sessionId, input.userId, new Date().toISOString());
+    return result.changes > 0;
+  }
+
+  async clearSessionMfaVerified(sessionId: string): Promise<boolean> {
+    return this.db.prepare(`UPDATE sessions SET mfa_verified_at = NULL WHERE id = ?`).run(sessionId).changes > 0;
+  }
+
+  async purgeEndedSessions(before: string): Promise<number> {
+    const result = this.db
+      .prepare(`DELETE FROM sessions WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR expires_at < ?`)
+      .run(before, before);
+    return result.changes;
+  }
+
+  async revokeOldestUserSessions(
+    userId: string,
+    keep: number,
+    reason: SessionEndReason,
+    options: { protectId?: string } = {}
+  ): Promise<string[]> {
+    const kept = Math.max(0, Math.floor(keep));
+    // IMMEDIATE takes the write lock before the read, so another connection cannot change the user's sessions
+    // between the count and the update.
+    return this.db
+      .transaction(() => {
+        const now = new Date().toISOString();
+        const live = this.queryAll<{ id: string }>(
+          `SELECT id FROM sessions
+           WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? AND break_glass = 0
+           ORDER BY created_at DESC, id DESC`,
+          [userId, now]
+        ).map((row) => toString(row.id));
+        const ended = sessionsToEvict(live, kept, options.protectId);
+        const revoke = this.db.prepare(
+          `UPDATE sessions SET revoked_at = ?, ip_address = NULL, user_agent = NULL, ended_reason = ? WHERE id = ? AND revoked_at IS NULL`
+        );
+        for (const id of ended) revoke.run(now, reason, id);
+        return ended;
+      })
+      .immediate();
   }
 
   async loadSessionMemory(namespace: string, sessionId: string): Promise<ChatMessage[]> {
@@ -6252,8 +6407,8 @@ export class SqliteStore implements Store {
       `INSERT INTO approval_requests (
          id, execution_id, workflow_id, workflow_name, project_id, node_id, node_type, kind, status, message,
          spec_json, path_json, details_json, requested_by_user_id, requested_by, timeout_minutes, expires_at,
-         asking_workflow_id, edits_salt, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         asking_workflow_id, edits_salt, requested_by_api_key_id, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.executionId,
@@ -6273,6 +6428,7 @@ export class SqliteStore implements Store {
         input.expiresAt ?? null,
         input.askingWorkflowId ?? null,
         input.editsSalt ?? null,
+        input.requestedByApiKeyId ?? null,
         now,
         now
       ]
@@ -6376,26 +6532,18 @@ export class SqliteStore implements Store {
     return this.decideApprovalRequestSync(input);
   }
 
-  private decideApprovalRequestSync(input: {
-    id: string;
-    status: "approved" | "rejected" | "timed_out" | "canceled";
-    decidedByUserId?: string | null;
-    decidedBy?: string | null;
-    reason?: string | null;
-    edits?: Record<string, unknown> | null;
-    editedFields?: string[];
-    decidedAt?: string;
-  }): boolean {
+  private decideApprovalRequestSync(input: ApprovalDecisionInput): boolean {
     const decidedAt = input.decidedAt ?? new Date().toISOString();
     const result = this.db
       .prepare(
         `UPDATE approval_requests
-            SET status = ?, decided_by_user_id = ?, decided_by = ?, decided_at = ?, reason = ?, edits_json = ?, edited_fields_json = ?, updated_at = ?
+            SET status = ?, decided_by_user_id = ?, decided_by_api_key_id = ?, decided_by = ?, decided_at = ?, reason = ?, edits_json = ?, edited_fields_json = ?, updated_at = ?
           WHERE id = ? AND status = 'pending'`
       )
       .run(
         input.status,
         input.decidedByUserId ?? null,
+        input.decidedByApiKeyId ?? null,
         input.decidedBy ?? null,
         decidedAt,
         input.reason ?? null,
@@ -6421,7 +6569,7 @@ export class SqliteStore implements Store {
     const result = this.db
       .prepare(
         `UPDATE approval_requests
-            SET status = 'pending', decided_by_user_id = NULL, decided_by = NULL, decided_at = NULL, reason = NULL,
+            SET status = 'pending', decided_by_user_id = NULL, decided_by_api_key_id = NULL, decided_by = NULL, decided_at = NULL, reason = NULL,
                 edits_json = NULL, edited_fields_json = NULL, updated_at = ?
           WHERE id = ? AND status IN ('approved', 'rejected', 'timed_out')`
       )
@@ -7501,6 +7649,13 @@ export class SqliteStore implements Store {
       .prepare(`UPDATE mfa_secrets SET backup_codes_json = ?, updated_at = ? WHERE user_id = ? AND backup_codes_json = ?`)
       .run(JSON.stringify(input.next), new Date().toISOString(), input.userId, JSON.stringify(input.expected));
     this.persist();
+    return result.changes > 0;
+  }
+
+  async markTotpStepUsed(userId: string, step: number): Promise<boolean> {
+    const result = this.db
+      .prepare(`UPDATE mfa_secrets SET last_totp_step = ? WHERE user_id = ? AND (last_totp_step IS NULL OR last_totp_step < ?)`)
+      .run(step, userId, step);
     return result.changes > 0;
   }
 
@@ -10149,6 +10304,20 @@ export class SqliteStore implements Store {
     return changes;
   }
 
+  async listPendingChallenges(input: { kind: string; limit: number }): Promise<PendingChallengeRow[]> {
+    const now = new Date().toISOString();
+    return this.queryAll<{ id_hash: unknown; user_id: unknown; scope: unknown; payload_sealed: unknown; expires_at: unknown }>(
+      `SELECT id_hash, user_id, scope, payload_sealed, expires_at FROM pending_challenges WHERE kind = ? ORDER BY created_at, id_hash LIMIT ?`,
+      [input.kind, Math.max(0, Math.floor(input.limit))]
+    ).map((row) => ({
+      idHash: toString(row.id_hash),
+      userId: row.user_id === null || row.user_id === undefined ? null : toString(row.user_id),
+      scope: row.scope === null || row.scope === undefined ? null : toString(row.scope),
+      payloadSealed: toString(row.payload_sealed),
+      expired: toString(row.expires_at) <= now
+    }));
+  }
+
   async prunePendingChallenges(): Promise<number> {
     const { changes } = this.db.prepare(`DELETE FROM pending_challenges WHERE expires_at <= ?`).run(new Date().toISOString());
     return changes;
@@ -11056,11 +11225,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT strftime('${fmt}', created_at) AS bucket,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY bucket
          ORDER BY bucket ASC
@@ -11087,11 +11256,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT workflow_id, MAX(workflow_name) AS workflow_name,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY workflow_id
          ORDER BY cost DESC, tt DESC
@@ -11120,11 +11289,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT user_id, MAX(user_email) AS user_email,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY user_id
          ORDER BY cost DESC, tt DESC
@@ -11153,11 +11322,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT project_id,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY project_id
          ORDER BY cost DESC, tt DESC
@@ -11185,11 +11354,11 @@ export class SqliteStore implements Store {
     const rows = this.queryAll<{
       providers_json: string | null;
       ti: number; to: number; ci: number; tt: number;
-      cost: number; calls: number; duration: number;
+      cost: number; calls: number; duration: number; trigger_type: string | null;
     }>(
       `SELECT providers_json, input_tokens AS ti, output_tokens AS "to",
               cached_input_tokens AS ci, total_tokens AS tt,
-              cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration
+              cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration, trigger_type
        FROM usage_events ${where}`,
       params
     );
@@ -11214,14 +11383,15 @@ export class SqliteStore implements Store {
           executions: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0,
           totalTokens: 0, costUsd: 0, llmCallCount: 0, totalDurationMs: 0
         };
-        cur.executions += 1;
+        const execution = r.trigger_type !== SUB_WORKFLOW_USAGE_TRIGGER;
+        if (execution) cur.executions += 1;
         cur.inputTokens += Math.round(toNumber(r.ti ?? 0) * share);
         cur.outputTokens += Math.round(toNumber(r.to ?? 0) * share);
         cur.cachedInputTokens += Math.round(toNumber(r.ci ?? 0) * share);
         cur.totalTokens += Math.round(toNumber(r.tt ?? 0) * share);
         cur.costUsd += Number(r.cost ?? 0) * share;
         cur.llmCallCount += p.calls || 0;
-        cur.totalDurationMs += Math.round(toNumber(r.duration ?? 0) * share);
+        if (execution) cur.totalDurationMs += Math.round(toNumber(r.duration ?? 0) * share);
         agg.set(key, cur);
       }
     }
@@ -11278,11 +11448,11 @@ export class SqliteStore implements Store {
       execs: number; ti: number; to: number; ci: number; tt: number;
       cost: number; calls: number; avgd: number;
     }>(
-      `SELECT COUNT(*) AS execs,
+      `SELECT ${USAGE_EXECS} AS execs,
               SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
               SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
               SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-              AVG(duration_ms) AS avgd
+              ${USAGE_AVG_DURATION} AS avgd
        FROM usage_events WHERE ${filters.join(" AND ")}`,
       params
     );
@@ -11311,12 +11481,13 @@ export class SqliteStore implements Store {
     providers: Array<{ providerId: string; model: string; calls: number }>;
     createdAt: string;
   }>> {
-    const filters: string[] = [];
+    // Recent executions: a sub-workflow's own row is not one (its spend counts in the totals).
+    const filters: string[] = [USAGE_EXECUTION_ROW];
     const params: Array<string | number> = [];
     if (input.workflowId) { filters.push("workflow_id = ?"); params.push(input.workflowId); }
     if (input.userId) { filters.push("user_id = ?"); params.push(input.userId); }
     if (input.projectId) { filters.push("project_id = ?"); params.push(input.projectId); }
-    const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    const where = `WHERE ${filters.join(" AND ")}`;
     const limit = clampLimit(input.limit, { fallback: 50, max: LIMIT_MAX.usageEvents });
     const rows = this.queryAll<{
       id: string; execution_id: string; workflow_id: string; workflow_name: string | null;

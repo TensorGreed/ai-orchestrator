@@ -40,6 +40,8 @@ export class ApiKeyService {
     name: string;
     scopes?: string[];
     expiresInDays?: number | null;
+    /** 13.2 — the key never outlives this moment (a key made with another key ends no later than that key). */
+    notAfter?: string | null;
   }): Promise<{ record: ApiKeyRecord; plaintext: string }> {
     const prefix = `${API_KEY_HUMAN_PREFIX}${nanoid(API_KEY_PREFIX_LENGTH)}`;
     const secret = crypto.randomBytes(API_KEY_SECRET_LENGTH).toString("base64url");
@@ -56,6 +58,9 @@ export class ApiKeyService {
       const date = new Date();
       date.setDate(date.getDate() + expiryDays);
       expiresAt = date.toISOString();
+    }
+    if (input.notAfter && (!expiresAt || Date.parse(input.notAfter) < Date.parse(expiresAt))) {
+      expiresAt = new Date(Date.parse(input.notAfter)).toISOString();
     }
 
     await this.store.saveApiKey({

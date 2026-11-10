@@ -107,6 +107,22 @@ describeStoreContract("store contract: pending challenges", (ctx) => {
     expect(await store.consumePendingChallenge({ idHash: "u-b", kind: "mcp_oauth" })).not.toBeNull();
     expect(await store.consumePendingChallenge({ idHash: "other", kind: "mcp_oauth" })).not.toBeNull();
   });
+  it("13.2 — lists a kind's challenges oldest first, bounded, without taking them out", async () => {
+    const store = ctx.store();
+    const t0 = Date.now();
+    await store.createPendingChallenge(challenge("k-old", { kind: "break_glass_session", ttlMs: 20, payloadSealed: "p-old" }));
+    await until(() => Date.now() - t0 > 30, "a distinct created_at");
+    await store.createPendingChallenge(challenge("k-new", { kind: "break_glass_session", userId: null, scope: "s" }));
+    await store.createPendingChallenge(challenge("k-other", { kind: "mfa_login" }));
+    await until(() => Date.now() - t0 > 250, "the 20 ms lifetime to pass");
+    const listed = await store.listPendingChallenges({ kind: "break_glass_session", limit: 10 });
+    expect(listed).toEqual([
+      { idHash: "k-old", userId: "u1", scope: null, payloadSealed: "p-old", expired: true },
+      { idHash: "k-new", userId: null, scope: "s", payloadSealed: "sealed-k-new", expired: false }
+    ]);
+    expect((await store.listPendingChallenges({ kind: "break_glass_session", limit: 1 })).map((row) => row.idHash)).toEqual(["k-old"]);
+    expect(await store.consumePendingChallenge({ idHash: "k-old", kind: "break_glass_session" })).not.toBeNull();
+  });
 });
 
 describeStoreContract("store contract: shared rate-limit buckets", (ctx) => {

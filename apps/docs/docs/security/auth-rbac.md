@@ -6,9 +6,79 @@ description: "Authentication and access control in L2M: session cookies, admin, 
 
 ## Session model
 
-- Login creates a persisted session record in SQLite.
+- Every sign-in (password, the MFA step, OIDC, SAML, LDAP) creates a persisted session record in the database
+  (SQLite or Postgres). A password that still needs an MFA code creates no session until the code is accepted.
 - API sets an `httpOnly` cookie (`SESSION_COOKIE_NAME`).
 - Frontend uses `credentials: include`.
+- A session lasts `SESSION_TTL_HOURS` (168 by default) from sign-in, unless the session policy below sets another
+  lifetime for the user's role.
+- Each session records how it was signed in (`password`, `oidc`, `saml` or `ldap`), the client address and user
+  agent, when it last passed an MFA check, and, once it ends, why (`logout`, `expired`, `idle`, `evicted` or
+  `admin`). Sessions created before
+  this was recorded keep working; their fields are empty.
+- The client address is kept only when it is a valid IPv4 or IPv6 address (behind a proxy it comes from
+  `X-Forwarded-For`, see `TRUST_PROXY`); the user agent is cut to 512 characters.
+- When a session ends (sign-out, expiry, or revoked), its client address and user agent are cleared at once.
+- Ended sessions are deleted after `AUDIT_LOG_RETENTION_DAYS` (365 by default), the same window as the audit log;
+  with `AUDIT_LOG_RETENTION_DAYS=0` they are kept, without address or user agent. Sign-in events stay in the audit
+  log under its own retention.
+
+## Session policy
+
+Three optional settings limit how long sessions last and how many a user keeps. With none of them set, sessions
+behave as before: no idle timeout, a lifetime of `SESSION_TTL_HOURS`, and no limit on sessions per user.
+
+| Setting | Meaning | `0` |
+| --- | --- | --- |
+| `SESSION_IDLE_TIMEOUT_MINUTES` | Signs a session out after this many minutes without user activity. | no idle timeout |
+| `SESSION_ABSOLUTE_TIMEOUT_HOURS` | The longest a session lives after sign-in, whatever the activity. Falls back to `SESSION_TTL_HOURS`. | not allowed |
+| `SESSION_MAX_PER_USER` | The most sessions a user keeps at once. | unlimited |
+
+Each one takes a global value and optional per-role overrides, in the form `<global>[,role:value]*`:
+
+```bash
+SESSION_IDLE_TIMEOUT_MINUTES=60,admin:15
+SESSION_ABSOLUTE_TIMEOUT_HOURS=168,admin:12
+SESSION_MAX_PER_USER=5,admin:2
+```
+
+Either part may be left out (`admin:15` sets only admins). A malformed value stops the API at startup with an error
+naming the setting and the entry. The settings are read-only in the studio: Settings > Security shows the values for
+your role.
+
+- **The current role applies.** Promoting a user to a role with a stricter value tightens the sessions they already
+  have.
+- **Only real activity counts toward the idle timeout.** The studio marks its background refreshes with the header
+  `X-L2M-Background: 1`, and the server never counts those requests as activity. Your own scripts can send the same
+  header. Activity is written at most once a minute per session, so the server allows one extra minute: a session
+  ends between the configured idle time and one minute after it, never earlier. `GET /api/auth/me` returns that
+  deadline (`idleExpiresAt`), and two minutes before it the studio asks whether to stay signed in.
+- **Going over the session limit never refuses a sign-in.** The new session is kept and the user's oldest sessions
+  end (reason `evicted`, audit event `session.evicted`). Signing in again in the same browser replaces that browser's
+  session, so it never evicts another device. Sessions that are already idle or past their role's lifetime end first
+  and are not counted. Break-glass sessions are neither counted nor ended by a normal sign-in; they skip the idle timeout too, but always
+  end at their fixed expiry, which activity never extends. With several API
+  instances the limit holds across them.
+- **Why a session ended.** A request with an ended session gets `401` with `reason` (`idle`, `expired`, `evicted`,
+  `admin`, `logout`); the studio's sign-in page explains it. The reason is reported to that session's cookie until the
+  ended row is deleted (`AUDIT_LOG_RETENTION_DAYS`); an unknown cookie gets no reason.
+- **Live-update streams close too.** A run, execution or eval event stream opened with a session checks it about every
+  two heartbeats (`SSE_HEARTBEAT_INTERVAL_MS`). When the session has ended, the stream sends a `session_ended` event
+  with the reason and closes. A run started from that stream keeps running.
+
+### Signed-in sessions
+
+Settings > Security lists your signed-in sessions (device, address, sign-in method, sign-in time, last activity). You
+can sign out one session or all others. These two actions need a signed-in browser session: called with an API key
+they answer `403` and end nothing. Admins can sign a user out everywhere from Settings > Access control > Users.
+Sessions are named by a handle derived from the session, never by the session cookie itself. Ending sessions is
+audited as `session.revoked`.
+
+### Upgrading
+
+Nothing changes until you set one of the settings. When you add an idle timeout, sessions that have already been idle
+longer than it are signed out on their next request; users sign in again. Lowering
+`SESSION_ABSOLUTE_TIMEOUT_HOURS` ends sessions older than the new value the same way.
 
 ## Roles
 
@@ -39,8 +109,8 @@ description: "Authentication and access control in L2M: session cookies, admin, 
 An admin invites someone by email and role (`POST /api/users/invite`, see [Endpoints](#endpoints)). The invite creates
 a **pending** user that already holds the role, so it can be added to projects at once, but it cannot sign in with a
 password until it accepts. The invitee opens the link (`<web app>/#invite=<token>`), sees the email and role, chooses a
-password of 8 characters or more and is signed in through the normal login (with its MFA step when `MFA_ENFORCE`
-applies).
+password of 8 characters or more and is signed in through the normal login (with MFA setup first when its role is
+in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
 
 - **The link.** The token is 32 random bytes; only its SHA-256 is stored. It works once and expires after 7 days unless
   the admin sets `expiresInHours` (1 to 720). The web app takes the token out of the address bar as soon as the page
@@ -162,7 +232,8 @@ on top of the global role:
   starts empty.
 - Running a workflow through an execute share needs `workflow:execute` in the
   project it is shared to; a viewer there can see it but not run it.
-- API keys act as their owner, with the owner's memberships.
+- API keys act as their owner, with the owner's memberships, unless the key carries a role ceiling or a project
+  list: see [Service accounts and API keys](./service-accounts.md).
 - A job a user put on the queue records that user as `triggeredBy` (a
   `triggeredBy` in the request body is kept as `customData.requestedBy`), and
   runs only if that user may still run the workflow when the job starts. If
@@ -220,6 +291,75 @@ its own project, whichever trigger started it:
 Triggers without a user (production webhooks, schedules, chat and form
 triggers in public or bearer mode, the MCP gateway) are not checked against a
 user, by design; they still get the run-time limits above.
+
+## Break-glass sign-in
+
+Break-glass sign-in is the way back in when no admin can sign in: the only admin is locked out, their authenticator
+is lost, or SSO is down. It is a one-time link minted on the server host. Nothing exists until someone runs the
+command, and nothing changes for deployments that never use it.
+
+```bash
+# On the API host, with the API's settings (the same .env or environment):
+pnpm --filter @ai-orchestrator/api admin:break-glass -- --email admin@example.com [--minutes 15]
+
+# Docker Compose: run it in the API container (`api-1` in docker-compose.prod.yml)
+docker compose exec api pnpm --filter @ai-orchestrator/api admin:break-glass -- --email admin@example.com
+```
+
+The command prints `<APP_PUBLIC_URL>/#break_glass=<token>&email=<admin>` (the first `WEB_ORIGIN` when
+`APP_PUBLIC_URL` is unset). Open it in a browser that can reach the studio. The page names the admin and the
+one-hour session; **Sign in for one hour** sends the token to `POST /api/auth/break-glass` and signs you in.
+
+- **The link** works once, for 5 to 60 minutes (`--minutes`, 15 by default). The token is in the `#` fragment, which
+  browsers never send to a server, so it does not reach web-server or proxy access logs or a `Referer`. Opening the
+  page uses nothing: a mail scanner, a chat link preview or a browser prefetch that fetches the link leaves it valid.
+  Only the confirm button uses it. It is kept in the database, so the running API sees it on SQLite and on every
+  instance of a cluster; only its SHA-256 is stored. Confirmed on two instances at once, it signs in once.
+- **Cross-site requests are refused.** The confirm POST must come from the studio: an `Origin` must be one of
+  `WEB_ORIGIN` or `APP_PUBLIC_URL`, and a browser request without one must be same-origin (`Sec-Fetch-Site`). A
+  refused request does not touch the link and is audited. A client on the host with no browser headers (curl) is
+  accepted.
+- **Who** can be signed in: a human admin. Other roles, unknown emails and service accounts are refused. The account
+  is checked again when the link is confirmed.
+- **The session** lasts one hour from confirmation, is never renewed, and is marked break-glass (sign-in method
+  `break_glass`). The sign-in policies (per-role MFA, step-up, session limits and idle timeouts) do not apply to it,
+  so a locked-out admin can reach Settings to fix them. Its one-hour expiry always applies. The
+  [network allowlists](./network-controls.md) still apply: a refused address never reaches the link, which stays
+  unused.
+- **The studio** shows a red banner for the whole session: "Break-glass session. Every action is recorded. It ends
+  at HH:MM."
+- **Audit**: `auth.break_glass_issued` (the command, with the host and OS user it ran as), `auth.break_glass_used`
+  (the link confirmed, or refused with the reason), `auth.break_glass_request` for **every** request made in the
+  session (method, route, status; not sampled) and `auth.break_glass_ended` (logout, expiry, or ended by an admin).
+  These rows are written even with `AUDIT_LOG_ENABLED=false`, and they also go to the external log streams when
+  those are on (the command sends its issue event there too).
+  Rows carry a short reference to the session, never the link or the session ID.
+- **Alerts**: the notification event `auth.break_glass_used` fires when the link is issued, when it is used and when
+  the session ends. Channels set in the environment receive it automatically; on a channel made in Settings, pick
+  **Break-glass sign-in**. The command reports what happened: which channels took the alert, which failed (a webhook
+  that answers with an error counts as failed), or that **no channel receives the event, so nobody was alerted**.
+  It still prints the link, since the outage that calls for break-glass may be what broke the channel. In the API the
+  used and ended alerts go out in the background, at most 10 seconds per channel, so a stalled channel never holds
+  up the sign-in. The audit log is the record either way.
+
+Who may run it: anyone with shell access to the API host and its database settings (including
+`SECRET_MASTER_KEY_BASE64`) can mint a link. That access already amounts to admin access, so the command adds no new
+trust; restrict host access as you would the database.
+
+What outlives the hour: the session ends after one hour, but what it created does not. API keys, invited or promoted
+admins, changed roles, MFA resets and settings changes stay. Review them afterwards.
+
+After using it:
+
+1. Fix what locked the admin out (re-enrol MFA, correct the SSO or network settings, reset the password).
+2. Sign out, or let the hour run out, and sign in normally.
+3. Review the session's `auth.break_glass_request` rows in the audit log. Revoke any API key or access it created
+   that should not stay, and record why break-glass was needed.
+4. If the issued alert came as a surprise, treat it as an incident: someone has shell access to the host.
+
+Break-glass sign-in is separate from [network break-glass](./network-controls.md#break-glass)
+(`NETWORK_BREAK_GLASS_CIDRS`), which admits addresses outside a wrong allowlist but still needs a normal sign-in.
+The two work together: from the host, the loopback range reaches the studio and the link signs you in.
 
 ## OIDC single sign-on
 
@@ -301,10 +441,11 @@ audit log as `user.login` with `metadata.method = "oidc"` (the failure reason is
 a short code; tokens are never logged).
 
 ::: warning By default SSO logins do not ask for MFA
-With `SSO_MFA` unset, OIDC and SAML logins skip the local TOTP step and
-`MFA_ENFORCE`, including for users who enrolled TOTP for password login. Either
-require MFA for the L2M application in your IdP's policy, or set `SSO_MFA` (see
-[MFA on SSO](#mfa-on-sso)).
+With `SSO_MFA` unset, OIDC and SAML logins skip the local TOTP step, including
+for users who enrolled TOTP for password login, unless the login's role is in
+`MFA_REQUIRED_ROLES` (see [MFA required per role](#mfa-required-per-role)).
+Either require MFA for the L2M application in your IdP's policy, or set
+`SSO_MFA` (see [MFA on SSO](#mfa-on-sso)).
 :::
 
 The `code` and `state` on the callback URL are replaced with `REDACTED` in the
@@ -481,13 +622,14 @@ API checks these settings at startup when SAML is on.
 
 `SSO_MFA` decides whether an OIDC or SAML login must show multi-factor
 authentication. It is read only when OIDC or SAML is on. LDAP login is not
-affected.
+affected by `SSO_MFA`; it follows the password login's rules (see
+[MFA required per role](#mfa-required-per-role)).
 
 | `SSO_MFA` | Behaviour |
 |---|---|
-| `off` (default, or unset) | No MFA check on SSO logins, as before. |
+| `off` (default, or unset) | No MFA check on SSO logins, as before, except for roles in `MFA_REQUIRED_ROLES`: those logins run as under `idp_or_local`, and a boot warning says so. |
 | `idp` | The login is accepted only if the IdP asserts MFA. Otherwise the browser returns to the login page with `sso_error=sso_mfa_required`; local TOTP is not offered. |
-| `idp_or_local` | IdP-asserted MFA is accepted. Otherwise, a user with local TOTP enrolled gets the usual **Verification code** step (the same challenge as a password login: one attempt, five minutes) and has no session until the code passes. A user without TOTP is treated like a password login under `MFA_ENFORCE`: an admin (the role the login would end with, after group mappings) gets a session and is expected to enrol (recorded as `mfaEnrollmentRequired: true` in the `user.login` audit and, for a JSON SAML client, in the answer, as the password login does; the browser redirect carries no flag); anyone else is refused with `sso_mfa_required`. |
+| `idp_or_local` | IdP-asserted MFA is accepted. Otherwise, a user with local TOTP enrolled gets the usual **Verification code** step (the same challenge as a password login: one attempt, five minutes) and has no session until the code passes. A user without TOTP is treated like a password login under `MFA_REQUIRED_ROLES`: a listed role (the role the login would end with, after group mappings) gets a session that can only set up MFA (recorded as `mfaEnrollmentRequired: true` in the `user.login` audit and, for a JSON SAML client, in the answer, as the password login does; the browser redirect carries no flag); anyone else is refused with `sso_mfa_required`. |
 
 What counts as IdP-asserted MFA:
 
@@ -531,7 +673,7 @@ Notes:
   sent; a wrong code is `reason: "mfa_invalid"`. Never a token, assertion or
   code.
 - Under `idp_or_local` a user without local TOTP and without IdP MFA cannot
-  sign in through SSO to enrol TOTP (except admins under `MFA_ENFORCE`). Use it
+  sign in through SSO to enrol TOTP (except roles in `MFA_REQUIRED_ROLES`). Use it
   when the IdP normally performs MFA and local TOTP is the fallback for
   accounts that already have it.
 
@@ -544,13 +686,172 @@ SAML_ALLOWED_GROUPS=<object id of the L2M users group>
 SSO_MFA=idp
 ```
 
+## MFA required per role
+
+Users who enrolled TOTP are always asked for a code at sign-in. To require MFA for whole roles, list them:
+
+```bash
+MFA_REQUIRED_ROLES=admin,builder   # any of admin, builder, operator, viewer; unset = no role requires MFA
+```
+
+`MFA_ENFORCE=true` is an alias that adds `admin` to the list. An unknown role name refuses to start.
+`MFA_ENABLED` has no effect (TOTP is always available); a boot note says so when it is set.
+
+A user in a listed role who signs in without passing MFA is **restricted, never refused**, so nobody is locked out of
+setting it up:
+
+- **No authenticator yet.** Password, LDAP and SSO sign-ins issue a session that can only reach
+  `GET /api/auth/me`, `/api/auth/mfa/*` and `POST /api/auth/logout`. Every other route answers
+  `403 { code: "mfa_enrollment_required" }`, and the studio opens the setup screen (secret, backup codes, then a code
+  to activate). Activating with a valid code lifts the restriction for the same session.
+- **Authenticator set up, but this session has no MFA check** (a session from before the upgrade, or a user whose role
+  was raised into a listed role): the session can reach `GET /api/auth/me`, `GET /api/auth/mfa/status`, sign-out and
+  `POST /api/auth/step-up`. Everything else answers `403 { code: "mfa_verification_required" }`, and the studio asks
+  for a code.
+
+`GET /api/auth/me` returns `mfaEnrollmentRequired: true` or `mfaVerificationRequired: true` for a restricted session.
+`GET /api/auth/mfa/status` adds `requiredForRole` and `stepUpMaxAgeMinutes`.
+
+**API keys of a listed role.** A personal API key works only while its owner has an authenticator set up. If the owner
+has none (never set up, or reset by an admin), every request with the key answers
+`403 { code: "mfa_enrollment_required" }` until they set one up. Creating a key in a listed role always needs an MFA
+check on the session within the step-up window, or within 15 minutes when step-up is off, because the key then works
+without a code. The owner's own role decides, so a key capped below it (`role:viewer` on an admin) is covered too. Work a
+key already started or decided before the rule applied to it (a queued run, an approval it decided, a run waiting on an
+approval) still runs with that key's limits when it resumes: it was authorized when it was made. Revoke the key to stop
+such work.
+
+**Turning MFA off.** A user in a listed role cannot turn their own MFA off: `POST /api/auth/mfa/disable` answers
+`409 { code: "mfa_required_for_role" }` (except from a break-glass session). A lost or replaced device goes through an
+admin's [MFA reset](#resetting-a-users-mfa). For other roles, turning MFA off clears the current session's MFA check at
+once and ends the user's other sessions.
+
+**LDAP.** LDAP has no TOTP step of its own, so the password login's rules apply: a user with TOTP gets the code step
+(`{ mfaChallenge }`, completed at `POST /api/auth/login/mfa`, the session is recorded with method `ldap`), and a listed
+role without TOTP gets the setup-only session (`mfaEnrollmentRequired: true`).
+
+**SSO.** See [MFA on SSO](#mfa-on-sso): with `SSO_MFA=off`, a listed role's OIDC or SAML login is accepted with
+IdP-asserted MFA, else the local TOTP step, else the setup-only session. Unlisted roles sign in as before.
+
+### Setting up an authenticator
+
+Setting up an authenticator (`POST /api/auth/mfa/enroll`) needs a sign-in within the last 10 minutes, or the account
+password again (`{ "password": "..." }`). Otherwise it answers `403 { code: "mfa_reauth_required" }`, and the studio
+asks for the password. This keeps a stolen session cookie from binding the thief's authenticator to the account. An
+account signed in through OIDC or SAML has no local password: the answer carries `sso: true`, and the user signs in
+again through the identity provider, then sets MFA up within 10 minutes. Break-glass sessions are not asked.
+
+### Wrong codes and reused codes
+
+Five wrong codes for one user within 15 minutes (on the sign-in code step, `POST /api/auth/step-up` or
+`POST /api/auth/mfa/disable`, counted together and across server instances) lock MFA verification for that user until
+the oldest of those failures is 15 minutes old. While locked, those routes answer
+`429 { code: "mfa_locked", lockedUntil }` with a `Retry-After` header, even for a correct code. The session that sent
+the fifth wrong step-up code is ended (reason `policy`). Each wrong code is audited as `mfa.code_failed`, and the lock
+as `mfa.locked`.
+
+Each TOTP code is accepted once: a code from a time step at or before the last accepted one is refused, so a code seen
+over someone's shoulder or in a log cannot be used again within its 90-second window. Backup codes were already
+single-use.
+
+**Upgrading with `MFA_ENFORCE=true`.** Before, the setting only flagged unenrolled admins at sign-in. Now it is
+enforced: an admin without an authenticator is restricted to setting one up, and an admin's session from before the
+upgrade asks for a code once.
+
+## Step-up for security actions
+
+```bash
+STEP_UP_MAX_AGE_MINUTES=15   # 0 or unset = off
+```
+
+With step-up on, the actions below need an MFA check on the session within the last N minutes. A sign-in through the
+TOTP step or with IdP-asserted MFA counts as a check at sign-in time. When the last check is older, the action answers
+`403 { code: "step_up_required", stepUp: { action, method: "totp", enrolled, maxAgeMinutes } }`; the studio asks for a
+code, sends it to `POST /api/auth/step-up` and retries the action once. A user without an authenticator is told to
+set one up in **Settings > Security** first. Break-glass sessions are not asked.
+
+| Action | Routes |
+|---|---|
+| Create a user | `POST /api/auth/register` (by an admin) |
+| Invite a user | `POST /api/users/invite` |
+| Change a user's role | `PUT /api/users/:id`, `PATCH /api/service-accounts/:id` (when the role changes) |
+| Delete a user | `DELETE /api/users/:id`, `DELETE /api/service-accounts/:id` |
+| Reset a user's MFA | `POST /api/users/:id/mfa/reset` |
+| Sign another user out | `POST /api/users/:id/sessions/revoke` (not when it names your own account) |
+| Turn your own MFA off | `POST /api/auth/mfa/disable` |
+| Create an API key | `POST /api/auth/api-keys`, `POST /api/service-accounts/:id/keys` |
+| Create a gateway client | `POST /api/mcp/clients` |
+| Create, change or delete a secret | `POST /api/secrets`, `PUT /api/secrets/:id/sensitive-output`, `POST /api/secrets/:id/shares`, `DELETE /api/secrets/:id/shares/:projectId`, `DELETE /api/secrets/:id` |
+| Change SSO group mappings | `POST /api/auth/sso/mappings`, `DELETE /api/auth/sso/mappings/:id` |
+| Change notification channels | `POST /api/notifications`, `DELETE /api/notifications/:id` |
+| Change audit export destinations and log streams | `POST`, `PUT`, `DELETE` on `/api/audit-export/destinations` and `/api/log-streams` |
+| Import MCP servers (creates secrets) | `POST /api/mcp/servers/import` |
+| Add or remove a project member | `POST /api/projects/:id/members`, `DELETE /api/projects/:id/members/:userId` |
+| Create, change or delete a custom role | `POST /api/custom-roles`, `PUT /api/custom-roles/:id`, `DELETE /api/custom-roles/:id` |
+
+**API keys.** With step-up on, personal API keys are refused on these actions with `403 step_up_required`
+(`stepUp.credential: "api_key"`): a key cannot answer a code, and a stolen personal key should not mint more keys or
+change roles. Other routes work with keys as before. With step-up off, keys behave exactly as before. Automation that
+performs these actions uses a [service account](./service-accounts.md): a service-account key whose role ceiling is
+`role:admin` is let through, as long as the account is still an admin and the key lists no projects (a project list
+caps a key at builder). Only an admin can give a key an admin ceiling.
+
+Actions on a person's account are the exception: resetting someone's MFA, signing someone out, changing a person's role
+and deleting a person need a person who has passed a second factor. With step-up on, a service-account key is refused
+on them too (`stepUp.target: "person"`); the same actions on a service account still work with its admin key.
+
+Every step-up is audited as `mfa.step_up` (success or failure).
+
+## Resetting a user's MFA
+
+An admin resets the MFA of a user who lost their authenticator from **Settings > Users > Reset MFA**, or with
+`POST /api/users/:id/mfa/reset`. The user's authenticator and backup codes are deleted and all their sessions end
+(reason `admin`); at their next sign-in they set MFA up again (restricted to setup if their role requires MFA). The
+reset is audited as `mfa.reset` with the user's email, role, whether they had MFA and how many sessions ended. It needs
+step-up when step-up is on. You cannot reset your own MFA, except from a break-glass session. The user's API keys are
+not revoked (a lost device does not mean a leaked key); in a role that requires MFA they stop working until the user
+sets up a new authenticator.
+
+## Keeping admin access
+
+No setting here refuses to start or refuses a sign-in outright: a listed role without MFA gets a setup-only session,
+and step-up only asks for a code. The last admin cannot be demoted or deleted (`PUT` and `DELETE /api/users/:id` answer
+`409 { code: "last_admin" }`), whoever asks, an admin service-account key included. Only people who can sign in count: an
+invited admin who has not accepted yet does not, and can be demoted or deleted freely, and an admin service account
+never counts (it cannot sign in or get a break-glass link). The count and the change happen in one transaction, so two
+requests at the same moment cannot leave the workspace without one, and the break-glass command always has an admin to
+sign in. A wrong-code lock (above) ends after 15 minutes on its own.
+
+If the only admin loses their authenticator and backup codes:
+
+1. **Another admin** resets their MFA (above).
+2. **Break-glass from the server host**: `pnpm --filter @ai-orchestrator/api admin:break-glass --email <admin>` prints a
+   one-time sign-in link for a one-hour session that skips the MFA requirement and step-up (every request in it is
+   audited). From it, reset the admin's MFA, then sign out.
+3. **Without break-glass**, with shell and database access on the host, delete the admin's authenticator row and sign
+   in again, which leads to MFA setup:
+
+   ```bash
+   # SQLite
+   node -e "const D=require('better-sqlite3'); new D(process.argv[1]).prepare(\"DELETE FROM mfa_secrets WHERE user_id = (SELECT id FROM users WHERE email = 'admin@example.com')\").run()" \
+     apps/api/data/orchestrator.db
+   # Postgres
+   psql "$DB_POSTGRESDB_URL" -c "DELETE FROM mfa_secrets WHERE user_id = (SELECT id FROM users WHERE email = 'admin@example.com');"
+   ```
+
 ## Endpoints
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
 - `POST /api/auth/login/mfa` (`{ challenge?, code }`; an SSO login's challenge comes from the `l2m_sso_mfa` cookie)
 - `POST /api/auth/logout`
-- `GET /api/auth/me`
+- `GET /api/auth/me` (with `session`: lifetime and idle deadline, null for an API key; `mfaEnrollmentRequired` /
+  `mfaVerificationRequired` for a restricted session)
+- `GET /api/auth/sessions`, `DELETE /api/auth/sessions/:handle`, `POST /api/auth/sessions/revoke-others`
+- `GET /api/users/:id/sessions`, `POST /api/users/:id/sessions/revoke` (admin, step-up; `{ handle? }`)
+- `POST /api/auth/step-up` (`{ code }`, TOTP or backup code; refreshes the session's MFA check)
+- `POST /api/auth/mfa/enroll` (`{ password? }`; the password is needed more than 10 minutes after signing in)
+- `POST /api/users/:id/mfa/reset` (admin, step-up)
 - `GET /api/auth/oidc/metadata` (public; `{ "enabled": false }` when OIDC is off)
 - `GET /api/auth/oidc/login` (browser navigation; redirects to the IdP)
 - `GET /api/auth/oidc/callback` (IdP redirect target)
@@ -562,6 +863,12 @@ SSO_MFA=idp
 
 ## Error contracts
 
-- `401` unauthenticated / invalid session
-- `403` authenticated but unauthorized
+- `401` unauthenticated / invalid session (with `reason` when a session ended: `idle`, `expired`, `evicted`, `admin`,
+  `logout`)
+- `403` authenticated but unauthorized; with a `code` of `mfa_enrollment_required` or `mfa_verification_required`
+  (a session restricted by `MFA_REQUIRED_ROLES`), `step_up_required` (a security action needs a recent MFA check),
+  `mfa_code_invalid` (a wrong step-up code), `mfa_reauth_required` (setting up MFA needs the password or a fresh
+  sign-in)
+- `409` `last_admin` (demoting or deleting the only admin who is a person), `mfa_required_for_role` (turning MFA off in a listed role)
+- `429` `mfa_locked` (too many wrong MFA codes; `lockedUntil` and `Retry-After` say when to try again)
 - `404` not found, or in a project you cannot read

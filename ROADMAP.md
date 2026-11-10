@@ -534,9 +534,9 @@ by what blocks adoption first. All of it stays self-hosted.
 ### 13.2 Identity and access
 - [x] OIDC single sign-on alongside SAML (Authorization Code + PKCE, optional, `OIDC_*` settings; see the Authentication and RBAC docs page)
 - [ ] SCIM 2.0 provisioning and deprovisioning of users and groups, with immediate session revocation
-- [ ] Session policy: idle and absolute timeouts, concurrent-session limits, MFA required per role, step-up authentication for sensitive actions (partial: MFA on SSO delivered, optional `SSO_MFA` for OIDC and SAML with IdP-asserted MFA or the local TOTP step; missing: timeouts, session limits, per-role MFA, step-up)
+- [x] Session policy: idle and absolute timeouts, concurrent-session limits, MFA required per role, step-up authentication for sensitive actions (all optional: idle and absolute timeouts per role, a per-user session limit and a signed-in sessions list; `MFA_REQUIRED_ROLES` with an enrolment-only session, step-up with `STEP_UP_MAX_AGE_MINUTES`, admin MFA reset; MFA on SSO with optional `SSO_MFA` for OIDC and SAML)
 - [ ] Network controls: IP allowlists for UI, API and webhooks, trusted-proxy configuration, mutual TLS option for the MCP gateway — *partial:* delivered are address and CIDR allowlists per scope (UI, API, webhooks, public, MCP gateway, metrics) with report mode and loopback break-glass, per-client gateway and per-webhook address lists, trusted-proxy handling through `TRUST_PROXY`, and client-certificate pinning (SHA-256 fingerprints, optional subject) for the MCP gateway through a verifying TLS-terminating proxy; a native TLS listener with mutual TLS in the API itself remains
-- [ ] Service accounts with scoped, rotating keys; break-glass admin access with alerting
+- [ ] Service accounts with scoped, rotating keys; break-glass admin access with alerting (partial: service accounts and API keys scoped by a role ceiling and a project list delivered; break-glass delivered, a one-hour admin sign-in link minted on the host with `admin:break-glass`, audited and alerted at issue, use and end; missing: key rotation and expiry warnings)
 
 ### 13.3 Data protection and tenancy
 - [ ] Envelope encryption with customer-managed keys (cloud KMS services and Vault Transit); master-key rotation without downtime

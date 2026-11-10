@@ -405,7 +405,8 @@ describe("SSO_MFA=idp_or_local", () => {
     expect(body.mfaChallenge).toMatch(/^mfa_/);
     expect(body.expiresInSeconds).toBe(300);
     expect(setCookies(json.headers["set-cookie"])).toEqual([]);
-    const viaBody = await completeTotp(context, { challenge: body.mfaChallenge, code: generateTotpCode(secret) });
+    // Each code is accepted once, so this second sign-in uses the next time step's code (still inside the window).
+    const viaBody = await completeTotp(context, { challenge: body.mfaChallenge, code: generateTotpCode(secret, Date.now() + 30_000) });
     expect(viaBody.statusCode).toBe(200);
     // Linked now, so no second link audit.
     expect((await context.store.listAuditLogs({ eventType: "user.sso_linked" })).items).toHaveLength(1);
@@ -487,8 +488,111 @@ describe("SSO_MFA=idp_or_local", () => {
     const local = await completeTotp(context, { challenge: localChallenge, cookie: sso.challengeCookie, code: generateTotpCode(secret) });
     expect(local.statusCode).toBe(200);
     expect(setCookies(local.headers["set-cookie"]).some((cookie) => cookie.startsWith("l2m_sso_mfa="))).toBe(false);
-    const ssoDone = await completeTotp(context, { cookie: sso.challengeCookie, code: generateTotpCode(secret) });
+    const ssoDone = await completeTotp(context, { cookie: sso.challengeCookie, code: generateTotpCode(secret, Date.now() + 30_000) });
     expect(ssoDone.statusCode).toBe(200);
     expect((await completeTotp(context, { challenge: localChallenge, code: generateTotpCode(secret) })).statusCode).toBe(401);
+  });
+});
+
+describe("13.2 — SSO sessions record how they were issued", () => {
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  it("OIDC: IdP MFA and the local TOTP step set the MFA time; the method, address and user agent are kept", async () => {
+    const context = await createContext({ SSO_MFA: "idp_or_local" });
+    context.oidc.user = { sub: "amy", email: "amy@example.com", email_verified: true, amr: ["pwd", "mfa"] };
+    const idp = await oidcLogin(context);
+    expect(await context.store.getSession(idp.session!)).toMatchObject({
+      authMethod: "oidc",
+      mfaVerifiedAt: expect.stringMatching(ISO),
+      breakGlass: false,
+      endedReason: null,
+      ipAddress: "127.0.0.1",
+      userAgent: "lightMyRequest"
+    });
+
+    const { secret } = await withTotp(context, "hana@example.com", "operator");
+    context.oidc.user = { sub: "hana", email: "hana@example.com", email_verified: true, amr: ["pwd"] };
+    const pending = await oidcLogin(context);
+    const done = await completeTotp(context, { cookie: pending.challengeCookie, code: generateTotpCode(secret) });
+    const session = cookieValue(setCookies(done.headers["set-cookie"]), "ao_session")!;
+    expect(await context.store.getSession(session)).toMatchObject({ authMethod: "oidc", mfaVerifiedAt: expect.stringMatching(ISO) });
+  });
+
+  it("SSO_MFA=off: OIDC and SAML sessions have their method and no MFA time; a new sign-in ends the browser's old session", async () => {
+    const context = await createContext();
+    context.oidc.user = { sub: "tess", email: "tess@example.com", email_verified: true, amr: ["pwd"] };
+    const oidc = await oidcLogin(context);
+    expect(await context.store.getSession(oidc.session!)).toMatchObject({ authMethod: "oidc", mfaVerifiedAt: null });
+
+    const saml = await samlFormLogin(context, { nameID: "tess-saml", email: "tess@example.com", authnContexts: [PASSWORD_ONLY] });
+    expect(await context.store.getSession(saml.session!)).toMatchObject({ authMethod: "saml", mfaVerifiedAt: null });
+
+    const again = await oidcLogin(context, { ao_session: oidc.session! });
+    expect(again.session).toBeTruthy();
+    expect(await context.store.getSession(oidc.session!)).toMatchObject({ revokedAt: expect.stringMatching(ISO), endedReason: "logout" });
+  });
+});
+
+describe("13.2 (D6) — MFA_REQUIRED_ROLES on SSO sign-ins", () => {
+  it("SSO_MFA=off: a listed role runs as idp_or_local (IdP MFA, else the TOTP step, else enrolment-only); other roles as before", async () => {
+    const context = await createContext({ MFA_REQUIRED_ROLES: "admin" }, { captureLogs: true });
+    expect(context.logs.some((line) => line.includes("SSO_MFA is off, but MFA_REQUIRED_ROLES is set"))).toBe(true);
+    // The listed role's sign-ins read the IdP's claims, so SAML asks the IdP to report what it actually did.
+    const unlisted = await samlFormLogin(context, { nameID: "vic", email: "vic@example.com", authnContexts: [PASSWORD_ONLY] });
+    expect(unlisted.session).toBeTruthy();
+    expect(context.saml.clientOptions[0]).toHaveProperty("disableRequestedAuthnContext", true);
+
+    // An unlisted role (a new viewer): signed in as before, no MFA time.
+    context.oidc.user = { sub: "val", email: "val@example.com", email_verified: true, amr: ["pwd"] };
+    const viewer = await oidcLogin(context);
+    expect(viewer.session).toBeTruthy();
+    expect(await context.store.getSession(viewer.session!)).toMatchObject({ mfaVerifiedAt: null });
+
+    // A listed role with IdP MFA: signed in, MFA time set.
+    await context.authService.register({ email: "ida@example.com", password: "IdaPassword123!", role: "admin" });
+    context.oidc.user = { sub: "ida", email: "ida@example.com", email_verified: true, amr: ["pwd", "mfa"] };
+    const idp = await oidcLogin(context);
+    expect(await context.store.getSession(idp.session!)).toMatchObject({ mfaVerifiedAt: expect.any(String) });
+    expect((await context.app.inject({ method: "GET", url: "/api/users", cookies: { ao_session: idp.session! } })).statusCode).toBe(200);
+
+    // A listed role with local TOTP and no IdP MFA: the local step.
+    const { secret } = await withTotp(context, "tom@example.com", "admin");
+    context.oidc.user = { sub: "tom", email: "tom@example.com", email_verified: true, amr: ["pwd"] };
+    const pending = await oidcLogin(context);
+    expect(pending.finish.headers.location).toBe(`${WEB}/?sso_mfa=totp`);
+    expect(pending.session).toBeUndefined();
+    const done = await completeTotp(context, { cookie: pending.challengeCookie, code: generateTotpCode(secret) });
+    expect(done.statusCode).toBe(200);
+
+    // A listed role with neither: a session that can only set up MFA.
+    await context.authService.register({ email: "una@example.com", password: "UnaPassword123!", role: "admin" });
+    context.oidc.user = { sub: "una", email: "una@example.com", email_verified: true, amr: ["pwd"] };
+    const enrol = await oidcLogin(context);
+    expect(enrol.finish.headers.location).toBe(`${WEB}/`);
+    const restricted = await context.app.inject({ method: "GET", url: "/api/users", cookies: { ao_session: enrol.session! } });
+    expect(restricted.statusCode).toBe(403);
+    expect(restricted.json()).toMatchObject({ code: "mfa_enrollment_required" });
+  });
+
+  it("SSO_MFA=off: a group mapping that makes the login a listed role applies the rule", async () => {
+    const context = await createContext({ MFA_REQUIRED_ROLES: "admin" });
+    await context.store.upsertSsoGroupMapping({ id: "m1", provider: "oidc", groupName: "l2m-admins", role: "admin" });
+    context.oidc.user = { sub: "mo", email: "mo@example.com", email_verified: true, groups: ["l2m-admins"] };
+    const admin = await oidcLogin(context);
+    expect((await loginAudits(context, "success"))[0]!.metadata).toMatchObject({ mfaEnrollmentRequired: true, provisioned: true });
+    expect((await context.app.inject({ method: "GET", url: "/api/workflows", cookies: { ao_session: admin.session! } })).statusCode).toBe(403);
+  });
+
+  it("SSO_MFA=idp_or_local: an unlisted role without TOTP is still refused, a listed one gets the enrolment-only session", async () => {
+    const context = await createContext({ SSO_MFA: "idp_or_local", MFA_REQUIRED_ROLES: "builder" });
+    await context.authService.register({ email: "bo@example.com", password: "BoPassword123!", role: "builder" });
+    context.oidc.user = { sub: "bo", email: "bo@example.com", email_verified: true };
+    const builder = await oidcLogin(context);
+    expect(builder.session).toBeTruthy();
+    expect((await context.app.inject({ method: "GET", url: "/api/workflows", cookies: { ao_session: builder.session! } })).statusCode).toBe(403);
+
+    await context.authService.register({ email: "op@example.com", password: "OpPassword123!", role: "operator" });
+    context.oidc.user = { sub: "op", email: "op@example.com", email_verified: true };
+    expect((await oidcLogin(context)).finish.headers.location).toBe(`${WEB}/?sso_error=sso_mfa_required`);
   });
 });

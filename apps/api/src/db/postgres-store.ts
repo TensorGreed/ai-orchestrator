@@ -377,6 +377,12 @@ export class PostgresStore implements Store {
   async listUsers(...args: Parameters<Store["listUsers"]>): ReturnType<Store["listUsers"]> {
     return auth.listUsers(this.ctx, ...args);
   }
+  async createServiceAccount(...args: Parameters<Store["createServiceAccount"]>): ReturnType<Store["createServiceAccount"]> {
+    return auth.createServiceAccount(this.ctx, ...args);
+  }
+  async updateServiceAccount(...args: Parameters<Store["updateServiceAccount"]>): ReturnType<Store["updateServiceAccount"]> {
+    return auth.updateServiceAccount(this.ctx, ...args);
+  }
   async createUserInvite(...args: Parameters<Store["createUserInvite"]>): ReturnType<Store["createUserInvite"]> {
     return auth.createUserInvite(this.ctx, ...args);
   }
@@ -398,8 +404,14 @@ export class PostgresStore implements Store {
   async updateUserRole(...args: Parameters<Store["updateUserRole"]>): ReturnType<Store["updateUserRole"]> {
     return auth.updateUserRole(this.ctx, ...args);
   }
+  async updateUserRoleKeepingAdmin(...args: Parameters<Store["updateUserRoleKeepingAdmin"]>): ReturnType<Store["updateUserRoleKeepingAdmin"]> {
+    return auth.updateUserRoleKeepingAdmin(this.ctx, ...args);
+  }
   async deleteUser(...args: Parameters<Store["deleteUser"]>): ReturnType<Store["deleteUser"]> {
     return auth.deleteUser(this.ctx, ...args);
+  }
+  async deleteUserKeepingAdmin(...args: Parameters<Store["deleteUserKeepingAdmin"]>): ReturnType<Store["deleteUserKeepingAdmin"]> {
+    return auth.deleteUserKeepingAdmin(this.ctx, ...args);
   }
   async getSession(...args: Parameters<Store["getSession"]>): ReturnType<Store["getSession"]> {
     return sessions.getSession(this.ctx, ...args);
@@ -415,6 +427,24 @@ export class PostgresStore implements Store {
   }
   async revokeExpiredSessions(...args: Parameters<Store["revokeExpiredSessions"]>): ReturnType<Store["revokeExpiredSessions"]> {
     return sessions.revokeExpiredSessions(this.ctx, ...args);
+  }
+  async listUserSessions(...args: Parameters<Store["listUserSessions"]>): ReturnType<Store["listUserSessions"]> {
+    return sessions.listUserSessions(this.ctx, ...args);
+  }
+  async revokeUserSessions(...args: Parameters<Store["revokeUserSessions"]>): ReturnType<Store["revokeUserSessions"]> {
+    return sessions.revokeUserSessions(this.ctx, ...args);
+  }
+  async markSessionMfaVerified(...args: Parameters<Store["markSessionMfaVerified"]>): ReturnType<Store["markSessionMfaVerified"]> {
+    return sessions.markSessionMfaVerified(this.ctx, ...args);
+  }
+  async clearSessionMfaVerified(...args: Parameters<Store["clearSessionMfaVerified"]>): ReturnType<Store["clearSessionMfaVerified"]> {
+    return sessions.clearSessionMfaVerified(this.ctx, ...args);
+  }
+  async purgeEndedSessions(...args: Parameters<Store["purgeEndedSessions"]>): ReturnType<Store["purgeEndedSessions"]> {
+    return sessions.purgeEndedSessions(this.ctx, ...args);
+  }
+  async revokeOldestUserSessions(...args: Parameters<Store["revokeOldestUserSessions"]>): ReturnType<Store["revokeOldestUserSessions"]> {
+    return sessions.revokeOldestUserSessions(this.ctx, ...args);
   }
   async loadSessionMemory(...args: Parameters<Store["loadSessionMemory"]>): ReturnType<Store["loadSessionMemory"]> {
     return sessions.loadSessionMemory(this.ctx, ...args);
@@ -1389,6 +1419,9 @@ export class PostgresStore implements Store {
   async replaceMfaBackupCodes(...args: Parameters<Store["replaceMfaBackupCodes"]>): ReturnType<Store["replaceMfaBackupCodes"]> {
     return auth.replaceMfaBackupCodes(this.ctx, ...args);
   }
+  async markTotpStepUsed(...args: Parameters<Store["markTotpStepUsed"]>): ReturnType<Store["markTotpStepUsed"]> {
+    return auth.markTotpStepUsed(this.ctx, ...args);
+  }
   async deleteMfaSecret(...args: Parameters<Store["deleteMfaSecret"]>): ReturnType<Store["deleteMfaSecret"]> {
     return auth.deleteMfaSecret(this.ctx, ...args);
   }
@@ -1529,6 +1562,9 @@ export class PostgresStore implements Store {
   }
   async deletePendingChallenges(...args: Parameters<Store["deletePendingChallenges"]>): ReturnType<Store["deletePendingChallenges"]> {
     return flow_state.deletePendingChallenges(this.ctx, ...args);
+  }
+  async listPendingChallenges(...args: Parameters<Store["listPendingChallenges"]>): ReturnType<Store["listPendingChallenges"]> {
+    return flow_state.listPendingChallenges(this.ctx, ...args);
   }
   async prunePendingChallenges(...args: Parameters<Store["prunePendingChallenges"]>): ReturnType<Store["prunePendingChallenges"]> {
     return flow_state.prunePendingChallenges(this.ctx, ...args);
