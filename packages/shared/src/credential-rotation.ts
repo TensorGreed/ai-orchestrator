@@ -31,11 +31,6 @@ export const CREDENTIAL_EXPIRY_WARNING_DAYS = 7;
 /** An old secret still in use after a rotation is announced when its grace window ends within this many hours. */
 export const ROTATION_GRACE_WARNING_HOURS = 24;
 
-/** Picker entries for the credential alerts (value and label, as the settings notification picker lists). */
-export const CREDENTIAL_NOTIFICATION_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: CREDENTIAL_EXPIRING_EVENT, label: "Credential expiring" }
-];
-
 /** Which credential an expiry alert is about. */
 export type CredentialKind = "api_key" | "service_account_key" | "mcp_client";
 

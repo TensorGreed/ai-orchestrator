@@ -4,7 +4,7 @@
  * TEST_POSTGRES_URL, on Postgres (including two instances sweeping at once).
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CREDENTIAL_EXPIRING_EVENT, CREDENTIAL_NOTIFICATION_OPTIONS, daysUntilExpiry } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRING_EVENT, NOTIFICATION_EVENT_LABELS, NOTIFICATION_EVENT_TYPES, daysUntilExpiry } from "@ai-orchestrator/shared";
 import { parseConfig } from "../config.js";
 import type { Store } from "../db/store.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, type TestStore } from "../test-support/test-store.js";
@@ -161,11 +161,16 @@ describe("credential.expiring alert", () => {
   it("a channel made in the settings receives it once it picks the event", async () => {
     const sent = capture();
     const service = new NotificationService(parseConfig({}), () => [
-      { channel: "slack", enabled: true, config: { webhookUrl: "https://hooks.slack.test/c" }, events: [CREDENTIAL_NOTIFICATION_OPTIONS[0]!.value] }
+      { channel: "slack", enabled: true, config: { webhookUrl: "https://hooks.slack.test/c" }, events: [CREDENTIAL_EXPIRING_EVENT] }
     ]);
     expect(await service.subscribes(CREDENTIAL_EXPIRING_EVENT)).toBe(true);
     await service.notify(event());
     expect(sent).toHaveLength(1);
+  });
+
+  it("the settings picker offers it", () => {
+    expect(NOTIFICATION_EVENT_TYPES).toContain(CREDENTIAL_EXPIRING_EVENT);
+    expect(NOTIFICATION_EVENT_LABELS[CREDENTIAL_EXPIRING_EVENT]).toBe("Credential expiring");
   });
 
   it("daysUntilExpiry counts whole days and ignores past or missing dates", () => {

@@ -1,4 +1,4 @@
-import { CREDENTIAL_EXPIRING_EVENT, type CredentialExpiryReason, type CredentialKind } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRING_EVENT, normalizeNotificationEvents, type CredentialExpiryReason, type CredentialKind } from "@ai-orchestrator/shared";
 import type { AppConfig } from "../config";
 
 interface NotificationChannel {
@@ -276,7 +276,8 @@ export class NotificationService {
   }
 
   private async load(): Promise<void> {
-    const channels = [...(await this.listConfigs())];
+    // Channels saved by an earlier settings UI hold workflow_failure / workflow_success; map them to the emitted names.
+    const channels = [...(await this.listConfigs())].map(c => ({ ...c, events: normalizeNotificationEvents(c.events) }));
     this.channels = channels;
 
     // Also add env-var-based defaults if no DB configs exist
