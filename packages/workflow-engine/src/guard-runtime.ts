@@ -8,6 +8,7 @@ import {
   guardProfileDisplayName,
   createDefaultGuardRegistry,
   createDefaultProtectionRegistry,
+  createGuardVerdictMemo,
   createSurrogateProvider,
   datamark,
   decodeGuardKeyMaterial,
@@ -15,7 +16,9 @@ import {
   DEFAULT_DATAMARK,
   evaluateGuardStack,
   generateCanaryToken,
+  guardVerdictMemoKey,
   hashGuardProfile,
+  isMemoisableVerdict,
   mergeGuardProfileOverride,
   PROMPT_HARDENING_TEXT,
   profileFeedsPropagatedLabels,
@@ -30,6 +33,7 @@ import {
   type GuardProfile,
   type GuardRegistry,
   type GuardToolContext,
+  type GuardVerdictMemo,
   type GuardVerdictSummary,
   type ProtectionBinding,
   type ProvenanceLabel,
@@ -45,6 +49,7 @@ import {
   guardProtectionNodeConfigSchema,
   type GuardBindingLevel,
   type GuardNodeConfig,
+  type GuardPlacementValue,
   type GuardProfileRef,
   normalizeDestinationHost,
   resolveRedirectChain,
@@ -108,8 +113,11 @@ export interface GuardVerdictEvent {
   executionId: string;
   workflowId: string;
   nodeId: string;
-  /** 12.6 — `gateway`: a check the MCP gateway made on a tool call (no run; the call's synthetic `mcpgw_*` id). */
-  placement: "node" | "agent" | "gateway";
+  /**
+   * 12.6 — `gateway`: a check the MCP gateway made on a tool call (no run; the call's synthetic `mcpgw_*` id).
+   * Phase 12 coverage — `response`, `retrieval` and `reveal` (see `GUARD_PLACEMENT_VALUES` in shared).
+   */
+  placement: GuardPlacementValue;
   iteration?: number;
   channel: GuardChannel;
   toolName?: string;
@@ -176,9 +184,16 @@ export interface GuardEvalScope {
   executionId: string;
   workflowId: string;
   nodeId: string;
-  placement: "node" | "agent" | "gateway";
+  placement: GuardPlacementValue;
   subject?: McpToolPolicySubject;
   logger?: (message: string, metadata?: unknown) => void;
+  /**
+   * Phase 12 coverage — a memo of clean checks (see `runVerdictMemoOf`). A
+   * check whose stack, channel, labels, content and context match an earlier
+   * clean check returns that result and records nothing. Absent: every check
+   * runs and records, as before.
+   */
+  memo?: GuardVerdictMemo<GuardCheckResult["verdicts"]>;
 }
 
 export interface GuardCheckResult {
@@ -186,6 +201,8 @@ export interface GuardCheckResult {
   content: unknown;
   transformed: boolean;
   verdicts: Array<{ profile: GuardProfileRef; summary: GuardVerdictSummary }>;
+  /** Phase 12 coverage — the result came from the scope's memo: nothing ran and nothing was recorded. */
+  memoHit?: true;
 }
 
 export class GuardBlockedError extends Error {
@@ -211,6 +228,21 @@ export const systemDnsResolver = async (hostname: string): Promise<string[]> => 
 const resolutionCache = new WeakMap<GuardRuntimeDependencies, Promise<GuardRunResolution>>();
 const issuedCache = new WeakMap<GuardRuntimeDependencies, Set<string>>();
 const rowsCache = new WeakMap<GuardRuntimeDependencies, Promise<DataDestinationRow[]>>();
+const memoCache = new WeakMap<GuardRuntimeDependencies, GuardVerdictMemo<GuardCheckResult["verdicts"]>>();
+
+/**
+ * Phase 12 coverage — the run's memo of clean checks, one per dependencies
+ * object (one per run), never shared across runs. Pass it as a scope's
+ * `memo` to let that checkpoint reuse an earlier clean check of the same text.
+ */
+export function runVerdictMemoOf(guard: GuardRuntimeDependencies): GuardVerdictMemo<GuardCheckResult["verdicts"]> {
+  let memo = memoCache.get(guard);
+  if (!memo) {
+    memo = createGuardVerdictMemo<GuardCheckResult["verdicts"]>();
+    memoCache.set(guard, memo);
+  }
+  return memo;
+}
 
 /** Phase 16 — the run's issued surrogates (the dependencies' own set, else one kept per dependencies object). */
 export function issuedSurrogatesOf(guard: GuardRuntimeDependencies): Set<string> {
@@ -400,9 +432,16 @@ export async function runGuardCheck(
   if (surrogateKey) protection.replace(createSurrogateProvider({ keys: async () => surrogateKey, defaultKeyId: "deployment" }));
   const issued = issuedSurrogatesOf(scope.guard);
   const subject = scope.subject ? { role: scope.subject.role, ...(scope.subject.userId ? { userId: scope.subject.userId } : {}) } : undefined;
+  const evaluated: GuardInput = { ...input, ...(subject && !input.subject ? { subject } : {}), ...(input.issuedSurrogates ? {} : { issuedSurrogates: issued }) };
+  // Phase 12 coverage — the same clean check earlier in this run: reuse it, record nothing new.
+  const memoKey = scope.memo && profiles.length > 0 ? guardVerdictMemoKey(profiles.map((entry) => entry.hash), evaluated) : undefined;
+  if (memoKey && scope.memo) {
+    const hit = scope.memo.get(memoKey);
+    if (hit) return { action: "allow", content: input.content, transformed: false, verdicts: hit, memoHit: true };
+  }
   const stack = await evaluateGuardStack(
     profiles.map((entry) => entry.profile),
-    { ...input, ...(subject && !input.subject ? { subject } : {}), ...(input.issuedSurrogates ? {} : { issuedSurrogates: issued }) },
+    evaluated,
     { registry, protection }
   );
   // Phase 16 — remember the surrogates this check issued: later checks and capture masking leave them alone.
@@ -412,6 +451,9 @@ export async function runGuardCheck(
     }
   }
   const verdicts = stack.verdicts.map((verdict, index) => ({ profile: guardProfileRef(profiles[index]!), summary: summarizeGuardVerdict(verdict) }));
+  if (memoKey && scope.memo && stack.action === "allow" && !stack.transformed && verdicts.length === profiles.length && verdicts.every((entry) => isMemoisableVerdict(entry.summary))) {
+    scope.memo.set(memoKey, verdicts);
+  }
   const checkId = randomUUID();
   for (const [index, entry] of verdicts.entries()) {
     if (!scope.guard.onVerdict || !scope.executionId) continue;

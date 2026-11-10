@@ -120,6 +120,8 @@ export async function evaluateGuardStack(
  * Apply an inline override to a stored profile: top-level fields replace,
  * `channels`, `shadow` and `protection.dataClasses` merge per key, and
  * `latencyBudget` merges per field. The result is validated again.
+ * `reveal` always comes from the stored profile: an inline override on a
+ * node can neither grant nor remove reveal rights.
  */
 export function mergeGuardProfileOverride(base: GuardProfile, override: Record<string, unknown> | undefined): GuardProfile {
   if (!override || Object.keys(override).length === 0) return base;
@@ -140,6 +142,8 @@ export function mergeGuardProfileOverride(base: GuardProfile, override: Record<s
       dataClasses: { ...base.protection.dataClasses, ...record(protection.dataClasses) }
     }
   };
+  if (base.reveal) merged.reveal = base.reveal;
+  else delete merged.reveal;
   return parseGuardProfile(merged);
 }
 

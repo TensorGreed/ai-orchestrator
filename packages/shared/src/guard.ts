@@ -33,10 +33,27 @@ export type GuardChannelValue = (typeof GUARD_CHANNEL_VALUES)[number];
 /**
  * Phase 16 — channels a guard profile may configure: the Guard node's
  * channels plus `egress` (outbound HTTP, connectors and senders), which the
- * engine checks itself and a Guard node never evaluates.
+ * engine checks itself and a Content Rules node never evaluates. Phase 12 coverage
+ * adds `response` (what an external caller receives) and `trigger_input` (an
+ * incoming webhook payload, checked at the route); a node never offers them.
  */
-export const GUARD_PROFILE_CHANNEL_VALUES = [...GUARD_CHANNEL_VALUES, "egress"] as const;
+export const GUARD_PROFILE_CHANNEL_VALUES = [...GUARD_CHANNEL_VALUES, "egress", "response", "trigger_input"] as const;
 export type GuardProfileChannelValue = (typeof GUARD_PROFILE_CHANNEL_VALUES)[number];
+
+/**
+ * Where a rule event was recorded. `node`: a Content Rules node; `agent`: an
+ * agent hook or delegated worker; `gateway`: the MCP or `/v1` gateway.
+ * Phase 12 coverage: `response` (the run-end check of what an external caller
+ * receives), `retrieval` (untrusted pieces and documents at the model
+ * boundary) and `reveal` (tokens turned back into values).
+ */
+export const GUARD_PLACEMENT_VALUES = ["node", "agent", "gateway", "response", "retrieval", "reveal"] as const;
+export type GuardPlacementValue = (typeof GUARD_PLACEMENT_VALUES)[number];
+
+/** A stored placement read back; unknown values read as `node`, as before. */
+export function parseGuardPlacement(value: unknown): GuardPlacementValue {
+  return typeof value === "string" && (GUARD_PLACEMENT_VALUES as readonly string[]).includes(value) ? (value as GuardPlacementValue) : "node";
+}
 
 export const GUARD_ACTION_VALUES = ["allow", "block", "redact", "mask", "protect", "transform", "require_approval", "review"] as const;
 export type GuardActionValue = (typeof GUARD_ACTION_VALUES)[number];
@@ -259,8 +276,9 @@ export interface GuardEventView {
   /**
    * Where the guard sat: a DAG guard node, an agent hook, or a delegated worker. 12.6 — `gateway`: a server tool called
    * through the MCP gateway (`executionId` is the call's `mcpgw_*` id, `nodeId` the tool name, no workflow).
+   * Phase 12 coverage — `response`, `retrieval` and `reveal` (see `GUARD_PLACEMENT_VALUES`).
    */
-  placement: "node" | "agent" | "gateway";
+  placement: GuardPlacementValue;
   toolName?: string | null;
   detectorId?: string | null;
   category?: string | null;

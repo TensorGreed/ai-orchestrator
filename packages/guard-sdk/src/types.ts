@@ -11,8 +11,21 @@ import { PROVENANCE_LABELS as SHARED_PROVENANCE_LABELS } from "@ai-orchestrator/
  * Where in the AI traffic the content sits. Phase 16: `egress` is outbound
  * data leaving through HTTP, connectors and senders; only profiles configure
  * it (the Guard node's channel list in shared stays without it).
+ *
+ * Phase 12 coverage: `response` is what an external caller receives from a
+ * webhook, chat or MCP invoke run; `trigger_input` is an incoming webhook
+ * payload checked at the route before dispatch. Both are opt-in by presence
+ * in a rule set and, like `egress`, never offered on the Content Rules node.
  */
-export type GuardChannel = "prompt" | "model_output" | "tool_arguments" | "tool_result" | "final_output" | "egress";
+export type GuardChannel =
+  | "prompt"
+  | "model_output"
+  | "tool_arguments"
+  | "tool_result"
+  | "final_output"
+  | "egress"
+  | "response"
+  | "trigger_input";
 
 export const GUARD_CHANNELS: readonly GuardChannel[] = [
   "prompt",
@@ -20,8 +33,13 @@ export const GUARD_CHANNELS: readonly GuardChannel[] = [
   "tool_arguments",
   "tool_result",
   "final_output",
-  "egress"
+  "egress",
+  "response",
+  "trigger_input"
 ];
+
+/** Channels only a rule set configures; the engine and the API check them, a Content Rules node never does. */
+export const PROFILE_ONLY_CHANNELS: ReadonlySet<GuardChannel> = new Set(["egress", "response", "trigger_input"]);
 
 /** Where the content came from. Policies key on these labels, not only on patterns. The list lives in `@ai-orchestrator/shared` (data-labels.ts). */
 export type { ProvenanceLabel };
@@ -69,7 +87,13 @@ export type GuardCategory =
   | "path_traversal"
   | "egress"
   | "schema_violation"
+  | "off_topic"
+  | "unsafe_content"
+  | "ungrounded"
   | (string & {});
+
+/** Phase 12 coverage — categories of the output checks (schema, topic, safety, grounding). */
+export const OUTPUT_CHECK_CATEGORIES: readonly GuardCategory[] = ["schema_violation", "off_topic", "unsafe_content", "ungrounded"];
 
 /** Categories whose findings may never be tokenised, redacted or masked away: they block or go to review. */
 export const INJECTION_CATEGORIES: ReadonlySet<string> = new Set([
@@ -107,6 +131,41 @@ export interface GuardToolContext {
   untrustedArguments?: string[];
 }
 
+/**
+ * Phase 12 coverage — a document the checked content drew on (a retrieved
+ * chunk, a reranked result, a retrieval tool's answer). Grounding checks
+ * compare the content against these; other detectors ignore them.
+ */
+export interface GuardSource {
+  /** Stable id within the check, such as the document id or `node:index`. */
+  id: string;
+  text: string;
+  /** 1-based number the content cites it by (`[1]`), when the context was numbered. */
+  citation?: number;
+  title?: string;
+  uri?: string;
+  /** The workflow node that produced it. */
+  nodeId?: string;
+}
+
+/**
+ * Phase 12 coverage — one templated piece of the checked content (a `{{ }}`
+ * expression in a prompt) with its own provenance. Metadata only: it names
+ * where untrusted text sits so verdicts and traces can point at it; it does
+ * not change what detectors see or how a verdict is formed.
+ */
+export interface GuardContentPiece {
+  /** Half-open range of the piece in the canonical text (`contentText`). */
+  span: GuardSpan;
+  labels: ProvenanceLabel[];
+  /** The prompt field the piece sits in. */
+  field?: "user_prompt" | "system_prompt" | (string & {});
+  /** The template expression, such as `results.rag.context`. Never the value. */
+  expression?: string;
+  /** The node whose output the expression read. */
+  sourceNodeId?: string;
+}
+
 export interface GuardInput {
   /** Text, or a JSON value. JSON is inspected through its canonical serialisation. */
   content: unknown;
@@ -137,6 +196,10 @@ export interface GuardInput {
   ignoredValues?: readonly string[];
   /** Phase 16 — evaluate the destination rules only (the channel's detectors already saw this content). */
   destinationOnly?: boolean;
+  /** Phase 12 coverage — documents the content drew on, for grounding checks. Absent: no grounding sources. */
+  sources?: GuardSource[];
+  /** Phase 12 coverage — templated pieces of the content and their provenance (metadata only). */
+  pieces?: GuardContentPiece[];
 }
 
 /** Half-open character range in the inspected text (`contentText`). */
