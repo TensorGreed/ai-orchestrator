@@ -77,13 +77,18 @@ export function GuardSecurityPage({ projects, workflows, activeProjectId, role, 
   );
 }
 
+/** An incoming request content rules refused at the route: its execution id never ran, so there is no run to open. */
+function requestRefused(event: GuardEventView): boolean {
+  return event.placement === "request" && (event.verdictAction === "block" || event.verdictAction === "review" || event.verdictAction === "require_approval");
+}
+
 function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]; workflows: WorkflowListItem[]; onOpenRun?: (executionId: string) => void }) {
   const [days, setDays] = useState<number>(14);
   const [projectId, setProjectId] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [profileId, setProfileId] = useState("");
   // 12.6 — "gateway": MCP gateway server tool calls; "run": workflow runs. Phase 12 coverage — "response": what callers received.
-  const [placement, setPlacement] = useState<"" | "gateway" | "run" | "response">("");
+  const [placement, setPlacement] = useState<"" | "gateway" | "run" | "response" | "request">("");
   // 12.7 — eval runs and replay jobs (red-team suites among them) are left out unless asked for.
   const [includeEval, setIncludeEval] = useState(false);
   const [profiles, setProfiles] = useState<GuardProfileSummary[]>([]);
@@ -175,10 +180,11 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
         </label>
         <label>
           <span>Source</span>
-          <select value={placement} onChange={(event) => setPlacement(event.target.value as "" | "gateway" | "run" | "response")}>
+          <select value={placement} onChange={(event) => setPlacement(event.target.value as "" | "gateway" | "run" | "response" | "request")}>
             <option value="">Runs and gateway</option>
             <option value="run">Workflow runs</option>
             <option value="response">Responses to callers</option>
+            <option value="request">Incoming requests</option>
             <option value="gateway">MCP gateway calls</option>
           </select>
         </label>
@@ -307,7 +313,11 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                     </td>
                     <td>{event.evidence[0]?.evidence ? <code className="guard-evidence">{event.evidence[0].evidence}</code> : <span className="kb-subtle">—</span>}</td>
                     <td>
-                      {onOpenRun && event.placement !== "gateway" ? (
+                      {requestRefused(event) ? (
+                        <span className="kb-subtle" title={`Request ${event.executionId.slice(0, 8)} was refused before it ran`}>
+                          request refused, no run
+                        </span>
+                      ) : onOpenRun && event.placement !== "gateway" ? (
                         <button type="button" className="mcp-ov-link mono-cell" onClick={() => onOpenRun(event.executionId)}>
                           {event.executionId.slice(0, 8)}
                         </button>

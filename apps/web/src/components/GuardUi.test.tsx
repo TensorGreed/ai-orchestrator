@@ -252,6 +252,32 @@ describe("Security page", () => {
           skippedDetectors: [],
           createdAt: now,
           runSource: "eval"
+        },
+        {
+          id: "e2",
+          verdictId: "v2",
+          executionId: "req-87654321",
+          workflowId: "wf-1",
+          workflowName: "Support agent",
+          projectId: "default",
+          nodeId: "hook",
+          placement: "request",
+          channel: "trigger_input",
+          detectorId: "dlp.patterns",
+          category: "credential",
+          score: 1,
+          requestedAction: "block",
+          effectiveAction: "block",
+          verdictAction: "block",
+          shadow: false,
+          evidence: [{ evidence: "sk-l…" }],
+          profileId: "default",
+          profileVersion: 1,
+          profileHash: "h",
+          latencyMs: 1,
+          budgetExceeded: false,
+          skippedDetectors: [],
+          createdAt: now
         }
       ]
     } as Awaited<ReturnType<typeof api.fetchGuardEvents>>);
@@ -264,6 +290,9 @@ describe("Security page", () => {
     expect(within(screen.getByLabelText("Top detectors")).getByText("guard.injection.indirect")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "exec-123" }));
     expect(onOpenRun).toHaveBeenCalledWith("exec-12345678");
+    // A request refused at the route never ran: no run to open.
+    expect(screen.getByText("request refused, no run")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "req-8765" })).toBeNull();
 
     await userEvent.selectOptions(screen.getByLabelText("Workflow"), "wf-1");
     await waitFor(() => expect(api.fetchGuardStats).toHaveBeenLastCalledWith(expect.objectContaining({ workflowId: "wf-1" })));
@@ -346,6 +375,8 @@ describe("Profile editor and bindings", () => {
     render(<GuardSecurityPage projects={projects} workflows={workflows} />);
     await userEvent.selectOptions(await screen.findByLabelText("Source"), "response");
     await waitFor(() => expect(api.fetchGuardEvents).toHaveBeenLastCalledWith(expect.objectContaining({ placement: "response" })));
+    await userEvent.selectOptions(screen.getByLabelText("Source"), "request");
+    await waitFor(() => expect(api.fetchGuardEvents).toHaveBeenLastCalledWith(expect.objectContaining({ placement: "request" })));
   });
 
   it("keeps the built-in profile read-only", async () => {

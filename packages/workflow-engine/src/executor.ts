@@ -161,7 +161,7 @@ import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCat
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
-import { checkRunResponse } from "./response-boundary";
+import { checkRunResponse, sealRunReply } from "./response-boundary";
 import {
   approvalGateOutcome,
   approvalGatePause,
@@ -8107,7 +8107,7 @@ export async function executeWorkflow(
 ): Promise<WorkflowExecutionResult> {
   // Sandbox sessions started by this run count against its workflow's circuit breaker (see quickjs-sandbox.ts).
   const owner = (request.resumeState?.workflow ?? request.workflow)?.id;
-  const run = async (): Promise<WorkflowExecutionResult> => {
+  const execute = async (): Promise<WorkflowExecutionResult> => {
     // A sub-workflow run reuses its parent's dependencies: its nodes report nothing of their own.
     // Its template reads belong to its own nodes, never to the parent node that started it.
     if (dependencies.activityRecorder) {
@@ -8119,6 +8119,17 @@ export async function executeWorkflow(
     const result = await executeWorkflowRun(request, { ...dependencies, activityRecorder: recorder });
     attachNodeActivity(result.nodeResults, recorder);
     return result;
+  };
+  // Phase 12 coverage — a run with a response boundary is stamped whatever its status (a paused run's reply is sealed).
+  const run = async (): Promise<WorkflowExecutionResult> => {
+    const result = await execute();
+    if (!request.responseBoundary || request.resumeState) return result;
+    return await sealRunReply({
+      result,
+      boundary: request.responseBoundary,
+      guard: dependencies.guard,
+      ...(dependencies.logger ? { logger: dependencies.logger } : {})
+    });
   };
   return owner ? runWithSandboxOwner(`workflow:${owner}`, run) : run();
 }

@@ -216,8 +216,10 @@ import {
   RESPONSE_WITHHELD_MESSAGE,
   RESPONSE_WITHHELD_STATUS,
   TRIGGER_INPUT_REFUSED_MESSAGE,
+  callerErrorOf,
   contentFilterEnvelope,
   responseBoundaryForTrigger,
+  responseRulesApply,
   responseWasWithheld
 } from "@ai-orchestrator/shared";
 import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
@@ -3336,6 +3338,12 @@ export async function createApp(
       } else {
         app.log.info({}, "EXECUTION_DISPATCH=queue: runs are dispatched to the queue's workers");
       }
+    },
+    onRequiredInline: ({ pool, label, reason, inline, changed }) => {
+      if (inline) metricsService.recordDispatchInlineRun(label);
+      if (!changed) return;
+      if (inline) app.log.warn({ pool, reason, label }, "EXECUTION_DISPATCH=queue: runs that answer external callers under response rules execute inline until every queue worker of the pool supports them");
+      else app.log.info({ pool, label }, "EXECUTION_DISPATCH=queue: runs that answer external callers are dispatched to the queue's workers again");
     }
   });
   const runPersistedView = async (executionId: string): Promise<PersistedRun | null> => {
@@ -10082,6 +10090,7 @@ export async function createApp(
     dispatchPoolOf,
     openExecutionRelay,
     executionRelayWaitMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
+    responseRulesExist: async () => await guardService.mayCheckChannel("response"),
     announce
   });
 
@@ -11171,7 +11180,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       );
       if (result.status === "error") {
         reply.code(500);
-        return { error: result.error ?? "mcp_server trigger execution failed" };
+        // Phase 12 coverage — under response rules the error text (which can quote run data) stays in the history.
+        return responseRulesApply(result)
+          ? { error: callerErrorOf(result, "mcp_server trigger execution failed"), executionId }
+          : { error: result.error ?? "mcp_server trigger execution failed" };
       }
       // Phase 12 coverage (D7) — content rules withheld the response: an MCP tool error result, never the output.
       if (responseWasWithheld(result)) {
@@ -11852,7 +11864,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
         const defaultResponsePayload = {
           output: result.output ?? null,
-          error: result.status === "error" ? (result.error ?? "Workflow execution failed") : undefined,
+          // Phase 12 coverage — under response rules the error text (which can quote run data) stays in the history.
+          error: result.status === "error" ? callerErrorOf(result, "Workflow execution failed") : undefined,
+          ...(result.status === "error" && responseRulesApply(result) ? { executionId } : {}),
           idempotency: security.idempotencyEnabled
             ? {
                 key: idempotencyKey ?? null,

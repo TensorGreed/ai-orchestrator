@@ -422,6 +422,7 @@ function guardEventWhere(filters: GuardEventFilters): { where: string; params: u
   if (filters.placement === "gateway") clauses.push("placement = 'gateway'");
   if (filters.placement === "run") clauses.push("placement <> 'gateway'");
   if (filters.placement === "response") clauses.push("placement = 'response'");
+  if (filters.placement === "request") clauses.push("placement = 'request'");
   if (filters.excludeEvalRuns) clauses.push("(run_source IS NULL OR run_source <> 'eval')");
   return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
 }

@@ -42,6 +42,7 @@ import {
   retryAfterSeconds
 } from "./run-helpers.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
+import { maskRunEvent, maskRunNodeData, runViewHidesNodeData } from "./response-run-view.js";
 import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispatch.js";
 import { onceEachElicitationEvent, type RunEventName, type RunRelay } from "./services/run-event-relay.js";
 import { followExecution } from "./services/execution-follow.js";
@@ -116,6 +117,8 @@ export interface ExecutionRoutesDeps {
    */
   openExecutionRelay: (executionId: string, onEvent: (name: RunEventName, payload: Record<string, unknown>) => void) => Promise<RunRelay>;
   executionRelayWaitMs: number;
+  /** Phase 12 coverage — whether a stored rule set has a `response` channel (run views below builder hide node data). */
+  responseRulesExist: () => Promise<boolean>;
 }
 
 export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
@@ -147,7 +150,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     runDispatcher,
     dispatchPoolOf,
     openExecutionRelay,
-    executionRelayWaitMs
+    executionRelayWaitMs,
+    responseRulesExist
   } = deps;
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
@@ -464,7 +468,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const access = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
 
-    return access.run;
+    return runViewHidesNodeData(user.role, access.run.triggerType, await responseRulesExist()) ? maskRunNodeData(access.run) : access.run;
   });
 
   /**
@@ -480,10 +484,13 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const access = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const executionId = access.run.id;
+    const masked = runViewHidesNodeData(user.role, access.run.triggerType, await responseRulesExist());
 
     let closed = false;
-    const send = (event: string, payload: unknown) => {
+    const send = (event: string, raw: unknown) => {
       if (closed || reply.raw.writableEnded || reply.raw.destroyed) return;
+      const payload = masked ? maskRunEvent(event, raw) : raw;
+      if (payload === null && raw !== null) return;
       reply.raw.write(`event: ${event}\n`);
       for (const line of JSON.stringify(payload ?? null).split("\n")) reply.raw.write(`data: ${line}\n`);
       reply.raw.write("\n");

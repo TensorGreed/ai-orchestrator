@@ -206,6 +206,13 @@ describe("guard trace", () => {
     ]);
     expect(withResponse[1]!.verdicts[0]).toMatchObject({ channel: "response", placement: "response" });
     expect(placementLabel("response")).toBe("response check");
+    expect(placementLabel("request")).toBe("request check");
+    const request = { ...base, id: "e4", verdictId: "v4", nodeId: "known", placement: "request", channel: "trigger_input" } as GuardEventView;
+    const withRequest = traceFromEvents([request, response], new Set(["known"]));
+    expect(withRequest.map((node) => [node.nodeId, node.placement])).toEqual([
+      ["known", "request"],
+      ["known", "response"]
+    ]);
     expect(placementLabel("agent")).toBe("agent");
     expect(placementLabel("node")).toBe("Content Rules node");
     expect(placementLabel("unknown")).toBe("Content Rules node");

@@ -1,11 +1,13 @@
 import { profileChecksResponses, profileChecksTriggerInput, type ProvenanceLabel } from "@ai-orchestrator/guard-sdk";
 import {
   orderedProvenance,
+  pausedReplyOutput,
   withheldResponseOutput,
   type DataLabels,
   type McpToolPolicySubject,
   type ResponseBoundary,
   type ResponseCheckSummary,
+  type ResponseRulesStamp,
   type SecretReference,
   type WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
@@ -32,6 +34,10 @@ import {
  * the caller may see. A block withholds the output; `review` and `require_approval` withhold it too, since the caller
  * cannot wait for a person. The run still ends `success`; the rule event (placement `response`) records why.
  * Node results are left as they ran: they are the builder's record of each step, as on every other run.
+ *
+ * Every run with a boundary is stamped (`responseRules`), whatever its status, so the API can tell which replies must
+ * not carry unchecked run data: while rules apply, a paused run answers only that it waits (`sealRunReply`), and a
+ * failed run's error text is replaced at the route.
  */
 
 /** The dependencies' `mayCheckChannel` shortcut, failing open (absent or failing: the profiles are resolved). */
@@ -90,10 +96,10 @@ export interface ResponseCheckInput {
  * a detector failed) withholds the output: the boundary fails closed, like a latency budget set to fail closed.
  */
 export async function checkRunResponse(input: ResponseCheckInput): Promise<WorkflowExecutionResult> {
-  const { result } = input;
-  if (!input.boundary || !input.guard) return result;
-  if (result.status !== "success" && result.status !== "partial") return result;
-  if (result.output === undefined) return result;
+  const { boundary } = input;
+  if (!boundary) return input.result;
+  if (input.result.status !== "success" && input.result.status !== "partial") return input.result;
+  if (!input.guard) return { ...input.result, responseRules: { surface: boundary.surface, apply: false } };
   let profiles: ResolvedGuardProfile[];
   try {
     profiles = await responseProfilesFor(input.guard);
@@ -101,9 +107,11 @@ export async function checkRunResponse(input: ResponseCheckInput): Promise<Workf
     input.logger?.("The response check could not resolve its rule sets; the response is withheld", {
       error: error instanceof Error ? error.message : String(error)
     });
-    return withhold(result, { action: "block", withheld: true, transformed: false, reason: "block: the response check could not run" });
+    const failed = { ...input.result, responseRules: { surface: boundary.surface, apply: true } };
+    return withhold(failed, { action: "block", withheld: true, transformed: false, reason: "block: the response check could not run" });
   }
-  if (profiles.length === 0) return result;
+  const result: WorkflowExecutionResult = { ...input.result, responseRules: { surface: boundary.surface, apply: profiles.length > 0 } };
+  if (profiles.length === 0 || result.output === undefined) return result;
   const scope: GuardEvalScope = {
     guard: input.guard,
     // One memo per run (the API builds the dependencies per run): a clean check of the same content earlier is reused.
@@ -118,7 +126,7 @@ export async function checkRunResponse(input: ResponseCheckInput): Promise<Workf
   };
   // A webhook caller with a Webhook Response node receives only its headers and body; everything else receives the
   // whole output.
-  const sent = input.boundary.surface === "webhook" ? webhookResponseOf(result.output) : undefined;
+  const sent = boundary.surface === "webhook" ? webhookResponseOf(result.output) : undefined;
   const content = sent ? { headers: sent.headers, body: sent.body } : result.output;
   let checked: GuardCheckResult;
   try {
@@ -154,6 +162,36 @@ function stringHeaders(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return headers;
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) headers[key] = String(entry);
   return headers;
+}
+
+/**
+ * Stamps a run with a boundary that did not end in the run-end check (paused, failed, canceled, or rejected before it
+ * started). While response rules apply, a paused run's output becomes `pausedReplyOutput`: its approval message can
+ * quote any node's data and no check has seen it. The approver still reads the message from the paused run's record.
+ * A failed run keeps its error for the history; the API answers the caller a generic one. Runs already stamped (by
+ * `checkRunResponse`) are returned as they are. The result is changed in place so callers keyed on it keep working.
+ */
+export async function sealRunReply(input: {
+  result: WorkflowExecutionResult;
+  boundary: ResponseBoundary | undefined;
+  guard: GuardRuntimeDependencies | undefined;
+  logger?: (message: string, metadata?: unknown) => void;
+}): Promise<WorkflowExecutionResult> {
+  const { result, boundary } = input;
+  if (!boundary || result.responseRules) return result;
+  let apply: boolean;
+  try {
+    apply = (await responseProfilesFor(input.guard)).length > 0;
+  } catch (error) {
+    input.logger?.("The response check could not resolve its rule sets; the reply carries no run data", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    apply = true;
+  }
+  const stamp: ResponseRulesStamp = { surface: boundary.surface, apply };
+  result.responseRules = stamp;
+  if (apply && result.status === "waiting_approval") result.output = pausedReplyOutput(result.executionId);
+  return result;
 }
 
 function withhold(result: WorkflowExecutionResult, summary: ResponseCheckSummary): WorkflowExecutionResult {
@@ -201,7 +239,7 @@ export async function checkTriggerInput(input: {
     executionId: input.executionId,
     workflowId: input.workflowId,
     nodeId: input.nodeId,
-    placement: "response",
+    placement: "request",
     ...(input.logger ? { logger: input.logger } : {})
   };
   let checked: GuardCheckResult;

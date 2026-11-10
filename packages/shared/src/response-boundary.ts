@@ -73,3 +73,54 @@ export function contentFilterEnvelope(executionId: string | undefined): { error:
 export function responseWasWithheld(result: { responseCheck?: ResponseCheckSummary } | null | undefined): boolean {
   return result?.responseCheck?.withheld === true;
 }
+
+/**
+ * The engine's stamp on a run that carried a response boundary. `apply`: a rule set of the run checks responses (or
+ * the check could not tell, which counts as applying). While it applies, the caller never receives run data the check
+ * did not see: a paused run answers `pausedReplyOutput`, a failed run `RESPONSE_FAILED_MESSAGE`.
+ */
+export interface ResponseRulesStamp {
+  surface: ResponseBoundarySurface;
+  apply: boolean;
+}
+
+/** What the caller reads for a failed run while response rules apply (builders read the error in the run history). */
+export const RESPONSE_FAILED_MESSAGE = "The workflow run failed.";
+
+/** Whether response rules applied to this run's answer. */
+export function responseRulesApply(result: { responseRules?: ResponseRulesStamp } | null | undefined): boolean {
+  return result?.responseRules?.apply === true;
+}
+
+/** The error text an external caller may read: the run's own, or a generic one while response rules apply. */
+export function callerErrorOf(result: { error?: string; responseRules?: ResponseRulesStamp }, fallback: string): string {
+  return responseRulesApply(result) ? RESPONSE_FAILED_MESSAGE : (result.error ?? fallback);
+}
+
+/** The output of a run paused for approval while response rules apply: no approval message, no node data. */
+export function pausedReplyOutput(executionId: string | undefined): { waitingForApproval: true; executionId: string | null } {
+  return { waitingForApproval: true, executionId: executionId ?? null };
+}
+
+/**
+ * A result that should carry the stamp but does not (an older worker ran the run): withheld, failing closed. The
+ * output and error are replaced; node results stay for the run history.
+ */
+export function withholdUnstampedResult<T extends { status: string; output?: unknown; error?: string; responseCheck?: ResponseCheckSummary; responseRules?: ResponseRulesStamp }>(
+  result: T,
+  boundary: ResponseBoundary
+): T {
+  if (result.responseRules) return result;
+  const responseRules: ResponseRulesStamp = { surface: boundary.surface, apply: true };
+  if (result.status === "success" || result.status === "partial") {
+    return {
+      ...result,
+      output: withheldResponseOutput(),
+      responseCheck: { action: "block", withheld: true, transformed: false, reason: "block: the response was not checked" },
+      responseRules
+    };
+  }
+  if (result.status === "waiting_approval") return { ...result, output: pausedReplyOutput((result as { executionId?: string }).executionId), responseRules };
+  return { ...result, responseRules };
+}
+

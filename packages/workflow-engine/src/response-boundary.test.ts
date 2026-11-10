@@ -4,7 +4,7 @@ import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { createDefaultGuardRegistry, GuardRegistry, hashGuardProfile, parseGuardProfile, type GuardDetector, type GuardProfileInput } from "@ai-orchestrator/guard-sdk";
 import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
-import { RESPONSE_WITHHELD_MESSAGE, type Workflow, type WorkflowExecutionResult, type WorkflowNode } from "@ai-orchestrator/shared";
+import { RESPONSE_FAILED_MESSAGE, RESPONSE_WITHHELD_MESSAGE, callerErrorOf, type Workflow, type WorkflowExecutionResult, type WorkflowNode } from "@ai-orchestrator/shared";
 import { executeWorkflow, type ExecuteWorkflowRequest, type WorkflowExecutionDependencies } from "./executor";
 import { builtInGuardProfile, type GuardRunResolution, type GuardRuntimeDependencies, type GuardVerdictEvent, type ResolvedGuardProfile } from "./guard-runtime";
 import { checkRunResponse, checkTriggerInput } from "./response-boundary";
@@ -257,13 +257,49 @@ describe("response boundary at the end of a run", () => {
     expect(events).toHaveLength(1);
   });
 
-  it("leaves error runs alone", async () => {
+  it("stamps error runs (the API answers a generic error while rules apply) and keeps their error for the history", async () => {
     const { guard, events } = guardFor([responseRules()]);
-    const broken: Workflow = { ...echo, nodes: [node("in", "webhook_input"), node("bad", "code_node", { language: "javascript", code: "throw new Error('nope')" })], edges: [{ id: "e1", source: "in", target: "bad" }] };
+    const broken: Workflow = { ...echo, nodes: [node("in", "webhook_input"), node("bad", "stop_and_error", { message: "leak {{webhook.text}}" }), node("out", "output")], edges: [{ id: "e1", source: "in", target: "bad" }, { id: "e2", source: "bad", target: "out" }] };
     const failed = await run(broken, SECRET, guard);
     expect(failed.status).toBe("error");
     expect(failed.responseCheck).toBeUndefined();
+    expect(failed.responseRules).toEqual({ surface: "webhook", apply: true });
+    expect(failed.error).toContain(SECRET);
+    expect(callerErrorOf(failed, "x")).toBe(RESPONSE_FAILED_MESSAGE);
     expect(events).toEqual([]);
+    // Without response rules the caller reads the run's own error, as before.
+    const plain = await run(broken, SECRET, guardFor([builtInGuardProfile()]).guard);
+    expect(plain.responseRules).toEqual({ surface: "webhook", apply: false });
+    expect(callerErrorOf(plain, "x")).toBe(plain.error);
+    // A run without a boundary is never stamped.
+    expect((await run(broken, SECRET, guard, {})).responseRules).toBeUndefined();
+  });
+
+  it("seals a paused run's reply while rules apply: no approval message, no node data", async () => {
+    const gated: Workflow = {
+      ...echo,
+      nodes: [node("in", "webhook_input"), node("gate", "human_approval", { approvalMessage: "Approve: {{webhook.text}}", timeoutMinutes: 5 }), node("out", "output", { responseTemplate: "done" })],
+      edges: [
+        { id: "e1", source: "in", target: "gate" },
+        { id: "e2", source: "gate", target: "out" }
+      ]
+    };
+    const paused: string[] = [];
+    const withPause = (guard: GuardRuntimeDependencies) => ({ ...deps(guard), persistPausedExecution: async (state: { approvalMessage?: string }) => void paused.push(String(state.approvalMessage)) }) as WorkflowExecutionDependencies;
+    const { guard } = guardFor([responseRules()]);
+    const sealed = await executeWorkflow({ workflow: gated, executionId: "exec-p", webhookPayload: { text: `key ${SECRET}` }, triggerType: "webhook", responseBoundary: { surface: "webhook" } }, withPause(guard));
+    expect(sealed.status).toBe("waiting_approval");
+    expect(sealed.output).toEqual({ waitingForApproval: true, executionId: "exec-p" });
+    expect(sealed.responseRules).toEqual({ surface: "webhook", apply: true });
+    // The approver still reads the message from the paused run's record.
+    expect(paused.at(-1)).toContain(SECRET);
+    // Without response rules the reply is unchanged.
+    const open = await executeWorkflow({ workflow: gated, executionId: "exec-q", webhookPayload: { text: "hello" }, triggerType: "webhook", responseBoundary: { surface: "webhook" } }, withPause(guardFor([]).guard));
+    expect(open.output).toMatchObject({ waitingForApproval: true, approvalMessage: "Approve: hello" });
+    // The rule sets could not be resolved: sealed (fails closed).
+    const failing = guardFor([], { resolveRun: () => { throw new Error("store down"); } });
+    const closed = await executeWorkflow({ workflow: gated, executionId: "exec-r", webhookPayload: { text: "hello" }, triggerType: "webhook", responseBoundary: { surface: "webhook" } }, withPause(failing.guard));
+    expect(closed.output).toEqual({ waitingForApproval: true, executionId: "exec-r" });
   });
 
   it("reuses a clean check of the same content earlier in the run (memo) and records nothing new", async () => {
@@ -317,7 +353,7 @@ describe("incoming payload check (trigger_input)", () => {
   it("refuses a blocked payload, rewrites a redacted one and passes a clean one", async () => {
     const blocked = await check({ text: SECRET }, [triggerRules]);
     expect(blocked.outcome).toMatchObject({ refused: true, transformed: false });
-    expect(blocked.events[0]).toMatchObject({ channel: "trigger_input", placement: "response", nodeId: "in" });
+    expect(blocked.events[0]).toMatchObject({ channel: "trigger_input", placement: "request", nodeId: "in" });
     const redacted = await check({ text: `mail ${EMAIL}` }, [triggerRules]);
     expect(redacted.outcome?.refused).toBe(false);
     expect(redacted.outcome?.transformed).toBe(true);

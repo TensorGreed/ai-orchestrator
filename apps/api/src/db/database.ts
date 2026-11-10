@@ -1468,7 +1468,7 @@ export interface GuardEventFilters {
   since?: string;
   onlyFindings?: boolean;
   /** 12.6 — `gateway`: only MCP gateway server tool calls; `run`: only workflow runs. */
-  placement?: "gateway" | "run" | "response";
+  placement?: "gateway" | "run" | "response" | "request";
   /** 12.7 — leave out verdicts eval runs and replay jobs recorded (`run_source = 'eval'`). */
   excludeEvalRuns?: boolean;
 }
@@ -13874,6 +13874,7 @@ export class SqliteStore implements Store {
     if (filters.placement === "gateway") clauses.push("placement = 'gateway'");
     if (filters.placement === "run") clauses.push("placement <> 'gateway'");
     if (filters.placement === "response") clauses.push("placement = 'response'");
+    if (filters.placement === "request") clauses.push("placement = 'request'");
     if (filters.excludeEvalRuns) clauses.push("(run_source IS NULL OR run_source <> 'eval')");
     return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }

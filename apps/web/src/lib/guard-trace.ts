@@ -49,6 +49,8 @@ export function placementLabel(placement: string): string {
       return "agent";
     case "response":
       return "response check";
+    case "request":
+      return "request check";
     case "gateway":
       return "MCP gateway";
     case "retrieval":
@@ -357,9 +359,10 @@ export function traceFromEvents(events: GuardEventView[], known: Set<string>): G
   const byNode = new Map<string, Map<string, GuardEventView[]>>();
   const nodeOf = new Map<string, string>();
   for (const event of events) {
-    const response = event.placement === "response";
-    if (known.has(event.nodeId) && !response) continue;
-    const group = response ? `${event.nodeId}\u0000response` : event.nodeId;
+    // The checks at the route (`request`) and the run-end check (`response`) are never in a node's output.
+    const own = event.placement === "response" || event.placement === "request";
+    if (known.has(event.nodeId) && !own) continue;
+    const group = own ? `${event.nodeId}\u0000${event.placement}` : event.nodeId;
     nodeOf.set(group, event.nodeId);
     const verdicts = byNode.get(group) ?? new Map<string, GuardEventView[]>();
     const rows = verdicts.get(event.verdictId) ?? [];

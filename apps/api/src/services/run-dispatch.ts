@@ -12,7 +12,7 @@
  * that does not hold, or no consumer serves the pool, runs go inline and the gate reports why (DispatchGate.status).
  */
 import { createHash } from "node:crypto";
-import type { McpCassetteSource, McpReplayMode, Workflow, WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import { withholdUnstampedResult, type McpCassetteSource, type McpReplayMode, type Workflow, type WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { adoptOutputLabels, outputLabelsOf } from "@ai-orchestrator/workflow-engine";
 import type { ClusterInstanceRecord } from "../db/store.js";
 import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "../run-types.js";
@@ -161,6 +161,7 @@ export interface DispatchGateStatus {
 export class DispatchGate {
   private readonly cache = new Map<string, { queue: boolean; reason: string | null; atMs: number }>();
   private last: { fallback: boolean; reason: string | null } = { fallback: false, reason: null };
+  private readonly requiredInline = new Map<string, boolean>();
 
   constructor(
     private readonly options: {
@@ -168,6 +169,12 @@ export class DispatchGate {
       listInstances: () => Promise<ClusterInstanceRecord[]>;
       /** Called when the gate starts or stops falling back to inline (log once, metrics). */
       onChange?: (fallback: boolean, reason: string | null) => void;
+      /**
+       * Phase 12 coverage — a run that needs a capability (`required`) went inline while the pool's other runs may
+       * still queue. Called per run, with `label` naming the capabilities (`capability:<name>`); `changed` is true when
+       * this pool and capability set starts or stops going inline, for a log line. Never changes `status()`.
+       */
+      onRequiredInline?: (event: { pool: string; label: string; reason: string | null; inline: boolean; changed: boolean }) => void;
       cacheMs?: number;
       now?: () => number;
     }
@@ -187,7 +194,7 @@ export class DispatchGate {
     const cacheKey = required.length > 0 ? `${pool}\u0000${[...required].sort().join(",")}` : pool;
     const cached = this.cache.get(cacheKey);
     if (cached && now - cached.atMs < (this.options.cacheMs ?? DISPATCH_GATE_CACHE_MS)) {
-      this.record(!cached.queue, cached.reason);
+      this.recordFor(pool, required, cacheKey, cached);
       return cached.queue;
     }
     let decision: { queue: boolean; reason: string | null };
@@ -197,8 +204,22 @@ export class DispatchGate {
       decision = { queue: false, reason: `the instance registry could not be read (${error instanceof Error ? error.message : String(error)})` };
     }
     this.cache.set(cacheKey, { ...decision, atMs: now });
-    this.record(!decision.queue, decision.reason);
+    this.recordFor(pool, required, cacheKey, decision);
     return decision.queue;
+  }
+
+  /** The gate's status follows the pool's plain decisions; a run that needs a capability reports on its own. */
+  private recordFor(pool: string, required: readonly string[], cacheKey: string, decision: { queue: boolean; reason: string | null }): void {
+    if (required.length === 0) {
+      this.record(!decision.queue, decision.reason);
+      return;
+    }
+    const inline = !decision.queue;
+    const changed = (this.requiredInline.get(cacheKey) ?? false) !== inline;
+    this.requiredInline.set(cacheKey, inline);
+    if (inline || changed) {
+      this.options.onRequiredInline?.({ pool, label: `capability:${[...required].sort().join(",")}`, reason: decision.reason, inline, changed });
+    }
   }
 
   status(): DispatchGateStatus {
@@ -382,7 +403,10 @@ export class RunDispatcher {
       const end = await Promise.race(ending);
       if (end.kind === "result") {
         await this.deps.releaseResult?.(spec);
-        return resultFromQueue(end.result);
+        const answered = resultFromQueue(end.result);
+        // Phase 12 coverage — a worker that cannot check responses (an older build that joined after the gate looked)
+        // leaves the result unstamped: its output never reaches the caller.
+        return spec.run.responseBoundary ? withholdUnstampedResult(answered, spec.run.responseBoundary) : answered;
       }
       if (end.kind === "failed") throw new DispatchFailedError(spec.run.executionId, end.error);
       if (end.kind === "timeout") throw new DispatchTimeoutError(spec.run.executionId, timeoutMs);

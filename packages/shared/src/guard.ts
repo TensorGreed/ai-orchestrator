@@ -47,7 +47,7 @@ export type GuardProfileChannelValue = (typeof GUARD_PROFILE_CHANNEL_VALUES)[num
  * receives), `retrieval` (untrusted pieces and documents at the model
  * boundary) and `reveal` (tokens turned back into values).
  */
-export const GUARD_PLACEMENT_VALUES = ["node", "agent", "gateway", "response", "retrieval", "reveal"] as const;
+export const GUARD_PLACEMENT_VALUES = ["node", "agent", "gateway", "response", "retrieval", "reveal", "request"] as const;
 export type GuardPlacementValue = (typeof GUARD_PLACEMENT_VALUES)[number];
 
 /** A stored placement read back; unknown values read as `node`, as before. */

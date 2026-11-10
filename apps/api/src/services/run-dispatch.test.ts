@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { DataLabels, WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import { RESPONSE_WITHHELD_MESSAGE, type DataLabels, type WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { adoptOutputLabels, outputLabelsOf } from "@ai-orchestrator/workflow-engine";
 import type { ClusterInstanceRecord } from "../db/store.js";
 import {
@@ -25,6 +25,7 @@ import {
 } from "./run-dispatch.js";
 import { QueueFullError } from "./queue-service.js";
 import type { RunRelayEnd } from "./run-event-relay.js";
+import { MetricsService } from "./metrics-service.js";
 
 // The engine does not cap data classes, but it only adopts labels that validate: a test sets what a run produced.
 const produced = vi.hoisted(() => ({ labels: undefined as unknown }));
@@ -90,10 +91,25 @@ describe("decideDispatch (capability gate)", () => {
     expect(capabilitiesFor(spec())).toEqual([]);
     expect(capabilitiesFor(boundary)).toEqual([RESPONSE_BOUNDARY_CAPABILITY]);
     // The gate keeps one decision per pool and capability set.
-    const gate = new DispatchGate({ mode: "queue", listInstances: async () => [current, older] });
+    const reported: Array<{ label: string; inline: boolean; changed: boolean }> = [];
+    const changes: boolean[] = [];
+    const gate = new DispatchGate({
+      mode: "queue",
+      listInstances: async () => [current, older],
+      onChange: (fallback) => void changes.push(fallback),
+      onRequiredInline: ({ label, inline, changed }) => void reported.push({ label, inline, changed })
+    });
     expect(await gate.useQueue("default")).toBe(true);
     expect(await gate.useQueue("default", capabilitiesFor(boundary))).toBe(false);
+    expect(await gate.useQueue("default", capabilitiesFor(boundary))).toBe(false);
     expect(await gate.useQueue("default")).toBe(true);
+    // Runs that need the capability report on their own label; the pool's status (and its warning) never flips.
+    expect(gate.status()).toEqual({ mode: "queue", fallback: false, reason: null });
+    expect(changes).toEqual([]);
+    expect(reported).toEqual([
+      { label: `capability:${RESPONSE_BOUNDARY_CAPABILITY}`, inline: true, changed: true },
+      { label: `capability:${RESPONSE_BOUNDARY_CAPABILITY}`, inline: true, changed: false }
+    ]);
   });
 
   it("DispatchGate never reads the registry with inline, caches a decision, reports changes once, and falls back when the read fails", async () => {
@@ -230,6 +246,22 @@ describe("RunDispatcher", () => {
     expect(current.calls).toContain("enqueue:-");
   });
 
+  it("withholds a queued boundary run's result that no worker stamped (an older worker claimed it)", async () => {
+    const boundary: DispatchedRunSpec = { ...spec(), run: { ...spec().run, responseBoundary: { surface: "webhook" } } };
+    const capable = [instance({ capabilities: ["bus-v1", "fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY, RESPONSE_BOUNDARY_CAPABILITY] })];
+    const raw = { ...result, output: { result: "raw answer" } };
+    const unstamped = make({ queue: true, end: { kind: "result", result: raw }, instances: capable });
+    const answered = await unstamped.dispatcher.run(boundary, { pool: "default" });
+    expect(answered.output).toEqual({ error: RESPONSE_WITHHELD_MESSAGE, code: "content_filter" });
+    expect(answered.responseCheck).toMatchObject({ withheld: true });
+    const stamped = { ...raw, responseRules: { surface: "webhook" as const, apply: false } };
+    const checked = make({ queue: true, end: { kind: "result", result: stamped }, instances: capable });
+    expect((await checked.dispatcher.run(boundary, { pool: "default" })).output).toEqual({ result: "raw answer" });
+    // A run without a boundary is answered as it came.
+    const plain = make({ queue: true, end: { kind: "result", result: raw } });
+    expect((await plain.dispatcher.run(spec(), { pool: "default" })).output).toEqual({ result: "raw answer" });
+  });
+
   it("answers with the output labels a worker stored beside the result, and without them when it stored none", async () => {
     const labels = { provenance: ["untrusted_external", "sensitive"], dataClasses: ["email"], source: "propagated" } as const;
     const ran = { ...result };
@@ -307,5 +339,16 @@ describe("RunDispatcher", () => {
     const { dispatcher, calls } = make({ queue: true, duplicate: true });
     expect(await dispatcher.fire(spec(), { pool: "default", queueItemId: "trig:wf:n:abc" })).toEqual({ queued: true, deduplicated: true });
     expect(calls).toEqual([`enqueue:trig:wf:n:abc@${FIRE_DEDUPE_WINDOW_MS}`, "deduplicated:trig:wf:n:abc"]);
+  });
+});
+
+describe("inline runs that need a worker capability (metrics)", () => {
+  it("are counted per capability label, apart from the pool's fallback", () => {
+    const metrics = new MetricsService();
+    metrics.recordDispatchInlineRun(`capability:${RESPONSE_BOUNDARY_CAPABILITY}`);
+    metrics.recordDispatchInlineRun(`capability:${RESPONSE_BOUNDARY_CAPABILITY}`);
+    const text = metrics.formatPrometheus();
+    expect(text).toMatch(/_dispatch_inline_runs_total\{reason="capability:content-rules-response-v1"\} 2/);
+    expect(text).not.toMatch(/_dispatch_inline_fallback /);
   });
 });
