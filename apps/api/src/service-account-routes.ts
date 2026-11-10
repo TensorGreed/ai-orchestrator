@@ -8,6 +8,8 @@
  *   GET    /api/service-accounts/:id/keys            admin: its API keys
  *   POST   /api/service-accounts/:id/keys            admin: creates a key (shown once), optionally scoped
  *   DELETE /api/service-accounts/:id/keys/:keyId     admin: revokes a key
+ *   POST   /api/service-accounts/:id/keys/:keyId/rotate  admin: a new key (shown once) with the same name and scope;
+ *                                                    the old one works for the grace window ({graceHours}, 24 by default)
  *
  * A service account is a `users` row with kind `service`: it has a global role, project memberships (the project
  * member routes take its id), RBAC and audit like a person, but no usable password, and every sign-in path (password,
@@ -19,9 +21,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomBytes } from "node:crypto";
 import { nanoid } from "nanoid";
 import { z } from "zod";
-import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
+import { credentialRotateBodySchema, DEFAULT_PROJECT_ID, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
 import type { Store, StoredUserSummary } from "./db/store.js";
-import type { ApiKeyService } from "./services/api-key-service.js";
+import { apiKeyRotationRefusal, type ApiKeyService } from "./services/api-key-service.js";
 import type { AuditActor, AuditEventInput } from "./services/audit-service.js";
 import { SERVICE_ACCOUNT_EMAIL_DOMAIN, type SafeUser, type UserRole } from "./services/auth-service.js";
 import { apiKeyCreateBodySchema, resolveNewKeyScope, type KeyScope } from "./services/key-scopes.js";
@@ -56,6 +58,8 @@ export interface ServiceAccountRoutesDeps {
   ) => Promise<void>;
   /** The scope of the API key the request was made with, when it was made with one. */
   requestKeyScope: (request: FastifyRequest) => KeyScope | null;
+  /** The id of the API key the request was made with, when it was made with one. */
+  requestApiKeyId?: (request: FastifyRequest) => string | null;
   /** Removes the account's own MCP OAuth connections (and their tokens), as deleting a person does. */
   disconnectMcpOAuth: (userId: string) => Promise<unknown>;
   /**
@@ -65,8 +69,10 @@ export interface ServiceAccountRoutesDeps {
   requireStepUp?: (
     request: FastifyRequest,
     reply: FastifyReply,
-    action: "api_key.create" | "user.role_change" | "user.delete"
+    action: "api_key.create" | "api_key.rotate" | "user.role_change" | "user.delete"
   ) => Promise<boolean>;
+  /** 13.2 — SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS: every new or rotated key expires within this many days (0 = no limit). */
+  keyMaxAgeDays?: number;
 }
 
 /** The service account's name: the email's local part, without the random part after the last `+`. */
@@ -219,11 +225,34 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
     return { keys: await apiKeyService.list(account.id) };
   });
 
+  /**
+   * 13.2 — the API key a key request was made with: a service account's key cannot make or rotate keys of its own
+   * account (it would renew itself without a person), and a key made with a key ends no later than that key.
+   */
+  async function callingKey(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    user: SafeUser,
+    account: { id: string }
+  ): Promise<{ ok: true; key: { id: string; expiresAt: string | null } | null } | { ok: false }> {
+    const keyId = deps.requestApiKeyId?.(request) ?? null;
+    if (!keyId) return { ok: true, key: null };
+    if (user.id === account.id) {
+      reply.code(403);
+      reply.send({ error: "A service account's key cannot create or rotate keys of its own account; an admin does that" });
+      return { ok: false };
+    }
+    const key = await apiKeyService.get(keyId, user.id);
+    return { ok: true, key: key ? { id: key.id, expiresAt: key.expiresAt } : { id: keyId, expiresAt: new Date().toISOString() } };
+  }
+
   app.post<{ Params: { id: string }; Body: unknown }>("/api/service-accounts/:id/keys", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const account = await findAccount(request.params.id);
     if (!account) return notFound(reply);
+    const caller = await callingKey(request, reply, user, account);
+    if (!caller.ok) return reply;
     if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "api_key.create"))) return reply;
     const parsed = apiKeyCreateBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -244,7 +273,9 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
       userId: account.id,
       name: parsed.data.name,
       scopes: scope.scopes,
-      expiresInDays: parsed.data.expiresInDays ?? null
+      expiresInDays: parsed.data.expiresInDays ?? null,
+      notAfter: caller.key?.expiresAt ?? null,
+      maxAgeDays: deps.keyMaxAgeDays ?? 0
     });
     await audit(request, user, {
       category: "api_key",
@@ -252,11 +283,67 @@ export function registerServiceAccountRoutes(deps: ServiceAccountRoutesDeps): vo
       action: "create",
       resourceType: "api_key",
       resourceId: record.id,
-      metadata: { name: record.name, scopes: record.scopes, keyPrefix: record.keyPrefix, ownerKind: "service", serviceAccountId: account.id }
+      metadata: {
+        name: record.name,
+        scopes: record.scopes,
+        keyPrefix: record.keyPrefix,
+        ownerKind: "service",
+        serviceAccountId: account.id,
+        ...(caller.key ? { createdWithApiKeyId: caller.key.id } : {})
+      }
     });
     reply.code(201);
     // The only response that carries the key.
     return { key: plaintext, record };
+  });
+
+  app.post<{ Params: { id: string; keyId: string }; Body: unknown }>("/api/service-accounts/:id/keys/:keyId/rotate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "api_key.rotate"))) return reply;
+    const parsed = credentialRotateBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid rotation payload", details: parsed.error.issues };
+    }
+    const account = await findAccount(request.params.id);
+    if (!account) return notFound(reply);
+    const caller = await callingKey(request, reply, user, account);
+    if (!caller.ok) return reply;
+    const graceHours = parsed.data.graceHours ?? KEY_ROTATION_GRACE_HOURS.default;
+    const rotated = await apiKeyService.rotate({
+      id: request.params.keyId,
+      userId: account.id,
+      graceHours,
+      notAfter: caller.key?.expiresAt ?? null,
+      maxAgeDays: deps.keyMaxAgeDays ?? 0
+    });
+    if (!rotated.ok) {
+      const refusal = apiKeyRotationRefusal(rotated.reason);
+      reply.code(refusal.status);
+      return refusal.body;
+    }
+    await audit(request, user, {
+      category: "api_key",
+      eventType: "api_key.rotate",
+      action: "update",
+      resourceType: "api_key",
+      resourceId: rotated.previous.id,
+      metadata: {
+        name: rotated.record.name,
+        newKeyId: rotated.record.id,
+        keyPrefix: rotated.record.keyPrefix,
+        previousKeyPrefix: rotated.previous.keyPrefix,
+        graceHours,
+        previousExpiresAt: rotated.previous.expiresAt,
+        expiresAt: rotated.record.expiresAt,
+        ownerKind: "service",
+        serviceAccountId: account.id,
+        ...(caller.key ? { rotatedWithApiKeyId: caller.key.id } : {})
+      }
+    });
+    // The only response that carries the new key.
+    return { key: rotated.plaintext, record: rotated.record, previous: rotated.previous };
   });
 
   app.delete<{ Params: { id: string; keyId: string } }>("/api/service-accounts/:id/keys/:keyId", async (request, reply) => {

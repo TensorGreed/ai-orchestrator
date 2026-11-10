@@ -485,7 +485,8 @@ describe("a release rollback that brings back another trust setting is an admin'
     const v1 = await save(bound(trusted));
     const v2 = await save(releaseHookWorkflow("wf-roll", "two"));
     expect((await callAs(ctx, "POST", "/api/workflows/wf-roll/publish", admin.cookie, { version: v1 })).statusCode).toBe(200);
-    expect((await callAs(ctx, "POST", "/api/workflows/wf-roll/publish", builder.cookie, { version: v2 })).statusCode).toBe(200);
+    // Publishing v2 drops the admin's trust from production, so it is an admin's call too (release-trigger-trust.test.ts).
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-roll/publish", admin.cookie, { version: v2 })).statusCode).toBe(200);
     const refused = await callAs(ctx, "POST", "/api/workflows/wf-roll/rollback", builder.cookie, { version: v1, reason: "Back" });
     expect(refused.statusCode, refused.body).toBe(403);
     expect(refused.json<{ error: string }>().error).toContain("only an admin");

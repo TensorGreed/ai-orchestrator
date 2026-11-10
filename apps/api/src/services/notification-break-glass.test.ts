@@ -3,7 +3,7 @@
  * settings receives it once it picks the event, and the message names the stage and the admin (never a link).
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BREAK_GLASS_NOTIFICATION_OPTIONS, BREAK_GLASS_SIGN_IN_EVENT } from "@ai-orchestrator/shared";
+import { BREAK_GLASS_SIGN_IN_EVENT, NOTIFICATION_EVENT_LABELS, NOTIFICATION_EVENT_TYPES } from "@ai-orchestrator/shared";
 import { parseConfig } from "../config.js";
 import { NotificationService, type NotificationEvent } from "./notification-service.js";
 
@@ -103,6 +103,7 @@ describe("break-glass sign-in alerts", () => {
   });
 
   it("the settings picker offers it", () => {
-    expect(BREAK_GLASS_NOTIFICATION_OPTIONS).toEqual([{ value: "auth.break_glass_used", label: "Break-glass sign-in" }]);
+    expect(NOTIFICATION_EVENT_TYPES).toContain(BREAK_GLASS_SIGN_IN_EVENT);
+    expect(NOTIFICATION_EVENT_LABELS[BREAK_GLASS_SIGN_IN_EVENT]).toBe("Break-glass sign-in");
   });
 });
