@@ -55,7 +55,7 @@ import type {
   ReplayCaptureStatus,
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
-import type { RetentionRunView } from "@ai-orchestrator/shared";
+import type { RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
 import { parseStoredGatewayRateLimit, type BudgetScopeType, type McpGatewayRateLimit } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
@@ -75,11 +75,14 @@ import {
   toMcpToolPolicyEffect
 } from "./store-shared.js";
 import {
+  RELEASE_EVIDENCE_RUN_IDS_SQL,
   RETENTION_BATCH_ROWS,
   isRetentionTable,
+  retentionPolicyFromRow,
   retentionRunFromRow,
-  retentionWhere,
+  retentionScopeWhere,
   yieldToEventLoop,
+  type RetentionPolicyRow,
   type RetentionRunRow,
   type RetentionScope,
   type RetentionTable
@@ -6162,13 +6165,12 @@ export class SqliteStore implements Store {
     if (!Number.isFinite(limit) || limit <= 0) return 0;
     // Batches by rowid (every table here has one), each its own statement, so a large purge never holds the event loop
     // for longer than one batch: it yields between batches and other requests run in between.
-    const statement = this.db.prepare(
-      `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${retentionWhere(table, "?")} LIMIT ?)`
-    );
+    const where = retentionScopeWhere(table, scope, "sqlite");
+    const statement = this.db.prepare(`DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${where.sql} LIMIT ?)`);
     let total = 0;
     while (total < limit) {
       const batch = Math.min(RETENTION_BATCH_ROWS, limit - total);
-      const deleted = statement.run(scope.before, batch).changes;
+      const deleted = statement.run(...where.params, batch).changes;
       total += deleted;
       if (deleted < batch) break;
       await yieldToEventLoop();
@@ -6176,12 +6178,13 @@ export class SqliteStore implements Store {
     return total;
   }
 
-  async countRetentionDue(table: RetentionTable, input: { before: string; cap: number }): Promise<number> {
+  async countRetentionDue(table: RetentionTable, input: Parameters<Store["countRetentionDue"]>[1]): Promise<number> {
     if (!isRetentionTable(table)) throw new Error(`Not a retention table: ${String(table)}`);
-    const row = this.queryOne<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${table} WHERE ${retentionWhere(table, "?")} LIMIT ?)`,
-      [input.before, Math.max(0, Math.floor(input.cap))]
-    );
+    const where = retentionScopeWhere(table, input, "sqlite");
+    const row = this.queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${table} WHERE ${where.sql} LIMIT ?)`, [
+      ...where.params,
+      Math.max(0, Math.floor(input.cap))
+    ]);
     return row ? toNumber(row.n) : 0;
   }
 
@@ -6199,6 +6202,55 @@ export class SqliteStore implements Store {
        FROM retention_runs ORDER BY started_at DESC, id DESC LIMIT ?`,
       [Math.max(1, Math.min(500, Math.floor(limit)))]
     ).map(retentionRunFromRow);
+  }
+
+  async listRetentionPolicies(filter: { scopeId?: string } = {}): Promise<RetentionPolicyRecord[]> {
+    const rows =
+      filter.scopeId === undefined
+        ? this.queryAll<RetentionPolicyRow>(
+            `SELECT scope_type, scope_id, data_class, days, updated_by, updated_at FROM retention_policies
+             WHERE scope_type = 'project' ORDER BY scope_id, data_class`
+          )
+        : this.queryAll<RetentionPolicyRow>(
+            `SELECT scope_type, scope_id, data_class, days, updated_by, updated_at FROM retention_policies
+             WHERE scope_type = 'project' AND scope_id = ? ORDER BY data_class`,
+            [filter.scopeId]
+          );
+    return rows.map(retentionPolicyFromRow).filter((row): row is RetentionPolicyRecord => row !== null);
+  }
+
+  async setRetentionPolicies(input: Parameters<Store["setRetentionPolicies"]>[0]): Promise<RetentionPolicyRecord[]> {
+    const before = await this.listRetentionPolicies({ scopeId: input.scopeId });
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      for (const [dataClass, days] of Object.entries(input.values)) {
+        if (days === undefined) continue;
+        if (days === null) {
+          this.exec(`DELETE FROM retention_policies WHERE scope_type = 'project' AND scope_id = ? AND data_class = ?`, [input.scopeId, dataClass]);
+        } else {
+          this.exec(
+            `INSERT INTO retention_policies (id, scope_type, scope_id, data_class, days, updated_by, updated_at)
+             VALUES (?, 'project', ?, ?, ?, ?, ?)
+             ON CONFLICT (scope_type, scope_id, data_class) DO UPDATE SET days = excluded.days, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+            [randomUUID(), input.scopeId, dataClass, days, input.updatedBy, now]
+          );
+        }
+      }
+    });
+    this.persist();
+    return before;
+  }
+
+  async listExistingExecutionIds(executionIds: readonly string[]): Promise<string[]> {
+    const ids = [...new Set(executionIds)];
+    const found: string[] = [];
+    for (let index = 0; index < ids.length; index += 500) {
+      const chunk = ids.slice(index, index + 500);
+      for (const row of this.queryAll<{ id: string }>(`SELECT id FROM execution_history WHERE id IN (${chunk.map(() => "?").join(", ")})`, chunk)) {
+        found.push(toString(row.id));
+      }
+    }
+    return found;
   }
 
   async saveWorkflowExecutionState(input: {
@@ -7394,6 +7446,8 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM custom_roles WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM workflow_shares WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM secret_shares WHERE project_id = ?`, [id]);
+    // 13.3 — and its retention values (a re-created project inherits the deployment's).
+    this.exec(`DELETE FROM retention_policies WHERE scope_type = 'project' AND scope_id = ?`, [id]);
     this.exec(`DELETE FROM projects WHERE id = ?`, [id]);
     this.persist();
     return true;
@@ -10892,7 +10946,8 @@ export class SqliteStore implements Store {
     );
     const newest = new Set<string>();
     const newestFinished = new Set<string>();
-    const keep = new Set<string>();
+    // 13.3 — the eval runs behind a workflow's current or previous published version stay whatever their age.
+    const keep = new Set<string>(this.queryAll<{ replay_run_id: string }>(RELEASE_EVIDENCE_RUN_IDS_SQL).map((row) => toString(row.replay_run_id)));
     const doomed: string[] = [];
     for (const row of rows) {
       const id = toString(row.id);

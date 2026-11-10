@@ -105,7 +105,7 @@ import type {
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
-import type { RetentionRunView } from "@ai-orchestrator/shared";
+import type { RetentionDataClass, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
 import type { RetentionScope, RetentionTable } from "./retention-tables.js";
 
 /** The decision `decideApprovalRequest` records. */
@@ -2019,12 +2019,25 @@ export interface Store extends AiGatewayStore {
    * large purge never blocks it for long; Postgres skips rows another transaction holds (postgres/prune.ts).
    */
   pruneRetentionTable(table: RetentionTable, scope: RetentionScope): Promise<number>;
-  /** 13.3 — `table`'s rows aged before `before`, counted up to `cap` (the admin page's backlog). */
-  countRetentionDue(table: RetentionTable, input: { before: string; cap: number }): Promise<number>;
+  /** 13.3 — `table`'s rows aged before `before` (of one project, or but those of some: RetentionScope), counted up to `cap`. */
+  countRetentionDue(table: RetentionTable, input: Omit<RetentionScope, "limit"> & { cap: number }): Promise<number>;
   /** 13.3 — records one retention purge (counts only). */
   saveRetentionRun(run: RetentionRunView): Promise<void>;
   /** 13.3 — the latest retention purges, newest first. */
   listRetentionRuns(limit: number): Promise<RetentionRunView[]>;
+  /** 13.3 R1 — stored per-project retention values, all of them or one project's. */
+  listRetentionPolicies(filter?: { scopeId?: string }): Promise<RetentionPolicyRecord[]>;
+  /**
+   * 13.3 R1 — sets a project's values in one transaction: a number of days replaces the class's value, null removes it
+   * (the class inherits the deployment's again). Returns the project's values before the change.
+   */
+  setRetentionPolicies(input: {
+    scopeId: string;
+    values: Partial<Record<RetentionDataClass, number | null>>;
+    updatedBy: string | null;
+  }): Promise<RetentionPolicyRecord[]>;
+  /** 13.3 R1 — which of these run ids still have run history (a rule event or tool call may outlive its run). */
+  listExistingExecutionIds(executionIds: readonly string[]): Promise<string[]>;
   saveWorkflowExecutionState(input: {
     id: string;
     workflowId: string;

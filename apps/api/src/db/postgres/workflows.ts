@@ -358,6 +358,8 @@ export async function deleteProject(ctx: PgContext, id: string): Promise<boolean
     for (const table of ["user_project_roles", "custom_roles", "workflow_shares", "secret_shares"]) {
       await client.query(`DELETE FROM ${table} WHERE project_id = $1`, [id]);
     }
+    // 13.3 — and its retention values (a re-created project inherits the deployment's).
+    await client.query(`DELETE FROM retention_policies WHERE scope_type = 'project' AND scope_id = $1`, [id]);
     await client.query(`DELETE FROM projects WHERE id = $1`, [id]);
     return true;
   });

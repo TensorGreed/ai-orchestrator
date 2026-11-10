@@ -272,7 +272,9 @@ See [Audit bundles and signed run manifests](../security/audit-bundles.md).
 
 See [Data retention](../operations/data-retention.md).
 
-- `GET /api/admin/retention` (admin; read-only; `{ intervalMs, maxRowsPerTick, bounds: { minDays, maxDays }, backlogCap, classes: [{ class, label, what, setting, days, cutoff, backlog, backlogCapped }], lastRun, nextRunAt, runs: [{ id, startedAt, finishedAt, instanceId, reason, outcome, counts, capped, error }] }`; `days: 0` means kept forever, and `backlog` counts the rows due now up to `backlogCap`)
+- `GET /api/admin/retention` (admin; read-only; `{ intervalMs, maxRowsPerTick, bounds: { minDays, maxDays }, backlogCap, classes: [{ class, label, what, setting, days, cutoff, backlog, backlogCapped }], lastRun, nextRunAt, runs: [{ id, startedAt, finishedAt, instanceId, reason, outcome, counts, capped, error }], projectOverrides: [{ projectId, projectName, classes }] }`; `days: 0` means kept forever, and `backlog` counts the rows due now up to `backlogCap`, projects' own cutoffs included)
+- `GET /api/projects/:id/retention` (project members; `{ projectId, bounds: { minDays, maxDays }, classes: [{ class, label, what, deploymentDays, deploymentSetting, days, effectiveDays, clamped, updatedBy, updatedAt }], exemptions, canEdit }`; `days: null` inherits the deployment's value)
+- `PUT /api/projects/:id/retention` (admins and the project's admins; step-up when it is on; body `{ classes: { runs?, tool_calls?, rule_events?, agent_memory? } }` with a number of days, or `null` to inherit again; `400 retention_out_of_bounds` outside `RETENTION_MIN_DAYS` to `RETENTION_MAX_DAYS`; answers the updated view)
 
 ## Golden runs and replay
 

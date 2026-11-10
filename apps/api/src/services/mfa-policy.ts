@@ -87,6 +87,7 @@ export const STEP_UP_ACTIONS = {
   "sso_mapping.change": "Create or delete an SSO group mapping",
   "project_member.change": "Add or remove a project member",
   "custom_role.change": "Create, change or delete a custom role",
+  "project_retention.change": "Change a project's data retention",
   "notification_channel.change": "Create or delete a notification channel",
   "audit_export.change": "Create, change or delete an audit export destination or log stream"
 } as const;

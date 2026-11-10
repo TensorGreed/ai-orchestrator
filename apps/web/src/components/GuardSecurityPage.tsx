@@ -88,7 +88,7 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
   const [includeEval, setIncludeEval] = useState(false);
   const [profiles, setProfiles] = useState<GuardProfileSummary[]>([]);
   const [stats, setStats] = useState<GuardStats | null>(null);
-  const [events, setEvents] = useState<Array<GuardEventView & { workflowName?: string }>>([]);
+  const [events, setEvents] = useState<Array<GuardEventView & { workflowName?: string; runDeleted?: boolean }>>([]);
   const [total, setTotal] = useState(0);
   const [findingsOnly, setFindingsOnly] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -306,7 +306,11 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                     </td>
                     <td>{event.evidence[0]?.evidence ? <code className="guard-evidence">{event.evidence[0].evidence}</code> : <span className="kb-subtle">—</span>}</td>
                     <td>
-                      {onOpenRun && event.placement !== "gateway" ? (
+                      {event.runDeleted ? (
+                        <span className="kb-subtle" title={`Run ${event.executionId}`}>
+                          Run deleted by retention
+                        </span>
+                      ) : onOpenRun && event.placement !== "gateway" ? (
                         <button type="button" className="mcp-ov-link mono-cell" onClick={() => onOpenRun(event.executionId)}>
                           {event.executionId.slice(0, 8)}
                         </button>

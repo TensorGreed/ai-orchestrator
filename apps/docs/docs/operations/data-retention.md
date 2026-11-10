@@ -9,7 +9,8 @@ set, an instance deletes exactly what it deleted before 13.3, and nothing more. 
 applied now, and older `.env` files set it: see [Upgrading: usage retention](#upgrading-usage-retention) first.
 
 Admins see the values in effect, what is due now and the latest purges under **Settings > Access control > Data
-protection** (read-only), or from `GET /api/admin/retention`.
+protection** (read-only), or from `GET /api/admin/retention`. A project can keep some kinds of data for a different
+time than the deployment: see [Per-project retention](#per-project-retention).
 
 ## What each setting deletes
 
@@ -36,6 +37,9 @@ Never deleted by age:
 
 - golden runs and golden-set cases (they are deliberate copies; delete them yourself or with a data-subject delete);
 - paused runs and pending approvals;
+- the eval runs that back a workflow's current or previous published version (the replay runs named by its two latest
+  releases and by the release it publishes now), whatever `EVAL_RUN_RETENTION_DAYS` says. Older releases keep their
+  record; only their evidence run can go;
 - the content rules token vault, knowledge-base content, releases and budgets.
 
 ### Upgrading: usage retention
@@ -79,13 +83,49 @@ are due per class (counted up to 10 000).
 The audit log and log-stream delivery prunes keep their own timers (`AUDIT_LOG_PRUNE_INTERVAL_MS`,
 `LOG_STREAM_EVENT_PRUNE_INTERVAL_MS`) and also run on the leader only.
 
+## Per-project retention
+
+A project can set its own number of days for four kinds of data, shorter or longer than the deployment. A kind without
+a value of its own uses the deployment's setting, so a project that sets nothing behaves exactly as before.
+
+| Kind | Covers | Deployment setting it replaces |
+|---|---|---|
+| Runs | Run history, with its cassettes, decided approvals and finished queue jobs | `EXECUTION_HISTORY_RETENTION_DAYS` |
+| Tool calls | MCP tool-call telemetry | `EXECUTION_HISTORY_RETENTION_DAYS` |
+| Rule events | Content rules events | `EXECUTION_HISTORY_RETENTION_DAYS` |
+| Agent memory | Simple Memory sessions, agent artifacts, the session tool cache | `AGENT_MEMORY_RETENTION_DAYS` |
+
+Set the values under **Settings > Workspace > Data retention**, or with `PUT /api/projects/:id/retention`. Admins and
+the project's admins (`project:manage`) can change them; every member can read them. With step-up on
+(`STEP_UP_MAX_AGE_MINUTES`), a change needs a fresh MFA check. Each change writes a `project.retention.update` audit
+entry with the values before and after.
+
+- **Bounds.** A value must lie between `RETENTION_MIN_DAYS` and `RETENTION_MAX_DAYS`. `0` keeps that kind forever and
+  is allowed only when `RETENTION_MAX_DAYS` is unset. If the bounds change later, a stored value outside them is
+  treated as the nearest bound (keep forever becomes the maximum), and the project page says so.
+- **Kinds can differ.** Rule events or tool calls may be kept longer than runs, for example a year of rule events for
+  an audit while runs go after 30 days. They then outlive the run they came from: the Security page shows "Run deleted
+  by retention" in place of the run link.
+- **Which project a row belongs to.** Runs and queue jobs follow their workflow's project now, so a workflow moved to
+  another project takes its history to the new project's values. Tool calls, rule events, cassettes and approvals
+  keep the project they were recorded in. Agent memory belongs to the project in its session key; memory written
+  before sessions were scoped per project belongs to the project of the workflow whose default namespace it uses.
+  Rows of no project (gateway calls outside any toolset project, older memory under a custom namespace, tool calls
+  recorded before they carried a project) follow the deployment.
+- **How a purge applies it.** For each kind, a purge first takes each project with its own value at that project's
+  cutoff, then every other row at the deployment's. The row cap is per table across all of them. Shortening a project
+  from a year to a week deletes its backlog over several purges; the admin page's "Due now" counts it.
+
+The exemptions are the same as for the deployment: golden runs and cases, paused runs, pending approvals and release
+evidence are never deleted by age. Admins see the projects with values of their own on the Data protection page.
+
 ## Other settings
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `RETENTION_MAX_ROWS_PER_TICK` | 50 000 | Rows one purge deletes at most per table (1000 to 10 000 000). |
-| `RETENTION_MIN_DAYS` | 1 | The shortest retention a project may set, once per-project retention is available. |
-| `RETENTION_MAX_DAYS` | unset | The longest retention a project may set; unset means no limit. Startup fails if it is below `RETENTION_MIN_DAYS`. |
+| `RETENTION_MIN_DAYS` | 1 | The shortest retention a project may set ([per-project retention](#per-project-retention)). |
+| `RETENTION_MAX_DAYS` | unset | The longest retention a project may set; unset means no limit, and a project may then also keep data forever. Startup fails if it is below `RETENTION_MIN_DAYS`. |
 
 ## Disk space after a large purge
 

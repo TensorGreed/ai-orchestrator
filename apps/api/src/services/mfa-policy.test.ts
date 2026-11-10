@@ -180,6 +180,7 @@ describe("decideStepUp", () => {
       "sso_mapping.change",
       "project_member.change",
       "custom_role.change",
+      "project_retention.change",
       "notification_channel.change",
       "audit_export.change"
     ]);

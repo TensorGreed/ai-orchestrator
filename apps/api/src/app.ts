@@ -222,6 +222,7 @@ import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-ser
 import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerRetentionRoutes } from "./retention-routes.js";
+import { registerProjectRetentionRoutes } from "./project-retention-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
@@ -13985,6 +13986,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
   registerRetentionRoutes({ app, retention, requireRole: (request, reply, roles) => requireRole(request, reply, roles) });
+  registerProjectRetentionRoutes({
+    app,
+    store,
+    retention,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    projectAccess: (user, projectId) => runAccess.project(user, projectId, "workflow:read"),
+    canManageProject: (user, projectId) => rbacService.can(user, projectId, "project:manage"),
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
+    audit: (request, user, event) => audit(request, user, event)
+  });
   registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, audit: async (request, user, event) => await audit(request, user, event) });
 
   // Phase 15.1 — golden runs and replay.

@@ -6,7 +6,10 @@
  * one; `row` for the two agent-memory tables keyed by several columns (SQLite rowid, Postgres ctid).
  */
 import {
+  RETENTION_DATA_CLASSES,
   RETENTION_PURGE_CLASSES,
+  type RetentionDataClass,
+  type RetentionPolicyRecord,
   type RetentionPurgeClass,
   type RetentionRunOutcome,
   type RetentionRunReason,
@@ -43,12 +46,15 @@ export const RETENTION_TABLES = {
 export type RetentionTable = keyof typeof RETENTION_TABLES;
 
 /**
- * Which rows one prune call may delete: those aged before `before`, at most `limit` of them. Per-project scopes
- * (a project's own cutoff, or every project but those with their own) extend this type.
+ * Which rows one prune call may delete: those aged before `before`, at most `limit` of them. Per-project retention
+ * narrows it to one project's rows (`projectId`), or to every row but those of the listed projects
+ * (`excludeProjects`, rows of no project included); only tables in RETENTION_PROJECT_KEYS accept either.
  */
 export interface RetentionScope {
   before: string;
   limit: number;
+  projectId?: string;
+  excludeProjects?: readonly string[];
 }
 
 /** Rows one batch deletes at most; the store yields between batches. */
@@ -125,3 +131,117 @@ export function retentionRunFromRow(row: RetentionRunRow): RetentionRunView {
     error: row.error === null || row.error === undefined ? null : String(row.error)
   };
 }
+
+/**
+ * 13.3 R1 — how a retention table's rows belong to a project:
+ * - `project_id`: the row's own column (rows without one belong to no project and follow the deployment);
+ * - `workflow`: the project of the row's workflow, now (a workflow moved to another project takes its rows along);
+ * - `namespace`: agent memory, by session key. Keys written since sessions were scoped start with the project
+ *   (`project:<length>:<id>:`, run-scope.ts); older keys under a workflow's own default namespace (`<workflowId>:...`)
+ *   belong to that workflow's project. Any other older key belongs to no project.
+ */
+export const RETENTION_PROJECT_KEYS: Partial<Record<RetentionTable, "project_id" | "workflow" | "namespace">> = {
+  execution_history: "workflow",
+  mcp_tool_calls: "project_id",
+  guard_events: "project_id",
+  approval_requests: "project_id",
+  mcp_cassettes: "project_id",
+  mcp_gateway_approvals: "project_id",
+  execution_queue: "workflow",
+  execution_queue_dlq: "workflow",
+  session_memory: "namespace",
+  session_artifacts: "namespace",
+  session_tool_cache: "namespace"
+};
+
+/** A `retention_policies` row as either driver returns it. */
+export interface RetentionPolicyRow {
+  scope_type: unknown;
+  scope_id: unknown;
+  data_class: unknown;
+  days: unknown;
+  updated_by: unknown;
+  updated_at: unknown;
+}
+
+/** A stored per-project value; null for a row of another scope or an unknown class (never applied). */
+export function retentionPolicyFromRow(row: RetentionPolicyRow): RetentionPolicyRecord | null {
+  const dataClass = String(row.data_class);
+  const days = Number(row.days);
+  if (String(row.scope_type) !== "project" || !(RETENTION_DATA_CLASSES as readonly string[]).includes(dataClass) || !Number.isFinite(days)) return null;
+  return {
+    scopeType: "project",
+    scopeId: String(row.scope_id),
+    dataClass: dataClass as RetentionDataClass,
+    days: Math.max(0, Math.floor(days)),
+    updatedBy: row.updated_by === null || row.updated_by === undefined ? null : String(row.updated_by),
+    updatedAt: timestamp(row.updated_at)
+  };
+}
+
+/** The session-key prefix of a project's agent memory (run-scope.ts `projectSessionNamespace`). */
+export function projectNamespacePrefix(projectId: string): string {
+  return `project:${projectId.length}:${projectId}:`;
+}
+
+export type RetentionDialect = "sqlite" | "postgres";
+
+/**
+ * The WHERE clause for the rows of `table` that `scope` names (their age, the table's never-aged filter and, when the
+ * scope has one, the project condition), with its parameters. SQLite binds `?` in order; Postgres numbers from `$1`.
+ * A project condition on a table no project owns throws.
+ */
+export function retentionScopeWhere(
+  table: RetentionTable,
+  scope: Pick<RetentionScope, "before" | "projectId" | "excludeProjects">,
+  dialect: RetentionDialect
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [scope.before];
+  const clauses = [retentionWhere(table, dialect === "sqlite" ? "?" : "$1")];
+  const bind = (value: unknown): string => {
+    params.push(value);
+    return dialect === "sqlite" ? "?" : `$${params.length}`;
+  };
+  // A list is one parameter: JSON text on SQLite (json_each), text[] on Postgres.
+  const inList = (values: readonly string[]): string =>
+    dialect === "sqlite" ? `IN (SELECT value FROM json_each(${bind(JSON.stringify(values))}))` : `= ANY(${bind([...values])}::text[])`;
+  const startsWithAny = (column: string, prefixes: readonly string[]): string =>
+    dialect === "sqlite"
+      ? `EXISTS (SELECT 1 FROM json_each(${bind(JSON.stringify(prefixes))}) WHERE substr(${column}, 1, length(value)) = value)`
+      : `EXISTS (SELECT 1 FROM unnest(${bind([...prefixes])}::text[]) AS p(prefix) WHERE substr(${column}, 1, length(p.prefix)) = p.prefix)`;
+  // An older session key under a workflow's own default namespace, for a workflow of the projects `projectMatch` picks.
+  const legacyKeyOf = (projectMatch: string): string =>
+    `(namespace NOT LIKE 'project:%' AND EXISTS (SELECT 1 FROM workflows w WHERE w.project_id ${projectMatch} ` +
+    `AND substr(namespace, 1, length(w.id) + 1) = w.id || ':'))`;
+
+  const excluded = scope.excludeProjects ?? [];
+  if (scope.projectId === undefined && excluded.length === 0) return { sql: clauses[0], params };
+  const key = RETENTION_PROJECT_KEYS[table];
+  if (!key) throw new Error(`Rows of ${table} belong to no project`);
+  if (scope.projectId !== undefined) {
+    const projectId = scope.projectId;
+    if (key === "project_id") clauses.push(`project_id = ${bind(projectId)}`);
+    else if (key === "workflow") clauses.push(`workflow_id IN (SELECT id FROM workflows WHERE project_id = ${bind(projectId)})`);
+    else clauses.push(`(${startsWithAny("namespace", [projectNamespacePrefix(projectId)])} OR ${legacyKeyOf(`= ${bind(projectId)}`)})`);
+  }
+  if (excluded.length > 0) {
+    if (key === "project_id") clauses.push(`(project_id IS NULL OR NOT (project_id ${inList(excluded)}))`);
+    else if (key === "workflow") clauses.push(`workflow_id NOT IN (SELECT id FROM workflows WHERE project_id ${inList(excluded)})`);
+    else clauses.push(`NOT ${startsWithAny("namespace", excluded.map(projectNamespacePrefix))} AND NOT ${legacyKeyOf(inList(excluded))}`);
+  }
+  return { sql: clauses.join(" AND "), params };
+}
+
+/**
+ * 13.3 R1 — the eval runs that back a workflow's current or previous published version, which the eval-run purge keeps
+ * whatever their age: the replay runs named by each workflow's two latest releases, and by the release of the version
+ * it publishes now. Holds on both dialects.
+ */
+export const RELEASE_EVIDENCE_RUN_IDS_SQL = `
+  SELECT replay_run_id FROM (
+    SELECT replay_run_id, ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY published_at DESC, id DESC) AS position
+    FROM workflow_releases WHERE replay_run_id IS NOT NULL
+  ) ranked WHERE position <= 2
+  UNION
+  SELECT r.replay_run_id FROM workflow_releases r JOIN workflows w ON w.id = r.workflow_id AND w.published_version = r.version
+  WHERE r.replay_run_id IS NOT NULL`;
