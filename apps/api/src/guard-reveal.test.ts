@@ -333,7 +333,7 @@ describe("Reveal and service accounts", () => {
     const { account, key, keyId } = await serviceAccount(context, admin);
     const { token, workflow } = await setUp(context, admin, { rules: { ...rulesFor({ roles: ["admin"] }), id: "bots" } });
     // A token issued before tokens were scoped to a project (a signed-in admin's run could reveal it).
-    const legacy = new GuardService(context.store, new SecretService(context.store, context.config.SECRET_MASTER_KEY_BASE64));
+    const legacy = new GuardService(context.store, new SecretService(context.store, context.config.SECRET_MASTER_KEY_BASE64), { autoApply: false });
     await legacy.vault.put({ token: "tok_email_LLLLLLLLLLLLLLLL", dataClass: "email", value: "legacy@example.org", createdAt: new Date().toISOString() });
 
     const byRole = (await viaKey(context, key, `/api/workflows/${workflow.id}/execute`, { user_prompt: `Mail ${token}` })).json<RunResult>();
