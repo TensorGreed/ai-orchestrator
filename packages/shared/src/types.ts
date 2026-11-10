@@ -1242,6 +1242,8 @@ export interface McpToolPolicySubject {
   /** MCP client credential id and name, for `source: "client"`. */
   clientId?: string;
   clientName?: string;
+  /** For `source: "user"`: the API key the run was started with, when it was (its limits are already in `role`). */
+  apiKeyId?: string;
 }
 
 /** Admin override of a registry tool's read-only classification. */

@@ -186,9 +186,12 @@ describe("API key requests", () => {
     const recorded = booted.contexts.filter((entry) => entry.url === "/api/workflows").at(-1)?.context;
     expect(recorded).toEqual({
       credential: "api_key",
-      user: { id: user.id, email: "bot@example.com", role: "builder" },
+      user: { id: user.id, email: "bot@example.com", role: "builder", apiKeyId: record.id },
       apiKeyId: record.id,
-      keyScopes: ["legacy-scope"]
+      keyScopes: ["legacy-scope"],
+      // 13.2 (L3a) — the parsed scope: a legacy string enforces nothing.
+      keyScope: { roleCeiling: null, projects: null, legacy: ["legacy-scope"] },
+      serviceAccount: false
     });
   });
 });

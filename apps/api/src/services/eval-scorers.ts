@@ -64,6 +64,8 @@ export interface EvalJudgeContext {
   /** The user who started the run (id and email must still match); a `secretRef` must still be usable by them in the workflow's project. */
   actorUserId: string | null;
   actorEmail: string | null;
+  /** 13.2 — the API key that started the run: the judge's secret check then uses that key's limits. */
+  actorApiKeyId?: string | null;
   /** The case's execution, when it ran one. */
   executionId?: string;
 }

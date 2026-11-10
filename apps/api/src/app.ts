@@ -126,7 +126,7 @@ import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
 import { EVAL_RUN_STALE_MS, EvalService, REPLAY_JOB_MAX_EXECUTIONS_DEFAULT, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
 import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
-import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
+import { AuthService, isServiceAccountEmail, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { RunWriteChains } from "./services/run-write-chains.js";
 import { NonRetryableQueueError, QueueFullError, QueueProducer, QueueService, type QueueJobContext } from "./services/queue-service";
@@ -134,6 +134,8 @@ import { AppLifecycle } from "./services/app-lifecycle.js";
 import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError, resumeEffectFreeNodeId } from "./db/queue-leases.js";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
 import { ApiKeyService } from "./services/api-key-service";
+import type { RequestAuthContext } from "./services/session-service.js";
+import { apiKeyCreateBodySchema, isStructuredScope, keyBoundUser, keyMayCallRoute, keyMayManageAccount, parseKeyScopes, resolveNewKeyScope, scopedKeyUser } from "./services/key-scopes.js";
 import { MfaService } from "./services/mfa-service";
 import {
   SAML_REQUEST_COOKIE_NAME,
@@ -215,6 +217,7 @@ import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recorded
 import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
+import { registerServiceAccountRoutes } from "./service-account-routes.js";
 import { asRecord, isExecutionTimeoutAbort, normalizeExecutionTimeoutMs, normalizeSessionId, retryAfterSeconds } from "./run-helpers.js";
 import { registerReleaseRoutes } from "./release-routes.js";
 import { registerGateAdmissionRoutes } from "./gate-admission-routes.js";
@@ -3467,12 +3470,8 @@ export async function createApp(
   /** True only for a request that authenticates (API key or session) as an admin; any failure counts as not admin. */
   const requestIsAdmin = async (request: FastifyRequest): Promise<boolean> => {
     try {
-      const apiKeyUser = await authenticateApiKey(request.headers as Record<string, unknown>);
-      if (apiKeyUser) return apiKeyUser.role === "admin";
-      const sessionId = getSessionIdFromRequest(request);
-      if (!sessionId) return false;
-      const user = await authService.getSessionUser(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
-      return user?.role === "admin";
+      // 13.2 — the shared credential path: an API key acts with its capped role (a key limited to projects is never admin).
+      return (await resolveRequestAuth(request))?.user.role === "admin";
     } catch {
       return false;
     }
@@ -4206,6 +4205,9 @@ export async function createApp(
     return await runScope.canUseSecretFor(scope, user, secretId);
   };
 
+  /** 13.2 — see keyBoundUser: a run decided or started with an API key keeps that key's limits. */
+  const backgroundRunUser = async (userId: string, apiKeyId?: string | null): Promise<SafeUser | null> => await keyBoundUser(store, userId, apiKeyId);
+
   // Phase 9.5 / 15.2 — the LLM judge for judge scorers (faithfulness,
   // answer_relevance, llm_judge). EVAL_JUDGE_ENABLED=false turns every judge
   // call off. A judge authenticates with its scorer's secretRef, which must
@@ -4222,7 +4224,7 @@ export async function createApp(
     const context = judgeInput.context;
     const workflow = context ? await store.getWorkflow(context.workflowId) : null;
     const projectId = workflow?.projectId ?? DEFAULT_PROJECT_ID;
-    const actor = context?.actorUserId && context.actorEmail ? await evalPolicyActor(context.actorUserId, context.actorEmail) : null;
+    const actor = context?.actorUserId && context.actorEmail ? await evalPolicyActor(context.actorUserId, context.actorEmail, context.actorApiKeyId) : null;
     if (judgeInput.secretRef) {
       if (!workflow || !actor || !await canUseJudgeSecret(actor, judgeInput.secretRef.secretId, workflow)) {
         throw new Error(`the judge's secret ${judgeInput.secretRef.secretId} cannot be used by the user who started this run in this workflow's project`);
@@ -4299,11 +4301,11 @@ export async function createApp(
     );
 
   // The starting user, found by id; a deleted user whose email a new account
-  // took over is not the same user.
-  const evalPolicyActor = async (userId: string, email: string): Promise<SafeUser | null> => {
-    const found = await store.getUserById(userId);
+  // took over is not the same user. A run an API key started keeps that key's limits.
+  const evalPolicyActor = async (userId: string, email: string, apiKeyId?: string | null): Promise<SafeUser | null> => {
+    const found = await backgroundRunUser(userId, apiKeyId);
     if (!found || found.email.toLowerCase() !== email.toLowerCase() || !MCP_POLICY_ROLES.includes(found.role as McpPolicyRole)) return null;
-    return { id: found.id, email: found.email, role: found.role as UserRole };
+    return found;
   };
 
   /**
@@ -4337,8 +4339,8 @@ export async function createApp(
    * the workflow (the same rule as queued runs). The run then executes with
    * their policy and project scope (run-scope.ts).
    */
-  const evalRunActor = async (userId: string, email: string, workflowId: string, permission: "workflow:read" | "workflow:execute" | "workflow:write" = "workflow:execute"): Promise<SafeUser | null> => {
-    const actor = await evalPolicyActor(userId, email);
+  const evalRunActor = async (userId: string, email: string, workflowId: string, permission: "workflow:read" | "workflow:execute" | "workflow:write" = "workflow:execute", apiKeyId?: string): Promise<SafeUser | null> => {
+    const actor = await evalPolicyActor(userId, email, apiKeyId);
     // Phase 15.6 — a guard policy simulation replays in projects its starter can read (models from the tape, no side effects).
     if (permission === "workflow:read") return actor && (await runAccess.workflow(actor, workflowId, "workflow:read")).ok ? actor : null;
     if (!actor || !(await runAccess.workflow(actor, workflowId, "workflow:execute")).ok) return null;
@@ -4350,7 +4352,7 @@ export async function createApp(
     if (!workflow) {
       return { output: null, error: `Workflow not found: ${input.workflowId}` };
     }
-    const policyActor = await evalRunActor(input.triggeredByUserId, input.triggeredBy, workflow.id);
+    const policyActor = await evalRunActor(input.triggeredByUserId, input.triggeredBy, workflow.id, "workflow:execute", input.triggeredByApiKeyId);
     if (!policyActor) {
       return { output: null, error: `The user who started this run (${input.triggeredBy}) can no longer run this workflow.` };
     }
@@ -4483,7 +4485,7 @@ export async function createApp(
       baselineFor: async (recording) => await replayService.baselineFor(recording),
       priceCall: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
       // Phase 15.3 — an inline or overridden candidate keeps needing workflow:write for every case.
-      actorFor: async (userId, email, workflowId, permission) => await evalRunActor(userId, email, workflowId, permission)
+      actorFor: async (userId, email, workflowId, permission, apiKeyId) => await evalRunActor(userId, email, workflowId, permission, apiKeyId)
     },
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
@@ -5064,9 +5066,12 @@ export async function createApp(
         const timedOut = decided === "timeout";
         const actorUserId = timedOut ? request.requestedByUserId : request.decidedByUserId;
         const actorEmail = timedOut ? request.requestedBy : request.decidedBy;
+        // 13.2 — a decision (or a run) made with an API key resumes with that key's limits, and is refused like a
+        // deleted user once the key is revoked or has expired.
+        const actorApiKeyId = timedOut ? request.requestedByApiKeyId : request.decidedByApiKeyId;
         if (actorUserId) {
-          const actorRecord = await store.getUserById(actorUserId);
-          actor = actorRecord && actorRecord.email === actorEmail ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
+          const actorRecord = await backgroundRunUser(actorUserId, actorApiKeyId);
+          actor = actorRecord && actorRecord.email === actorEmail ? actorRecord : null;
           const check = actor
             ? await approvalPersonCheck(request, actor, async (user, workflowId, permission) => await runAccess.run(user, { id: workflowId, workflowId }, permission), {
                 skipSelfApproval: true,
@@ -5237,8 +5242,9 @@ export async function createApp(
       await store.getWorkflow(workflow.id)
         ? (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok
         : (await runAccess.project(user, workflow.projectId, "workflow:execute")).ok,
+    // 13.2 — people only: a service account is never an approver.
     listUsers: async () =>
-      (await store.listUsers()).map((entry) => ({
+      (await store.listUsers({ kind: "human" })).map((entry) => ({
         id: entry.id,
         email: entry.email,
         role: entry.role === "admin" || entry.role === "builder" || entry.role === "operator" ? entry.role : "viewer"
@@ -5342,7 +5348,7 @@ export async function createApp(
     if (asked !== undefined && asked !== "draft") {
       return { ok: false, status: 400, error: "channel can only be draft" };
     }
-    const viaKey = Boolean(await authenticateApiKey(request.headers as Record<string, unknown>));
+    const viaKey = (await resolveRequestAuth(request))?.credential === "api_key";
     if (!viaKey) return { channel: "draft" };
     if (asked === undefined) return { channel: "production" };
     const write = await runAccess.workflow(user, workflowId, "workflow:write");
@@ -5401,12 +5407,17 @@ export async function createApp(
     overrides?: Partial<AuditActor>
   ): AuditActor => {
     const { ipAddress, userAgent } = extractIpAndUa(request);
+    // 13.2 — a request authenticated with an API key records the key's id (and whether a service account owns it).
+    const auth = sessionService.getRequestAuth(request);
+    const keyFields: Partial<AuditActor> =
+      auth?.credential === "api_key" ? { apiKeyId: auth.apiKeyId, ...(auth.serviceAccount ? { serviceAccount: true } : {}) } : {};
     return {
       userId: user?.id ?? null,
       email: user?.email ?? null,
-      type: request.headers["authorization"] ? "api_key" : "user",
+      type: auth ? (auth.credential === "api_key" ? "api_key" : "user") : request.headers["authorization"] ? "api_key" : "user",
       ipAddress,
       userAgent,
+      ...keyFields,
       ...overrides
     };
   };
@@ -5539,32 +5550,56 @@ export async function createApp(
     }
   };
 
-  /** The user, key id and scopes a request's API key names, or null. */
+  /**
+   * The user a request's API key acts as, with the key's id and scope, or null. 13.2: the owner's role is capped by
+   * the key's role ceiling (and at builder for a key limited to projects), and the project list rides on the user
+   * (`projectScope`) so every RBAC check honours it. A key without a structured scope acts with its owner's role.
+   */
   const authenticateApiKeyCredential = async (
     headers: Record<string, unknown>
-  ): Promise<{ user: SafeUser; apiKeyId: string; keyScopes: string[] } | null> => {
+  ): Promise<Omit<Extract<RequestAuthContext, { credential: "api_key" }>, "credential"> | null> => {
     const token = extractBearerToken(headers);
     if (!token) return null;
     const verified = await apiKeyService.verify(token);
     if (!verified) return null;
-    const user = await store.getUserById(verified.userId);
-    if (!user) return null;
+    const owner = await store.getUserById(verified.userId);
+    if (!owner) return null;
+    const keyScope = parseKeyScopes(verified.scopes);
     return {
-      user: {
-        id: user.id,
-        email: user.email,
-        role:
-          user.role === "admin" || user.role === "builder" || user.role === "operator" || user.role === "viewer"
-            ? user.role
-            : "viewer"
-      },
+      user: scopedKeyUser({ id: owner.id, email: owner.email, role: safeUserRole(owner.role), ...(owner.kind === "service" ? { serviceAccount: true as const } : {}) }, keyScope, verified.keyId),
       apiKeyId: verified.keyId,
-      keyScopes: verified.scopes
+      keyScopes: verified.scopes,
+      keyScope,
+      serviceAccount: owner.kind === "service"
     };
   };
 
-  const authenticateApiKey = async (headers: Record<string, unknown>): Promise<SafeUser | null> =>
-    (await authenticateApiKeyCredential(headers))?.user ?? null;
+  /**
+   * 13.2 — the one place a request's credential is resolved: an API key (Authorization: Bearer) first, then the
+   * session cookie. The result is recorded as the request's sign-in context, so it is resolved once per request and
+   * later checks read it (`sessionService.getRequestAuth`). requireRole, requestIsAdmin and executeChannelFor all go
+   * through here. Null when the request carries no valid credential.
+   */
+  const resolveRequestAuth = async (request: {
+    cookies: Record<string, string | undefined>;
+    headers: Record<string, unknown>;
+  }): Promise<RequestAuthContext | null> => {
+    const known = sessionService.getRequestAuth(request);
+    if (known) return known;
+    const apiKey = await authenticateApiKeyCredential(request.headers);
+    if (apiKey) {
+      const context: RequestAuthContext = { credential: "api_key", ...apiKey };
+      sessionService.setRequestAuth(request, context);
+      return context;
+    }
+    const sessionId = getSessionIdFromRequest(request);
+    if (!sessionId) return null;
+    const resolved = await authService.getSessionAuth(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
+    if (!resolved) return null;
+    const context: RequestAuthContext = { credential: "session", user: resolved.user, session: resolved.session };
+    sessionService.setRequestAuth(request, context);
+    return context;
+  };
 
   const setSessionCookie = (reply: FastifyReply, sessionId: string) => {
     reply.setCookie(config.SESSION_COOKIE_NAME, sessionId, {
@@ -5590,43 +5625,44 @@ export async function createApp(
   };
 
   const requireRole = async (
-    request: { cookies: Record<string, string | undefined>; headers: Record<string, unknown> },
+    request: {
+      cookies: Record<string, string | undefined>;
+      headers: Record<string, unknown>;
+      method?: string;
+      routeOptions?: { url?: string };
+    },
     reply: FastifyReply,
     allowedRoles: UserRole[]
   ): Promise<SafeUser | null> => {
-    // Allow API key authentication (Phase 5.1) as a first-class alternative to session cookies.
-    const apiKey = await authenticateApiKeyCredential(request.headers as Record<string, unknown>);
-    if (apiKey) {
-      // 13.2 — the request's sign-in context, for checks that run after this one.
-      sessionService.setRequestAuth(request, { credential: "api_key", ...apiKey });
-      if (!hasRequiredRole(apiKey.user, allowedRoles)) {
-        deny(reply, 403, "Insufficient permissions");
-        return null;
+    // An API key (Phase 5.1) or the session cookie; 13.2: resolved once per request through resolveRequestAuth.
+    const auth = await resolveRequestAuth(request);
+    if (!auth) {
+      if (getSessionIdFromRequest(request)) {
+        clearSessionCookie(reply);
+        deny(reply, 401, "Session expired or invalid");
+      } else {
+        deny(reply, 401, "Authentication required");
       }
-      return apiKey.user;
-    }
-
-    const sessionId = getSessionIdFromRequest(request);
-    if (!sessionId) {
-      deny(reply, 401, "Authentication required");
       return null;
     }
 
-    const resolved = await authService.getSessionAuth(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
-    if (!resolved) {
-      clearSessionCookie(reply);
-      deny(reply, 401, "Session expired or invalid");
+    // 13.2 — a key limited to projects calls only the routes that check projects (key-scopes.ts); the rest fail closed.
+    if (auth.credential === "api_key" && !keyMayCallRoute(auth.keyScope, request.method, request.routeOptions?.url)) {
+      deny(reply, 403, "This API key is limited to projects and cannot call this route");
       return null;
     }
-    const user = resolved.user;
-    sessionService.setRequestAuth(request, { credential: "session", user, session: resolved.session });
+    // 13.2 — a scoped key cannot change its owner's account security (MFA): that needs a session or an unscoped key.
+    if (auth.credential === "api_key" && !keyMayManageAccount(auth.keyScope, request.method, request.routeOptions?.url)) {
+      deny(reply, 403, "A scoped API key cannot change its owner's account security; sign in, or use an unscoped key");
+      return null;
+    }
 
-    if (!hasRequiredRole(user, allowedRoles)) {
+    if (!hasRequiredRole(auth.user, allowedRoles)) {
       deny(reply, 403, "Insufficient permissions");
       return null;
     }
 
-    return user;
+    return auth.user;
   };
 
   const requirePermission = async (
@@ -5651,6 +5687,10 @@ export async function createApp(
     // was deleted meanwhile, refuse rather than create a fresh account by email.
     if (input.userId && !storeUser) {
       throw new Error("The account this sign-in belongs to no longer exists");
+    }
+    // 13.2 — a service account never signs in (SSO, LDAP or otherwise); only its API keys authenticate.
+    if (storeUser?.kind === "service" || (!storeUser && isServiceAccountEmail(normalizedEmail))) {
+      throw new Error("Service accounts cannot sign in");
     }
     let created = false;
     const ssoRoles = input.provider === "saml" ? samlService : input.provider === "ldap" ? ldapService : oidcService;
@@ -7619,7 +7659,8 @@ export async function createApp(
       return;
     }
     const mfa = await mfaService.status(user.id);
-    const memberships = await rbacService.listUserProjects(user.id);
+    // 13.2 — a key limited to projects sees only those memberships.
+    const memberships = (await rbacService.listUserProjects(user.id)).filter((m) => !user.projectScope || user.projectScope.includes(m.projectId));
     return { user, mfa, memberships };
   });
 
@@ -7715,11 +7756,7 @@ export async function createApp(
   // Phase 5.1 — API keys
   // ---------------------------------------------------------------------------
 
-  const apiKeyCreateSchema = z.object({
-    name: z.string().min(1).max(120),
-    scopes: z.array(z.string().min(1).max(64)).optional(),
-    expiresInDays: z.number().int().nonnegative().optional()
-  });
+  const apiKeyCreateSchema = apiKeyCreateBodySchema;
 
   app.get("/api/auth/api-keys", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
@@ -7738,11 +7775,34 @@ export async function createApp(
       reply.code(400);
       return { error: "Invalid API key payload", details: parsed.error.issues };
     }
+    // 13.2 — the ceiling may not exceed the owner's role, and a key made with a scoped key reaches no further than it.
+    const owner = await store.getUserById(user.id);
+    const auth = sessionService.getRequestAuth(request);
+    // 13.2 — a service account's keys come only from the admin route (POST /api/service-accounts/:id/keys), so an
+    // admin decides each one and its expiry; its own keys cannot mint more.
+    if (owner?.kind === "service" || user.serviceAccount) {
+      reply.code(403);
+      return { error: "A service account's API keys are created by an admin under Settings > Service Accounts, not with its own key" };
+    }
+    // 13.2 — a key made with another key ends no later than the calling key.
+    const callerKey =
+      auth?.credential === "api_key" ? (await apiKeyService.list(user.id)).find((entry) => entry.id === auth.apiKeyId) ?? null : null;
+    const scope = await resolveNewKeyScope(parsed.data, {
+      ownerRole: safeUserRole(owner?.role ?? user.role),
+      callerRole: user.role,
+      callerScope: auth?.credential === "api_key" ? auth.keyScope : null,
+      projectExists: async (projectId) => projectId === DEFAULT_PROJECT_ID || Boolean(await store.getProject(projectId))
+    });
+    if (!scope.ok) {
+      reply.code(scope.status);
+      return { error: scope.error };
+    }
     const { plaintext, record } = await apiKeyService.create({
       userId: user.id,
       name: parsed.data.name,
-      scopes: parsed.data.scopes,
-      expiresInDays: parsed.data.expiresInDays ?? null
+      scopes: scope.scopes,
+      expiresInDays: parsed.data.expiresInDays ?? null,
+      notAfter: callerKey?.expiresAt ?? null
     });
     await audit(request, user, {
       category: "api_key",
@@ -7750,7 +7810,13 @@ export async function createApp(
       action: "create",
       resourceType: "api_key",
       resourceId: record.id,
-      metadata: { name: record.name, scopes: record.scopes, keyPrefix: record.keyPrefix }
+      metadata: {
+        name: record.name,
+        scopes: record.scopes,
+        keyPrefix: record.keyPrefix,
+        ownerKind: owner?.kind ?? "human",
+        ...(callerKey ? { createdWithApiKeyId: callerKey.id } : {})
+      }
     });
     return {
       key: plaintext,
@@ -7761,6 +7827,12 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/auth/api-keys/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    // 13.2 — a scoped key may revoke itself, and no other key (its owner's or, for an admin, anyone's).
+    const auth = sessionService.getRequestAuth(request);
+    if (auth?.credential === "api_key" && isStructuredScope(auth.keyScope) && auth.apiKeyId !== request.params.id) {
+      reply.code(403);
+      return { error: "A scoped API key can revoke only itself; sign in, or use an unscoped key" };
+    }
     const ok = await apiKeyService.revoke(request.params.id, user.role === "admin" ? undefined : user.id);
     if (!ok) {
       reply.code(404);
@@ -13879,14 +13951,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       throw new Error(await releaseService.productionRefusal(payload.workflowId) ?? `Workflow not found: ${payload.workflowId}`);
     }
     // A job a user enqueued runs only if that user may still run the
-    // workflow: a revoked membership or a deleted account stops it.
-    // Retrying cannot fix that, so the job goes straight to the DLQ.
+    // workflow: a revoked membership or a deleted account stops it, and so
+    // does a revoked or expired key when an API key queued it (the job runs
+    // with that key's limits). Retrying cannot fix that, so the job goes
+    // straight to the DLQ.
     let enqueuedBy: SafeUser | null = null;
     if (payload.enqueuedByUserId) {
-      const found = await store.getUserById(payload.enqueuedByUserId);
-      enqueuedBy = found ? { id: found.id, email: found.email, role: found.role as UserRole } : null;
+      enqueuedBy = await backgroundRunUser(payload.enqueuedByUserId, payload.enqueuedByApiKeyId);
       if (!enqueuedBy || !(await runAccess.workflow(enqueuedBy, workflow.id, "workflow:execute")).ok) {
-        const reason = enqueuedBy ? "no_execute_permission" : "user_not_found";
+        const reason = enqueuedBy ? "no_execute_permission" : payload.enqueuedByApiKeyId ? "user_or_key_not_found" : "user_not_found";
         await auditService.record({
           category: "workflow",
           eventType: "queue.job_refused",
@@ -14153,6 +14226,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             // Who queued it comes from the session, never from the body.
             triggeredBy: user.email,
             enqueuedByUserId: user.id,
+            ...(user.apiKeyId ? { enqueuedByApiKeyId: user.apiKeyId } : {}),
             executionTimeoutMs: typeof body.executionTimeoutMs === "number" ? body.executionTimeoutMs : undefined,
             customData: (() => {
               const custom = body.customData && typeof body.customData === "object" && !Array.isArray(body.customData)
@@ -14296,6 +14370,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   // ── Phase 7.3: User management (admin only) ─────────────────────────
 
+  registerServiceAccountRoutes({
+    app,
+    store,
+    apiKeyService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event),
+    requestKeyScope: (request) => {
+      const auth = sessionService.getRequestAuth(request);
+      return auth?.credential === "api_key" ? auth.keyScope : null;
+    },
+    disconnectMcpOAuth: async (userId) => await mcpOAuthService.disconnectUserEverywhere(userId)
+  });
+
   registerUserInviteRoutes({
     app,
     store,
@@ -14315,11 +14402,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const invite = invites.get(u.id);
       return { id: u.id, email: u.email, role: u.role, createdAt: u.createdAt, ...(invite ? { pending: true, inviteExpiresAt: invite.expiresAt } : {}) };
     };
+    // 13.2 — people by default; `?kind=service` lists the service accounts.
+    const kind = asRecord(request.query).kind === "service" ? "service" : "human";
     if (pageRequest) {
-      const { items, total } = await store.listUsersPage({ limit: pageRequest.pageSize, offset: pageRequest.offset });
+      const { items, total } = await store.listUsersPage({ limit: pageRequest.pageSize, offset: pageRequest.offset, kind });
       return pageEnvelope(items.map(userView), total, pageRequest);
     }
-    const users = await store.listUsers();
+    const users = await store.listUsers({ kind });
     return { users: users.map(userView) };
   });
 

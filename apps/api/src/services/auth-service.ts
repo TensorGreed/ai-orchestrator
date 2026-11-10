@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
-import type { LoginSession, Store } from "../db/store.js";
+import type { LoginSession, Store, StoredUserKind } from "../db/store.js";
 import { SessionService, type SessionRequestInfo } from "./session-service.js";
 
 export type UserRole = "admin" | "builder" | "operator" | "viewer";
@@ -9,7 +9,32 @@ export interface SafeUser {
   id: string;
   email: string;
   role: UserRole;
+  /**
+   * 13.2 — set only when the request is authenticated by an API key limited to projects (key-scopes.ts): the projects
+   * it may reach. RBAC checks (rbacService.can) refuse every other project.
+   */
+  projectScope?: string[];
+  /**
+   * 13.2 — the API key the request was authenticated with. Work that runs later on this user's behalf (an approval
+   * it decided, a queued run, an eval or replay job) records it, and runs again with that key's limits.
+   */
+  apiKeyId?: string;
+  /** 13.2 — set when the user is a service account (acting through one of its keys): it is never an approver. */
+  serviceAccount?: true;
 }
+
+/** 13.2 — a person, or a service account (a machine identity that only uses API keys). */
+export type UserKind = StoredUserKind;
+
+/** Service accounts get an email in this reserved domain (RFC 2606), so no person or SSO login can claim it. */
+export const SERVICE_ACCOUNT_EMAIL_DOMAIN = "service.invalid";
+
+export function isServiceAccountEmail(email: string): boolean {
+  return email.trim().toLowerCase().endsWith(`@${SERVICE_ACCOUNT_EMAIL_DOMAIN}`);
+}
+
+/** The password hash a service account is stored with: not `salt:hash`, so no password ever matches it. */
+export const UNUSABLE_PASSWORD_HASH = "!";
 
 const validRoles: UserRole[] = ["admin", "builder", "operator", "viewer"];
 
@@ -108,6 +133,9 @@ export class AuthService {
 
   async register(input: { email: string; password: string; role: UserRole }): Promise<SafeUser> {
     const email = normalizeEmail(input.email);
+    if (isServiceAccountEmail(email)) {
+      throw new Error(`Emails in @${SERVICE_ACCOUNT_EMAIL_DOMAIN} are reserved for service accounts`);
+    }
     const existing = await this.store.getUserByEmail(email);
     if (existing) {
       throw new Error("An account with this email already exists");
@@ -127,7 +155,8 @@ export class AuthService {
   async verifyCredentials(emailInput: string, password: string): Promise<SafeUser> {
     const email = normalizeEmail(emailInput);
     const user = await this.store.getUserByEmail(email);
-    if (!user || !verifyPassword(password, user.passwordHash)) {
+    // A service account never signs in (its hash matches no password; the kind check makes that explicit).
+    if (!user || user.kind === "service" || !verifyPassword(password, user.passwordHash)) {
       throw new Error("Invalid email or password");
     }
     return this.toSafeUser(user);
@@ -174,7 +203,8 @@ export class AuthService {
     }
 
     const user = await this.store.getUserById(session.userId);
-    if (!user) {
+    // 13.2 — service accounts have no sign-in sessions; a row naming one is not honoured.
+    if (!user || user.kind === "service") {
       return null;
     }
 

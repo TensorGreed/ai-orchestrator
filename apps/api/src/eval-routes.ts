@@ -524,6 +524,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       ...(scorers.data ? { scorers: scorers.data } : {}),
       triggeredBy: user.email,
       triggeredByUserId: user.id,
+      ...(user.apiKeyId ? { triggeredByApiKeyId: user.apiKeyId } : {}),
       ...(mcpOptions.data.record ? { recordMcp: true } : {}),
       ...(mcpOptions.data.replay ? { replayMcp: mcpOptions.data.replay } : {}),
       ...(guardProfile ? { guardProfile } : {})

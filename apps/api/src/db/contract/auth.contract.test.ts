@@ -41,6 +41,50 @@ describeStoreContract("store contract: users and auth", (ctx) => {
     expect(await store.getUserById("u1")).toMatchObject({ role: "viewer", passwordHash: "h2" });
   });
 
+  it("13.2 service accounts: created with kind service and an unusable hash, listed by kind, updated, never re-kinded by saveUser", async () => {
+    const store = ctx.store();
+    const person = await user(store, "u1");
+    expect(person).toMatchObject({ id: "u1" });
+    expect(await store.getUserById("u1")).toMatchObject({ kind: "human", description: null, createdBy: null });
+    await tick();
+    const created = await store.createServiceAccount({ id: "svc1", email: "Bot@Service.Invalid", role: "operator", description: "nightly", createdBy: "u1" });
+    expect(created).toMatchObject({ id: "svc1", email: "bot@service.invalid", role: "operator", kind: "service", description: "nightly", createdBy: "u1" });
+    expect(created).not.toHaveProperty("passwordHash");
+    expect(created?.createdAt).toMatch(ISO);
+    expect(await store.getUserById("svc1")).toMatchObject({ kind: "service", passwordHash: "!" });
+    expect(await store.getUserByEmail("BOT@service.invalid")).toMatchObject({ id: "svc1", kind: "service" });
+    // The email is taken (by anyone): null, nothing written.
+    expect(await store.createServiceAccount({ id: "svc2", email: "bot@service.invalid", role: "viewer", description: null, createdBy: null })).toBeNull();
+    expect(await store.createServiceAccount({ id: "svc3", email: "u1@example.com", role: "viewer", description: null, createdBy: null })).toBeNull();
+    expect(await store.getUserById("svc2")).toBeNull();
+
+    expect(await store.countUsers()).toBe(2);
+    expect((await store.listUsers()).map((u) => u.id)).toEqual(["svc1", "u1"]);
+    expect((await store.listUsers({ kind: "human" })).map((u) => u.id)).toEqual(["u1"]);
+    expect(await store.listUsers({ kind: "service" })).toEqual([expect.objectContaining({ id: "svc1", kind: "service", description: "nightly" })]);
+    expect(await store.listUsersPage({ limit: 10, offset: 0, kind: "service" })).toMatchObject({ total: 1, items: [{ id: "svc1" }] });
+    expect(await store.listUsersPage({ limit: 10, offset: 0, kind: "human" })).toMatchObject({ total: 1, items: [{ id: "u1" }] });
+    expect((await store.listUsersPage({ limit: 1, offset: 1 })).total).toBe(2);
+
+    expect(await store.updateServiceAccount("svc1", { role: "builder" })).toMatchObject({ role: "builder", description: "nightly" });
+    expect(await store.updateServiceAccount("svc1", { description: null })).toMatchObject({ role: "builder", description: null });
+    expect(await store.updateServiceAccount("svc1", { description: "again" })).toMatchObject({ description: "again" });
+    // People are not service accounts.
+    expect(await store.updateServiceAccount("u1", { role: "admin" })).toBeNull();
+    expect(await store.getUserById("u1")).toMatchObject({ role: "builder" });
+    expect(await store.updateServiceAccount("missing", { role: "admin" })).toBeNull();
+
+    // saveUser on an existing row keeps its kind, description and creator.
+    await store.saveUser({ id: "svc1", email: "bot@service.invalid", passwordHash: "!", role: "viewer" });
+    expect(await store.getUserById("svc1")).toMatchObject({ kind: "service", role: "viewer", description: "again", createdBy: "u1" });
+
+    // Deleting the creator leaves the account.
+    expect(await store.deleteUser("u1")).toBe(true);
+    expect(await store.getUserById("svc1")).toMatchObject({ kind: "service", createdBy: "u1" });
+    expect(await store.deleteUser("svc1")).toBe(true);
+    expect(await store.listUsers({ kind: "service" })).toEqual([]);
+  });
+
   it("deleteUser removes the user's sessions, API keys, MFA secret, SSO identities and project roles", async () => {
     const store = ctx.store();
     await user(store, "u1");
