@@ -9373,6 +9373,11 @@ export async function createApp(
       reply.code(400);
       return { error: "role must be project_admin, editor, viewer, or custom" };
     }
+    // 13.3 — a role that grants a deployment-wide permission (data-subject requests) is an admin's to hand out.
+    if (role === "custom" && parsed.data.customRoleId && user.role !== "admin" && (await rbacService.grantsDeploymentPermission(parsed.data.customRoleId))) {
+      reply.code(403);
+      return { error: "Only an admin can give a role that grants a deployment-wide permission." };
+    }
     try {
       await rbacService.addMember({
         userId: parsed.data.userId,
@@ -14193,6 +14198,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     isLeader: () => leaderElection.isLeader(),
     dueDays: subjectRequestSettings.dueDays,
     exportTtlHours: subjectRequestSettings.exportTtlHours,
+    exportMaxBytes: subjectRequestSettings.exportMaxBytes,
     audit: async (event) => {
       await auditService.record(event);
       await logStreamingService.dispatchAudit(event);
@@ -14217,6 +14223,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     available: captureAvailable,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    canManage: async (user) => await rbacService.canDeployment(user, "data_subject:manage"),
     runAccess,
     audit: async (request, user, event) => await audit(request, user, event)
   });

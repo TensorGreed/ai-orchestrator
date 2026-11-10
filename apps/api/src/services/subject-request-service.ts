@@ -73,6 +73,14 @@ const DEFAULT_POLL_MS = 15_000;
 const DEFAULT_SWEEP_MS = 10 * 60_000;
 const DEFAULT_LEASE_TTL_MS = 5 * 60_000;
 const ORPHAN_REFS_PER_SWEEP = 5_000;
+/** Errors in a row before a request fails (a passing page resets the count). */
+export const SUBJECT_REQUEST_MAX_ERRORS = 3;
+/** Times an export is started before the request fails (a crash while building it cannot loop). */
+export const SUBJECT_EXPORT_MAX_ATTEMPTS = 3;
+/** Found entries an export reads between lease renewals. */
+const EXPORT_RENEW_EVERY = 25;
+/** Default byte budget of an export's rows (SUBJECT_EXPORT_MAX_BYTES). */
+export const SUBJECT_EXPORT_DEFAULT_MAX_BYTES = 209_715_200;
 const MAX_ERROR_LENGTH = 500;
 
 /** The data-subject lookup's own kinds (paged by the store's subjectTextPage), then the request-only kinds. */
@@ -122,8 +130,14 @@ interface LookupState {
   rowsSearched: number;
   possible: number;
   truncated: boolean;
+  /** Why the export holds fewer rows than were found: the row limit, or the byte budget. */
+  truncatedBy?: "rows" | "bytes";
   found: FoundRow[];
   classesTried?: string[];
+  /** Errors in a row (reset by a passing page). */
+  errors: number;
+  /** Times the export was started. */
+  exportAttempts: number;
 }
 
 /** Sealing with the master key (SecretService). */
@@ -140,6 +154,8 @@ export interface SubjectRequestServiceOptions {
   isLeader: () => boolean;
   dueDays: number;
   exportTtlHours: number;
+  /** Most bytes of rows in one export (uncompressed); more are left out and the manifest says so. */
+  exportMaxBytes?: number;
   audit?: (event: AuditEventInput) => Promise<unknown>;
   notify?: (event: NotificationEvent) => Promise<void>;
   logger?: { info(fields: Record<string, unknown>, message: string): void; warn(fields: Record<string, unknown>, message: string): void };
@@ -266,7 +282,7 @@ function parseField(text: string | null): unknown {
 }
 
 function emptyState(): LookupState {
-  return { phase: "references", kindIndex: 0, cursor: null, rowsSearched: 0, possible: 0, truncated: false, found: [] };
+  return { phase: "references", kindIndex: 0, cursor: null, rowsSearched: 0, possible: 0, truncated: false, found: [], errors: 0, exportAttempts: 0 };
 }
 
 function readState(progress: Record<string, unknown>): LookupState {
@@ -279,6 +295,9 @@ function readState(progress: Record<string, unknown>): LookupState {
     rowsSearched: typeof progress.rowsSearched === "number" ? progress.rowsSearched : 0,
     possible: typeof progress.possible === "number" ? progress.possible : 0,
     truncated: progress.truncated === true,
+    ...(progress.truncatedBy === "rows" || progress.truncatedBy === "bytes" ? { truncatedBy: progress.truncatedBy } : {}),
+    errors: typeof progress.errors === "number" ? progress.errors : 0,
+    exportAttempts: typeof progress.exportAttempts === "number" ? progress.exportAttempts : 0,
     found: Array.isArray(progress.found)
       ? (progress.found as FoundRow[]).filter((row) => row && typeof row.id === "string" && (SUBJECT_ROW_KINDS as readonly string[]).includes(row.k))
       : [],
@@ -559,8 +578,12 @@ export class SubjectRequestService {
       }
       const pending = await store.listSubjectRequests({ limit: 50, statuses: ["searching"] });
       // Oldest first.
+      let first = true;
       for (const record of pending.reverse()) {
         if (this.stopped) break;
+        // Keeps the lease (and leadership) between requests, not only between scan pages.
+        if (!first && !(await this.renew(lease))) break;
+        first = false;
         await this.process(record, async () => await this.renew(lease));
       }
     } finally {
@@ -584,15 +607,20 @@ export class SubjectRequestService {
       this.options.logger?.warn({ error: this.message(error) }, "Could not expire data-subject exports");
     }
     try {
+      // A restore leaves exports out: a `ready` request without one can never be downloaded.
+      const orphaned = await store.expireReadySubjectRequestsWithoutExport(now.toISOString());
+      if (orphaned.length > 0) this.options.logger?.info({ requests: orphaned.length }, "Expired data-subject requests whose export is gone");
+    } catch (error) {
+      this.options.logger?.warn({ error: this.message(error) }, "Could not expire data-subject requests without an export");
+    }
+    try {
       const pruned = await store.pruneOrphanSubjectRefs(ORPHAN_REFS_PER_SWEEP);
       if (pruned > 0) this.options.logger?.info({ pruned }, "Removed subject references whose rows are gone");
     } catch (error) {
       this.options.logger?.warn({ error: this.message(error) }, "Could not remove orphaned subject references");
     }
     try {
-      const open = await store.listSubjectRequests({ limit: 500, statuses: ["searching", "ready"] });
-      for (const record of open) {
-        if (record.dueNotifiedAt || Date.parse(record.dueAt) >= now.getTime()) continue;
+      for (const record of await store.listOverdueSubjectRequests(now.toISOString(), 500)) {
         const claimed = await store.updateSubjectRequest(record.id, { dueNotifiedAt: now.toISOString(), updatedAt: now.toISOString() }, record.status);
         if (!claimed) continue;
         await this.options.notify?.({
@@ -603,7 +631,7 @@ export class SubjectRequestService {
           subjectRequest: { requestId: record.id, type: record.type, subjectKind: record.subjectKind, status: record.status, dueAt: record.dueAt }
         });
         await this.options.audit?.({
-          category: "system",
+          category: "data_protection",
           eventType: "data_subject.request_overdue",
           action: "notify",
           actor: { type: "system" },
@@ -617,21 +645,42 @@ export class SubjectRequestService {
     }
   }
 
-  /** Runs one request's lookup from where it stopped to its export. Returns early when the lease is lost. */
+  /**
+   * Runs one request's lookup from where it stopped to its export. Returns early when the lease is lost. An error
+   * leaves the request searching until it has failed SUBJECT_REQUEST_MAX_ERRORS times in a row; a value that cannot
+   * be opened, or an export started too often, fails it at once.
+   */
   private async process(initial: SubjectRequestRecord, renew: () => Promise<boolean>): Promise<void> {
     const { store, secrets } = this.options;
     const state = readState(initial.progress);
-    const save = async (): Promise<boolean> =>
-      await store.updateSubjectRequest(initial.id, { progress: { ...state }, updatedAt: this.now().toISOString() }, "searching");
+    // What is stored: an error writes its count onto this, never a page read halfway.
+    let saved: LookupState = structuredClone(state);
+    const save = async (): Promise<boolean> => {
+      state.errors = 0;
+      const ok = await store.updateSubjectRequest(initial.id, { progress: { ...state }, updatedAt: this.now().toISOString() }, "searching");
+      if (ok) saved = structuredClone(state);
+      return ok;
+    };
+    let permanent = false;
     try {
-      if (!initial.valueSealed) throw new Error("The request's value is no longer stored");
-      const value = secrets.openValue(REQUEST_VALUE_PURPOSE, initial.valueSealed);
+      if (!initial.valueSealed) {
+        permanent = true;
+        throw new Error("The request's value is no longer stored");
+      }
+      let value: string;
+      try {
+        value = secrets.openValue(REQUEST_VALUE_PURPOSE, initial.valueSealed);
+      } catch {
+        permanent = true;
+        throw new Error("The request's value cannot be opened with the current master key");
+      }
       const seen = new Set(state.found.map((row) => `${row.k}:${row.id}`));
       const add = (row: FoundRow): void => {
         const key = `${row.k}:${row.id}`;
         if (seen.has(key)) return;
         if (state.found.length >= SUBJECT_REQUEST_MAX_ROWS) {
           state.truncated = true;
+          state.truncatedBy = "rows";
           return;
         }
         seen.add(key);
@@ -680,18 +729,34 @@ export class SubjectRequestService {
       }
 
       if (state.phase === "export") {
-        await this.buildExport(initial, value, state);
+        if (state.exportAttempts >= SUBJECT_EXPORT_MAX_ATTEMPTS) {
+          permanent = true;
+          throw new Error(`The export could not be built in ${SUBJECT_EXPORT_MAX_ATTEMPTS} attempts`);
+        }
+        // Counted before the build, so a crash while building is counted too.
+        state.exportAttempts += 1;
+        if (!(await save())) return;
+        await this.buildExport(initial, value, state, renew);
       }
     } catch (error) {
       const message = this.message(error).slice(0, MAX_ERROR_LENGTH);
+      const errors = saved.errors + 1;
+      if (!permanent && errors < SUBJECT_REQUEST_MAX_ERRORS) {
+        this.options.logger?.warn({ requestId: initial.id, error: message, errors }, "A data-subject request hit an error; it will be retried");
+        await store
+          .updateSubjectRequest(initial.id, { progress: { ...saved, errors }, updatedAt: this.now().toISOString() }, "searching")
+          .catch(() => false);
+        return;
+      }
       this.options.logger?.warn({ requestId: initial.id, error: message }, "A data-subject request failed");
-      await store.updateSubjectRequest(
+      const failed = await store.updateSubjectRequest(
         initial.id,
-        { status: "failed", valueSealed: null, progress: { ...state, found: [] }, error: message, updatedAt: this.now().toISOString() },
+        { status: "failed", valueSealed: null, progress: { ...saved, found: [], errors }, error: message, updatedAt: this.now().toISOString() },
         "searching"
       );
+      if (!failed) return;
       await this.options.audit?.({
-        category: "system",
+        category: "data_protection",
         eventType: "data_subject.request_failed",
         action: "export",
         outcome: "failure",
@@ -728,20 +793,25 @@ export class SubjectRequestService {
     return row ? [row] : [];
   }
 
-  private async buildExport(record: SubjectRequestRecord, value: string, state: LookupState): Promise<void> {
+  private async buildExport(record: SubjectRequestRecord, value: string, state: LookupState, renew: () => Promise<boolean>): Promise<void> {
     const { store, secrets } = this.options;
+    const maxBytes = this.options.exportMaxBytes ?? SUBJECT_EXPORT_DEFAULT_MAX_BYTES;
     const lines = new Map<SubjectRowKind, string[]>();
     const written = new Set<string>();
     const counts: Partial<Record<SubjectRowKind, number>> = {};
     let foundByReference = 0;
+    let totalBytes = 0;
+    let full = false;
+    let index = 0;
     for (const found of state.found) {
+      if (full) break;
+      // Keeps the lease while a large export is read; another instance takes over when it is lost.
+      if (index > 0 && index % EXPORT_RENEW_EVERY === 0 && !(await renew())) return;
+      index += 1;
       for (const row of await this.rowsOf(found)) {
         const kind = found.s === "memory_ref" ? ROW_KIND_OF[row.kind as unknown as SubjectScanKind] ?? found.k : found.k;
         const key = `${kind}:${row.id}`;
         if (written.has(key)) continue;
-        written.add(key);
-        counts[kind] = (counts[kind] ?? 0) + 1;
-        if (found.by === "r") foundByReference += 1;
         const fields: Record<string, unknown> = {};
         for (const [field, text] of Object.entries(row.texts)) fields[field] = parseField(text);
         const line = JSON.stringify({
@@ -754,6 +824,17 @@ export class SubjectRequestService {
           foundBy: found.by === "r" ? "reference" : "search",
           fields
         });
+        const lineBytes = Buffer.byteLength(line) + 1;
+        if (totalBytes + lineBytes > maxBytes) {
+          state.truncated = true;
+          state.truncatedBy = "bytes";
+          full = true;
+          break;
+        }
+        totalBytes += lineBytes;
+        written.add(key);
+        counts[kind] = (counts[kind] ?? 0) + 1;
+        if (found.by === "r") foundByReference += 1;
         const list = lines.get(kind) ?? [];
         list.push(line);
         lines.set(kind, list);
@@ -770,26 +851,31 @@ export class SubjectRequestService {
     }
     if (staff) files.push({ path: "staff.json", text: `${JSON.stringify(staff, null, 2)}\n` });
 
+    // Only the subject's own tokens are revealed: a found row often holds other people's values too, and those stay
+    // tokenised (counted as tokensKeptForOthers).
     let tokensRevealed: number | false = false;
+    let tokensKeptForOthers = 0;
     if (record.revealTokens) {
       tokensRevealed = 0;
+      const subject = normalizeSubjectValue(value);
       const tokens = new Set<string>();
       for (const file of files) for (const match of file.text.matchAll(TOKEN_PATTERN)) tokens.add(match[0]);
       const values = new Map<string, string>();
       for (const token of tokens) {
         const original = (await this.options.revealToken?.(token)) ?? null;
-        if (original !== null) values.set(token, original);
+        if (original !== null && normalizeSubjectValue(original) === subject) values.set(token, original);
       }
-      if (values.size > 0) {
-        for (const file of files) {
-          file.text = file.text.replace(TOKEN_PATTERN, (token) => {
-            const original = values.get(token);
-            if (original === undefined) return token;
-            tokensRevealed = (tokensRevealed as number) + 1;
-            // Inside JSON text: the original value as a JSON string body.
-            return JSON.stringify(original).slice(1, -1);
-          });
-        }
+      for (const file of files) {
+        file.text = file.text.replace(TOKEN_PATTERN, (token) => {
+          const original = values.get(token);
+          if (original === undefined) {
+            tokensKeptForOthers += 1;
+            return token;
+          }
+          tokensRevealed = (tokensRevealed as number) + 1;
+          // Inside JSON text: the original value as a JSON string body.
+          return JSON.stringify(original).slice(1, -1);
+        });
       }
     }
 
@@ -812,8 +898,11 @@ export class SubjectRequestService {
       foundByReference,
       possibleMatchesLeftOut: state.possible,
       truncated: state.truncated,
+      ...(state.truncatedBy ? { truncatedBy: state.truncatedBy } : {}),
       maxRows: SUBJECT_REQUEST_MAX_ROWS,
+      maxBytes,
       tokensRevealed,
+      ...(record.revealTokens ? { tokensKeptForOthers } : {}),
       files: files.map((file) => file.path),
       notCovered: [
         ...(record.scan ? [] : ["Stored data of workflows without subject references (the search of stored data was turned off)"]),
@@ -827,37 +916,61 @@ export class SubjectRequestService {
     );
     const bytes = Buffer.from(zip);
     const expiresAt = new Date(this.now().getTime() + this.options.exportTtlHours * HOUR_MS).toISOString();
-    await store.saveSubjectExport({
-      id: `dsx_${crypto.randomUUID()}`,
-      requestId: record.id,
-      sealedBlob: secrets.sealValue(SUBJECT_EXPORT_PURPOSE, bytes.toString("base64")),
-      bytes: bytes.length,
-      sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
-      createdAt: generatedAt,
-      expiresAt
-    });
-    const ready = await store.updateSubjectRequest(
+    const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+    // The export row and the switch to `ready` in one transaction, only while the request is still searching: a worker
+    // that lost the lease can never store a second export or re-open a downloaded one.
+    const ready = await store.completeSubjectRequest(
       record.id,
       {
         status: "ready",
         valueSealed: null,
         counts: counts as Record<string, number>,
         // The found list is not kept once the export exists: only the counts and where the lookup ended.
-        progress: { phase: "finished", kindIndex: state.kindIndex, cursor: null, rowsSearched: state.rowsSearched, possible: state.possible, truncated: state.truncated, found: [], foundByReference },
+        progress: {
+          phase: "finished",
+          kindIndex: state.kindIndex,
+          cursor: null,
+          rowsSearched: state.rowsSearched,
+          possible: state.possible,
+          truncated: state.truncated,
+          ...(state.truncatedBy ? { truncatedBy: state.truncatedBy } : {}),
+          found: [],
+          foundByReference
+        },
         updatedAt: generatedAt
       },
-      "searching"
+      {
+        id: `dsx_${crypto.randomUUID()}`,
+        requestId: record.id,
+        sealedBlob: secrets.sealValue(SUBJECT_EXPORT_PURPOSE, bytes.toString("base64")),
+        bytes: bytes.length,
+        sha256,
+        createdAt: generatedAt,
+        expiresAt
+      }
     );
     if (!ready) return;
     this.options.logger?.info({ requestId: record.id, rows: written.size, bytes: bytes.length }, "Data-subject export ready");
     await this.options.audit?.({
-      category: "system",
+      category: "data_protection",
       eventType: "data_subject.export_ready",
       action: "export",
       actor: { type: "system" },
       resourceType: "subject_request",
       resourceId: record.id,
-      metadata: { requestId: record.id, counts, foundByReference, possibleMatchesLeftOut: state.possible, truncated: state.truncated, bytes: bytes.length, tokensRevealed, expiresAt }
+      metadata: {
+        requestId: record.id,
+        counts,
+        foundByReference,
+        possibleMatchesLeftOut: state.possible,
+        truncated: state.truncated,
+        ...(state.truncatedBy ? { truncatedBy: state.truncatedBy } : {}),
+        bytes: bytes.length,
+        sha256,
+        tokensRevealed,
+        ...(record.revealTokens ? { tokensKeptForOthers } : {}),
+        expiresAt
+      }
     });
   }
 

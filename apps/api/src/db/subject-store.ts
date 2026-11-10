@@ -3,8 +3,9 @@
  * and the lookups a request reads), and the row mapping both stores share. SQLite: subject-sqlite.ts; Postgres:
  * postgres/subject.ts.
  *
- * Nothing here stores a subject's value: references are keyed hashes, a request keeps its value sealed with the master
- * key only while its lookup runs, and exports are sealed.
+ * References are keyed hashes of the subject's value; a session reference's row id names the memory session, whose
+ * session id may be the value itself (as in session_memory). A request keeps its value sealed with the master key only
+ * while its lookup runs, and exports are sealed.
  */
 import {
   SUBJECT_KINDS,
@@ -44,7 +45,10 @@ export interface SubjectRefRow {
   createdAt: string;
 }
 
-/** A memory session's row id: its namespace and session id. */
+/**
+ * A memory session's row id: its namespace and session id. A session reference's row id therefore holds the session id
+ * in clear, next to its hash (session_memory holds the same id); deleting the session should delete its references.
+ */
 export function memorySessionRowId(namespace: string, sessionId: string): string {
   return JSON.stringify([namespace, sessionId]);
 }
@@ -105,6 +109,16 @@ export type SubjectRequestPatch = Partial<
   Pick<SubjectRequestRecord, "status" | "valueSealed" | "counts" | "progress" | "deferred" | "error" | "dueNotifiedAt">
 > & { updatedAt: string };
 
+export interface SubjectExportWrite {
+  id: string;
+  requestId: string;
+  sealedBlob: string;
+  bytes: number;
+  sha256: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
 export interface SubjectExportRecord {
   id: string;
   requestId: string;
@@ -132,6 +146,16 @@ export interface StaffSubjectRows {
   auditEntries: Array<Record<string, unknown>>;
 }
 
+/**
+ * The two emails the authored sections of a staff export match (`IN (?, ?)`): the stored user's email (or the value
+ * when no user has it) and the value lower-cased, which is how the app stores emails. A value typed with capitals
+ * still finds every authored row.
+ */
+export function staffEmailsOf(user: Record<string, unknown> | undefined | null, email: string): [string, string] {
+  const lower = email.trim().toLowerCase();
+  return [user && typeof user.email === "string" && user.email ? user.email : email.trim(), lower];
+}
+
 /** Rows per section of a staff export at most. */
 export const STAFF_SUBJECT_ROWS_CAP = 10_000;
 
@@ -154,7 +178,17 @@ export interface SubjectStore {
   /** Applies `patch`; with `expectStatus`, only while the request is still in that status. Returns whether it applied. */
   updateSubjectRequest(id: string, patch: SubjectRequestPatch, expectStatus?: SubjectRequestStatus): Promise<boolean>;
 
-  saveSubjectExport(input: { id: string; requestId: string; sealedBlob: string; bytes: number; sha256: string; createdAt: string; expiresAt: string }): Promise<void>;
+  /** Stores a request's export unless one is stored already (an export is never replaced or re-opened). */
+  saveSubjectExport(input: SubjectExportWrite): Promise<void>;
+  /**
+   * Finishes a request: applies `patch` and stores its export in one transaction, only while the request is still
+   * `searching`. False (nothing written) when another worker finished, failed or expired it first.
+   */
+  completeSubjectRequest(id: string, patch: SubjectRequestPatch, exported: SubjectExportWrite): Promise<boolean>;
+  /** Open requests (`searching`, `ready`) past `at` and not yet notified, oldest due first. */
+  listOverdueSubjectRequests(at: string, limit: number): Promise<SubjectRequestRecord[]>;
+  /** Marks `ready` requests that have no export row (a restore leaves exports out) `expired`; returns their ids. */
+  expireReadySubjectRequestsWithoutExport(at: string): Promise<string[]>;
   getSubjectExport(requestId: string): Promise<SubjectExportRecord | null>;
   /**
    * Takes the sealed file of a request's export for its one download: only when it was not downloaded and has not
@@ -170,7 +204,10 @@ export interface SubjectStore {
   subjectScanRow(kind: SubjectScanKind, id: string): Promise<SubjectTextRow | null>;
   /** A memory session and its artifacts, as export rows. */
   memorySessionSubjectRows(namespace: string, sessionId: string): Promise<SubjectTextRow[]>;
-  /** A staff member's identity and authored rows, by email (each section at most STAFF_SUBJECT_ROWS_CAP rows). */
+  /**
+   * A staff member's identity and authored rows, by email in any case (each section at most STAFF_SUBJECT_ROWS_CAP
+   * rows). The authored sections match the stored user's email, or the lower-cased value when no user has it.
+   */
   staffSubjectRows(email: string): Promise<StaffSubjectRows>;
 }
 
@@ -358,14 +395,14 @@ export const STAFF_SECTION_SQL = {
   projectRoles: "SELECT project_id, role, custom_role_id, created_at, updated_at FROM user_project_roles WHERE user_id = ? ORDER BY project_id LIMIT ?",
   apiKeys: "SELECT id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at LIMIT ?",
   runsTriggered:
-    "SELECT id, workflow_id, workflow_name, status, trigger_type, started_at, completed_at FROM execution_history WHERE triggered_by = ? ORDER BY started_at LIMIT ?",
-  workflowsCreated: "SELECT id, name, project_id, created_at FROM workflows WHERE created_by = ? ORDER BY created_at LIMIT ?",
+    "SELECT id, workflow_id, workflow_name, status, trigger_type, started_at, completed_at FROM execution_history WHERE triggered_by IN (?, ?) ORDER BY started_at LIMIT ?",
+  workflowsCreated: "SELECT id, name, project_id, created_at FROM workflows WHERE created_by IN (?, ?) ORDER BY created_at LIMIT ?",
   approvals:
-    "SELECT id, execution_id, workflow_id, project_id, kind, status, requested_by, decided_by, decided_at, created_at FROM approval_requests WHERE requested_by = ? OR decided_by = ? ORDER BY created_at LIMIT ?",
-  evalRuns: "SELECT id, workflow_id, status, started_at FROM eval_runs WHERE triggered_by = ? ORDER BY started_at LIMIT ?",
-  releasesPublished: "SELECT id, workflow_id, version, verdict, published_at FROM workflow_releases WHERE published_by = ? ORDER BY published_at LIMIT ?",
+    "SELECT id, execution_id, workflow_id, project_id, kind, status, requested_by, decided_by, decided_at, created_at FROM approval_requests WHERE requested_by IN (?, ?) OR decided_by IN (?, ?) ORDER BY created_at LIMIT ?",
+  evalRuns: "SELECT id, workflow_id, status, started_at FROM eval_runs WHERE triggered_by IN (?, ?) ORDER BY started_at LIMIT ?",
+  releasesPublished: "SELECT id, workflow_id, version, verdict, published_at FROM workflow_releases WHERE published_by IN (?, ?) ORDER BY published_at LIMIT ?",
   auditEntries:
-    "SELECT id, event_type, category, action, outcome, resource_type, resource_id, project_id, ip_address, user_agent, message, created_at FROM audit_logs WHERE actor_email = ? OR actor_user_id = ? ORDER BY created_at LIMIT ?"
+    "SELECT id, event_type, category, action, outcome, resource_type, resource_id, project_id, ip_address, user_agent, message, created_at FROM audit_logs WHERE actor_email IN (?, ?) OR actor_user_id = ? ORDER BY created_at LIMIT ?"
 } as const;
 
 /** `?` placeholders numbered for Postgres. */

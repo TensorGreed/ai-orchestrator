@@ -178,9 +178,10 @@ describe("data-subject requests in the app", () => {
     expect((await call(context, "GET", `/api/data-protection/requests/${id}`, admin)).json<SubjectRequestView>().status).toBe("done");
     expect((await call(context, "GET", "/api/data-protection/requests/missing", admin)).statusCode).toBe(404);
 
-    const audit = await testSql(context.store).all<{ event_type: string; outcome: string }>(
-      "SELECT event_type, outcome FROM audit_logs WHERE event_type LIKE 'data_subject.%' ORDER BY created_at"
+    const audit = await testSql(context.store).all<{ event_type: string; outcome: string; category: string }>(
+      "SELECT event_type, outcome, category FROM audit_logs WHERE event_type LIKE 'data_subject.%' ORDER BY created_at"
     );
+    expect(new Set(audit.map((row) => row.category))).toEqual(new Set(["data_protection"]));
     expect(audit.map((row) => `${row.event_type}:${row.outcome}`)).toEqual([
       "data_subject.request_created:success",
       "data_subject.export_ready:success",
@@ -205,6 +206,33 @@ describe("data-subject requests in the app", () => {
     expect(download.json()).toMatchObject({ code: "step_up_required", stepUp: { action: "subject_export.download" } });
     // Refused before the claim: the export is still there.
     expect((await call(context, "GET", `/api/data-protection/requests/${id}`, admin)).json<SubjectRequestView>().export?.available).toBe(true);
+  });
+
+  it("a deployment-wide custom role with data_subject:manage may make requests; a project role may not, and only an admin hands it out", async () => {
+    const context = await createTestContext();
+    const builderCookie = await login(context, "builder");
+    const viewerCookie = await login(context, "viewer");
+    const users = (await context.store.listUsers()).filter((user) => user.role !== "admin");
+    const builder = users.find((user) => user.role === "builder")!;
+    const viewer = users.find((user) => user.role === "viewer")!;
+    await context.store.upsertProject({ id: "p1", name: "P1" });
+    const make = (cookie: string) => call(context, "POST", "/api/data-protection/requests", cookie, { type: "export", value: CUSTOMER, scan: false });
+
+    expect((await make(builderCookie)).statusCode).toBe(403);
+    await context.store.upsertCustomRole({ id: "privacy", projectId: null, name: "Privacy", description: null, permissions: ["data_subject:manage"], createdBy: null });
+    await context.store.upsertCustomRole({ id: "p1-privacy", projectId: "p1", name: "P1 privacy", description: null, permissions: ["data_subject:manage"], createdBy: null });
+    await context.store.upsertProjectRole({ userId: viewer.id, projectId: "p1", role: "custom", customRoleId: "p1-privacy" });
+    expect((await make(viewerCookie)).statusCode).toBe(403);
+    expect((await call(context, "GET", "/api/data-protection/requests", viewerCookie)).statusCode).toBe(403);
+    await context.store.upsertProjectRole({ userId: builder.id, projectId: "default", role: "custom", customRoleId: "privacy" });
+    const made = await make(builderCookie);
+    expect(made.statusCode, made.body).toBe(201);
+    expect((await call(context, "GET", "/api/data-protection/requests", builderCookie)).statusCode).toBe(200);
+
+    // A project admin who is not an admin cannot hand out a role granting a deployment-wide permission.
+    await context.store.upsertProjectRole({ userId: builder.id, projectId: "p1", role: "project_admin" });
+    const handOut = await call(context, "POST", "/api/projects/p1/members", builderCookie, { userId: viewer.id, role: "custom", customRoleId: "privacy" });
+    expect(handOut.statusCode).toBe(403);
   });
 
   it("refuses an invalid subject reference when a workflow is saved", async () => {

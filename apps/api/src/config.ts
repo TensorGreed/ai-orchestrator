@@ -115,6 +115,8 @@ const envSchema = z.object({
   SUBJECT_REQUEST_DUE_DAYS: optionalIntFromEnv(1, 365),
   /** Hours a data-subject export can be downloaded (once) before it is deleted (default 72). */
   SUBJECT_EXPORT_TTL_HOURS: optionalIntFromEnv(1, 720),
+  /** Most bytes of rows one data-subject export holds (uncompressed); a larger answer is cut and says so (default 200 MB). */
+  SUBJECT_EXPORT_MAX_BYTES: optionalIntFromEnv(1_048_576, 536_870_912),
   SEED_SAMPLE_WORKFLOWS: booleanFromEnv.default(false),
   SECRET_MASTER_KEY_BASE64: z.string().min(1).optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("ao_session"),
@@ -740,16 +742,20 @@ export function resolveRetentionSettings(
   };
 }
 
-/** 13.3 — data-subject requests: the defaults of SUBJECT_REQUEST_DUE_DAYS and SUBJECT_EXPORT_TTL_HOURS. */
-export const SUBJECT_REQUEST_DEFAULTS = { dueDays: 30, exportTtlHours: 72 } as const;
+/** 13.3 — data-subject requests: the defaults of SUBJECT_REQUEST_DUE_DAYS, SUBJECT_EXPORT_TTL_HOURS and SUBJECT_EXPORT_MAX_BYTES. */
+export const SUBJECT_REQUEST_DEFAULTS = { dueDays: 30, exportTtlHours: 72, exportMaxBytes: 209_715_200 } as const;
 
-export function resolveSubjectRequestSettings(config: Pick<AppConfig, "SUBJECT_REQUEST_DUE_DAYS" | "SUBJECT_EXPORT_TTL_HOURS">): {
+export function resolveSubjectRequestSettings(
+  config: Pick<AppConfig, "SUBJECT_REQUEST_DUE_DAYS" | "SUBJECT_EXPORT_TTL_HOURS" | "SUBJECT_EXPORT_MAX_BYTES">
+): {
   dueDays: number;
   exportTtlHours: number;
+  exportMaxBytes: number;
 } {
   return {
     dueDays: config.SUBJECT_REQUEST_DUE_DAYS ?? SUBJECT_REQUEST_DEFAULTS.dueDays,
-    exportTtlHours: config.SUBJECT_EXPORT_TTL_HOURS ?? SUBJECT_REQUEST_DEFAULTS.exportTtlHours
+    exportTtlHours: config.SUBJECT_EXPORT_TTL_HOURS ?? SUBJECT_REQUEST_DEFAULTS.exportTtlHours,
+    exportMaxBytes: config.SUBJECT_EXPORT_MAX_BYTES ?? SUBJECT_REQUEST_DEFAULTS.exportMaxBytes
   };
 }
 

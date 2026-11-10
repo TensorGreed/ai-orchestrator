@@ -2708,8 +2708,9 @@ export const MIGRATIONS: Migration[] = [
     version: 67,
     description: "13.3 — data-subject requests: subject references (keyed hashes), requests, sealed exports and the subject key",
     // subject_ref_keys holds the key subject references are hashed with, sealed with the master key (db:import
-    // --source-master-key re-seals it, so references keep matching after a master-key change). subject_refs holds only
-    // keyed hashes, never values. subject_requests keeps a request's value sealed only while its lookup runs.
+    // --source-master-key re-seals it, so references keep matching after a master-key change). subject_refs holds keyed
+    // hashes of the values and the row each points at: a run id, or for a session reference the memory session's
+    // namespace and session id (the same id session_memory holds). subject_requests keeps a request's value sealed only while its lookup runs.
     // subject_exports holds sealed export files until they are downloaded once or expire; it is not backed up.
     up: `
       CREATE TABLE IF NOT EXISTS subject_ref_keys (

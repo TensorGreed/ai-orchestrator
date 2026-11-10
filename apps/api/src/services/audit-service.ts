@@ -18,6 +18,8 @@ export type AuditCategory =
   | "sharing"
   | "approval"
   | "release"
+  /** 13.3 — legal holds (and later data-subject requests). */
+  | "data_protection"
   | "system";
 
 export interface AuditActor {

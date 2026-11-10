@@ -17,6 +17,9 @@ import { ReplayCaptureService } from "./replay-capture-service.js";
 import { SecretService } from "./secret-service.js";
 import {
   REQUEST_VALUE_PURPOSE,
+  SUBJECT_EXPORT_MAX_ATTEMPTS,
+  SUBJECT_REQUEST_LEASE,
+  SUBJECT_REQUEST_MAX_ERRORS,
   SUBJECT_SCAN_PAGE,
   SubjectRequestError,
   SubjectRequestService,
@@ -401,12 +404,15 @@ for (const kind of kinds) {
       expect(audits.filter((event) => event.eventType === "data_subject.request_overdue")).toHaveLength(1);
     });
 
-    it("reveals reversible tokens only when asked", async () => {
+    it("reveals the subject's own reversible tokens only when asked, never another person's", async () => {
       const token = "tok_email_ABCDEFGHIJKLMNOP";
+      const othersToken = "tok_email_OTHERPERSON00000";
       const { store, make } = await setup();
-      const service = make({ revealToken: async (candidate) => (candidate === token ? EMAIL : null) });
+      const service = make({
+        revealToken: async (candidate) => (candidate === token ? EMAIL.toUpperCase() : candidate === othersToken ? "bob.other@example.com" : null)
+      });
       await store.upsertWorkflow({ ...WORKFLOW, settings: {} });
-      await saveRun(store, "run-email", { to: EMAIL, cc: token, other: "tok_email_ZZZZZZZZZZZZZZZZ" });
+      await saveRun(store, "run-email", { to: EMAIL, cc: token, other: "tok_email_ZZZZZZZZZZZZZZZZ", bcc: othersToken });
       const plain = await service.create({ type: "export", subjectKind: "end_user", value: EMAIL, scan: true, revealTokens: false }, { id: "u1", email: "admin@example.com" });
       const revealed = await service.create({ type: "export", subjectKind: "end_user", value: EMAIL, scan: true, revealTokens: true }, { id: "u1", email: "admin@example.com" });
       await finish(service);
@@ -415,8 +421,11 @@ for (const kind of kinds) {
       expect(JSON.parse(plainFiles["manifest.json"]!).tokensRevealed).toBe(false);
       const revealedFiles = unzip((await service.download(revealed.id, { email: "a" })).bytes);
       expect(revealedFiles["run.jsonl"]).not.toContain(token);
-      expect(jsonl(revealedFiles["run.jsonl"])[0]).toMatchObject({ fields: { input: { cc: EMAIL, other: "tok_email_ZZZZZZZZZZZZZZZZ" } } });
-      expect(JSON.parse(revealedFiles["manifest.json"]!).tokensRevealed).toBe(1);
+      expect(revealedFiles["run.jsonl"]).not.toContain("bob.other@example.com");
+      expect(jsonl(revealedFiles["run.jsonl"])[0]).toMatchObject({
+        fields: { input: { cc: EMAIL.toUpperCase(), other: "tok_email_ZZZZZZZZZZZZZZZZ", bcc: othersToken } }
+      });
+      expect(JSON.parse(revealedFiles["manifest.json"]!)).toMatchObject({ tokensRevealed: 1, tokensKeptForOthers: 2 });
     });
 
     it("exports a staff member's identity and authored rows, never a credential", async () => {
@@ -425,7 +434,8 @@ for (const kind of kinds) {
         `INSERT INTO users (id, email, password_hash, role, created_at, updated_at) VALUES ('u-staff', '${EMAIL}', 'pw-hash-secret', 'builder', '${AT}', '${AT}')`,
         `INSERT INTO execution_history (id, workflow_id, status, started_at, triggered_by) VALUES ('run-by-staff', 'wf', 'success', '${AT}', '${EMAIL}')`
       ]);
-      const created = await service.create({ type: "export", subjectKind: "staff", value: EMAIL, scan: false, revealTokens: false }, { id: "u1", email: "admin@example.com" });
+      // Typed with capitals: the authored rows are still found.
+      const created = await service.create({ type: "export", subjectKind: "staff", value: EMAIL.toUpperCase(), scan: false, revealTokens: false }, { id: "u1", email: "admin@example.com" });
       await finish(service);
       const files = unzip((await service.download(created.id, { email: "admin@example.com" })).bytes);
       const staff = JSON.parse(files["staff.json"]!) as { user: { id: string }; runsTriggered: Array<{ id: string }> };
@@ -457,6 +467,128 @@ for (const kind of kinds) {
       expect(failed.valueSealed).toBeNull();
       expect(failed.error).toBeTruthy();
       expect(audits.map((event) => event.eventType)).toContain("data_subject.request_failed");
+    });
+
+    it("a worker that lost the lease never stores a second export or re-opens a downloaded one", async () => {
+      const { store, make } = await setup();
+      await store.upsertWorkflow(WORKFLOW);
+      await saveRun(store, "run-1", { customerId: "CUST-777" });
+      let bLeads = false;
+      const b = make({ instanceId: "instance-b", isLeader: () => bLeads });
+      await b.recordRunRefs({ executionId: "run-1", workflow: WORKFLOW, run: { input: { customerId: "CUST-777" } } });
+      let downloaded = false;
+      // Instance A stalls while it reads its export; meanwhile its lease lapses, B finishes the request and the admin
+      // downloads it. Then A carries on.
+      const a = make({
+        store: new Proxy(store, {
+          get: (target, property) =>
+            property === "subjectScanRow"
+              ? async (...args: Parameters<Store["subjectScanRow"]>) => {
+                  if (!downloaded) {
+                    downloaded = true;
+                    await target.releaseLease(SUBJECT_REQUEST_LEASE, "instance-a");
+                    bLeads = true;
+                    await b.work();
+                    await b.download(created.id, { email: "admin@example.com" });
+                  }
+                  return await target.subjectScanRow(...args);
+                }
+              : Reflect.get(target, property, target)
+        })
+      });
+      const created = await b.create({ type: "export", subjectKind: "end_user", value: "CUST-777", scan: false, revealTokens: false }, { id: "u1", email: "a@b.c" });
+      await b.idle();
+      await a.work();
+      expect(downloaded).toBe(true);
+      expect((await store.getSubjectRequest(created.id))!.status).toBe("done");
+      expect(await store.getSubjectExport(created.id)).toMatchObject({ stored: false, downloadedBy: "admin@example.com" });
+      await expect(a.download(created.id, { email: "admin@example.com" })).rejects.toThrow(/already downloaded/);
+    });
+
+    it("cuts an export at its byte budget and says so", async () => {
+      const { store, make } = await setup();
+      const service = make({ exportMaxBytes: 600 });
+      await store.upsertWorkflow({ ...WORKFLOW, settings: {} });
+      for (let i = 0; i < 5; i += 1) await saveRun(store, `run-${i}`, { to: EMAIL, padding: "x".repeat(200) });
+      const created = await service.create({ type: "export", subjectKind: "end_user", value: EMAIL, scan: true, revealTokens: false }, { id: "u1", email: "a@b.c" });
+      await finish(service);
+      const view = (await service.get(created.id))!;
+      expect(view).toMatchObject({ status: "ready", truncated: true });
+      const files = unzip((await service.download(created.id, { email: "a" })).bytes);
+      const manifest = JSON.parse(files["manifest.json"]!) as Record<string, unknown>;
+      expect(manifest).toMatchObject({ truncated: true, truncatedBy: "bytes", maxBytes: 600 });
+      const rows = jsonl(files["run.jsonl"]);
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.length).toBeLessThan(5);
+      expect(manifest.counts).toEqual({ run: rows.length });
+    });
+
+    it("fails a request whose export was started too often (a crash cannot loop)", async () => {
+      const { store, service, make, audits } = await setup({ isLeader: () => false });
+      const created = await service.create({ type: "export", subjectKind: "end_user", value: EMAIL, scan: false, revealTokens: false }, { id: "u1", email: "a@b.c" });
+      // As if the export had crashed the process each time it started.
+      await store.updateSubjectRequest(created.id, { progress: { phase: "export", exportAttempts: SUBJECT_EXPORT_MAX_ATTEMPTS }, updatedAt: AT }, "searching");
+      await make({ isLeader: () => true }).work();
+      const failed = (await store.getSubjectRequest(created.id))!;
+      expect(failed).toMatchObject({ status: "failed", valueSealed: null });
+      expect(failed.error).toContain(`${SUBJECT_EXPORT_MAX_ATTEMPTS} attempts`);
+      expect(audits.map((event) => event.eventType)).toContain("data_subject.request_failed");
+    });
+
+    it("keeps a request searching through passing errors, and fails it after several in a row", async () => {
+      const { store, make } = await setup({ isLeader: () => false });
+      await store.upsertWorkflow({ ...WORKFLOW, settings: {} });
+      await saveRun(store, "run-email", { to: EMAIL });
+      let failures = 1;
+      const flaky = new Proxy(store, {
+        get: (target, property) =>
+          property === "subjectScanPage"
+            ? async (...args: Parameters<Store["subjectScanPage"]>) => {
+                if (failures > 0) {
+                  failures -= 1;
+                  throw new Error("connection reset");
+                }
+                return await target.subjectScanPage(...args);
+              }
+            : Reflect.get(target, property, target)
+      });
+      const follower = make();
+      const one = await follower.create({ type: "export", subjectKind: "end_user", value: EMAIL, scan: true, revealTokens: false }, { id: "u1", email: "a@b.c" });
+      const worker = make({ store: flaky, isLeader: () => true });
+      await worker.work();
+      const retried = (await store.getSubjectRequest(one.id))!;
+      expect(retried.status).toBe("searching");
+      expect(retried.valueSealed).not.toBeNull();
+      expect((retried.progress as { errors: number }).errors).toBe(1);
+      await finish(worker);
+      expect((await store.getSubjectRequest(one.id))!.status).toBe("ready");
+
+      failures = SUBJECT_REQUEST_MAX_ERRORS;
+      const two = await follower.create({ type: "export", subjectKind: "end_user", value: EMAIL, scan: true, revealTokens: false }, { id: "u1", email: "a@b.c" });
+      for (let pass = 0; pass < SUBJECT_REQUEST_MAX_ERRORS; pass += 1) await worker.work();
+      const failed = (await store.getSubjectRequest(two.id))!;
+      expect(failed).toMatchObject({ status: "failed", valueSealed: null, error: "connection reset" });
+    });
+
+    it("expires a ready request whose export is gone (a restore), and notifies the oldest overdue requests first", async () => {
+      const { store, service, notified, clock } = await setup({ isLeader: () => false });
+      const ready = await service.create({ type: "export", subjectKind: "end_user", value: EMAIL, scan: false, revealTokens: false }, { id: "u1", email: "a@b.c" });
+      await store.updateSubjectRequest(ready.id, { status: "ready", valueSealed: null, updatedAt: AT }, "searching");
+      // More open requests than one overdue check reads, the oldest made first.
+      const oldest = await service.create({ type: "export", subjectKind: "end_user", value: EMAIL, scan: false, revealTokens: false }, { id: "u1", email: "a@b.c" });
+      clock.now = new Date(T0.getTime() + 60_000);
+      for (let i = 0; i < 500; i += 1) {
+        await store.createSubjectRequest({
+          ...(await store.getSubjectRequest(oldest.id))!,
+          id: `dsr_bulk_${i}`,
+          createdAt: new Date(T0.getTime() + 120_000 + i).toISOString(),
+          dueAt: new Date(T0.getTime() + 2 * 86_400_000 * 30).toISOString()
+        });
+      }
+      clock.now = new Date(T0.getTime() + 31 * 86_400_000);
+      await service.sweep();
+      expect((await store.getSubjectRequest(ready.id))!.status).toBe("expired");
+      expect(notified.map((event) => event.subjectRequest?.requestId)).toEqual([oldest.id]);
     });
   });
 }

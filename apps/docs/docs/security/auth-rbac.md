@@ -238,6 +238,9 @@ on top of the global role:
   `workflow:execute` on it may answer them.
 - Session-mode chat and form triggers only answer users who can read the
   workflow's project.
+- Data-subject requests are made by admins and by users with a deployment-wide custom role (one with no project)
+  granting `data_subject:manage`. The permission does nothing in a project role, and only an admin can assign a role
+  that grants it. See [Data-subject requests](./data-subject-requests.md).
 
 ## What a running workflow can reach
 

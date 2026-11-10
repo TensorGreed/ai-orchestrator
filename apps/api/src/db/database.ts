@@ -11198,6 +11198,11 @@ export class SqliteStore implements Store {
   listSubjectRequests(...args: Parameters<SubjectStore["listSubjectRequests"]>) { return this.subjects.listSubjectRequests(...args); }
   updateSubjectRequest(...args: Parameters<SubjectStore["updateSubjectRequest"]>) { return this.subjects.updateSubjectRequest(...args); }
   saveSubjectExport(...args: Parameters<SubjectStore["saveSubjectExport"]>) { return this.subjects.saveSubjectExport(...args); }
+  completeSubjectRequest(...args: Parameters<SubjectStore["completeSubjectRequest"]>) { return this.subjects.completeSubjectRequest(...args); }
+  listOverdueSubjectRequests(...args: Parameters<SubjectStore["listOverdueSubjectRequests"]>) { return this.subjects.listOverdueSubjectRequests(...args); }
+  expireReadySubjectRequestsWithoutExport(...args: Parameters<SubjectStore["expireReadySubjectRequestsWithoutExport"]>) {
+    return this.subjects.expireReadySubjectRequestsWithoutExport(...args);
+  }
   getSubjectExport(...args: Parameters<SubjectStore["getSubjectExport"]>) { return this.subjects.getSubjectExport(...args); }
   claimSubjectExport(...args: Parameters<SubjectStore["claimSubjectExport"]>) { return this.subjects.claimSubjectExport(...args); }
   expireSubjectExports(...args: Parameters<SubjectStore["expireSubjectExports"]>) { return this.subjects.expireSubjectExports(...args); }

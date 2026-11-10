@@ -124,6 +124,42 @@ describeStoreContract("store contract: data-subject requests", (ctx) => {
     expect(await store.getSubjectExport("none")).toBeNull();
   });
 
+  it("finishes a request and stores its export in one step, only while it is searching; an export is never re-opened", async () => {
+    const store = ctx.store();
+    const exported = (id: string, requestId: string, blob: string) => ({ id, requestId, sealedBlob: blob, bytes: 4, sha256: "s", createdAt: AT, expiresAt: "2026-11-05T00:00:00.000Z" });
+    await store.createSubjectRequest(request("r1"));
+    expect(await store.completeSubjectRequest("r1", { status: "ready", valueSealed: null, updatedAt: AT }, exported("x1", "r1", "blob-1"))).toBe(true);
+    expect(await store.getSubjectRequest("r1")).toMatchObject({ status: "ready", valueSealed: null });
+    expect(await store.claimSubjectExport({ requestId: "r1", by: "a@example.com", at: "2026-11-02T00:00:00.000Z" })).toBe("blob-1");
+    // A stale worker that finishes later writes nothing: no second export, the downloaded one stays spent.
+    expect(await store.completeSubjectRequest("r1", { status: "ready", updatedAt: AT }, exported("x2", "r1", "blob-2"))).toBe(false);
+    await store.saveSubjectExport(exported("x3", "r1", "blob-3"));
+    expect(await store.getSubjectExport("r1")).toMatchObject({ id: "x1", stored: false, downloadedBy: "a@example.com" });
+    expect(await store.claimSubjectExport({ requestId: "r1", by: "b@example.com", at: "2026-11-02T00:00:01.000Z" })).toBeNull();
+    // A request no longer searching is left as it is.
+    await store.createSubjectRequest(request("r2", { status: "failed" }));
+    expect(await store.completeSubjectRequest("r2", { status: "ready", updatedAt: AT }, exported("x4", "r2", "blob-4"))).toBe(false);
+    expect(await store.getSubjectExport("r2")).toBeNull();
+  });
+
+  it("lists overdue open requests oldest due first, and expires ready requests that lost their export", async () => {
+    const store = ctx.store();
+    await store.createSubjectRequest(request("late", { dueAt: "2026-11-02T00:00:00.000Z", createdAt: "2026-10-01T00:00:00.000Z" }));
+    await store.createSubjectRequest(request("later", { dueAt: "2026-11-03T00:00:00.000Z", status: "ready" }));
+    await store.createSubjectRequest(request("notified", { dueAt: "2026-11-01T00:00:00.000Z", dueNotifiedAt: AT }));
+    await store.createSubjectRequest(request("closed", { dueAt: "2026-11-01T00:00:00.000Z", status: "done" }));
+    await store.createSubjectRequest(request("future", { dueAt: "2026-12-01T00:00:00.000Z" }));
+    expect((await store.listOverdueSubjectRequests("2026-11-10T00:00:00.000Z", 10)).map((row) => row.id)).toEqual(["late", "later"]);
+    expect((await store.listOverdueSubjectRequests("2026-11-10T00:00:00.000Z", 1)).map((row) => row.id)).toEqual(["late"]);
+
+    await store.createSubjectRequest(request("kept", { status: "ready" }));
+    await store.saveSubjectExport({ id: "xk", requestId: "kept", sealedBlob: "b", bytes: 1, sha256: "s", createdAt: AT, expiresAt: "2026-11-05T00:00:00.000Z" });
+    expect(await store.expireReadySubjectRequestsWithoutExport("2026-11-10T00:00:00.000Z")).toEqual(["later"]);
+    expect(await store.getSubjectRequest("later")).toMatchObject({ status: "expired", updatedAt: "2026-11-10T00:00:00.000Z" });
+    expect((await store.getSubjectRequest("kept"))?.status).toBe("ready");
+    expect(await store.expireReadySubjectRequestsWithoutExport("2026-11-10T00:00:00.000Z")).toEqual([]);
+  });
+
   it("pages every scan kind once, in a stable order, and reads a row by id", async () => {
     const store = ctx.store();
     await seed([
@@ -205,6 +241,11 @@ describeStoreContract("store contract: data-subject requests", (ctx) => {
     expect(rows.apiKeys.map((row) => row.id)).toEqual(["k1"]);
     expect(rows.runsTriggered.map((row) => row.id)).toEqual(["run-1"]);
     expect(rows.auditEntries.map((row) => row.id)).toEqual(["a1"]);
+    // Typed with capitals: every authored section still matches.
+    const typed = await store.staffSubjectRows("ANA@EXAMPLE.COM");
+    expect(typed.user).toMatchObject({ id: "u1" });
+    expect(typed.runsTriggered.map((row) => row.id)).toEqual(["run-1"]);
+    expect(typed.auditEntries.map((row) => row.id)).toEqual(["a1"]);
     const nobody = await store.staffSubjectRows("nobody@example.com");
     expect(nobody.user).toBeNull();
     expect(nobody.apiKeys).toEqual([]);

@@ -18,9 +18,11 @@ import {
   plainRow,
   scanRowId,
   scanRowParams,
+  staffEmailsOf,
   subjectRequestPatchSql,
   subjectRequestValues,
   type StaffSubjectRows,
+  type SubjectExportWrite,
   type SubjectScanKind,
   type SubjectStore
 } from "./subject-store.js";
@@ -146,6 +148,14 @@ export function sqliteSubjectStore(db: BetterSqlite3Database): SubjectStore {
   const one = <T = Row>(sql: string, params: unknown[] = []): T | null => (db.prepare(sql).get(...params) as T | undefined) ?? null;
   const run = (sql: string, params: unknown[] = []) => db.prepare(sql).run(...params);
 
+  const insertExport = (input: SubjectExportWrite): void => {
+    run(
+      `INSERT INTO subject_exports (id, request_id, sealed_blob, bytes, sha256, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (request_id) DO NOTHING`,
+      [input.id, input.requestId, input.sealedBlob, input.bytes, input.sha256, input.createdAt, input.expiresAt]
+    );
+  };
+
   return {
     async getSubjectRefKey() {
       return one<{ key_sealed: string }>("SELECT key_sealed FROM subject_ref_keys WHERE id = ?", [SUBJECT_KEY_ID])?.key_sealed ?? null;
@@ -209,12 +219,33 @@ export function sqliteSubjectStore(db: BetterSqlite3Database): SubjectStore {
     },
 
     async saveSubjectExport(input) {
-      run(
-        `INSERT INTO subject_exports (id, request_id, sealed_blob, bytes, sha256, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (request_id) DO UPDATE SET id = excluded.id, sealed_blob = excluded.sealed_blob, bytes = excluded.bytes, sha256 = excluded.sha256,
-           created_at = excluded.created_at, expires_at = excluded.expires_at, downloaded_at = NULL, downloaded_by = NULL`,
-        [input.id, input.requestId, input.sealedBlob, input.bytes, input.sha256, input.createdAt, input.expiresAt]
-      );
+      insertExport(input);
+    },
+
+    async completeSubjectRequest(id, patch, exported) {
+      const { set, values } = subjectRequestPatchSql(patch, () => "?");
+      return db.transaction(() => {
+        if (run(`UPDATE subject_requests SET ${set} WHERE id = ? AND status = 'searching'`, [...values, id]).changes === 0) return false;
+        insertExport(exported);
+        return true;
+      })();
+    },
+
+    async listOverdueSubjectRequests(at, limit) {
+      return all(
+        `SELECT ${SUBJECT_REQUEST_COLUMNS} FROM subject_requests
+         WHERE status IN ('searching', 'ready') AND due_notified_at IS NULL AND due_at < ? ORDER BY due_at, id LIMIT ?`,
+        [at, Math.max(1, Math.min(500, Math.floor(limit)))]
+      ).map(mapSubjectRequestRow);
+    },
+
+    async expireReadySubjectRequestsWithoutExport(at) {
+      return db.transaction(() => {
+        const where = `status = 'ready' AND NOT EXISTS (SELECT 1 FROM subject_exports e WHERE e.request_id = subject_requests.id)`;
+        const ids = all<{ id: string }>(`SELECT id FROM subject_requests WHERE ${where}`, []).map((row) => String(row.id));
+        if (ids.length > 0) run(`UPDATE subject_requests SET status = 'expired', updated_at = ? WHERE ${where}`, [at]);
+        return ids;
+      })();
     },
 
     async getSubjectExport(requestId) {
@@ -286,17 +317,18 @@ export function sqliteSubjectStore(db: BetterSqlite3Database): SubjectStore {
       const user = one(STAFF_SECTION_SQL.user, [email]);
       const userId = user ? String(user.id) : null;
       const byUser = (sql: string) => (userId ? all(sql, [userId, cap]).map(plainRow) : []);
+      const emails = staffEmailsOf(user, email);
       const rows: StaffSubjectRows = {
         user: user ? plainRow(user) : null,
         ssoIdentities: byUser(STAFF_SECTION_SQL.ssoIdentities),
         projectRoles: byUser(STAFF_SECTION_SQL.projectRoles),
         apiKeys: byUser(STAFF_SECTION_SQL.apiKeys),
-        runsTriggered: all(STAFF_SECTION_SQL.runsTriggered, [email, cap]).map(plainRow),
-        workflowsCreated: all(STAFF_SECTION_SQL.workflowsCreated, [email, cap]).map(plainRow),
-        approvals: all(STAFF_SECTION_SQL.approvals, [email, email, cap]).map(plainRow),
-        evalRuns: all(STAFF_SECTION_SQL.evalRuns, [email, cap]).map(plainRow),
-        releasesPublished: all(STAFF_SECTION_SQL.releasesPublished, [email, cap]).map(plainRow),
-        auditEntries: all(STAFF_SECTION_SQL.auditEntries, [email, userId ?? "", cap]).map(plainRow)
+        runsTriggered: all(STAFF_SECTION_SQL.runsTriggered, [...emails, cap]).map(plainRow),
+        workflowsCreated: all(STAFF_SECTION_SQL.workflowsCreated, [...emails, cap]).map(plainRow),
+        approvals: all(STAFF_SECTION_SQL.approvals, [...emails, ...emails, cap]).map(plainRow),
+        evalRuns: all(STAFF_SECTION_SQL.evalRuns, [...emails, cap]).map(plainRow),
+        releasesPublished: all(STAFF_SECTION_SQL.releasesPublished, [...emails, cap]).map(plainRow),
+        auditEntries: all(STAFF_SECTION_SQL.auditEntries, [...emails, userId ?? "", cap]).map(plainRow)
       };
       return rows;
     }

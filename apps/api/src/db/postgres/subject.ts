@@ -20,9 +20,11 @@ import {
   plainRow,
   scanRowId,
   scanRowParams,
+  staffEmailsOf,
   subjectRequestPatchSql,
   subjectRequestValues,
   type StaffSubjectRows,
+  type SubjectExportWrite,
   type SubjectRefWrite,
   type SubjectRequestPatch,
   type SubjectRequestRecord,
@@ -221,16 +223,40 @@ export async function updateSubjectRequest(ctx: PgContext, id: string, patch: Su
   return (result.rowCount ?? 0) > 0;
 }
 
-export async function saveSubjectExport(
-  ctx: PgContext,
-  input: { id: string; requestId: string; sealedBlob: string; bytes: number; sha256: string; createdAt: string; expiresAt: string }
-): Promise<void> {
-  await ctx.execute(
-    `INSERT INTO subject_exports (id, request_id, sealed_blob, bytes, sha256, created_at, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (request_id) DO UPDATE SET id = EXCLUDED.id, sealed_blob = EXCLUDED.sealed_blob, bytes = EXCLUDED.bytes, sha256 = EXCLUDED.sha256,
-       created_at = EXCLUDED.created_at, expires_at = EXCLUDED.expires_at, downloaded_at = NULL, downloaded_by = NULL`,
-    [input.id, input.requestId, input.sealedBlob, input.bytes, input.sha256, input.createdAt, input.expiresAt]
+const INSERT_EXPORT_SQL = `INSERT INTO subject_exports (id, request_id, sealed_blob, bytes, sha256, created_at, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
+   ON CONFLICT (request_id) DO NOTHING`;
+const exportParams = (input: SubjectExportWrite) => [input.id, input.requestId, input.sealedBlob, input.bytes, input.sha256, input.createdAt, input.expiresAt];
+
+export async function saveSubjectExport(ctx: PgContext, input: SubjectExportWrite): Promise<void> {
+  await ctx.execute(INSERT_EXPORT_SQL, exportParams(input));
+}
+
+export async function completeSubjectRequest(ctx: PgContext, id: string, patch: SubjectRequestPatch, exported: SubjectExportWrite): Promise<boolean> {
+  const { set, values } = subjectRequestPatchSql(patch, (n) => `$${n}`);
+  return await ctx.withTransaction(async (client) => {
+    const updated = await client.query(`UPDATE subject_requests SET ${set} WHERE id = $${values.length + 1} AND status = 'searching'`, [...values, id]);
+    if ((updated.rowCount ?? 0) === 0) return false;
+    await client.query(INSERT_EXPORT_SQL, exportParams(exported));
+    return true;
+  });
+}
+
+export async function listOverdueSubjectRequests(ctx: PgContext, at: string, limit: number): Promise<SubjectRequestRecord[]> {
+  const rows = await ctx.query<Row>(
+    `SELECT ${SUBJECT_REQUEST_COLUMNS} FROM subject_requests
+     WHERE status IN ('searching', 'ready') AND due_notified_at IS NULL AND due_at < $1 ORDER BY due_at, id COLLATE "C" LIMIT $2`,
+    [at, Math.max(1, Math.min(500, Math.floor(limit)))]
   );
+  return rows.map(mapSubjectRequestRow);
+}
+
+export async function expireReadySubjectRequestsWithoutExport(ctx: PgContext, at: string): Promise<string[]> {
+  const rows = await ctx.query<{ id: string }>(
+    `UPDATE subject_requests r SET status = 'expired', updated_at = $1
+     WHERE r.status = 'ready' AND NOT EXISTS (SELECT 1 FROM subject_exports e WHERE e.request_id = r.id) RETURNING r.id`,
+    [at]
+  );
+  return rows.map((row) => String(row.id));
 }
 
 export async function getSubjectExport(ctx: PgContext, requestId: string) {
@@ -309,16 +335,17 @@ export async function staffSubjectRows(ctx: PgContext, email: string): Promise<S
   const user = await ctx.queryOne<Row>(numbered(STAFF_SECTION_SQL.user), [email]);
   const userId = user ? String(user.id) : null;
   const byUser = async (sql: string) => (userId ? await all(sql, [userId, cap]) : []);
+  const emails = staffEmailsOf(user, email);
   return {
     user: user ? plainRow(user) : null,
     ssoIdentities: await byUser(STAFF_SECTION_SQL.ssoIdentities),
     projectRoles: await byUser(STAFF_SECTION_SQL.projectRoles),
     apiKeys: await byUser(STAFF_SECTION_SQL.apiKeys),
-    runsTriggered: await all(STAFF_SECTION_SQL.runsTriggered, [email, cap]),
-    workflowsCreated: await all(STAFF_SECTION_SQL.workflowsCreated, [email, cap]),
-    approvals: await all(STAFF_SECTION_SQL.approvals, [email, email, cap]),
-    evalRuns: await all(STAFF_SECTION_SQL.evalRuns, [email, cap]),
-    releasesPublished: await all(STAFF_SECTION_SQL.releasesPublished, [email, cap]),
-    auditEntries: await all(STAFF_SECTION_SQL.auditEntries, [email, userId ?? "", cap])
+    runsTriggered: await all(STAFF_SECTION_SQL.runsTriggered, [...emails, cap]),
+    workflowsCreated: await all(STAFF_SECTION_SQL.workflowsCreated, [...emails, cap]),
+    approvals: await all(STAFF_SECTION_SQL.approvals, [...emails, ...emails, cap]),
+    evalRuns: await all(STAFF_SECTION_SQL.evalRuns, [...emails, cap]),
+    releasesPublished: await all(STAFF_SECTION_SQL.releasesPublished, [...emails, cap]),
+    auditEntries: await all(STAFF_SECTION_SQL.auditEntries, [...emails, userId ?? "", cap])
   };
 }

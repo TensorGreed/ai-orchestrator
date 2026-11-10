@@ -1,11 +1,13 @@
 /**
  * 13.3 — data-subject requests and subject references.
  *
- *   POST /api/data-protection/requests                 make a request for a person's data (admins; the value is used, then dropped)
- *   GET  /api/data-protection/requests                 requests, newest first (admins)
- *   GET  /api/data-protection/requests/:id             one request with its progress (admins)
- *   GET  /api/data-protection/requests/:id/export      the export zip, once (admins; step-up)
+ *   POST /api/data-protection/requests                 make a request for a person's data (managers; the value is used, then dropped)
+ *   GET  /api/data-protection/requests                 requests, newest first (managers)
+ *   GET  /api/data-protection/requests/:id             one request with its progress (managers)
+ *   GET  /api/data-protection/requests/:id/export      the export zip, once (managers; step-up)
  *   POST /api/data-protection/subject-refs/preview     how subject references resolve on a workflow's latest runs (workflow editors)
+ *
+ * Managers: admins, and members through a deployment-wide custom role granting `data_subject:manage`.
  *
  * The person's value is never logged, audited or returned: the audit trail names the request id, its type and what it
  * found.
@@ -31,6 +33,8 @@ export interface DataProtectionRoutesDeps {
   available: boolean;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   requireStepUp: (request: FastifyRequest, reply: FastifyReply, action: StepUpAction) => Promise<boolean>;
+  /** `data_subject:manage` (deployment-wide). */
+  canManage: (user: SafeUser) => Promise<boolean>;
   runAccess: RunAccess;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => Promise<void>;
 }
@@ -45,7 +49,18 @@ function quietIssue(error: z.ZodError): string {
 }
 
 export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): void {
-  const { app, store, requests, requireRole, requireStepUp, runAccess } = deps;
+  const { app, store, requests, requireRole, requireStepUp, canManage, runAccess } = deps;
+
+  /** A signed-in request manager, or null after answering 401/403. */
+  const manager = async (request: FastifyRequest, reply: FastifyReply): Promise<SafeUser | null> => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return null;
+    if (!(await canManage(user))) {
+      reply.code(403).send({ error: "Data-subject requests need the data_subject:manage permission (admins have it)." });
+      return null;
+    }
+    return user;
+  };
 
   const unavailable = (reply: FastifyReply) => {
     reply.code(503);
@@ -60,7 +75,7 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
   };
 
   app.post<{ Body: unknown }>("/api/data-protection/requests", async (request, reply) => {
-    const user = await requireRole(request, reply, ["admin"]);
+    const user = await manager(request, reply);
     if (!user) return reply;
     if (!deps.available) return unavailable(reply);
     const parsed = subjectRequestCreateSchema.safeParse(request.body ?? {});
@@ -73,7 +88,7 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
       const created = await requests.create(parsed.data, { id: user.id, email: user.email });
       await deps.audit(request, user, {
         eventType: "data_subject.request_created",
-        category: "system",
+        category: "data_protection",
         action: "create",
         resourceType: "subject_request",
         resourceId: created.id,
@@ -87,7 +102,7 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
   });
 
   app.get<{ Querystring: { limit?: string } }>("/api/data-protection/requests", async (request, reply) => {
-    const user = await requireRole(request, reply, ["admin"]);
+    const user = await manager(request, reply);
     if (!user) return reply;
     if (!deps.available) return unavailable(reply);
     const limit = Number(request.query.limit ?? 100);
@@ -95,7 +110,7 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
   });
 
   app.get<{ Params: { id: string } }>("/api/data-protection/requests/:id", async (request, reply) => {
-    const user = await requireRole(request, reply, ["admin"]);
+    const user = await manager(request, reply);
     if (!user) return reply;
     if (!deps.available) return unavailable(reply);
     const found = await requests.get(request.params.id);
@@ -107,7 +122,7 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
   });
 
   app.get<{ Params: { id: string } }>("/api/data-protection/requests/:id/export", async (request, reply) => {
-    const user = await requireRole(request, reply, ["admin"]);
+    const user = await manager(request, reply);
     if (!user) return reply;
     if (!deps.available) return unavailable(reply);
     if (!(await requireStepUp(request, reply, "subject_export.download"))) return reply;
@@ -115,7 +130,7 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
       const result = await requests.download(request.params.id, { email: user.email });
       await deps.audit(request, user, {
         eventType: "data_subject.export_downloaded",
-        category: "system",
+        category: "data_protection",
         action: "export",
         resourceType: "subject_request",
         resourceId: request.params.id,
@@ -129,7 +144,7 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
       if (error instanceof SubjectRequestError && error.code === "conflict") {
         await deps.audit(request, user, {
           eventType: "data_subject.export_downloaded",
-          category: "system",
+          category: "data_protection",
           action: "export",
           outcome: "failure",
           resourceType: "subject_request",

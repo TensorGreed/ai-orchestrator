@@ -18,7 +18,16 @@ export type Permission =
   | "secret:use"
   | "project:manage"
   | "project:invite"
-  | "role:manage";
+  | "role:manage"
+  /**
+   * 13.3 — make data-subject requests and download their exports. Deployment-wide: admins have it, and so does a
+   * member through a deployment-wide custom role (one with no project) that grants it. A project role never grants it.
+   */
+  | "data_subject:manage";
+
+/** 13.3 — permissions that are deployment-wide, not per project (see `canDeployment`). */
+export const DEPLOYMENT_PERMISSIONS = ["data_subject:manage"] as const satisfies readonly Permission[];
+export type DeploymentPermission = (typeof DEPLOYMENT_PERMISSIONS)[number];
 
 export const ALL_PERMISSIONS: Permission[] = [
   "workflow:read",
@@ -31,7 +40,8 @@ export const ALL_PERMISSIONS: Permission[] = [
   "secret:use",
   "project:manage",
   "project:invite",
-  "role:manage"
+  "role:manage",
+  "data_subject:manage"
 ];
 
 const PROJECT_ROLE_PERMISSIONS: Record<ProjectRole, Permission[]> = {
@@ -266,6 +276,27 @@ export class RbacService {
 
   async can(user: SafeUser, projectId: string, permission: Permission): Promise<boolean> {
     return (await this.effectivePermissions(user, projectId)).includes(permission);
+  }
+
+  /**
+   * 13.3 — a deployment-wide permission: global admins, or a membership (in any project) whose custom role has no
+   * project and grants it. Never for a request made with an API key limited to projects.
+   */
+  async canDeployment(user: SafeUser, permission: DeploymentPermission): Promise<boolean> {
+    if (user.projectScope) return false;
+    if (user.role === "admin") return true;
+    for (const row of await this.store.listUserProjectRoles(user.id)) {
+      if (!row.customRoleId) continue;
+      const custom = await this.store.getCustomRole(row.customRoleId);
+      if (custom && !custom.projectId && custom.permissions.includes(permission)) return true;
+    }
+    return false;
+  }
+
+  /** 13.3 — whether a custom role grants a deployment-wide permission (only an admin may hand such a role out). */
+  async grantsDeploymentPermission(customRoleId: string): Promise<boolean> {
+    const custom = await this.store.getCustomRole(customRoleId);
+    return Boolean(custom && custom.permissions.some((permission) => (DEPLOYMENT_PERMISSIONS as readonly string[]).includes(permission)));
   }
 
   // --- Workflow sharing ----------------------------------------------------

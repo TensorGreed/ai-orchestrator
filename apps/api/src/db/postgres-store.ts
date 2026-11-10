@@ -1055,6 +1055,17 @@ export class PostgresStore implements Store {
   async saveSubjectExport(...args: Parameters<Store["saveSubjectExport"]>): ReturnType<Store["saveSubjectExport"]> {
     return subject.saveSubjectExport(this.ctx, ...args);
   }
+  async completeSubjectRequest(...args: Parameters<Store["completeSubjectRequest"]>): ReturnType<Store["completeSubjectRequest"]> {
+    return subject.completeSubjectRequest(this.ctx, ...args);
+  }
+  async listOverdueSubjectRequests(...args: Parameters<Store["listOverdueSubjectRequests"]>): ReturnType<Store["listOverdueSubjectRequests"]> {
+    return subject.listOverdueSubjectRequests(this.ctx, ...args);
+  }
+  async expireReadySubjectRequestsWithoutExport(
+    ...args: Parameters<Store["expireReadySubjectRequestsWithoutExport"]>
+  ): ReturnType<Store["expireReadySubjectRequestsWithoutExport"]> {
+    return subject.expireReadySubjectRequestsWithoutExport(this.ctx, ...args);
+  }
   async getSubjectExport(...args: Parameters<Store["getSubjectExport"]>): ReturnType<Store["getSubjectExport"]> {
     return subject.getSubjectExport(this.ctx, ...args);
   }
