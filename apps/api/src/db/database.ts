@@ -107,6 +107,7 @@ import type {
   ClusterInstanceHeartbeat,
   ClusterInstanceRecord,
   ConsumedPendingChallenge,
+  PendingChallengeRow,
   PendingChallengeInput,
   ReleaseApprovalDecisionInput,
   LoginSession,
@@ -2566,10 +2567,14 @@ export class SqliteStore implements Store {
     return this.db.name;
   }
 
-  static async create(dbFilePath: string): Promise<SqliteStore> {
+  /**
+   * Opens (creating if needed) and migrates the file. `busyTimeoutMs` is how long a statement waits for another
+   * process's write lock (better-sqlite3's default is 5 s); a CLI next to a running API passes a longer wait.
+   */
+  static async create(dbFilePath: string, options: { busyTimeoutMs?: number } = {}): Promise<SqliteStore> {
     const absolutePath = path.resolve(dbFilePath);
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-    const db = new Database(absolutePath);
+    const db = new Database(absolutePath, options.busyTimeoutMs === undefined ? {} : { timeout: options.busyTimeoutMs });
     return new SqliteStore(db);
   }
 
@@ -10297,6 +10302,20 @@ export class SqliteStore implements Store {
       .prepare(`DELETE FROM pending_challenges WHERE kind = ? AND scope = ? AND user_id IS ?`)
       .run(input.kind, input.scope, input.userId);
     return changes;
+  }
+
+  async listPendingChallenges(input: { kind: string; limit: number }): Promise<PendingChallengeRow[]> {
+    const now = new Date().toISOString();
+    return this.queryAll<{ id_hash: unknown; user_id: unknown; scope: unknown; payload_sealed: unknown; expires_at: unknown }>(
+      `SELECT id_hash, user_id, scope, payload_sealed, expires_at FROM pending_challenges WHERE kind = ? ORDER BY created_at, id_hash LIMIT ?`,
+      [input.kind, Math.max(0, Math.floor(input.limit))]
+    ).map((row) => ({
+      idHash: toString(row.id_hash),
+      userId: row.user_id === null || row.user_id === undefined ? null : toString(row.user_id),
+      scope: row.scope === null || row.scope === undefined ? null : toString(row.scope),
+      payloadSealed: toString(row.payload_sealed),
+      expired: toString(row.expires_at) <= now
+    }));
   }
 
   async prunePendingChallenges(): Promise<number> {

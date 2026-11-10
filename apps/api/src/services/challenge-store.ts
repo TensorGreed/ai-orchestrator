@@ -15,7 +15,12 @@
 import { createHash } from "node:crypto";
 import type { Store } from "../db/store.js";
 
-export type ChallengeKind = "mfa_login" | "sso_mfa" | "mcp_oauth";
+/**
+ * `break_glass` (a one-time sign-in link minted on the host) and `break_glass_session` (the claim that the session's
+ * end alert goes out once) are always kept in the database store, whatever the deployment, because the link is minted
+ * by another process (break-glass-service.ts).
+ */
+export type ChallengeKind = "mfa_login" | "sso_mfa" | "mcp_oauth" | "break_glass" | "break_glass_session";
 
 export interface IssueChallengeInput<T> {
   kind: ChallengeKind;
@@ -156,7 +161,8 @@ export class DbChallengeStore implements ChallengeStore {
   readonly backend = "database" as const;
 
   constructor(
-    private readonly store: Pick<Store, "createPendingChallenge" | "consumePendingChallenge" | "deletePendingChallenges" | "prunePendingChallenges">,
+    private readonly store: Pick<Store, "createPendingChallenge" | "consumePendingChallenge" | "deletePendingChallenges" | "prunePendingChallenges"> &
+      Partial<Pick<Store, "listPendingChallenges">>,
     private readonly sealer: ChallengeSealer,
     private readonly logger?: { warn: (message: string, fields?: Record<string, unknown>) => void }
   ) {}
@@ -187,6 +193,24 @@ export class DbChallengeStore implements ChallengeStore {
       return null;
     }
     return { payload, userId: row.userId, expired: row.expired };
+  }
+
+  /**
+   * 13.2 — up to `limit` challenges of `kind`, oldest first, opened but left in place (the caller consumes one before
+   * acting on it). A row that does not open is skipped.
+   */
+  async list<T>(kind: ChallengeKind, limit: number): Promise<Array<{ payload: T; userId: string | null; expired: boolean }>> {
+    if (!this.store.listPendingChallenges) throw new Error("This store cannot list pending challenges");
+    const rows = await this.store.listPendingChallenges({ kind, limit });
+    const listed: Array<{ payload: T; userId: string | null; expired: boolean }> = [];
+    for (const row of rows) {
+      try {
+        listed.push({ payload: JSON.parse(this.sealer.openValue(sealPurpose(kind, row.idHash), row.payloadSealed)) as T, userId: row.userId, expired: row.expired });
+      } catch {
+        this.logger?.warn("A pending challenge could not be opened; it is skipped", { kind });
+      }
+    }
+    return listed;
   }
 
   async discard(kind: ChallengeKind, filter: { scope: string; userId: string | null }): Promise<void> {

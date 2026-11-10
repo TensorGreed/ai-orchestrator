@@ -6,7 +6,8 @@ export const NOTIFICATION_EVENT_TYPES = [
   "execution.failure",
   "approval.requested",
   "approval.timed_out",
-  "network.break_glass_used"
+  "network.break_glass_used",
+  "auth.break_glass_used"
 ] as const;
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
@@ -16,7 +17,8 @@ export const NOTIFICATION_EVENT_LABELS: Record<NotificationEventType, string> = 
   "execution.failure": "Workflow failure",
   "approval.requested": "Approval requested",
   "approval.timed_out": "Approval timed out",
-  "network.break_glass_used": "Break-glass access used"
+  "network.break_glass_used": "Break-glass access used",
+  "auth.break_glass_used": "Break-glass sign-in"
 };
 
 /** Names an earlier settings UI stored for channels; they map to the names the server emits. */

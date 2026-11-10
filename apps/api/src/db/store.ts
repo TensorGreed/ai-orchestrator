@@ -274,6 +274,15 @@ export interface PendingChallengeInput {
   ttlMs: number;
 }
 
+/** 13.2 — a pending challenge as listed (still stored). */
+export interface PendingChallengeRow {
+  idHash: string;
+  userId: string | null;
+  scope: string | null;
+  payloadSealed: string;
+  expired: boolean;
+}
+
 /** Phase 13.1 — a pending challenge taken out of the store (it is gone afterwards, whatever the caller does with it). */
 export interface ConsumedPendingChallenge {
   userId: string | null;
@@ -2319,6 +2328,11 @@ export interface Store extends AiGatewayStore {
   deletePendingChallenges(input: { kind: string; scope: string; userId: string | null }): Promise<number>;
   /** Removes expired challenges. Returns how many. */
   prunePendingChallenges(): Promise<number>;
+  /**
+   * 13.2 — up to `limit` live and expired challenges of `kind`, oldest first, without taking them out (the break-glass
+   * end sweep reads its claims; it still consumes each one before acting on it).
+   */
+  listPendingChallenges(input: { kind: string; limit: number }): Promise<PendingChallengeRow[]>;
   /**
    * Counts one hit in the fixed window of `key`, in one atomic statement: a key whose window (`windowMs`) has passed
    * starts a new one at 1. Returns the count in the current window and the milliseconds left in it.

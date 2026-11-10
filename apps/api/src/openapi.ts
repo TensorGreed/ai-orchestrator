@@ -387,6 +387,21 @@ export const openApiSpec = {
         }
       }
     },
+    "/api/auth/break-glass": {
+      post: {
+        tags: ["Auth"],
+        summary: "Confirm a one-time break-glass sign-in link minted on the host with admin:break-glass (a one-hour admin session). Same-origin only",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["token"], properties: { token: { type: "string" } } } } }
+        },
+        responses: {
+          "200": { description: "Signed in: the session cookie is set; answers the user and when the session ends" },
+          "401": { description: "The link is invalid, expired or already used" },
+          "403": { description: "Cross-site request (Origin or Sec-Fetch-Site), or refused by a network allowlist" }
+        }
+      }
+    },
     "/api/auth/ldap/login": {
       post: {
         tags: ["Auth"],
