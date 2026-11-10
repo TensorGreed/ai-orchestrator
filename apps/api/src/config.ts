@@ -800,7 +800,9 @@ export function parseTrustProxy(raw: string | undefined): boolean | number | str
     const family = net.isIP(address ?? "");
     const prefixOk =
       prefix === undefined || (/^\d+$/.test(prefix) && Number(prefix) <= (family === 6 ? 128 : 32));
-    if (family === 0 || !prefixOk || extra !== undefined) {
+    // A /0 range matches every address, which proxy-addr refuses; say so by name rather than failing at boot.
+    const matchesAll = prefix !== undefined && /^0+$/.test(prefix);
+    if (family === 0 || !prefixOk || extra !== undefined || matchesAll) {
       throw new Error(
         `Invalid environment configuration: TRUST_PROXY entry "${entry}" is not an IP address, a CIDR range, ` +
           "loopback, linklocal or uniquelocal (or use true, false or a hop count)"

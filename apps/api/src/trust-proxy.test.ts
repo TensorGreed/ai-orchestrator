@@ -85,6 +85,44 @@ async function resolve(row: Row): Promise<string> {
   }
 }
 
+interface ForwardedRow {
+  trust: string | undefined;
+  socket: string;
+  protocol: string;
+  hostname: string;
+}
+
+/** X-Forwarded-Proto and X-Forwarded-Host are honoured only when the connecting socket is a trusted hop. */
+const forwardedRows: ForwardedRow[] = [
+  { trust: undefined, socket: "10.0.0.5", protocol: "http", hostname: "api.internal" },
+  { trust: "false", socket: "10.0.0.5", protocol: "http", hostname: "api.internal" },
+  { trust: "1", socket: "10.0.0.5", protocol: "https", hostname: "app.example.com" },
+  { trust: "2", socket: "10.0.0.5", protocol: "https", hostname: "app.example.com" },
+  { trust: "true", socket: "10.0.0.5", protocol: "https", hostname: "app.example.com" },
+  { trust: "10.0.0.0/8", socket: "10.0.0.5", protocol: "https", hostname: "app.example.com" },
+  { trust: "10.0.0.0/8", socket: "192.0.2.1", protocol: "http", hostname: "api.internal" }
+];
+
+describe("TRUST_PROXY resolves request.protocol and request.hostname", () => {
+  for (const row of forwardedRows) {
+    it(`TRUST_PROXY=${JSON.stringify(row.trust)} socket ${row.socket} -> ${row.protocol} ${row.hostname}`, async () => {
+      const app = Fastify({ trustProxy: toFastifyTrustProxy(parseTrustProxy(row.trust)) });
+      app.get("/p", async (request) => ({ protocol: request.protocol, hostname: request.hostname }));
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: "/p",
+          remoteAddress: row.socket,
+          headers: { host: "api.internal", "x-forwarded-proto": "https", "x-forwarded-host": "app.example.com" }
+        });
+        expect(response.json()).toEqual({ protocol: row.protocol, hostname: row.hostname });
+      } finally {
+        await app.close();
+      }
+    });
+  }
+});
+
 describe("TRUST_PROXY resolves request.ip", () => {
   for (const row of rows) {
     const label = `TRUST_PROXY=${JSON.stringify(row.trust)} socket ${row.socket} X-Forwarded-For ${row.xff ?? "(none)"} -> ${row.ip}`;
