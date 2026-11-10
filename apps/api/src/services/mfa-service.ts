@@ -68,21 +68,30 @@ export function generateTotpCode(base32Secret: string, timestampMs: number = Dat
   return hotp(base32Decode(base32Secret), counter);
 }
 
-export function verifyTotpCode(
+/** The TOTP time step a code matches (within the ±1 step window), or null. */
+export function matchTotpStep(
   base32Secret: string,
   code: string,
   timestampMs: number = Date.now()
-): boolean {
-  if (!code || !/^\d{6}$/.test(code)) return false;
+): number | null {
+  if (!code || !/^\d{6}$/.test(code)) return null;
   const counter = Math.floor(timestampMs / 1000 / TOTP_STEP_SECONDS);
   const secret = base32Decode(base32Secret);
   for (let w = -TOTP_WINDOW; w <= TOTP_WINDOW; w += 1) {
     const candidate = hotp(secret, counter + w);
     if (crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(code))) {
-      return true;
+      return counter + w;
     }
   }
-  return false;
+  return null;
+}
+
+export function verifyTotpCode(
+  base32Secret: string,
+  code: string,
+  timestampMs: number = Date.now()
+): boolean {
+  return matchTotpStep(base32Secret, code, timestampMs) !== null;
 }
 
 export interface MfaEnrollment {
@@ -177,7 +186,7 @@ export class MfaService {
     const record = await this.store.getMfaSecret(userId);
     if (!record) return false;
     const secret = this.decrypt(record.secretIv, record.secretAuthTag, record.secretCiphertext);
-    if (!verifyTotpCode(secret, code)) return false;
+    if (matchTotpStep(secret, code) === null) return false;
     await this.store.upsertMfaSecret({
       userId,
       secretIv: record.secretIv,
@@ -194,7 +203,9 @@ export class MfaService {
     const record = await this.store.getMfaSecret(userId);
     if (!record || !record.enabled) return false;
     const secret = this.decrypt(record.secretIv, record.secretAuthTag, record.secretCiphertext);
-    if (verifyTotpCode(secret, code)) return true;
+    const step = matchTotpStep(secret, code);
+    // 13.2 — each code is accepted once: a step at or before the last accepted one is refused (RFC 6238 §5.2).
+    if (step !== null) return await this.store.markTotpStepUsed(userId, step);
 
     const codeHash = crypto.createHash("sha256").update(code.toUpperCase()).digest("hex");
     const matchIndex = record.backupCodes.findIndex((hashed) => {

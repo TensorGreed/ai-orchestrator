@@ -116,6 +116,36 @@ export type GateCaseDecisionRecordInput = Parameters<Store["decideGateCaseReques
 
 /** Phase 13.1 — the claim a queued run's writes are fenced on. */
 /** 13.2 (v61) — how a sign-in session was issued (`sessions.auth_method`; null on rows from before v61). */
+/** 13.2 (v62) — `users.kind`: a person, or a service account (no password, signs in only with API keys). */
+export type StoredUserKind = "human" | "service";
+
+/** A user row as the store reads it (the password hash included). */
+export interface StoredUser {
+  id: string;
+  email: string;
+  passwordHash: string;
+  role: string;
+  kind: StoredUserKind;
+  /** Service accounts: what the account is for. */
+  description: string | null;
+  /** Service accounts: the admin who created it (kept as text; deleting that admin leaves the account working). */
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A user row without the password hash (listings). */
+export type StoredUserSummary = Omit<StoredUser, "passwordHash">;
+
+/** 13.2 — a new service account: stored with kind `service` and an unusable password hash. */
+export interface ServiceAccountCreate {
+  id: string;
+  email: string;
+  role: string;
+  description: string | null;
+  createdBy: string | null;
+}
+
 export type SessionAuthMethod = "password" | "oidc" | "saml" | "ldap" | "break_glass";
 
 /** 13.2 (v61) — why a session ended (`sessions.ended_reason`; null while live, and on rows revoked before v61). */
@@ -354,6 +384,12 @@ export type McpGatewayApprovalCreateResult =
  * were requested, whatever the history retention, so the table and its argument previews never grow without bound.
  */
 export const MCP_GATEWAY_APPROVAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The WHERE clause of a user listing by kind: anything but 'human' lists as a service account, as storedUserFromRow reads it. */
+export function userKindWhere(kind: StoredUserKind | undefined): string {
+  if (!kind) return "";
+  return kind === "human" ? "WHERE kind = 'human'" : "WHERE kind <> 'human'";
+}
 
 /** The cutoff for `MCP_GATEWAY_APPROVAL_RETENTION_MS` at `now`. */
 export function mcpGatewayApprovalRetentionCutoff(now: string): string {
@@ -1403,23 +1439,14 @@ export interface Store extends AiGatewayStore {
 
   // ---- Users, sessions, API keys, MFA and SSO identities
 
+  /** Every user row, service accounts included (first-run bootstrap only asks whether any exists). */
   countUsers(): Promise<number>;
-  getUserByEmail(email: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null>;
-  getUserById(id: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null>;
+  getUserByEmail(email: string): Promise<StoredUser | null>;
+  getUserById(id: string): Promise<StoredUser | null>;
+  /**
+   * Inserts or updates a user. An insert is a person (`kind` human); an update never changes the kind, description or
+   * creator.
+   */
   saveUser(input: {
     id: string;
     email: string;
@@ -1432,13 +1459,15 @@ export interface Store extends AiGatewayStore {
     createdAt: string;
     updatedAt: string;
   }>;
-  listUsers(): Promise<Array<{
-    id: string;
-    email: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  }>>;
+  /** Users, newest first; `kind` keeps only people or only service accounts (default: both). */
+  listUsers(options?: { kind?: StoredUserKind }): Promise<StoredUserSummary[]>;
+  /**
+   * 13.2 — creates a service account (kind `service`, the unusable password hash `!`). Null when a user with the
+   * email exists.
+   */
+  createServiceAccount(input: ServiceAccountCreate): Promise<StoredUserSummary | null>;
+  /** 13.2 — changes a service account's role and/or description; null when no service account has the id. */
+  updateServiceAccount(id: string, patch: { role?: string; description?: string | null }): Promise<StoredUserSummary | null>;
   /**
    * Roadmap 7.3 — a deployment-level invite: a pending user (an unusable password, so it cannot sign in with one) and
    * its one-time invite, written together. An email whose user still has an unaccepted invite (pending) is invited
@@ -1457,12 +1486,25 @@ export interface Store extends AiGatewayStore {
   /** Marks the user's unaccepted invites accepted (the user signed in another way, for example SSO). */
   closeUserInvites(userId: string, now: string): Promise<number>;
   /** Roadmap 7.3 — one page of listUsers' rows (newest first, id tiebreak) and the number of users. */
-  listUsersPage(options: { limit: number; offset: number }): Promise<{
-    items: Array<{ id: string; email: string; role: string; createdAt: string; updatedAt: string }>;
+  listUsersPage(options: { limit: number; offset: number; kind?: StoredUserKind }): Promise<{
+    items: StoredUserSummary[];
     total: number;
   }>;
   updateUserRole(id: string, role: string): Promise<boolean>;
+  /**
+   * 13.2 — changes a user's global role, but never demotes the last admin: when the user is an accepted admin and
+   * `role` is not admin, the change happens only if another accepted admin remains (an invited user who never accepted
+   * does not count). Counted and written in one transaction (Postgres locks the admin rows), so two admins demoting
+   * each other at once cannot both succeed.
+   */
+  updateUserRoleKeepingAdmin(id: string, role: string): Promise<"updated" | "not_found" | "last_admin">;
   deleteUser(id: string): Promise<boolean>;
+  /**
+   * 13.2 — deletes a user (as deleteUser), but never the last accepted admin who is a person: a service account never
+   * counts, since it cannot sign in or get a break-glass link. Counted and deleted in one transaction (Postgres locks
+   * the admin rows), so two deletes at once cannot remove both of the last two admins.
+   */
+  deleteUserKeepingAdmin(id: string): Promise<"deleted" | "not_found" | "last_admin">;
   getSession(sessionId: string): Promise<LoginSession | null>;
   /**
    * Inserts a session. Only services/session-service.ts calls this (issueSession), so every sign-in path records the
@@ -1487,6 +1529,8 @@ export interface Store extends AiGatewayStore {
    * is missing, revoked, past its expiry, or belongs to another user.
    */
   markSessionMfaVerified(sessionId: string, input: { userId: string; at: string }): Promise<boolean>;
+  /** 13.2 — forgets a session's MFA check (after MFA was turned off); false when the session does not exist. */
+  clearSessionMfaVerified(sessionId: string): Promise<boolean>;
   /**
    * 13.2 — deletes sessions that ended (revoked, or past their expiry) before `before`; returns how many. Personal
    * fields are already cleared when a session ends; this removes the rows themselves after the retention window.
@@ -1497,7 +1541,8 @@ export interface Store extends AiGatewayStore {
    * returns the ended ids, oldest first. `protectId` (the session being issued) is never ended: it is kept first and
    * counts toward `keep`. Atomic across instances: Postgres locks the user row (`FOR UPDATE`) for the transaction,
    * SQLite runs one immediate write transaction, so two sign-ins racing past a limit leave exactly `keep` live
-   * sessions (each racer's own session survives its own call).
+   * sessions (each racer's own session survives its own call). Break-glass sessions are neither counted nor ended:
+   * a normal sign-in never ends a break-glass session.
    */
   revokeOldestUserSessions(userId: string, keep: number, reason: SessionEndReason, options?: { protectId?: string }): Promise<string[]>;
   saveApiKey(input: {
@@ -1561,6 +1606,11 @@ export interface Store extends AiGatewayStore {
    */
   replaceMfaBackupCodes(input: { userId: string; expected: readonly string[]; next: readonly string[] }): Promise<boolean>;
   deleteMfaSecret(userId: string): Promise<boolean>;
+  /**
+   * 13.2 (v63) — records that the TOTP time step `step` was accepted for this user. Compare-and-set: true only when no
+   * step at or after it was accepted before, so one code is accepted once (RFC 6238 §5.2) even across instances.
+   */
+  markTotpStepUsed(userId: string, step: number): Promise<boolean>;
   findSsoIdentity(provider: string, subject: string): Promise<{
     id: string;
     userId: string;
@@ -2028,6 +2078,8 @@ export interface Store extends AiGatewayStore {
     id: string;
     status: "approved" | "rejected" | "timed_out" | "canceled";
     decidedByUserId?: string | null;
+    /** 13.2 — the API key that decided, when one did. */
+    decidedByApiKeyId?: string | null;
     decidedBy?: string | null;
     reason?: string | null;
     edits?: Record<string, unknown> | null;

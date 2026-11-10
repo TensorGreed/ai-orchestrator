@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { GuardProfileVersionView, GuardSimulationView } from "@ai-orchestrator/shared";
-import { ApiError, cancelGuardSimulation, fetchGuardSimulation, simulateGuardProfile, type GuardFieldIssue } from "../lib/api";
+import { ApiError, cancelGuardSimulation, fetchGuardSimulation, inBackground, simulateGuardProfile, type GuardFieldIssue } from "../lib/api";
 import {
   actionTransition,
   changeLabel,
@@ -73,7 +73,8 @@ export function useSimulationRunner<P>(starter: (payload: P) => Promise<{ simula
       const delay = failures === 0 ? pollMs : pollRetryDelay(failures, retryBaseMs);
       timer.current = setTimeout(async () => {
         try {
-          const response = await fetchGuardSimulation(id);
+          // Background traffic: the poll is not user activity for the idle timeout.
+          const response = await inBackground(() => fetchGuardSimulation(id));
           setLost(null);
           setSimulation(response.simulation);
           if (simulationFinished(response.simulation)) setBusy(false);

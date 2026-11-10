@@ -39,6 +39,15 @@ SAML logins, from the IdP or the local TOTP step; `SSO_MFA_OIDC_AMR`,
 `SSO_MFA_OIDC_ACR` and `SSO_MFA_SAML_AUTHN_CONTEXTS` tune what counts as IdP
 MFA. See [MFA on SSO](../security/auth-rbac.md#mfa-on-sso).
 
+`MFA_REQUIRED_ROLES` (unset by default; a comma list of `admin`, `builder`,
+`operator`, `viewer`) makes MFA required for those roles: an unenrolled user
+gets a session that can only set it up. `MFA_ENFORCE=true` adds `admin` to the
+list. `STEP_UP_MAX_AGE_MINUTES` (0 or unset = off) asks for a fresh code before
+security actions such as role changes, new API keys and secret changes, and
+refuses personal API keys on them (a service account's key with an admin role
+ceiling is let through). See
+[MFA required per role](../security/auth-rbac.md#mfa-required-per-role).
+
 ## Rate limits (on by default)
 
 `RATE_LIMIT_ENABLED=true` (the default) limits requests per client address in

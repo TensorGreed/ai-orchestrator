@@ -6,7 +6,16 @@
  * (and projects). A write whose user or project was deleted meanwhile throws StoreReferenceMissingError (409), not the
  * raw 23503.
  */
-import { type Store, type UserInviteCreate, type UserInviteRecord } from "../store.js";
+import {
+  type ServiceAccountCreate,
+  type Store,
+  type StoredUser,
+  type StoredUserKind,
+  type StoredUserSummary,
+  type UserInviteCreate,
+  type UserInviteRecord,
+  userKindWhere
+} from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { withReferenceCheck } from "../store-errors.js";
@@ -16,64 +25,48 @@ export async function countUsers(ctx: PgContext): Promise<number> {
   return row ? toNum(row.count) : 0;
 }
 
-export async function getUserByEmail(ctx: PgContext, email: string): Promise<{
+type UserRow = {
   id: string;
   email: string;
-  passwordHash: string;
+  password_hash: string;
   role: string;
-  createdAt: string;
-  updatedAt: string;
-} | null> {
-  const row = await ctx.queryOne<{
-    id: string;
-    email: string;
-    password_hash: string;
-    role: string;
-    created_at: string;
-    updated_at: string;
-  }>(
-    `SELECT id, email, password_hash, role, created_at, updated_at FROM users WHERE lower(email) = lower($1)`,
-    [email]
-  );
-  if (!row) return null;
+  kind: string | null;
+  description: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+const USER_COLUMNS = "id, email, password_hash, role, kind, description, created_by, created_at, updated_at";
+
+function storedUserFromRow(row: UserRow): StoredUser {
   return {
     id: toStr(row.id),
     email: toStr(row.email),
     passwordHash: toStr(row.password_hash),
     role: toStr(row.role),
+    // Fails closed: only 'human' is a person; any other value (a typo, a manual fix) is a service account, which cannot sign in.
+    kind: row.kind === "human" ? "human" : "service",
+    description: row.description ? toStr(row.description) : null,
+    createdBy: row.created_by ? toStr(row.created_by) : null,
     createdAt: toStr(row.created_at),
     updatedAt: toStr(row.updated_at)
   };
 }
 
-export async function getUserById(ctx: PgContext, id: string): Promise<{
-  id: string;
-  email: string;
-  passwordHash: string;
-  role: string;
-  createdAt: string;
-  updatedAt: string;
-} | null> {
-  const row = await ctx.queryOne<{
-    id: string;
-    email: string;
-    password_hash: string;
-    role: string;
-    created_at: string;
-    updated_at: string;
-  }>(
-    `SELECT id, email, password_hash, role, created_at, updated_at FROM users WHERE id = $1`,
-    [id]
-  );
-  if (!row) return null;
-  return {
-    id: toStr(row.id),
-    email: toStr(row.email),
-    passwordHash: toStr(row.password_hash),
-    role: toStr(row.role),
-    createdAt: toStr(row.created_at),
-    updatedAt: toStr(row.updated_at)
-  };
+function userSummaryFromRow(row: UserRow): StoredUserSummary {
+  const { passwordHash: _hash, ...summary } = storedUserFromRow(row);
+  return summary;
+}
+
+export async function getUserByEmail(ctx: PgContext, email: string): Promise<StoredUser | null> {
+  const row = await ctx.queryOne<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE lower(email) = lower($1)`, [email]);
+  return row ? storedUserFromRow(row) : null;
+}
+
+export async function getUserById(ctx: PgContext, id: string): Promise<StoredUser | null> {
+  const row = await ctx.queryOne<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE id = $1`, [id]);
+  return row ? storedUserFromRow(row) : null;
 }
 
 export async function saveUser(ctx: PgContext, input: {
@@ -104,27 +97,38 @@ export async function saveUser(ctx: PgContext, input: {
   return { id: input.id, email: input.email.toLowerCase(), role: input.role, createdAt, updatedAt: now };
 }
 
-export async function listUsers(ctx: PgContext): Promise<Array<{
-  id: string;
-  email: string;
-  role: string;
-  createdAt: string;
-  updatedAt: string;
-}>> {
-  const rows = await ctx.query<{
-    id: string;
-    email: string;
-    role: string;
-    created_at: string;
-    updated_at: string;
-  }>(`SELECT id, email, role, created_at, updated_at FROM users ORDER BY created_at DESC`);
-  return rows.map((r: { id: string; email: string; role: string; created_at: string; updated_at: string }) => ({
-    id: r.id,
-    email: r.email,
-    role: r.role,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at
-  }));
+export async function listUsers(ctx: PgContext, options: { kind?: StoredUserKind } = {}): Promise<StoredUserSummary[]> {
+  const rows = await ctx.query<UserRow>(`SELECT ${USER_COLUMNS} FROM users ${userKindWhere(options.kind)} ORDER BY created_at DESC`);
+  return rows.map(userSummaryFromRow);
+}
+
+export async function createServiceAccount(ctx: PgContext, input: ServiceAccountCreate): Promise<StoredUserSummary | null> {
+  const now = new Date().toISOString();
+  const row = await ctx.queryOne<UserRow>(
+    `INSERT INTO users (id, email, password_hash, role, kind, description, created_by, created_at, updated_at)
+     VALUES ($1, $2, '!', $3, 'service', $4, $5, $6, $6)
+     ON CONFLICT DO NOTHING
+     RETURNING ${USER_COLUMNS}`,
+    [input.id, input.email.toLowerCase(), input.role, input.description, input.createdBy, now]
+  );
+  return row ? userSummaryFromRow(row) : null;
+}
+
+export async function updateServiceAccount(
+  ctx: PgContext,
+  id: string,
+  patch: { role?: string; description?: string | null }
+): Promise<StoredUserSummary | null> {
+  const row = await ctx.queryOne<UserRow>(
+    `UPDATE users SET
+       role = COALESCE($2, role),
+       description = CASE WHEN $3::boolean THEN $4 ELSE description END,
+       updated_at = $5
+     WHERE id = $1 AND kind = 'service'
+     RETURNING ${USER_COLUMNS}`,
+    [id, patch.role ?? null, patch.description !== undefined, patch.description ?? null, new Date().toISOString()]
+  );
+  return row ? userSummaryFromRow(row) : null;
 }
 
 type UserInviteRow = {
@@ -238,15 +242,59 @@ export async function closeUserInvites(ctx: PgContext, userId: string, now: stri
 }
 
 export async function listUsersPage(ctx: PgContext, options: Parameters<Store["listUsersPage"]>[0]): ReturnType<Store["listUsersPage"]> {
-  const count = await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM users`);
-  const rows = await ctx.query<{ id: string; email: string; role: string; created_at: string; updated_at: string }>(
-    `SELECT id, email, role, created_at, updated_at FROM users ORDER BY created_at DESC, id ASC LIMIT $1 OFFSET $2`,
+  const where = userKindWhere(options.kind);
+  const count = await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM users ${where}`);
+  const rows = await ctx.query<UserRow>(
+    `SELECT ${USER_COLUMNS} FROM users ${where} ORDER BY created_at DESC, id ASC LIMIT $1 OFFSET $2`,
     [options.limit, options.offset]
   );
   return {
-    items: rows.map((r) => ({ id: r.id, email: r.email, role: r.role, createdAt: r.created_at, updatedAt: r.updated_at })),
+    items: rows.map(userSummaryFromRow),
     total: count ? toNum(count.count) : 0
   };
+}
+
+/** SQL: the user named by `column` accepted an invite, or was never invited. */
+function acceptedUser(column: string): string {
+  return `(NOT EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NOT NULL))`;
+}
+
+/**
+ * Changes a role, never demoting the last accepted admin. The admin rows are locked for the transaction, so a second
+ * demotion waits for the first and then counts again.
+ */
+type PgClient = Parameters<Parameters<PgContext["withTransaction"]>[0]>[0];
+
+/**
+ * 13.2 — locks the admin rows and the target, then reads the target: null when it does not exist, else whether it is
+ * the only accepted admin who is a person (who could still sign in, or get a break-glass link). Only people count: a
+ * service account can never sign in. A second change waits for the lock and then counts again.
+ */
+async function lockAndCheckLastHumanAdmin(client: PgClient, id: string): Promise<{ lastAdmin: boolean; role: string } | null> {
+  await client.query(`SELECT id FROM users WHERE role = 'admin' OR id = $1 ORDER BY id FOR UPDATE`, [id]);
+  const target = await client.query<{ role: string; kind: string | null; accepted: boolean }>(
+    `SELECT u.role, u.kind, ${acceptedUser("u.id")} AS accepted FROM users u WHERE u.id = $1`,
+    [id]
+  );
+  const row = target.rows[0];
+  if (!row) return null;
+  if (toStr(row.role) !== "admin" || toStr(row.kind) !== "human" || !row.accepted) return { lastAdmin: false, role: toStr(row.role) };
+  const others = await client.query<{ count: string | number }>(
+    `SELECT COUNT(*) AS count FROM users u WHERE u.role = 'admin' AND u.kind = 'human' AND u.id <> $1 AND ${acceptedUser("u.id")}`,
+    [id]
+  );
+  return { lastAdmin: toNum(others.rows[0]?.count ?? 0) === 0, role: toStr(row.role) };
+}
+
+export async function updateUserRoleKeepingAdmin(ctx: PgContext, id: string, role: string): Promise<"updated" | "not_found" | "last_admin"> {
+  return ctx.withTransaction(async (client) => {
+    const checked = await lockAndCheckLastHumanAdmin(client, id);
+    if (!checked) return "not_found";
+    if (role !== "admin" && checked.lastAdmin) return "last_admin";
+    await client.query(`UPDATE users SET role = $1, updated_at = $2 WHERE id = $3`, [role, new Date().toISOString(), id]);
+    return "updated";
+  });
 }
 
 export async function updateUserRole(ctx: PgContext, id: string, role: string): Promise<boolean> {
@@ -270,15 +318,30 @@ export async function deleteUser(ctx: PgContext, id: string): Promise<boolean> {
     // row: one already in flight commits before this lock is granted, so the deletes below see and remove it; one that
     // starts later waits and then fails with StoreReferenceMissingError. Either way the user delete cannot hit 23503.
     await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [id]);
-    await client.query(`DELETE FROM sessions WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM api_keys WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM mfa_secrets WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM sso_identities WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM user_project_roles WHERE user_id = $1`, [id]);
-    await client.query(`DELETE FROM user_invites WHERE user_id = $1`, [id]);
-    const result = await client.query(`DELETE FROM users WHERE id = $1`, [id]);
-    return (result.rowCount ?? 0) > 0;
+    return await deleteUserRows(client, id);
   });
+}
+
+/** 13.2 — deletes a user unless it is the last accepted admin who is a person; counted and deleted in one transaction. */
+export async function deleteUserKeepingAdmin(ctx: PgContext, id: string): Promise<"deleted" | "not_found" | "last_admin"> {
+  return ctx.withTransaction(async (client) => {
+    // Locks the admin rows and the target (as for deleteUser, the target's lock also orders it after child inserts).
+    const checked = await lockAndCheckLastHumanAdmin(client, id);
+    if (!checked) return "not_found";
+    if (checked.lastAdmin) return "last_admin";
+    return (await deleteUserRows(client, id)) ? "deleted" : "not_found";
+  });
+}
+
+async function deleteUserRows(client: PgClient, id: string): Promise<boolean> {
+  await client.query(`DELETE FROM sessions WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM api_keys WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM mfa_secrets WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM sso_identities WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM user_project_roles WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM user_invites WHERE user_id = $1`, [id]);
+  const result = await client.query(`DELETE FROM users WHERE id = $1`, [id]);
+  return (result.rowCount ?? 0) > 0;
 }
 
 /** A stored JSON array of strings (SQLite's parseJsonArray): anything else reads as []. */
@@ -649,6 +712,15 @@ export async function replaceMfaBackupCodes(ctx: PgContext, input: Parameters<St
   const result = await ctx.pool.query(
     `UPDATE mfa_secrets SET backup_codes_json = $1, updated_at = $2 WHERE user_id = $3 AND backup_codes_json = $4`,
     [JSON.stringify(input.next), new Date().toISOString(), input.userId, JSON.stringify(input.expected)]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Compare-and-set on the last accepted TOTP step: true only for a step after every step accepted before. */
+export async function markTotpStepUsed(ctx: PgContext, userId: string, step: number): Promise<boolean> {
+  const result = await ctx.pool.query(
+    `UPDATE mfa_secrets SET last_totp_step = $1 WHERE user_id = $2 AND (last_totp_step IS NULL OR last_totp_step < $1)`,
+    [step, userId]
   );
   return (result.rowCount ?? 0) > 0;
 }

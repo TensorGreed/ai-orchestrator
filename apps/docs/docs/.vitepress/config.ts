@@ -177,6 +177,7 @@ export default defineConfig({
         text: "Security",
         items: [
           { text: "Auth + RBAC", link: "/security/auth-rbac" },
+          { text: "Service Accounts + API Keys", link: "/security/service-accounts" },
           { text: "Secrets", link: "/security/secrets" },
           { text: "Secure Webhooks", link: "/security/secure-webhooks" },
           { text: "Audit Bundles", link: "/security/audit-bundles" },

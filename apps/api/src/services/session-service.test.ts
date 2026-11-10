@@ -10,6 +10,7 @@ import { createTestStore, type TestStore } from "../test-support/test-store.js";
 import {
   SESSION_ID_FORMAT,
   SESSION_IP_MAX,
+  SESSION_TOUCH_MAP_MAX,
   SESSION_USER_AGENT_MAX,
   SessionService,
   isPolicyExempt,
@@ -17,6 +18,7 @@ import {
   sessionRequestFields
 } from "./session-service.js";
 import { AuthService } from "./auth-service.js";
+import type { Store } from "../db/store.js";
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const stores: TestStore[] = [];
@@ -225,5 +227,20 @@ describe("one session-issuing path", () => {
     };
     walk(src);
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("touch throttle map", () => {
+  it("never holds more than SESSION_TOUCH_MAP_MAX sessions, even when all are active within one minute", async () => {
+    const touched: string[] = [];
+    const store = { touchSession: async (id: string) => void touched.push(id) } as unknown as Store;
+    const service = new SessionService(store, { ttlHours: 1, now: () => 1_000_000 });
+    for (let i = 0; i < SESSION_TOUCH_MAP_MAX + 50; i += 1) await service.recordActivity(`sess_${i}`);
+    expect(service.touchedSessionCount).toBe(SESSION_TOUCH_MAP_MAX);
+    expect(touched).toHaveLength(SESSION_TOUCH_MAP_MAX + 50);
+    // A remembered session is still throttled; background requests never write.
+    await service.recordActivity(`sess_${SESSION_TOUCH_MAP_MAX + 49}`);
+    await service.recordActivity("sess_new", { background: true });
+    expect(touched).toHaveLength(SESSION_TOUCH_MAP_MAX + 50);
   });
 });

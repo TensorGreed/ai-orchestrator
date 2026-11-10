@@ -1644,3 +1644,73 @@ describe("what approvals record and send", () => {
     expect(() => parseConfig({ ...base, APP_PUBLIC_URL: "l2m.example.test" })).toThrow();
   });
 });
+
+describe("13.2 — a decision made with an API key resumes with that key's limits", () => {
+  const asKey = (context: TestContext, key: string, method: "GET" | "POST" | "DELETE", url: string, payload?: unknown) =>
+    context.app.inject({ method, url, headers: { authorization: `Bearer ${key}` }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const refusals = async (context: TestContext) =>
+    (await context.store.listAuditLogs({ category: "approval", pageSize: 100 })).items.filter((entry) => entry.eventType === "approval.resume_refused").length;
+
+  it("an admin's key limited to alpha approves in alpha; its resume is refused once the key is revoked or the workflow leaves alpha, where the admin's own session still resumes it", async () => {
+    const context = await createTestContext({ queue: true });
+    const requester = await login(context, "builder", "requester");
+    const admin = await login(context, "admin", "lead");
+    await context.store.upsertProject({ id: "alpha", name: "Alpha" });
+    await context.store.upsertProject({ id: "beta", name: "Beta" });
+    const mint = async () => {
+      const created = await call(context, "POST", "/api/auth/api-keys", admin.cookie, { name: "ci", projects: ["alpha"] });
+      expect(created.statusCode, created.body).toBe(200);
+      return created.json<{ key: string; record: { id: string } }>();
+    };
+    const workflow = gateWorkflow("wf-key-resume", GATE, "alpha");
+    const run = await startRun(context, workflow, requester.cookie);
+    const pendingAgain = async () => {
+      await waitFor(async () => (await context.store.getWorkflowExecutionState(run.executionId!))?.status === "waiting_approval");
+      await waitFor(async () => (await context.store.listApprovalRequestsForExecution(run.executionId!)).at(-1)!.status === "pending");
+    };
+
+    // 1. Decided with the key, which is revoked before the queue runs the resume: refused as for a deleted user.
+    const first = await mint();
+    context.queue!.stop();
+    expect((await asKey(context, first.key, "POST", `/api/approvals/${run.executionId}/approve`, { edits: { reply: "ok" } })).statusCode).toBe(202);
+    expect((await context.store.listApprovalRequestsForExecution(run.executionId!)).at(-1)).toMatchObject({ decidedByUserId: admin.id, decidedByApiKeyId: first.record.id });
+    expect((await call(context, "DELETE", `/api/auth/api-keys/${first.record.id}`, admin.cookie)).statusCode).toBe(200);
+    context.queue!.start();
+    await waitFor(async () => (await refusals(context)) === 1);
+    await pendingAgain();
+
+    // 2. Decided with a live key, then the workflow moves to beta: the key reaches only alpha, so the resume is
+    //    refused, where the unscoped admin it belongs to would have gone on.
+    const second = await mint();
+    context.queue!.stop();
+    expect((await asKey(context, second.key, "POST", `/api/approvals/${run.executionId}/approve`, { edits: { reply: "ok" } })).statusCode).toBe(202);
+    await context.store.upsertWorkflow({ ...workflow, projectId: "beta" });
+    context.queue!.start();
+    await waitFor(async () => (await refusals(context)) === 2);
+    await pendingAgain();
+    expect((await context.store.getExecutionHistory(run.executionId!))?.status).not.toBe("success");
+
+    // 3. The admin's own session decides it, and the run goes on in beta.
+    expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, admin.cookie, { edits: { reply: "ok" } })).statusCode).toBe(202);
+    expect((await context.store.listApprovalRequestsForExecution(run.executionId!)).at(-1)).toMatchObject({ decidedByUserId: admin.id, decidedByApiKeyId: null });
+    await waitFor(async () => (await context.store.getExecutionHistory(run.executionId!))?.status === "success");
+  });
+
+  it("a service account never decides, so its key cannot get round the approver or self-approval rules", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin", "lead");
+    const created = await call(context, "POST", "/api/service-accounts", admin.cookie, { name: "approver-bot", role: "admin" });
+    expect(created.statusCode, created.body).toBe(201);
+    const accountId = created.json<{ serviceAccount: { id: string } }>().serviceAccount.id;
+    const key = (await call(context, "POST", `/api/service-accounts/${accountId}/keys`, admin.cookie, { name: "bot" })).json<{ key: string }>().key;
+    // Started by the admin; the gate allows admins, but the machine is not a person.
+    const run = await startRun(context, gateWorkflow("wf-bot-approver", GATE), admin.cookie);
+    const refused = await asKey(context, key, "POST", `/api/approvals/${run.executionId}/approve`, { edits: { reply: "ok" } });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.body).toContain("service account");
+    expect((await context.store.listApprovalRequestsForExecution(run.executionId!)).at(-1)!.status).toBe("pending");
+    // Nor does it count as someone else who could approve: alone with the machine, the admin is told nobody can.
+    const check = await call(context, "POST", "/api/approvals/eligibility", admin.cookie, { workflowId: "wf-unsaved" });
+    expect(check.json()).toEqual({ othersCanApprove: false, requesterCanApprove: false });
+  });
+});

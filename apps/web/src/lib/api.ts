@@ -158,11 +158,142 @@ export class ApiError extends Error {
   }
 }
 
-async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * Phase 13.2 — session policy on the client.
+ *
+ * Background traffic (timers and pollers) carries `X-L2M-Background: 1` so the server does not count it as user
+ * activity for the idle timeout. `inBackground(() => fetchX())` marks every request that `fetchX` starts before its
+ * first `await`, which covers the plain client functions below (each calls `apiRequest` straight away). A request
+ * that is not background is foreground: its start time is what the idle warning counts from.
+ */
+export const BACKGROUND_HEADER = "X-L2M-Background";
+
+let backgroundDepth = 0;
+let lastForegroundRequestAt = Date.now();
+
+export function inBackground<T>(run: () => Promise<T>): Promise<T> {
+  backgroundDepth += 1;
+  try {
+    return run();
+  } finally {
+    backgroundDepth -= 1;
+  }
+}
+
+/** Epoch ms of the last foreground (user-driven) API request this tab sent. */
+export function getLastForegroundRequestAt(): number {
+  return lastForegroundRequestAt;
+}
+
+export type SessionEndReason = "idle" | "expired" | "evicted" | "admin" | "logout" | "policy";
+const SESSION_END_REASONS: readonly SessionEndReason[] = ["idle", "expired", "evicted", "admin", "logout", "policy"];
+
+/** Why a 401 says the session ended, or null when the payload carries no known reason. */
+export function sessionEndReasonOf(payload: unknown): SessionEndReason | null {
+  if (!payload || typeof payload !== "object") return null;
+  const reason = (payload as { reason?: unknown }).reason;
+  return typeof reason === "string" && (SESSION_END_REASONS as readonly string[]).includes(reason) ? (reason as SessionEndReason) : null;
+}
+
+/** The sign-in screen's explanation for a reason, or null when the reason needs none. */
+export function sessionEndMessage(reason: SessionEndReason | null | undefined): string | null {
+  switch (reason) {
+    case "idle":
+      return "You were signed out after a period of inactivity.";
+    case "expired":
+      return "Your session reached its maximum length. Sign in again.";
+    case "evicted":
+      return "You were signed out because you signed in on another device or browser.";
+    case "admin":
+      return "An administrator ended your session.";
+    default:
+      return null;
+  }
+}
+
+type SessionEndedListener = (reason: SessionEndReason) => void;
+const sessionEndedListeners = new Set<SessionEndedListener>();
+
+/** Called whenever a response says this browser's session has ended (a 401 that carries a reason). */
+export function onSessionEnded(listener: SessionEndedListener): () => void {
+  sessionEndedListeners.add(listener);
+  return () => {
+    sessionEndedListeners.delete(listener);
+  };
+}
+
+/** Tells the app this browser's session is over (for example after ending the current session from Settings). */
+export function notifySessionEnded(reason: SessionEndReason): void {
+  for (const listener of [...sessionEndedListeners]) listener(reason);
+}
+
+
+// ---------------------------------------------------------------------------
+// 13.2 — MFA required per role and step-up. The API answers 403 with a `code` the studio acts on:
+// `mfa_enrollment_required` / `mfa_verification_required` (the session may only set up or verify MFA) and
+// `step_up_required` (a security-admin action needs a fresh code). The app registers handlers here; every request
+// below goes through them, so no call site needs to know.
+// ---------------------------------------------------------------------------
+
+/** What a session restricted by MFA_REQUIRED_ROLES still has to do. */
+export type MfaGate = "enroll" | "verify";
+
+/** The `stepUp` part of a 403 `step_up_required` answer. */
+export interface StepUpChallenge {
+  action?: string;
+  method?: "totp";
+  enrolled?: boolean;
+  maxAgeMinutes?: number;
+  /** `api_key` when a key made the request (it cannot step up). */
+  credential?: "api_key";
+  message: string;
+}
+
+export interface AuthChallengeHandlers {
+  /** Ask for a code; resolve true once POST /api/auth/step-up succeeded (the request is then retried once). */
+  onStepUp?: (challenge: StepUpChallenge) => Promise<boolean>;
+  /** The session turned out to be restricted: show the enrolment or verification screen. */
+  onMfaGate?: (gate: MfaGate) => void;
+}
+
+let authChallengeHandlers: AuthChallengeHandlers = {};
+
+/** Sets the app's handlers for step-up and MFA-restricted sessions; a key given as undefined clears that handler. */
+export function setAuthChallengeHandlers(handlers: AuthChallengeHandlers): void {
+  authChallengeHandlers = { ...authChallengeHandlers, ...handlers };
+}
+
+/** The MFA gate a 403 answer names, or null. */
+export function mfaGateFromPayload(payload: Record<string, unknown> | undefined): MfaGate | null {
+  if (payload?.code === "mfa_enrollment_required") return "enroll";
+  if (payload?.code === "mfa_verification_required") return "verify";
+  return null;
+}
+
+/** The step-up challenge a 403 answer carries, or null. */
+export function stepUpFromPayload(payload: Record<string, unknown> | undefined): StepUpChallenge | null {
+  if (payload?.code !== "step_up_required") return null;
+  const raw = payload.stepUp && typeof payload.stepUp === "object" ? (payload.stepUp as Record<string, unknown>) : {};
+  return {
+    ...(typeof raw.action === "string" ? { action: raw.action } : {}),
+    ...(raw.method === "totp" ? { method: "totp" as const } : {}),
+    ...(typeof raw.enrolled === "boolean" ? { enrolled: raw.enrolled } : {}),
+    ...(typeof raw.maxAgeMinutes === "number" ? { maxAgeMinutes: raw.maxAgeMinutes } : {}),
+    ...(raw.credential === "api_key" ? { credential: "api_key" as const } : {}),
+    message: String(payload.error ?? "This action needs a recent MFA check")
+  };
+}
+
+async function apiRequest<T>(path: string, init?: RequestInit, retried = false): Promise<T> {
   const headers = new Headers(init?.headers);
   const body = init?.body;
   if (body !== undefined && body !== null && !(body instanceof FormData) && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
+  }
+  if (backgroundDepth > 0) {
+    headers.set(BACKGROUND_HEADER, "1");
+  } else if (!headers.has(BACKGROUND_HEADER)) {
+    lastForegroundRequestAt = Date.now();
   }
 
   const response = await apiFetch(`${API_BASE}${path}`, {
@@ -180,6 +311,19 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const payload = json && typeof json === "object" ? (json as Record<string, unknown>) : {};
+    if (response.status === 401) {
+      const reason = sessionEndReasonOf(payload);
+      if (reason) notifySessionEnded(reason);
+    }
+    if (response.status === 403) {
+      const stepUp = stepUpFromPayload(payload);
+      // A session can answer with a code and retry once; an API key cannot.
+      if (stepUp && !retried && stepUp.credential !== "api_key" && stepUp.enrolled !== false && authChallengeHandlers.onStepUp) {
+        if (await authChallengeHandlers.onStepUp(stepUp)) return await apiRequest<T>(path, init, true);
+      }
+      const gate = mfaGateFromPayload(payload);
+      if (gate) authChallengeHandlers.onMfaGate?.(gate);
+    }
     throw new ApiError(String(payload.error ?? "API request failed"), response.status, payload);
   }
 
@@ -216,8 +360,108 @@ export async function logoutUser() {
   });
 }
 
+/** Phase 13.2 — the session behind this browser's cookie; null when the caller authenticated with an API key. */
+export interface SessionInfo {
+  handle: string;
+  createdAt: string;
+  expiresAt: string;
+  /** Null when the user's role has no idle timeout. */
+  idleTimeoutMinutes: number | null;
+  idleExpiresAt: string | null;
+  breakGlass: boolean;
+}
+
 export async function fetchAuthMe() {
-  return apiRequest<{ user: AuthUser }>("/api/auth/me");
+  return apiRequest<{ user: AuthUser; session?: SessionInfo | null; mfaEnrollmentRequired?: boolean; mfaVerificationRequired?: boolean }>(
+    "/api/auth/me"
+  );
+}
+
+/** The MFA gate /api/auth/me reports for this session, or null. */
+export function mfaGateFromMe(me: { mfaEnrollmentRequired?: boolean; mfaVerificationRequired?: boolean }): MfaGate | null {
+  if (me.mfaEnrollmentRequired) return "enroll";
+  if (me.mfaVerificationRequired) return "verify";
+  return null;
+}
+
+/** 13.2 — verifies a TOTP or backup code for this session (step-up, or lifting a verification-only session). */
+export async function stepUpSession(payload: { code: string }) {
+  return apiRequest<{ ok: true; mfaVerifiedAt: string; stepUpMaxAgeMinutes: number }>("/api/auth/step-up", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  }, true);
+}
+
+export type SessionAuthMethod = "password" | "oidc" | "saml" | "ldap" | "break_glass";
+
+/** One live sign-in. `handle` is an opaque, non-secret id (never the cookie). */
+export interface SessionView {
+  handle: string;
+  current: boolean;
+  authMethod: SessionAuthMethod | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  lastSeenAt: string | null;
+  expiresAt: string;
+  mfaVerified: boolean;
+  breakGlass: boolean;
+}
+
+export interface SessionPolicyView {
+  idleTimeoutMinutes: number | null;
+  absoluteTimeoutHours: number;
+  maxPerUser: number | null;
+}
+
+/** My live sessions, newest first, plus the policy that applies to me. */
+export async function fetchMySessions() {
+  return apiRequest<{ sessions: SessionView[]; policy: SessionPolicyView }>("/api/auth/sessions");
+}
+
+/** Ends one of my sessions; `current: true` means it was this browser's (the server has cleared the cookie). */
+export async function revokeMySession(handle: string) {
+  return apiRequest<{ ok: true; current: boolean }>(`/api/auth/sessions/${encodeURIComponent(handle)}`, { method: "DELETE" });
+}
+
+/** Ends all my live sessions except this one. */
+export async function revokeMyOtherSessions() {
+  return apiRequest<{ revoked: number }>("/api/auth/sessions/revoke-others", { method: "POST" });
+}
+
+/** Admin: one user's live sessions. */
+export async function fetchUserSessions(userId: string) {
+  return apiRequest<{ sessions: SessionView[] }>(`/api/users/${encodeURIComponent(userId)}/sessions`);
+}
+
+/** Admin: ends one session (`handle`) or all of a user's sessions; an admin targeting themselves keeps the current one. */
+export async function revokeUserSessions(userId: string, handle?: string) {
+  return apiRequest<{ revoked: number }>(`/api/users/${encodeURIComponent(userId)}/sessions/revoke`, {
+    method: "POST",
+    body: JSON.stringify(handle ? { handle } : {})
+  });
+}
+
+export interface DeploymentUserView {
+  id: string;
+  email: string;
+  role: AuthUser["role"];
+  createdAt: string;
+  pending?: boolean;
+  inviteExpiresAt?: string;
+}
+
+/** Admin: the people on the deployment (service accounts are listed by fetchServiceAccounts). */
+export async function fetchDeploymentUsers() {
+  return apiRequest<{ users: DeploymentUserView[] }>("/api/users");
+}
+
+/** Admin: resets a user's MFA (authenticator and backup codes deleted, sessions ended). */
+export async function resetUserMfa(userId: string) {
+  return apiRequest<{ ok: true; userId: string; hadMfa: boolean; sessionsEnded: number }>(
+    `/api/users/${encodeURIComponent(userId)}/mfa/reset`,
+    { method: "POST" }
+  );
 }
 
 /**
@@ -1223,17 +1467,31 @@ export interface MfaStatus {
   pending: boolean;
   activatedAt: string | null;
   remainingBackupCodes: number;
+  /** 13.2 — the user's role requires MFA (MFA_REQUIRED_ROLES). */
+  requiredForRole?: boolean;
+  /** 13.2 — minutes a code counts for security-admin actions; 0 = step-up off. */
+  stepUpMaxAgeMinutes?: number;
 }
 
 export async function fetchMfaStatus() {
   return apiRequest<MfaStatus>("/api/auth/mfa/status");
 }
 
-export async function enrollMfa() {
-  return apiRequest<{ secret: string; otpauthUrl: string; backupCodes: string[] }>(
-    "/api/auth/mfa/enroll",
-    { method: "POST" }
-  );
+/**
+ * Sets up an authenticator. Outside the first 10 minutes after signing in, the API asks for the password again
+ * (403 `mfa_reauth_required`); an SSO account signs in again instead.
+ */
+export async function enrollMfa(payload: { password?: string } = {}) {
+  return apiRequest<{ secret: string; otpauthUrl: string; backupCodes: string[] }>("/api/auth/mfa/enroll", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+/** 13.2 — what an MFA setup refusal asks for: the password again, or (SSO) a fresh sign-in; null for other errors. */
+export function mfaReauthFromError(error: unknown): "password" | "sso" | null {
+  if (!(error instanceof ApiError) || error.payload?.code !== "mfa_reauth_required") return null;
+  return error.payload.sso === true ? "sso" : "password";
 }
 
 export async function activateMfa(payload: { code: string }) {
@@ -1322,7 +1580,13 @@ export async function fetchApiKeys() {
   return apiRequest<{ keys: ApiKeyRecord[] }>("/api/auth/api-keys");
 }
 
-export async function createApiKey(payload: { name: string; scopes?: string[]; expiresInDays?: number }) {
+/** 13.2 — a key's scope: `role` caps the role it acts with, `projects` limits it to those projects. */
+export interface ApiKeyScopeInput {
+  role?: "admin" | "builder" | "operator" | "viewer" | null;
+  projects?: string[] | null;
+}
+
+export async function createApiKey(payload: { name: string; scopes?: string[]; expiresInDays?: number } & ApiKeyScopeInput) {
   return apiRequest<{ key: string; record: ApiKeyRecord }>("/api/auth/api-keys", {
     method: "POST",
     body: JSON.stringify(payload)
@@ -1331,6 +1595,62 @@ export async function createApiKey(payload: { name: string; scopes?: string[]; e
 
 export async function revokeApiKey(id: string) {
   return apiRequest<{ ok: boolean }>(`/api/auth/api-keys/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 13.2 — Service accounts (admin)
+// ---------------------------------------------------------------------------
+
+export interface ServiceAccount {
+  id: string;
+  name: string;
+  email: string;
+  role: "admin" | "builder" | "operator" | "viewer";
+  description: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  projects: Array<{ projectId: string; role: string; customRoleId: string | null }>;
+  activeKeys: number;
+}
+
+export async function fetchServiceAccounts() {
+  return apiRequest<{ serviceAccounts: ServiceAccount[] }>("/api/service-accounts");
+}
+
+export async function createServiceAccount(payload: { name: string; role: ServiceAccount["role"]; description?: string | null }) {
+  return apiRequest<{ serviceAccount: ServiceAccount }>("/api/service-accounts", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateServiceAccount(id: string, payload: { role?: ServiceAccount["role"]; description?: string | null }) {
+  return apiRequest<{ serviceAccount: ServiceAccount }>(`/api/service-accounts/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteServiceAccount(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/service-accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function fetchServiceAccountKeys(id: string) {
+  return apiRequest<{ keys: ApiKeyRecord[] }>(`/api/service-accounts/${encodeURIComponent(id)}/keys`);
+}
+
+export async function createServiceAccountKey(id: string, payload: { name: string; expiresInDays?: number } & ApiKeyScopeInput) {
+  return apiRequest<{ key: string; record: ApiKeyRecord }>(`/api/service-accounts/${encodeURIComponent(id)}/keys`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function revokeServiceAccountKey(id: string, keyId: string) {
+  return apiRequest<{ ok: boolean }>(`/api/service-accounts/${encodeURIComponent(id)}/keys/${encodeURIComponent(keyId)}`, {
     method: "DELETE"
   });
 }
@@ -2798,7 +3118,8 @@ export function subscribeEvalRun(runId: string, onEvent: (event: EvalRunEvent) =
       timer = null;
       if (stopped) return;
       try {
-        emit(await poll(runId));
+        // Background traffic: following a long run is not user activity for the idle timeout.
+        emit(await inBackground(() => poll(runId)));
       } catch {
         // A failed poll is retried on the next tick.
       }

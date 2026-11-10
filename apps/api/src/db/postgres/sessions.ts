@@ -149,6 +149,11 @@ export async function markSessionMfaVerified(ctx: PgContext, sessionId: string, 
   return rows.length > 0;
 }
 
+export async function clearSessionMfaVerified(ctx: PgContext, sessionId: string): Promise<boolean> {
+  const rows = await ctx.query<{ id: string }>(`UPDATE sessions SET mfa_verified_at = NULL WHERE id = $1 RETURNING id`, [sessionId]);
+  return rows.length > 0;
+}
+
 export async function purgeEndedSessions(ctx: PgContext, before: string): Promise<number> {
   const rows = await ctx.query<{ id: string }>(
     `DELETE FROM sessions WHERE (revoked_at IS NOT NULL AND revoked_at < $1) OR expires_at < $1 RETURNING id`,
@@ -175,7 +180,7 @@ export async function revokeOldestUserSessions(
     const now = new Date().toISOString();
     const live = await client.query<{ id: string }>(
       `SELECT id FROM sessions
-         WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > $2
+         WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > $2 AND break_glass = 0
          ORDER BY created_at DESC, id DESC`,
       [userId, now]
     );
