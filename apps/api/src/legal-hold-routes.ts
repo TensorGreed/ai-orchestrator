@@ -8,7 +8,9 @@
  *   GET  /api/legal-holds/:id/items       the rows a runs or subject hold names, paged         hold managers
  *   POST /api/legal-holds/:id/release     release, with a reason (step-up when it is on)       hold managers
  *
- * Hold managers: admins, and members through a deployment-wide custom role granting `legal_hold:manage`.
+ * Hold managers: admins, and members through a deployment-wide custom role granting `legal_hold:manage`. A subject
+ * hold runs the data-subject lookup, which is admin-only, so only admins place one. A release needs a person: API keys
+ * are refused.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { legalHoldPlaceSchema, legalHoldReleaseSchema, type LegalHoldStatus } from "@ai-orchestrator/shared";
@@ -28,6 +30,8 @@ export interface LegalHoldRoutesDeps {
   /** `legal_hold:manage` (deployment-wide). */
   canManage: (user: SafeUser) => Promise<boolean>;
   runAccess: RunAccess;
+  /** Whether the request is authenticated by an API key (not a signed-in session). */
+  viaApiKey: (request: FastifyRequest) => boolean;
 }
 
 const STATUSES: ReadonlySet<string> = new Set<LegalHoldStatus>(["active", "released"]);
@@ -84,6 +88,11 @@ export function registerLegalHoldRoutes(deps: LegalHoldRoutesDeps): void {
     if (!parsed.success) {
       reply.code(400);
       return { error: firstIssue(parsed.error.issues), details: parsed.error.issues };
+    }
+    // The lookup behind a subject hold is admin-only: whether it finds anything says whether the value is stored.
+    if (parsed.data.scopeType === "subject" && user.role !== "admin") {
+      reply.code(403);
+      return { error: "Only an admin can place a hold on a data subject (it runs the data-subject lookup)." };
     }
     try {
       const hold = await deps.service(request, user).place(parsed.data, { userId: user.id, email: user.email });
@@ -146,6 +155,10 @@ export function registerLegalHoldRoutes(deps: LegalHoldRoutesDeps): void {
   app.post<{ Params: { id: string }; Body: unknown }>("/api/legal-holds/:id/release", async (request, reply) => {
     const user = await manager(request, reply);
     if (!user) return reply;
+    if (deps.viaApiKey(request)) {
+      reply.code(403);
+      return { error: "Releasing a legal hold needs a signed-in person; an API key cannot do it." };
+    }
     if (!(await requireStepUp(request, reply, "legal_hold.change"))) return reply;
     const parsed = legalHoldReleaseSchema.safeParse(request.body ?? {});
     if (!parsed.success) {

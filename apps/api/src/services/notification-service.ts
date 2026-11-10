@@ -243,8 +243,9 @@ export class NotificationService {
   private envChannelEvents(): string[] {
     const events = this.config.NOTIFICATIONS_APPROVAL_EVENTS ? ["execution.failure", ...APPROVAL_NOTIFICATION_EVENTS] : ["execution.failure"];
     // Phase 13.2 — break-glass alerts reach the env channels too (they only fire when an allowlist is set).
-    // 13.3 — and legal-hold changes (they only fire when someone places or releases a hold).
-    return [...events, ...NETWORK_NOTIFICATION_EVENTS, ...AUTH_NOTIFICATION_EVENTS, ...DATA_PROTECTION_NOTIFICATION_EVENTS];
+    // 13.3 — legal-hold changes are not sent here by default: a hold's name can name a matter, so only channels made in
+    // the settings that pick data.legal_hold_changed receive them.
+    return [...events, ...NETWORK_NOTIFICATION_EVENTS, ...AUTH_NOTIFICATION_EVENTS];
   }
 
   /** Reloads the channels from the stored configs (plus the env-configured defaults). */

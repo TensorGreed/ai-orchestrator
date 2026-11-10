@@ -122,9 +122,9 @@ export interface LegalHoldConflictBody {
   holds: LegalHoldRef[];
 }
 
-/** One sentence naming the holds that keep something, for refusals. */
-export function legalHoldRefusalMessage(what: string, holds: readonly LegalHoldRef[]): string {
+/** One sentence naming the holds that keep something, for refusals (`refused`: what cannot happen, "deleted" by default). */
+export function legalHoldRefusalMessage(what: string, holds: readonly LegalHoldRef[], refused = "deleted"): string {
   const names = holds.slice(0, 3).map((hold) => `"${hold.name}"`).join(", ");
   const more = holds.length > 3 ? ` and ${holds.length - 3} more` : "";
-  return `${what} is under legal hold (${names}${more}); it cannot be deleted until the hold is released.`;
+  return `${what} is under legal hold (${names}${more}); it cannot be ${refused} until the hold is released.`;
 }

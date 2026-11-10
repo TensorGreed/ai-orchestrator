@@ -206,6 +206,68 @@ describe("legal holds in the app", () => {
     expect((status.json() as { held: boolean }).held).toBe(true);
   }, 60_000);
 
+  it("review fixes: subject holds are admin-only, a key cannot release, a project admin cannot take the role away, a held workflow cannot be transferred", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const other = await login(context, "viewer");
+    await context.store.upsertProject({ id: "p5", name: "P5" });
+    await context.store.upsertProject({ id: "p6", name: "P6" });
+    await context.store.upsertWorkflow(workflow("wf-5", "p5"));
+    await context.store.upsertCustomRole({ id: "compliance", projectId: null, name: "Compliance", description: null, permissions: ["legal_hold:manage"], createdBy: null });
+    await context.store.upsertProjectRole({ userId: builder.userId, projectId: "p5", role: "custom", customRoleId: "compliance" });
+
+    // A non-admin hold manager cannot place a subject hold (it would tell them whether a value is stored).
+    const subject = await context.app.inject({
+      method: "POST",
+      url: "/api/legal-holds",
+      headers: { cookie: builder.cookie },
+      payload: { name: "S", reason: "r", scopeType: "subject", subject: { value: "someone@example.com" } }
+    });
+    expect(subject.statusCode).toBe(403);
+    expect(subject.body).not.toContain("someone@example.com");
+
+    // A project admin of p5 cannot remove or change the member whose role manages legal holds; an admin can.
+    await context.store.upsertProjectRole({ userId: other.userId, projectId: "p5", role: "project_admin" });
+    const remove = await context.app.inject({ method: "DELETE", url: `/api/projects/p5/members/${builder.userId}`, headers: { cookie: other.cookie } });
+    expect(remove.statusCode).toBe(403);
+    const change = await context.app.inject({
+      method: "POST",
+      url: "/api/projects/p5/members",
+      headers: { cookie: other.cookie },
+      payload: { userId: builder.userId, role: "viewer" }
+    });
+    expect(change.statusCode).toBe(403);
+    expect((await context.store.getProjectRole(builder.userId, "p5"))?.customRoleId).toBe("compliance");
+
+    // A held workflow cannot be transferred out of its project (409 legal_hold), nor moved by a save.
+    const placed = await context.app.inject({
+      method: "POST",
+      url: "/api/legal-holds",
+      headers: { cookie: admin.cookie },
+      payload: { name: "P5 hold", reason: "r", scopeType: "project", scopeId: "p5" }
+    });
+    const hold = (placed.json() as { hold: { id: string } }).hold;
+    const transfer = await context.app.inject({ method: "POST", url: "/api/workflows/wf-5/transfer", headers: { cookie: admin.cookie }, payload: { targetProjectId: "p6" } });
+    expect(transfer.statusCode).toBe(409);
+    expect(transfer.json()).toMatchObject({ code: "legal_hold" });
+    expect((await context.store.getWorkflow("wf-5"))?.projectId).toBe("p5");
+
+    // An API key (an admin service account's) cannot release a hold.
+    const account = await context.app.inject({ method: "POST", url: "/api/service-accounts", headers: { cookie: admin.cookie }, payload: { name: "ops", role: "admin" } });
+    const accountId = (account.json() as { serviceAccount: { id: string } }).serviceAccount.id;
+    const created = await context.app.inject({ method: "POST", url: `/api/service-accounts/${accountId}/keys`, headers: { cookie: admin.cookie }, payload: { name: "ci" } });
+    const key = (created.json() as { key: string }).key;
+    const viaKey = await context.app.inject({
+      method: "POST",
+      url: `/api/legal-holds/${hold.id}/release`,
+      headers: { authorization: `Bearer ${key}` },
+      payload: { reason: "r" }
+    });
+    expect(viaKey.statusCode).toBe(403);
+    expect((await context.store.getLegalHold(hold.id))?.status).toBe("active");
+  }, 60_000);
+
   it("placing and releasing need step-up when it is on", async () => {
     const context = await createTestContext({ STEP_UP_MAX_AGE_MINUTES: "10" });
     const admin = await login(context, "admin");

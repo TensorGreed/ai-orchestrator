@@ -293,6 +293,15 @@ export class RbacService {
     return false;
   }
 
+  /**
+   * 13.3 — whether a user's membership of a project carries a deployment-wide permission (legal holds): only an admin
+   * may take such a membership away or change it, as only an admin may give it.
+   */
+  async membershipGrantsDeploymentPermission(userId: string, projectId: string): Promise<boolean> {
+    const row = await this.store.getProjectRole(userId, projectId);
+    return Boolean(row?.customRoleId && (await this.grantsDeploymentPermission(row.customRoleId)));
+  }
+
   /** 13.3 — whether a custom role grants a deployment-wide permission (only an admin may hand such a role out). */
   async grantsDeploymentPermission(customRoleId: string): Promise<boolean> {
     const custom = await this.store.getCustomRole(customRoleId);

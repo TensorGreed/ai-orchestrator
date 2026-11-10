@@ -9362,6 +9362,10 @@ export async function createApp(
       reply.code(403);
       return { error: "Only an admin can give a role that manages legal holds." };
     }
+    if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(parsed.data.userId, project.id))) {
+      reply.code(403);
+      return { error: "Only an admin can change the membership of someone whose role manages legal holds." };
+    }
     try {
       await rbacService.addMember({
         userId: parsed.data.userId,
@@ -9407,6 +9411,11 @@ export async function createApp(
         return { error: "Insufficient permissions to remove members" };
       }
       if (!await requireStepUp(request, reply, "project_member.change")) return;
+      // 13.3 — a membership that grants a deployment-wide permission (legal holds) is an admin's to take away.
+      if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(request.params.userId, project.id))) {
+        reply.code(403);
+        return { error: "Only an admin can remove someone whose role manages legal holds." };
+      }
       const ok = await rbacService.removeMember(request.params.userId, project.id);
       if (!ok) {
         reply.code(404);
@@ -14188,7 +14197,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
     canManage: async (user) => await rbacService.canDeployment(user, "legal_hold:manage"),
-    runAccess
+    runAccess,
+    viaApiKey: (request) => sessionService.getRequestAuth(request)?.credential === "api_key"
   });
 
   // Phase 15.5 — golden-set files.

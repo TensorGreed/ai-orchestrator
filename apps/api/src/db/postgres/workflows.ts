@@ -8,7 +8,8 @@ import { ProjectNotEmptyError } from "../store-errors.js";
 import { type Store } from "../store.js";
 import { parseTagsJson, toNum, toStr } from "./helpers.js";
 import { gateStateForWrite } from "./release.js";
-import { refuseIfHeld } from "./legal-holds.js";
+import { legalHoldsOnWith, refuseIfHeld } from "./legal-holds.js";
+import { LEGAL_HOLD_LOCK_SHARED_SQL } from "../legal-hold-sql.js";
 import type { PgContext } from "./context.js";
 
 // Workflow methods
@@ -162,9 +163,7 @@ export async function upsertWorkflow(ctx: PgContext, workflow: Workflow, options
     createdAt,
     updatedAt: now
   };
-
-  await ctx.execute(
-    `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id, created_by)
+  const sql = `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
@@ -174,21 +173,37 @@ export async function upsertWorkflow(ctx: PgContext, workflow: Workflow, options
          updated_at = EXCLUDED.updated_at,
          tags_json = EXCLUDED.tags_json,
          project_id = EXCLUDED.project_id,
-         folder_id = EXCLUDED.folder_id`,
-    [
-      payload.id,
-      payload.name,
-      payload.schemaVersion,
-      payload.workflowVersion,
-      JSON.stringify(payload),
-      createdAt,
-      now,
-      JSON.stringify(payload.tags ?? []),
-      payload.projectId ?? DEFAULT_PROJECT_ID,
-      payload.folderId ?? null,
-      options.createdBy ?? null
-    ]
-  );
+         folder_id = EXCLUDED.folder_id`;
+  const params = [
+    payload.id,
+    payload.name,
+    payload.schemaVersion,
+    payload.workflowVersion,
+    JSON.stringify(payload),
+    createdAt,
+    now,
+    JSON.stringify(payload.tags ?? []),
+    payload.projectId ?? DEFAULT_PROJECT_ID,
+    payload.folderId ?? null,
+    options.createdBy ?? null
+  ];
+  if (!existing) {
+    await ctx.execute(sql, params);
+    return payload;
+  }
+  // 13.3 — a held workflow's runs reach their project through the workflow, so it cannot leave a held project (or
+  // move at all while a hold covers it or its rows). The hold check and the write share one transaction under the
+  // legal-hold lock, read against the row as it is now.
+  await ctx.withTransaction(async (client) => {
+    // The lock first, before the row lock, as every hold-checked delete does.
+    await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+    const current = await client.query<{ project_id: string | null }>(`SELECT project_id FROM workflows WHERE id = $1 FOR UPDATE`, [payload.id]);
+    const currentProject = current.rows[0] ? (current.rows[0].project_id ?? DEFAULT_PROJECT_ID) : null;
+    if (currentProject !== null && currentProject !== payload.projectId) {
+      await refuseIfHeld(client, { kind: "workflow", id: payload.id }, "This workflow", "moved to another project");
+    }
+    await client.query(sql, params);
+  });
   return payload;
 }
 
@@ -657,9 +672,14 @@ export async function writeWorkflowVersion(ctx: PgContext, entry: Parameters<Sto
 
 type Queryable = Pick<PoolClient, "query">;
 
-/** Keeps the newest `keep` unpinned versions; pinned ones never count and are never pruned (as SQLite). */
+/**
+ * Keeps the newest `keep` unpinned versions; pinned ones never count and are never pruned (as SQLite). 13.3: nothing
+ * is pruned while a legal hold covers the workflow (the definitions behind held runs). `db` is in a transaction.
+ */
 async function pruneVersions(db: Queryable, workflowId: string, keep: number): Promise<number> {
   if (keep <= 0) return 0;
+  await db.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+  if ((await legalHoldsOnWith(db, { kind: "workflow", id: workflowId })).length > 0) return 0;
   const result = await db.query(
     `DELETE FROM workflow_versions WHERE id IN (
        SELECT id FROM workflow_versions WHERE workflow_id = $1 AND pinned = 0 ORDER BY version DESC OFFSET $2
@@ -670,7 +690,7 @@ async function pruneVersions(db: Queryable, workflowId: string, keep: number): P
 }
 
 export async function pruneWorkflowVersions(ctx: PgContext, workflowId: string, keep: number): Promise<number> {
-  return pruneVersions(ctx.pool, workflowId, keep);
+  return ctx.withTransaction(async (client) => pruneVersions(client, workflowId, keep));
 }
 
 export async function maxWorkflowVersionNumber(ctx: PgContext, workflowId: string): Promise<number> {

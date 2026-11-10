@@ -1,6 +1,7 @@
 /**
- * 13.3 — the legal-hold service: what each scope holds, the audit rows and the `data.legal_hold_changed` alert (sent to
- * channels set in the environment by default), and that a subject hold never records the value it was looked up by.
+ * 13.3 — the legal-hold service: what each scope holds, the audit rows and the `data.legal_hold_changed` alert (sent
+ * only to channels that pick it, never to environment channels by default), and that a subject hold never records the
+ * value it was looked up by.
  */
 import path from "node:path";
 import os from "node:os";
@@ -133,14 +134,17 @@ describe("LegalHoldService", () => {
 });
 
 describe("data.legal_hold_changed alerts", () => {
-  it("reach the channels set in the environment by default and name the hold, never items", async () => {
+  it("reach only a stored channel that picked the event, never the environment channels; they name the hold, never items", async () => {
     const sent: Array<{ url: string; body: string }> = [];
     vi.stubGlobal("fetch", async (url: string, init: { body: string }) => {
       sent.push({ url, body: init.body });
       return new Response("ok", { status: 200 });
     });
-    const config = parseConfig({ NOTIFICATIONS_ENABLED: "true", NOTIFICATION_SLACK_WEBHOOK_URL: "https://hooks.slack.test/a" });
-    const notifications = new NotificationService(config, () => []);
+    const config = parseConfig({ NOTIFICATIONS_ENABLED: "true", NOTIFICATION_SLACK_WEBHOOK_URL: "https://hooks.slack.test/env" });
+    const notifications = new NotificationService(config, () => [
+      { channel: "slack", enabled: true, config: { webhookUrl: "https://hooks.slack.test/picked" }, events: [LEGAL_HOLD_CHANGED_EVENT] },
+      { channel: "slack", enabled: true, config: { webhookUrl: "https://hooks.slack.test/other" }, events: ["execution.failure"] }
+    ]);
     await notifications.notify({
       type: LEGAL_HOLD_CHANGED_EVENT,
       workflowId: "",
@@ -148,7 +152,7 @@ describe("data.legal_hold_changed alerts", () => {
       timestamp: "2026-11-10T12:00:00.000Z",
       legalHold: { change: "placed", id: "lh_1", name: "Acme v. Doe", scopeType: "subject", scopeId: null, itemCount: 4, by: "counsel@example.com" }
     });
-    expect(sent).toHaveLength(1);
+    expect(sent.map((entry) => entry.url)).toEqual(["https://hooks.slack.test/picked"]);
     const text = (JSON.parse(sent[0]!.body) as { text: string }).text;
     expect(text).toMatch(/Legal hold placed/);
     expect(text).toMatch(/Acme v. Doe/);

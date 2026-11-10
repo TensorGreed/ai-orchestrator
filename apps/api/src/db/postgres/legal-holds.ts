@@ -102,8 +102,8 @@ export async function legalHoldsOn(ctx: PgContext, target: LegalHoldTarget): Pro
  * then throws LegalHoldError when a hold keeps anything deleting `target` would remove. Held to commit, so no hold is
  * placed between this check and the delete.
  */
-export async function refuseIfHeld(client: Queryable, target: LegalHoldTarget, what: string): Promise<void> {
+export async function refuseIfHeld(client: Queryable, target: LegalHoldTarget, what: string, refused?: string): Promise<void> {
   await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
   const holds = await legalHoldsOnWith(client, target);
-  if (holds.length > 0) throw new LegalHoldError(what, holds);
+  if (holds.length > 0) throw new LegalHoldError(what, holds, refused);
 }

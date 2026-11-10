@@ -239,8 +239,10 @@ on top of the global role:
 - Session-mode chat and form triggers only answer users who can read the
   workflow's project.
 - Legal holds are managed by admins and by users with a deployment-wide custom role (one with no project) granting
-  `legal_hold:manage`. The permission does nothing in a project role, and only an admin can assign a role that grants
-  it. See [Legal holds](../operations/legal-hold.md).
+  `legal_hold:manage`. The permission does nothing in a project role. Only an admin can assign a role that grants it,
+  or remove or change the membership that carries it. Holds on a data subject are admin-only (placing one runs the
+  data-subject lookup), and releasing a hold needs a signed-in person, not an API key. See
+  [Legal holds](../operations/legal-hold.md).
 
 ## What a running workflow can reach
 

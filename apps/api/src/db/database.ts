@@ -93,6 +93,8 @@ import {
   legalHoldItemFromRow,
   legalHoldsOnSql,
   notHeldSql,
+  heldRowSql,
+  mergeHeldMemory,
   type LegalHoldInsert,
   type LegalHoldRow,
   type LegalHoldTarget
@@ -4578,6 +4580,11 @@ export class SqliteStore implements Store {
       createdAt,
       updatedAt
     };
+    // 13.3 — a held workflow's runs reach their project through the workflow, so it cannot leave a held project (or
+    // move at all while a hold covers it or its rows).
+    if (existing && (existing.projectId ?? DEFAULT_PROJECT_ID) !== payload.projectId) {
+      this.refuseIfHeldSync({ kind: "workflow", id: workflow.id }, "This workflow", "moved to another project");
+    }
 
     this.exec(
       `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id, created_by)
@@ -5336,6 +5343,11 @@ export class SqliteStore implements Store {
     );
     const now = new Date().toISOString();
     const createdAt = existing ? toString(existing.created_at) : now;
+    // 13.3 — under a legal hold the stored history only grows (the runtime saves its last messages only).
+    const held = existing
+      ? this.queryOne(`SELECT 1 AS held FROM session_memory WHERE namespace = ? AND session_id = ? AND ${heldRowSql("session_memory")}`, [namespace, sessionId])
+      : null;
+    const toStore = held ? mergeHeldMemory(parseJsonList<ChatMessage>(existing!.messages_json), messages) : messages;
 
     if (labels) {
       const merged = mergeDataLabels([parseStoredDataLabels(existing?.labels_json ?? null), labels].filter((entry): entry is DataLabels => Boolean(entry)));
@@ -5347,7 +5359,7 @@ export class SqliteStore implements Store {
            messages_json = excluded.messages_json,
            labels_json = excluded.labels_json,
            updated_at = excluded.updated_at`,
-        [namespace, sessionId, JSON.stringify(messages), labelsJson, createdAt, now]
+        [namespace, sessionId, JSON.stringify(toStore), labelsJson, createdAt, now]
       );
     } else {
       // An untracked run loads the stored messages and saves them again with its turn: the labels stay, plus
@@ -5360,7 +5372,7 @@ export class SqliteStore implements Store {
            messages_json = excluded.messages_json,
            labels_json = excluded.labels_json,
            updated_at = excluded.updated_at`,
-        [namespace, sessionId, JSON.stringify(messages), kept ? JSON.stringify(kept) : null, createdAt, now]
+        [namespace, sessionId, JSON.stringify(toStore), kept ? JSON.stringify(kept) : null, createdAt, now]
       );
     }
 
@@ -6171,26 +6183,27 @@ export class SqliteStore implements Store {
     return result;
   }
 
+  /** The pre-13.3 whole purge, kept as the reference the retention tests compare against; it keeps held rows too. */
   async pruneExecutionHistory(input: { before: string }): Promise<number> {
     const before = this.queryOne<{ count: number }>(
-      `SELECT COUNT(*) as count FROM execution_history WHERE started_at < ?`,
+      `SELECT COUNT(*) as count FROM execution_history WHERE started_at < ? AND ${notHeldSql("execution_history")}`,
       [input.before]
     );
-    this.exec(`DELETE FROM execution_history WHERE started_at < ?`, [input.before]);
+    this.exec(`DELETE FROM execution_history WHERE started_at < ? AND ${notHeldSql("execution_history")}`, [input.before]);
     // Phase 10.1 — tool-call telemetry follows the execution-history retention.
-    this.exec(`DELETE FROM mcp_tool_calls WHERE started_at < ?`, [input.before]);
+    this.exec(`DELETE FROM mcp_tool_calls WHERE started_at < ? AND ${notHeldSql("mcp_tool_calls")}`, [input.before]);
     // Phase 12.4 — and gateway approval requests (their argument previews).
-    this.exec(`DELETE FROM mcp_gateway_approvals WHERE requested_at < ?`, [input.before]);
+    this.exec(`DELETE FROM mcp_gateway_approvals WHERE requested_at < ? AND ${notHeldSql("mcp_gateway_approvals")}`, [input.before]);
     // Phase 10.8 — so do cassettes recorded from those runs.
-    this.exec(`DELETE FROM mcp_cassettes WHERE created_at < ?`, [input.before]);
+    this.exec(`DELETE FROM mcp_cassettes WHERE created_at < ? AND ${notHeldSql("mcp_cassettes")}`, [input.before]);
     // Phase 12.1 — and so do guard events.
-    this.exec(`DELETE FROM guard_events WHERE created_at < ?`, [input.before]);
+    this.exec(`DELETE FROM guard_events WHERE created_at < ? AND ${notHeldSql("guard_events")}`, [input.before]);
     // Phase 11.2 — and decided approval requests; pending ones stay with their paused run.
-    this.exec(`DELETE FROM approval_requests WHERE status <> 'pending' AND created_at < ?`, [input.before]);
+    this.exec(`DELETE FROM approval_requests WHERE status <> 'pending' AND created_at < ? AND ${notHeldSql("approval_requests")}`, [input.before]);
     // Phase 13.1 — and finished queue jobs and dead-letter entries: their payloads (a dispatched run's spec, with its
     // input) and stored results never outlive the history.
-    this.exec(`DELETE FROM execution_queue WHERE (status = 'completed' OR status = 'dead') AND updated_at < ?`, [input.before]);
-    this.exec(`DELETE FROM execution_queue_dlq WHERE failed_at < ?`, [input.before]);
+    this.exec(`DELETE FROM execution_queue WHERE (status = 'completed' OR status = 'dead') AND updated_at < ? AND ${notHeldSql("execution_queue")}`, [input.before]);
+    this.exec(`DELETE FROM execution_queue_dlq WHERE failed_at < ? AND ${notHeldSql("execution_queue_dlq")}`, [input.before]);
     const deleted = before ? toNumber(before.count) : 0;
     if (deleted > 0) {
       this.persist();
@@ -6301,9 +6314,9 @@ export class SqliteStore implements Store {
   }
 
   /** Throws LegalHoldError when a hold keeps anything deleting `target` would remove. */
-  private refuseIfHeldSync(target: LegalHoldTarget, what: string): void {
+  private refuseIfHeldSync(target: LegalHoldTarget, what: string, refused?: string): void {
     const holds = this.legalHoldsOnSync(target);
-    if (holds.length > 0) throw new LegalHoldError(what, holds);
+    if (holds.length > 0) throw new LegalHoldError(what, holds, refused);
   }
 
 
@@ -9453,6 +9466,8 @@ export class SqliteStore implements Store {
 
   private pruneWorkflowVersionsSync(workflowId: string, keep: number): number {
     if (keep <= 0) return 0;
+    // 13.3 — nothing is pruned while a legal hold covers the workflow (the definitions behind held runs).
+    if (this.legalHoldsOnSync({ kind: "workflow", id: workflowId }).length > 0) return 0;
     const toDelete = this.queryAll<{ id: string }>(
       `SELECT id FROM workflow_versions WHERE workflow_id = ? AND pinned = 0 ORDER BY version DESC LIMIT -1 OFFSET ?`,
       [workflowId, keep]
@@ -12597,7 +12612,8 @@ export class SqliteStore implements Store {
     this.db.transaction(() => {
       this.exec(`DELETE FROM mcp_server_probes WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_snapshots WHERE server_id = ?`, [id]);
-      this.exec(`DELETE FROM mcp_tool_calls WHERE registry_server_id = ?`, [id]);
+      // 13.3 — tool calls under a legal hold stay, with a dangling server id (as after retention).
+      this.exec(`DELETE FROM mcp_tool_calls WHERE registry_server_id = ? AND ${notHeldSql("mcp_tool_calls")}`, [id]);
       this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_open_world_overrides WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = ?`, [id]);
@@ -13436,11 +13452,14 @@ export class SqliteStore implements Store {
     })();
   }
 
-  /** Phase 12.4 — expires pending requests past their expiry and deletes decided ones past the retention. */
+  /** Phase 12.4 — expires pending requests past their expiry and deletes decided ones past the retention (13.3: unless held). */
   private sweepMcpGatewayApprovals(now: string): void {
     this.exec(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`, [now]);
     const cutoff = mcpGatewayApprovalRetentionCutoff(now);
-    this.exec(`DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < ? AND expires_at < ?`, [cutoff, cutoff]);
+    this.exec(
+      `DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < ? AND expires_at < ? AND ${notHeldSql("mcp_gateway_approvals")}`,
+      [cutoff, cutoff]
+    );
   }
 
   private getMcpGatewayApprovalSync(id: string): McpGatewayApproval | null {
@@ -14841,7 +14860,13 @@ export class SqliteStore implements Store {
 
   /** Golden-set cases made from a recording (their input is a copy of the recording's). */
   async deleteEvalFixturesForRecording(recordingId: string): Promise<number> {
-    return this.deleteEvalFixturesForRecordingSync(recordingId);
+    return this.transaction(() => {
+      // 13.3 — refused (deleting nothing) while a legal hold covers any of the cases.
+      for (const { id } of this.queryAll<{ id: string }>(`SELECT id FROM eval_fixtures WHERE recording_id = ?`, [recordingId])) {
+        this.refuseIfHeldSync({ kind: "row", table: "eval_fixtures", id: toString(id) }, "A golden-set case of this golden run");
+      }
+      return this.deleteEvalFixturesForRecordingSync(recordingId);
+    });
   }
 
   private deleteEvalFixturesForRecordingSync(recordingId: string): number {
@@ -15359,6 +15384,10 @@ export class SqliteStore implements Store {
         }
         if (change.admittedFixtureIds !== undefined) {
           this.setReleaseGateAdmissionSync(change.workflowId, change.admittedFixtureIds, change.updatedAt, change.updatedBy);
+        }
+        // 13.3 — a case under a legal hold stays: the whole change is refused (LegalHoldError, 409) before anything goes.
+        for (const fixtureId of change.deleteFixtureIds ?? []) {
+          this.refuseIfHeldSync({ kind: "row", table: "eval_fixtures", id: fixtureId }, "This golden-set case", "removed");
         }
         for (const fixtureId of change.deleteFixtureIds ?? []) this.deleteEvalFixtureSync(fixtureId);
         if (change.required) this.setEvalFixtureRequiredSync(change.required.fixtureId, change.required.required);

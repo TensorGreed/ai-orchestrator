@@ -9,6 +9,8 @@
  * hold, so the result is exactly the backup. --merge inserts without
  * emptying anything (best-effort; conflicts will abort the import). Each
  * table is logged as restored, emptied (not in the backup) or untouched.
+ * --replace is refused while the destination has active legal holds (13.3);
+ * --allow-replace-held goes ahead anyway.
  *
  * Without --source-master-key, the backup's first secrets and mfa_secrets
  * rows must open with SECRET_MASTER_KEY_BASE64, or the import is refused
@@ -46,6 +48,7 @@ interface Args {
   replace: boolean;
   allowAuditChange: boolean;
   allowKeyMismatch: boolean;
+  allowReplaceHeld: boolean;
 }
 
 type DumpFile = Omit<BackupDump, "format" | "formatVersion"> & { format: string; formatVersion: number };
@@ -58,6 +61,7 @@ function parseArgs(argv: string[]): Args {
   let replace = false;
   let allowAuditChange = false;
   let allowKeyMismatch = false;
+  let allowReplaceHeld = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     // pnpm passes the `--` that separates its own options from the script's (pnpm --filter … db:export -- --out x).
@@ -84,6 +88,8 @@ function parseArgs(argv: string[]): Args {
       allowAuditChange = true;
     } else if (arg === "--allow-key-mismatch") {
       allowKeyMismatch = true;
+    } else if (arg === "--allow-replace-held") {
+      allowReplaceHeld = true;
     } else if (arg === "--help" || arg === "-h") {
       printUsageAndExit(0);
     } else {
@@ -92,7 +98,7 @@ function parseArgs(argv: string[]): Args {
   }
   if (!inPath) throw new Error("--in <file.json> is required");
   if (merge && replace) throw new Error("--merge and --replace together: choose one.");
-  return { in: inPath, yes, sourceMasterKey, merge, replace, allowAuditChange, allowKeyMismatch };
+  return { in: inPath, yes, sourceMasterKey, merge, replace, allowAuditChange, allowKeyMismatch, allowReplaceHeld };
 }
 
 function printUsageAndExit(code: number): never {
@@ -100,7 +106,7 @@ function printUsageAndExit(code: number): never {
     [
       "Usage: pnpm --filter @ai-orchestrator/api db:import -- --in <file.json> --yes \\",
       "         [--source-master-key <base64> | --source-master-key-file <path>] [--replace | --merge]",
-      "         [--allow-audit-change] [--allow-key-mismatch]",
+      "         [--allow-audit-change] [--allow-key-mismatch] [--allow-replace-held]",
       "",
       "Options:",
       "  --in, -i <file.json>       Backup file produced by db:export.",
@@ -115,6 +121,8 @@ function printUsageAndExit(code: number): never {
       "  --merge                    Add the backup's rows without emptying anything (best-effort).",
       "  --allow-audit-change       Restore even if the restored audit chain's verdict differs from the",
       "                             one the backup recorded (both are printed, then a WARNING).",
+      "  --allow-replace-held       With --replace, go ahead although the destination has active legal holds",
+      "                             (their data and the holds are deleted). Keep a copy of the destination first.",
       "  --allow-key-mismatch       Restore even though SECRET_MASTER_KEY_BASE64 cannot open the backup's",
       "                             secrets (without --source-master-key); they stay unreadable.",
       "                             The check opens the backup's first secrets and mfa_secrets rows only:",
@@ -210,6 +218,7 @@ async function main() {
       merge: args.merge,
       replace: args.replace,
       allowAuditChange: args.allowAuditChange,
+      allowReplaceHeld: args.allowReplaceHeld,
       prepare: (table, rows) => (willReencrypt ? reencryptRows(table, rows, sourceKey ?? destKey, destKey) : { rows, touched: 0 }),
       log: (line) => console.log(line),
       warn: (line) => console.warn(line)

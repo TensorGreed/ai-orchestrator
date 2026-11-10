@@ -279,11 +279,11 @@ See [Data retention](../operations/data-retention.md).
 See [Legal holds](../operations/legal-hold.md).
 
 - `GET /api/legal-holds?status=` (admin or `legal_hold:manage`; `{ holds }`)
-- `POST /api/legal-holds` (admin or `legal_hold:manage`; step-up `legal_hold.change`; `{ name, reason, matterRef?, endsAt?, scopeType: "project"|"workflow"|"runs"|"subject", scopeId?, executionIds?, subject?: { value, dataClass?, country? } }`; `201 { hold }`; audited as `legal_hold.placed`)
+- `POST /api/legal-holds` (admin or `legal_hold:manage`, `subject` scope admin only; step-up `legal_hold.change`; `{ name, reason, matterRef?, endsAt?, scopeType: "project"|"workflow"|"runs"|"subject", scopeId?, executionIds?, subject?: { value, dataClass?, country? } }`; `201 { hold }`; audited as `legal_hold.placed`)
 - `GET /api/legal-holds/status?workflowId=|projectId=|executionId=` (anyone who can read it; `{ held, holds }`)
 - `GET /api/legal-holds/:id`, `GET /api/legal-holds/:id/items?offset=&limit=` (admin or `legal_hold:manage`)
-- `POST /api/legal-holds/:id/release` (admin or `legal_hold:manage`; step-up; `{ reason }`; 409 when already released; audited as `legal_hold.released`)
-- A delete refused by a hold answers `409 { error, code: "legal_hold", holds: [{ id, name }] }`; a data-subject delete skips held rows with reason `held`.
+- `POST /api/legal-holds/:id/release` (admin or `legal_hold:manage`, signed-in only: API keys get 403; step-up; `{ reason }`; 409 when already released; audited as `legal_hold.released`)
+- A delete, a gate case removal or a workflow move refused by a hold answers `409 { error, code: "legal_hold", holds: [{ id, name }] }`; a data-subject delete skips held rows with reason `held`.
 
 ## Golden runs and replay
 

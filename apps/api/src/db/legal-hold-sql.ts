@@ -18,7 +18,6 @@
  * Everything here is trusted SQL over column names; values never go into it.
  */
 import {
-  LEGAL_HOLD_SCOPE_TYPES,
   legalHoldRefusalMessage,
   type LegalHoldItemKind,
   type LegalHoldItemView,
@@ -41,9 +40,10 @@ export class LegalHoldError extends Error {
   readonly code = "legal_hold";
   constructor(
     readonly what: string,
-    readonly holds: LegalHoldRef[]
+    readonly holds: LegalHoldRef[],
+    refused = "deleted"
   ) {
-    super(legalHoldRefusalMessage(what, holds));
+    super(legalHoldRefusalMessage(what, holds, refused));
     this.name = "LegalHoldError";
   }
 }
@@ -190,6 +190,25 @@ export function heldRowSql(table: HoldableTable, ref: string = table, lh = "lh")
   return `EXISTS (SELECT 1 FROM legal_holds ${lh} WHERE ${lh}.status = 'active' AND ${holdMatchSql(table, ref, lh)})`;
 }
 
+/**
+ * 13.3 — the agent memory to store for a held session: the runtime saves only its last `maxMessages`, so while held
+ * the stored history only grows. `next` is appended after the longest stored tail it starts with (compared as JSON);
+ * when none matches, all of it is appended. Nothing stored is ever dropped. Loading still reads the last messages
+ * only, so the agent sees what it would without the hold.
+ */
+export function mergeHeldMemory<T>(stored: readonly T[], next: readonly T[]): T[] {
+  const storedJson = stored.map((message) => JSON.stringify(message));
+  const nextJson = next.map((message) => JSON.stringify(message));
+  for (let overlap = Math.min(storedJson.length, nextJson.length); overlap > 0; overlap -= 1) {
+    let same = true;
+    for (let index = 0; index < overlap && same; index += 1) {
+      same = storedJson[storedJson.length - overlap + index] === nextJson[index];
+    }
+    if (same) return [...stored, ...next.slice(overlap)];
+  }
+  return [...stored, ...next];
+}
+
 /** What a purge or delete appends: the row is not held. */
 export function notHeldSql(table: HoldableTable, ref: string = table): string {
   return `NOT ${heldRowSql(table, ref, "lhn")}`;
@@ -312,13 +331,15 @@ function optionalText(value: unknown): string | null {
 }
 
 export function legalHoldFromRow(row: LegalHoldRow): LegalHoldView {
-  const scopeType = String(row.scope_type);
+  // The stored scope as it is, even one this version does not know (a newer version's, after a downgrade): never
+  // shown as another scope. Here it holds only the rows it names one by one (its items).
+  const scopeType = String(row.scope_type) as LegalHoldScopeType;
   return {
     id: String(row.id),
     name: String(row.name),
     reason: String(row.reason),
     matterRef: optionalText(row.matter_ref),
-    scopeType: ((LEGAL_HOLD_SCOPE_TYPES as readonly string[]).includes(scopeType) ? scopeType : "project") as LegalHoldScopeType,
+    scopeType,
     scopeId: String(row.scope_id),
     status: String(row.status) === "active" ? "active" : "released",
     endsAt: optionalText(row.ends_at),

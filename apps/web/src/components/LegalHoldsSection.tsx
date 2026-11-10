@@ -37,7 +37,8 @@ function describeScope(hold: LegalHoldView): string {
     case "subject":
       return `Data subject: ${hold.itemCount} ${hold.itemCount === 1 ? "row" : "rows"}`;
     default:
-      return hold.scopeType;
+      // A scope this version does not know (organization, or a newer one): shown as stored, never as another scope.
+      return `Other scope: ${String(hold.scopeType)}${hold.scopeId && hold.scopeId !== hold.id ? ` ${hold.scopeId}` : ""}`;
   }
 }
 

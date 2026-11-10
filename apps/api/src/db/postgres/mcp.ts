@@ -11,6 +11,7 @@
  *   members and gateway clients. `seq` never changes on UPDATE or VACUUM, unlike `xmin` / `ctid`.
  */
 import { randomUUID } from "node:crypto";
+import { LEGAL_HOLD_LOCK_SHARED_SQL, notHeldSql } from "../legal-hold-sql.js";
 import { parseRecordedCallLabels, parseStoredGatewayRateLimit } from "@ai-orchestrator/shared";
 import {
   MCP_POLICY_KINDS,
@@ -496,11 +497,13 @@ export async function updateMcpServer(ctx: PgContext, ...[id, patch]: Parameters
 
 export async function deleteMcpServer(ctx: PgContext, ...[id]: Parameters<Store["deleteMcpServer"]>): ReturnType<Store["deleteMcpServer"]> {
   return ctx.withTransaction(async (client) => {
+    // 13.3 — the legal-hold lock first (before any row lock): tool calls under a hold stay, with a dangling server id.
+    await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
     const existing = await one(client, `SELECT id FROM mcp_servers WHERE id = $1 FOR UPDATE`, [id]);
     if (!existing) return false;
     await client.query(`DELETE FROM mcp_server_probes WHERE server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_tool_snapshots WHERE server_id = $1`, [id]);
-    await client.query(`DELETE FROM mcp_tool_calls WHERE registry_server_id = $1`, [id]);
+    await client.query(`DELETE FROM mcp_tool_calls WHERE registry_server_id = $1 AND ${notHeldSql("mcp_tool_calls")}`, [id]);
     await client.query(`DELETE FROM mcp_tool_classifications WHERE server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_tool_open_world_overrides WHERE server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = $1`, [id]);
@@ -1284,11 +1287,18 @@ export async function deleteMcpToolPolicy(ctx: PgContext, ...[id]: Parameters<St
  */
 export const ADVISORY_LOCK_CLASS_GATEWAY_APPROVALS = 0x4c3250;
 
-/** Expires pending requests past their expiry and deletes decided ones past MCP_GATEWAY_APPROVAL_RETENTION_MS. */
-async function sweepMcpGatewayApprovals(executor: Queryable, now: string): Promise<void> {
-  await executor.query(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= $1`, [now]);
+/**
+ * Expires pending requests past their expiry and deletes decided ones past MCP_GATEWAY_APPROVAL_RETENTION_MS, except
+ * those under a legal hold. `client` is in a transaction: the legal-hold lock it takes is held to commit.
+ */
+async function sweepMcpGatewayApprovals(client: Queryable, now: string): Promise<void> {
+  await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+  await client.query(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= $1`, [now]);
   const cutoff = mcpGatewayApprovalRetentionCutoff(now);
-  await executor.query(`DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < $1 AND expires_at < $1`, [cutoff]);
+  await client.query(
+    `DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < $1 AND expires_at < $1 AND ${notHeldSql("mcp_gateway_approvals")}`,
+    [cutoff]
+  );
 }
 
 /** One pending request per identical call: the partial unique index (v47) makes a concurrent second insert a no-op. */
@@ -1367,7 +1377,7 @@ export async function getMcpGatewayApproval(ctx: PgContext, ...[id]: Parameters<
 }
 
 export async function listMcpGatewayApprovals(ctx: PgContext, ...[filter, now]: Parameters<Store["listMcpGatewayApprovals"]>): ReturnType<Store["listMcpGatewayApprovals"]> {
-  await sweepMcpGatewayApprovals(ctx.pool, now);
+  await ctx.withTransaction(async (client) => sweepMcpGatewayApprovals(client, now));
   const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
   const result = filter.status
     ? await ctx.query<Row>(

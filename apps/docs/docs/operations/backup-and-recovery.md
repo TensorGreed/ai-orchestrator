@@ -162,6 +162,8 @@ sign-in session ids; `db:export` leaves sessions out.
        emptied first, including ones the backup does not hold, and so are the destination's sign-in sessions, so
        everyone signs in again. `--merge` adds the backup's rows instead (best-effort;
        a conflicting row aborts it);
+     - `--replace` into a destination with active [legal holds](./legal-hold.md): emptying it would delete the held
+       data and the holds. Release them, or keep a copy of the destination and pass `--allow-replace-held`;
      - a backup whose secrets or MFA enrolments `SECRET_MASTER_KEY_BASE64` cannot open: it was written with another
        key. Give that key with `--source-master-key-file` (see [Change the master key](#change-the-master-key-planned-rotation)),
        or, when it is lost, pass `--allow-key-mismatch` and recover as in

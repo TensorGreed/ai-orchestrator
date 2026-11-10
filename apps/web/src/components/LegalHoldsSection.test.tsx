@@ -50,6 +50,14 @@ describe("LegalHoldsSection", () => {
     expect(await screen.findByRole("status")).toHaveProperty("textContent", expect.stringContaining("Released"));
   });
 
+  it("shows a scope it does not know as stored, never as another scope", async () => {
+    vi.mocked(api.fetchLegalHolds).mockResolvedValue({ holds: [{ ...hold, id: "lh_9", scopeType: "organization", scopeId: "org-1" }] });
+    render(<LegalHoldsSection />);
+    const row = await screen.findByTestId("legal-hold-lh_9");
+    expect(row.textContent).toContain("Other scope: organization org-1");
+    expect(row.textContent).not.toContain("Project");
+  });
+
   it("places a runs hold from a list of ids, and shows a refusal", async () => {
     vi.mocked(api.fetchLegalHolds).mockResolvedValue({ holds: [] });
     vi.mocked(api.placeLegalHold).mockResolvedValueOnce({ hold: { ...hold, scopeType: "runs", scopeId: "lh_2", itemCount: 2 } });

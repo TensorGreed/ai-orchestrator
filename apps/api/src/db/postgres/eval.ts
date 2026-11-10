@@ -12,6 +12,7 @@ import type { PgContext } from "./context.js";
 import { toNum, toStr } from "./helpers.js";
 import { deleteRunsWhole } from "./prune.js";
 import { refuseIfHeld } from "./legal-holds.js";
+import { LEGAL_HOLD_LOCK_SHARED_SQL } from "../legal-hold-sql.js";
 
 function rowCount(result: { rowCount: number | null }): number {
   return result.rowCount ?? 0;
@@ -410,5 +411,12 @@ export async function evalRunIdsForResults(ctx: PgContext, ...[input]: Parameter
 }
 
 export async function deleteEvalFixturesForRecording(ctx: PgContext, ...[recordingId]: Parameters<Store["deleteEvalFixturesForRecording"]>): ReturnType<Store["deleteEvalFixturesForRecording"]> {
-  return rowCount(await ctx.pool.query(`DELETE FROM eval_fixtures WHERE recording_id = $1`, [recordingId]));
+  return ctx.withTransaction(async (client) => {
+    // 13.3 — refused (deleting nothing) while a legal hold covers any of the cases.
+    await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+    for (const { id } of (await client.query<{ id: string }>(`SELECT id FROM eval_fixtures WHERE recording_id = $1`, [recordingId])).rows) {
+      await refuseIfHeld(client, { kind: "row", table: "eval_fixtures", id: toStr(id) }, "A golden-set case of this golden run");
+    }
+    return rowCount(await client.query(`DELETE FROM eval_fixtures WHERE recording_id = $1`, [recordingId]));
+  });
 }

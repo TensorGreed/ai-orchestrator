@@ -7,7 +7,7 @@ import { type ChatMessage, type DataLabels, isEmptyDataLabels, labelsForUntracke
 import type { LoginSession, LoginSessionInput, SessionAuthMethod, SessionEndReason } from "../store.js";
 import { parseJsonSafe, toStr, labelsField } from "./helpers.js";
 import type { PgContext } from "./context.js";
-import { notHeldSql } from "../legal-hold-sql.js";
+import { LEGAL_HOLD_LOCK_SHARED_SQL, heldRowSql, mergeHeldMemory, notHeldSql } from "../legal-hold-sql.js";
 import { withReferenceCheck } from "../store-errors.js";
 import { sessionsToEvict } from "../session-eviction.js";
 
@@ -220,39 +220,44 @@ export async function loadSessionMemoryLabels(ctx: PgContext, namespace: string,
   return row ? parseStoredDataLabels(row.labels_json) : null;
 }
 
-/** Saves a session's memory; `labels` (Phase 16) only while the run tracks labels, merged with the stored ones; none keeps stored labels plus `untrusted_external`. */
+/**
+ * Saves a session's memory; `labels` (Phase 16) only while the run tracks labels, merged with the stored ones; none
+ * keeps stored labels plus `untrusted_external`. 13.3 — under a legal hold the stored history only grows: the read,
+ * the hold check and the write share a transaction under the legal-hold lock.
+ */
 export async function saveSessionMemory(ctx: PgContext, namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): Promise<void> {
-  const row = await ctx.queryOne<{ created_at: string; labels_json: string | null }>(
-    `SELECT created_at, labels_json FROM session_memory WHERE namespace = $1 AND session_id = $2`,
-    [namespace, sessionId]
-  );
-  const now = new Date().toISOString();
-  const createdAt = row ? toStr(row.created_at) : now;
-  if (labels) {
-    const merged = mergeDataLabels([parseStoredDataLabels(row?.labels_json ?? null), labels].filter((entry): entry is DataLabels => Boolean(entry)));
-    const labelsJson = merged && !isEmptyDataLabels(merged) ? JSON.stringify({ ...merged, source: "propagated" }) : row?.labels_json ?? null;
-    await ctx.execute(
+  await ctx.withTransaction(async (client) => {
+    await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+    const row = (
+      await client.query<{ created_at: string; labels_json: string | null; messages_json: string; held: boolean }>(
+        `SELECT created_at, labels_json, messages_json, ${heldRowSql("session_memory")} AS held
+           FROM session_memory WHERE namespace = $1 AND session_id = $2 FOR UPDATE`,
+        [namespace, sessionId]
+      )
+    ).rows[0];
+    const now = new Date().toISOString();
+    const createdAt = row ? toStr(row.created_at) : now;
+    const stored = row?.held ? parseJsonSafe(row.messages_json) : null;
+    const toStore = row?.held ? mergeHeldMemory(Array.isArray(stored) ? (stored as ChatMessage[]) : [], messages) : messages;
+    let labelsJson: string | null;
+    if (labels) {
+      const merged = mergeDataLabels([parseStoredDataLabels(row?.labels_json ?? null), labels].filter((entry): entry is DataLabels => Boolean(entry)));
+      labelsJson = merged && !isEmptyDataLabels(merged) ? JSON.stringify({ ...merged, source: "propagated" }) : row?.labels_json ?? null;
+    } else {
+      // An untracked save keeps the stored labels and adds `untrusted_external` (the old messages are still in memory).
+      const kept = labelsForUntrackedSave(parseStoredDataLabels(row?.labels_json ?? null));
+      labelsJson = kept ? JSON.stringify(kept) : null;
+    }
+    await client.query(
       `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (namespace, session_id) DO UPDATE SET
            messages_json = EXCLUDED.messages_json,
            labels_json = EXCLUDED.labels_json,
            updated_at = EXCLUDED.updated_at`,
-      [namespace, sessionId, JSON.stringify(messages), labelsJson, createdAt, now]
+      [namespace, sessionId, JSON.stringify(toStore), labelsJson, createdAt, now]
     );
-    return;
-  }
-  // An untracked save keeps the stored labels and adds `untrusted_external` (the old messages are still in memory).
-  const kept = labelsForUntrackedSave(parseStoredDataLabels(row?.labels_json ?? null));
-  await ctx.execute(
-    `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (namespace, session_id) DO UPDATE SET
-         messages_json = EXCLUDED.messages_json,
-         labels_json = EXCLUDED.labels_json,
-         updated_at = EXCLUDED.updated_at`,
-    [namespace, sessionId, JSON.stringify(messages), kept ? JSON.stringify(kept) : null, createdAt, now]
-  );
+  });
 }
 
 export async function saveSessionToolCall(ctx: PgContext, input: {
@@ -301,8 +306,10 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
   );
   const createdAt = inserted[0] ? toStr(inserted[0].created_at) : now;
 
-  // Prune old records
-  await ctx.execute(
+  // Prune old records, never a held one (13.3: under the legal-hold lock, so a hold placed meanwhile binds it).
+  await ctx.withTransaction(async (client) => {
+    await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+    await client.query(
     `DELETE FROM session_tool_cache
        WHERE namespace = $1 AND session_id = $2
          AND id NOT IN (
@@ -312,8 +319,9 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
            LIMIT $3
          )
          AND ${notHeldSql("session_tool_cache")}`,
-    [input.namespace, input.sessionId, MAX_SESSION_TOOL_CACHE_RECORDS]
-  );
+      [input.namespace, input.sessionId, MAX_SESSION_TOOL_CACHE_RECORDS]
+    );
+  });
 
   return {
     id,
