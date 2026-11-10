@@ -1815,6 +1815,20 @@ export interface GuardVaultRow {
   value_hash: string | null;
   value_sealed: string;
   created_at: string;
+  /** Phase 12 coverage (v69) — null on tokens issued before tokens were scoped to a project. */
+  project_id?: string | null;
+  execution_id?: string | null;
+}
+
+/** Phase 12 coverage — what a vault write stores: the sealed value, plus the project and run that issued the token. */
+export interface GuardVaultInsert {
+  token: string;
+  dataClass: string;
+  valueHash: string | null;
+  valueSealed: string;
+  createdAt: string;
+  projectId?: string | null;
+  executionId?: string | null;
 }
 
 interface GuardProfileRow {
@@ -4183,6 +4197,10 @@ export class SqliteStore implements Store {
       CREATE INDEX IF NOT EXISTS idx_guard_benchmarks_profile ON guard_benchmarks(profile_id, created_at DESC);
     `);
     this.ensureColumn("guard_events", "run_source", "TEXT");
+    // Phase 12 coverage (v69) — the project and run that issued a vault token: a Reveal node reveals only its own project's tokens.
+    this.ensureColumn("guard_token_vault", "project_id", "TEXT");
+    this.ensureColumn("guard_token_vault", "execution_id", "TEXT");
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_guard_token_vault_project ON guard_token_vault(project_id)`);
     // 12.6b (v60) — the /v1 AI gateway: route sets, routes, client grants and per-request usage.
     ensureAiGatewaySchema(this.db);
 
@@ -13923,14 +13941,11 @@ export class SqliteStore implements Store {
   }
 
   /** Stores a token; a concurrent deterministic insert for the same value keeps the first one. */
-  async putGuardVault(input: { token: string; dataClass: string; valueHash: string | null; valueSealed: string; createdAt: string }): Promise<void> {
-    this.exec(`INSERT OR IGNORE INTO guard_token_vault (token, data_class, value_hash, value_sealed, created_at) VALUES (?, ?, ?, ?, ?)`, [
-      input.token,
-      input.dataClass,
-      input.valueHash,
-      input.valueSealed,
-      input.createdAt
-    ]);
+  async putGuardVault(input: GuardVaultInsert): Promise<void> {
+    this.exec(
+      `INSERT OR IGNORE INTO guard_token_vault (token, data_class, value_hash, value_sealed, created_at, project_id, execution_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [input.token, input.dataClass, input.valueHash, input.valueSealed, input.createdAt, input.projectId ?? null, input.executionId ?? null]
+    );
     this.persist();
   }
 

@@ -59,6 +59,7 @@ import {
   type DestinationRef,
   type GuardDestinationSummary,
   type McpToolPolicySubject,
+  type RevealClassSummary,
   type SecretReference,
   type WorkflowNode
 } from "@ai-orchestrator/shared";
@@ -177,6 +178,36 @@ export interface GuardRuntimeDependencies {
    * outbound checks record only verdicts with a finding.
    */
   recordCleanOutbound?: boolean;
+  /**
+   * Phase 12 coverage — the run's project. Vault tokens a Reveal node may reveal must have been issued in it. Absent:
+   * only tokens issued before tokens were scoped to a project, and only for an admin's run.
+   */
+  projectId?: string | null;
+  /**
+   * Phase 12 coverage — the run must never reveal: a replay, an eval run, a rule simulation or a candidate rule set
+   * run. A Reveal node then passes its input through untouched.
+   */
+  revealDisabled?: boolean;
+  /**
+   * Phase 12 coverage — records what a Reveal node revealed and refused (counts and token hashes, never values). A
+   * Reveal node reveals nothing unless this is set, and fails when it throws.
+   */
+  onReveal?(event: GuardRevealEvent): Promise<void> | void;
+}
+
+/** Phase 12 coverage — one Reveal node step, for rule events and the audit log. */
+export interface GuardRevealEvent {
+  executionId: string;
+  workflowId: string;
+  nodeId: string;
+  /** Who the rules judged: the run subject's source and role, and the user or service account when there is one. */
+  subject: { source: string; role?: string; userId?: string; serviceAccountId?: string } | null;
+  /** The rule sets whose reveal rules applied (the first one is the event's rule set when nothing was revealed). */
+  profiles: GuardProfileRef[];
+  revealed: RevealClassSummary[];
+  refused: RevealClassSummary[];
+  /** A person approved this reveal. */
+  approved: boolean;
 }
 
 export interface GuardEvalScope {
@@ -418,7 +449,8 @@ export async function resolveGuardNodeProfiles(
   return { profiles: dedupeByHash(profiles), resolution };
 }
 
-function keyResolverFor(scope: GuardEvalScope) {
+/** Key material for a key id (a secret id), resolved through the run's secret scope. */
+export function keyResolverFor(scope: Pick<GuardEvalScope, "resolveSecret">) {
   return async (keyId: string) => decodeGuardKeyMaterial(await scope.resolveSecret({ secretId: keyId }));
 }
 

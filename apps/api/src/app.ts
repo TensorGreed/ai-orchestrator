@@ -1546,7 +1546,9 @@ export async function createApp(
     logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
     // Phase 16 — destination rows are read when a run first needs them.
     destinationRows: async () => await store.listDataDestinations(),
-    ...(runtimeMasterKey.length === 32 ? { surrogateKey: deriveCaptureSurrogateKey(runtimeMasterKey) } : {})
+    ...(runtimeMasterKey.length === 32 ? { surrogateKey: deriveCaptureSurrogateKey(runtimeMasterKey) } : {}),
+    // Phase 12 coverage — a Reveal node's audit entry (the audit service is set up further down; runs start later).
+    audit: async (event) => await auditService.record(event)
   });
   await guardService.ensureBuiltIns();
   const connectorRegistry = createDefaultConnectorRegistry();

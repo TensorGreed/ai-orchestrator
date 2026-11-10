@@ -17,10 +17,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { createDefaultGuardRegistry, GUARD_CHANNELS, type GuardChannel } from "@ai-orchestrator/guard-sdk";
 import {
-  GUARD_ACTION_VALUES,
+  GUARD_EVENT_ACTION_VALUES,
   GUARD_BUILTIN_PROFILE_ID,
   GUARD_DESTINATION_RULES_PROFILE_ID,
-  GUARD_PROFILE_CHANNEL_VALUES,
+  GUARD_EVENT_CHANNEL_VALUES,
   REVEAL_RULES_ADMIN_ONLY_MESSAGE,
   destinationRulesEnforcementSchema,
   guardDocumentHasRevealRules,
@@ -75,8 +75,9 @@ function eventFilters(query: Record<string, unknown>): GuardEventFilters & { lim
     ...(str(query.projectId) ? { projectId: str(query.projectId) } : {}),
     ...(str(query.workflowId) ? { workflowId: str(query.workflowId) } : {}),
     ...(str(query.profileId) ? { profileId: str(query.profileId) } : {}),
-    ...(channel && (GUARD_PROFILE_CHANNEL_VALUES as readonly string[]).includes(channel) ? { channel } : {}),
-    ...(action && (GUARD_ACTION_VALUES as readonly string[]).includes(action) ? { action } : {}),
+    ...(channel && (GUARD_EVENT_CHANNEL_VALUES as readonly string[]).includes(channel) ? { channel } : {}),
+    // Phase 12 coverage — `reveal` is an event action (a Reveal node's events), not a rule action.
+    ...(action && (GUARD_EVENT_ACTION_VALUES as readonly string[]).includes(action) ? { action } : {}),
     ...(since && !Number.isNaN(Date.parse(since)) ? { since: new Date(since).toISOString() } : {}),
     ...(query.findings === "true" || query.findings === "1" ? { onlyFindings: true } : {}),
     // 12.6 — gateway server tool calls, or workflow runs only.

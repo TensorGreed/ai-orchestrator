@@ -55,7 +55,11 @@ import {
   setTopLevel,
   destinationRuleLines,
   suggestProfileId,
-  type GuardDocument
+  revealRuleLine,
+  revealRulesOf,
+  setRevealRules,
+  type GuardDocument,
+  type RevealRuleView
 } from "../lib/guard-profile-edit";
 import { actionLabel, channelLabel } from "../lib/guard-trace";
 import { GuardSimulationCard, useGuardSimulation } from "./GuardSimulationPanel";
@@ -477,6 +481,7 @@ function GuardProfileEditor({
           ))}
         </fieldset>
         <DestinationRulesSummary document={document} />
+        <RevealRulesSection document={document} role={role} readOnly={readOnly} onChange={update} />
       </section>
 
       <section className="kb-section">
@@ -1022,6 +1027,129 @@ function DestinationRulesSummary({ document }: { document: Record<string, unknow
         ))}
       </ol>
       <p className="kb-subtle">Where data may go, by the tiers on the Data destinations tab. Change them with Edit as JSON.</p>
+    </div>
+  );
+}
+
+const REVEAL_ROLES = ["admin", "builder", "operator", "viewer"] as const;
+const splitList = (text: string): string[] =>
+  text
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+/**
+ * Phase 12 coverage — who may turn protected tokens back into values (Reveal nodes). Nobody may unless a rule says so.
+ * Only admins may add, change or remove reveal rules; others see them read-only. Nothing shows for a non-admin when
+ * the rule set has none.
+ */
+export function RevealRulesSection({
+  document,
+  role,
+  readOnly,
+  onChange
+}: {
+  document: GuardDocument;
+  role: Role;
+  readOnly: boolean;
+  onChange: (next: GuardDocument) => void;
+}) {
+  const rules = revealRulesOf(document);
+  const isAdmin = role === "admin";
+  const editable = isAdmin && !readOnly;
+  const [draft, setDraft] = useState({ name: "", dataClasses: "", roles: [] as string[], users: "", serviceAccounts: "", workflows: "", requireApproval: false });
+  if (rules.length === 0 && !editable) return null;
+  const draftRule: RevealRuleView = {
+    ...(draft.name.trim() ? { name: draft.name.trim() } : {}),
+    dataClasses: splitList(draft.dataClasses),
+    roles: draft.roles,
+    users: splitList(draft.users),
+    serviceAccounts: splitList(draft.serviceAccounts),
+    workflows: splitList(draft.workflows),
+    requireApproval: draft.requireApproval
+  };
+  const draftReady = draftRule.dataClasses.length > 0 && draftRule.roles.length + draftRule.users.length + draftRule.serviceAccounts.length > 0;
+  return (
+    <div className="guard-dest-rules-block" aria-label="Reveal rules">
+      <h5>Reveal rules</h5>
+      {rules.length === 0 ? (
+        <p className="kb-subtle">No reveal rules: no Reveal node can turn this rule set&apos;s protected values back into the original.</p>
+      ) : (
+        <ol className="guard-dest-rules">
+          {rules.map((rule, index) => (
+            <li key={index}>
+              {revealRuleLine(rule)}
+              {editable && (
+                <button type="button" className="pg-btn small ghost danger" aria-label={`Remove reveal rule ${index + 1}`} onClick={() => onChange(setRevealRules(document, rules.filter((_, at) => at !== index)))}>
+                  Remove
+                </button>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+      <p className="kb-subtle">
+        Roles and users match only runs a signed-in person started. Webhook, chat, schedule and gateway runs never match them; name a service account to allow an unattended run.
+        Revealed values count as sensitive again, so destination rules decide where they may go.
+      </p>
+      {!isAdmin && rules.length > 0 && (
+        <p className="guard-lock-note" role="note">
+          Only an admin can change reveal rules or save this rule set while it has them.
+        </p>
+      )}
+      {editable && (
+        <fieldset className="guard-reveal-form">
+          <legend>Add a reveal rule</legend>
+          <label>
+            <span>Name (optional)</span>
+            <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+          </label>
+          <label>
+            <span>Data classes</span>
+            <input aria-label="Reveal data classes" placeholder="card_number, email" value={draft.dataClasses} onChange={(event) => setDraft({ ...draft, dataClasses: event.target.value })} />
+          </label>
+          <div role="group" aria-label="Reveal roles">
+            {REVEAL_ROLES.map((entry) => (
+              <label key={entry} className="guard-check">
+                <input
+                  type="checkbox"
+                  checked={draft.roles.includes(entry)}
+                  onChange={(event) => setDraft({ ...draft, roles: event.target.checked ? [...draft.roles, entry] : draft.roles.filter((value) => value !== entry) })}
+                />
+                <span>{entry}</span>
+              </label>
+            ))}
+          </div>
+          <label>
+            <span>User ids</span>
+            <input value={draft.users} onChange={(event) => setDraft({ ...draft, users: event.target.value })} />
+          </label>
+          <label>
+            <span>Service account ids</span>
+            <input value={draft.serviceAccounts} onChange={(event) => setDraft({ ...draft, serviceAccounts: event.target.value })} />
+          </label>
+          <label>
+            <span>Only in workflows (ids, optional)</span>
+            <input value={draft.workflows} onChange={(event) => setDraft({ ...draft, workflows: event.target.value })} />
+          </label>
+          <label className="guard-check">
+            <input type="checkbox" checked={draft.requireApproval} onChange={(event) => setDraft({ ...draft, requireApproval: event.target.checked })} />
+            <span>A person approves each reveal first</span>
+          </label>
+          <button
+            type="button"
+            className="pg-btn small"
+            disabled={!draftReady}
+            title={draftReady ? undefined : "Name at least one data class and one role, user or service account"}
+            onClick={() => {
+              onChange(setRevealRules(document, [...rules, draftRule]));
+              setDraft({ name: "", dataClasses: "", roles: [], users: "", serviceAccounts: "", workflows: "", requireApproval: false });
+            }}
+          >
+            Add reveal rule
+          </button>
+        </fieldset>
+      )}
     </div>
   );
 }

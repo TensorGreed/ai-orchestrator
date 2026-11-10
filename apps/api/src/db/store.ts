@@ -77,6 +77,7 @@ import type {
   GuardProfileVersionRecord,
   GuardSimulationRecord,
   GuardBenchmarkStoredRecord,
+  GuardVaultInsert,
   GuardVaultRow,
   KnowledgeBaseChunkRecord,
   KnowledgeBaseRecord,
@@ -816,7 +817,7 @@ export interface Store extends AiGatewayStore {
   getGuardVaultByToken(token: string): Promise<GuardVaultRow | null>;
   getGuardVaultByHash(valueHash: string): Promise<GuardVaultRow | null>;
   /** Stores a token; a concurrent deterministic insert for the same value keeps the first one. */
-  putGuardVault(input: { token: string; dataClass: string; valueHash: string | null; valueSealed: string; createdAt: string }): Promise<void>;
+  putGuardVault(input: GuardVaultInsert): Promise<void>;
 
   // ---- Data destinations
 

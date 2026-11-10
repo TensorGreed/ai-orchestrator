@@ -1,5 +1,5 @@
 ---
-description: "Reference for the 43 nodes in the L2M Utility category, with every config field and default. DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait."
+description: "Reference for the 44 nodes in the L2M Utility category, with every config field and default. DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait."
 ---
 
 <!--
@@ -12,7 +12,7 @@ description: "Reference for the 43 nodes in the L2M Utility category, with every
 
 DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait.
 
-43 nodes.
+44 nodes.
 
 ---
 ### `aggregate_node` — Aggregate
@@ -462,6 +462,37 @@ Tokenises, encrypts, hashes or masks sensitive data for a Content Rules node. At
   "deterministic": false,
   "formatPreserving": false,
   "protectMatches": true
+}
+```
+
+---
+
+### `guard_reveal` — Reveal
+
+Turns protection tokens in one field back into the original values, only for the data classes the rule set's reveal rules allow whoever started the run. Everything else stays protected. Revealed values count as sensitive again, so destination rules decide where they may go.
+
+**Config fields**
+
+| Field | Type | Required | Values |
+|---|---|---|---|
+| `profileId` | `string` | yes | — |
+| `inputField` | `string` | yes | — |
+| `keySecretRefs` | `array<object>` | no | — |
+| `formatPreservingClasses` | `array<string>` | no | — |
+| `onRefused` | `string` | no | `keep` \| `fail` |
+| `approvalMessage` | `string` | no | — |
+| `timeoutMinutes` | `number` | no | — |
+
+**Example config**
+
+```json
+{
+  "profileId": "effective",
+  "inputField": "text",
+  "keySecretRefs": [],
+  "formatPreservingClasses": [],
+  "onRefused": "keep",
+  "timeoutMinutes": 1440
 }
 ```
 

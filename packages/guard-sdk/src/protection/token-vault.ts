@@ -14,6 +14,12 @@ export interface TokenVaultRecord {
   /** HMAC of the value for deterministic lookups; absent for random tokens. */
   valueHash?: string;
   createdAt: string;
+  /**
+   * Phase 12 coverage — the project and run that issued the token. The storage fills them in on `put` when it knows
+   * the run; a token without a project was issued before tokens were scoped (only an admin's run may reveal it).
+   */
+  projectId?: string | null;
+  executionId?: string | null;
 }
 
 /** Storage behind the vault. The wiring layer supplies a database-backed implementation. */

@@ -73,6 +73,7 @@ export const workflowNodeSchema = z.object({
     "output_guardrail",
     "guard",
     "guard_protection",
+    "guard_reveal",
     "basic_llm_chain",
     "qa_chain",
     "summarization_chain",

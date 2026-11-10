@@ -40,6 +40,7 @@ export type NodePaletteIconKey =
   | "output_guardrail"
   | "guard"
   | "guard_protection"
+  | "guard_reveal"
   | "input_validator"
   | "output_parser"
   | "rag_retrieve"
@@ -291,6 +292,15 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
         <rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="#65A30D" strokeWidth="1.6" />
         <path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3" fill="none" stroke="#65A30D" strokeWidth="1.6" strokeLinecap="round" />
         <path d="M9 15.5h1.5M11.75 15.5h1.5M14.5 15.5H16" fill="none" stroke="#65A30D" strokeWidth="1.8" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (icon === "guard_reveal") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="#65A30D" strokeWidth="1.6" />
+        <path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 6.6-1.6" fill="none" stroke="#65A30D" strokeWidth="1.6" strokeLinecap="round" />
+        <circle cx="12" cy="15.5" r="1.6" fill="none" stroke="#65A30D" strokeWidth="1.6" />
       </svg>
     );
   }
@@ -1163,6 +1173,7 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   output_guardrail: "output_guardrail",
   guard: "guard",
   guard_protection: "guard_protection",
+  guard_reveal: "guard_reveal",
   input_validator: "input_validator",
   output_parser: "output_parser",
   rag_retrieve: "rag_retrieve",

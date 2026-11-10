@@ -160,6 +160,7 @@ import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCat
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
+import { executeRevealNodeStep } from "./reveal-node";
 import {
   approvalGateOutcome,
   approvalGatePause,
@@ -3992,7 +3993,9 @@ function ragDestinationRefs(type: string, config: Record<string, unknown>, _depe
 
 /** Phase 15.1 — the replay stub for a node, if the run is a replay and the node is stubbed. */
 function replayStubFor(node: WorkflowNode, dependencies: WorkflowExecutionDependencies): ReplayNodeStub | null {
-  if (!dependencies.replayNodeHook || node.type === "sticky_note" || node.disabled === true) {
+  // Phase 12 coverage — a Reveal node is never answered from the recording (that would replay revealed values): its
+  // handler runs and, in a replay, passes its input through.
+  if (!dependencies.replayNodeHook || node.type === "sticky_note" || node.type === "guard_reveal" || node.disabled === true) {
     return null;
   }
   return dependencies.replayNodeHook(node);
@@ -4039,6 +4042,20 @@ async function executeNodeHandler(
   await directMcpPolicyPreCheck(node, config, context, dependencies);
   // Phase 16 — outbound checks (egress, MCP destination rules) run before the handler, and before a replay's stub.
   const outbound = await outboundPreCheck(node, config, context, dependencies);
+
+  // Phase 12 coverage — the Reveal node (never stubbed: `replayStubFor`); in a replay it passes its input through.
+  if (node.type === "guard_reveal") {
+    return await executeRevealNodeStep({
+      node,
+      scope: guardScopeFor(node, context, dependencies, "reveal"),
+      merged: context.merged,
+      parentIds: Object.keys(context.parentOutputs),
+      globals: context.globals,
+      ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+      ...(context.labelScope ? { labelScope: context.labelScope } : {}),
+      replay: Boolean(dependencies.replayNodeHook)
+    });
+  }
 
   const replayStub = replayStubFor(node, dependencies);
   if (replayStub) {

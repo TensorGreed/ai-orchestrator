@@ -79,6 +79,7 @@ export const BESPOKE_CREDENTIAL_EDITOR_TYPES: ReadonlySet<string> = new Set([
   "azure_ai_search_vector_store",
   "qdrant_vector_store",
   "guard_protection",
+  "guard_reveal",
   "slack_send_message",
   "slack_trigger",
   "smtp_send_email",

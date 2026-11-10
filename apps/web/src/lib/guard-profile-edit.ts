@@ -189,3 +189,69 @@ export function destinationRuleLines(document: Record<string, unknown>): string[
     return `${name}${what} may only go to ${where}; otherwise ${action}${rule.shadow === true ? " (shadow: observe only)" : ""}.`;
   });
 }
+
+/** Phase 12 coverage — one reveal rule as the editor sees it (lists are plain strings). */
+export interface RevealRuleView {
+  name?: string;
+  dataClasses: string[];
+  roles: string[];
+  users: string[];
+  serviceAccounts: string[];
+  workflows: string[];
+  requireApproval: boolean;
+}
+
+const strings = (value: unknown): string[] => (Array.isArray(value) ? value.map(String).map((entry) => entry.trim()).filter(Boolean) : []);
+
+/** Phase 12 coverage — the document's reveal rules; empty when it has none (nobody may reveal). */
+export function revealRulesOf(document: GuardDocument): RevealRuleView[] {
+  return (Array.isArray(rec(document.reveal).rules) ? (rec(document.reveal).rules as unknown[]) : []).map((raw) => {
+    const rule = rec(raw);
+    const subjects = rec(rule.subjects);
+    return {
+      ...(typeof rule.name === "string" && rule.name ? { name: rule.name } : {}),
+      dataClasses: strings(rule.dataClasses),
+      roles: strings(subjects.roles),
+      users: strings(subjects.users),
+      serviceAccounts: strings(subjects.serviceAccounts),
+      workflows: strings(rule.workflows),
+      requireApproval: rule.requireApproval === true
+    };
+  });
+}
+
+/** Phase 12 coverage — replaces the reveal rules; no rules removes the block, so a rule set without them serialises as before. */
+export function setRevealRules(document: GuardDocument, rules: RevealRuleView[]): GuardDocument {
+  const next = cloneDocument(document);
+  if (rules.length === 0) {
+    delete next.reveal;
+    return next;
+  }
+  next.reveal = {
+    rules: rules.map((rule) => ({
+      ...(rule.name?.trim() ? { name: rule.name.trim() } : {}),
+      dataClasses: strings(rule.dataClasses),
+      subjects: {
+        ...(rule.roles.length ? { roles: strings(rule.roles) } : {}),
+        ...(rule.users.length ? { users: strings(rule.users) } : {}),
+        ...(rule.serviceAccounts.length ? { serviceAccounts: strings(rule.serviceAccounts) } : {})
+      },
+      ...(rule.workflows.length ? { workflows: strings(rule.workflows) } : {}),
+      ...(rule.requireApproval ? { requireApproval: true } : {})
+    }))
+  };
+  return next;
+}
+
+/** Phase 12 coverage — one plain sentence per reveal rule, for the editor. */
+export function revealRuleLine(rule: RevealRuleView): string {
+  const who = [
+    ...rule.roles.map((role) => `${role}s`),
+    ...rule.users.map((user) => `user ${user}`),
+    ...rule.serviceAccounts.map((account) => `service account ${account}`)
+  ];
+  const name = rule.name ? `${rule.name}: ` : "";
+  const where = rule.workflows.length ? ` in ${rule.workflows.length === 1 ? "workflow" : "workflows"} ${rule.workflows.join(", ")}` : "";
+  const approval = rule.requireApproval ? ", after a person approves" : "";
+  return `${name}${who.join(", ") || "nobody"} may reveal ${rule.dataClasses.join(", ") || "nothing"}${where}${approval}.`;
+}

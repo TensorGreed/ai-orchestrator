@@ -137,6 +137,8 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
   // Guard.
   guard: "guard",
   guard_protection: "guard",
+  // Phase 12 coverage — the Reveal node never reveals in a replay: it passes its input through.
+  guard_reveal: "guard",
   output_guardrail: "guard",
 
   // MCP.
@@ -1056,6 +1058,7 @@ export const REPLAY_LIVE_READ_POLICY: Readonly<Record<WorkflowNodeType, ReplayLi
   output_parser: "refused",
   guard: "refused",
   guard_protection: "refused",
+  guard_reveal: "refused",
   output_guardrail: "refused",
   mcp_tool: "refused",
   workflow_tool: "refused",

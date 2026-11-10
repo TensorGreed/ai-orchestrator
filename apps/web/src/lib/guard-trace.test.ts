@@ -252,3 +252,17 @@ describe("displayRuleSetName", () => {
     expect(displayRuleSetName("default", undefined)).toBeUndefined();
   });
 });
+
+describe("reveal events (Phase 12 coverage)", () => {
+  it("labels reveal actions and channels, explains a refused reveal, and keeps reveals out of the daily verdict chart", async () => {
+    const { actionLabel, channelLabel, dailySeries, verdictReasonLine } = await import("./guard-trace");
+    expect(actionLabel("reveal")).toBe("Revealed");
+    expect(channelLabel("reveal")).toBe("Reveal");
+    expect(
+      verdictReasonLine({ effectiveAction: "block", shadow: false, detectorId: "reveal", category: "reveal", dataClass: "card_number", channel: "reveal", evidence: [] })
+    ).toBe("Reveal refused: card number stayed protected.");
+    const now = new Date("2026-11-10T12:00:00Z");
+    const series = dailySeries([{ day: "2026-11-10", action: "reveal", count: 3 }, { day: "2026-11-10", action: "block", count: 1 }], 1, now);
+    expect(series).toEqual([{ day: "2026-11-10", blocked: 1, review: 0, rewritten: 0, allowed: 0 }]);
+  });
+});

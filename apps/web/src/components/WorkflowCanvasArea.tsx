@@ -114,6 +114,7 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "output_guardrail",
         "guard",
         "guard_protection",
+        "guard_reveal",
         "output_parser",
         "basic_llm_chain",
         "qa_chain",

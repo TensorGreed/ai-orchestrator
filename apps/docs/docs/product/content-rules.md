@@ -120,6 +120,31 @@ With **protectMatches** (on by default), rules that would allow, mask or redact 
 
 If a finding should be protected but no provider covers its class, the key is missing or the provider fails, the rule set's `protection.fallback` applies. It defaults to `block`.
 
+## Reveal node
+
+A **Reveal** node turns protection tokens in one field of the incoming item back into the original values. It is a normal DAG step: put it right before the step that truly needs the value (a CRM write, a reply to the customer), not earlier.
+
+Nobody may reveal unless the rule set says so. A rule set's `reveal` block lists who may reveal which data classes:
+
+```json
+"reveal": {
+  "rules": [
+    { "name": "Billing admins", "dataClasses": ["card_number"], "subjects": { "roles": ["admin"] }, "requireApproval": true },
+    { "dataClasses": ["email"], "subjects": { "serviceAccounts": ["sa-crm"] }, "workflows": ["wf-crm-sync"] }
+  ]
+}
+```
+
+- **Only an admin can save a rule set with reveal rules.** A builder's save of one answers 403, and a node's inline override can never add or remove them.
+- **Who matches.** Roles and users match only runs a signed-in person started. Webhook, chat, schedule, form and gateway runs act as the workflow's owner, so a role or user rule never matches them, whoever the owner is. A service account matches only a rule that names its id. `workflows` limits a rule to those workflows.
+- **Which tokens.** Token vault tokens (`tok_<class>_…`), found by shape; format-preserving vault tokens for the classes the node lists, found by the data detectors and then looked up exactly in the vault; and encrypted values (`enc:<key>:…`) under the keys the node lists. A vault token issued in another project is never revealed; tokens issued before tokens were scoped to a project are revealed only for a run a signed-in admin started. Mask, keyed hash and surrogate are one-way and never reveal.
+- **What the node does with the rest.** A token no rule allows stays as it is. With **When a token may not be revealed: Fail the step** one refused token fails the node and nothing is revealed.
+- **Approval.** A matching rule with `requireApproval` pauses the run; the approver sees data classes and counts, never values. Approving runs the node again for exactly those tokens.
+- **Where revealed data may go.** Revealed values carry the `sensitive` label and their data class again, so [destination rules](./data-labels-and-destinations.md) and outbound checks decide where they can be sent next.
+- **Replays never reveal.** In a replay, an eval run or a rule simulation the node passes its input through untouched and records nothing.
+
+Each Reveal step that revealed or refused something writes rule events with placement, channel and action `reveal` (a refused class records `block` as its effective action), with the first 16 hex characters of each token's sha256 as evidence, and one audit log entry `content_rules.reveal` with who started the run, the workflow, the node and the counts. Neither ever holds a value or a token. If the events cannot be written, nothing is revealed.
+
 ## What gets recorded
 
 Every check writes rows to `guard_events`: one per applied action, or one row for a clean verdict. A row holds:
@@ -149,4 +174,4 @@ Rows never hold the content that was checked, the raw matched value, protection 
 - **Sub-workflows** run under the calling workflow's rule set resolution, not their own bindings. **Error-handler workflows** run under their own workflow and project bindings.
 - **Read scoping.** Rule events, the Security page counts and the bindings listed on a rule set are limited to the workflows and projects the user can read. Rule sets and their versions are instance-wide: every signed-in user can read every rule set. Run history itself is filtered by role only.
 - **Custom patterns.** The nested-quantifier check catches the common catastrophic shapes but not every slow pattern (overlapping alternations such as `(a|aa)+` pass). Patterns run over the whole checked text and the latency budget cannot interrupt a regular expression that is already running, so keep dictionary patterns simple and anchored.
-- **Token vault.** `guard_token_vault` rows are not covered by run retention and are not scoped to a project: a token resolves for any run on the instance, and rows stay until they are deleted. Sealing binds each value to the vault's purpose but not to its token or row. Keys for deterministic tokens and keyed hashes must be at least 16 bytes.
+- **Token vault.** `guard_token_vault` rows are not covered by run retention, and rows stay until they are deleted. Each row records the project and run that issued it (rows from before this was recorded have none); a Reveal node reveals only its own project's tokens, while a Content Rules node reuses a deterministic token for an equal value whichever project issued it. Sealing binds each value to the vault's purpose but not to its token or row. Keys for deterministic tokens and keyed hashes must be at least 16 bytes.

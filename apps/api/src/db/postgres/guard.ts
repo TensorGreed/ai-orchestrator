@@ -473,7 +473,9 @@ function mapVaultRow(row: Row | null): GuardVaultRow | null {
     data_class: toStr(row.data_class),
     value_hash: nullableText(row.value_hash),
     value_sealed: toStr(row.value_sealed),
-    created_at: toStr(row.created_at)
+    created_at: toStr(row.created_at),
+    project_id: nullableText(row.project_id),
+    execution_id: nullableText(row.execution_id)
   };
 }
 
@@ -488,7 +490,7 @@ export async function getGuardVaultByHash(ctx: PgContext, valueHash: string): Pr
 /** Stores a token; a concurrent insert of the same token or value hash keeps the first one (like INSERT OR IGNORE). */
 export async function putGuardVault(ctx: PgContext, input: Parameters<Store["putGuardVault"]>[0]): Promise<void> {
   await ctx.execute(
-    `INSERT INTO guard_token_vault (token, data_class, value_hash, value_sealed, created_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
-    [input.token, input.dataClass, input.valueHash, input.valueSealed, input.createdAt]
+    `INSERT INTO guard_token_vault (token, data_class, value_hash, value_sealed, created_at, project_id, execution_id) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
+    [input.token, input.dataClass, input.valueHash, input.valueSealed, input.createdAt, input.projectId ?? null, input.executionId ?? null]
   );
 }

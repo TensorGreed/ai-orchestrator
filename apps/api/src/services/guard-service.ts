@@ -43,6 +43,7 @@ import {
   STARTER_DESTINATION_RULE_NAME,
   destinationRulesMode,
   parseGuardPlacement,
+  REVEAL_EVENT_DETECTOR_ID,
   type DataDestinationRow,
   type DestinationRuleView,
   type GatewayGuardProfileRef,
@@ -57,6 +58,7 @@ import {
 } from "@ai-orchestrator/shared";
 import type {
   GuardRunResolution,
+  GuardRevealEvent,
   GuardRuntimeDependencies,
   GuardVerdictEvent,
   ResolvedGuardProfile
@@ -71,6 +73,7 @@ import type {
   GuardProfileVersionRecord
 } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
+import type { AuditEventInput } from "./audit-service.js";
 import type { Store } from "../db/store.js";
 import { filterAsync, mapAsync } from "../async-array.js";
 
@@ -110,6 +113,8 @@ export interface GuardServiceOptions {
   destinationRows?: () => Promise<DataDestinationRow[]>;
   /** Phase 16 — the deployment surrogate key (HKDF `l2m/capture-surrogate/v1`), for runtime surrogates. */
   surrogateKey?: Uint8Array;
+  /** Phase 12 coverage — writes an audit log entry (a Reveal node's `content_rules.reveal`). */
+  audit?: (event: AuditEventInput) => Promise<unknown>;
 }
 
 export interface GuardRunContext {
@@ -736,8 +741,11 @@ export class GuardService {
     return {
       resolveRun: () => resolution,
       loadProfile: async (profileId) => await this.loadProfile(profileId),
-      vault: this.vault,
+      vault: this.vaultFor({ projectId: context.projectId, executionId: context.executionId }),
       onVerdict: async (event) => await this.recordVerdict(event, { executionId: context.executionId, workflowId: context.workflowId ?? "", projectId: context.projectId }),
+      // A gateway server tool call runs no Reveal node; reveal stays off.
+      projectId: context.projectId,
+      revealDisabled: true,
       destinationRows: async () => (await this.options.destinationRows?.()) ?? [],
       ...(this.options.surrogateKey ? { surrogateKey: this.options.surrogateKey } : {}),
       issuedSurrogates: new Set<string>()
@@ -872,8 +880,12 @@ export class GuardService {
           : override && override.profileId === profileId
             ? await this.loadProfile(profileId, override.version)
             : await this.loadProfile(profileId),
-      vault: context.simulation?.vault ?? this.vault,
+      vault: context.simulation?.vault ?? this.vaultFor({ projectId: context.projectId ?? null, executionId: context.executionId ?? null }),
       onVerdict: async (event) => (context.simulation ? context.simulation.sink.record(event) : await this.recordVerdict(event, context)),
+      // Phase 12 coverage — a Reveal node reveals only this project's tokens, and never in a simulation, a candidate
+      // rule set run (replays) or an eval run.
+      projectId: context.projectId ?? null,
+      ...(GuardService.revealDisabledFor(context) ? { revealDisabled: true } : { onReveal: async (event: GuardRevealEvent) => await this.recordReveal(event, context) }),
       // Phase 16 — read when a check first needs them (the engine keeps them for this run only).
       destinationRows: async () => context.destinationRows ?? (await this.options.destinationRows?.()) ?? [],
       ...(this.options.surrogateKey ? { surrogateKey: this.options.surrogateKey } : {}),
@@ -946,20 +958,30 @@ export class GuardService {
   // Token vault
   // -------------------------------------------------------------------------
 
-  /** Database-backed vault storage; the original value is sealed with the master key. */
-  readonly vault: TokenVaultStorage = {
-    getByToken: async (token) => this.openVaultRow(await this.store.getGuardVaultByToken(token)),
-    getByValueHash: async (valueHash) => this.openVaultRow(await this.store.getGuardVaultByHash(valueHash)),
-    put: async (record: TokenVaultRecord) => {
-      await this.store.putGuardVault({
-        token: record.token,
-        dataClass: record.dataClass,
-        valueHash: record.valueHash ?? null,
-        valueSealed: this.secrets.sealValue(VAULT_PURPOSE, record.value),
-        createdAt: record.createdAt
-      });
-    }
-  };
+  /** Database-backed vault storage with no run scope (tokens it writes have no project); the value is sealed with the master key. */
+  readonly vault: TokenVaultStorage = this.vaultFor({});
+
+  /**
+   * Phase 12 coverage — vault storage for one run: tokens it writes record the run's project and execution, and
+   * reads return them, so a Reveal node can refuse another project's tokens.
+   */
+  vaultFor(scope: { projectId?: string | null; executionId?: string | null }): TokenVaultStorage {
+    return {
+      getByToken: async (token) => this.openVaultRow(await this.store.getGuardVaultByToken(token)),
+      getByValueHash: async (valueHash) => this.openVaultRow(await this.store.getGuardVaultByHash(valueHash)),
+      put: async (record: TokenVaultRecord) => {
+        await this.store.putGuardVault({
+          token: record.token,
+          dataClass: record.dataClass,
+          valueHash: record.valueHash ?? null,
+          valueSealed: this.secrets.sealValue(VAULT_PURPOSE, record.value),
+          createdAt: record.createdAt,
+          projectId: scope.projectId ?? null,
+          executionId: scope.executionId ?? null
+        });
+      }
+    };
+  }
 
   private openVaultRow(row: Awaited<ReturnType<Store["getGuardVaultByToken"]>>): TokenVaultRecord | undefined {
     if (!row) return undefined;
@@ -969,7 +991,9 @@ export class GuardService {
         dataClass: row.data_class as TokenVaultRecord["dataClass"],
         value: this.secrets.openValue(VAULT_PURPOSE, row.value_sealed),
         ...(row.value_hash ? { valueHash: row.value_hash } : {}),
-        createdAt: row.created_at
+        createdAt: row.created_at,
+        projectId: row.project_id ?? null,
+        executionId: row.execution_id ?? null
       };
     } catch {
       this.options.logger?.("A token vault entry could not be opened with the current master key");
@@ -1044,6 +1068,84 @@ export class GuardService {
     } catch (error) {
       this.options.logger?.("Guard events could not be written", { error: error instanceof Error ? error.message : String(error) });
     }
+  }
+
+  /** Phase 12 coverage — runs that must never reveal: rule simulations, candidate rule set runs (replays) and eval runs. */
+  static revealDisabledFor(context: Pick<GuardRunContext, "simulation" | "profileOverride" | "profileSubstitute" | "runSource">): boolean {
+    return Boolean(context.simulation || context.profileOverride || context.profileSubstitute || context.runSource === "eval");
+  }
+
+  /**
+   * Phase 12 coverage — a Reveal node step as rule events (placement and channel `reveal`, verdict action `reveal`): one
+   * row per revealed data class (action `reveal`) and one per refused class and reason (requested `reveal`, effective
+   * `block`), with token hashes as evidence, never values; then one audit log entry `content_rules.reveal`. A failed write throws, so the
+   * engine reveals nothing it could not record.
+   */
+  async recordReveal(event: GuardRevealEvent, context: GuardRunContext): Promise<void> {
+    if (event.revealed.length === 0 && event.refused.length === 0) return;
+    const verdictId = randomUUID();
+    const createdAt = new Date().toISOString();
+    const fallback = event.profiles[0] ?? { profileId: GUARD_BUILTIN_PROFILE_ID, version: 0, hash: "" };
+    const profileFor = (rule?: { profileId: string; version: number }) =>
+      (rule && event.profiles.find((ref) => ref.profileId === rule.profileId && ref.version === rule.version)) || fallback;
+    // The step's verdict is always `reveal`, so a refused reveal does not count as a blocked rule verdict.
+    const verdictAction = "reveal";
+    const row = (entry: GuardRevealEvent["revealed"][number], revealed: boolean): GuardEventInsert => {
+      const profile = profileFor(entry.rule);
+      const message = revealed
+        ? `Revealed ${entry.count} token${entry.count === 1 ? "" : "s"}${entry.rule ? ` under reveal rule ${entry.rule.index + 1}${entry.rule.name ? ` (${entry.rule.name})` : ""}` : ""}${event.approved ? " after approval" : ""}`
+        : `Refused ${entry.count} token${entry.count === 1 ? "" : "s"}: ${entry.reason ?? "no_rule"}`;
+      return {
+        id: randomUUID(),
+        verdictId,
+        executionId: event.executionId || context.executionId || "",
+        workflowId: event.workflowId || context.workflowId || null,
+        projectId: context.projectId ?? null,
+        nodeId: event.nodeId,
+        placement: "reveal",
+        iteration: null,
+        toolName: null,
+        channel: "reveal",
+        detectorId: REVEAL_EVENT_DETECTOR_ID,
+        category: REVEAL_EVENT_DETECTOR_ID,
+        dataClass: entry.dataClass ?? null,
+        score: null,
+        requestedAction: "reveal",
+        effectiveAction: revealed ? "reveal" : "block",
+        verdictAction,
+        shadow: false,
+        evidence: (entry.tokenHashes.length > 0 ? entry.tokenHashes : [""]).map((hash) => ({ evidence: hash ? `sha256:${hash}` : "", spans: [], message })),
+        profileId: profile.profileId,
+        profileVersion: profile.version,
+        profileHash: profile.hash,
+        latencyMs: 0,
+        budgetExceeded: false,
+        skippedDetectors: [],
+        createdAt,
+        ...(context.runSource ? { runSource: context.runSource } : {})
+      };
+    };
+    await this.store.insertGuardEvents([...event.revealed.map((entry) => row(entry, true)), ...event.refused.map((entry) => row(entry, false))]);
+    const userId = event.subject?.serviceAccountId ?? event.subject?.userId ?? null;
+    await this.options.audit?.({
+      eventType: "content_rules.reveal",
+      category: "execution",
+      action: "reveal",
+      outcome: event.revealed.length > 0 ? "success" : "denied",
+      actor: userId ? { type: "user", userId } : { type: "system" },
+      resourceType: "workflow",
+      ...(event.workflowId ? { resourceId: event.workflowId } : {}),
+      projectId: context.projectId ?? null,
+      metadata: {
+        executionId: event.executionId,
+        nodeId: event.nodeId,
+        subject: event.subject,
+        approved: event.approved,
+        revealed: event.revealed.map((entry) => ({ dataClass: entry.dataClass ?? null, count: entry.count, ...(entry.rule ? { rule: entry.rule } : {}) })),
+        refused: event.refused.map((entry) => ({ dataClass: entry.dataClass ?? null, count: entry.count, reason: entry.reason ?? null }))
+      },
+      message: `Reveal node ${event.nodeId}: revealed ${event.revealed.reduce((total, entry) => total + entry.count, 0)}, refused ${event.refused.reduce((total, entry) => total + entry.count, 0)}`
+    });
   }
 
   async listEvents(filters: GuardEventFilters & { limit?: number; offset?: number }): Promise<{ events: GuardEventView[]; total: number }> {

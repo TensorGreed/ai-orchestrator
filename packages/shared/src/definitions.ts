@@ -1388,6 +1388,34 @@ const baseNodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "guard_reveal",
+    label: "Reveal",
+    category: "Utility",
+    description:
+      "Turns protection tokens in one field back into the original values, only for the data classes the rule set's reveal rules allow whoever started the run. Everything else stays protected. Revealed values count as sensitive again, so destination rules decide where they may go.",
+    configSchema: {
+      type: "object",
+      properties: {
+        profileId: { type: "string" },
+        inputField: { type: "string" },
+        keySecretRefs: { type: "array", items: { type: "object" } },
+        formatPreservingClasses: { type: "array", items: { type: "string" } },
+        onRefused: { type: "string", enum: ["keep", "fail"] },
+        approvalMessage: { type: "string" },
+        timeoutMinutes: { type: "number" }
+      },
+      required: ["profileId", "inputField"]
+    },
+    sampleConfig: {
+      profileId: "effective",
+      inputField: "text",
+      keySecretRefs: [],
+      formatPreservingClasses: [],
+      onRefused: "keep",
+      timeoutMinutes: 1440
+    }
+  },
+  {
     type: "basic_llm_chain",
     label: "Basic LLM Chain",
     category: "LLM",

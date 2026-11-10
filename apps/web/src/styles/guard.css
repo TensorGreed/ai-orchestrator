@@ -167,7 +167,8 @@
   background: var(--err-soft);
 }
 .guard-action-review,
-.guard-action-require_approval {
+.guard-action-require_approval,
+.guard-action-reveal {
   color: var(--warn);
   border-color: var(--warn);
   background: var(--warn-soft);
@@ -1052,4 +1053,27 @@
 }
 .guard-bench-fill-warn {
   background: var(--warn);
+}
+
+/* ---- Phase 12 coverage: reveal rules in the rule set editor ---------- */
+.guard-reveal-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px 12px;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+  padding: 8px 12px;
+}
+.guard-reveal-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.guard-reveal-form label.guard-check {
+  flex-direction: row;
+  align-items: center;
+}
+.guard-dest-rules li .pg-btn {
+  margin-left: 8px;
 }
