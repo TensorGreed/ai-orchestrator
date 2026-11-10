@@ -221,6 +221,38 @@ describe("budget", () => {
     expect((await run({ type: "budget", maxCostIncreasePct: 10 }, ctx({ baseline: null }))).reason).toContain("no golden run");
   });
 
+  it("skips the increase check when the golden run made model calls but recorded 0 tokens or $0", async () => {
+    const baseline = facts({ totals: { totalTokens: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, modelCalls: 1 } });
+    const candidate = facts({ totals: { totalTokens: 120, costUsd: 0.02 } });
+    const skippedOnly = await run({ type: "budget", maxTokensIncreasePct: 10, maxCostIncreasePct: 10 }, ctx({ baseline, candidate }));
+    expect(skippedOnly).toMatchObject({ pass: true, score: 1 });
+    expect(skippedOnly.reason).toContain("tokens increase not checked (the golden run made model calls but recorded 0)");
+    expect(skippedOnly.reason).toContain("cost increase not checked");
+    expect(skippedOnly.reason).not.toContain("rose from 0");
+    // Other limits still apply.
+    const withLimit = await run({ type: "budget", maxTokensIncreasePct: 10, maxTokens: 100 }, ctx({ baseline, candidate }));
+    expect(withLimit.pass).toBe(false);
+    expect(withLimit.reason).toContain("tokens 120 > 100");
+    expect(withLimit.reason).toContain("tokens increase not checked");
+  });
+
+  it("keeps a golden run with no model calls as a real 0 baseline: a candidate that adds them fails", async () => {
+    const baseline = facts({ totals: { totalTokens: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, modelCalls: 0 } });
+    const candidate = facts({ totals: { totalTokens: 120, costUsd: 0.02, modelCalls: 1 } });
+    const result = await run({ type: "budget", maxTokensIncreasePct: 10, maxCostIncreasePct: 10 }, ctx({ baseline, candidate }));
+    expect(result.pass).toBe(false);
+    expect(result.reason).toContain("tokens rose from 0 to 120");
+    expect(result.reason).toContain("cost rose from 0 to 0.02");
+    expect((await run({ type: "budget", maxTokensIncreasePct: 10 }, ctx({ baseline, candidate: facts({ totals: { totalTokens: 0, modelCalls: 0 } }) }))).reason).toContain(
+      "tokens unchanged at 0"
+    );
+  });
+
+  it("does not skip a 0 ms latency baseline", async () => {
+    const baseline = facts({ totals: { durationMs: 0 } });
+    expect((await run({ type: "budget", maxLatencyIncreasePct: 10 }, ctx({ baseline }))).reason).toContain("latency rose from 0 to 1000");
+  });
+
   it("rejects a budget without a limit at the schema", () => {
     expect(evalScorerSpecSchema.safeParse({ type: "budget" }).success).toBe(false);
   });

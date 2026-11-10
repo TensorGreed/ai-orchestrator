@@ -10,7 +10,7 @@
  * above one it never applied (MigrationGapError), so a mistake is loud rather than a silently skipped migration.
  * Reserved now: v61-v68 (open and planned changes that merge separately; reveal takes v69).
  */
-const RESERVED_UNTIL_MERGED = new Set<number>([61, 62, 63, 64, 65, 66, 67, 68]);
+const RESERVED_UNTIL_MERGED = new Set<number>([62, 63, 64, 65, 66, 67, 68]);
 
 export function contiguousMigrationVersions(versions: readonly number[]): number[] {
   const max = Math.max(0, ...versions);

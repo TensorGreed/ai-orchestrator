@@ -13,7 +13,10 @@ import {
   type SecretReference
 } from "@ai-orchestrator/shared";
 import { ProviderRegistry } from "./registry";
+import { ToolCallAssembler } from "./tool-call-assembly";
 import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "./types";
+import { chargedUsage, estimateAnswerTokens, estimateRequestTokens } from "./usage-estimate";
+import { isStreamUsageRefusal } from "./call-options";
 
 /**
  * Phase 15.3 — record and replay of model calls (the model tape).
@@ -224,24 +227,18 @@ function responseFromChunks(chunks: LLMStreamChunk[]): LLMCallResponse {
   let content = "";
   let finishReason: LLMCallResponse["finishReason"];
   let usage: LLMCallResponse["usage"];
-  const calls = new Map<string, { id: string; name: string; argumentsText: string }>();
+  const assembler = new ToolCallAssembler();
   for (const chunk of chunks) {
     if (chunk.type === "text_delta") content += chunk.textDelta;
     else if (chunk.type === "finish") finishReason = chunk.reason;
     else if (chunk.type === "usage") usage = chunk.usage;
-    else {
-      const id = chunk.toolCallId ?? `toolcall_${calls.size}`;
-      const entry = calls.get(id) ?? { id, name: chunk.name ?? `tool_${calls.size}`, argumentsText: "" };
-      if (chunk.name) entry.name = chunk.name;
-      if (chunk.argumentsDelta) entry.argumentsText += chunk.argumentsDelta;
-      calls.set(id, entry);
-    }
+    else assembler.add(chunk);
   }
   return {
     content,
     ...(finishReason ? { finishReason } : {}),
     ...(usage ? { usage } : {}),
-    toolCalls: [...calls.values()].map((call) => {
+    toolCalls: assembler.calls().map((call) => {
       let args: Record<string, unknown> = {};
       try {
         const parsed = JSON.parse(call.argumentsText || "{}") as unknown;
@@ -288,7 +285,11 @@ export function recordingProviderAdapter(adapter: LLMProviderAdapter, recorder: 
         }
         recorder.push({ ...base, response: call.scrub(responseFromChunks(chunks)), durationMs: Math.round(performance.now() - started) });
       } catch (error) {
-        recorder.push({ ...base, error: String(call.scrub(errorMessage(error))), durationMs: Math.round(performance.now() - started) });
+        // A refusal of the usage option is answered by the caller sending the request again without it (the engine's
+        // LLM Call does). That retry is recorded under the same request; the refusal is not, or a replay would answer
+        // it first and fail a run that succeeded.
+        const refusalBeforeRetry = chunks.length === 0 && request.options?.streamUsage === true && isStreamUsageRefusal(error);
+        if (!refusalBeforeRetry) recorder.push({ ...base, error: String(call.scrub(errorMessage(error))), durationMs: Math.round(performance.now() - started) });
         throw error;
       }
     };
@@ -394,7 +395,14 @@ export class ModelTapePlayer {
     if (liveAdapter) {
       this.live += 1;
       const response = await liveAdapter.generate(request, context);
-      const usage = (response as { usage?: Record<string, unknown> }).usage ?? {};
+      // A live call is real spend: a provider that reports no usage is charged the same estimate as a run's call.
+      const { usage } = chargedUsage(response.usage, () => ({
+        input: estimateRequestTokens(request),
+        output: estimateAnswerTokens(
+          typeof response.content === "string" ? response.content : "",
+          (response.toolCalls ?? []).map((toolCall) => ({ name: toolCall.name, arguments: JSON.stringify(toolCall.arguments ?? {}) }))
+        )
+      }));
       const tokens = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
       this.liveCalls.push({
         ...call.site,
@@ -457,9 +465,11 @@ function replayProviderAdapter(definition: ProviderDefinition, player: ModelTape
     generateStream: async function* (request, context) {
       const { response } = await player.answer(request, context);
       if (response.content) yield { type: "text_delta", textDelta: response.content };
-      for (const call of response.toolCalls ?? []) {
-        yield { type: "tool_call_delta", toolCallId: call.id, name: call.name, argumentsDelta: JSON.stringify(call.arguments ?? {}) };
+      for (const [index, call] of (response.toolCalls ?? []).entries()) {
+        yield { type: "tool_call_delta", index, toolCallId: call.id, name: call.name, argumentsDelta: JSON.stringify(call.arguments ?? {}) };
       }
+      // The recorded usage, so a replayed stream reports what the original reported and is not estimated afresh.
+      if (response.usage) yield { type: "usage", usage: response.usage };
     }
   };
 }

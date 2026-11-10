@@ -6,9 +6,20 @@ description: "Authentication and access control in L2M: session cookies, admin, 
 
 ## Session model
 
-- Login creates a persisted session record in SQLite.
+- Every sign-in (password, the MFA step, OIDC, SAML, LDAP) creates a persisted session record in the database
+  (SQLite or Postgres). A password that still needs an MFA code creates no session until the code is accepted.
 - API sets an `httpOnly` cookie (`SESSION_COOKIE_NAME`).
 - Frontend uses `credentials: include`.
+- A session lasts `SESSION_TTL_HOURS` (168 by default) from sign-in.
+- Each session records how it was signed in (`password`, `oidc`, `saml` or `ldap`), the client address and user
+  agent, when it last passed an MFA check, and, once it ends, why (`logout` or `expired`). Sessions created before
+  this was recorded keep working; their fields are empty.
+- The client address is kept only when it is a valid IPv4 or IPv6 address (behind a proxy it comes from
+  `X-Forwarded-For`, see `TRUST_PROXY`); the user agent is cut to 512 characters.
+- When a session ends (sign-out, expiry, or revoked), its client address and user agent are cleared at once.
+- Ended sessions are deleted after `AUDIT_LOG_RETENTION_DAYS` (365 by default), the same window as the audit log;
+  with `AUDIT_LOG_RETENTION_DAYS=0` they are kept, without address or user agent. Sign-in events stay in the audit
+  log under its own retention.
 
 ## Roles
 

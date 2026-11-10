@@ -548,6 +548,11 @@ export interface WorkflowExecutionState {
    */
   guardRunSource?: "eval";
   /**
+   * The user the run's budgets are matched against (who started it), so the sub-workflows of the resumed part are
+   * checked against that user's budgets, not the approver's. Written and read only by the API.
+   */
+  budgetSubject?: { userEmail: string | null; userId: string | null };
+  /**
    * Phase 16 — the run's data labels, beside `nodeOutputs`: the input's
    * labels, every completed node's labels, and whether labels are tracked
    * (stored and scanned). A resumed run carries on with them.

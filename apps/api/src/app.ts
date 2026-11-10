@@ -108,6 +108,7 @@ import {
   resolveOidcSettings,
   resolveSamlSettings,
   parseTrustProxy,
+  toFastifyTrustProxy,
   resolveNetworkSettings,
   resolveSsoMfaSettings,
   resolveQueueSettings,
@@ -183,6 +184,7 @@ import { TracingService, parseKeyValueList, parseTraceparent } from "./services/
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
+import { SubWorkflowSpendTracker, usageUserOf, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
@@ -268,6 +270,9 @@ import {
   guardedFetch,
   type CodeSandboxPlan,
   type OutboundGuardConfig,
+  type SubWorkflowAdmission,
+  type SubWorkflowAdmissionRequest,
+  type SubWorkflowUsage,
   type WorkflowExecutionDependencies
 } from "@ai-orchestrator/workflow-engine";
 import {
@@ -311,7 +316,7 @@ import {
   resolveMcpOAuthRedirectUri
 } from "./services/mcp-oauth-service.js";
 import { isInternalSecretProvider } from "./services/secret-service.js";
-import type { QueueClaimFence, Store } from "./db/store.js";
+import type { QueueClaimFence, SessionAuthMethod, Store } from "./db/store.js";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -1462,8 +1467,8 @@ export async function createApp(
   // - `genReqId` falls back to nanoid for fresh requests; nanoid is already
   //   a transitive dep here and produces shorter URL-safe IDs than crypto
   //   randomUUID without collision risk in the lifetime of an instance.
-  // - `requestIdLogLabel: "reqId"` keys the ID under `reqId` in every log
-  //   line that Pino emits via request.log, so `grep reqId=<id>` works.
+  // - Fastify's default log label is `reqId`, so every line that Pino emits
+  //   via request.log carries the ID under `reqId` and `grep reqId=<id>` works.
   // The X-Request-ID response header is set in the onSend hook below so
   // clients (and curl --include) see the same ID their request carried.
   const app = Fastify({
@@ -1484,9 +1489,8 @@ export async function createApp(
     },
     bodyLimit: config.API_BODY_LIMIT_BYTES,
     // TRUST_PROXY unset = false: request.ip (and so the rate-limit key) is the address that connected.
-    trustProxy: parseTrustProxy(config.TRUST_PROXY),
+    trustProxy: toFastifyTrustProxy(parseTrustProxy(config.TRUST_PROXY)),
     requestIdHeader: "x-request-id",
-    requestIdLogLabel: "reqId",
     genReqId: () => nanoid()
   });
   // 12.6 — model allowlists. Every model call goes through this seam: each run, gateway sampling call, provider test,
@@ -1953,6 +1957,14 @@ export async function createApp(
     authService.addCleanupTask(async () => await challengeStore.prune());
     authService.addCleanupTask(async () => await store.pruneRateLimitBuckets());
   }
+  // 13.2 — ended sessions are kept as long as audit logs (AUDIT_LOG_RETENTION_DAYS, 0 = keep), then deleted. Their
+  // address and user agent were already cleared when they ended.
+  if (config.AUDIT_LOG_RETENTION_DAYS > 0) {
+    authService.addCleanupTask(async () =>
+      await store.purgeEndedSessions(new Date(Date.now() - config.AUDIT_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString())
+    );
+  }
+  authService.sessions.setLogger(app.log);
   authService.startSessionCleanup();
   app.addHook("onClose", async () => {
     authService.stopSessionCleanup();
@@ -2183,6 +2195,18 @@ export async function createApp(
       if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
       runReleases.set(input.executionId, { channel, version: releaseVersion });
     }
+    // The model spend of the run's sub-workflows joins its usage row (a replay starts none).
+    const runSubWorkflowSpend =
+      input.executionId && !input.replay
+        ? subWorkflowSpend.start({
+            executionId: input.executionId,
+            workflowId: input.workflow.id,
+            workflowName: input.workflow.name ?? null,
+            projectId: input.workflow.projectId ?? null,
+            ...(typeof input.triggeredBy === "string" ? { triggeredBy: input.triggeredBy } : {}),
+            ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {})
+          })
+        : undefined;
     // Phase 15.6 — sampled for production capture: the run records like a "Record calls" run.
     const captureTicket =
       replayCapture && input.executionId
@@ -2301,6 +2325,14 @@ export async function createApp(
           // A replay never starts a sub-workflow (Execute Workflow nodes are stubbed).
           loadWorkflow: input.replay ? undefined : scoped.loadWorkflow,
           scopeSubWorkflow: input.replay ? undefined : modelScopedSubWorkflows(scoped.scopeSubWorkflow, runModelRegistry, runModelScope),
+          // A child is refused while a used-up block budget applies to this run (its earlier children counted).
+          ...(input.replay
+            ? {}
+            : {
+                admitSubWorkflow: async (child: Workflow, request: SubWorkflowAdmissionRequest) =>
+                  await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend)
+              }),
+          ...(runSubWorkflowSpend ? { onSubWorkflowUsage: async (usage: SubWorkflowUsage) => await runSubWorkflowSpend.report(usage) } : {}),
           // Phase 9.1 — built-in persistent vector store, limited to the
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
@@ -2374,7 +2406,9 @@ export async function createApp(
                 // 12.6 — and its client and toolset, so the resumed part's usage is charged to them.
                 ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {}),
                 // 12.7 — an eval run's resumed part still records its Content rules verdicts as eval traffic.
-                ...(input.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {})
+                ...(input.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
+                // Who the run's budgets are matched against, kept for the resumed part (not the approver).
+                budgetSubject: input.budgetSubject ?? (({ userEmail, userId }) => ({ userEmail, userId }))(runBudgetContext(input))
               })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
@@ -2737,6 +2771,8 @@ export async function createApp(
     gatewayUsage?: RunWorkflowExecutionInput["gatewayUsage"];
   }) => {
     if (input.result.status === "waiting_approval") {
+      // The resumed run is recorded apart: what the children spent so far is recorded now.
+      await subWorkflowSpend.take(input.executionId)?.closeDetached();
       app.log.info(
         {
           executionId: input.executionId,
@@ -2829,12 +2865,10 @@ export async function createApp(
         }
       }
       // 12.6 — a gateway call's run is the client's, also the part after an approval (whoever decided it).
-      const usageUser = input.gatewayUsage
-        ? { email: null, id: `mcp-client:${input.gatewayUsage.clientName}` }
-        : {
-            email: typeof input.triggeredBy === "string" && input.triggeredBy.includes("@") ? input.triggeredBy : null,
-            id: typeof input.triggeredBy === "string" && !input.triggeredBy.includes("@") ? input.triggeredBy : null
-          };
+      const usageUser = usageUserOf(input.triggeredBy, input.gatewayUsage);
+      // The run's sub-workflows' spend joins its row; a child that ends later is recorded on its own.
+      const runSubWorkflowSpend = subWorkflowSpend.take(input.executionId);
+      const subWorkflowTelemetry = runSubWorkflowSpend?.closeIntoRun() ?? [];
       const usageResult = await usageService.recordExecution({
         executionId: input.executionId,
         workflowId: input.workflow.id,
@@ -2847,8 +2881,21 @@ export async function createApp(
         status: input.result.status,
         durationMs: toDurationMs(input.result.startedAt, input.result.completedAt) ?? 0,
         nodeResults: nodeOutputs,
-        ...(input.liveModelCalls ? { liveModelCalls: input.liveModelCalls } : {})
-      });
+        ...(input.liveModelCalls ? { liveModelCalls: input.liveModelCalls } : {}),
+        ...(subWorkflowTelemetry.length > 0 ? { subWorkflowTelemetry } : {})
+      })
+        .catch((error: unknown) => {
+          // The run's row failed: its sub-workflows' spend was in it, and is lost with the run's own.
+          if (subWorkflowTelemetry.length > 0) {
+            const lost = usageService.totalTelemetry(subWorkflowTelemetry);
+            app.log.warn(
+              { executionId: input.executionId, workflowId: input.workflow.id, costUsd: lost.costUsd, totalTokens: lost.totalTokens },
+              "A run's usage row was not written; its sub-workflows' spend is not recorded"
+            );
+          }
+          throw error;
+        })
+        .finally(() => runSubWorkflowSpend?.recorded());
 
       // Phase 8.3 — fire budget alerts on threshold crossings. Debounced per
       // (budget, period, severity) so users don't get spammed. Phase 15.1 — a
@@ -3340,6 +3387,11 @@ export async function createApp(
    * signed-in user, else the trigger's name as usage records it) and, for a gateway call's run, the client and the
    * toolset's project.
    */
+  /** A run's budget user from its trigger's name (paused states written before the subject was kept). */
+  const budgetSubjectOf = (triggeredBy: string | undefined): { userEmail: string | null; userId: string | null } => {
+    const user = usageUserOf(triggeredBy, undefined);
+    return { userEmail: user.email, userId: user.id };
+  };
   const runBudgetContext = (run: Pick<DispatchedRunInput, "workflow" | "triggeredBy" | "policyActor" | "gatewayUsage">): BudgetCheckContext => {
     const by = typeof run.triggeredBy === "string" ? run.triggeredBy : null;
     return {
@@ -3351,6 +3403,48 @@ export async function createApp(
         ? { client: { id: run.gatewayUsage.clientId, name: run.gatewayUsage.clientName }, toolsetProjectId: run.gatewayUsage.toolsetProjectId }
         : {})
     };
+  };
+  /**
+   * A sub-workflow (Execute Workflow, Workflow Tool) is refused while a used-up `block` budget applies to its run:
+   * matched as the run was admitted (the top-level run's workflow, project and client, and the user who started it,
+   * also after an approval: not the approver), counting what the run's earlier children spent and a reservation for
+   * each child still running beside it (sub-workflow-spend.ts). The check and the child's reservation are one step
+   * per execution (`admitIf`), so children admitted at once cannot together pass the cap. Not for the runs that are
+   * never refused (golden-run replays, eval runs, resumed or not). With no block budget no usage is read and every
+   * child starts. Returns the child's admission, settled when it stops running.
+   */
+  const admitSubWorkflowBudget = async (
+    run: Pick<RunWorkflowExecutionInput, "workflow" | "triggerType" | "triggeredBy" | "policyActor" | "gatewayUsage" | "guardRunSource" | "budgetSubject">,
+    child: Workflow,
+    request: SubWorkflowAdmissionRequest,
+    spend: RunSubWorkflowSpend | undefined
+  ): Promise<SubWorkflowAdmission | void> => {
+    const exempt = Boolean(run.triggerType && (BUDGET_EXEMPT_TRIGGER_TYPES.has(run.triggerType) || run.triggerType === "eval")) || run.guardRunSource === "eval";
+    if (!exempt) {
+      const ctx: BudgetCheckContext = { ...runBudgetContext(run), ...(run.budgetSubject ?? {}) };
+      const notStarted = (reason: string) => new Error(`Sub-workflow '${child.name}' was not started: ${reason}`);
+      const refusal: { blocked: BudgetExceededError | null } = { blocked: null };
+      const fits = async (pending?: () => Spend): Promise<boolean> => {
+        if (!(await budgetService.appliesBlock(ctx))) return true;
+        refusal.blocked = await budgetService.checkBlock(ctx, pending);
+        return !refusal.blocked;
+      };
+      let admission: SubWorkflowAdmission | undefined;
+      try {
+        if (spend) admission = await spend.admitIf(request, fits);
+        else await fits();
+      } catch (error) {
+        throw notStarted(error instanceof Error ? error.message : String(error));
+      }
+      const blocked = refusal.blocked;
+      if (blocked) {
+        blocked.run = { workflowId: run.workflow.id, projectId: run.workflow.projectId ?? null, triggerType: "sub_workflow" };
+        await noteRefusedRun(blocked, { subWorkflowId: child.id });
+        throw notStarted(blocked.message);
+      }
+      return admission;
+    }
+    return spend?.admit(request);
   };
   /**
    * 12.6 (D8) — a used-up `block` budget refuses every run a trigger starts, not only `POST /api/workflows/:id/execute`:
@@ -3386,14 +3480,23 @@ export async function createApp(
     }
   };
   const noteRefusedHttpRun = async (error: BudgetExceededError, request: FastifyRequest): Promise<void> => {
+    await noteRefusedRun(error, { url: request.url });
+  };
+  /**
+   * A run (or a sub-workflow, trigger type `sub_workflow`) a budget refused: logged and audited as `budget.run_refused`
+   * once per workflow, trigger type, budget and period on this instance.
+   */
+  const noteRefusedRun = async (error: BudgetExceededError, details: { url?: string; subWorkflowId?: string }): Promise<void> => {
     if (!error.run) return;
     const key = JSON.stringify([error.run.workflowId, error.run.triggerType, error.budget.id, error.periodStart]);
     if (refusedRunsNoted.has(key)) return;
     if (refusedRunsNoted.size >= 10_000) refusedRunsNoted.clear();
     refusedRunsNoted.add(key);
     app.log.warn(
-      { workflowId: error.run.workflowId, triggerType: error.run.triggerType, budgetId: error.budget.id, periodStart: error.periodStart, url: request.url },
-      "A budget refused a run (HTTP 402); later refusals this period are not logged again"
+      { workflowId: error.run.workflowId, triggerType: error.run.triggerType, budgetId: error.budget.id, periodStart: error.periodStart, ...details },
+      error.run.triggerType === "sub_workflow"
+        ? "A budget refused a sub-workflow; later refusals this period are not logged again"
+        : "A budget refused a run (HTTP 402); later refusals this period are not logged again"
     );
     try {
       await auditService.record({
@@ -3407,6 +3510,7 @@ export async function createApp(
         projectId: error.run.projectId,
         metadata: {
           triggerType: error.run.triggerType,
+          ...(details.subWorkflowId ? { subWorkflowId: details.subWorkflowId } : {}),
           budgetId: error.budget.id,
           budgetName: error.budget.name,
           period: error.budget.period,
@@ -4696,6 +4800,11 @@ export async function createApp(
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
   });
   const budgetService = new BudgetService(store);
+  const subWorkflowSpend = new SubWorkflowSpendTracker({
+    usageService,
+    budgetService,
+    logger: { warn: (fields, message) => app.log.warn(fields, message) }
+  });
   budgetService.setLogger({
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
@@ -4913,6 +5022,10 @@ export async function createApp(
   const abandonQueueStoppedRun = (executionId: string, workflowId: string, job: QueueJobContext) => {
     runReleases.delete(executionId);
     dropCapture(executionId, "skipped_not_stored");
+    // The run leaves no usage row; what its sub-workflows spent is still recorded.
+    subWorkflowSpend.abandon(executionId, "stopped by the queue").catch((error: unknown) => {
+      app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record a stopped run's sub-workflow spend");
+    });
     app.log.warn({ executionId, workflowId, reason: String(job.signal.reason) }, "Queued run stopped by the queue");
   };
 
@@ -5035,6 +5148,8 @@ export async function createApp(
           ...(gatewayGuard ? { gatewayGuard } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           ...(state.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
+          // Sub-workflows the resumed part starts are checked against the budgets of the user who started the run.
+          budgetSubject: state.budgetSubject ?? budgetSubjectOf(pending.triggeredBy ?? undefined),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
@@ -5068,8 +5183,16 @@ export async function createApp(
         });
         return result;
       } catch (error) {
-        // Stopped by the queue: the decision stands and the queue's policy decides who resumes it.
-        if (queueJob?.signal.aborted) throw error;
+        // Stopped by the queue: the decision stands and the queue's policy decides who resumes it. What this attempt's
+        // sub-workflows spent is recorded now (the next attempt starts its own).
+        if (queueJob?.signal.aborted) {
+          await subWorkflowSpend.abandon(job.executionId, "the resume was stopped by the queue").catch((spendError: unknown) => {
+            app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a stopped resume's sub-workflow spend");
+          });
+          throw error;
+        }
+        // What the failed resume's sub-workflows spent is still recorded.
+        await subWorkflowSpend.abandon(job.executionId, "the resume failed");
         // The decision is kept for a new try: the run waits again and the request is pending again.
         await approvalService.reopenAfterFailedResume(job);
         throw error;
@@ -5396,25 +5519,9 @@ export async function createApp(
     return match ? match[1].trim() : null;
   };
 
-  type StoredSession = NonNullable<Awaited<ReturnType<typeof store.getSession>>>;
-  // Session IDs this server issues: `sess_` plus 24 to 64 URL-safe characters. Anything else cannot name a session.
-  const SESSION_ID_FORMAT = /^sess_[A-Za-z0-9_-]{24,64}$/;
-  const requestSessions = new WeakMap<object, Promise<StoredSession | null>>();
-
-  /**
-   * The session row the request's cookie names, looked up at most once per request: the rate-limit exemption check
-   * and the auth layer share the result. A cookie that is not shaped like a session ID costs no lookup. A failed
-   * lookup is not remembered as a miss for the auth layer (it looks again); the exemption treats it as no session.
-   */
-  const getRequestSession = (request: object, sessionId: string): Promise<StoredSession | null> => {
-    if (!SESSION_ID_FORMAT.test(sessionId)) return Promise.resolve(null);
-    const cached = requestSessions.get(request);
-    if (cached) return cached;
-    const lookup = store.getSession(sessionId) as Promise<StoredSession | null>;
-    requestSessions.set(request, lookup);
-    lookup.catch(() => requestSessions.delete(request));
-    return lookup;
-  };
+  // 13.2 — sessions are issued and looked up (once per request) through the session service.
+  const sessionService = authService.sessions;
+  const getRequestSession = (request: object, sessionId: string) => sessionService.getRequestSession(request, sessionId);
 
   /**
    * True when a request is studio traffic from a signed-in browser: a session cookie naming a live session, and no
@@ -5434,7 +5541,10 @@ export async function createApp(
     }
   };
 
-  const authenticateApiKey = async (headers: Record<string, unknown>): Promise<SafeUser | null> => {
+  /** The user, key id and scopes a request's API key names, or null. */
+  const authenticateApiKeyCredential = async (
+    headers: Record<string, unknown>
+  ): Promise<{ user: SafeUser; apiKeyId: string; keyScopes: string[] } | null> => {
     const token = extractBearerToken(headers);
     if (!token) return null;
     const verified = await apiKeyService.verify(token);
@@ -5442,14 +5552,21 @@ export async function createApp(
     const user = await store.getUserById(verified.userId);
     if (!user) return null;
     return {
-      id: user.id,
-      email: user.email,
-      role:
-        user.role === "admin" || user.role === "builder" || user.role === "operator" || user.role === "viewer"
-          ? user.role
-          : "viewer"
+      user: {
+        id: user.id,
+        email: user.email,
+        role:
+          user.role === "admin" || user.role === "builder" || user.role === "operator" || user.role === "viewer"
+            ? user.role
+            : "viewer"
+      },
+      apiKeyId: verified.keyId,
+      keyScopes: verified.scopes
     };
   };
+
+  const authenticateApiKey = async (headers: Record<string, unknown>): Promise<SafeUser | null> =>
+    (await authenticateApiKeyCredential(headers))?.user ?? null;
 
   const setSessionCookie = (reply: FastifyReply, sessionId: string) => {
     reply.setCookie(config.SESSION_COOKIE_NAME, sessionId, {
@@ -5480,13 +5597,15 @@ export async function createApp(
     allowedRoles: UserRole[]
   ): Promise<SafeUser | null> => {
     // Allow API key authentication (Phase 5.1) as a first-class alternative to session cookies.
-    const apiKeyUser = await authenticateApiKey(request.headers as Record<string, unknown>);
-    if (apiKeyUser) {
-      if (!hasRequiredRole(apiKeyUser, allowedRoles)) {
+    const apiKey = await authenticateApiKeyCredential(request.headers as Record<string, unknown>);
+    if (apiKey) {
+      // 13.2 — the request's sign-in context, for checks that run after this one.
+      sessionService.setRequestAuth(request, { credential: "api_key", ...apiKey });
+      if (!hasRequiredRole(apiKey.user, allowedRoles)) {
         deny(reply, 403, "Insufficient permissions");
         return null;
       }
-      return apiKeyUser;
+      return apiKey.user;
     }
 
     const sessionId = getSessionIdFromRequest(request);
@@ -5495,12 +5614,14 @@ export async function createApp(
       return null;
     }
 
-    const user = await authService.getSessionUser(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
-    if (!user) {
+    const resolved = await authService.getSessionAuth(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
+    if (!resolved) {
       clearSessionCookie(reply);
       deny(reply, 401, "Session expired or invalid");
       return null;
     }
+    const user = resolved.user;
+    sessionService.setRequestAuth(request, { credential: "session", user, session: resolved.session });
 
     if (!hasRequiredRole(user, allowedRoles)) {
       deny(reply, 403, "Insufficient permissions");
@@ -5627,14 +5748,22 @@ export async function createApp(
     return { user, created };
   };
 
-  const issueSessionForUser = async (user: SafeUser, reply: FastifyReply): Promise<{ expiresAt: string }> => {
-    const expiresAtDate = new Date();
-    expiresAtDate.setHours(expiresAtDate.getHours() + config.SESSION_TTL_HOURS);
-    const expiresAt = expiresAtDate.toISOString();
-    const sessionId = `sess_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomBytes(6).toString("hex")}`;
-    await store.saveSession({ id: sessionId, userId: user.id, expiresAt });
-    setSessionCookie(reply, sessionId);
-    return { expiresAt };
+  /** 13.2 — issues a session through the session service (the only path that saves one) and sets the cookie. */
+  const issueSessionForUser = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    user: SafeUser,
+    options: { method: SessionAuthMethod; mfaVerified: boolean }
+  ): Promise<{ expiresAt: string }> => {
+    const issued = await sessionService.issueSession({
+      user,
+      method: options.method,
+      request,
+      mfaVerified: options.mfaVerified,
+      ttlHours: config.SESSION_TTL_HOURS
+    });
+    setSessionCookie(reply, issued.sessionId);
+    return { expiresAt: issued.expiresAt };
   };
 
   // ---------------------------------------------------------------------------
@@ -5673,11 +5802,14 @@ export async function createApp(
     const { user, created } = await provisionSsoUser(input.provision);
     const previousSessionId = getSessionIdFromRequest(request);
     if (previousSessionId) {
-      await store.revokeSession(previousSessionId).catch((revokeError: unknown) => {
+      await sessionService.endSession(previousSessionId, "logout").catch((revokeError: unknown) => {
         request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
       });
     }
-    const { expiresAt } = await issueSessionForUser(user, reply);
+    const { expiresAt } = await issueSessionForUser(request, reply, user, {
+      method: input.method,
+      mfaVerified: input.mfa === "local_totp" || (input.mfa !== null && typeof input.mfa === "object")
+    });
     try {
       if (input.firstLink && !created) {
         // First SSO link to an account that already existed (possibly with local MFA): make it visible.
@@ -7311,6 +7443,12 @@ export async function createApp(
     }
   });
 
+  /** A password sign-in that needs no MFA step now: issues the session (SESSION_TTL_HOURS) and sets the cookie. */
+  const issuePasswordSession = async (request: FastifyRequest, reply: FastifyReply, user: SafeUser) => {
+    const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "password", mfaVerified: false });
+    return { user, expiresAt };
+  };
+
   app.post<{ Body: unknown }>("/api/auth/login", async (request, reply) => {
     const parsed = authLoginSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -7322,15 +7460,16 @@ export async function createApp(
     }
 
     try {
-      const result = await authService.login(parsed.data.email, parsed.data.password);
+      const user = await authService.verifyCredentials(parsed.data.email, parsed.data.password);
       // MFA gate: if the user has MFA enabled (or MFA_ENFORCE is on for admin), require a challenge step.
-      const mfaStatus = await mfaService.status(result.user.id);
-      const mustProvideMfa = mfaStatus.enabled || (config.MFA_ENFORCE && result.user.role === "admin");
+      // 13.2 — a session is issued only once no MFA step is pending, so a password alone never creates one.
+      const mfaStatus = await mfaService.status(user.id);
+      const mustProvideMfa = mfaStatus.enabled || (config.MFA_ENFORCE && user.role === "admin");
       if (mustProvideMfa) {
         if (!mfaStatus.enabled) {
           // MFA enforced but not enrolled — still issue the session so user can enrol immediately,
           // but flag it so the UI can redirect to the MFA enrolment flow.
-          setSessionCookie(reply, result.sessionId);
+          const result = await issuePasswordSession(request, reply, user);
           await audit(request, result.user, {
             category: "auth",
             eventType: "user.login",
@@ -7345,15 +7484,14 @@ export async function createApp(
             mfaEnrollmentRequired: true
           };
         }
-        // Revoke the freshly-created session and exchange it for a short-lived MFA challenge token.
-        await store.revokeSession(result.sessionId);
-        const challengeId = await issueMfaChallenge(result.user.id);
-        await audit(request, result.user, {
+        // No session yet: the password step earns a short-lived MFA challenge token instead.
+        const challengeId = await issueMfaChallenge(user.id);
+        await audit(request, user, {
           category: "auth",
           eventType: "user.login.mfa_challenge",
           action: "login",
           resourceType: "user",
-          resourceId: result.user.id,
+          resourceId: user.id,
           metadata: { mfaChallengeIssued: true }
         });
         reply.code(200);
@@ -7362,7 +7500,7 @@ export async function createApp(
           expiresInSeconds: Math.floor(MFA_CHALLENGE_TTL_MS / 1000)
         };
       }
-      setSessionCookie(reply, result.sessionId);
+      const result = await issuePasswordSession(request, reply, user);
       await audit(request, result.user, {
         category: "auth",
         eventType: "user.login",
@@ -7454,7 +7592,7 @@ export async function createApp(
           ? storeUser.role
           : "viewer"
     };
-    const { expiresAt } = await issueSessionForUser(safeUser, reply);
+    const { expiresAt } = await issueSessionForUser(request, reply, safeUser, { method: "password", mfaVerified: true });
     return { user: safeUser, expiresAt };
   });
 
@@ -7821,7 +7959,7 @@ export async function createApp(
         email: profile.email,
         groups: profile.groups
       });
-      const { expiresAt } = await issueSessionForUser(user, reply);
+      const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: false });
       return { user, expiresAt, provisioned: created };
     } catch (error) {
       const err = error as Error & { code?: string };

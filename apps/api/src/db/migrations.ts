@@ -2576,7 +2576,32 @@ export const MIGRATIONS: Migration[] = [
     `
   },
   {
-    // Provisional number: v61-v68 are reserved by other open changes; renumber at merge if they land later.
+    version: 61,
+    description: "13.2 — sign-in sessions record how they were issued, their MFA time, a break-glass flag and why they ended",
+    // Every column is nullable or has a default, so sessions issued before the upgrade stay valid (no backfill).
+    // auth_method: password | oidc | saml | ldap | break_glass. ended_reason: logout | expired | idle | evicted |
+    // admin | policy. idx_sessions_user_live serves the per-user session list and the concurrent-session limit.
+    up: `
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_method TEXT;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ip_address TEXT;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS mfa_verified_at TIMESTAMPTZ NULL;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS break_glass INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ended_reason TEXT;
+      CREATE INDEX IF NOT EXISTS idx_sessions_user_live ON sessions(user_id, revoked_at, expires_at);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_sessions_user_live;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS ended_reason;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS break_glass;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS mfa_verified_at;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS user_agent;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS ip_address;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS auth_method;
+    `
+  },
+  {
+    // Provisional number: v62-v68 are reserved by other open changes; renumber at merge if they land later.
     version: 69,
     description: "Phase 12 coverage — reveal: the project and run that issued each token vault token",
     // A Reveal node reveals only tokens issued in the run's project. Rows written before this migration keep a null
