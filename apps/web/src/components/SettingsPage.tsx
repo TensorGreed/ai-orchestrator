@@ -126,7 +126,6 @@ import {
   type AuditChainStatus,
   type AuditExportDestination
 } from "../lib/api";
-import { BREAK_GLASS_NOTIFICATION_OPTIONS } from "@ai-orchestrator/shared";
 import { AuditSigningKeysSection } from "./AuditSigningKeysSection";
 import { NetworkSettingsTab } from "./NetworkSettingsTab";
 import { ServiceAccountsTab } from "./ServiceAccountsTab";
@@ -3386,7 +3385,7 @@ function NotificationsTab() {
               )}
 
               <div className="ntf-events">
-                {[...NOTIFICATION_EVENTS, ...BREAK_GLASS_NOTIFICATION_OPTIONS].map((ev) => (
+                {NOTIFICATION_EVENTS.map((ev) => (
                   <label key={ev.value}>
                     <input
                       type="checkbox"
