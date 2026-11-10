@@ -6,7 +6,7 @@ Thanks for considering a contribution. L2M is **pure OSS** (MIT) and the project
 
 L2M is **the MCP-native agent runtime**: visual workflow builder, multi-agent Swarm, and a first-party VS Code surface. The differentiators we deepen on every PR are first-class [MCP](https://modelcontextprotocol.io/) integration, multi-agent topologies, and IDE composability.
 
-We're explicitly **not** chasing n8n connector parity for its own sake — community-authored nodes (see [Phase 6 of the GA roadmap](.github/ROADMAP_BOARD.md)) are the answer to the long tail. If your contribution targets a generic SaaS connector, please open a Discussion first to align on whether it belongs in-tree or as a `l2m-nodes-*` package.
+We're explicitly **not** chasing connector parity with other automation tools for its own sake — community-authored nodes (see [Phase 6 of the GA roadmap](.github/ROADMAP_BOARD.md)) are the answer to the long tail. If your contribution targets a generic SaaS connector, please open a Discussion first to align on whether it belongs in-tree or as a `l2m-nodes-*` package.
 
 ## Where to start
 

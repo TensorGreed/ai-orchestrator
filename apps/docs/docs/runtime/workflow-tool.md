@@ -39,7 +39,7 @@ A workflow tool is governed as the MCP server `workflow:<workflowId>`:
 - **Content rules** check the call's arguments and result like any tool call, under the parent run's rule sets; the child runs under them too.
 - **Labels.** The labels of the agent's context at the call go to the child as its input labels, and the child's output labels come back on the result (on a failed run, the labels of what its failed step read, since the error can quote it). Untrusted content in the call therefore reaches the child's own tool rules.
 - **Telemetry and replay.** Each call writes an MCP tool call row (adapter `l2m-workflow`). A recorded run's cassette holds the call, so a replay answers it from the recording and never runs the child.
-- **Spend.** The child's model calls count in the run's usage and budget alerts, each priced by its own model.
+- **Spend.** The child's model calls count in the run's usage and budgets as soon as the call ends, each priced by its own model, also when the agent then fails or is stopped (see [Budgets: sub-workflows](../product/budgets.md#sub-workflows)). Before each call the run's block budgets are checked, counting the calls before it; a used-up one refuses the call with a tool error. A child that is still running when its call times out is counted when it ends.
 
 ## Across instances
 
