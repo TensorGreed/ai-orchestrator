@@ -3,6 +3,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import { ensureAiGatewaySchema, sqliteAiGatewayStore } from "./ai-gateway-sqlite.js";
+import { ensureSubjectSchema, sqliteSubjectStore } from "./subject-sqlite.js";
+import type { SubjectStore } from "./subject-store.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
 import type {
   ApprovalRequestKind,
@@ -4317,6 +4319,8 @@ export class SqliteStore implements Store {
       CREATE INDEX IF NOT EXISTS idx_session_artifacts_updated ON session_artifacts(updated_at);
       CREATE INDEX IF NOT EXISTS idx_session_tool_cache_created ON session_tool_cache(created_at);
     `);
+    // 13.3 (v67) — data-subject requests: subject references, requests, sealed exports and the subject key.
+    ensureSubjectSchema(this.db);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -11179,6 +11183,29 @@ export class SqliteStore implements Store {
   }
 
   // 12.6b — the /v1 AI gateway tables (ai-gateway-sqlite.ts).
+  // 13.3 — data-subject requests (subject-sqlite.ts).
+  private subjectStoreImpl?: SubjectStore;
+  private get subjects(): SubjectStore {
+    return (this.subjectStoreImpl ??= sqliteSubjectStore(this.db));
+  }
+  getSubjectRefKey(...args: Parameters<SubjectStore["getSubjectRefKey"]>) { return this.subjects.getSubjectRefKey(...args); }
+  initSubjectRefKey(...args: Parameters<SubjectStore["initSubjectRefKey"]>) { return this.subjects.initSubjectRefKey(...args); }
+  addSubjectRefs(...args: Parameters<SubjectStore["addSubjectRefs"]>) { return this.subjects.addSubjectRefs(...args); }
+  listSubjectRefs(...args: Parameters<SubjectStore["listSubjectRefs"]>) { return this.subjects.listSubjectRefs(...args); }
+  pruneOrphanSubjectRefs(...args: Parameters<SubjectStore["pruneOrphanSubjectRefs"]>) { return this.subjects.pruneOrphanSubjectRefs(...args); }
+  createSubjectRequest(...args: Parameters<SubjectStore["createSubjectRequest"]>) { return this.subjects.createSubjectRequest(...args); }
+  getSubjectRequest(...args: Parameters<SubjectStore["getSubjectRequest"]>) { return this.subjects.getSubjectRequest(...args); }
+  listSubjectRequests(...args: Parameters<SubjectStore["listSubjectRequests"]>) { return this.subjects.listSubjectRequests(...args); }
+  updateSubjectRequest(...args: Parameters<SubjectStore["updateSubjectRequest"]>) { return this.subjects.updateSubjectRequest(...args); }
+  saveSubjectExport(...args: Parameters<SubjectStore["saveSubjectExport"]>) { return this.subjects.saveSubjectExport(...args); }
+  getSubjectExport(...args: Parameters<SubjectStore["getSubjectExport"]>) { return this.subjects.getSubjectExport(...args); }
+  claimSubjectExport(...args: Parameters<SubjectStore["claimSubjectExport"]>) { return this.subjects.claimSubjectExport(...args); }
+  expireSubjectExports(...args: Parameters<SubjectStore["expireSubjectExports"]>) { return this.subjects.expireSubjectExports(...args); }
+  subjectScanPage(...args: Parameters<SubjectStore["subjectScanPage"]>) { return this.subjects.subjectScanPage(...args); }
+  subjectScanRow(...args: Parameters<SubjectStore["subjectScanRow"]>) { return this.subjects.subjectScanRow(...args); }
+  memorySessionSubjectRows(...args: Parameters<SubjectStore["memorySessionSubjectRows"]>) { return this.subjects.memorySessionSubjectRows(...args); }
+  staffSubjectRows(...args: Parameters<SubjectStore["staffSubjectRows"]>) { return this.subjects.staffSubjectRows(...args); }
+
   private aiGatewayStore?: AiGatewayStore;
   private get aiGateway(): AiGatewayStore {
     return (this.aiGatewayStore ??= sqliteAiGatewayStore(this.db));

@@ -105,6 +105,7 @@ import type {
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
+import type { SubjectStore } from "./subject-store.js";
 import type { RetentionRunView } from "@ai-orchestrator/shared";
 import type { RetentionScope, RetentionTable } from "./retention-tables.js";
 
@@ -430,7 +431,7 @@ export interface UserInviteCreate {
   expiresAt: string;
 }
 
-export interface Store extends AiGatewayStore {
+export interface Store extends AiGatewayStore, SubjectStore {
   // ---- Store lifecycle
 
   /** Phase 10.7 — where the database lives (a file path, or ":memory:"); names this deployment's sandbox containers. */

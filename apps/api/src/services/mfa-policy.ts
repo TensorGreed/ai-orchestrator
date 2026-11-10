@@ -88,7 +88,9 @@ export const STEP_UP_ACTIONS = {
   "project_member.change": "Add or remove a project member",
   "custom_role.change": "Create, change or delete a custom role",
   "notification_channel.change": "Create or delete a notification channel",
-  "audit_export.change": "Create, change or delete an audit export destination or log stream"
+  "audit_export.change": "Create, change or delete an audit export destination or log stream",
+  "subject_request.reveal": "Make a data-subject export that reveals tokenised values",
+  "subject_export.download": "Download a data-subject export"
 } as const;
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS;

@@ -259,6 +259,8 @@ shell history (`--source-master-key <base64>` also works), and warns when the fi
 Start the API on the new database with the new key. Keep the old key while you keep backups written with it.
 Production-capture surrogates are derived from the key, so values captured after the change get surrogates that no
 longer match earlier recordings.
+The data-subject reference key is re-sealed with the rest, so [subject references](../security/data-subject-requests.md)
+keep matching after the change. Data-subject exports are never in a backup.
 
 ### Point-in-time recovery on Postgres
 

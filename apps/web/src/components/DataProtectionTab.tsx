@@ -1,10 +1,11 @@
 /**
  * 13.3 — Settings > Data protection: how long the deployment keeps each kind of data (read-only, from the environment),
- * what is due for deletion now, and the latest purges.
+ * what is due for deletion now, and the latest purges; then data-subject requests.
  */
 import { useEffect, useState } from "react";
 import { RETENTION_PURGE_CLASS_LABELS, type RetentionAdminView, type RetentionRunView } from "@ai-orchestrator/shared";
 import { ApiError, fetchRetention } from "../lib/api";
+import { SubjectRequestsSection } from "./SubjectRequestsSection";
 
 function formatError(err: unknown): string {
   if (err instanceof ApiError) return err.message;
@@ -63,6 +64,7 @@ export function DataProtectionTab() {
   }, []);
 
   return (
+    <>
     <section className="settings-section" aria-label="Data protection">
       <h3>Data protection</h3>
       <p className="settings-muted">
@@ -150,5 +152,7 @@ export function DataProtectionTab() {
         </>
       )}
     </section>
+    <SubjectRequestsSection />
+    </>
   );
 }

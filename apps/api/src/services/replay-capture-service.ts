@@ -929,6 +929,16 @@ export class ReplayCaptureService {
   }
 
   /**
+   * 13.3 — the lookup's strict matching for one value, as a function over stored rows, for data-subject requests that
+   * read more stores than this lookup (production runs, paused runs, approvals, agent memory). Same finders, same
+   * certainty; throws like `findSubject` for a value too short to search.
+   */
+  async subjectMatcher(query: ReplayFindSubjectQuery): Promise<{ classesTried: string[]; match: (row: SubjectTextRow) => ReplayFindSubjectMatch | null }> {
+    const { classesTried, needles } = await this.needlesFor(query);
+    return { classesTried, match: (row) => this.matchRow(row, needles) };
+  }
+
+  /**
    * Search: every stored copy of `value`, as its surrogate (a masked
    * capture) or raw (a run saved by hand, captured with masking off, or a
    * replay of one). The value is never stored or logged. Pages are small and

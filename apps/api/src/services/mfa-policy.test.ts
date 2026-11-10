@@ -181,7 +181,9 @@ describe("decideStepUp", () => {
       "project_member.change",
       "custom_role.change",
       "notification_channel.change",
-      "audit_export.change"
+      "audit_export.change",
+      "subject_request.reveal",
+      "subject_export.download"
     ]);
   });
 });

@@ -110,6 +110,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_session_artifacts_updated ON session
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_session_tool_cache_created ON session_tool_cache(created_at);
 ```
 
+## Subject references
+
+Subject references ([data-subject requests](../security/data-subject-requests.md)) are removed with the runs they point
+at: a background sweep deletes references whose run or memory session is gone. Data-subject exports expire after
+`SUBJECT_EXPORT_TTL_HOURS`.
+
 ## Backups
 
 Retention does not reach backups already taken. Rotate backups within the retention you promise; see

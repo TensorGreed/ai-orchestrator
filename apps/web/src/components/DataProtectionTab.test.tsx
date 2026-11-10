@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RetentionAdminView } from "@ai-orchestrator/shared";
 import * as api from "../lib/api";
@@ -6,7 +6,7 @@ import { DataProtectionTab } from "./DataProtectionTab";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, fetchRetention: vi.fn() };
+  return { ...actual, fetchRetention: vi.fn(), fetchSubjectRequests: vi.fn(async () => ({ requests: [] })) };
 });
 
 afterEach(() => {
@@ -82,7 +82,8 @@ describe("DataProtectionTab", () => {
     expect(last).toContain("Runs: 1,200, Tool calls: 3");
     expect(last).toContain("usage: failed");
     expect(screen.getByRole("table", { name: "Recent purges" }).textContent).toContain("Nothing due");
-    expect(screen.queryByRole("button")).toBeNull();
+    // Retention is read-only: no controls in its section (the data-subject requests section below has its own).
+    expect(within(screen.getByRole("region", { name: "Data protection" })).queryByRole("button")).toBeNull();
   });
 
   it("before the first purge, and on an error", async () => {

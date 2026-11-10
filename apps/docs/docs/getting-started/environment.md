@@ -118,6 +118,12 @@ deletes. Upgrading: an `.env` copied from an older `.env.example` sets `USAGE_EV
 deletes usage events older than a year; remove it or set `0` to keep them
 ([details](../operations/data-retention.md#upgrading-usage-retention)).
 
+## Data-subject requests (optional)
+
+`SUBJECT_REQUEST_DUE_DAYS` (30, 1 to 365) sets when a data-subject request is due; one notice goes out once it is
+overdue. `SUBJECT_EXPORT_TTL_HOURS` (72, 1 to 720) sets how long its export can be downloaded. See
+[Data-subject requests](../security/data-subject-requests.md).
+
 ## MCP server registry probes (optional)
 
 - `MCP_PROBE_INTERVAL_MS` (default `300000`; `0` turns scheduled probes off)

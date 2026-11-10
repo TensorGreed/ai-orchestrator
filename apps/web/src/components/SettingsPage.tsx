@@ -3093,7 +3093,8 @@ const NOTIFICATION_CHANNELS = [
 const NOTIFICATION_EVENTS = [
   { value: "workflow_failure", label: "Workflow Failure" },
   { value: "workflow_success", label: "Workflow Success" },
-  { value: "network.break_glass_used", label: "Break-glass access used" }
+  { value: "network.break_glass_used", label: "Break-glass access used" },
+  { value: "data.subject_request_due", label: "Data-subject request overdue" }
 ];
 
 function NotificationsTab() {

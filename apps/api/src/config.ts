@@ -110,6 +110,11 @@ const envSchema = z.object({
   AI_GATEWAY_REQUEST_RETENTION_DAYS: optionalIntFromEnv(0, 36_500),
   /** Agent memory (Simple Memory sessions, agent artifacts, the session tool cache) by last update, in days. Unset or 0 keeps it. */
   AGENT_MEMORY_RETENTION_DAYS: optionalIntFromEnv(0, 36_500),
+  // 13.3 — data-subject requests (docs/security/data-subject-requests.md). Both optional.
+  /** Days an admin has to answer a data-subject request; an open request past it sends data.subject_request_due (default 30). */
+  SUBJECT_REQUEST_DUE_DAYS: optionalIntFromEnv(1, 365),
+  /** Hours a data-subject export can be downloaded (once) before it is deleted (default 72). */
+  SUBJECT_EXPORT_TTL_HOURS: optionalIntFromEnv(1, 720),
   SEED_SAMPLE_WORKFLOWS: booleanFromEnv.default(false),
   SECRET_MASTER_KEY_BASE64: z.string().min(1).optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("ao_session"),
@@ -732,6 +737,19 @@ export function resolveRetentionSettings(
     agentMemoryDays: config.AGENT_MEMORY_RETENTION_DAYS ?? 0,
     aiGatewayRequestDays: config.AI_GATEWAY_REQUEST_RETENTION_DAYS ?? 0,
     usageEventDays: config.USAGE_EVENTS_RETENTION_DAYS ?? 0
+  };
+}
+
+/** 13.3 — data-subject requests: the defaults of SUBJECT_REQUEST_DUE_DAYS and SUBJECT_EXPORT_TTL_HOURS. */
+export const SUBJECT_REQUEST_DEFAULTS = { dueDays: 30, exportTtlHours: 72 } as const;
+
+export function resolveSubjectRequestSettings(config: Pick<AppConfig, "SUBJECT_REQUEST_DUE_DAYS" | "SUBJECT_EXPORT_TTL_HOURS">): {
+  dueDays: number;
+  exportTtlHours: number;
+} {
+  return {
+    dueDays: config.SUBJECT_REQUEST_DUE_DAYS ?? SUBJECT_REQUEST_DEFAULTS.dueDays,
+    exportTtlHours: config.SUBJECT_EXPORT_TTL_HOURS ?? SUBJECT_REQUEST_DEFAULTS.exportTtlHours
   };
 }
 

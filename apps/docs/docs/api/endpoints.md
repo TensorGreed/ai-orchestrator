@@ -274,6 +274,15 @@ See [Data retention](../operations/data-retention.md).
 
 - `GET /api/admin/retention` (admin; read-only; `{ intervalMs, maxRowsPerTick, bounds: { minDays, maxDays }, backlogCap, classes: [{ class, label, what, setting, days, cutoff, backlog, backlogCapped }], lastRun, nextRunAt, runs: [{ id, startedAt, finishedAt, instanceId, reason, outcome, counts, capped, error }] }`; `days: 0` means kept forever, and `backlog` counts the rows due now up to `backlogCap`)
 
+## Data-subject requests
+
+See [Data-subject requests](../security/data-subject-requests.md). The value is never echoed, logged or audited.
+
+- `POST /api/data-protection/requests` (admin; `{ type: "export", subjectKind?: "end_user" | "staff", value, scan?, revealTokens? }`; 201 with the request; `revealTokens` needs step-up when it is on)
+- `GET /api/data-protection/requests` (admin; `{ requests }`, newest first), `GET /api/data-protection/requests/:id` (admin; `{ id, type, subjectKind, status, scan, revealTokens, counts, foundByReference, truncated, progress, dueAt, overdue, createdBy, createdAt, updatedAt, error, export }`; `status` is `searching`, `ready`, `done`, `expired` or `failed`)
+- `GET /api/data-protection/requests/:id/export` (admin; step-up when on; the zip, once; 409 once downloaded or expired)
+- `POST /api/data-protection/subject-refs/preview` (builder with write access to the workflow; `{ workflowId, subjectRefs }` → `{ runs, refs: [{ expression, resolved, sample }] }`, samples masked)
+
 ## Golden runs and replay
 
 See [Golden runs and replay](../product/golden-runs.md).

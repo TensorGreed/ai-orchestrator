@@ -2702,6 +2702,73 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS retention_runs;
       DROP TABLE IF EXISTS retention_policies;
     `
+  },
+  {
+    // Provisional number: v66 belongs to legal hold; renumber at merge if the order changes.
+    version: 67,
+    description: "13.3 — data-subject requests: subject references (keyed hashes), requests, sealed exports and the subject key",
+    // subject_ref_keys holds the key subject references are hashed with, sealed with the master key (db:import
+    // --source-master-key re-seals it, so references keep matching after a master-key change). subject_refs holds only
+    // keyed hashes, never values. subject_requests keeps a request's value sealed only while its lookup runs.
+    // subject_exports holds sealed export files until they are downloaded once or expire; it is not backed up.
+    up: `
+      CREATE TABLE IF NOT EXISTS subject_ref_keys (
+        id TEXT PRIMARY KEY,
+        key_sealed TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS subject_refs (
+        hash TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        row_id TEXT NOT NULL,
+        project_id TEXT,
+        workflow_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (hash, kind, row_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_subject_refs_row ON subject_refs(kind, row_id);
+      CREATE INDEX IF NOT EXISTS idx_subject_refs_created ON subject_refs(created_at);
+      CREATE TABLE IF NOT EXISTS subject_requests (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        subject_kind TEXT NOT NULL,
+        query_hash TEXT NOT NULL,
+        value_sealed TEXT,
+        scan INTEGER NOT NULL DEFAULT 1,
+        reveal_tokens INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        due_at TIMESTAMPTZ NOT NULL,
+        due_notified_at TIMESTAMPTZ,
+        counts_json TEXT NOT NULL DEFAULT '{}',
+        progress_json TEXT NOT NULL DEFAULT '{}',
+        deferred_json TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT,
+        created_by_user_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_subject_requests_status ON subject_requests(status);
+      CREATE INDEX IF NOT EXISTS idx_subject_requests_created ON subject_requests(created_at);
+      CREATE TABLE IF NOT EXISTS subject_exports (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        sealed_blob TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        downloaded_at TIMESTAMPTZ,
+        downloaded_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_subject_exports_expires ON subject_exports(expires_at);
+    `,
+    down: `
+      DROP TABLE IF EXISTS subject_exports;
+      DROP TABLE IF EXISTS subject_requests;
+      DROP TABLE IF EXISTS subject_refs;
+      DROP TABLE IF EXISTS subject_ref_keys;
+    `
   }
 ];
 

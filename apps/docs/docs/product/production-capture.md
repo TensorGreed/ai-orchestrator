@@ -102,7 +102,7 @@ Captured runs are kept for `REPLAY_CAPTURE_RETENTION_DAYS` (14 days by default) 
 
 ## Data-subject lookup
 
-When someone asks what you hold about them, or asks you to delete it, an admin first searches for a value, then deletes what the search found. Searching never deletes. In the app, admins find this as **Find a person's data** under Evaluations → Golden sets.
+When someone asks what you hold about them, or asks you to delete it, an admin first searches for a value, then deletes what the search found. To export everything the deployment holds about a person, production runs and agent memory included, use a [data-subject request](../security/data-subject-requests.md). Searching never deletes. In the app, admins find this as **Find a person's data** under Evaluations → Golden sets.
 
 ```http
 POST /api/replay/recordings/find-subject

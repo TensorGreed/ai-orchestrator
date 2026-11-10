@@ -45,6 +45,8 @@ export interface NotificationEvent {
     /** Ended: why (logout, expired, admin, ...). */
     reason?: string;
   };
+  /** 13.3 — set for data.subject_request_due: which request is past its due date. Never the person's value. */
+  subjectRequest?: { requestId: string; type: string; subjectKind: string; status: string; dueAt: string };
 }
 
 /** Phase 13.2 — an address outside the ui/api allowlist was admitted because it is in NETWORK_BREAK_GLASS_CIDRS. */
@@ -55,6 +57,9 @@ export const NETWORK_NOTIFICATION_EVENTS = ["network.break_glass_used"] as const
  * says which). The same name as BREAK_GLASS_SIGN_IN_EVENT in @ai-orchestrator/shared.
  */
 export const AUTH_NOTIFICATION_EVENTS = ["auth.break_glass_used"] as const;
+
+/** 13.3 — a data-subject request is past its due date (SUBJECT_REQUEST_DUE_DAYS) and not finished. */
+export const DATA_PROTECTION_NOTIFICATION_EVENTS = ["data.subject_request_due"] as const;
 
 /** Phase 11.2 — approval events channels subscribe to alongside execution events. */
 export const APPROVAL_NOTIFICATION_EVENTS = ["approval.requested", "approval.timed_out"] as const;
@@ -85,6 +90,22 @@ const BREAK_GLASS_STAGE_TEXT: Record<NonNullable<NotificationEvent["auth"]>["sta
 };
 
 function describeEvent(event: NotificationEvent): NotificationContent {
+  if (event.type === "data.subject_request_due" && event.subjectRequest) {
+    const request = event.subjectRequest;
+    return {
+      title: "Data-subject request overdue",
+      icon: "\u23F0",
+      color: "F2B705",
+      facts: [
+        { name: "Request", value: request.requestId },
+        { name: "Type", value: `${request.type} (${request.subjectKind === "staff" ? "staff member" : "end user"})` },
+        { name: "Status", value: request.status },
+        { name: "Due", value: request.dueAt },
+        { name: "Time", value: event.timestamp }
+      ],
+      text: "A data-subject request is past its due date. Open Settings > Access control > Data protection to finish it."
+    };
+  }
   if (event.type === "auth.break_glass_used" && event.auth) {
     const stage = BREAK_GLASS_STAGE_TEXT[event.auth.stage];
     const facts: NotificationContent["facts"] = [{ name: "Account", value: event.auth.email }];
@@ -210,7 +231,8 @@ export class NotificationService {
   private envChannelEvents(): string[] {
     const events = this.config.NOTIFICATIONS_APPROVAL_EVENTS ? ["execution.failure", ...APPROVAL_NOTIFICATION_EVENTS] : ["execution.failure"];
     // Phase 13.2 — break-glass alerts reach the env channels too (they only fire when an allowlist is set).
-    return [...events, ...NETWORK_NOTIFICATION_EVENTS, ...AUTH_NOTIFICATION_EVENTS];
+    // 13.3 — overdue data-subject requests, which only exist once an admin makes one.
+    return [...events, ...NETWORK_NOTIFICATION_EVENTS, ...AUTH_NOTIFICATION_EVENTS, ...DATA_PROTECTION_NOTIFICATION_EVENTS];
   }
 
   /** Reloads the channels from the stored configs (plus the env-configured defaults). */
