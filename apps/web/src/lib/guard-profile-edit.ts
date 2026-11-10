@@ -7,10 +7,19 @@ export type GuardDocument = Record<string, unknown>;
 export const GUARD_EDITOR_CHANNELS = ["prompt", "tool_arguments", "tool_result", "model_output", "final_output"] as const;
 export const GUARD_EDITOR_ACTIONS = ["allow", "block", "review", "require_approval", "redact", "mask", "protect", "transform"] as const;
 
+/** An action rule as the editor sees it. Fields the form does not show (such as `stream`) are carried through untouched. */
+export interface ActionRuleView {
+  action: string;
+  shadow?: boolean;
+  providerId?: string;
+  stream?: string;
+  [field: string]: unknown;
+}
+
 export interface ChannelView {
   detectors: Array<{ id: string; threshold: number; options?: Record<string, unknown> }>;
-  actions: Record<string, { action: string; shadow?: boolean; providerId?: string }>;
-  defaultAction: { action: string; shadow?: boolean };
+  actions: Record<string, ActionRuleView>;
+  defaultAction: ActionRuleView;
 }
 
 const rec = (value: unknown): Record<string, unknown> => (value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
@@ -28,10 +37,10 @@ export function channelOf(document: GuardDocument, channel: string): ChannelView
   const actions: ChannelView["actions"] = {};
   for (const [key, value] of Object.entries(rec(raw.actions))) {
     const rule = rec(value);
-    actions[key] = { action: String(rule.action ?? "block"), ...(typeof rule.shadow === "boolean" ? { shadow: rule.shadow } : {}), ...(typeof rule.providerId === "string" ? { providerId: rule.providerId } : {}) };
+    actions[key] = { ...rule, action: String(rule.action ?? "block") };
   }
   const fallback = rec(raw.defaultAction);
-  return { detectors, actions, defaultAction: { action: String(fallback.action ?? "block"), ...(typeof fallback.shadow === "boolean" ? { shadow: fallback.shadow } : {}) } };
+  return { detectors, actions, defaultAction: { ...fallback, action: String(fallback.action ?? "block") } };
 }
 
 function withChannel(document: GuardDocument, channel: string, update: (current: ChannelView) => ChannelView): GuardDocument {
@@ -74,7 +83,7 @@ export function setActionRule(document: GuardDocument, channel: string, key: str
 }
 
 export function setDefaultAction(document: GuardDocument, channel: string, action: string): GuardDocument {
-  return withChannel(document, channel, (current) => ({ ...current, defaultAction: { action } }));
+  return withChannel(document, channel, (current) => ({ ...current, defaultAction: { ...current.defaultAction, action } }));
 }
 
 /** Profile-level shadow mode for one action (rules can still override it). */
