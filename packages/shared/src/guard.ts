@@ -33,10 +33,27 @@ export type GuardChannelValue = (typeof GUARD_CHANNEL_VALUES)[number];
 /**
  * Phase 16 — channels a guard profile may configure: the Guard node's
  * channels plus `egress` (outbound HTTP, connectors and senders), which the
- * engine checks itself and a Guard node never evaluates.
+ * engine checks itself and a Content Rules node never evaluates. Phase 12 coverage
+ * adds `response` (what an external caller receives) and `trigger_input` (an
+ * incoming webhook payload, checked at the route); a node never offers them.
  */
-export const GUARD_PROFILE_CHANNEL_VALUES = [...GUARD_CHANNEL_VALUES, "egress"] as const;
+export const GUARD_PROFILE_CHANNEL_VALUES = [...GUARD_CHANNEL_VALUES, "egress", "response", "trigger_input"] as const;
 export type GuardProfileChannelValue = (typeof GUARD_PROFILE_CHANNEL_VALUES)[number];
+
+/**
+ * Where a rule event was recorded. `node`: a Content Rules node; `agent`: an
+ * agent hook or delegated worker; `gateway`: the MCP or `/v1` gateway.
+ * Phase 12 coverage: `response` (the run-end check of what an external caller
+ * receives), `retrieval` (untrusted pieces and documents at the model
+ * boundary) and `reveal` (tokens turned back into values).
+ */
+export const GUARD_PLACEMENT_VALUES = ["node", "agent", "gateway", "response", "retrieval", "reveal"] as const;
+export type GuardPlacementValue = (typeof GUARD_PLACEMENT_VALUES)[number];
+
+/** A stored placement read back; unknown values read as `node`, as before. */
+export function parseGuardPlacement(value: unknown): GuardPlacementValue {
+  return typeof value === "string" && (GUARD_PLACEMENT_VALUES as readonly string[]).includes(value) ? (value as GuardPlacementValue) : "node";
+}
 
 export const GUARD_ACTION_VALUES = ["allow", "block", "redact", "mask", "protect", "transform", "require_approval", "review"] as const;
 export type GuardActionValue = (typeof GUARD_ACTION_VALUES)[number];
@@ -63,8 +80,16 @@ export function defaultGuardLabels(channel: GuardChannelValue): Array<(typeof GU
 export const guardNodeConfigSchema = z.object({
   /** A stored profile id, or `effective` for the run's effective profile. */
   profileId: z.string().min(1).default(GUARD_EFFECTIVE_PROFILE_REF),
-  /** Inline override merged onto the referenced profile (channels, shadow, latency budget, protection). */
-  profileOverride: z.record(z.string(), z.unknown()).optional(),
+  /**
+   * Inline override merged onto the referenced profile (channels, shadow, latency budget, protection). Reveal rules
+   * are refused here: only a stored rule set may carry them.
+   */
+  profileOverride: z
+    .record(z.string(), z.unknown())
+    .refine((value) => !Object.prototype.hasOwnProperty.call(value, "reveal"), {
+      message: "Reveal rules can only be set on a stored rule set, not in a node's inline override"
+    })
+    .optional(),
   /** Channel the content is evaluated as. */
   channel: z.enum(GUARD_CHANNEL_VALUES).default("prompt"),
   /** Dot path of the field to inspect in the incoming item (falls back to run inputs such as `user_prompt`). */
@@ -259,8 +284,9 @@ export interface GuardEventView {
   /**
    * Where the guard sat: a DAG guard node, an agent hook, or a delegated worker. 12.6 — `gateway`: a server tool called
    * through the MCP gateway (`executionId` is the call's `mcpgw_*` id, `nodeId` the tool name, no workflow).
+   * Phase 12 coverage — `response`, `retrieval` and `reveal` (see `GUARD_PLACEMENT_VALUES`).
    */
-  placement: "node" | "agent" | "gateway";
+  placement: GuardPlacementValue;
   toolName?: string | null;
   detectorId?: string | null;
   category?: string | null;
@@ -281,4 +307,64 @@ export interface GuardEventView {
   createdAt: string;
   /** 12.7 — `eval`: recorded by an eval run or a replay job (left out of the Security page unless asked for). */
   runSource?: "eval";
+}
+
+/**
+ * Phase 12 coverage — reveal rules (user decision 2026-11-10).
+ *
+ * - Authorship: only an admin may save (create, import or update) a rule set whose document carries reveal rules.
+ * - Matching: a rule's `roles` and `users` match only runs started by a signed-in person (subject source `user`).
+ *   Webhook, chat, schedule and other unattended runs act as the workflow owner (source `owner`), so a role or user
+ *   rule never matches them. `serviceAccounts` match the named service account explicitly, whatever started the run.
+ * - `workflows`, when set, limits the rule to those workflows. Data classes must match exactly.
+ * The rule set schema itself (`revealRuleSchema`) lives in `@ai-orchestrator/guard-sdk`.
+ */
+
+/** What a builder sees when saving a rule set with reveal rules (403). */
+export const REVEAL_RULES_ADMIN_ONLY_MESSAGE = "Only an admin can save a rule set with reveal rules";
+
+/** True when a rule set document (as submitted, before validation) carries at least one reveal rule. */
+export function guardDocumentHasRevealRules(document: unknown): boolean {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return false;
+  const reveal = (document as Record<string, unknown>).reveal;
+  if (!reveal || typeof reveal !== "object" || Array.isArray(reveal)) return false;
+  const rules = (reveal as Record<string, unknown>).rules;
+  return Array.isArray(rules) && rules.length > 0;
+}
+
+/** The subject a reveal is judged for: the run subject, plus the service account a run acts as, when it has one. */
+export interface RevealSubject {
+  /** `user`: a signed-in person started the run. Anything else is unattended (owner, fallback, client, ...). */
+  source: string;
+  role?: string;
+  userId?: string | null;
+  serviceAccountId?: string | null;
+}
+
+/** The parts of a reveal rule the match reads (structurally the guard-sdk `RevealRule`). */
+export interface RevealRuleLike {
+  dataClasses: readonly string[];
+  subjects: { roles?: readonly string[]; users?: readonly string[]; serviceAccounts?: readonly string[] };
+  workflows?: readonly string[];
+}
+
+/** Whether a reveal rule names this subject: role and user only for runs a signed-in person started; service accounts explicitly. */
+export function revealRuleMatchesSubject(rule: RevealRuleLike, subject: RevealSubject | null | undefined): boolean {
+  if (!subject) return false;
+  if (subject.serviceAccountId && (rule.subjects.serviceAccounts ?? []).includes(subject.serviceAccountId)) return true;
+  if (subject.source !== "user") return false;
+  if (subject.userId && (rule.subjects.users ?? []).includes(subject.userId)) return true;
+  return Boolean(subject.role && (rule.subjects.roles ?? []).includes(subject.role));
+}
+
+/** Whether a reveal rule allows revealing this data class for this subject in this workflow. */
+export function revealRuleAllows(rule: RevealRuleLike, request: { subject: RevealSubject | null | undefined; dataClass: string; workflowId?: string | null }): boolean {
+  if (!rule.dataClasses.includes(request.dataClass)) return false;
+  if (rule.workflows && rule.workflows.length > 0 && !(request.workflowId && rule.workflows.includes(request.workflowId))) return false;
+  return revealRuleMatchesSubject(rule, request.subject);
+}
+
+/** The first rule that allows the reveal, or undefined: reveal is denied unless a rule matches. */
+export function findRevealRule<T extends RevealRuleLike>(rules: readonly T[], request: { subject: RevealSubject | null | undefined; dataClass: string; workflowId?: string | null }): T | undefined {
+  return rules.find((rule) => revealRuleAllows(rule, request));
 }

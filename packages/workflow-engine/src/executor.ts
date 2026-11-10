@@ -28,7 +28,7 @@ import {
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
 import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { chargedUsage, estimateAnswerTokens, estimateRequestTokens, isStreamUsageRefusal, providerDestinationRef } from "@ai-orchestrator/provider-sdk";
+import { ToolCallAssembler, chargedUsage, estimateAnswerTokens, estimateRequestTokens, isStreamUsageRefusal, providerDestinationRef } from "@ai-orchestrator/provider-sdk";
 import {
   GUARD_EFFECTIVE_PROFILE_REF,
   NODE_ACTIVITY_LIMIT,
@@ -188,6 +188,7 @@ import {
 } from "./destination-guard";
 import {
   builtInGuardProfile,
+  runVerdictMemoOf,
   createAgentGuardSession,
   GuardBlockedError,
   guardMayUseLabels,
@@ -3661,7 +3662,7 @@ async function runLlmCall(
 ): Promise<Record<string, unknown>> {
   if (input.dependencies.onLLMDelta && providerAdapter.generateStream) {
     let streamedText = "";
-    const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
+    const toolCallAssembler = new ToolCallAssembler();
     let llmDeltaIndex = 0;
     let reportedUsage: Extract<LLMStreamChunk, { type: "usage" }>["usage"] | undefined;
     const streamRequest: ProviderCallRequest = {
@@ -3691,23 +3692,11 @@ async function runLlmCall(
         });
         llmDeltaIndex += 1;
       } else if (chunk.type === "tool_call_delta") {
-        const toolCallId = chunk.toolCallId ?? `toolcall_${toolCallById.size}`;
-        const existing = toolCallById.get(toolCallId) ?? {
-          id: toolCallId,
-          name: chunk.name ?? `tool_${toolCallById.size}`,
-          argumentsText: ""
-        };
-        if (typeof chunk.name === "string" && chunk.name) {
-          existing.name = chunk.name;
-        }
-        if (typeof chunk.argumentsDelta === "string") {
-          existing.argumentsText += chunk.argumentsDelta;
-        }
-        toolCallById.set(toolCallId, existing);
+        toolCallAssembler.add(chunk);
       }
     }
 
-    const toolCalls = [...toolCallById.values()].map((entry) => {
+    const toolCalls = toolCallAssembler.calls().map((entry) => {
       let parsedArguments: Record<string, unknown> = {};
       try {
         parsedArguments = JSON.parse(entry.argumentsText || "{}") as Record<string, unknown>;
@@ -3727,7 +3716,7 @@ async function runLlmCall(
       input: estimateRequestTokens(streamRequest),
       output: estimateAnswerTokens(
         streamedText,
-        [...toolCallById.values()].map((entry) => ({ name: entry.name, arguments: entry.argumentsText }))
+        toolCallAssembler.calls().map((entry) => ({ name: entry.name, arguments: entry.argumentsText }))
       )
     }));
 
@@ -3895,20 +3884,33 @@ function buildGraphIndexes(workflow: Workflow): GraphIndexes {
   };
 }
 
+/** Phase 12 coverage — the run's memo of clean checks (see `guardScopeFor`). */
+function guardRunMemo(context: Pick<NodeRuntimeContext, "nodeOutputs" | "globals">, dependencies: Pick<WorkflowExecutionDependencies, "guard">) {
+  return dependencies.guard ? runVerdictMemoOf(dependencies.guard) : runVerdictMemoOf(STANDALONE_GUARD, context.nodeOutputs ?? context.globals);
+}
+
 /** Phase 12.1 — without guard dependencies, guard nodes use the built-in default profile and agents run unguarded. */
 const STANDALONE_GUARD: GuardRuntimeDependencies = {
   resolveRun: () => ({ source: "none", stack: [], chain: [] }),
   loadProfile: (profileId) => (profileId === "default" ? builtInGuardProfile() : undefined)
 };
 
+/**
+ * Phase 12 coverage — `options.memo`: the scope reuses earlier clean checks of
+ * this run. With the standalone fallback (shared by every run in the process)
+ * the memo is kept on the run's own output map, so it never crosses runs.
+ */
 function guardScopeFor(
   node: WorkflowNode,
   context: NodeRuntimeContext,
   dependencies: WorkflowExecutionDependencies,
-  placement: GuardEvalScope["placement"]
+  placement: GuardEvalScope["placement"],
+  options: { memo?: boolean } = {}
 ): GuardEvalScope {
+  const guard = dependencies.guard ?? STANDALONE_GUARD;
   return {
-    guard: dependencies.guard ?? STANDALONE_GUARD,
+    guard,
+    ...(options.memo ? { memo: guardRunMemo(context, dependencies) } : {}),
     resolveSecret: dependencies.resolveSecret,
     executionId: typeof context.globals.execution_id === "string" ? context.globals.execution_id : "",
     workflowId: context.workflow.id,

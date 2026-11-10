@@ -77,3 +77,39 @@ describe("rule set edits", () => {
     expect("labels" in setLabelTracking(on, false)).toBe(false);
   });
 });
+
+describe("fields the form does not show", () => {
+  const buffered = () => ({
+    id: "b",
+    name: "B",
+    version: "1",
+    channels: {
+      final_output: {
+        detectors: [{ id: "output.grounding", threshold: 0.5 }],
+        actions: { ungrounded: { action: "block", stream: "buffer", futureField: { keep: true } }, card_number: { action: "protect", providerId: "token_vault" } },
+        defaultAction: { action: "block", stream: "buffer", providerId: "token_vault", shadow: true }
+      }
+    }
+  });
+
+  it("survive toggling detectors, rules and the default action", () => {
+    let next = setDetector(buffered(), "final_output", "dlp.patterns", true);
+    next = setDetector(next, "final_output", "dlp.patterns", false);
+    next = setActionRule(next, "final_output", "email", { action: "redact" });
+    next = setChannelEnabled(next, "final_output", true);
+    const view = channelOf(next, "final_output")!;
+    expect(view.actions.ungrounded).toEqual({ action: "block", stream: "buffer", futureField: { keep: true } });
+    expect(view.actions.card_number).toEqual({ action: "protect", providerId: "token_vault" });
+    expect(view.defaultAction).toEqual({ action: "block", stream: "buffer", providerId: "token_vault", shadow: true });
+    const raw = (next.channels as Record<string, { actions: Record<string, unknown> }>).final_output!.actions.ungrounded;
+    expect(raw).toEqual({ action: "block", stream: "buffer", futureField: { keep: true } });
+  });
+
+  it("survive changing a rule's action and the default action", () => {
+    let next = setActionRule(buffered(), "final_output", "ungrounded", { action: "review" });
+    next = setDefaultAction(next, "final_output", "review");
+    const view = channelOf(next, "final_output")!;
+    expect(view.actions.ungrounded).toEqual({ action: "review", stream: "buffer", futureField: { keep: true } });
+    expect(view.defaultAction).toMatchObject({ action: "review", stream: "buffer", providerId: "token_vault" });
+  });
+});

@@ -108,6 +108,7 @@ import {
   resolveOidcSettings,
   resolveSamlSettings,
   parseTrustProxy,
+  toFastifyTrustProxy,
   resolveNetworkSettings,
   resolveSsoMfaSettings,
   resolveQueueSettings,
@@ -1469,8 +1470,8 @@ export async function createApp(
   // - `genReqId` falls back to nanoid for fresh requests; nanoid is already
   //   a transitive dep here and produces shorter URL-safe IDs than crypto
   //   randomUUID without collision risk in the lifetime of an instance.
-  // - `requestIdLogLabel: "reqId"` keys the ID under `reqId` in every log
-  //   line that Pino emits via request.log, so `grep reqId=<id>` works.
+  // - Fastify's default log label is `reqId`, so every line that Pino emits
+  //   via request.log carries the ID under `reqId` and `grep reqId=<id>` works.
   // The X-Request-ID response header is set in the onSend hook below so
   // clients (and curl --include) see the same ID their request carried.
   const app = Fastify({
@@ -1491,9 +1492,8 @@ export async function createApp(
     },
     bodyLimit: config.API_BODY_LIMIT_BYTES,
     // TRUST_PROXY unset = false: request.ip (and so the rate-limit key) is the address that connected.
-    trustProxy: parseTrustProxy(config.TRUST_PROXY),
+    trustProxy: toFastifyTrustProxy(parseTrustProxy(config.TRUST_PROXY)),
     requestIdHeader: "x-request-id",
-    requestIdLogLabel: "reqId",
     genReqId: () => nanoid()
   });
   // 12.6 — model allowlists. Every model call goes through this seam: each run, gateway sampling call, provider test,
