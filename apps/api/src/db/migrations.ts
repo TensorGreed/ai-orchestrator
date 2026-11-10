@@ -2686,6 +2686,56 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE api_keys DROP COLUMN IF EXISTS rotated_at;
       ALTER TABLE api_keys DROP COLUMN IF EXISTS superseded_by;
     `
+  },
+  {
+    version: 65,
+    description: "13.3 — retention: per-scope policies, the purge log, and indexes for purging by age",
+    // retention_policies is read from per-project retention on; scope_type is 'project' (other scopes are refused by
+    // the API). retention_runs keeps counts only, for 90 days. The indexes serve purging and counting by age.
+    // On a large install the execution_history index can take minutes to build, and CREATE INDEX blocks writes to the
+    // table meanwhile. To avoid that, build it beforehand with
+    //   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_execution_history_workflow_started ON execution_history(workflow_id, started_at);
+    // (and the same for the others): IF NOT EXISTS then skips each one here.
+    up: `
+      CREATE TABLE IF NOT EXISTS retention_policies (
+        id TEXT PRIMARY KEY,
+        scope_type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        data_class TEXT NOT NULL,
+        days INTEGER NOT NULL,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_retention_policies_scope ON retention_policies(scope_type, scope_id, data_class);
+      CREATE TABLE IF NOT EXISTS retention_runs (
+        id TEXT PRIMARY KEY,
+        started_at TIMESTAMPTZ NOT NULL,
+        finished_at TIMESTAMPTZ NOT NULL,
+        instance_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        counts_json TEXT NOT NULL DEFAULT '{}',
+        capped_json TEXT NOT NULL DEFAULT '[]',
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_retention_runs_started ON retention_runs(started_at);
+      CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_started ON execution_history(workflow_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_project_started ON mcp_tool_calls(project_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_project_created ON guard_events(project_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_session_memory_updated ON session_memory(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_session_artifacts_updated ON session_artifacts(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_session_tool_cache_created ON session_tool_cache(created_at);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_session_tool_cache_created;
+      DROP INDEX IF EXISTS idx_session_artifacts_updated;
+      DROP INDEX IF EXISTS idx_session_memory_updated;
+      DROP INDEX IF EXISTS idx_guard_events_project_created;
+      DROP INDEX IF EXISTS idx_mcp_tool_calls_project_started;
+      DROP INDEX IF EXISTS idx_execution_history_workflow_started;
+      DROP TABLE IF EXISTS retention_runs;
+      DROP TABLE IF EXISTS retention_policies;
+    `
   }
 ];
 

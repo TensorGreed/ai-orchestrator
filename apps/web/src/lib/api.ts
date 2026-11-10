@@ -110,6 +110,7 @@ import type {
   McpClientBudgetUsage,
   McpGatewayRateLimit,
   NetworkSettingsView,
+  RetentionAdminView,
   McpGatewaySessionView,
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -3885,6 +3886,11 @@ export async function updateMcpClientNetwork(
 /** 13.2 — the deployment's network allowlists (read-only) and how this browser's address fares (admin). */
 export async function fetchNetworkSettings() {
   return apiRequest<NetworkSettingsView>("/api/settings/network");
+}
+
+/** 13.3 — the deployment's retention per class, the backlog and the latest purges (admin, read-only). */
+export async function fetchRetention() {
+  return apiRequest<RetentionAdminView>("/api/admin/retention");
 }
 
 /** 12.2 — a client's open sessions on the instance that answers, with the labels each has collected. */

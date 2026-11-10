@@ -174,7 +174,9 @@ export const EXPORTED_TABLES = [
   "ai_gateway_route_sets",
   "ai_gateway_routes",
   "ai_gateway_client_grants",
-  "ai_gateway_requests"
+  "ai_gateway_requests",
+  // 13.3 — retention values per project
+  "retention_policies"
 ] as const;
 
 /** Tables db:export leaves out on purpose, and why (the runbook lists them as safe to lose). */
@@ -193,6 +195,7 @@ export const NOT_EXPORTED_TABLES: Record<string, string> = {
   cluster_instances: "liveness of running instances",
   cluster_run_owners: "which live instance runs a run",
   log_stream_events: "log stream delivery history",
+  retention_runs: "retention purge log (counts only), kept 90 days; the next purge writes a new one",
   guard_profile_revision: "a change counter the guard tables' triggers bump; caches only compare it",
   knowledge_base_chunks_fts: "SQLite full-text index, rebuilt from knowledge_base_chunks",
   knowledge_base_chunks_fts_config: "SQLite full-text index storage",

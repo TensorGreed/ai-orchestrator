@@ -271,6 +271,12 @@ See [Audit bundles and signed run manifests](../security/audit-bundles.md).
 - `GET /api/audit/signing-keys` (admin; `{ activeKeyId, canRotate, keys: [{ keyId, algorithm, publicKey, publicKeyPem, source, status, createdAt, retiredAt }] }`)
 - `POST /api/audit/signing-keys/rotate` (admin; `201 { key, keys }`; 409 when the key comes from `AUDIT_SIGNING_KEY_BASE64`; audited as `audit.signing_key.rotated`)
 
+## Data retention
+
+See [Data retention](../operations/data-retention.md).
+
+- `GET /api/admin/retention` (admin; read-only; `{ intervalMs, maxRowsPerTick, bounds: { minDays, maxDays }, backlogCap, classes: [{ class, label, what, setting, days, cutoff, backlog, backlogCapped }], lastRun, nextRunAt, runs: [{ id, startedAt, finishedAt, instanceId, reason, outcome, counts, capped, error }] }`; `days: 0` means kept forever, and `backlog` counts the rows due now up to `backlogCap`)
+
 ## Golden runs and replay
 
 See [Golden runs and replay](../product/golden-runs.md).

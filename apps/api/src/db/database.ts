@@ -56,6 +56,7 @@ import type {
   ReplayCaptureStatus,
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
+import type { RetentionRunView } from "@ai-orchestrator/shared";
 import { parseStoredGatewayRateLimit, type BudgetScopeType, type McpGatewayRateLimit } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
@@ -74,6 +75,16 @@ import {
   guardBindingScopeOf,
   toMcpToolPolicyEffect
 } from "./store-shared.js";
+import {
+  RETENTION_BATCH_ROWS,
+  isRetentionTable,
+  retentionRunFromRow,
+  retentionWhere,
+  yieldToEventLoop,
+  type RetentionRunRow,
+  type RetentionScope,
+  type RetentionTable
+} from "./retention-tables.js";
 import { GATEWAY_APPROVAL_ONE_PENDING_INDEX, ONE_PENDING_APPROVAL_INDEX, POLICY_SUGGESTION_ONE_OPEN_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
 import {
   normalizeMcpRuntimeLimits,
@@ -4335,6 +4346,37 @@ export class SqliteStore implements Store {
     this.ensureColumn("mcp_clients", "rotated_at", "TEXT");
     this.ensureColumn("mcp_clients", "expiry_notified_at", "TEXT");
     this.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_clients_previous_token_prefix ON mcp_clients(previous_token_prefix)`);
+    // 13.3 (v65) — retention: per-scope policies (read from R1 on), the purge log, and indexes for purging by age.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS retention_policies (
+        id TEXT PRIMARY KEY,
+        scope_type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        data_class TEXT NOT NULL,
+        days INTEGER NOT NULL,
+        updated_by TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_retention_policies_scope ON retention_policies(scope_type, scope_id, data_class);
+      CREATE TABLE IF NOT EXISTS retention_runs (
+        id TEXT PRIMARY KEY,
+        started_at TEXT NOT NULL,
+        finished_at TEXT NOT NULL,
+        instance_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        counts_json TEXT NOT NULL DEFAULT '{}',
+        capped_json TEXT NOT NULL DEFAULT '[]',
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_retention_runs_started ON retention_runs(started_at);
+      CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_started ON execution_history(workflow_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_project_started ON mcp_tool_calls(project_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_project_created ON guard_events(project_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_session_memory_updated ON session_memory(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_session_artifacts_updated ON session_artifacts(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_session_tool_cache_created ON session_tool_cache(created_at);
+    `);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -6172,6 +6214,51 @@ export class SqliteStore implements Store {
       this.persist();
     }
     return deleted;
+  }
+
+  async pruneRetentionTable(table: RetentionTable, scope: RetentionScope): Promise<number> {
+    if (!isRetentionTable(table)) throw new Error(`Not a retention table: ${String(table)}`);
+    const limit = Math.floor(scope.limit);
+    if (!Number.isFinite(limit) || limit <= 0) return 0;
+    // Batches by rowid (every table here has one), each its own statement, so a large purge never holds the event loop
+    // for longer than one batch: it yields between batches and other requests run in between.
+    const statement = this.db.prepare(
+      `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${retentionWhere(table, "?")} LIMIT ?)`
+    );
+    let total = 0;
+    while (total < limit) {
+      const batch = Math.min(RETENTION_BATCH_ROWS, limit - total);
+      const deleted = statement.run(scope.before, batch).changes;
+      total += deleted;
+      if (deleted < batch) break;
+      await yieldToEventLoop();
+    }
+    return total;
+  }
+
+  async countRetentionDue(table: RetentionTable, input: { before: string; cap: number }): Promise<number> {
+    if (!isRetentionTable(table)) throw new Error(`Not a retention table: ${String(table)}`);
+    const row = this.queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${table} WHERE ${retentionWhere(table, "?")} LIMIT ?)`,
+      [input.before, Math.max(0, Math.floor(input.cap))]
+    );
+    return row ? toNumber(row.n) : 0;
+  }
+
+  async saveRetentionRun(run: RetentionRunView): Promise<void> {
+    this.exec(
+      `INSERT INTO retention_runs (id, started_at, finished_at, instance_id, reason, outcome, counts_json, capped_json, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [run.id, run.startedAt, run.finishedAt, run.instanceId, run.reason, run.outcome, JSON.stringify(run.counts), JSON.stringify(run.capped), run.error]
+    );
+  }
+
+  async listRetentionRuns(limit: number): Promise<RetentionRunView[]> {
+    return this.queryAll<RetentionRunRow>(
+      `SELECT id, started_at, finished_at, instance_id, reason, outcome, counts_json, capped_json, error
+       FROM retention_runs ORDER BY started_at DESC, id DESC LIMIT ?`,
+      [Math.max(1, Math.min(500, Math.floor(limit)))]
+    ).map(retentionRunFromRow);
   }
 
   async saveWorkflowExecutionState(input: {

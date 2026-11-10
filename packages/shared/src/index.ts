@@ -36,3 +36,4 @@ export * from "./agent-tools";
 export * from "./guard-benchmark";
 export * from "./ai-gateway";
 export * from "./notification-events";
+export * from "./retention";

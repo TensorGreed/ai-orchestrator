@@ -26,6 +26,7 @@ import * as model_allowlist from "./postgres/model-allowlist.js";
 import * as queue from "./postgres/queue.js";
 import * as release from "./postgres/release.js";
 import * as replay from "./postgres/replay.js";
+import * as retention from "./postgres/retention.js";
 import * as schedules from "./postgres/schedules.js";
 import * as secrets from "./postgres/secrets.js";
 import * as sessions from "./postgres/sessions.js";
@@ -506,6 +507,18 @@ export class PostgresStore implements Store {
   }
   async pruneExecutionHistory(...args: Parameters<Store["pruneExecutionHistory"]>): ReturnType<Store["pruneExecutionHistory"]> {
     return executions.pruneExecutionHistory(this.ctx, ...args);
+  }
+  async pruneRetentionTable(...args: Parameters<Store["pruneRetentionTable"]>): ReturnType<Store["pruneRetentionTable"]> {
+    return retention.pruneRetentionTable(this.ctx, ...args);
+  }
+  async countRetentionDue(...args: Parameters<Store["countRetentionDue"]>): ReturnType<Store["countRetentionDue"]> {
+    return retention.countRetentionDue(this.ctx, ...args);
+  }
+  async saveRetentionRun(...args: Parameters<Store["saveRetentionRun"]>): ReturnType<Store["saveRetentionRun"]> {
+    return retention.saveRetentionRun(this.ctx, ...args);
+  }
+  async listRetentionRuns(...args: Parameters<Store["listRetentionRuns"]>): ReturnType<Store["listRetentionRuns"]> {
+    return retention.listRetentionRuns(this.ctx, ...args);
   }
   async saveWorkflowExecutionState(...args: Parameters<Store["saveWorkflowExecutionState"]>): ReturnType<Store["saveWorkflowExecutionState"]> {
     return executions.saveWorkflowExecutionState(this.ctx, ...args);

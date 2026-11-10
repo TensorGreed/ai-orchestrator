@@ -116,6 +116,7 @@ import {
   resolveMfaPolicy,
   resolveQueueSettings,
   resolveExecutionDispatch,
+  resolveRetentionSettings,
   ssoPostLoginUrl,
   toolArgumentSummariesEnabled,
   type AppConfig
@@ -188,6 +189,7 @@ import {
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GIT_SYNC_LOCK_WAIT_MS, GitSyncService } from "./services/git-sync-service.js";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
+import { RetentionService, captureStep, ruleSimulationStep, usageRetentionWarning } from "./services/retention-service.js";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
@@ -223,6 +225,7 @@ import { McpPolicySimulationService } from "./services/mcp-policy-simulation-ser
 import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-service.js";
 import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
+import { registerRetentionRoutes } from "./retention-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
@@ -232,7 +235,7 @@ import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
+import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
 import { registerServiceAccountRoutes } from "./service-account-routes.js";
@@ -1916,67 +1919,9 @@ export async function createApp(
     if (clusterMode) announce({ t: "workflow_changed", id: workflowId });
   };
 
-  const pruneExecutionHistory = async (reason: "startup" | "interval" | "write") => {
-    const retentionDays = config.EXECUTION_HISTORY_RETENTION_DAYS;
-    if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
-      return 0;
-    }
-    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const deleted = await store.pruneExecutionHistory({ before: cutoff });
-      if (deleted > 0) {
-        app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned execution history");
-      }
-      return deleted;
-    } catch (error) {
-      app.log.warn(
-        {
-          cutoff,
-          retentionDays,
-          reason,
-          error: secretService.redact(error instanceof Error ? error.message : String(error))
-        },
-        "Failed to prune execution history"
-      );
-      return 0;
-    }
-  };
-
-  // Phase 15.2 — finished eval runs and replay jobs, on the same timer. The
-  // newest run of every set is kept.
-  const pruneEvalRuns = async (reason: "startup" | "interval") => {
-    const retentionDays = config.EVAL_RUN_RETENTION_DAYS;
-    if (retentionDays <= 0) return 0;
-    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const deleted = await store.pruneEvalRuns({ before: cutoff });
-      if (deleted > 0) app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned eval runs and replay jobs");
-      return deleted;
-    } catch (error) {
-      app.log.warn(
-        { cutoff, retentionDays, reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) },
-        "Failed to prune eval runs and replay jobs"
-      );
-      return 0;
-    }
-  };
-
-  await pruneExecutionHistory("startup");
-  await pruneEvalRuns("startup");
-  const retentionTimer = config.EXECUTION_HISTORY_RETENTION_DAYS > 0 || config.EVAL_RUN_RETENTION_DAYS > 0
-    // promise-ok: both prunes catch and log their own errors
-    ? setInterval(async () => {
-        await pruneExecutionHistory("interval");
-        await pruneEvalRuns("interval");
-      }, config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS)
-    : null;
-  if (retentionTimer) {
-    const timerWithUnref = retentionTimer as { unref?: () => void };
-    timerWithUnref.unref?.();
-    app.addHook("onClose", async () => {
-      clearInterval(retentionTimer);
-    });
-  }
+  // 13.3 — every purge by age goes through the retention service (created below, once the leader election, audit and
+  // log streaming exist; started when the app is ready). A finished run nudges it.
+  let retentionService: RetentionService | null = null;
 
   if (clusterMode) {
     // Phase 13.1 — the shared flow state expires on the database clock; the session cleanup tick removes what expired.
@@ -2164,7 +2109,7 @@ export async function createApp(
       }
       if (meta.phase === "final") {
         handOffCapture(meta.executionId);
-        await pruneExecutionHistory("write");
+        retentionService?.nudge();
         // Phase 15.1 — replays are experiments, not traffic: they stay out of execution metrics and SLOs.
         if (meta.triggerType !== REPLAY_TRIGGER_TYPE) {
           const status = meta.status === "success" ? "success" : meta.status === "canceled" ? "canceled" : "error";
@@ -4962,11 +4907,40 @@ export async function createApp(
     bufferSize: config.LOG_STREAM_BUFFER_SIZE,
     retryMaxAttempts: config.LOG_STREAM_RETRY_MAX_ATTEMPTS,
     eventRetentionDays: config.LOG_STREAM_EVENT_RETENTION_DAYS,
-    eventPruneIntervalMs: config.LOG_STREAM_EVENT_PRUNE_INTERVAL_MS
+    eventPruneIntervalMs: config.LOG_STREAM_EVENT_PRUNE_INTERVAL_MS,
+    // 13.3 — only the leader prunes delivery history.
+    shouldPrune: () => leaderElection.isLeader()
   });
   logStreamingService.start();
   app.addHook("onClose", async () => {
     await logStreamingService.stop();
+  });
+
+  // 13.3 — the retention service: leader-only, one instance at a time (its lease), batched, recorded. Captured runs and
+  // rule simulations register their steps further down, once their services exist.
+  const retention = new RetentionService({
+    store,
+    settings: resolveRetentionSettings(config),
+    executionHistoryDays: config.EXECUTION_HISTORY_RETENTION_DAYS,
+    evalRunDays: config.EVAL_RUN_RETENTION_DAYS,
+    intervalMs: config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS,
+    instanceId: leaderElection.getInstanceId(),
+    isLeader: () => leaderElection.isLeader(),
+    metrics: metricsService,
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
+    },
+    logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },
+    redact: (text) => String(secretService.redact(text))
+  });
+  retentionService = retention;
+  // 13.3 — usage retention is applied since 13.3. An .env copied from an older .env.example still sets 365; say loudly
+  // what that now deletes, so an operator who wants to keep chargeback history removes it or sets 0.
+  const usageWarning = usageRetentionWarning(config.USAGE_EVENTS_RETENTION_DAYS);
+  if (usageWarning) app.log.warn(usageWarning.fields, usageWarning.message);
+  app.addHook("onClose", async () => {
+    await retention.stop();
   });
 
   const notificationService = new NotificationService(config, async () =>
@@ -5412,9 +5386,11 @@ export async function createApp(
     return { channel: "draft" };
   };
 
+  // 13.3 — the leader prunes (every instance did before); HA off, every instance is its own leader, as before.
   const pruneAuditLogs = async (reason: "startup" | "interval") => {
     const retentionDays = config.AUDIT_LOG_RETENTION_DAYS;
     if (!Number.isFinite(retentionDays) || retentionDays <= 0) return 0;
+    if (!leaderElection.isLeader()) return 0;
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
     try {
       const deleted = await auditService.purge({ before: cutoff });
@@ -5430,7 +5406,7 @@ export async function createApp(
       return 0;
     }
   };
-  await pruneAuditLogs("startup");
+  // The start-up audit prune runs with the start-up retention purge (below), once leadership is known.
   const auditRetentionTimer = config.AUDIT_LOG_RETENTION_DAYS > 0
     // promise-ok: the task catches and logs its own errors
     ? setInterval(async () => await pruneAuditLogs("interval"), config.AUDIT_LOG_PRUNE_INTERVAL_MS)
@@ -14208,6 +14184,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     environmentSecretValues: () => environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
+  registerRetentionRoutes({ app, retention, requireRole: (request, reply, roles) => requireRole(request, reply, roles) });
   registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, audit: async (request, user, event) => await audit(request, user, event) });
 
   // Phase 15.1 — golden runs and replay.
@@ -14354,19 +14331,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   });
   if (captureAvailable) {
     replayCapture = captureService;
-    // Retention for captured runs nobody promoted, on the execution-history timer's interval.
-    const pruneCaptures = async (reason: "startup" | "interval") => {
-      try {
-        const deleted = await captureService.pruneExpired();
-        if (deleted > 0) app.log.info({ deleted, reason, retentionDays: captureService.deployment.retentionDays }, "Pruned captured runs past retention");
-      } catch (error) {
-        app.log.warn({ reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Failed to prune captured runs");
-      }
-    };
-    await pruneCaptures("startup");
-    // promise-ok: the task catches and logs its own errors
-    const captureRetentionTimer = setInterval(async () => await pruneCaptures("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
-    (captureRetentionTimer as { unref?: () => void }).unref?.();
+    // 13.3 — captured runs nobody promoted are purged by the retention service (REPLAY_CAPTURE_RETENTION_DAYS).
+    retention.register(captureStep(() => captureService.deployment.retentionDays, async (before) => await store.pruneReplayCaptures(before)));
     // Tickets of runs that never wrote their final history are given back on this timer too (the sweep is cheap).
     const captureSweepTimer = setInterval(() => {
       sweepStaleCaptures();
@@ -14379,7 +14345,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }, CAPTURE_SWEEP_INTERVAL_MS);
     (captureSweepTimer as { unref?: () => void }).unref?.();
     app.addHook("onClose", async () => {
-      clearInterval(captureRetentionTimer);
       clearInterval(captureSweepTimer);
       replayCapture = null;
       await captureService.idle();
@@ -14493,22 +14458,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to finish interrupted guard simulations");
     }
   }
-  // Kept GUARD_SIMULATION_RETENTION_DAYS, pruned on the execution-history timer with their replay jobs.
-  const pruneGuardSimulations = async (reason: "startup" | "interval") => {
-    const cutoff = new Date(Date.now() - GUARD_SIMULATION_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const deleted = await guardSimulationService.prune(cutoff);
-      if (deleted > 0) app.log.info({ deleted, cutoff, reason }, "Pruned guard simulations");
-    } catch (err) {
-      app.log.warn({ cutoff, reason, err: err instanceof Error ? err.message : String(err) }, "Failed to prune guard simulations");
-    }
-  };
-  await pruneGuardSimulations("startup");
-  // promise-ok: the task catches and logs its own errors
-  const simulationPruneTimer = setInterval(async () => await pruneGuardSimulations("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
-  (simulationPruneTimer as { unref?: () => void }).unref?.();
-  app.addHook("onClose", async () => {
-    clearInterval(simulationPruneTimer);
+  // Kept GUARD_SIMULATION_RETENTION_DAYS, purged by the retention service with their replay jobs.
+  retention.register(ruleSimulationStep(async (before) => await guardSimulationService.prune(before)));
+  // 13.3 — every step is registered: the start-up purges run once the leader is known.
+  // The leader election has started by now (an earlier onReady hook), so an HA leader purges at start-up too.
+  app.addHook("onReady", async () => {
+    await pruneAuditLogs("startup");
+    await retention.start();
   });
 
   registerMcpTestingRoutes({

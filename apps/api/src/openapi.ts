@@ -116,6 +116,18 @@ export const openApiSpec = {
       }
     },
 
+    "/api/admin/retention": {
+      get: {
+        tags: ["Observability"],
+        summary:
+          "Data retention (admin, read-only): days kept per class and the setting each comes from (0 = kept forever), the rows due now (counted up to backlogCap), the latest purges with their counts, and when the next interval purge is due",
+        responses: {
+          "200": { description: "Retention view" },
+          "403": { description: "Not an admin" }
+        }
+      }
+    },
+
     // ── Auth ───────────────────────────────────────────────────────────────
     "/api/auth/register": {
       post: {
