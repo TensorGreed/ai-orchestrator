@@ -193,6 +193,12 @@ export interface GuardRuntimeDependencies {
    * Reveal node reveals nothing unless this is set, and fails when it throws.
    */
   onReveal?(event: GuardRevealEvent): Promise<void> | void;
+  /**
+   * Phase 12 coverage — the content rules of a sub-workflow this run starts: the API scopes the vault (Protect steps
+   * tag the child's project) and the Reveal node to the child's project. Absent: the engine keeps these
+   * dependencies, with reveal off for a child in another project.
+   */
+  forWorkflow?(workflow: { id: string; projectId: string | null }): GuardRuntimeDependencies;
 }
 
 /** Phase 12 coverage — one Reveal node step, for rule events and the audit log. */
@@ -208,6 +214,8 @@ export interface GuardRevealEvent {
   refused: RevealClassSummary[];
   /** A person approved this reveal. */
   approved: boolean;
+  /** Who approved it (their user id), when the resumed decision says so. */
+  approvedBy?: string;
 }
 
 export interface GuardEvalScope {

@@ -50,6 +50,11 @@ export interface RevealTokensOptions {
   vaultPrefix?: string;
   /** Distinct tokens one call may look at (default 1000); more fails the call. */
   maxTokens?: number;
+  /**
+   * Called for each token turned into its value. The caller keeps the pair in memory only (the engine uses it to put
+   * the token back wherever the run stores or sends the value); never stored or logged.
+   */
+  onRevealed?(token: string, value: string): void;
 }
 
 export interface RevealTokensResult {
@@ -200,6 +205,7 @@ export async function revealTokens(content: unknown, options: RevealTokensOption
       entry.hashes.add(hash);
       revealed.set(outcome.dataClass, entry);
       if (outcome.grant.requireApproval) approvalHashes.add(hash);
+      options.onRevealed?.(span.token, outcome.value);
       out += text.slice(cursor, span.start) + outcome.value;
       cursor = span.end;
     }

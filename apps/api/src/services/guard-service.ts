@@ -34,6 +34,7 @@ import {
   type TokenVaultStorage
 } from "@ai-orchestrator/guard-sdk";
 import {
+  DEFAULT_PROJECT_ID,
   DESTINATION_PREVIEW_SIMULATION_PROFILE,
   DESTINATION_RULES_OBSERVING_DAYS,
   GUARD_BUILTIN_PROFILE_ID,
@@ -198,6 +199,14 @@ export interface GuardProfileSubstitute {
   name: string;
   profile: GuardProfile;
   inline: boolean;
+}
+
+/**
+ * Phase 12 coverage — the vault scope of tokens a gateway toolset or route set without a project issues. No workflow
+ * run's project matches it, so no Reveal node reveals them.
+ */
+export function gatewayVaultScope(toolsetId: string): string {
+  return `gateway:${toolsetId}`;
 }
 
 /** Parsed guard profile versions kept per service (a version's document never changes). */
@@ -741,7 +750,9 @@ export class GuardService {
     return {
       resolveRun: () => resolution,
       loadProfile: async (profileId) => await this.loadProfile(profileId),
-      vault: this.vaultFor({ projectId: context.projectId, executionId: context.executionId }),
+      // Phase 12 coverage — a toolset or route set without a project tags its tokens with its own scope, which no
+      // workflow run's project matches (a null project would read as a token issued before tokens were scoped).
+      vault: this.vaultFor({ projectId: context.projectId ?? gatewayVaultScope(context.toolsetId), executionId: context.executionId }),
       onVerdict: async (event) => await this.recordVerdict(event, { executionId: context.executionId, workflowId: context.workflowId ?? "", projectId: context.projectId }),
       // A gateway server tool call runs no Reveal node; reveal stays off.
       projectId: context.projectId,
@@ -869,7 +880,7 @@ export class GuardService {
   runtimeFor(context: GuardRunContext): GuardRuntimeDependencies {
     const override = context.profileOverride;
     const substitute = context.profileSubstitute;
-    return {
+    const runtime: GuardRuntimeDependencies = {
       resolveRun: async () => await this.resolveRun(context),
       // Phase 16 — a simulation's unsaved document may opt in; stored versions are checked in one cached query.
       mayUseLabels: async () => (substitute ? profileUsesLabels(substitute.profile) : false) || await this.mayUseLabels(),
@@ -893,6 +904,23 @@ export class GuardService {
       // A simulation compares every checkpoint on both sides, clean ones included.
       ...(context.simulation ? { recordCleanOutbound: true } : {})
     };
+    const runProject = context.projectId ?? DEFAULT_PROJECT_ID;
+    // Phase 12 coverage — a sub-workflow in another project: its Protect steps tag its own project, and it never
+    // reveals (its tokens and the run's rule sets belong to different projects). Its checks keep the run's rule sets.
+    const forWorkflow = (workflow: { id: string; projectId: string | null }): GuardRuntimeDependencies => {
+      const childProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
+      if (childProject === runProject) return runtime;
+      const { onReveal: _onReveal, ...rest } = runtime;
+      return {
+        ...rest,
+        vault: context.simulation?.vault ?? this.vaultFor({ projectId: childProject, executionId: context.executionId ?? null }),
+        projectId: childProject,
+        revealDisabled: true,
+        forWorkflow
+      };
+    };
+    runtime.forWorkflow = forWorkflow;
+    return runtime;
   }
 
   // -------------------------------------------------------------------------
@@ -1125,14 +1153,16 @@ export class GuardService {
         ...(context.runSource ? { runSource: context.runSource } : {})
       };
     };
-    await this.store.insertGuardEvents([...event.revealed.map((entry) => row(entry, true)), ...event.refused.map((entry) => row(entry, false))]);
-    const userId = event.subject?.serviceAccountId ?? event.subject?.userId ?? null;
+    // Only a person (or a service account) who started the run is the actor; webhook, schedule, chat and gateway
+    // runs are the system's, with the subject in the metadata.
+    const startedBy = event.subject?.serviceAccountId ?? (event.subject?.source === "user" ? event.subject.userId : undefined);
+    // The audit entry first: when it cannot be written the node fails, and no event claims a reveal.
     await this.options.audit?.({
       eventType: "content_rules.reveal",
       category: "execution",
       action: "reveal",
       outcome: event.revealed.length > 0 ? "success" : "denied",
-      actor: userId ? { type: "user", userId } : { type: "system" },
+      actor: startedBy ? { type: "user", userId: startedBy } : { type: "system" },
       resourceType: "workflow",
       ...(event.workflowId ? { resourceId: event.workflowId } : {}),
       projectId: context.projectId ?? null,
@@ -1141,11 +1171,13 @@ export class GuardService {
         nodeId: event.nodeId,
         subject: event.subject,
         approved: event.approved,
+        ...(event.approvedBy ? { approvedBy: event.approvedBy } : {}),
         revealed: event.revealed.map((entry) => ({ dataClass: entry.dataClass ?? null, count: entry.count, ...(entry.rule ? { rule: entry.rule } : {}) })),
         refused: event.refused.map((entry) => ({ dataClass: entry.dataClass ?? null, count: entry.count, reason: entry.reason ?? null }))
       },
       message: `Reveal node ${event.nodeId}: revealed ${event.revealed.reduce((total, entry) => total + entry.count, 0)}, refused ${event.refused.reduce((total, entry) => total + entry.count, 0)}`
     });
+    await this.store.insertGuardEvents([...event.revealed.map((entry) => row(entry, true)), ...event.refused.map((entry) => row(entry, false))]);
   }
 
   async listEvents(filters: GuardEventFilters & { limit?: number; offset?: number }): Promise<{ events: GuardEventView[]; total: number }> {

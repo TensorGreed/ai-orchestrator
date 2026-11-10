@@ -327,7 +327,8 @@ export function GuardRevealFields({ config, setConfig, secrets }: { config: Conf
       <div className="cfg-tip">
         Turns protected tokens in one field back into the original values, only for the data classes the rule set&apos;s reveal rules allow whoever started
         the run. Nobody may reveal unless a rule says so. Webhook, chat and schedule runs never match role or user rules. Revealed values count as sensitive
-        again, so destination rules decide where they may go. Replays never reveal.
+        again, so destination rules decide where they may go. Only the following steps of this run see the values: run history keeps the tokens.
+        Replays never reveal.
       </div>
       <div className="cfg-field">
         <label className="cfg-label" htmlFor="guard-reveal-profile">
@@ -342,7 +343,10 @@ export function GuardRevealFields({ config, setConfig, secrets }: { config: Conf
           ))}
           {profileId !== "effective" && !profiles.some((profile) => profile.id === profileId) && <option value={profileId}>{profileId}</option>}
         </select>
-        <div className="cfg-help">Its reveal rules decide who may reveal which data classes. Only an admin can write reveal rules.</div>
+        <div className="cfg-help">
+          Only rule sets bound to this workflow or its project count: a rule set chosen here reveals nothing unless it is bound. Its reveal rules
+          decide who may reveal which data classes. Only an admin can write reveal rules.
+        </div>
       </div>
       <div className="cfg-field">
         <label className="cfg-label" htmlFor="guard-reveal-field">

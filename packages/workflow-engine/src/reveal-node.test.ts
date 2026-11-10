@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { DefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createAesGcmProvider, hashGuardProfile, InMemoryTokenVaultStorage, parseGuardProfile, type GuardProfileInput } from "@ai-orchestrator/guard-sdk";
-import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
+import { createDefaultMCPRegistry, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
-import type { McpToolPolicySubject, Workflow, WorkflowExecutionState, WorkflowNode } from "@ai-orchestrator/shared";
-import { executeWorkflow, resumeWorkflowExecution, type WorkflowExecutionDependencies } from "./executor";
+import { resolvePendingApproval, type McpToolPolicySubject, type Workflow, type WorkflowExecutionState, type WorkflowNode } from "@ai-orchestrator/shared";
+import { executeWorkflow, resumeWorkflowExecution, runRevealedValues, type WorkflowExecutionDependencies } from "./executor";
 import { builtInGuardProfile, type GuardRevealEvent, type GuardRunResolution, type ResolvedGuardProfile } from "./guard-runtime";
 import { validateWorkflowGraph } from "./validation";
 
@@ -41,7 +41,10 @@ const PROFILES: Record<string, ResolvedGuardProfile> = {
     }
   }),
   approval: resolved("approval", { ...base("approval"), reveal: { rules: [{ dataClasses: ["card_number"], subjects: { roles: ["admin"] }, requireApproval: true }] } }),
-  scoped: resolved("scoped", { ...base("scoped"), reveal: { rules: [{ dataClasses: ["card_number"], subjects: { roles: ["admin"] }, workflows: ["another-workflow"] }] } })
+  scoped: resolved("scoped", { ...base("scoped"), reveal: { rules: [{ dataClasses: ["card_number"], subjects: { roles: ["admin"] }, workflows: ["another-workflow"] }] } }),
+  // An enforced rule set with a reveal block and no rules: the ceiling, no reveal at all in its project.
+  ceiling: resolved("ceiling", { ...base("ceiling"), reveal: { rules: [] } }),
+  plain: resolved("plain", base("plain"))
 };
 
 async function vault() {
@@ -54,10 +57,13 @@ async function vault() {
   return storage;
 }
 
-async function guardDeps(options: { stack?: string[]; projectId?: string | null; revealDisabled?: boolean; onReveal?: (event: GuardRevealEvent) => void | Promise<void>; noRecorder?: boolean } = {}) {
+async function guardDeps(
+  options: { stack?: string[]; enforced?: string; projectId?: string | null; revealDisabled?: boolean; onReveal?: (event: GuardRevealEvent) => void | Promise<void>; noRecorder?: boolean } = {}
+) {
   const reveals: GuardRevealEvent[] = [];
-  const stack = (options.stack ?? []).map((id) => PROFILES[id]!);
-  const resolution: GuardRunResolution = { source: stack.length ? "project" : "none", stack, chain: [] };
+  const enforced = options.enforced ? PROFILES[options.enforced]! : undefined;
+  const stack = [...(enforced ? [enforced] : []), ...(options.stack ?? []).map((id) => PROFILES[id]!)];
+  const resolution: GuardRunResolution = { source: enforced ? "enforced" : stack.length ? "project" : "none", ...(enforced ? { enforced } : {}), stack, chain: [] };
   return {
     reveals,
     guard: {
@@ -79,11 +85,30 @@ async function guardDeps(options: { stack?: string[]; projectId?: string | null;
   };
 }
 
+/** What the downstream `sink` node sent (an MCP tool call): the run's own nodes get the revealed values. */
+let sent: Array<Record<string, unknown>> = [];
+
+function sinkRegistry() {
+  const registry = createDefaultMCPRegistry();
+  registry.register({
+    definition: { id: "sink-mcp", label: "Sink", description: "Test", configSchema: {}, authSchema: {} },
+    async discoverTools() {
+      return [{ serverId: "sink-mcp", serverLabel: "Sink", name: "send", description: "Send", inputSchema: { type: "object", properties: {} } }];
+    },
+    async invokeTool(_name: string, args: Record<string, unknown>) {
+      sent.push(args);
+      if (args.fail) return { ok: false, error: `Rejected ${String(args.text)}` };
+      return { ok: true, output: { echoed: args.text } };
+    }
+  } as unknown as MCPServerAdapter);
+  return registry;
+}
+
 function deps(guard: WorkflowExecutionDependencies["guard"], extra: Partial<WorkflowExecutionDependencies> = {}, paused?: WorkflowExecutionState[]): WorkflowExecutionDependencies {
   return {
     providerRegistry: new ProviderRegistry(),
     connectorRegistry: createDefaultConnectorRegistry(),
-    mcpRegistry: createDefaultMCPRegistry(),
+    mcpRegistry: sinkRegistry(),
     agentRuntime: new DefaultAgentRuntime(),
     resolveSecret: async (ref) => (ref?.secretId === "sec_key" ? KEY.toString("base64") : undefined),
     ...(guard ? { guard } : {}),
@@ -98,16 +123,23 @@ function node(id: string, type: string, config: Record<string, unknown> = {}): W
   return { id, type: type as WorkflowNode["type"], name: id, position: { x: 0, y: 0 }, config };
 }
 
-function revealWorkflow(config: Record<string, unknown> = {}): Workflow {
+function revealWorkflow(config: Record<string, unknown> = {}, sinkArgs = '{"text":"{{text}}"}'): Workflow {
   return {
     id: "wf-reveal",
     name: "Reveal",
     schemaVersion: "1.0.0",
     workflowVersion: 1,
-    nodes: [node("in", "webhook_input"), node("reveal", "guard_reveal", { inputField: "text", ...config }), node("out", "output")],
+    projectId: "proj-a",
+    nodes: [
+      node("in", "webhook_input"),
+      node("reveal", "guard_reveal", { inputField: "text", ...config }),
+      node("sink", "mcp_tool", { serverId: "sink-mcp", toolName: "send", argsTemplate: sinkArgs, retry: { enabled: false } }),
+      node("out", "output")
+    ],
     edges: [
       { id: "e1", source: "in", target: "reveal" },
-      { id: "e2", source: "reveal", target: "out" }
+      { id: "e2", source: "reveal", target: "sink" },
+      { id: "e3", source: "sink", target: "out" }
     ]
   };
 }
@@ -119,13 +151,18 @@ const ANA: McpToolPolicySubject = { role: "operator", source: "user", userId: "u
 const statusOf = (result: Awaited<ReturnType<typeof executeWorkflow>>, id: string) => result.nodeResults.filter((entry) => entry.nodeId === id).at(-1);
 const revealOutput = (result: Awaited<ReturnType<typeof executeWorkflow>>) => statusOf(result, "reveal")?.output as Record<string, any>;
 
-async function run(text: unknown, options: { subject?: McpToolPolicySubject; config?: Record<string, unknown>; guard?: Awaited<ReturnType<typeof guardDeps>>; extra?: Partial<WorkflowExecutionDependencies> } = {}) {
+async function run(
+  text: unknown,
+  options: { subject?: McpToolPolicySubject; config?: Record<string, unknown>; guard?: Awaited<ReturnType<typeof guardDeps>>; extra?: Partial<WorkflowExecutionDependencies>; sinkArgs?: string } = {}
+) {
   const guarded = options.guard ?? (await guardDeps({ stack: ["support"] }));
+  sent = [];
   const result = await executeWorkflow(
-    { workflow: revealWorkflow(options.config), executionId: "exec-r", webhookPayload: { text }, ...(options.subject ? { toolPolicySubject: options.subject } : {}) },
+    { workflow: revealWorkflow(options.config, options.sinkArgs), executionId: "exec-r", webhookPayload: { text }, ...(options.subject ? { toolPolicySubject: options.subject } : {}) },
     deps(guarded.guard, options.extra)
   );
-  return { result, reveals: guarded.reveals };
+  // What the downstream node got in the run (the revealed values), and what the run keeps (tokens).
+  return { result, reveals: guarded.reveals, got: sent.at(-1)?.text };
 }
 
 describe("Reveal node", () => {
@@ -136,6 +173,7 @@ describe("Reveal node", () => {
     const output = revealOutput(result);
     expect(output.text).toBe(`Card ${CARD_TOKEN}`);
     expect(output.reveal.revealed).toEqual([]);
+    expect(runRevealedValues(result)).toBe(false);
     expect(output.reveal.refused).toEqual([expect.objectContaining({ dataClass: "card_number", reason: "no_rule", count: 1 })]);
     expect(reveals).toHaveLength(1);
     expect(JSON.stringify(reveals)).not.toContain(CARD);
@@ -143,9 +181,16 @@ describe("Reveal node", () => {
   });
 
   it("reveals for a signed-in admin, records counts and hashes only, and labels the output sensitive with its class", async () => {
-    const { result, reveals } = await run({ note: `Card ${CARD_TOKEN} for ${EMAIL_TOKEN}` }, { subject: ADMIN });
+    const { result, reveals, got } = await run({ note: `Card ${CARD_TOKEN} for ${EMAIL_TOKEN}` }, { subject: ADMIN, sinkArgs: '{"text":"{{text.note}}"}' });
     const output = revealOutput(result);
-    expect(output.text).toEqual({ note: `Card ${CARD} for ${EMAIL_TOKEN}` });
+    expect(got).toBe(`Card ${CARD} for ${EMAIL_TOKEN}`);
+    // The run keeps the token: its result never holds the revealed value.
+    expect(output.text).toEqual({ note: `Card ${CARD_TOKEN} for ${EMAIL_TOKEN}` });
+    expect(JSON.stringify(result)).not.toContain(CARD);
+    // The API keeps such a run out of replay capture and cassettes (the mark survives a copy, never serialises).
+    expect(runRevealedValues(result)).toBe(true);
+    expect(runRevealedValues({ ...result })).toBe(true);
+    expect(JSON.parse(JSON.stringify(result))).toEqual(JSON.parse(JSON.stringify({ ...result })));
     expect(output.reveal.revealed).toEqual([
       expect.objectContaining({ dataClass: "card_number", count: 1, rule: { profileId: "support", version: 1, index: 0, name: "Billing admins" } })
     ]);
@@ -168,21 +213,21 @@ describe("Reveal node", () => {
 
   it("matches users by id and service accounts only by explicit id", async () => {
     const ana = await run(`Mail ${EMAIL_TOKEN}`, { subject: ANA });
-    expect(revealOutput(ana.result).text).toBe(`Mail ${EMAIL}`);
+    expect(ana.got).toBe(`Mail ${EMAIL}`);
     const serviceAccount = await run(`Mail ${EMAIL_TOKEN} card ${CARD_TOKEN}`, { subject: { role: "admin", source: "user", userId: "sa-crm", serviceAccountId: "sa-crm" } });
     // The service account's admin role matches no role rule; its own id matches the email rule.
-    expect(revealOutput(serviceAccount.result).text).toBe(`Mail ${EMAIL} card ${CARD_TOKEN}`);
+    expect(serviceAccount.got).toBe(`Mail ${EMAIL} card ${CARD_TOKEN}`);
     const other = await run(`Mail ${EMAIL_TOKEN}`, { subject: { role: "admin", source: "owner", serviceAccountId: "sa-other" } });
     expect(revealOutput(other.result).text).toBe(`Mail ${EMAIL_TOKEN}`);
   });
 
   it("refuses tokens from another project, and older unscoped tokens unless an admin started the run", async () => {
-    const { result } = await run(`${OTHER_PROJECT_TOKEN} ${LEGACY_TOKEN}`, { subject: ADMIN });
-    expect(revealOutput(result).text).toBe(`${OTHER_PROJECT_TOKEN} 4000 0566 5566 5556`);
+    const { result, got } = await run(`${OTHER_PROJECT_TOKEN} ${LEGACY_TOKEN}`, { subject: ADMIN });
+    expect(got).toBe(`${OTHER_PROJECT_TOKEN} 4000 0566 5566 5556`);
     expect(revealOutput(result).reveal.refused).toEqual([expect.objectContaining({ dataClass: "card_number", reason: "other_project" })]);
     const builderStack = await guardDeps({ stack: ["support"] });
     const ana = await run(`${EMAIL_TOKEN}`, { subject: ANA, guard: builderStack });
-    expect(revealOutput(ana.result).text).toBe(EMAIL);
+    expect(ana.got).toBe(EMAIL);
   });
 
   it("limits a rule to its workflows", async () => {
@@ -196,7 +241,8 @@ describe("Reveal node", () => {
     const card = await aes.protect(CARD, { dataClass: "card_number", keyId: "sec_key" });
     const email = await aes.protect(EMAIL, { dataClass: "email", keyId: "sec_key" });
     const listed = await run(`${card} ${email}`, { subject: ADMIN, config: { keySecretRefs: [{ secretId: "sec_key" }] } });
-    expect(revealOutput(listed.result).text).toBe(`${CARD} ${email}`);
+    expect(listed.got).toBe(`${CARD} ${email}`);
+    expect(JSON.stringify(listed.result)).not.toContain(CARD);
     expect(revealOutput(listed.result).reveal.refused).toEqual([expect.objectContaining({ reason: "not_decryptable" })]);
     const unlisted = await run(card, { subject: ADMIN });
     expect(revealOutput(unlisted.result).text).toBe(card);
@@ -223,11 +269,16 @@ describe("Reveal node", () => {
     expect(paused[0]?.approvalHandoff).toMatchObject({ kind: "rerun", source: "reveal_node" });
     expect(JSON.stringify(paused[0])).not.toContain(CARD);
     expect(guarded.reveals).toHaveLength(0);
-    const approved = await resumeWorkflowExecution({ executionId: "exec-ap", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps(guarded.guard));
+    // Only an admin other than the person who started the run may approve, and a rejection needs a reason.
+    expect(paused[0]?.approvalHandoff).toMatchObject({ request: { kind: "guard", approverRoles: ["admin"], allowSelfApproval: false, requireRejectReason: true } });
+    expect(resolvePendingApproval(paused[0]!).request).toMatchObject({ allowSelfApproval: false, approverRoles: ["admin"] });
+    sent = [];
+    const approved = await resumeWorkflowExecution({ executionId: "exec-ap", state: paused[0]!, decision: "approve", actedBy: "u-approver" }, deps(guarded.guard));
     expect(approved.status).toBe("success");
-    expect(revealOutput(approved).text).toBe(CARD);
+    expect(sent.at(-1)?.text).toBe(CARD);
+    expect(JSON.stringify(approved)).not.toContain(CARD);
     expect(revealOutput(approved).reveal.approved).toBe(true);
-    expect(guarded.reveals[0]?.approved).toBe(true);
+    expect(guarded.reveals[0]).toMatchObject({ approved: true, approvedBy: "u-approver" });
     const rejected = await resumeWorkflowExecution({ executionId: "exec-ap", state: paused[0]!, decision: "reject", actedBy: "admin" }, deps(guarded.guard));
     expect(rejected.status).toBe("error");
     expect(JSON.stringify(rejected)).not.toContain(CARD);
@@ -265,6 +316,130 @@ describe("Reveal node", () => {
     expect(revealOutput(result).text).toBe("Nothing protected here");
     expect(revealOutput(result).reveal).toEqual({ field: "text", revealed: [], refused: [] });
     expect(reveals).toHaveLength(0);
+  });
+
+  it("takes reveal rules only from rule sets that apply to the run (a node cannot name an unbound one)", async () => {
+    // Nothing bound: a node naming a stored rule set with reveal rules reveals nothing.
+    const unbound = await run(CARD_TOKEN, { subject: ADMIN, guard: await guardDeps(), config: { profileId: "support" } });
+    expect(unbound.got).toBe(CARD_TOKEN);
+    expect(revealOutput(unbound.result).reveal.refused).toEqual([expect.objectContaining({ dataClass: "card_number", reason: "no_rule" })]);
+    // Bound elsewhere in the stack: the node's choice narrows to that rule set (no approval rule from `approval`).
+    const narrowed = await run(CARD_TOKEN, { subject: ADMIN, guard: await guardDeps({ stack: ["approval", "support"] }), config: { profileId: "support" } });
+    expect(narrowed.result.status).toBe("success");
+    expect(narrowed.got).toBe(CARD);
+    // A bound rule set the node does not name contributes nothing.
+    const other = await run(CARD_TOKEN, { subject: ADMIN, guard: await guardDeps({ stack: ["support"] }), config: { profileId: "scoped" } });
+    expect(other.got).toBe(CARD_TOKEN);
+  });
+
+  it("treats an enforced rule set's reveal block as the ceiling", async () => {
+    const capped = await run(CARD_TOKEN, { subject: ADMIN, guard: await guardDeps({ enforced: "ceiling", stack: ["support"] }) });
+    expect(capped.got).toBe(CARD_TOKEN);
+    expect(revealOutput(capped.result).reveal.refused[0].reason).toBe("no_rule");
+    const named = await run(CARD_TOKEN, { subject: ADMIN, guard: await guardDeps({ enforced: "ceiling", stack: ["support"] }), config: { profileId: "support" } });
+    expect(named.got).toBe(CARD_TOKEN);
+    // An enforced rule set without a reveal block leaves the bound rule sets' reveal rules in force.
+    const open = await run(CARD_TOKEN, { subject: ADMIN, guard: await guardDeps({ enforced: "plain", stack: ["support"] }) });
+    expect(open.got).toBe(CARD);
+  });
+
+  it("keeps revealed values out of live events, the error workflow input and log metadata", async () => {
+    const events: unknown[] = [];
+    const errorInputs: unknown[] = [];
+    const logged: unknown[] = [];
+    const guarded = await guardDeps({ stack: ["support"] });
+    sent = [];
+    const wf = { ...revealWorkflow({}, '{"text":"{{text}}","fail":true}'), settings: { errorWorkflowId: "wf-errors" } } as Workflow;
+    const result = await executeWorkflow(
+      { workflow: wf, executionId: "exec-ev", webhookPayload: { text: `Card ${CARD_TOKEN}` }, toolPolicySubject: ADMIN },
+      deps(guarded.guard, {
+        onNodeStart: (event) => void events.push(event),
+        onNodeComplete: (event) => void events.push(event),
+        onNodeActivity: (event) => void events.push(event),
+        logger: (message, metadata) => void logged.push([message, metadata]),
+        triggerErrorWorkflow: async (input) => void errorInputs.push(input)
+      })
+    );
+    // The downstream node got the value (and failed with it in its error message).
+    expect(sent.at(-1)?.text).toBe(`Card ${CARD}`);
+    expect(result.status).toBe("error");
+    expect(events.length).toBeGreaterThan(0);
+    expect(errorInputs).toHaveLength(1);
+    for (const kept of [result, events, errorInputs, logged]) {
+      expect(JSON.stringify(kept)).not.toContain(CARD);
+    }
+    expect(JSON.stringify(result)).toContain(CARD_TOKEN);
+  });
+
+  it("keeps revealed values out of a paused run's saved state (the run continues with the tokens)", async () => {
+    const guarded = await guardDeps({ stack: ["support"] });
+    const wf = revealWorkflow();
+    wf.nodes.splice(2, 0, node("gate", "approval_gate", { message: "Send it?" }));
+    wf.edges = [
+      { id: "e1", source: "in", target: "reveal" },
+      { id: "e2", source: "reveal", target: "gate" },
+      { id: "e3", source: "gate", sourceHandle: "approved", target: "sink" },
+      { id: "e4", source: "sink", target: "out" }
+    ];
+    const paused: WorkflowExecutionState[] = [];
+    const first = await executeWorkflow({ workflow: wf, executionId: "exec-gate", webhookPayload: { text: CARD_TOKEN }, toolPolicySubject: ADMIN }, deps(guarded.guard, {}, paused));
+    expect(first.status).toBe("waiting_approval");
+    expect(paused).toHaveLength(1);
+    expect(JSON.stringify(paused)).not.toContain(CARD);
+    expect(JSON.stringify(first)).not.toContain(CARD);
+    sent = [];
+    const resumed = await resumeWorkflowExecution({ executionId: "exec-gate", state: paused[0]!, decision: "approve", actedBy: "u-lead" }, deps(guarded.guard));
+    expect(resumed.status).toBe("success");
+    expect(sent.at(-1)?.text).toBe(CARD_TOKEN);
+  });
+
+  it("scopes a sub-workflow's content rules to its own project", async () => {
+    const child: Workflow = {
+      id: "wf-child",
+      name: "Child",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "proj-b",
+      nodes: [node("start", "manual_trigger"), node("reveal", "guard_reveal", { inputField: "text" }), node("sink", "mcp_tool", { serverId: "sink-mcp", toolName: "send", argsTemplate: '{"text":"{{text}}"}', retry: { enabled: false } }), node("end", "output")],
+      edges: [
+        { id: "c1", source: "start", target: "reveal" },
+        { id: "c2", source: "reveal", target: "sink" },
+        { id: "c3", source: "sink", target: "end" }
+      ]
+    };
+    const parent: Workflow = {
+      id: "wf-parent",
+      name: "Parent",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "proj-a",
+      nodes: [node("in", "webhook_input"), node("call", "execute_workflow", { workflowId: "wf-child", inputMapping: { text: "text" } }), node("out", "output")],
+      edges: [
+        { id: "p1", source: "in", target: "call" },
+        { id: "p2", source: "call", target: "out" }
+      ]
+    };
+    const extra = { loadWorkflow: (id: string) => (id === "wf-child" ? child : undefined) };
+    // Without the API's hook, a child in another project never reveals.
+    const guarded = await guardDeps({ stack: ["support"] });
+    sent = [];
+    const result = await executeWorkflow({ workflow: parent, executionId: "exec-sub", webhookPayload: { text: CARD_TOKEN }, toolPolicySubject: ADMIN }, deps(guarded.guard, extra));
+    expect(result.status).toBe("success");
+    expect(sent.at(-1)?.text).toBe(CARD_TOKEN);
+    expect(guarded.reveals).toHaveLength(0);
+    // With it, the child's rules and vault come from the API, for the child's project.
+    const scopedFor: Array<{ id: string; projectId: string | null }> = [];
+    const hooked = await guardDeps({ stack: ["support"] });
+    const childGuard = await guardDeps({ stack: ["support"], projectId: "proj-b" });
+    const withHook = { ...hooked.guard, forWorkflow: (workflow: { id: string; projectId: string | null }) => (scopedFor.push(workflow), childGuard.guard) };
+    sent = [];
+    const scoped = await executeWorkflow({ workflow: parent, executionId: "exec-sub2", webhookPayload: { text: `${CARD_TOKEN} ${OTHER_PROJECT_TOKEN}` }, toolPolicySubject: ADMIN }, deps(withHook, extra));
+    expect(scoped.status).toBe("success");
+    expect(scopedFor).toEqual([{ id: "wf-child", projectId: "proj-b" }]);
+    // Under proj-b's scope the proj-b token opens and the proj-a token stays protected.
+    expect(sent.at(-1)?.text).toBe(`${CARD_TOKEN} 5555 5555 5555 4444`);
+    expect(childGuard.reveals[0]?.refused).toEqual([expect.objectContaining({ reason: "other_project" })]);
+    expect(JSON.stringify(scoped)).not.toContain("5555 5555 5555 4444");
   });
 
   it("validates the node configuration", () => {

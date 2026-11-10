@@ -54,6 +54,16 @@ describe("reveal subjects", () => {
     expect(revealSubjectIsAdmin(subject)).toBe(false);
   });
 
+  it("treats a service account's address as a service account even without its id", () => {
+    const subject = revealSubjectOf({ source: "user", role: "admin", userId: "sa-1", email: "crm-bot@SERVICE.invalid" });
+    expect(subject).toEqual({ source: "service_account", serviceAccountId: "sa-1" });
+    expect(findRevealRule(rules, { subject, dataClass: "card_number" })).toBeUndefined();
+    expect(findRevealRule(rules, { subject, dataClass: "email" })).toBe(rules[1]);
+    expect(revealSubjectIsAdmin(subject)).toBe(false);
+    expect(revealSubjectOf({ source: "user", role: "admin", email: "bot@service.invalid" })).toEqual({ source: "service_account" });
+    expect(revealSubjectOf({ source: "user", role: "admin", userId: "u", email: "ana@service.invalid.example.org" })).toEqual({ source: "user", role: "admin", userId: "u" });
+  });
+
   it("treats only a signed-in admin as an admin for unscoped tokens", () => {
     expect(revealSubjectIsAdmin(revealSubjectOf({ source: "user", role: "admin", userId: "u" }))).toBe(true);
     expect(revealSubjectIsAdmin(revealSubjectOf({ source: "owner", role: "admin", userId: "u" }))).toBe(false);

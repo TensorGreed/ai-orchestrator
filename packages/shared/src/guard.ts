@@ -389,10 +389,15 @@ export function findRevealRule<T extends RevealRuleLike>(rules: readonly T[], re
  * or user rule.
  */
 export function revealSubjectOf(
-  subject: { source: string; role?: string; userId?: string; serviceAccountId?: string } | null | undefined
+  subject: { source: string; role?: string; userId?: string; email?: string; serviceAccountId?: string } | null | undefined
 ): RevealSubject | undefined {
   if (!subject) return undefined;
   if (subject.serviceAccountId) return { source: "service_account", serviceAccountId: subject.serviceAccountId };
+  // A service account's sign-in address is `…@service.invalid`: such a subject is a service account even when the
+  // id was not carried over (a run paused before the subject recorded it), so it never matches a role or user rule.
+  if (subject.email && /@service\.invalid$/i.test(subject.email.trim())) {
+    return subject.userId ? { source: "service_account", serviceAccountId: subject.userId } : { source: "service_account" };
+  }
   return { source: subject.source, ...(subject.role ? { role: subject.role } : {}), ...(subject.userId ? { userId: subject.userId } : {}) };
 }
 

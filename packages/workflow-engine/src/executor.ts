@@ -161,6 +161,7 @@ import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
 import { executeRevealNodeStep } from "./reveal-node";
+import { childGuardFor, redactingDependencies, redactingSessionStores, RevealRedactor } from "./reveal-redaction";
 import {
   approvalGateOutcome,
   approvalGatePause,
@@ -546,6 +547,11 @@ export interface WorkflowExecutionDependencies {
     errorStack?: string;
     timestamp: string;
   }) => Promise<void>;
+  /**
+   * Phase 12 coverage — set by the engine for the duration of a run (not part of the caller contract): the values
+   * Reveal nodes revealed, put back as their tokens in everything the run hands outside (see reveal-redaction.ts).
+   */
+  revealRedactor?: RevealRedactor;
 }
 
 export interface McpToolPolicySnapshot {
@@ -675,6 +681,8 @@ interface NodeRuntimeContext {
   toolPolicySubject?: McpToolPolicySubject;
   /** Phase 12.1 — guard approvals granted by a resumed `rerun` hand-off (never from globals). */
   approvedHandoffKeys?: ReadonlySet<string>;
+  /** Phase 12 coverage — who approved a Reveal node's granted key (the resumed decision's `actedBy`). */
+  approvedHandoffBy?: ReadonlyMap<string, string>;
   /** Phase 11.2 — set only for the node a resumed run paused at (an Approval Gate or a sync Execute Workflow). */
   resumeDecision?: NodeResumeDecision;
   /** Phase 11.2 — the run's approved write-tool calls and their stored results. */
@@ -4225,7 +4233,9 @@ async function executeNodeHandler(
       parentIds: Object.keys(context.parentOutputs),
       globals: context.globals,
       ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+      ...(context.approvedHandoffBy ? { approvers: context.approvedHandoffBy } : {}),
       ...(context.labelScope ? { labelScope: context.labelScope } : {}),
+      ...(dependencies.revealRedactor ? { redactor: dependencies.revealRedactor } : {}),
       replay: Boolean(dependencies.replayNodeHook)
     });
   }
@@ -4725,9 +4735,7 @@ async function executeNodeHandler(
       // Phase 6.4 — inside a Workflow Tool's child, the calling agent's write controls reach this workflow too (tighten-only).
       const targetWorkflow = dependencies.callerWriteControls ? withCallerWriteControls(loadedTarget, dependencies.callerWriteControls) : loadedTarget;
 
-      const scopedChildDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
-        ? { ...dependencies, ...dependencies.scopeSubWorkflow(targetWorkflow) }
-        : dependencies;
+      const scopedChildDependencies = childDependenciesFor(dependencies, targetWorkflow);
       const mode = config.mode === "async" ? "async" : "sync";
       const resume = context.resumeDecision;
       const resumingChild = resume && resume.nodeId === node.id && resume.handoff.kind === "sub_workflow" ? resume.handoff : undefined;
@@ -6505,7 +6513,7 @@ async function executeNodeHandler(
           else dependencies.abortSignal?.addEventListener("abort", abortFromRun, { once: true });
           let scoped: WorkflowExecutionDependencies;
           try {
-            scoped = dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies;
+            scoped = childDependenciesFor(dependencies, child);
           } catch (error) {
             dependencies.abortSignal?.removeEventListener("abort", abortFromRun);
             settleSubWorkflow(admission);
@@ -8346,12 +8354,42 @@ export async function executeWorkflow(
         executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined })
       );
     }
-    const recorder = createNodeActivityRecorder(dependencies.onNodeActivity);
-    const result = await executeWorkflowRun(request, { ...dependencies, activityRecorder: recorder });
+    // Phase 12 coverage — revealed values reach this run's own nodes only; the result, the paused state, the live
+    // events and the session stores keep the tokens.
+    const redactor = new RevealRedactor();
+    const redacting = redactingDependencies(dependencies, redactor);
+    const recorder = createNodeActivityRecorder(redacting.onNodeActivity);
+    const result = await executeWorkflowRun(request, { ...redacting, activityRecorder: recorder, revealRedactor: redactor });
     attachNodeActivity(result.nodeResults, recorder);
-    return result;
+    const redacted = redactor.redact(result);
+    if (redactor.active) Object.defineProperty(redacted, REVEALED_VALUES, { value: true, enumerable: true });
+    return redacted;
   };
   return owner ? runWithSandboxOwner(`workflow:${owner}`, run) : run();
+}
+
+/** Marks a result whose run revealed values: a symbol key, so it survives object spreads but never serialises. */
+const REVEALED_VALUES: unique symbol = Symbol("l2m.revealedValues");
+
+/**
+ * Phase 12 coverage — a Reveal node of this run (or of a sub-workflow it ran) revealed something. Known only to the
+ * process that ran it (never stored), so the API can keep such runs out of replay capture and MCP cassettes.
+ */
+export function runRevealedValues(result: object): boolean {
+  return (result as { [REVEALED_VALUES]?: boolean })[REVEALED_VALUES] === true;
+}
+
+/**
+ * A sub-workflow's dependencies: the parent's, with the child's own project scope on top. Phase 12 coverage — the
+ * child's content rules work in the child's project (its Protect steps tag its project, and a child in another
+ * project never reveals), and its session stores keep the parent run's revealed values out as well.
+ */
+function childDependenciesFor(dependencies: WorkflowExecutionDependencies, child: Workflow): WorkflowExecutionDependencies {
+  if (!dependencies.scopeSubWorkflow && !dependencies.guard) return dependencies;
+  const scoped: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : { ...dependencies };
+  const guard = scoped.guard ? childGuardFor(scoped.guard, child) : undefined;
+  const stores = dependencies.revealRedactor ? redactingSessionStores(scoped, dependencies.revealRedactor) : {};
+  return { ...scoped, ...stores, ...(guard ? { guard } : {}) };
 }
 
 /** Copies each node's recorded activity onto its results; nodes restored from a paused run keep theirs. */
@@ -8509,6 +8547,7 @@ async function executeWorkflowRun(
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
   const approvedHandoffKeys = approvedHandoffKeysFromState(request.resumeState);
+  const approvedHandoffBy = new Map<string, string>();
   const writeToolCalls = new WriteToolCallLedger(approvedHandoffKeys, request.resumeState?.approvedToolResults);
   const customData = request.resumeState
     ? toRecord(globals.execution_custom_data)
@@ -8841,6 +8880,7 @@ async function executeWorkflowRun(
     } else if (handoff?.kind === "rerun") {
       if (approved) {
         approvedHandoffKeys.add(handoff.approvalKey);
+        if (handoff.source === "reveal_node" && request.approvalDecision.actedBy) approvedHandoffBy.set(handoff.approvalKey, request.approvalDecision.actedBy);
         if (handoff.source === "agent_tool_gate") {
           const waitingResult = request.resumeState.nodeResults.find((entry) => entry.nodeId === waitingNode.id && entry.status === "waiting_approval");
           const toolName = toRecord(waitingResult?.output).toolName;
@@ -9495,6 +9535,7 @@ async function executeWorkflowRun(
                   callStack,
                   toolPolicySubject,
                   approvedHandoffKeys,
+                  approvedHandoffBy,
                   writeToolCalls,
                   recordAttachmentUsage,
                   labelScope: childLabelScope
@@ -9641,6 +9682,7 @@ async function executeWorkflowRun(
           callStack,
           toolPolicySubject,
           approvedHandoffKeys,
+          approvedHandoffBy,
           writeToolCalls,
           ...(resumeDecision ? { resumeDecision } : {}),
           recordAttachmentUsage,
