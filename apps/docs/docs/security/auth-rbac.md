@@ -29,7 +29,8 @@ description: "Authentication and access control in L2M: session cookies, admin, 
     users, with any role
   - with `AUTH_ALLOW_PUBLIC_REGISTER=true`, a signed-out caller always gets `viewer`, whatever role it asks for; a
     signed-in user can give a role up to their own (a `viewer` creates viewers, a `builder` up to `builder`, an
-    `admin` any role) and gets `403` above it; a request with an API key (`Authorization: Bearer`) gets `403`.
+    `admin` any role) and gets `403` above it; a request with an L2M API key (`Authorization: Bearer ao_...`,
+    valid or not) gets `403`, while any other Bearer value (an auth proxy's own token, for example) is ignored.
     Refusals are audited as `user.register` with outcome `denied`.
   - `admin` can invite a user by email (see [User invites](#user-invites))
 

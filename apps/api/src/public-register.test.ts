@@ -1,8 +1,8 @@
 /**
  * POST /api/auth/register, every caller against every requested role. With AUTH_ALLOW_PUBLIC_REGISTER on, a signed-out
- * caller always gets viewer, a signed-in caller cannot grant a role above its own, and an API key is refused. With it
- * off, the route is admin user creation (a session or a key of an admin). The first user is the bootstrap admin either
- * way. Runs on SQLite and, under TEST_STORE=postgres, on Postgres.
+ * caller always gets viewer, a signed-in caller cannot grant a role above its own, an L2M API key is refused, and any
+ * other Bearer value is ignored. With it off, the route is admin user creation (a session or a key of an admin). The
+ * first user is the bootstrap admin either way. Runs on SQLite and, under TEST_STORE=postgres, on Postgres.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { Store } from "./db/store.js";
@@ -109,6 +109,9 @@ describe("public registration on: a signed-in caller", () => {
           expect(audits[0]).toMatchObject({ outcome: "success", metadata: { role: requested, actorEmail: actor.email } });
         } else {
           expect(response.statusCode, response.body).toBe(403);
+          expect(response.json<{ error: string }>().error).toBe(
+            requested === "admin" ? "Only admins can create admin users" : `Your role (${actorRole}) cannot create a user with the ${requested} role`
+          );
           expect(await ctx.store.getUserByEmail(email)).toBeNull();
           expect(audits[0]).toMatchObject({
             outcome: "denied",
@@ -154,18 +157,19 @@ describe("public registration on: an API key", () => {
         expect(await ctx.store.getUserByEmail(email)).toBeNull();
         const audits = await registerAudits(ctx, email);
         expect(audits).toHaveLength(1);
-        expect(audits[0]).toMatchObject({ outcome: "denied", metadata: { reason: "api_key" } });
+        expect(audits[0]).toMatchObject({ outcome: "denied", metadata: { role: requested ?? "viewer", reason: "api_key" } });
       }
     });
   }
 
-  it("a key that does not verify is refused too", async () => {
+  it("a well-formed key that does not verify is refused too", async () => {
     const ctx = await context(true);
     await loginAs(ctx, "admin");
     const email = newEmail();
-    const response = await register(ctx, { email }, { authorization: "Bearer not-a-real-key" });
+    const response = await register(ctx, { email, admin: true }, { authorization: "Bearer ao_AAAAAAAAAA.not-a-real-secret" });
     expect(response.statusCode, response.body).toBe(403);
     expect(await ctx.store.getUserByEmail(email)).toBeNull();
+    expect(await registerAudits(ctx, email)).toMatchObject([{ outcome: "denied", metadata: { role: "admin", reason: "api_key" } }]);
   });
 
   it("a key sent with an admin session is refused", async () => {
@@ -176,6 +180,27 @@ describe("public registration on: an API key", () => {
     const response = await register(ctx, { email, role: "builder" }, { cookie: admin.cookie, authorization: `Bearer ${key}` });
     expect(response.statusCode, response.body).toBe(403);
     expect(await ctx.store.getUserByEmail(email)).toBeNull();
+  });
+});
+
+describe("public registration on: a Bearer value that is not an L2M key", () => {
+  it("is ignored: a signed-out caller still registers as a viewer", async () => {
+    const ctx = await context(true);
+    await loginAs(ctx, "admin");
+    const email = newEmail();
+    const response = await register(ctx, { email, role: "builder" }, { authorization: "Bearer eyJhbGciOi.proxy-token.sig" });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json<{ user: { role: string } }>().user.role).toBe("viewer");
+  });
+
+  it("is ignored: the session cookie is the actor", async () => {
+    const ctx = await context(true);
+    const builder = await loginAs(ctx, "builder");
+    const allowed = await register(ctx, { email: newEmail(), role: "builder" }, { cookie: builder.cookie, authorization: "Bearer proxy-token" });
+    expect(allowed.statusCode, allowed.body).toBe(200);
+    expect(allowed.json<{ user: { role: string } }>().user.role).toBe("builder");
+    const refused = await register(ctx, { email: newEmail(), role: "admin" }, { cookie: builder.cookie, authorization: "Bearer proxy-token" });
+    expect(refused.statusCode, refused.body).toBe(403);
   });
 });
 
