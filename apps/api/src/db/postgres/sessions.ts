@@ -7,6 +7,7 @@ import { type ChatMessage, type DataLabels, isEmptyDataLabels, labelsForUntracke
 import type { LoginSession, LoginSessionInput, SessionAuthMethod, SessionEndReason } from "../store.js";
 import { parseJsonSafe, toStr, labelsField } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { notHeldSql } from "../legal-hold-sql.js";
 import { withReferenceCheck } from "../store-errors.js";
 import { sessionsToEvict } from "../session-eviction.js";
 
@@ -309,7 +310,8 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
            WHERE namespace = $1 AND session_id = $2
            ORDER BY created_at DESC, seq DESC
            LIMIT $3
-         )`,
+         )
+         AND ${notHeldSql("session_tool_cache")}`,
     [input.namespace, input.sessionId, MAX_SESSION_TOOL_CACHE_RECORDS]
   );
 

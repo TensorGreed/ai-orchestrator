@@ -128,6 +128,56 @@ export const openApiSpec = {
       }
     },
 
+    "/api/legal-holds": {
+      get: {
+        tags: ["Observability"],
+        summary: "Legal holds, newest first (admins, or a role with legal_hold:manage); ?status=active|released",
+        responses: { "200": { description: "{ holds }" }, "403": { description: "Not a hold manager" } }
+      },
+      post: {
+        tags: ["Observability"],
+        summary:
+          "Place a legal hold on a project, a workflow, a list of runs (executionIds) or a data subject (subject: the rows the data-subject lookup finds now). Held data is kept from every purge and delete until the hold is released. Step-up when it is on; audited (legal_hold.placed) and sent as data.legal_hold_changed",
+        responses: {
+          "201": { description: "{ hold }" },
+          "400": { description: "Invalid payload, or a subject the lookup found nothing for" },
+          "403": { description: "Not a hold manager, or step-up required" },
+          "404": { description: "The project, workflow or runs do not exist" }
+        }
+      }
+    },
+    "/api/legal-holds/status": {
+      get: {
+        tags: ["Observability"],
+        summary: "Whether a workflow, project or run (one of workflowId, projectId, executionId) is under legal hold; hold names only for hold managers",
+        responses: { "200": { description: "{ held, holds }" }, "404": { description: "Not found or not readable" } }
+      }
+    },
+    "/api/legal-holds/{id}": {
+      get: {
+        tags: ["Observability"],
+        summary: "One legal hold",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ hold }" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/legal-holds/{id}/items": {
+      get: {
+        tags: ["Observability"],
+        summary: "The rows a runs or subject hold names (kind, rowId), paged with offset and limit (at most 500)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ items, total, offset, limit }" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/legal-holds/{id}/release": {
+      post: {
+        tags: ["Observability"],
+        summary: "Release a legal hold, with a reason. The next purge deletes what was due. Step-up when it is on; audited (legal_hold.released)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ hold }" }, "404": { description: "Not found" }, "409": { description: "Already released" } }
+      }
+    },
+
     // ── Auth ───────────────────────────────────────────────────────────────
     "/api/auth/register": {
       post: {

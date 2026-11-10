@@ -27,6 +27,7 @@
  * synchronously to its end, so no prune and delete ever interleave.
  */
 import type { PoolClient } from "pg";
+import { LEGAL_HOLD_LOCK_SHARED_SQL, notHeldSql } from "../legal-hold-sql.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -81,9 +82,11 @@ export async function deleteUnlockedInBatches(
  */
 export async function deleteRunsWhole(tx: Queryable, runIds: readonly string[]): Promise<Set<string>> {
   if (runIds.length === 0) return new Set();
+  // 13.3 — the legal-hold lock, shared, before any row lock; a run a hold keeps is never taken.
+  await tx.query(LEGAL_HOLD_LOCK_SHARED_SQL);
   const locked = (
     await tx.query<{ id: string }>(
-      `SELECT id FROM eval_runs WHERE id = ANY($1::text[]) AND status NOT IN ('queued', 'running') ORDER BY id FOR UPDATE SKIP LOCKED`,
+      `SELECT id FROM eval_runs WHERE id = ANY($1::text[]) AND status NOT IN ('queued', 'running') AND ${notHeldSql("eval_runs")} ORDER BY id FOR UPDATE SKIP LOCKED`,
       [runIds]
     )
   ).rows.map((row) => String(row.id));

@@ -12,6 +12,7 @@ import {
   type RetentionRunReason,
   type RetentionRunView
 } from "@ai-orchestrator/shared";
+import { isHoldableTable, notHeldSql } from "./legal-hold-sql.js";
 
 export interface RetentionTableSpec {
   /** The column a row is aged by. */
@@ -54,10 +55,14 @@ export interface RetentionScope {
 /** Rows one batch deletes at most; the store yields between batches. */
 export const RETENTION_BATCH_ROWS = 1000;
 
-/** The WHERE clause for `table`'s due rows, with `cutoff` (`?` or `$1`) standing for the cutoff. */
+/**
+ * The WHERE clause for `table`'s due rows, with `cutoff` (`?` or `$1`) standing for the cutoff. Rows a legal hold
+ * keeps are never due (legal-hold-sql.ts); every table but the purge log can be held.
+ */
 export function retentionWhere(table: RetentionTable, cutoff: "?" | "$1"): string {
   const spec: RetentionTableSpec = RETENTION_TABLES[table];
-  return spec.filter ? `${spec.time} < ${cutoff} AND ${spec.filter}` : `${spec.time} < ${cutoff}`;
+  const due = spec.filter ? `${spec.time} < ${cutoff} AND ${spec.filter}` : `${spec.time} < ${cutoff}`;
+  return isHoldableTable(table) ? `${due} AND ${notHeldSql(table)}` : due;
 }
 
 export function isRetentionTable(value: string): value is RetentionTable {

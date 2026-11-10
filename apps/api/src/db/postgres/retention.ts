@@ -6,6 +6,7 @@
 import type { RetentionRunView } from "@ai-orchestrator/shared";
 import type { PgContext } from "./context.js";
 import { deleteUnlockedInBatches } from "./prune.js";
+import { LEGAL_HOLD_LOCK_SHARED_SQL } from "../legal-hold-sql.js";
 import {
   RETENTION_BATCH_ROWS,
   RETENTION_TABLES,
@@ -21,10 +22,37 @@ export async function pruneRetentionTable(ctx: PgContext, table: RetentionTable,
   if (!isRetentionTable(table)) throw new Error(`Not a retention table: ${String(table)}`);
   const limit = Math.floor(scope.limit);
   if (!Number.isFinite(limit) || limit <= 0) return 0;
-  return await deleteUnlockedInBatches(ctx.pool, table, retentionWhere(table, "$1"), [scope.before], RETENTION_BATCH_ROWS, {
+  return await deleteUnheldInBatches(ctx, table, retentionWhere(table, "$1"), [scope.before], {
     key: RETENTION_TABLES[table].key === "row" ? "ctid" : "id",
     maxRows: limit
   });
+}
+
+/**
+ * 13.3 — deleteUnlockedInBatches for a purge `where` that leaves out held rows (legal-hold-sql.ts): each batch is its
+ * own short transaction that takes the legal-hold lock shared before it reads, so a hold placed meanwhile (which takes
+ * it exclusively) waits for the batch under way and is seen by the next one.
+ */
+export async function deleteUnheldInBatches(
+  ctx: PgContext,
+  table: string,
+  where: string,
+  params: unknown[],
+  options: { key?: "id" | "ctid"; maxRows?: number; batchRows?: number } = {}
+): Promise<number> {
+  const maxRows = options.maxRows ?? Number.POSITIVE_INFINITY;
+  const batchRows = options.batchRows ?? RETENTION_BATCH_ROWS;
+  let total = 0;
+  while (total < maxRows) {
+    const batch = Math.min(batchRows, maxRows - total);
+    const deleted = await ctx.withTransaction(async (client) => {
+      await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+      return await deleteUnlockedInBatches(client, table, where, params, batch, { key: options.key, maxRows: batch });
+    });
+    total += deleted;
+    if (deleted < batch) break;
+  }
+  return total;
 }
 
 export async function countRetentionDue(ctx: PgContext, table: RetentionTable, input: { before: string; cap: number }): Promise<number> {

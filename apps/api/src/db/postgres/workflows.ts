@@ -8,6 +8,7 @@ import { ProjectNotEmptyError } from "../store-errors.js";
 import { type Store } from "../store.js";
 import { parseTagsJson, toNum, toStr } from "./helpers.js";
 import { gateStateForWrite } from "./release.js";
+import { refuseIfHeld } from "./legal-holds.js";
 import type { PgContext } from "./context.js";
 
 // Workflow methods
@@ -196,6 +197,9 @@ export async function deleteWorkflow(ctx: PgContext, id: string, options: { refu
   const legacyNamespaces = ((await ctx.store.getWorkflow(id))?.nodes ?? []).map((node) => `${id}:${node.id}`);
   return ctx.withTransaction(async (client) => {
     const run = (sql: string, params: unknown[]) => client.query(sql, params);
+    // 13.3 — first, before any row lock: nothing goes while a legal hold keeps the workflow, its project, or any of its
+    // runs or golden runs (the lock is held to commit, so no hold is placed in between).
+    await refuseIfHeld(client, { kind: "workflow", id }, "This workflow");
     // The workflow row is locked first, as a publish, an unpublish or a gate save does (workflow row, then the rest), so
     // a delete never holds a workflow version row while waiting for the workflow row. With `refuseIfGateEnforced` the
     // gate is then read before anything goes; a gate save holds the workflow row while it writes, so it is seen.
@@ -336,8 +340,10 @@ export async function deleteProject(ctx: PgContext, id: string): Promise<boolean
   // since the store went async); the route checks first and such a save is a race with an admin's delete.
   // user_project_roles has a foreign key to projects on Postgres, so its rows go before the project row.
   return ctx.withTransaction(async (client) => {
-    const existing = await client.query(`SELECT id FROM projects WHERE id = $1 FOR UPDATE`, [id]);
+    const existing = await client.query(`SELECT id FROM projects WHERE id = $1`, [id]);
     if (existing.rows.length === 0) return false;
+    await refuseIfHeld(client, { kind: "project", id }, "This project");
+    await client.query(`SELECT id FROM projects WHERE id = $1 FOR UPDATE`, [id]);
     // Never move a project's workflows or secrets into the default project.
     const count = async (table: string) =>
       toNum((await client.query<{ count: string }>(`SELECT COUNT(*) AS count FROM ${table} WHERE project_id = $1`, [id])).rows[0]?.count ?? 0);

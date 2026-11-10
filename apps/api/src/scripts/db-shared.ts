@@ -176,7 +176,10 @@ export const EXPORTED_TABLES = [
   "ai_gateway_client_grants",
   "ai_gateway_requests",
   // 13.3 — retention values per project
-  "retention_policies"
+  "retention_policies",
+  // 13.3 — legal holds and the rows they name
+  "legal_holds",
+  "legal_hold_items"
 ] as const;
 
 /** Tables db:export leaves out on purpose, and why (the runbook lists them as safe to lose). */

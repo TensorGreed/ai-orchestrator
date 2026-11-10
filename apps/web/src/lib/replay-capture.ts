@@ -178,6 +178,7 @@ const DROP_REASONS: Record<ReplayCaptureLastDrop["outcome"], string> = {
   dropped_unscannable: "the run's content was nested too deeply to check for personal data",
   dropped_incomplete_mask: "a personal value could not be masked everywhere",
   skipped_too_large: "the run was larger than the capture size limit",
+  held_budget: "the capture budget is full of captured runs under legal hold, which are never evicted",
   failed: "an error while saving it"
 };
 

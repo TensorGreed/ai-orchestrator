@@ -222,6 +222,9 @@ import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-ser
 import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerRetentionRoutes } from "./retention-routes.js";
+import { registerLegalHoldRoutes } from "./legal-hold-routes.js";
+import { LegalHoldService } from "./services/legal-hold-service.js";
+import { LegalHoldError } from "./db/legal-hold-sql.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
@@ -9354,6 +9357,11 @@ export async function createApp(
       reply.code(400);
       return { error: "role must be project_admin, editor, viewer, or custom" };
     }
+    // 13.3 — a role that grants a deployment-wide permission (legal holds) is an admin's to hand out.
+    if (role === "custom" && parsed.data.customRoleId && user.role !== "admin" && (await rbacService.grantsDeploymentPermission(parsed.data.customRoleId))) {
+      reply.code(403);
+      return { error: "Only an admin can give a role that manages legal holds." };
+    }
     try {
       await rbacService.addMember({
         userId: parsed.data.userId,
@@ -9937,6 +9945,8 @@ export async function createApp(
     try {
       deleted = await store.deleteWorkflow(request.params.id, { refuseIfGateEnforced: user.role !== "admin" });
     } catch (error) {
+      // 13.3 — answered 409 `legal_hold` by the error handler, naming the holds.
+      if (error instanceof LegalHoldError) throw error;
       if (!(error instanceof ReleaseGateEnforcedError)) {
         reply.code(400);
         return { error: error instanceof Error ? error.message : "Failed to delete workflow" };
@@ -10407,6 +10417,7 @@ export async function createApp(
         reply.code(409);
         return { error: error.message, ...error.counts };
       }
+      if (error instanceof LegalHoldError) throw error;
       reply.code(400);
       return { error: error instanceof Error ? error.message : "Failed to delete project" };
     }
@@ -14162,6 +14173,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     subjectRowRemoval: async (user, row) => await releaseService.dataSubjectRemoval(user, row)
   });
 
+  // 13.3 — legal holds: placed and released by hold managers; every purge and delete of held data honours them.
+  registerLegalHoldRoutes({
+    app,
+    store,
+    service: (request, user) =>
+      new LegalHoldService({
+        store,
+        audit: async (event) => await audit(request, user, event),
+        notify: async (event) => await notificationService.notify(event),
+        ...(captureAvailable ? { findSubject: async (query) => await captureService.findSubject(query) } : {}),
+        logger: { warn: (fields, message) => app.log.warn(fields, message) }
+      }),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    canManage: async (user) => await rbacService.canDeployment(user, "legal_hold:manage"),
+    runAccess
+  });
+
   // Phase 15.5 — golden-set files.
   registerGoldenSetFileRoutes({
     app,
@@ -15259,6 +15288,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     // Roadmap 7.3 — a malformed page or pageSize on a list route.
     if (error instanceof PaginationQueryError) {
       reply.code(400).send({ error: error.message });
+      return;
+    }
+
+    // 13.3 — a delete refused because a legal hold keeps what it would remove.
+    if (error instanceof LegalHoldError) {
+      reply.code(409).send({ error: error.message, code: "legal_hold", holds: error.holds });
       return;
     }
 
