@@ -273,6 +273,7 @@ const ROUTE_TABLE: Record<string, () => Promise<void>> = {
     const [enf1] = ctx.versions["wf-enf-a"]!;
     const override = await withKey("POST", "/api/workflows/wf-enf-a/publish", { version: enf1, override: { reason: "ship it" } });
     expect(override.statusCode, override.body).toBe(403);
+    expect(json<{ error: string }>(override).error).toBe("Only admins can override the release gate");
     // A gated publish judges the replay jobs already run and starts none: with none, it is blocked.
     const runsBefore = (await ctx.store.listEvalRuns({ workflowId: "wf-enf-a" })).length;
     const gated = await withKey("POST", "/api/workflows/wf-enf-a/publish", { version: enf1 });
@@ -297,9 +298,11 @@ const ROUTE_TABLE: Record<string, () => Promise<void>> = {
   },
   "GET /api/workflows/:id/release-state": async () => {
     refused(await withKey("GET", "/api/workflows/wf-rel-b/release-state"));
-    const state = json<{ state: { publishedVersion: number; canPublish: boolean } }>(await withKey("GET", "/api/workflows/wf-rel-a/release-state")).state;
+    const state = json<{ state: { publishedVersion: number; canPublish: boolean; canEditGate: boolean } }>(await withKey("GET", "/api/workflows/wf-rel-a/release-state")).state;
     expect(state.publishedVersion).toBe(ctx.versions["wf-rel-a"]![1]);
     expect(state.canPublish).toBe(true);
+    // The key cannot call the gate settings route, so it is not offered.
+    expect(state.canEditGate).toBe(false);
   },
   "GET /api/workflows/:id/publish-preview": async () => {
     refused(await withKey("GET", `/api/workflows/wf-rel-b/publish-preview?version=${ctx.versions["wf-rel-b"]![0]}`));
@@ -315,6 +318,7 @@ const ROUTE_TABLE: Record<string, () => Promise<void>> = {
     const [enf1, enf2] = ctx.versions["wf-enf-a"]!;
     const enforced = await withKey("POST", "/api/workflows/wf-enf-a/rollback", { version: enf1, reason: "back" });
     expect(enforced.statusCode, enforced.body).toBe(403);
+    expect(json<{ error: string }>(enforced).error).toMatch(/release gate is enforced: only an admin can roll back/);
     expect(await ctx.store.getPublishedVersion("wf-enf-a")).toBe(enf2);
 
     const [relA1] = ctx.versions["wf-rel-a"]!;

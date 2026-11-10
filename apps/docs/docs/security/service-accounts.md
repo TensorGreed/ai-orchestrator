@@ -62,10 +62,12 @@ did.
     `…/cancel`), approvals (`/api/approvals`, `…/approve`, `…/reject`) and releases (`…/publish`, `…/releases`,
     `…/release-state`, `…/publish-preview`, `…/rollback`). Every other route answers `403`, among them unpublish,
     the release-gate settings, workflow delete, secrets and knowledge bases.
-  - publishes and rolls back as a builder, whatever its owner's role: it cannot override a release gate, and while a
-    gate is on and enforced it cannot roll back. A publish judges the replay jobs that already ran for the version
-    and starts none, so a key that may publish cannot start work through it. To have the gate's replay job run
-    first, start it from a session or an unscoped key.
+  - publishes and rolls back as a builder, whatever its owner's role: it cannot override a release gate, cannot roll
+    back while a gate is on and enforced, and cannot publish or roll back to a version whose trigger input trust
+    differs from what production runs now. A publish judges the replay jobs that already ran for the version and
+    starts no replay or eval run; like a save, it re-registers the workflow's schedules and triggers, which run in
+    the workflow's project. To have the gate's replay job run first, start it from a session or an unscoped key.
+  - is told `canEditGate: false` by `release-state`, since it cannot call the gate settings route.
   - reaches a workflow of another project only when that workflow is shared to one of its projects.
 
 The scope is stored with the key as strings (`role:operator`, `project:proj_payments`), and `scopes` in the create
