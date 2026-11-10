@@ -3036,6 +3036,9 @@ describe("Phase 4.1 rate limiting", () => {
     expect(parseTrustProxy("10.0.0.0/8, 127.0.0.1, ::1, loopback")).toEqual(["10.0.0.0/8", "127.0.0.1", "::1", "loopback"]);
     expect(() => parseTrustProxy("nginx")).toThrow(/TRUST_PROXY/);
     expect(() => parseTrustProxy("10.0.0.0/33")).toThrow(/TRUST_PROXY/);
+    expect(() => parseTrustProxy("0.0.0.0/0")).toThrow(/TRUST_PROXY/);
+    expect(() => parseTrustProxy("::/0")).toThrow(/TRUST_PROXY/);
+    expect(() => parseTrustProxy("10.0.0.0/8,0.0.0.0/0")).toThrow(/TRUST_PROXY/);
   });
 });
 

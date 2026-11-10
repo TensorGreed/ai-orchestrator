@@ -26,6 +26,8 @@ export interface NodeTelemetry {
   latencyMs?: number;
   /** Number of model calls (only set for agent nodes; llm_call is always 1). */
   llmCallCount?: number;
+  /** The provider sent no usage (or only part of it): the token counts are an estimate, as spend and budgets record them. */
+  usageEstimated?: boolean;
 }
 
 export interface EditorNodeData {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chargedUsage, estimateAnswerTokens, estimateRequestTokens, estimateTextTokens, unseenOutputTokens } from "./ai-gateway-usage.js";
+import { chargedUsage, estimateAnswerTokens, estimateRequestTokens, estimateTextTokens, unseenOutputTokens } from "./usage-estimate";
 
 const guess = { input: 10, output: 20 };
 const never = () => {
@@ -107,9 +107,9 @@ describe("chargedUsage", () => {
     expect(chargedUsage({ inputTokens: 5, totalTokens: 5 }, () => ({ input: 10, output: 0 }))).toEqual({ usage: { inputTokens: 5, outputTokens: 0, totalTokens: 5 }, estimated: false });
   });
 
-  it("trusts a total on its own, and splits it by the estimate", () => {
-    expect(chargedUsage({ totalTokens: 100 }, () => guess)).toEqual({ usage: { inputTokens: 80, outputTokens: 20, totalTokens: 100 }, estimated: false });
-    expect(chargedUsage({ totalTokens: 5 }, () => guess)).toEqual({ usage: { inputTokens: 0, outputTokens: 5, totalTokens: 5 }, estimated: false });
+  it("trusts a total on its own, splits it by the estimate, and flags the guessed split", () => {
+    expect(chargedUsage({ totalTokens: 100 }, () => guess)).toEqual({ usage: { inputTokens: 80, outputTokens: 20, totalTokens: 100 }, estimated: true });
+    expect(chargedUsage({ totalTokens: 5 }, () => guess)).toEqual({ usage: { inputTokens: 0, outputTokens: 5, totalTokens: 5 }, estimated: true });
   });
 
   it("never lets a low total hide the parts", () => {

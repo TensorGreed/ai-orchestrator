@@ -4,61 +4,87 @@
  */
 import { randomUUID } from "node:crypto";
 import { type ChatMessage, type DataLabels, isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels } from "@ai-orchestrator/shared";
-import { type Store } from "../store.js";
+import type { LoginSession, LoginSessionInput, SessionAuthMethod, SessionEndReason } from "../store.js";
 import { parseJsonSafe, toStr, labelsField } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { withReferenceCheck } from "../store-errors.js";
+import { sessionsToEvict } from "../session-eviction.js";
 
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
 
-export async function getSession(ctx: PgContext, sessionId: string): Promise<{
+interface SessionRow {
   id: string;
-  userId: string;
-  expiresAt: string;
-  createdAt: string;
-  lastSeenAt: string;
-  revokedAt: string | null;
-} | null> {
-  const row = await ctx.queryOne<{
-    id: string;
-    user_id: string;
-    expires_at: string;
-    created_at: string;
-    last_seen_at: string;
-    revoked_at: string | null;
-  }>(
-    `SELECT id, user_id, expires_at, created_at, last_seen_at, revoked_at FROM sessions WHERE id = $1`,
-    [sessionId]
-  );
-  if (!row) return null;
+  user_id: string;
+  expires_at: string;
+  created_at: string;
+  last_seen_at: string;
+  revoked_at: string | null;
+  auth_method: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  mfa_verified_at: string | null;
+  break_glass: number | null;
+  ended_reason: string | null;
+}
+
+const SESSION_COLUMNS =
+  "id, user_id, expires_at, created_at, last_seen_at, revoked_at, auth_method, ip_address, user_agent, mfa_verified_at, break_glass, ended_reason";
+
+function sessionFromRow(row: SessionRow): LoginSession {
   return {
     id: toStr(row.id),
     userId: toStr(row.user_id),
     expiresAt: toStr(row.expires_at),
     createdAt: toStr(row.created_at),
     lastSeenAt: toStr(row.last_seen_at),
-    revokedAt: row.revoked_at ? toStr(row.revoked_at) : null
+    revokedAt: row.revoked_at ? toStr(row.revoked_at) : null,
+    authMethod: row.auth_method ? (toStr(row.auth_method) as SessionAuthMethod) : null,
+    ipAddress: row.ip_address ? toStr(row.ip_address) : null,
+    userAgent: row.user_agent ? toStr(row.user_agent) : null,
+    mfaVerifiedAt: row.mfa_verified_at ? toStr(row.mfa_verified_at) : null,
+    breakGlass: Number(row.break_glass ?? 0) === 1,
+    endedReason: row.ended_reason ? (toStr(row.ended_reason) as SessionEndReason) : null
   };
 }
 
-export async function saveSession(ctx: PgContext, input: {
-  id: string;
-  userId: string;
-  expiresAt: string;
-}): Promise<{
-  id: string;
-  userId: string;
-  expiresAt: string;
-  createdAt: string;
-  lastSeenAt: string;
-}> {
+export async function getSession(ctx: PgContext, sessionId: string): Promise<LoginSession | null> {
+  const row = await ctx.queryOne<SessionRow>(`SELECT ${SESSION_COLUMNS} FROM sessions WHERE id = $1`, [sessionId]);
+  return row ? sessionFromRow(row) : null;
+}
+
+export async function saveSession(ctx: PgContext, input: LoginSessionInput): Promise<LoginSession> {
   const now = new Date().toISOString();
+  const session: LoginSession = {
+    id: input.id,
+    userId: input.userId,
+    expiresAt: input.expiresAt,
+    createdAt: now,
+    lastSeenAt: now,
+    revokedAt: null,
+    authMethod: input.authMethod ?? null,
+    ipAddress: input.ipAddress ?? null,
+    userAgent: input.userAgent ?? null,
+    mfaVerifiedAt: input.mfaVerifiedAt ?? null,
+    breakGlass: input.breakGlass === true,
+    endedReason: null
+  };
   await withReferenceCheck(() => ctx.execute(
-    `INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at, revoked_at)
-       VALUES ($1, $2, $3, $4, $5, NULL)`,
-    [input.id, input.userId, input.expiresAt, now, now]
+    `INSERT INTO sessions (${SESSION_COLUMNS})
+       VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, NULL)`,
+    [
+      session.id,
+      session.userId,
+      session.expiresAt,
+      now,
+      now,
+      session.authMethod,
+      session.ipAddress,
+      session.userAgent,
+      session.mfaVerifiedAt,
+      session.breakGlass ? 1 : 0
+    ]
   ));
-  return { id: input.id, userId: input.userId, expiresAt: input.expiresAt, createdAt: now, lastSeenAt: now };
+  return session;
 }
 
 export async function touchSession(ctx: PgContext, sessionId: string): Promise<void> {
@@ -68,19 +94,101 @@ export async function touchSession(ctx: PgContext, sessionId: string): Promise<v
   );
 }
 
-export async function revokeSession(ctx: PgContext, sessionId: string): Promise<void> {
-  await ctx.execute(
-    `UPDATE sessions SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL`,
-    [new Date().toISOString(), sessionId]
+export async function revokeSession(ctx: PgContext, sessionId: string, reason?: SessionEndReason): Promise<boolean> {
+  const rows = await ctx.query<{ id: string }>(
+    `UPDATE sessions SET revoked_at = $1, ip_address = NULL, user_agent = NULL, ended_reason = $2 WHERE id = $3 AND revoked_at IS NULL RETURNING id`,
+    [new Date().toISOString(), reason ?? null, sessionId]
   );
+  return rows.length > 0;
 }
 
 export async function revokeExpiredSessions(ctx: PgContext): Promise<void> {
   const now = new Date().toISOString();
   await ctx.execute(
-    `UPDATE sessions SET revoked_at = $1 WHERE revoked_at IS NULL AND expires_at <= $2`,
+    `UPDATE sessions SET revoked_at = $1, ip_address = NULL, user_agent = NULL, ended_reason = 'expired' WHERE revoked_at IS NULL AND expires_at <= $2`,
     [now, now]
   );
+}
+
+export async function listUserSessions(
+  ctx: PgContext,
+  userId: string,
+  options: { liveOnly?: boolean; now?: string } = {}
+): Promise<LoginSession[]> {
+  const live = options.liveOnly === true;
+  const rows = await ctx.query<SessionRow>(
+    `SELECT ${SESSION_COLUMNS} FROM sessions
+       WHERE user_id = $1${live ? " AND revoked_at IS NULL AND expires_at > $2" : ""}
+       ORDER BY created_at DESC, id DESC`,
+    live ? [userId, options.now ?? new Date().toISOString()] : [userId]
+  );
+  return rows.map(sessionFromRow);
+}
+
+export async function revokeUserSessions(
+  ctx: PgContext,
+  userId: string,
+  options: { exceptId?: string; reason: SessionEndReason }
+): Promise<number> {
+  const rows = await ctx.query<{ id: string }>(
+    `UPDATE sessions SET revoked_at = $1, ip_address = NULL, user_agent = NULL, ended_reason = $2
+       WHERE user_id = $3 AND revoked_at IS NULL AND id <> $4
+       RETURNING id`,
+    [new Date().toISOString(), options.reason, userId, options.exceptId ?? ""]
+  );
+  return rows.length;
+}
+
+export async function markSessionMfaVerified(ctx: PgContext, sessionId: string, input: { userId: string; at: string }): Promise<boolean> {
+  const rows = await ctx.query<{ id: string }>(
+    `UPDATE sessions SET mfa_verified_at = $1
+       WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL AND expires_at > $4
+       RETURNING id`,
+    [input.at, sessionId, input.userId, new Date().toISOString()]
+  );
+  return rows.length > 0;
+}
+
+export async function purgeEndedSessions(ctx: PgContext, before: string): Promise<number> {
+  const rows = await ctx.query<{ id: string }>(
+    `DELETE FROM sessions WHERE (revoked_at IS NOT NULL AND revoked_at < $1) OR expires_at < $1 RETURNING id`,
+    [before]
+  );
+  return rows.length;
+}
+
+/**
+ * Keeps the user's `keep` newest live sessions (never ending `protectId`) and ends the rest. The user row is locked
+ * for the transaction, so two instances signing the same user in at once take turns: the second sees the first's
+ * session and its evictions.
+ */
+export async function revokeOldestUserSessions(
+  ctx: PgContext,
+  userId: string,
+  keep: number,
+  reason: SessionEndReason,
+  options: { protectId?: string } = {}
+): Promise<string[]> {
+  const kept = Math.max(0, Math.floor(keep));
+  return ctx.withTransaction(async (client) => {
+    await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [userId]);
+    const now = new Date().toISOString();
+    const live = await client.query<{ id: string }>(
+      `SELECT id FROM sessions
+         WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > $2
+         ORDER BY created_at DESC, id DESC`,
+      [userId, now]
+    );
+    const ended = sessionsToEvict(live.rows.map((row) => toStr(row.id)), kept, options.protectId);
+    if (ended.length > 0) {
+      await client.query(
+        `UPDATE sessions SET revoked_at = $1, ip_address = NULL, user_agent = NULL, ended_reason = $2
+           WHERE id = ANY($3::text[]) AND revoked_at IS NULL`,
+        [now, reason, ended]
+      );
+    }
+    return ended;
+  });
 }
 
 export async function loadSessionMemory(ctx: PgContext, namespace: string, sessionId: string): Promise<ChatMessage[]> {

@@ -9586,6 +9586,7 @@ export function NodeInspector({
       { key: "tokens-out", label: "Tokens out", value: formatCount(telemetry?.outputTokens) },
       { key: "tokens-cached", label: "Cached", value: formatCount(telemetry?.cachedInputTokens) },
       { key: "tokens-total", label: "Total tokens", value: formatCount(telemetry?.totalTokens) },
+      { key: "tokens-estimated", label: "Token counts", value: telemetry?.usageEstimated ? "Estimated (the provider reported no usage, or only part)" : undefined },
       { key: "latency", label: "LLM latency", value: formatMs(telemetry?.latencyMs) },
       { key: "calls", label: "LLM calls", value: formatCount(telemetry?.llmCallCount) },
       { key: "model", label: "Model", value: telemetry?.model },
