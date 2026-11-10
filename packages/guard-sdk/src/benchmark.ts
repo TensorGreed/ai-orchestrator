@@ -48,7 +48,7 @@ const corpusToolSchema = z.object({
 const corpusItemSchema = z.object({
   id: z.string().min(1).max(64),
   label: z.enum(["attack", "benign"]),
-  content: z.unknown(),
+  content: z.unknown().optional(),
   /** base64 of the JSON-encoded content, decoded at load time; keeps credential-shaped fixtures out of the source text so secret scanners stay quiet. */
   contentB64: z.string().min(1).optional(),
   note: z.string().optional(),

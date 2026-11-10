@@ -3,7 +3,7 @@
 # Multi-stage build for the L2M web UI.
 #
 # - build stage installs deps + compiles the React/Vite SPA to static files.
-# - runtime stage is nginx:1.30-alpine-slim serving the built dist/ over HTTP,
+# - runtime stage is nginx:1.31-alpine-slim serving the built dist/ over HTTP,
 #   with the nginx.conf from this folder proxying /api, /webhook, /webhook-test,
 #   and /health to the upstream `api` service (the docker-compose.yml service
 #   name). The HEALTHCHECK uses BusyBox's built-in wget, so nothing is added
@@ -20,9 +20,10 @@
 # builds use the same release), keeping release builds reproducible;
 # Dependabot (.github/dependabot.yml) proposes digest updates weekly.
 
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS build
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS build
 WORKDIR /app
-RUN corepack enable
+RUN npm install --global corepack@0.36.0 \
+    && corepack enable
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/web/package.json apps/web/
@@ -36,7 +37,7 @@ COPY packages/shared packages/shared
 RUN pnpm --filter @ai-orchestrator/web build
 
 # ---------- runtime stage ----------
-FROM nginx:1.30-alpine-slim@sha256:dede8895648b461178c3bc604f7eed4423efe5220b2c4d839f5eb3d34ac3f8f7 AS runtime
+FROM nginx:1.31-alpine-slim@sha256:f45171d36c76a8b2f5ef97108a3a8a2294248a6578a0a180edc2d78f7d2edc26 AS runtime
 # zlib from the Alpine repository: the base image ships 1.3.2-r1, affected by
 # CVE-2026-4738 (critical, fixed in 1.4-r0). Drop once the pinned base has it.
 RUN apk upgrade --no-cache zlib

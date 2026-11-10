@@ -683,7 +683,11 @@ async function loadRedis(): Promise<(url: string, opts?: unknown) => never> {
     };
     const Redis = mod.default ?? mod.Redis;
     if (!Redis) throw new Error("ioredis not found");
-    return ((u: string, o?: unknown) => new Redis(u, o)) as never;
+    // ioredis 6 defaults to RESP3, which changes the shape of some replies (for example
+    // ZRANGE ... WITHSCORES comes back nested). Stay on RESP2 so node output is unchanged
+    // and servers older than Redis 6 keep working; a caller's options can still override it.
+    return ((u: string, o?: unknown) =>
+      new Redis(u, { protocol: 2, ...((o as Record<string, unknown> | undefined) ?? {}) })) as never;
   } catch (err) {
     throw new WorkflowError(
       `redis: 'ioredis' module not available (${(err as Error).message})`,
