@@ -1937,6 +1937,12 @@ export interface McpClient {
   certFingerprints: string[];
   /** 13.2 — optional pin on the certificate's subject CN or a subject alternative name. */
   certSubject: string | null;
+  /** 13.2 — after a rotation: the old token's prefix, which keeps working until previousExpiresAt; null otherwise. */
+  previousTokenPrefix?: string | null;
+  /** 13.2 — when the old token stops working (the end of the rotation's grace window). */
+  previousExpiresAt?: string | null;
+  /** 13.2 — when the token was last rotated; null when it never was. */
+  rotatedAt?: string | null;
 }
 
 /** One tool a toolset exposes, as an MCP client would list it. */

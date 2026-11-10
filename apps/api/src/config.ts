@@ -121,6 +121,8 @@ const envSchema = z.object({
 
   // Phase 5.1 — Authentication enhancements
   API_KEY_DEFAULT_EXPIRY_DAYS: z.coerce.number().int().nonnegative().default(0),
+  // 13.2 — a service account's keys expire within this many days (new keys and rotated ones). 0 or unset = no limit.
+  SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS: optionalIntFromEnv(0, 3650),
   // MFA_ENABLED has no effect (TOTP is always available); a boot note says so when it is set.
   MFA_ENABLED: booleanFromEnv.default(false),
   // 13.2 — MFA_ENFORCE=true is an alias for MFA_REQUIRED_ROLES=admin (see resolveMfaPolicy).
@@ -562,6 +564,8 @@ const envSchema = z.object({
   NOTIFICATIONS_ENABLED: booleanFromEnv.default(false),
   /** Phase 11.2 — channels set from the environment also send approval.requested and approval.timed_out. */
   NOTIFICATIONS_APPROVAL_EVENTS: booleanFromEnv.default(true),
+  /** 13.2 — channels set from the environment also send credential.expiring (keys and gateway clients about to stop working). Off unless set. */
+  NOTIFICATIONS_CREDENTIAL_EVENTS: optionalBooleanFromEnv,
   NOTIFICATION_SMTP_HOST: z.string().optional(),
   NOTIFICATION_SMTP_PORT: z.coerce.number().int().positive().default(587),
   NOTIFICATION_SMTP_SECURE: booleanFromEnv.default(false),

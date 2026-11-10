@@ -48,6 +48,13 @@ refuses personal API keys on them (a service account's key with an admin role
 ceiling is let through). See
 [MFA required per role](../security/auth-rbac.md#mfa-required-per-role).
 
+`SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS` (0 or unset = no limit) makes every new or
+rotated service-account key expire within that many days.
+`NOTIFICATIONS_CREDENTIAL_EVENTS=true` sends the `credential.expiring` warning
+(an API key or gateway client expiring within 7 days, or a rotated key still in
+use as its grace window ends) to the channels set in the environment; off by
+default. See [Rotating keys](../security/service-accounts.md#rotating-keys).
+
 ## Rate limits (on by default)
 
 `RATE_LIMIT_ENABLED=true` (the default) limits requests per client address in

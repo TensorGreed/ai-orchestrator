@@ -580,7 +580,7 @@ by what blocks adoption first. All of it stays self-hosted.
 - [ ] SCIM 2.0 provisioning and deprovisioning of users and groups, with immediate session revocation
 - [x] Session policy: idle and absolute timeouts, concurrent-session limits, MFA required per role, step-up authentication for sensitive actions (all optional: idle and absolute timeouts per role, a per-user session limit and a signed-in sessions list; `MFA_REQUIRED_ROLES` with an enrolment-only session, step-up with `STEP_UP_MAX_AGE_MINUTES`, admin MFA reset; MFA on SSO with optional `SSO_MFA` for OIDC and SAML)
 - [ ] Network controls: IP allowlists for UI, API and webhooks, trusted-proxy configuration, mutual TLS option for the MCP gateway
-- [ ] Service accounts with scoped, rotating keys; break-glass admin access with alerting (partial: service accounts and API keys scoped by a role ceiling and a project list delivered; break-glass delivered, a one-hour admin sign-in link minted on the host with `admin:break-glass`, audited and alerted at issue, use and end; missing: key rotation and expiry warnings)
+- [x] Service accounts with scoped, rotating keys; break-glass admin access with alerting (service accounts and API keys scoped by a role ceiling and a project list; key and gateway client token rotation with a grace window, 24 hours by default, an optional maximum age for service-account keys and `credential.expiring` warnings; break-glass, a one-hour admin sign-in link minted on the host with `admin:break-glass`, audited and alerted at issue, use and end)
 
 ### 13.3 Data protection and tenancy
 - [ ] Envelope encryption with customer-managed keys (cloud KMS services and Vault Transit); master-key rotation without downtime

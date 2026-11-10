@@ -333,6 +333,22 @@ export const openApiSpec = {
         }
       }
     },
+    "/api/auth/api-keys/{id}/rotate": {
+      post: {
+        tags: ["Auth"],
+        summary:
+          "Rotate one of your own API keys: a new key (returned once) with the same name, scope and limits; the old key keeps working for graceHours (default 24, 0 ends it now). A scoped key may rotate only itself; a key rotated with a key expires no later than the calling key. Needs step-up when it is on (api_key.rotate).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: {
+          "200": { description: "{ key, record, previous }: the new key (plaintext once), its record, and the old key's record with its new expiresAt" },
+          "400": { description: "Invalid graceHours" },
+          "403": { description: "A scoped key rotating another key, a service account's key, or step-up required (code: step_up_required)" },
+          "404": { description: "No such key of yours" },
+          "409": { description: "Already rotated (code: already_rotated), or revoked or expired (code: inactive)" }
+        }
+      }
+    },
     "/api/auth/saml/metadata": {
       get: {
         tags: ["Auth"],
@@ -540,6 +556,25 @@ export const openApiSpec = {
           { name: "keyId", in: "path", required: true, schema: { type: "string" } }
         ],
         responses: { "200": { description: "Revoked" }, "404": { description: "Service account or key not found" } }
+      }
+    },
+    "/api/service-accounts/{id}/keys/{keyId}/rotate": {
+      post: {
+        tags: ["Users"],
+        summary:
+          "Rotate a service account's API key (admin): a new key (returned once) with the same name and scope; the old key keeps working for graceHours (default 24, 0 ends it now). SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS caps the new key's expiry. Needs step-up when it is on (api_key.rotate).",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "keyId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: {
+          "200": { description: "{ key, record, previous }" },
+          "400": { description: "Invalid graceHours" },
+          "403": { description: "Step-up required (code: step_up_required)" },
+          "404": { description: "Service account or key not found" },
+          "409": { description: "Already rotated (code: already_rotated), or revoked or expired (code: inactive)" }
+        }
       }
     },
     "/api/users/{id}/sessions": {
@@ -3415,6 +3450,22 @@ export const openApiSpec = {
         responses: { "200": { description: "Revoked client" }, "404": { description: "Not found" } }
       }
     },
+    "/api/mcp/clients/{id}/rotate": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "Rotate a client's token (admin): a new token (returned once); the old token keeps working for graceHours (default 24, 0 ends it now, never past the client's own expiry). While an old token is still in its grace window, only a rotation with graceHours 0 is taken (it ends every old token now). Name, role, toolsets, limits and live sessions are kept. Needs step-up when it is on (mcp_client.rotate).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: {
+          "200": { description: "{ client, token }: client.previousTokenPrefix and previousExpiresAt describe the old token" },
+          "400": { description: "Invalid graceHours" },
+          "403": { description: "Step-up required (code: step_up_required)" },
+          "404": { description: "Not found" },
+          "409": { description: "Revoked or expired (code: inactive), an old token still in its grace window (code: rotation_pending), or rotated at the same moment by another request (code: rotation_conflict)" }
+        }
+      }
+    },
     "/api/mcp/clients/{id}/network": {
       put: {
         tags: ["MCP"],
@@ -3554,6 +3605,14 @@ export const openApiSpec = {
           projects: { type: "array", items: { type: "string" }, maxItems: 50, nullable: true },
           scopes: { type: "array", items: { type: "string", maxLength: 160 } },
           expiresInDays: { type: "integer", minimum: 0 }
+        }
+      },
+      CredentialRotate: {
+        type: "object",
+        description:
+          "How long the old key or token keeps working after a rotation, in hours (0 to 168; default 24; 0 ends it at once). The new credential keeps the old one's name, scope and limits.",
+        properties: {
+          graceHours: { type: "integer", minimum: 0, maximum: 168 }
         }
       },
       SafeUser: {
