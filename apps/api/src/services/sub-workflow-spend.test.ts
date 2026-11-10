@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { SubWorkflowUsage } from "@ai-orchestrator/workflow-engine";
-import { RESERVATION_FLOOR, SubWorkflowSpendTracker, usageUserOf, type RunUsageAttribution } from "./sub-workflow-spend.js";
+import { BudgetCheckTimeoutError, RESERVATION_FLOOR, SubWorkflowSpendTracker, usageUserOf, type RunUsageAttribution } from "./sub-workflow-spend.js";
 import type { RecordExecutionInput } from "./usage-service.js";
 
 const blob = (tokens: number) => ({ providerId: "p", model: "m", usage: { inputTokens: tokens, outputTokens: 0, totalTokens: tokens } });
@@ -17,7 +17,7 @@ const usage = (workflowId: string, tokens: number, status: SubWorkflowUsage["sta
   telemetry: [blob(tokens)]
 });
 
-function fixture(maxOpenRuns?: number) {
+function fixture(maxOpenRuns?: number, budgetCheckTimeoutMs?: number) {
   const rows: RecordExecutionInput[] = [];
   const alerts: Array<Record<string, unknown>> = [];
   const tokensOf = (blobs: ReadonlyArray<Record<string, unknown>>) => blobs.reduce((sum, entry) => sum + ((entry.usage as { totalTokens: number }).totalTokens ?? 0), 0);
@@ -35,7 +35,8 @@ function fixture(maxOpenRuns?: number) {
     },
     budgetService: { recordExecution: async (ctx) => void alerts.push(ctx as unknown as Record<string, unknown>) },
     logger: { warn: () => undefined },
-    ...(maxOpenRuns ? { maxOpenRuns } : {})
+    ...(maxOpenRuns ? { maxOpenRuns } : {}),
+    ...(budgetCheckTimeoutMs ? { budgetCheckTimeoutMs } : {})
   });
   return { tracker, rows, alerts };
 }
@@ -201,6 +202,65 @@ describe("SubWorkflowSpendTracker", () => {
     expect(tracker.take("a")).toBeUndefined();
     expect(tracker.take("b")).toBeDefined();
     expect(tracker.take("c")).toBeDefined();
+  });
+
+  it("keeps counting a run still going after it was dropped from the open runs (more than the bound open at once)", async () => {
+    const { tracker } = fixture(1);
+    const live = tracker.start({ ...attribution, executionId: "live" });
+    // Another run opens: "live" is dropped from the open runs while it still runs, with no child running.
+    tracker.start({ ...attribution, executionId: "other" });
+    expect(tracker.take("live")).toBeUndefined();
+    const cap = async (pending: () => { totalTokens: number }) => pending().totalTokens + RESERVATION_FLOOR.totalTokens <= 2_500;
+    // Its own async children are still reserved against its next ones: two fit under the cap, the third does not.
+    expect(await live.admitIf({ mode: "async" }, cap)).toBeDefined();
+    expect(await live.admitIf({ mode: "async" }, cap)).toBeDefined();
+    expect(await live.admitIf({ mode: "async" }, cap)).toBeUndefined();
+    expect(live.concurrentRunning({ mode: "async" })).toBe(2);
+    // A retried segment of the same execution sees them too.
+    const retry = tracker.start({ ...attribution, executionId: "live" });
+    expect(retry.concurrentRunning({ mode: "async" })).toBe(2);
+  });
+
+  it("refuses a child whose budget check hangs, and lets the next check go on", async () => {
+    const { tracker } = fixture(undefined, 30);
+    const spend = tracker.start(attribution);
+    const hung = spend.admitIf({ mode: "async" }, () => new Promise<boolean>(() => undefined));
+    const next = spend.admitIf({ mode: "async" }, async () => true);
+    await expect(hung).rejects.toBeInstanceOf(BudgetCheckTimeoutError);
+    await expect(hung).rejects.toThrow("The budgets could not be read within");
+    expect(await next).toBeDefined();
+    expect(spend.concurrentRunning({ mode: "async" })).toBe(1);
+  });
+
+  it("closes only the stopped attempt's record: a retry of the execution keeps its own for its row", async () => {
+    const { tracker, rows } = fixture();
+    const first = {};
+    const second = {};
+    const stopped = tracker.start(attribution, first);
+    await stopped.report(usage("wf-a", 3));
+    // The retry starts in the same process before the stopped attempt is cleaned up.
+    const retry = tracker.start(attribution, second);
+    await retry.report(usage("wf-b", 4));
+    await tracker.abandon(attribution.executionId, "stopped by the queue", first);
+    // The retry's child joins its run's row.
+    expect(tracker.take(attribution.executionId)).toBe(retry);
+    expect(retry.closeIntoRun()).toEqual([blob(4)]);
+    // The stopped attempt's child got a row of its own (when the retry replaced it).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rows.map((row) => row.subWorkflowTelemetry)).toEqual([[blob(3)]]);
+  });
+
+  it("holds a failed model call's usage for the run's row without raising a child's reservation", async () => {
+    const { tracker, rows } = fixture();
+    const spend = tracker.start(attribution);
+    await spend.reportModelUsage({ ...blob(800), latencyMs: 12 });
+    spend.admit({ mode: "async" });
+    // 800 held, and the running child reserved at the floor (no child has finished).
+    expect(spend.pending({ mode: "async" })).toEqual({ costUsd: 0.8 + RESERVATION_FLOOR.costUsd, totalTokens: 800 + RESERVATION_FLOOR.totalTokens });
+    expect(tracker.take(attribution.executionId)?.closeIntoRun()).toEqual([{ ...blob(800), latencyMs: 12 }]);
+    // After the row: a row of its own.
+    await spend.reportModelUsage(blob(9));
+    expect(rows).toEqual([expect.objectContaining({ executionId: "exec-1", workflowId: "wf-parent", status: "error", triggerType: "sub_workflow", subWorkflowTelemetry: [blob(9)] })]);
   });
 
   it("attributes usage like a run's row", () => {

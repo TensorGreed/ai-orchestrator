@@ -183,7 +183,7 @@ import { TracingService, parseKeyValueList, parseTraceparent } from "./services/
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
-import { SubWorkflowSpendTracker, usageUserOf, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
+import { SubWorkflowSpendTracker, usageUserOf, withinBudgetCheckTime, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
@@ -2203,7 +2203,7 @@ export async function createApp(
             projectId: input.workflow.projectId ?? null,
             ...(typeof input.triggeredBy === "string" ? { triggeredBy: input.triggeredBy } : {}),
             ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {})
-          })
+          }, input.spendAttempt)
         : undefined;
     // Phase 15.6 — sampled for production capture: the run records like a "Record calls" run.
     const captureTicket =
@@ -2330,7 +2330,13 @@ export async function createApp(
                 admitSubWorkflow: async (child: Workflow, request: SubWorkflowAdmissionRequest) =>
                   await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend)
               }),
-          ...(runSubWorkflowSpend ? { onSubWorkflowUsage: async (usage: SubWorkflowUsage) => await runSubWorkflowSpend.report(usage) } : {}),
+          ...(runSubWorkflowSpend
+            ? {
+                onSubWorkflowUsage: async (usage: SubWorkflowUsage) => await runSubWorkflowSpend.report(usage),
+                // A streamed model call that failed, was cancelled or timed out is charged its estimate in the run's row.
+                onUnrecordedModelUsage: async (telemetry: Record<string, unknown>) => await runSubWorkflowSpend.reportModelUsage(telemetry)
+              }
+            : {}),
           // Phase 9.1 — built-in persistent vector store, limited to the
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
@@ -3292,6 +3298,7 @@ export async function createApp(
         }
         const executed = await runWorkflowExecution({
           ...run,
+          spendAttempt: context,
           ...(mcpPlan ? { mcpPlan } : {}),
           hooks: queueJobHooks(context, progressHooks)
         });
@@ -3430,7 +3437,7 @@ export async function createApp(
       let admission: SubWorkflowAdmission | undefined;
       try {
         if (spend) admission = await spend.admitIf(request, fits);
-        else await fits();
+        else await withinBudgetCheckTime(fits(), subWorkflowSpend.checkTimeoutMs);
       } catch (error) {
         throw notStarted(error instanceof Error ? error.message : String(error));
       }
@@ -5021,7 +5028,7 @@ export async function createApp(
     runReleases.delete(executionId);
     dropCapture(executionId, "skipped_not_stored");
     // The run leaves no usage row; what its sub-workflows spent is still recorded.
-    subWorkflowSpend.abandon(executionId, "stopped by the queue").catch((error: unknown) => {
+    subWorkflowSpend.abandon(executionId, "stopped by the queue", job).catch((error: unknown) => {
       app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record a stopped run's sub-workflow spend");
     });
     app.log.warn({ executionId, workflowId, reason: String(job.signal.reason) }, "Queued run stopped by the queue");
@@ -5143,6 +5150,7 @@ export async function createApp(
           : null;
         const result = await runWorkflowExecution({
           ...(hooks ? { hooks } : {}),
+          ...(queueJob ? { spendAttempt: queueJob } : {}),
           ...(gatewayGuard ? { gatewayGuard } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           ...(state.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
@@ -5184,13 +5192,15 @@ export async function createApp(
         // Stopped by the queue: the decision stands and the queue's policy decides who resumes it. What this attempt's
         // sub-workflows spent is recorded now (the next attempt starts its own).
         if (queueJob?.signal.aborted) {
-          await subWorkflowSpend.abandon(job.executionId, "the resume was stopped by the queue").catch((spendError: unknown) => {
+          await subWorkflowSpend.abandon(job.executionId, "the resume was stopped by the queue", queueJob).catch((spendError: unknown) => {
             app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a stopped resume's sub-workflow spend");
           });
           throw error;
         }
         // What the failed resume's sub-workflows spent is still recorded.
-        await subWorkflowSpend.abandon(job.executionId, "the resume failed");
+        await subWorkflowSpend.abandon(job.executionId, "the resume failed").catch((spendError: unknown) => {
+          app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a failed resume's sub-workflow spend");
+        });
         // The decision is kept for a new try: the run waits again and the request is pending again.
         await approvalService.reopenAfterFailedResume(job);
         throw error;
@@ -13919,6 +13929,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const hooks = queueJobHooks(context, progressHooks);
     const result = await runWorkflowExecution({
       ...(hooks ? { hooks } : {}),
+      spendAttempt: context,
       policyActor: enqueuedBy,
       elicitationsForWorkflow: true,
       workflow,

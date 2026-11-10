@@ -164,4 +164,9 @@ export interface RunWorkflowExecutionInput {
    * keeps the user who started it (from the paused state), not the approver. Used for its sub-workflows' checks.
    */
   budgetSubject?: { userEmail: string | null; userId: string | null };
+  /**
+   * The queue attempt that runs this (its job context): a stopped attempt then closes only its own sub-workflow spend
+   * record, not one a retry of the same execution has started since.
+   */
+  spendAttempt?: object;
 }
