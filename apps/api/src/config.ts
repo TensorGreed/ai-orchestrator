@@ -48,6 +48,9 @@ function optionalIntFromEnv(min: number, max: number) {
   );
 }
 
+/** 13.3 — the shortest usage retention: monthly budgets sum a month of usage events. */
+export const USAGE_EVENTS_MIN_RETENTION_DAYS = 31;
+
 const envSchema = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("warn"),
   API_PORT: z.coerce.number().int().positive().default(4000),
@@ -554,10 +557,19 @@ const envSchema = z.object({
   // Operators with negotiated rates / self-hosted GPU costs override here.
   LLM_PRICING_OVERRIDES_JSON: z.string().default(""),
   /**
-   * 13.3 — usage_events rows older than this many days are deleted. 0 (the default) keeps them: an upgrade deletes no
-   * chargeback history. `.env.example` suggests 365 for new installs.
+   * 13.3 — usage_events rows older than this many days are deleted. 0 (the default) keeps them. An explicit value is
+   * honoured as set, so an install whose .env still has the old `USAGE_EVENTS_RETENTION_DAYS=365` line now deletes
+   * older usage rows (the start-up log warns, naming the date). At least 31 when set: monthly budgets sum a month of
+   * usage. No upper limit, as before.
    */
-  USAGE_EVENTS_RETENTION_DAYS: z.coerce.number().int().nonnegative().max(36_500).default(0),
+  USAGE_EVENTS_RETENTION_DAYS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(0)
+    .refine((days) => days === 0 || days >= USAGE_EVENTS_MIN_RETENTION_DAYS, {
+      message: `USAGE_EVENTS_RETENTION_DAYS must be 0 (keep) or at least ${USAGE_EVENTS_MIN_RETENTION_DAYS} days: monthly budgets sum a month of usage`
+    }),
 
   // Phase 7.1 — Deployment & HA
   WORKER_MODE: z.enum(["all", "api", "webhook", "worker"]).default("all"),

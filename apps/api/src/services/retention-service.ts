@@ -11,9 +11,9 @@
  * lease, so two instances never purge at once, whatever their HA settings. A purge runs at start-up, on
  * EXECUTION_HISTORY_PRUNE_INTERVAL_MS, and after finished runs (nudge(), at most once a minute per instance).
  *
- * Records: every start-up and interval purge, and every other purge that deleted rows or failed, writes a
- * `retention_runs` row (counts only, kept 90 days). A purge that deleted rows adds to the
- * `<prefix>_retention_deleted_total{class}` counter and writes one `retention.purged` audit row with the counts.
+ * Records: every start-up, interval and manual purge writes a `retention_runs` row (counts only, kept 90 days) and,
+ * when rows went, one `retention.purged` audit row. After-run purges write neither: their counts are added to the next
+ * recorded purge. Every purge adds what it deleted to the `<prefix>_retention_deleted_total{class}` counter.
  *
  * Seams for later steps: `effectiveRetention(projectId, class)` resolves a class's days (deployment only today;
  * per-project values slot in between), and every class is a step, so another deletion source registers as one.
@@ -31,7 +31,7 @@ import {
 } from "@ai-orchestrator/shared";
 import type { RetentionSettings } from "../config.js";
 import type { Store } from "../db/store.js";
-import type { RetentionTable } from "../db/retention-tables.js";
+import { yieldToEventLoop, type RetentionTable } from "../db/retention-tables.js";
 import type { AuditEventInput } from "./audit-service.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -133,6 +133,14 @@ export class RetentionService {
   private readonly leaseTtlMs: number;
   private timer: NodeJS.Timeout | null = null;
   private inFlight: Promise<RetentionTickResult> | null = null;
+  private inFlightReason: RetentionRunReason | null = null;
+  /** What after-run purges deleted since the last recorded purge; the next scheduled purge records and audits it. */
+  private pending: { counts: RetentionRunView["counts"]; capped: Set<RetentionPurgeClass>; errors: string[]; purges: number } = {
+    counts: {},
+    capped: new Set(),
+    errors: [],
+    purges: 0
+  };
   private lastNudgeAt = Number.NEGATIVE_INFINITY;
   private stopped = false;
 
@@ -224,13 +232,22 @@ export class RetentionService {
     });
   }
 
-  /** Runs one purge now (a purge already running on this instance is joined, not repeated). */
+  /**
+   * Runs one purge now. A purge already running on this instance is joined, not repeated; a scheduled purge that
+   * finds an after-run purge running waits for it and then runs itself, so every scheduled purge is recorded.
+   */
   async tick(reason: RetentionRunReason): Promise<RetentionTickResult> {
-    if (this.inFlight) return await this.inFlight;
+    while (this.inFlight) {
+      const current = this.inFlight;
+      if (reason === "write" || this.inFlightReason !== "write") return await current;
+      await current.catch(() => undefined);
+    }
     const run = this.runTick(reason).finally(() => {
       this.inFlight = null;
+      this.inFlightReason = null;
     });
     this.inFlight = run;
+    this.inFlightReason = reason;
     return await run;
   }
 
@@ -274,6 +291,8 @@ export class RetentionService {
           errors.push(`${retentionClass}: ${message}`);
           this.options.logger?.warn({ reason, class: retentionClass, before, error: message }, "Retention purge failed for a class");
         }
+        // Let timers and requests run between classes (SQLite purges are synchronous inside each batch).
+        await yieldToEventLoop();
         // Renew between classes; a lease taken over (this purge outlived its TTL) stops the purge here.
         if (!(await this.renew(lease))) {
           errors.push("lease: lost to another instance; the purge stopped");
@@ -308,33 +327,62 @@ export class RetentionService {
       capped,
       error: errors.length > 0 ? errors.join("; ").slice(0, MAX_ERROR_LENGTH) : null
     };
-    // After-run purges are frequent; they are recorded only when they did something worth showing.
-    if (reason !== "write" || deleted > 0 || errors.length > 0) {
-      try {
-        await store.saveRetentionRun(run);
-      } catch (error) {
-        this.options.logger?.warn({ error: this.message(error) }, "Failed to record a retention purge");
+    if (reason === "write") {
+      // After-run purges run up to once a minute: they leave no purge-log row or audit entry of their own. What they
+      // deleted is added to the next scheduled purge's record.
+      for (const [key, n] of Object.entries(counts)) {
+        const retentionClass = key as RetentionPurgeClass;
+        this.pending.counts[retentionClass] = (this.pending.counts[retentionClass] ?? 0) + (n ?? 0);
       }
+      for (const retentionClass of capped) this.pending.capped.add(retentionClass);
+      this.pending.errors.push(...errors);
+      this.pending.purges += 1;
+      if (deleted > 0) this.options.logger?.info({ reason, counts, capped }, "Retention purge deleted rows");
+      return { status: "ran", run, deleted };
     }
-    if (deleted > 0) {
-      this.options.logger?.info({ reason, counts, capped }, "Retention purge deleted rows");
+
+    // A scheduled purge records itself with what the after-run purges since the last record deleted.
+    const carried = this.pending;
+    this.pending = { counts: {}, capped: new Set(), errors: [], purges: 0 };
+    const recordedCounts: RetentionRunView["counts"] = { ...counts };
+    for (const [key, n] of Object.entries(carried.counts)) {
+      const retentionClass = key as RetentionPurgeClass;
+      recordedCounts[retentionClass] = (recordedCounts[retentionClass] ?? 0) + (n ?? 0);
+    }
+    const recordedCapped = [...new Set([...capped, ...carried.capped])];
+    const recordedErrors = [...errors, ...carried.errors.map((error) => `after a run: ${error}`)];
+    const recordedDeleted = Object.values(recordedCounts).reduce((sum: number, n) => sum + (n ?? 0), 0);
+    const recorded: RetentionRunView = {
+      ...run,
+      counts: recordedCounts,
+      capped: recordedCapped,
+      outcome: errors.length > 0 ? outcome : carried.errors.length > 0 ? "partial" : "ok",
+      error: recordedErrors.length > 0 ? recordedErrors.join("; ").slice(0, MAX_ERROR_LENGTH) : null
+    };
+    try {
+      await store.saveRetentionRun(recorded);
+    } catch (error) {
+      this.options.logger?.warn({ error: this.message(error) }, "Failed to record a retention purge");
+    }
+    if (recordedDeleted > 0) {
+      this.options.logger?.info({ reason, counts: recordedCounts, capped: recordedCapped }, "Retention purge deleted rows");
       try {
         await this.options.audit?.({
           category: "system",
           eventType: "retention.purged",
           action: "delete",
-          outcome: errors.length > 0 ? "failure" : "success",
+          outcome: recordedErrors.length > 0 ? "failure" : "success",
           actor: { type: "system" },
           resourceType: "retention",
-          resourceId: run.id,
-          metadata: { reason, counts, capped, deleted },
-          message: `Retention purge deleted ${deleted} row${deleted === 1 ? "" : "s"}`
+          resourceId: recorded.id,
+          metadata: { reason, counts: recordedCounts, capped: recordedCapped, deleted: recordedDeleted, afterRunPurges: carried.purges },
+          message: `Retention purge deleted ${recordedDeleted} row${recordedDeleted === 1 ? "" : "s"}`
         });
       } catch (error) {
         this.options.logger?.warn({ error: this.message(error) }, "Failed to audit a retention purge");
       }
     }
-    return { status: "ran", run, deleted };
+    return { status: "ran", run: recorded, deleted };
   }
 
   /** The admin view: deployment values, backlog and the latest purges. */
@@ -421,5 +469,22 @@ export function captureStep(days: () => number, prune: (before: string) => Promi
     async run({ before }) {
       return { deleted: await prune(before), capped: false };
     }
+  };
+}
+
+/**
+ * The start-up warning for an explicit USAGE_EVENTS_RETENTION_DAYS (null when usage is kept). Usage retention is applied
+ * since 13.3, and an .env copied from an older .env.example still sets 365, so the log names the date before which
+ * usage rows now go.
+ */
+export function usageRetentionWarning(days: number, now: Date = new Date()): { fields: Record<string, unknown>; message: string } | null {
+  if (!Number.isFinite(days) || days <= 0) return null;
+  const deletesBefore = new Date(now.getTime() - days * DAY_MS).toISOString();
+  return {
+    fields: { setting: "USAGE_EVENTS_RETENTION_DAYS", days, deletesBefore },
+    message:
+      `USAGE_EVENTS_RETENTION_DAYS=${days} is set: usage events older than ${deletesBefore.slice(0, 10)} are deleted by the ` +
+      "retention purge, and FinOps totals, chargeback reports and budget history for those days go with them. " +
+      "Remove the setting or set it to 0 to keep usage history."
   };
 }

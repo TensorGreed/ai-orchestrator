@@ -42,20 +42,27 @@ describe("retention purge on SQLite under load", () => {
 
     let last = performance.now();
     let worstGap = 0;
+    let fired = 0;
     const timer = setInterval(() => {
       const now = performance.now();
       worstGap = Math.max(worstGap, now - last);
       last = now;
+      fired += 1;
     }, 10);
     try {
       last = performance.now();
       const result = await service.tick("manual");
       expect(result.status === "ran" && result.run.counts.runs).toBe(ROWS);
+      // One more timer turn, so a purge that blocked the loop up to its end is measured too (a synchronous DELETE
+      // never lets the timer fire while it runs), and count the gap still open.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      worstGap = Math.max(worstGap, performance.now() - last);
     } finally {
       clearInterval(timer);
     }
     const left = db.prepare(`SELECT COUNT(*) AS n FROM execution_history`).get() as { n: number };
     expect(left.n).toBe(0);
     expect(worstGap).toBeLessThan(100);
+    expect(fired).toBeGreaterThanOrEqual(5);
   }, 120_000);
 });

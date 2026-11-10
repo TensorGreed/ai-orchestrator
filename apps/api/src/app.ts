@@ -186,7 +186,7 @@ import {
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GIT_SYNC_LOCK_WAIT_MS, GitSyncService } from "./services/git-sync-service.js";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
-import { RetentionService, captureStep, ruleSimulationStep } from "./services/retention-service.js";
+import { RetentionService, captureStep, ruleSimulationStep, usageRetentionWarning } from "./services/retention-service.js";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
@@ -4832,6 +4832,10 @@ export async function createApp(
     redact: (text) => String(secretService.redact(text))
   });
   retentionService = retention;
+  // 13.3 — usage retention is applied since 13.3. An .env copied from an older .env.example still sets 365; say loudly
+  // what that now deletes, so an operator who wants to keep chargeback history removes it or sets 0.
+  const usageWarning = usageRetentionWarning(config.USAGE_EVENTS_RETENTION_DAYS);
+  if (usageWarning) app.log.warn(usageWarning.fields, usageWarning.message);
   app.addHook("onClose", async () => {
     await retention.stop();
   });
@@ -5259,7 +5263,7 @@ export async function createApp(
       return 0;
     }
   };
-  await pruneAuditLogs("startup");
+  // The start-up audit prune runs with the start-up retention purge (below), once leadership is known.
   const auditRetentionTimer = config.AUDIT_LOG_RETENTION_DAYS > 0
     // promise-ok: the task catches and logs its own errors
     ? setInterval(async () => await pruneAuditLogs("interval"), config.AUDIT_LOG_PRUNE_INTERVAL_MS)
@@ -14256,8 +14260,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   }
   // Kept GUARD_SIMULATION_RETENTION_DAYS, purged by the retention service with their replay jobs.
   retention.register(ruleSimulationStep(async (before) => await guardSimulationService.prune(before)));
-  // 13.3 — every step is registered: the start-up purge runs once the leader is known (after acquireEarly).
+  // 13.3 — every step is registered: the start-up purges run once the leader is known.
+  // The leader election has started by now (an earlier onReady hook), so an HA leader purges at start-up too.
   app.addHook("onReady", async () => {
+    await pruneAuditLogs("startup");
     await retention.start();
   });
 

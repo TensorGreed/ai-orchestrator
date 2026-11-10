@@ -9,7 +9,7 @@ import { resolveRetentionSettings, type AppConfig } from "../config.js";
 import { RETENTION_TABLES, type RetentionTable } from "../db/retention-tables.js";
 import type { Store } from "../db/store.js";
 import type { AuditEventInput } from "./audit-service.js";
-import { RETENTION_LEASE_NAME, RetentionService, type RetentionServiceOptions } from "./retention-service.js";
+import { RETENTION_LEASE_NAME, RetentionService, usageRetentionWarning, type RetentionServiceOptions } from "./retention-service.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, type TestStore, type TestStoreKind } from "../test-support/test-store.js";
 import { testSql } from "../test-support/test-sql.js";
 import { retentionRowSql } from "../test-support/retention-rows.js";
@@ -216,7 +216,7 @@ for (const kind of kinds) {
       expect(tick).toHaveBeenCalledTimes(2);
     }, 60_000);
 
-    it("records scheduled purges always, after-run purges only when they did something; audits and counts deletions", async () => {
+    it("records and audits scheduled purges only; after-run purges add their counts to the next record", async () => {
       const store = await open();
       const audit = vi.fn(async (_event: AuditEventInput) => undefined);
       const metrics = { recordRetentionDeleted: vi.fn((_cls: RetentionPurgeClass, _n: number) => undefined) };
@@ -230,26 +230,70 @@ for (const kind of kinds) {
       expect(audit).not.toHaveBeenCalled();
       expect(metrics.recordRetentionDeleted).not.toHaveBeenCalled();
 
+      // Two after-run purges that delete: no record or audit entry of their own, but the metric counts at once.
       await seed(store, [retentionRowSql("execution_history", "old-1", OLD), retentionRowSql("guard_events", "old-1", OLD)]);
+      const write = await service.tick("write");
+      expect(write.status === "ran" && write.run.counts).toEqual({ runs: 1, rule_events: 1 });
+      await seed(store, [retentionRowSql("execution_history", "old-2", OLD)]);
       await service.tick("write");
+      expect((await store.listRetentionRuns(10)).map((run) => run.reason)).toEqual(["startup"]);
+      expect(audit).not.toHaveBeenCalled();
+      expect(metrics.recordRetentionDeleted.mock.calls).toEqual([
+        ["runs", 1],
+        ["rule_events", 1],
+        ["runs", 1]
+      ]);
+
+      // The next scheduled purge records and audits them with its own.
+      await seed(store, [retentionRowSql("mcp_tool_calls", "old-1", OLD)]);
+      const scheduled = await service.tick("interval");
+      expect(scheduled.status === "ran" && scheduled.deleted).toBe(1);
       const runs = await store.listRetentionRuns(10);
-      expect(runs[0]).toMatchObject({ reason: "write", outcome: "ok", counts: { runs: 1, rule_events: 1 } });
+      expect(runs[0]).toMatchObject({ reason: "interval", outcome: "ok", counts: { runs: 2, rule_events: 1, tool_calls: 1 } });
       expect(audit).toHaveBeenCalledTimes(1);
       expect(audit.mock.calls[0]![0]).toMatchObject({
         eventType: "retention.purged",
         category: "system",
         actor: { type: "system" },
-        metadata: { reason: "write", counts: { runs: 1, rule_events: 1 }, deleted: 2 }
+        resourceId: runs[0]!.id,
+        metadata: { reason: "interval", counts: { runs: 2, rule_events: 1, tool_calls: 1 }, deleted: 4, afterRunPurges: 2 }
       });
-      expect(metrics.recordRetentionDeleted.mock.calls).toEqual([
-        ["runs", 1],
-        ["rule_events", 1]
-      ]);
+      // Carried counts go into one record only.
+      await service.tick("interval");
+      expect((await store.listRetentionRuns(1))[0]?.counts).toEqual({});
+      expect(audit).toHaveBeenCalledTimes(1);
       const view = await service.view();
-      expect(view.lastRun?.reason).toBe("write");
-      // The next interval purge is due one interval after the last scheduled one (the start-up purge).
-      const startup = runs.find((run) => run.reason === "startup")!;
-      expect(view.nextRunAt).toBe(new Date(Date.parse(startup.startedAt) + 3_600_000).toISOString());
+      expect(view.lastRun?.reason).toBe("interval");
+      expect(view.nextRunAt).toBe(new Date(Date.parse(view.lastRun!.startedAt) + 3_600_000).toISOString());
+    }, 60_000);
+
+    it("a scheduled purge that finds an after-run purge running waits for it, then runs and records itself", async () => {
+      const store = await open();
+      await seed(store, [retentionRowSql("execution_history", "old-1", OLD)]);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const service = makeService(store);
+      service.register({
+        class: "usage",
+        setting: "USAGE_EVENTS_RETENTION_DAYS",
+        days: () => 31,
+        run: async () => {
+          await gate;
+          return { deleted: 0, capped: false };
+        }
+      });
+      const write = service.tick("write");
+      const interval = service.tick("interval");
+      // Another after-run purge joins the one running instead of starting its own.
+      const joined = service.tick("write");
+      release();
+      const [first, second, third] = await Promise.all([write, interval, joined]);
+      expect(first.status === "ran" && first.run.reason).toBe("write");
+      expect(third).toBe(first);
+      expect(second.status === "ran" && second.run).toMatchObject({ reason: "interval", counts: { runs: 1 } });
+      expect((await store.listRetentionRuns(10)).map((run) => run.reason)).toEqual(["interval"]);
     }, 60_000);
 
     it("a failing class is recorded and the others still run", async () => {
@@ -314,5 +358,15 @@ describe("resolveRetentionSettings", () => {
 
   it("refuses a maximum below the minimum", () => {
     expect(() => resolveRetentionSettings({ USAGE_EVENTS_RETENTION_DAYS: 0, RETENTION_MIN_DAYS: 30, RETENTION_MAX_DAYS: 7 })).toThrow(/RETENTION_MAX_DAYS \(7\) is below RETENTION_MIN_DAYS \(30\)/);
+  });
+});
+
+describe("usageRetentionWarning", () => {
+  it("is silent when usage is kept, and names the setting and the date before which rows go when it is set", () => {
+    expect(usageRetentionWarning(0, NOW)).toBeNull();
+    const warning = usageRetentionWarning(365, NOW)!;
+    expect(warning.fields).toEqual({ setting: "USAGE_EVENTS_RETENTION_DAYS", days: 365, deletesBefore: "2025-11-10T12:00:00.000Z" });
+    expect(warning.message).toContain("USAGE_EVENTS_RETENTION_DAYS=365 is set: usage events older than 2025-11-10 are deleted");
+    expect(warning.message).toContain("set it to 0 to keep usage history");
   });
 });

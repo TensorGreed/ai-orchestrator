@@ -114,7 +114,9 @@ How long each kind of data is kept: `EXECUTION_HISTORY_RETENTION_DAYS` (30), `EV
 `AUDIT_LOG_RETENTION_DAYS` (365), and, kept forever unless set, `USAGE_EVENTS_RETENTION_DAYS`,
 `AGENT_MEMORY_RETENTION_DAYS` and `AI_GATEWAY_REQUEST_RETENTION_DAYS`. `RETENTION_MAX_ROWS_PER_TICK` (50 000) caps the
 rows one purge deletes per table. See [Data retention](../operations/data-retention.md) for every setting and what it
-deletes.
+deletes. Upgrading: an `.env` copied from an older `.env.example` sets `USAGE_EVENTS_RETENTION_DAYS=365`, which now
+deletes usage events older than a year; remove it or set `0` to keep them
+([details](../operations/data-retention.md#upgrading-usage-retention)).
 
 ## MCP server registry probes (optional)
 

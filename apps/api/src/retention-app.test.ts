@@ -112,7 +112,7 @@ describe("retention in the app", () => {
   }, 60_000);
 
   it("USAGE_EVENTS_RETENTION_DAYS and AGENT_MEMORY_RETENTION_DAYS, once set, purge their rows", async () => {
-    const context = await createTestContext({ USAGE_EVENTS_RETENTION_DAYS: "30", AGENT_MEMORY_RETENTION_DAYS: "30" }, SEED);
+    const context = await createTestContext({ USAGE_EVENTS_RETENTION_DAYS: "31", AGENT_MEMORY_RETENTION_DAYS: "30" }, SEED);
     expect(await count(context.store, "usage_events")).toBe(1);
     expect(await count(context.store, "session_memory")).toBe(0);
     expect((await context.store.listRetentionRuns(1))[0]?.counts).toEqual({ runs: 1, usage: 1, agent_memory: 1 });
@@ -143,5 +143,9 @@ describe("retention in the app", () => {
     expect(() => parseConfig({ RETENTION_MIN_DAYS: "30", RETENTION_MAX_DAYS: "7" })).toThrow(/RETENTION_MAX_DAYS/);
     expect(() => parseConfig({ RETENTION_MAX_ROWS_PER_TICK: "10" })).toThrow(/RETENTION_MAX_ROWS_PER_TICK/);
     expect(parseConfig({}).USAGE_EVENTS_RETENTION_DAYS).toBe(0);
+    // Set, it is at least 31 days (monthly budgets sum a month of usage), with no upper limit, as before.
+    expect(() => parseConfig({ USAGE_EVENTS_RETENTION_DAYS: "30" })).toThrow(/at least 31 days/);
+    expect(parseConfig({ USAGE_EVENTS_RETENTION_DAYS: "31" }).USAGE_EVENTS_RETENTION_DAYS).toBe(31);
+    expect(parseConfig({ USAGE_EVENTS_RETENTION_DAYS: "100000" }).USAGE_EVENTS_RETENTION_DAYS).toBe(100_000);
   });
 });
