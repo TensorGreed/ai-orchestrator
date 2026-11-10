@@ -55,9 +55,36 @@ HTTP refusals (402) are logged and audited as `budget.run_refused` once per work
 
 A replay is checked like a run when it may call a model or a tool live: an MCP replay of a past run (`/api/executions/:id/replay`, its model calls are live), and a golden-run replay with live models, a lenient model tape (a miss calls the live model), live-read nodes or a server answered live. A golden-run replay that answers every model and MCP call from its tapes (models from the tape, strict) is never refused; this includes release gate cases set up that way. A gate or replay job case that is refused fails with the budget's message.
 
-**Not refused:** tape-only replays, eval runs, the resume of a run that waited on an approval, error workflows, and sub-workflows (only the run that started them is checked). Their spend still counts toward budgets. The resumed part of a run an MCP gateway call started is charged to that client and its toolset's project, not to the approver.
+**Not refused:** tape-only replays, eval runs, the resume of a run that waited on an approval, and error workflows. Their spend still counts toward budgets. A sub-workflow that a resumed run starts is checked (see [Sub-workflows](#sub-workflows)). The resumed part of a run an MCP gateway call started is charged to that client and its toolset's project, not to the approver.
 
 A run that starts under the cap may take it over, and runs that start together are checked before any of them ends, so usage can pass a cap by the runs in flight. Each instance keeps a copy of the budgets and reads it again every 2 seconds and right after a change on that instance; a budget changed on another instance applies within 2 seconds. When the budgets cannot be read, runs are refused (HTTP 503) rather than started unchecked.
+
+## Sub-workflows
+
+A workflow run by an **Execute Workflow** node, or called by an agent through a **Workflow Tool**, runs inside the run that started it, so its model spend is that run's:
+
+- It is recorded in the usage of the top-level run, and counts toward that run's workflow, project, user, MCP client and global budgets. The caller pays: a child in another project, or a child with a workflow budget of its own, does not count it toward its own budgets.
+- Nested children count once, in the top-level run, however deep they are.
+- A child that fails still counts what it spent before it failed. A Workflow Tool's child counts as soon as its call ends, even when the agent then fails, is stopped or waits on an approval.
+- An async child (mode **async**) counts too. When it ends after its run was recorded, its spend is recorded on its own for the same run (trigger type `sub_workflow`). So is what a run's children spent before it paused for an approval, and what they spent in a run that stopped without being recorded (a queue that stopped it, a resume that failed).
+- A child in another project runs with that project's credentials (secrets, model keys) but its spend counts toward the caller's budgets, not that project's. Share a workflow for **execute** only with projects whose spend on its credentials you accept.
+
+### Refusing a child
+
+Before a child starts, the `block` budgets of its run are checked again. A run's budgets are matched as when it started: its workflow, project and MCP client, and the user who started it, also for children started after an approval (never the approver). The check counts:
+
+- what the run's earlier children spent,
+- and a reservation for each child still running beside it: async children, and a Workflow Tool child whose call timed out. Each is reserved at the largest spend a finished child of the run has had, and at least one cent or 1,000 tokens before any has finished. Sync and Workflow Tool children run one at a time and count once they end; the children a child runs inside are not reserved against it. Children still running from before an approval pause (or from a queue attempt that was stopped) stay reserved after the run resumes.
+
+A run's checks happen one after another, each child reserved before the next check, so children started at the same moment cannot together pass a cap. This holds within the server running the run, where all of its children run; separate runs, also on other servers, see each other only through recorded usage (see the note on runs in flight above). With no `block` budget that matches the run, nothing is checked, reserved against or limited (as long as the budgets can be read: when they cannot, a child is refused, as runs are).
+
+A refused child does not start: the Execute Workflow node fails (an async one too) with `Sub-workflow '…' was not started: Budget "…" exceeded for the current month.`, and a Workflow Tool call returns that message to the agent as a tool error. A budget's refusal is audited as `budget.run_refused` (trigger type `sub_workflow`, with the child's workflow id) once per workflow, budget and period. A paused child that resumes after an approval is not checked again, and the children of eval runs (resumed or not) are never refused.
+
+The run's other model calls count only when the run ends, and a reservation is an estimate, so a run can still pass a cap by its own calls or by a child that spends more than the ones before it.
+
+### Usage views
+
+A `sub_workflow` row is spend, not an execution: the usage totals and charts count its tokens and cost, but not as an execution or in the average duration, and the recent executions list leaves it out.
 
 ## API
 

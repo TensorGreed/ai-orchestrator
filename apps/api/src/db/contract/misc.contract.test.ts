@@ -260,6 +260,28 @@ describeStoreContract("store contract: usage events and rollups", (ctx) => {
     expect(await store.queryUsageRollup({ ...window, groupBy: "day", limit: 0 })).toHaveLength(2);
   });
 
+  it("a sub-workflow's own row counts its spend but is no execution: not in counts, average durations or the recent list", async () => {
+    const store = ctx.store();
+    await store.writeUsageEvent(usage("run", { durationMs: 1000 }));
+    await store.writeUsageEvent(usage("child", { triggerType: "sub_workflow", status: "error", durationMs: 9000, costUsd: 0.3, totalTokens: 300 }));
+    const totals = await store.queryUsageTotals(window);
+    expect(totals).toMatchObject({ executions: 1, avgDurationMs: 1000, totalTokens: 450 });
+    expect(totals.costUsd).toBeCloseTo(0.4, 10);
+    const [day] = await store.queryUsageRollup({ ...window, groupBy: "day" });
+    expect(day).toMatchObject({ executions: 1, avgDurationMs: 1000, totalTokens: 450 });
+    const [byWorkflow] = await store.queryUsageRollup({ ...window, groupBy: "workflow" });
+    expect(byWorkflow).toMatchObject({ workflowId: "wf-a", executions: 1, avgDurationMs: 1000, totalTokens: 450 });
+    const [byProvider] = await store.queryUsageRollup({ ...window, groupBy: "provider" });
+    expect(byProvider).toMatchObject({ executions: 1, avgDurationMs: 1000, totalTokens: 450 });
+    expect((await store.listUsageEvents()).map((e) => e.id)).toEqual(["run"]);
+    // Budgets count it.
+    expect((await store.queryBudgetUsage({ ...window, workflowId: "wf-a" })).totalTokens).toBe(450);
+    // Only sub-workflow rows: no executions, no average.
+    const onlyChild = { from: "2026-10-01T10:15:00.000Z", to: "2026-10-01T10:15:00.001Z" };
+    await store.writeUsageEvent(usage("lone", { triggerType: "sub_workflow", createdAt: "2026-10-01T10:15:00.000Z", workflowId: "wf-z" }));
+    expect(await store.queryUsageTotals({ ...onlyChild, workflowId: "wf-z" })).toMatchObject({ executions: 0, avgDurationMs: 0, totalTokens: 150 });
+  });
+
   it("events created in the same millisecond list by id, newest id first", async () => {
     const store = ctx.store();
     for (const id of ["x2", "x3", "x1"]) await store.writeUsageEvent(usage(id, { createdAt: "2026-10-01T10:00:00.000Z" }));

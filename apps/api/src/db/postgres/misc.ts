@@ -2,6 +2,7 @@
  * Phase 13.1 — PostgresStore: Store lifecycle, git sync, leases, variables, usage and budgets, notification configs.
  * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
+import { SUB_WORKFLOW_USAGE_TRIGGER, USAGE_AVG_DURATION, USAGE_EXECS, USAGE_EXECUTION_ROW } from "../usage-sql.js";
 import { type Store } from "../store.js";
 import type { BudgetRecord } from "../database.js";
 import { toNum, toStr } from "./helpers.js";
@@ -312,11 +313,11 @@ export async function writeUsageEvent(ctx: PgContext, input: Parameters<Store["w
 }
 
 /** `cost_usd` is double precision (v40), the same 8-byte float as SQLite's REAL, so sums match SQLite's. */
-const AGGREGATES = `COUNT(*) AS execs,
+const AGGREGATES = `${USAGE_EXECS} AS execs,
   SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
   SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
   SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-  AVG(duration_ms) AS avgd`;
+  ${USAGE_AVG_DURATION} AS avgd`;
 
 type AggregateRow = {
   execs: string | number; ti: string | number | null; to: string | number | null; ci: string | number | null;
@@ -412,11 +413,11 @@ export async function queryUsageRollup(ctx: PgContext, input: Parameters<Store["
   // groupBy === "provider": providers_json is per execution, so it is unfolded here, as the SQLite store does.
   const rows = await ctx.query<{
     providers_json: string | null; ti: number; to: number; ci: number; tt: number;
-    cost: number; calls: number; duration: number;
+    cost: number; calls: number; duration: number; trigger_type: string | null;
   }>(
     `SELECT providers_json, input_tokens AS ti, output_tokens AS "to",
             cached_input_tokens AS ci, total_tokens AS tt,
-            cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration
+            cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration, trigger_type
      FROM usage_events ${where}
      ORDER BY created_at ASC, id COLLATE "C" ASC`,
     params
@@ -442,14 +443,15 @@ export async function queryUsageRollup(ctx: PgContext, input: Parameters<Store["
         executions: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0,
         totalTokens: 0, costUsd: 0, llmCallCount: 0, totalDurationMs: 0
       };
-      cur.executions += 1;
+      const execution = r.trigger_type !== SUB_WORKFLOW_USAGE_TRIGGER;
+      if (execution) cur.executions += 1;
       cur.inputTokens += Math.round(toNum(r.ti ?? 0) * share);
       cur.outputTokens += Math.round(toNum(r.to ?? 0) * share);
       cur.cachedInputTokens += Math.round(toNum(r.ci ?? 0) * share);
       cur.totalTokens += Math.round(toNum(r.tt ?? 0) * share);
       cur.costUsd += Number(r.cost ?? 0) * share;
       cur.llmCallCount += p.calls || 0;
-      cur.totalDurationMs += Math.round(toNum(r.duration ?? 0) * share);
+      if (execution) cur.totalDurationMs += Math.round(toNum(r.duration ?? 0) * share);
       agg.set(key, cur);
     }
   }
@@ -539,11 +541,12 @@ export async function queryBudgetUsage(ctx: PgContext, input: Parameters<Store["
 
 export async function listUsageEvents(ctx: PgContext, input: Parameters<Store["listUsageEvents"]>[0] = {}): ReturnType<Store["listUsageEvents"]> {
   const params: Array<string | number> = [];
-  const filters: string[] = [];
+  // Recent executions: a sub-workflow's own row is not one (its spend counts in the totals).
+  const filters: string[] = [USAGE_EXECUTION_ROW];
   if (input.workflowId) { params.push(input.workflowId); filters.push(`workflow_id = $${params.length}`); }
   if (input.userId) { params.push(input.userId); filters.push(`user_id = $${params.length}`); }
   if (input.projectId) { params.push(input.projectId); filters.push(`project_id = $${params.length}`); }
-  const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+  const where = `WHERE ${filters.join(" AND ")}`;
   const limit = clampLimit(input.limit, { fallback: 50, max: LIMIT_MAX.usageEvents });
   const rows = await ctx.query<{
     id: string; execution_id: string; workflow_id: string; workflow_name: string | null;
