@@ -12,7 +12,9 @@ export const ARGUMENT_VALIDATION_DETECTOR_ID = "tool.arguments";
  */
 
 const ajv = new Ajv({ allErrors: true, strict: false, validateSchema: false, allowUnionTypes: true });
-const cache = new Map<string, ValidateFunction>();
+/** Compiled schemas by schema text, oldest dropped first (also from Ajv's own cache) so edited schemas do not pile up. */
+const cache = new Map<string, { validate: ValidateFunction; schema: Record<string, unknown> }>();
+const CACHE_ENTRIES = 500;
 
 export interface ArgumentLimits {
   maxBytes?: number;
@@ -37,6 +39,13 @@ export interface ArgumentIssue {
   code: "too_large" | "too_deep" | "string_too_long" | "array_too_long" | "too_many_properties" | "schema" | "schema_invalid" | "not_an_object";
   path: string;
   message: string;
+}
+
+/** Size limits of a JSON value (depth, string length, array length, properties), before a validator sees it. */
+export function jsonLimitIssues(value: unknown, limits: Required<ArgumentLimits>): ArgumentIssue[] {
+  const out: ArgumentIssue[] = [];
+  limitIssues(value, limits, "", 0, out);
+  return out;
 }
 
 function limitIssues(value: unknown, limits: Required<ArgumentLimits>, path: string, depth: number, out: ArgumentIssue[]): void {
@@ -83,15 +92,29 @@ function mapValues(value: unknown, fn: (v: unknown) => unknown): unknown {
   return out;
 }
 
-function compile(schema: Record<string, unknown>, strict: boolean): ValidateFunction | null {
+/**
+ * Compile a JSON Schema once per schema text (shared with the output schema
+ * check). `strict` adds `additionalProperties: false` where a schema is
+ * silent. Null when the schema cannot be compiled.
+ */
+export function compileJsonSchema(schema: Record<string, unknown>, strict: boolean): ValidateFunction | null {
   const { $schema: _s, $id: _i, ...rest } = schema;
   const effective = strict ? strictSchema(rest) : rest;
   const key = JSON.stringify(effective);
   const cached = cache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached.validate;
+  }
   try {
     const validate = ajv.compile(effective);
-    cache.set(key, validate);
+    cache.set(key, { validate, schema: effective });
+    if (cache.size > CACHE_ENTRIES) {
+      const [oldestKey, oldest] = cache.entries().next().value as [string, { schema: Record<string, unknown> }];
+      cache.delete(oldestKey);
+      ajv.removeSchema(oldest.schema);
+    }
     return validate;
   } catch {
     return null;
@@ -115,7 +138,7 @@ export function validateToolArguments(args: unknown, schema: Record<string, unkn
       return issues;
     }
   }
-  const validate = compile(schema, effectiveLimits.rejectAdditional);
+  const validate = compileJsonSchema(schema, effectiveLimits.rejectAdditional);
   if (!validate) {
     issues.push({ code: "schema_invalid", path: "", message: "The tool's input schema could not be compiled; arguments are refused" });
     return issues;

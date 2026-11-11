@@ -1,8 +1,10 @@
-import { createDefaultGuardProfile, mergeGuardProfileOverride } from "@ai-orchestrator/guard-sdk";
+import { createDefaultGuardProfile, mergeGuardProfileOverride, outputSchemaOptionIssues } from "@ai-orchestrator/guard-sdk";
+import { outputGuardrailProfile, readOutputGuardrailConfig } from "./output-checks-runtime";
 import {
   approvalGateConfigSchema,
   guardNodeConfigSchema,
   guardProtectionNodeConfigSchema,
+  OUTPUT_GUARDRAIL_CHECK_VALUES,
   parseIpAllowlist,
   workflowSchema,
   type Workflow,
@@ -821,14 +823,27 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         });
       } else {
         for (const check of config.checks) {
-          if (check !== "no_pii" && check !== "no_profanity" && check !== "must_contain_json") {
+          if (!(OUTPUT_GUARDRAIL_CHECK_VALUES as readonly unknown[]).includes(check)) {
             issues.push({
               code: "invalid_output_guardrail_check",
-              message: "Output Guardrail checks must be one of no_pii, no_profanity, must_contain_json.",
+              message: `Output Guardrail checks must be one of ${OUTPUT_GUARDRAIL_CHECK_VALUES.join(", ")}.`,
               nodeId: node.id
             });
             break;
           }
+        }
+        // Phase 12 coverage — the settings the new checks read.
+        try {
+          const guardrail = readOutputGuardrailConfig(config);
+          outputGuardrailProfile(guardrail);
+          if (guardrail.schema) {
+            const schemaIssues = outputSchemaOptionIssues({ schema: guardrail.schema });
+            if (schemaIssues.length > 0) {
+              issues.push({ code: "invalid_output_guardrail_schema", message: `Output Guardrail schema: ${schemaIssues[0]!.message}.`, nodeId: node.id });
+            }
+          }
+        } catch (error) {
+          issues.push({ code: "invalid_output_guardrail_config", message: error instanceof Error ? error.message : String(error), nodeId: node.id });
         }
       }
       if (config.onFail !== "retry" && config.onFail !== "error") {
