@@ -403,7 +403,7 @@ export function createDlpDetector(defaults: DlpDetectorOptions = {}): GuardDetec
     id: DLP_DETECTOR_ID,
     tier: "rule",
     description: "Email, phone, payment cards (Luhn), IBAN (mod-97), US SSN and other national ids, credentials, keys and custom dictionaries.",
-    channels: ["prompt", "model_output", "tool_arguments", "tool_result", "final_output"],
+    channels: ["prompt", "model_output", "tool_arguments", "tool_result", "final_output", "response", "trigger_input"],
     categories: ["sensitive_data"],
     // A key block runs over many lines: it can grow past a stream's held-back tail.
     nonStreamLocal: ["private_key"],

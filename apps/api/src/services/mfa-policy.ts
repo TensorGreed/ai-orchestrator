@@ -92,7 +92,9 @@ export const STEP_UP_ACTIONS = {
   "project_retention.change": "Change a project's data retention",
   "notification_channel.change": "Create or delete a notification channel",
   "audit_export.change": "Create, change or delete an audit export destination or log stream",
-  "legal_hold.change": "Place or release a legal hold"
+  "legal_hold.change": "Place or release a legal hold",
+  "subject_request.reveal": "Make a data-subject export that reveals tokenised values",
+  "subject_export.download": "Download a data-subject export"
 } as const;
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS;

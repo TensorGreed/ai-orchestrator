@@ -28,7 +28,7 @@ describe("content rules coverage: shared contract", () => {
   });
 
   it("lists the new placements after the existing ones", () => {
-    expect(GUARD_PLACEMENT_VALUES).toEqual(["node", "agent", "gateway", "response", "retrieval", "reveal"]);
+    expect(GUARD_PLACEMENT_VALUES).toEqual(["node", "agent", "gateway", "response", "retrieval", "reveal", "request"]);
   });
 
   it("reads stored placements back, unknown ones as node as before", () => {

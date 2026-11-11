@@ -104,6 +104,8 @@ export class MetricsService {
   private workerSlotsFree: number | null = null;
   /** Phase 13.1 — queue dispatch (EXECUTION_DISPATCH=queue only; null otherwise, so nothing is exported). */
   private dispatch: { fallback: boolean; fallbacksTotal: number; dispatchedTotal: number } | null = null;
+  /** Phase 12 coverage — runs sent inline because a worker of their pool lacked a capability they need, per label. */
+  private readonly dispatchInlineRuns = new Map<string, number>();
 
   private readonly startTime = Date.now();
 
@@ -194,6 +196,12 @@ export class MetricsService {
   recordDispatchFallback(): void {
     if (!this.enabled) return;
     this.dispatchState().fallbacksTotal += 1;
+  }
+
+  /** Phase 12 coverage — a run that needs a worker capability went inline (`reason`: `capability:<name>`). */
+  recordDispatchInlineRun(reason: string): void {
+    if (!this.enabled) return;
+    this.dispatchInlineRuns.set(reason, (this.dispatchInlineRuns.get(reason) ?? 0) + 1);
   }
 
   /** Phase 13.1 — queue dispatch: a run was put on the queue for a worker. */
@@ -351,6 +359,11 @@ export class MetricsService {
       g(`${p}_dispatch_inline_fallback`, "1 while EXECUTION_DISPATCH=queue runs execute inline because a live worker lacks dispatch support (or none serves the pool)", this.dispatch.fallback ? 1 : 0);
       c(`${p}_dispatch_inline_fallbacks_total`, "Times queue dispatch started falling back to inline", this.dispatch.fallbacksTotal);
       c(`${p}_dispatch_runs_total`, "Runs this instance put on the queue for a worker (EXECUTION_DISPATCH=queue)", this.dispatch.dispatchedTotal);
+    }
+    if (this.dispatchInlineRuns.size > 0) {
+      lines.push(`# HELP ${p}_dispatch_inline_runs_total Runs executed inline because a queue worker of their pool lacks a capability they need`);
+      lines.push(`# TYPE ${p}_dispatch_inline_runs_total counter`);
+      for (const [reason, count] of this.dispatchInlineRuns) lines.push(`${p}_dispatch_inline_runs_total{reason="${reason.replace(/[\\"\n]/g, "_")}"} ${count}`);
     }
     if (this.cluster) {
       g(`${p}_cluster_live_instances`, "Live API instances in the registry (Postgres)", this.cluster.liveInstances);

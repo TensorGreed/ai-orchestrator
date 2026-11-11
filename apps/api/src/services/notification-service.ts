@@ -46,6 +46,8 @@ export interface NotificationEvent {
     /** Ended: why (logout, expired, admin, ...). */
     reason?: string;
   };
+  /** 13.3 — set for data.subject_request_due: which request is past its due date. Never the person's value. */
+  subjectRequest?: { requestId: string; type: string; subjectKind: string; status: string; dueAt: string };
   /** 13.3 — set for data.legal_hold_changed: which hold was placed or released, and by whom. Never a subject value. */
   legalHold?: {
     change: "placed" | "released";
@@ -78,8 +80,8 @@ export const NETWORK_NOTIFICATION_EVENTS = ["network.break_glass_used"] as const
  */
 export const AUTH_NOTIFICATION_EVENTS = ["auth.break_glass_used"] as const;
 
-/** 13.3 — a legal hold was placed or released. The same name as LEGAL_HOLD_CHANGED_EVENT in @ai-orchestrator/shared. */
-export const DATA_PROTECTION_NOTIFICATION_EVENTS = ["data.legal_hold_changed"] as const;
+/** 13.3 — a legal hold was placed or released; a data-subject request is past its due date (SUBJECT_REQUEST_DUE_DAYS). The same name as LEGAL_HOLD_CHANGED_EVENT in @ai-orchestrator/shared. */
+export const DATA_PROTECTION_NOTIFICATION_EVENTS = ["data.legal_hold_changed", "data.subject_request_due"] as const;
 
 /** 13.2 — a key or gateway client stops working soon; channels set in the environment take it with NOTIFICATIONS_CREDENTIAL_EVENTS=true. */
 export const CREDENTIAL_NOTIFICATION_EVENTS = [CREDENTIAL_EXPIRING_EVENT] as const;
@@ -119,6 +121,22 @@ const BREAK_GLASS_STAGE_TEXT: Record<NonNullable<NotificationEvent["auth"]>["sta
 };
 
 function describeEvent(event: NotificationEvent): NotificationContent {
+  if (event.type === "data.subject_request_due" && event.subjectRequest) {
+    const request = event.subjectRequest;
+    return {
+      title: "Data-subject request overdue",
+      icon: "\u23F0",
+      color: "F2B705",
+      facts: [
+        { name: "Request", value: request.requestId },
+        { name: "Type", value: `${request.type} (${request.subjectKind === "staff" ? "staff member" : "end user"})` },
+        { name: "Status", value: request.status },
+        { name: "Due", value: request.dueAt },
+        { name: "Time", value: event.timestamp }
+      ],
+      text: "A data-subject request is past its due date. Open Settings > Access control > Data protection to finish it."
+    };
+  }
   if (event.type === "data.legal_hold_changed" && event.legalHold) {
     const hold = event.legalHold;
     const placed = hold.change === "placed";
@@ -289,7 +307,8 @@ export class NotificationService {
     // the settings that pick data.legal_hold_changed receive them.
     // 13.2 — credential expiry warnings only when asked for, so an install that sets nothing sees no new alerts.
     const credential = this.config.NOTIFICATIONS_CREDENTIAL_EVENTS ? CREDENTIAL_NOTIFICATION_EVENTS : [];
-    return [...events, ...NETWORK_NOTIFICATION_EVENTS, ...AUTH_NOTIFICATION_EVENTS, ...credential];
+    // 13.3 — overdue data-subject requests, which only exist once someone makes one, are sent by default.
+    return [...events, ...NETWORK_NOTIFICATION_EVENTS, ...AUTH_NOTIFICATION_EVENTS, "data.subject_request_due", ...credential];
   }
 
   /** 13.2 — whether any enabled channel takes this event now (a sweep with no audience claims and sends nothing). */

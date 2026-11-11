@@ -321,7 +321,7 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
     const session = await signIn(booted, "root@example.com");
     const project = (await booted.store.listProjects())[0]!;
     const account = (await booted.store.createServiceAccount({ id: "svc_ci", email: "ci+0@service.invalid", role: "viewer", description: null, createdBy: admin.id }))!;
-    const routes: Array<{ method: "POST" | "PUT" | "PATCH" | "DELETE"; url: string; payload?: Record<string, unknown> }> = [
+    const routes: Array<{ method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; url: string; payload?: Record<string, unknown> }> = [
       { method: "POST", url: "/api/auth/register", payload: { email: "n@example.com", password: "Pass-word-123!" } },
       { method: "POST", url: "/api/users/invite", payload: { email: "i@example.com" } },
       { method: "PUT", url: `/api/users/${other.id}`, payload: { role: "operator" } },
@@ -360,7 +360,9 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "PATCH", url: `/api/service-accounts/${account.id}`, payload: { role: "operator" } },
       { method: "DELETE", url: `/api/service-accounts/${account.id}` },
       { method: "POST", url: "/api/legal-holds", payload: { name: "Matter", reason: "r", scopeType: "project", scopeId: project.id } },
-      { method: "POST", url: "/api/legal-holds/lh_x/release", payload: { reason: "r" } }
+      { method: "POST", url: "/api/legal-holds/lh_x/release", payload: { reason: "r" } },
+      { method: "POST", url: "/api/data-protection/requests", payload: { type: "export", value: "ana@example.com", revealTokens: true } },
+      { method: "GET", url: "/api/data-protection/requests/dsr_x/export" }
     ];
     const seen = new Set<string>();
     for (const route of routes) {

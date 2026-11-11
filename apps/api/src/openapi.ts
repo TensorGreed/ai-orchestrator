@@ -128,6 +128,52 @@ export const openApiSpec = {
       }
     },
 
+    "/api/data-protection/requests": {
+      post: {
+        tags: ["Observability"],
+        summary:
+          "Make a data-subject request (admin or data_subject:manage): { type: 'export', subjectKind: 'end_user'|'staff', value, scan?, revealTokens? }. The value is used for the lookup and never stored, logged or returned; revealTokens needs step-up when it is on. The lookup runs in the background",
+        responses: {
+          "201": { description: "The request, status searching" },
+          "400": { description: "Invalid request (the value is never echoed)" },
+          "403": { description: "Not an admin or data_subject:manage holder, or step-up required" },
+          "503": { description: "No master key" }
+        }
+      },
+      get: {
+        tags: ["Observability"],
+        summary: "Data-subject requests, newest first (admin or data_subject:manage): status, counts per kind, progress, due date and the export's state",
+        responses: { "200": { description: "{ requests }" }, "403": { description: "Not an admin or data_subject:manage holder" } }
+      }
+    },
+    "/api/data-protection/requests/{id}": {
+      get: {
+        tags: ["Observability"],
+        summary: "One data-subject request with its progress (admin or data_subject:manage)",
+        responses: { "200": { description: "The request" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/data-protection/requests/{id}/export": {
+      get: {
+        tags: ["Observability"],
+        summary:
+          "Download a data-subject export (admin or data_subject:manage; step-up): a zip with manifest.json and one JSON-lines file per kind. It can be downloaded once, until SUBJECT_EXPORT_TTL_HOURS pass; every attempt is audited",
+        responses: {
+          "200": { description: "application/zip" },
+          "403": { description: "Not an admin or data_subject:manage holder, or step-up required" },
+          "404": { description: "Not found" },
+          "409": { description: "Not ready, already downloaded, or expired" }
+        }
+      }
+    },
+    "/api/data-protection/subject-refs/preview": {
+      post: {
+        tags: ["Workflows"],
+        summary:
+          "Preview subject references (workflow editors): { workflowId, subjectRefs } resolved on the workflow's latest runs, with how many resolved and a masked sample",
+        responses: { "200": { description: "{ runs, refs }" }, "400": { description: "Invalid expression" }, "404": { description: "Workflow not found" } }
+      }
+    },
     "/api/legal-holds": {
       get: {
         tags: ["Observability"],

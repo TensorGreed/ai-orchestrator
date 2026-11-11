@@ -116,6 +116,9 @@ import type {
   LegalHoldPlaceInput,
   LegalHoldStatus,
   LegalHoldView,
+  SubjectRequestCreateInput,
+  SubjectRequestView,
+  SubjectRefPreviewView,
   McpGatewaySessionView,
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -3898,6 +3901,53 @@ export async function fetchRetention() {
   return apiRequest<RetentionAdminView>("/api/admin/retention");
 }
 
+/** 13.3 — data-subject requests, newest first (admin). */
+export async function fetchSubjectRequests() {
+  return apiRequest<{ requests: SubjectRequestView[] }>("/api/data-protection/requests");
+}
+
+/** 13.3 — one data-subject request with its progress (admin). */
+export async function fetchSubjectRequest(id: string) {
+  return apiRequest<SubjectRequestView>(`/api/data-protection/requests/${encodeURIComponent(id)}`);
+}
+
+/** 13.3 — makes a data-subject request (admin). The value is sent once and never shown again. */
+export async function createSubjectRequest(payload: Partial<SubjectRequestCreateInput> & Pick<SubjectRequestCreateInput, "type" | "value">) {
+  return apiRequest<SubjectRequestView>("/api/data-protection/requests", { method: "POST", body: JSON.stringify(payload) });
+}
+
+/** 13.3 — how subject references resolve on a workflow's latest runs (values masked). */
+export async function previewSubjectRefs(payload: { workflowId: string; subjectRefs: string[] }) {
+  return apiRequest<SubjectRefPreviewView>("/api/data-protection/subject-refs/preview", { method: "POST", body: JSON.stringify(payload) });
+}
+
+/**
+ * 13.3 — downloads a data-subject export (once). Asks for a recent MFA check when step-up is on, like every other
+ * request, and retries once after it.
+ */
+export async function downloadSubjectExport(id: string, retried = false): Promise<{ blob: Blob; fileName: string }> {
+  const response = await apiFetch(`${API_BASE}/api/data-protection/requests/${encodeURIComponent(id)}/export`, { credentials: "include" });
+  if (!response.ok) {
+    let payload: Record<string, unknown> = {};
+    try {
+      const json: unknown = await response.json();
+      if (json && typeof json === "object") payload = json as Record<string, unknown>;
+    } catch {
+      payload = {};
+    }
+    if (response.status === 403) {
+      const stepUp = stepUpFromPayload(payload);
+      if (stepUp && !retried && stepUp.credential !== "api_key" && stepUp.enrolled !== false && authChallengeHandlers.onStepUp) {
+        if (await authChallengeHandlers.onStepUp(stepUp)) return await downloadSubjectExport(id, true);
+      }
+    }
+    throw new ApiError(String(payload.error ?? "The export could not be downloaded"), response.status, payload);
+  }
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  return { blob: await response.blob(), fileName: match?.[1] ?? `subject-export-${id}.zip` };
+}
+
 /** 13.3 — legal holds, newest first (hold managers). */
 export async function fetchLegalHolds(status?: LegalHoldStatus) {
   return apiRequest<{ holds: LegalHoldView[] }>(`/api/legal-holds${status ? `?status=${status}` : ""}`);
@@ -4331,7 +4381,7 @@ export interface GuardEventFilter {
   days?: number;
   findings?: boolean;
   /** 12.6 — `gateway`: MCP gateway server tool calls only; `run`: workflow runs only. */
-  placement?: "gateway" | "run";
+  placement?: "gateway" | "run" | "response" | "request";
   /** 12.7 — include verdicts eval runs and replay jobs recorded (left out by default). */
   includeEval?: boolean;
   limit?: number;

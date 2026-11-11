@@ -84,6 +84,42 @@ describe("guard profiles across instances on one database", () => {
     expect(logged).toEqual([{ message: expect.stringContaining("labels check failed"), metadata: { error: "unsupported Unicode escape sequence" } }]);
   });
 
+  it("a response or incoming-payload channel saved by another instance makes mayCheckChannel true here (Phase 12 coverage)", async () => {
+    const { ga, gb } = await instances();
+    // The built-in rule set configures neither channel.
+    expect(await ga.mayCheckChannel("response")).toBe(false);
+    expect(await ga.mayCheckChannel("trigger_input")).toBe(false);
+    const channels = { response: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: {}, defaultAction: { action: "allow" } } };
+    await gb.createProfile({ document: strict({ channels }) }, null);
+    expect(await ga.mayCheckChannel("response")).toBe(true);
+    expect(await ga.mayCheckChannel("trigger_input")).toBe(false);
+    await gb.updateProfile("strict", { document: strict({ channels: { trigger_input: channels.response } }) }, null);
+    expect(await ga.mayCheckChannel("trigger_input")).toBe(true);
+    // Any stored version counts (an older one can still be pinned by a replay): the response channel stays known.
+    expect(await ga.mayCheckChannel("response")).toBe(true);
+    // The runtime's shortcut is the service's answer.
+    expect(await ga.runtimeFor({ workflowId: "wf", projectId: "default" }).mayCheckChannel!("response")).toBe(true);
+  });
+
+  it("mayCheckChannel fails open: a store error answers true and is logged, never thrown", async () => {
+    const { a } = await instances();
+    const logged: string[] = [];
+    const failing = new Proxy(a, {
+      get(target, property, receiver) {
+        if (property === "anyGuardProfileHasChannel") {
+          return async () => {
+            throw new Error("store down");
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+    const service = new GuardService(failing, new SecretService(a, key), { autoApply: true, logger: (message) => logged.push(message) });
+    expect(await service.mayCheckChannel("response")).toBe(true);
+    expect(logged).toEqual([expect.stringContaining("channel check failed")]);
+  });
+
   it("a profile deleted by another instance is no longer resolved here", async () => {
     const { ga, gb } = await instances();
     await gb.createProfile({ document: strict() }, null);

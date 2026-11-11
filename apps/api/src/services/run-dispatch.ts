@@ -12,7 +12,7 @@
  * that does not hold, or no consumer serves the pool, runs go inline and the gate reports why (DispatchGate.status).
  */
 import { createHash } from "node:crypto";
-import type { McpCassetteSource, McpReplayMode, Workflow, WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import { withholdUnstampedResult, type McpCassetteSource, type McpReplayMode, type Workflow, type WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { adoptOutputLabels, outputLabelsOf } from "@ai-orchestrator/workflow-engine";
 import type { ClusterInstanceRecord } from "../db/store.js";
 import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "../run-types.js";
@@ -26,6 +26,18 @@ export type ExecutionDispatchMode = "inline" | "queue";
 
 /** What a queue consumer advertises when it runs dispatched jobs (the instance registry's capabilities). */
 export const QUEUE_DISPATCH_CAPABILITY = "queue-dispatch-v1";
+/**
+ * Phase 12 coverage — a worker that checks a run's response boundary (`run.responseBoundary`). A job that carries one
+ * is dispatched only while every live consumer of its pool advertises this too: an older worker would ignore the field
+ * and answer the caller with an unchecked output. Until then such runs go inline.
+ */
+export const RESPONSE_BOUNDARY_CAPABILITY = "content-rules-response-v1";
+
+/** The capabilities a worker needs, besides QUEUE_DISPATCH_CAPABILITY, to run this spec. */
+export function capabilitiesFor(spec: DispatchedRunSpec): string[] {
+  return spec.run.responseBoundary ? [RESPONSE_BOUNDARY_CAPABILITY] : [];
+}
+
 /** The DispatchedRunSpec format this build writes and reads. */
 export const DISPATCH_SPEC_VERSION = 1;
 
@@ -158,6 +170,7 @@ export interface DispatchGateStatus {
 export class DispatchGate {
   private readonly cache = new Map<string, { queue: boolean; reason: string | null; atMs: number }>();
   private last: { fallback: boolean; reason: string | null } = { fallback: false, reason: null };
+  private readonly requiredInline = new Map<string, boolean>();
 
   constructor(
     private readonly options: {
@@ -165,6 +178,12 @@ export class DispatchGate {
       listInstances: () => Promise<ClusterInstanceRecord[]>;
       /** Called when the gate starts or stops falling back to inline (log once, metrics). */
       onChange?: (fallback: boolean, reason: string | null) => void;
+      /**
+       * Phase 12 coverage — a run that needs a capability (`required`) went inline while the pool's other runs may
+       * still queue. Called per run, with `label` naming the capabilities (`capability:<name>`); `changed` is true when
+       * this pool and capability set starts or stops going inline, for a log line. Never changes `status()`.
+       */
+      onRequiredInline?: (event: { pool: string; label: string; reason: string | null; inline: boolean; changed: boolean }) => void;
       cacheMs?: number;
       now?: () => number;
     }
@@ -174,24 +193,42 @@ export class DispatchGate {
     return this.options.mode;
   }
 
-  /** Whether a run for `pool` goes on the queue now. Always false with `inline`. */
-  async useQueue(pool: string): Promise<boolean> {
+  /**
+   * Whether a run for `pool` goes on the queue now. Always false with `inline`. `required`: capabilities every live
+   * consumer of the pool must also advertise (see capabilitiesFor).
+   */
+  async useQueue(pool: string, required: readonly string[] = []): Promise<boolean> {
     if (this.options.mode !== "queue") return false;
     const now = (this.options.now ?? Date.now)();
-    const cached = this.cache.get(pool);
+    const cacheKey = required.length > 0 ? `${pool}\u0000${[...required].sort().join(",")}` : pool;
+    const cached = this.cache.get(cacheKey);
     if (cached && now - cached.atMs < (this.options.cacheMs ?? DISPATCH_GATE_CACHE_MS)) {
-      this.record(!cached.queue, cached.reason);
+      this.recordFor(pool, required, cacheKey, cached);
       return cached.queue;
     }
     let decision: { queue: boolean; reason: string | null };
     try {
-      decision = decideDispatch(await this.options.listInstances(), pool);
+      decision = decideDispatch(await this.options.listInstances(), pool, required);
     } catch (error) {
       decision = { queue: false, reason: `the instance registry could not be read (${error instanceof Error ? error.message : String(error)})` };
     }
-    this.cache.set(pool, { ...decision, atMs: now });
-    this.record(!decision.queue, decision.reason);
+    this.cache.set(cacheKey, { ...decision, atMs: now });
+    this.recordFor(pool, required, cacheKey, decision);
     return decision.queue;
+  }
+
+  /** The gate's status follows the pool's plain decisions; a run that needs a capability reports on its own. */
+  private recordFor(pool: string, required: readonly string[], cacheKey: string, decision: { queue: boolean; reason: string | null }): void {
+    if (required.length === 0) {
+      this.record(!decision.queue, decision.reason);
+      return;
+    }
+    const inline = !decision.queue;
+    const changed = (this.requiredInline.get(cacheKey) ?? false) !== inline;
+    this.requiredInline.set(cacheKey, inline);
+    if (inline || changed) {
+      this.options.onRequiredInline?.({ pool, label: `capability:${[...required].sort().join(",")}`, reason: decision.reason, inline, changed });
+    }
   }
 
   status(): DispatchGateStatus {
@@ -206,7 +243,7 @@ export class DispatchGate {
 }
 
 /** The gate's rule over the registry's rows (exported for tests). */
-export function decideDispatch(instances: ClusterInstanceRecord[], pool: string): { queue: boolean; reason: string | null } {
+export function decideDispatch(instances: ClusterInstanceRecord[], pool: string, required: readonly string[] = []): { queue: boolean; reason: string | null } {
   const consumers = instances.filter(
     (instance) => instance.live && (instance.workerMode === "all" || instance.workerMode === "worker") && instance.pools.includes(pool)
   );
@@ -217,6 +254,13 @@ export function decideDispatch(instances: ClusterInstanceRecord[], pool: string)
   if (old.length > 0) {
     const names = old.slice(0, 3).map((instance) => `${instance.id}${instance.appVersion ? ` (${instance.appVersion})` : ""}`).join(", ");
     return { queue: false, reason: `queue consumers of pool "${pool}" without ${QUEUE_DISPATCH_CAPABILITY}: ${names}${old.length > 3 ? ", ..." : ""}` };
+  }
+  for (const capability of required) {
+    const lacking = consumers.filter((instance) => !instance.capabilities.includes(capability));
+    if (lacking.length > 0) {
+      const names = lacking.slice(0, 3).map((instance) => `${instance.id}${instance.appVersion ? ` (${instance.appVersion})` : ""}`).join(", ");
+      return { queue: false, reason: `queue consumers of pool "${pool}" without ${capability}: ${names}${lacking.length > 3 ? ", ..." : ""}` };
+    }
   }
   return { queue: true, reason: null };
 }
@@ -344,7 +388,7 @@ export class RunDispatcher {
     options: { pool: string; passthrough?: WorkflowExecutionEventHooks; enforceBackpressure?: boolean; closed?: Promise<void>; local?: LocalRunParts; admitted?: boolean }
   ): Promise<WorkflowExecutionResult> {
     if (!options.admitted) await this.deps.admit?.(spec);
-    if (!(await this.deps.gate.useQueue(options.pool))) {
+    if (!(await this.deps.gate.useQueue(options.pool, capabilitiesFor(spec)))) {
       return await this.deps.executeLocally(spec, options.passthrough, options.local);
     }
     if (this.waiting >= this.deps.maxWaiting) throw new DispatchBusyError(this.deps.maxWaiting);
@@ -368,7 +412,10 @@ export class RunDispatcher {
       const end = await Promise.race(ending);
       if (end.kind === "result") {
         await this.deps.releaseResult?.(spec);
-        return resultFromQueue(end.result);
+        const answered = resultFromQueue(end.result);
+        // Phase 12 coverage — a worker that cannot check responses (an older build that joined after the gate looked)
+        // leaves the result unstamped: its output never reaches the caller.
+        return spec.run.responseBoundary ? withholdUnstampedResult(answered, spec.run.responseBoundary) : answered;
       }
       if (end.kind === "failed") throw new DispatchFailedError(spec.run.executionId, end.error);
       if (end.kind === "timeout") throw new DispatchTimeoutError(spec.run.executionId, timeoutMs);
@@ -397,7 +444,7 @@ export class RunDispatcher {
       if (!(error instanceof BudgetExceededError) || !this.deps.recordRefused) throw error;
       return { queued: false, result: await this.deps.recordRefused(spec, error), refused: error };
     }
-    if (!(await this.deps.gate.useQueue(options.pool))) {
+    if (!(await this.deps.gate.useQueue(options.pool, capabilitiesFor(spec)))) {
       return { queued: false, result: await this.deps.executeLocally(spec) };
     }
     const added = await this.deps.enqueue(spec, {

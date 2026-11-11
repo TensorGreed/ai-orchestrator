@@ -162,6 +162,7 @@ import { IdleSessionWarning } from "./components/IdleSessionWarning";
 import { INVITE_SIGNED_IN_NOTICE, inviteTokenFromLocation, stripInviteParam } from "./lib/user-invite";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WriteToolApprovalDialog } from "./components/WriteToolApprovalDialog";
+import { SubjectRefsDialog } from "./components/SubjectRefsDialog";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
@@ -1172,6 +1173,7 @@ function StudioApp() {
   const [showWelcome, setShowWelcome] = useState<boolean>(() => !isWelcomeDismissed());
   const [templateInitialCategory, setTemplateInitialCategory] = useState<string | undefined>(undefined);
   const [writeToolDialogOpen, setWriteToolDialogOpen] = useState(false);
+  const [subjectRefsDialogOpen, setSubjectRefsDialogOpen] = useState(false);
   const [shareWorkflowTarget, setShareWorkflowTarget] = useState<{
     id: string;
     name: string;
@@ -4929,6 +4931,8 @@ function StudioApp() {
           }
           writeToolApproval={currentWorkflow.settings?.writeToolApproval?.enabled === true}
           onEditWriteToolApproval={canManageWorkflows ? () => setWriteToolDialogOpen(true) : undefined}
+          subjectRefsSet={(currentWorkflow.settings?.dataProtection?.subjectRefs?.length ?? 0) > 0}
+          onEditSubjectRefs={canManageWorkflows ? () => setSubjectRefsDialogOpen(true) : undefined}
           recordMcp={recordMcp}
           onToggleRecordMcp={canManageWorkflows ? () => setRecordMcp((value) => !value) : undefined}
           docsUrl={docsUrl}
@@ -5881,6 +5885,20 @@ function StudioApp() {
           settings={currentWorkflow.settings?.writeToolApproval}
           onChange={(writeToolApproval) => setCurrentWorkflow((current) => ({ ...current, settings: { ...(current.settings ?? {}), writeToolApproval } }))}
           onClose={() => setWriteToolDialogOpen(false)}
+        />
+      )}
+
+      {subjectRefsDialogOpen && (
+        <SubjectRefsDialog
+          workflowId={currentWorkflow.id}
+          subjectRefs={currentWorkflow.settings?.dataProtection?.subjectRefs}
+          onChange={(subjectRefs) =>
+            setCurrentWorkflow((current) => {
+              const { dataProtection: _previous, ...rest } = current.settings ?? {};
+              return { ...current, settings: subjectRefs.length > 0 ? { ...rest, dataProtection: { subjectRefs } } : rest };
+            })
+          }
+          onClose={() => setSubjectRefsDialogOpen(false)}
         />
       )}
 

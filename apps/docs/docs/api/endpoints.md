@@ -290,6 +290,15 @@ See [Legal holds](../operations/legal-hold.md).
 - `POST /api/legal-holds/:id/release` (admin or `legal_hold:manage`, signed-in only: API keys get 403; step-up; `{ reason }`; 409 when already released; audited as `legal_hold.released`)
 - A delete, a gate case removal or a workflow move refused by a hold answers `409 { error, code: "legal_hold", holds: [{ id, name }] }`; a data-subject delete skips held rows with reason `held`.
 
+## Data-subject requests
+
+See [Data-subject requests](../security/data-subject-requests.md). The value is never echoed, logged or audited.
+
+- `POST /api/data-protection/requests` (admin or `data_subject:manage`; `{ type: "export", subjectKind?: "end_user" | "staff", value, scan?, revealTokens? }`; 201 with the request; `revealTokens` needs step-up when it is on)
+- `GET /api/data-protection/requests` (admin or `data_subject:manage`; `{ requests }`, newest first), `GET /api/data-protection/requests/:id` (admin or `data_subject:manage`; `{ id, type, subjectKind, status, scan, revealTokens, counts, foundByReference, truncated, progress, dueAt, overdue, createdBy, createdAt, updatedAt, error, export }`; `status` is `searching`, `ready`, `done`, `expired` or `failed`)
+- `GET /api/data-protection/requests/:id/export` (admin or `data_subject:manage`; step-up when on; the zip, once; 409 once downloaded or expired)
+- `POST /api/data-protection/subject-refs/preview` (builder with write access to the workflow; `{ workflowId, subjectRefs }` → `{ runs, refs: [{ expression, resolved, sample }] }`, samples masked)
+
 ## Golden runs and replay
 
 See [Golden runs and replay](../product/golden-runs.md).

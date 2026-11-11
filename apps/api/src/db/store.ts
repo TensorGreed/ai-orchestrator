@@ -105,6 +105,7 @@ import type {
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
+import type { SubjectStore } from "./subject-store.js";
 import type { LegalHoldItemView, LegalHoldRef, LegalHoldStatus, LegalHoldView, RetentionDataClass, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
 import type { RetentionScope, RetentionTable } from "./retention-tables.js";
 import type { LegalHoldInsert, LegalHoldTarget } from "./legal-hold-sql.js";
@@ -462,7 +463,7 @@ export interface UserInviteCreate {
   expiresAt: string;
 }
 
-export interface Store extends AiGatewayStore {
+export interface Store extends AiGatewayStore, SubjectStore {
   // ---- Store lifecycle
 
   /** Phase 10.7 — where the database lives (a file path, or ":memory:"); names this deployment's sandbox containers. */
@@ -889,6 +890,13 @@ export interface Store extends AiGatewayStore {
    * at once.
    */
   anyGuardProfileUsesLabels(): Promise<boolean>;
+  /**
+   * Phase 12 coverage — whether any stored version of any rule set configures this channel (`response`: the
+   * run-end check of what external callers receive; `trigger_input`: the webhook route's check of incoming payloads).
+   * Read from the stored JSON and cached per rule set revision like `anyGuardProfileUsesLabels`, so a webhook
+   * request in a deployment with no such rule set pays one primary-key read.
+   */
+  anyGuardProfileHasChannel(channel: "response" | "trigger_input"): Promise<boolean>;
   /**
    * Phase 16 — observed destination verdicts that would have stopped content:
    * verdicts since `since` with a shadow destination-rule finding of this

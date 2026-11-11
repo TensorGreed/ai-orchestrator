@@ -23,10 +23,14 @@ export type Permission =
    * 13.3 — place and release legal holds. Deployment-wide: admins have it, and so does a member through a
    * deployment-wide custom role (one with no project) that grants it. A project role never grants it.
    */
-  | "legal_hold:manage";
+  | "legal_hold:manage"
+  /**
+   * 13.3 — make data-subject requests and download their exports. Deployment-wide, like legal_hold:manage.
+   */
+  | "data_subject:manage";
 
 /** 13.3 — permissions that are deployment-wide, not per project (see `canDeployment`). */
-export const DEPLOYMENT_PERMISSIONS = ["legal_hold:manage"] as const satisfies readonly Permission[];
+export const DEPLOYMENT_PERMISSIONS = ["legal_hold:manage", "data_subject:manage"] as const satisfies readonly Permission[];
 export type DeploymentPermission = (typeof DEPLOYMENT_PERMISSIONS)[number];
 
 export const ALL_PERMISSIONS: Permission[] = [
@@ -41,7 +45,8 @@ export const ALL_PERMISSIONS: Permission[] = [
   "project:manage",
   "project:invite",
   "role:manage",
-  "legal_hold:manage"
+  "legal_hold:manage",
+  "data_subject:manage"
 ];
 
 const PROJECT_ROLE_PERMISSIONS: Record<ProjectRole, Permission[]> = {
@@ -294,7 +299,7 @@ export class RbacService {
   }
 
   /**
-   * 13.3 — whether a user's membership of a project carries a deployment-wide permission (legal holds): only an admin
+   * 13.3 — whether a user's membership of a project carries a deployment-wide permission (legal holds, data-subject requests): only an admin
    * may take such a membership away or change it, as only an admin may give it.
    */
   async membershipGrantsDeploymentPermission(userId: string, projectId: string): Promise<boolean> {
