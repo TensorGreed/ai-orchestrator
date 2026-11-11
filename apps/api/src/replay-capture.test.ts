@@ -1825,3 +1825,57 @@ describe("replay comparison of guard-masked spans", () => {
     expect(await jobOf(handId)).toEqual(["fail"]);
   }, 60_000);
 });
+
+describe("13.3 legal holds and production capture", () => {
+  it("never evicts a captured run under legal hold: with only held ones left, a new run is not captured (held_budget)", async () => {
+    const context = await createTestContext({ REPLAY_CAPTURES_MAX_PER_WORKFLOW: "2" });
+    const builder = await login(context, "builder");
+    await save(context, hookWorkflow("wf-held"));
+    await enableCapture(context, builder.cookie, "wf-held", { maxPerDay: 10 });
+    await hook(context, "wf-held");
+    await waitForCaptures(context, builder.cookie, "wf-held", 1);
+    await hook(context, "wf-held");
+    const held = (await waitForCaptures(context, builder.cookie, "wf-held", 2)).map((item) => item.id).sort();
+    await settle();
+    await context.store.placeLegalHold({
+      id: "lh-capture", name: "Matter", reason: "r", matterRef: null, scopeType: "workflow", scopeId: "wf-held", endsAt: null,
+      createdBy: null, createdAt: new Date().toISOString(), items: []
+    });
+    await hook(context, "wf-held");
+    const until = Date.now() + 20_000;
+    while ((await context.store.getReplayCaptureSettings("wf-held"))?.lastDropOutcome !== "held_budget" && Date.now() < until) await sleep(50);
+    expect((await context.store.getReplayCaptureSettings("wf-held"))?.lastDropOutcome).toBe("held_budget");
+    expect((await inbox(context, builder.cookie, "wf-held")).items.map((item) => item.id).sort()).toEqual(held);
+    // A discard of a held capture is refused per item.
+    const discard = await call(context, "POST", "/api/replay/captures/discard", builder.cookie, { ids: held });
+    expect(discard.json<{ discarded: number; results: Array<{ ok: boolean; error?: string }> }>()).toMatchObject({ discarded: 0 });
+    expect(discard.json<{ results: Array<{ error?: string }> }>().results[0]?.error).toMatch(/legal hold/);
+  }, 60_000);
+
+  it("a data-subject delete skips rows under legal hold (reason held) and deletes them once it is released", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    await save(context, hookWorkflow("wf-subject-held"));
+    const run = await call(context, "POST", "/api/workflows/wf-subject-held/execute", builder.cookie, { input: { user_prompt: `contact ${EMAIL}` } });
+    const saved = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "Hand" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    const placed = await call(context, "POST", "/api/legal-holds", admin.cookie, { name: "Subject", reason: "Litigation", scopeType: "subject", subject: { value: EMAIL } });
+    expect(placed.statusCode, placed.body).toBe(201);
+    expect(placed.body).not.toContain(EMAIL);
+    const hold = placed.json<{ hold: { id: string; itemCount: number } }>().hold;
+    expect(hold.itemCount).toBeGreaterThanOrEqual(1);
+
+    const found = (await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value: EMAIL })).json<ReplayFindSubjectResult>();
+    const targets = found.matches.map((match) => ({ kind: match.kind, id: match.id }));
+    const kept = (await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, { value: EMAIL, targets })).json<ReplayFindSubjectDeleteResult>();
+    expect(kept.removed).toEqual([]);
+    expect(kept.skipped.map((row) => row.reason)).toEqual(targets.map(() => "held"));
+    expect((await context.store.listReplayRecordings({})).total).toBe(1);
+
+    expect((await call(context, "POST", `/api/legal-holds/${hold.id}/release`, admin.cookie, { reason: "Settled" })).statusCode).toBe(200);
+    const removed = (await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, { value: EMAIL, targets })).json<ReplayFindSubjectDeleteResult>();
+    expect(removed.skipped).toEqual([]);
+    expect((await context.store.listReplayRecordings({})).total).toBe(0);
+  }, 60_000);
+});

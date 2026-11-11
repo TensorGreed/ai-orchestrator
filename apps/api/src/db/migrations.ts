@@ -2736,6 +2736,44 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS retention_runs;
       DROP TABLE IF EXISTS retention_policies;
     `
+  },
+  {
+    // Provisional number, like v65: renumber at merge if the numbers before it change.
+    version: 66,
+    description: "13.3 — legal holds and the rows they name one by one",
+    // A hold covers a project or a workflow (scope_id), or the rows listed in legal_hold_items (a list of runs, or the
+    // rows a data-subject lookup found). Every purge and hold-checked delete tests both tables (db/legal-hold-sql.ts);
+    // the index on (kind, row_id) serves that test. Both tables are exported in backups.
+    up: `
+      CREATE TABLE IF NOT EXISTS legal_holds (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        matter_ref TEXT,
+        scope_type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        ends_at TIMESTAMPTZ,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        released_by TEXT,
+        released_at TIMESTAMPTZ,
+        release_reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_legal_holds_status_scope ON legal_holds(status, scope_type, scope_id);
+      CREATE TABLE IF NOT EXISTS legal_hold_items (
+        hold_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        row_id TEXT NOT NULL,
+        added_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (hold_id, kind, row_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_legal_hold_items_kind_row ON legal_hold_items(kind, row_id);
+    `,
+    down: `
+      DROP TABLE IF EXISTS legal_hold_items;
+      DROP TABLE IF EXISTS legal_holds;
+    `
   }
 ];
 

@@ -15,6 +15,9 @@ import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "../store-s
 import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import type { LegalHoldRef } from "@ai-orchestrator/shared";
+import { ITEM_KIND_TABLES, LEGAL_HOLD_LOCK_SHARED_SQL } from "../legal-hold-sql.js";
+import { legalHoldsOnWith } from "./legal-holds.js";
 
 type Row = Record<string, unknown>;
 
@@ -106,8 +109,12 @@ export async function deleteSubjectRow(
   ctx: PgContext,
   kind: SubjectStoreKind,
   id: string
-): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }> }> {
+): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }>; heldBy?: LegalHoldRef[] }> {
   return ctx.withTransaction(async (client) => {
+    // 13.3 — a row a legal hold keeps stays: the lock first (shared, to commit), then the check.
+    await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+    const heldBy = await legalHoldsOnWith(client, { kind: "row", table: ITEM_KIND_TABLES[kind], id });
+    if (heldBy.length > 0) return { deleted: false, cascaded: [], heldBy };
     const resultsOf = async (fixtureIds: string[]) => {
       if (fixtureIds.length === 0) return [];
       const resultIds = await ids(client, `SELECT id FROM eval_results WHERE fixture_id = ANY($1::text[]) ORDER BY seq`, [fixtureIds]);

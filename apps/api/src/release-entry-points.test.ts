@@ -79,6 +79,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "db/database.ts", match: "", kind: "not_run", why: "the SQLite store's own internals (the async wrapper of getWorkflow, upsert, delete)", count: 3 },
   { file: "db/postgres-store.ts", match: "", kind: "not_run", why: "the Postgres store's own internals (the delegations to db/postgres/*)", count: 3 },
   { file: "db/postgres/workflows.ts", match: "", kind: "not_run", why: "the Postgres store's workflow internals (getWorkflow, upsert, delete, getWorkflowVersion)", count: 4 },
+  { file: "services/legal-hold-service.ts", match: "store.getWorkflow(input.scopeId", kind: "not_run", why: "a workflow hold checks the workflow exists and reads its project; nothing runs" },
   { file: "mcp-safety-preset-routes.ts", match: "", kind: "not_run", why: "the untrusted-write switch only checks the workflow exists and reads its project for access" },
   { file: "db/postgres/data-destinations.ts", match: "", kind: "not_run", why: "the Postgres store's destination-scan stub, not a workflow run", count: 1 },
   { file: "services/release-service.ts", match: "", kind: "production", why: "the release resolver, production path claims and its gate, judge, request and unpublish checks, and a rollback's trigger trust check (12.2)", count: 21 },

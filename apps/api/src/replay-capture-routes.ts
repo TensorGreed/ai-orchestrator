@@ -36,6 +36,7 @@ import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { ReplayCaptureError, ReplayCaptureService } from "./services/replay-capture-service.js";
 import type { Store } from "./db/store.js";
+import { LegalHoldError } from "./db/legal-hold-sql.js";
 import { mapAsync } from "./async-array.js";
 
 export interface ReplayCaptureRoutesDeps {
@@ -61,7 +62,8 @@ const CAPTURE_ERROR_STATUS: Record<ReplayCaptureError["code"], number> = {
   forbidden: 403,
   conflict: 409,
   too_large: 413,
-  limit: 409
+  limit: 409,
+  held_budget: 409
 };
 
 function firstIssue(error: z.ZodError): string {
@@ -224,7 +226,13 @@ export function registerReplayCaptureRoutes(deps: ReplayCaptureRoutesDeps): void
   const discardOne = async (request: FastifyRequest, user: SafeUser, id: string): Promise<{ id: string; ok: boolean; error?: string; status: number }> => {
     const access = await candidateAccess(user, id, "workflow:write");
     if (!access.ok) return { id, ok: false, error: access.error, status: access.status };
-    await store.deleteReplayRecording(id);
+    try {
+      await store.deleteReplayRecording(id);
+    } catch (error) {
+      // 13.3 — a captured run under legal hold stays; the others in a bulk discard go on.
+      if (error instanceof LegalHoldError) return { id, ok: false, error: error.message, status: 409 };
+      throw error;
+    }
     await deps.audit(request, user, {
       eventType: "replay.capture.discarded",
       category: "workflow",

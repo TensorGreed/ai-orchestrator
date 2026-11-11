@@ -7,6 +7,7 @@ import { type CancelExecutionResult, type QueueClaimFence, type Store } from "..
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { deleteUnlockedInBatches } from "./prune.js";
+import { notHeldSql } from "../legal-hold-sql.js";
 
 /** 12.6 (D13) — see Store.recordBudgetRefusedRun: one row per trigger per budget period, its counter bumped atomically. */
 export async function recordBudgetRefusedRun(ctx: PgContext, input: Parameters<Store["recordBudgetRefusedRun"]>[0]): ReturnType<Store["recordBudgetRefusedRun"]> {
@@ -366,25 +367,26 @@ export async function cancelExecution(ctx: PgContext, input: {
 /**
  * The same deletes as SqliteStore.pruneExecutionHistory; returns the history rows removed. Never waits for a row lock
  * (see prune.ts): rows a workflow delete or another writer holds are skipped and go on a later run. Tables in the
- * order a workflow delete takes them.
+ * order a workflow delete takes them. Rows under a legal hold are kept (13.3; this is the reference the retention
+ * tests compare against, with no production caller).
  */
 export async function pruneExecutionHistory(ctx: PgContext, input: { before: string }): Promise<number> {
   const before = [input.before];
-  const deleted = await deleteUnlockedInBatches(ctx.pool, "execution_history", "started_at < $1", before);
+  const deleted = await deleteUnlockedInBatches(ctx.pool, "execution_history", `started_at < $1 AND ${notHeldSql("execution_history")}`, before);
   // Phase 11.2 — and decided approval requests; pending ones stay with their paused run.
-  await deleteUnlockedInBatches(ctx.pool, "approval_requests", "status <> 'pending' AND created_at < $1", before);
+  await deleteUnlockedInBatches(ctx.pool, "approval_requests", `status <> 'pending' AND created_at < $1 AND ${notHeldSql("approval_requests")}`, before);
   // Phase 10.8 — so do cassettes recorded from those runs.
-  await deleteUnlockedInBatches(ctx.pool, "mcp_cassettes", "created_at < $1", before);
+  await deleteUnlockedInBatches(ctx.pool, "mcp_cassettes", `created_at < $1 AND ${notHeldSql("mcp_cassettes")}`, before);
   // Phase 12.1 — and so do guard events.
-  await deleteUnlockedInBatches(ctx.pool, "guard_events", "created_at < $1", before);
+  await deleteUnlockedInBatches(ctx.pool, "guard_events", `created_at < $1 AND ${notHeldSql("guard_events")}`, before);
   // Phase 10.1 — tool-call telemetry follows the execution-history retention.
-  await deleteUnlockedInBatches(ctx.pool, "mcp_tool_calls", "started_at < $1", before);
+  await deleteUnlockedInBatches(ctx.pool, "mcp_tool_calls", `started_at < $1 AND ${notHeldSql("mcp_tool_calls")}`, before);
   // Phase 12.4 — and gateway approval requests (their argument previews).
-  await deleteUnlockedInBatches(ctx.pool, "mcp_gateway_approvals", "requested_at < $1", before);
+  await deleteUnlockedInBatches(ctx.pool, "mcp_gateway_approvals", `requested_at < $1 AND ${notHeldSql("mcp_gateway_approvals")}`, before);
   // Phase 13.1 — and finished queue jobs and dead-letter entries: their payloads (a dispatched run's spec, with its
   // input) and stored results never outlive the history.
-  await deleteUnlockedInBatches(ctx.pool, "execution_queue", "(status = 'completed' OR status = 'dead') AND updated_at < $1", before);
-  await deleteUnlockedInBatches(ctx.pool, "execution_queue_dlq", "failed_at < $1", before);
+  await deleteUnlockedInBatches(ctx.pool, "execution_queue", `(status = 'completed' OR status = 'dead') AND updated_at < $1 AND ${notHeldSql("execution_queue")}`, before);
+  await deleteUnlockedInBatches(ctx.pool, "execution_queue_dlq", `failed_at < $1 AND ${notHeldSql("execution_queue_dlq")}`, before);
   return deleted;
 }
 
