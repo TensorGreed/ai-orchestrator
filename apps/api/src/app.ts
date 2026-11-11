@@ -73,6 +73,8 @@ import {
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
 import { BUDGET_SCOPE_TYPES, isBudgetScopeType, type BudgetScopeType } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
 import {
   executeCodeNodeSandbox,
   executeWorkflow,
@@ -108,6 +110,7 @@ import {
   resolveOidcSettings,
   resolveSamlSettings,
   parseTrustProxy,
+  toFastifyTrustProxy,
   resolveNetworkSettings,
   resolveSsoMfaSettings,
   resolveMfaPolicy,
@@ -136,7 +139,7 @@ import { NonRetryableQueueError, QueueFullError, QueueProducer, QueueService, ty
 import { AppLifecycle } from "./services/app-lifecycle.js";
 import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError, resumeEffectFreeNodeId } from "./db/queue-leases.js";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
-import { ApiKeyService } from "./services/api-key-service";
+import { ApiKeyService, apiKeyRotationRefusal } from "./services/api-key-service";
 import type { RequestAuthContext, SessionRejectReason } from "./services/session-service.js";
 import { apiKeyCreateBodySchema, isStructuredScope, keyBoundUser, keyMayCallRoute, keyMayManageAccount, parseKeyScopes, resolveNewKeyScope, scopedKeyUser } from "./services/key-scopes.js";
 import { MfaService } from "./services/mfa-service";
@@ -204,6 +207,7 @@ import { TracingService, parseKeyValueList, parseTraceparent } from "./services/
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
+import { SubWorkflowSpendTracker, usageUserOf, withinBudgetCheckTime, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
@@ -225,6 +229,10 @@ import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerRetentionRoutes } from "./retention-routes.js";
 import { registerDataProtectionRoutes } from "./data-protection-routes.js";
 import { SubjectRequestService, runSessionId } from "./services/subject-request-service.js";
+import { registerLegalHoldRoutes } from "./legal-hold-routes.js";
+import { LegalHoldService } from "./services/legal-hold-service.js";
+import { LegalHoldError } from "./db/legal-hold-sql.js";
+import { registerProjectRetentionRoutes } from "./project-retention-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
@@ -295,6 +303,9 @@ import {
   guardedFetch,
   type CodeSandboxPlan,
   type OutboundGuardConfig,
+  type SubWorkflowAdmission,
+  type SubWorkflowAdmissionRequest,
+  type SubWorkflowUsage,
   type WorkflowExecutionDependencies
 } from "@ai-orchestrator/workflow-engine";
 import {
@@ -324,7 +335,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
-import { NetworkControls, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
+import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
 import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
@@ -1494,8 +1505,8 @@ export async function createApp(
   // - `genReqId` falls back to nanoid for fresh requests; nanoid is already
   //   a transitive dep here and produces shorter URL-safe IDs than crypto
   //   randomUUID without collision risk in the lifetime of an instance.
-  // - `requestIdLogLabel: "reqId"` keys the ID under `reqId` in every log
-  //   line that Pino emits via request.log, so `grep reqId=<id>` works.
+  // - Fastify's default log label is `reqId`, so every line that Pino emits
+  //   via request.log carries the ID under `reqId` and `grep reqId=<id>` works.
   // The X-Request-ID response header is set in the onSend hook below so
   // clients (and curl --include) see the same ID their request carried.
   const app = Fastify({
@@ -1516,9 +1527,8 @@ export async function createApp(
     },
     bodyLimit: config.API_BODY_LIMIT_BYTES,
     // TRUST_PROXY unset = false: request.ip (and so the rate-limit key) is the address that connected.
-    trustProxy: parseTrustProxy(config.TRUST_PROXY),
+    trustProxy: toFastifyTrustProxy(parseTrustProxy(config.TRUST_PROXY)),
     requestIdHeader: "x-request-id",
-    requestIdLogLabel: "reqId",
     genReqId: () => nanoid()
   });
   // 12.6 — model allowlists. Every model call goes through this seam: each run, gateway sampling call, provider test,
@@ -2167,6 +2177,18 @@ export async function createApp(
       if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
       runReleases.set(input.executionId, { channel, version: releaseVersion });
     }
+    // The model spend of the run's sub-workflows joins its usage row (a replay starts none).
+    const runSubWorkflowSpend =
+      input.executionId && !input.replay
+        ? subWorkflowSpend.start({
+            executionId: input.executionId,
+            workflowId: input.workflow.id,
+            workflowName: input.workflow.name ?? null,
+            projectId: input.workflow.projectId ?? null,
+            ...(typeof input.triggeredBy === "string" ? { triggeredBy: input.triggeredBy } : {}),
+            ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {})
+          }, input.spendAttempt)
+        : undefined;
     // Phase 15.6 — sampled for production capture: the run records like a "Record calls" run.
     const captureTicket =
       replayCapture && input.executionId
@@ -2285,6 +2307,20 @@ export async function createApp(
           // A replay never starts a sub-workflow (Execute Workflow nodes are stubbed).
           loadWorkflow: input.replay ? undefined : scoped.loadWorkflow,
           scopeSubWorkflow: input.replay ? undefined : modelScopedSubWorkflows(scoped.scopeSubWorkflow, runModelRegistry, runModelScope),
+          // A child is refused while a used-up block budget applies to this run (its earlier children counted).
+          ...(input.replay
+            ? {}
+            : {
+                admitSubWorkflow: async (child: Workflow, request: SubWorkflowAdmissionRequest) =>
+                  await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend, runController.signal)
+              }),
+          ...(runSubWorkflowSpend
+            ? {
+                onSubWorkflowUsage: async (usage: SubWorkflowUsage) => await runSubWorkflowSpend.report(usage),
+                // A streamed model call that failed, was cancelled or timed out is charged its estimate in the run's row.
+                onUnrecordedModelUsage: async (telemetry: Record<string, unknown>) => await runSubWorkflowSpend.reportModelUsage(telemetry)
+              }
+            : {}),
           // Phase 9.1 — built-in persistent vector store, limited to the
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
@@ -2358,7 +2394,9 @@ export async function createApp(
                 // 12.6 — and its client and toolset, so the resumed part's usage is charged to them.
                 ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {}),
                 // 12.7 — an eval run's resumed part still records its Content rules verdicts as eval traffic.
-                ...(input.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {})
+                ...(input.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
+                // Who the run's budgets are matched against, kept for the resumed part (not the approver).
+                budgetSubject: input.budgetSubject ?? (({ userEmail, userId }) => ({ userEmail, userId }))(runBudgetContext(input))
               })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
@@ -2721,6 +2759,8 @@ export async function createApp(
     gatewayUsage?: RunWorkflowExecutionInput["gatewayUsage"];
   }) => {
     if (input.result.status === "waiting_approval") {
+      // The resumed run is recorded apart: what the children spent so far is recorded now.
+      await subWorkflowSpend.take(input.executionId)?.closeDetached();
       app.log.info(
         {
           executionId: input.executionId,
@@ -2827,12 +2867,10 @@ export async function createApp(
         }
       }
       // 12.6 — a gateway call's run is the client's, also the part after an approval (whoever decided it).
-      const usageUser = input.gatewayUsage
-        ? { email: null, id: `mcp-client:${input.gatewayUsage.clientName}` }
-        : {
-            email: typeof input.triggeredBy === "string" && input.triggeredBy.includes("@") ? input.triggeredBy : null,
-            id: typeof input.triggeredBy === "string" && !input.triggeredBy.includes("@") ? input.triggeredBy : null
-          };
+      const usageUser = usageUserOf(input.triggeredBy, input.gatewayUsage);
+      // The run's sub-workflows' spend joins its row; a child that ends later is recorded on its own.
+      const runSubWorkflowSpend = subWorkflowSpend.take(input.executionId);
+      const subWorkflowTelemetry = runSubWorkflowSpend?.closeIntoRun() ?? [];
       const usageResult = await usageService.recordExecution({
         executionId: input.executionId,
         workflowId: input.workflow.id,
@@ -2845,8 +2883,21 @@ export async function createApp(
         status: input.result.status,
         durationMs: toDurationMs(input.result.startedAt, input.result.completedAt) ?? 0,
         nodeResults: nodeOutputs,
-        ...(input.liveModelCalls ? { liveModelCalls: input.liveModelCalls } : {})
-      });
+        ...(input.liveModelCalls ? { liveModelCalls: input.liveModelCalls } : {}),
+        ...(subWorkflowTelemetry.length > 0 ? { subWorkflowTelemetry } : {})
+      })
+        .catch((error: unknown) => {
+          // The run's row failed: its sub-workflows' spend was in it, and is lost with the run's own.
+          if (subWorkflowTelemetry.length > 0) {
+            const lost = usageService.totalTelemetry(subWorkflowTelemetry);
+            app.log.warn(
+              { executionId: input.executionId, workflowId: input.workflow.id, costUsd: lost.costUsd, totalTokens: lost.totalTokens },
+              "A run's usage row was not written; its sub-workflows' spend is not recorded"
+            );
+          }
+          throw error;
+        })
+        .finally(() => runSubWorkflowSpend?.recorded());
 
       // Phase 8.3 — fire budget alerts on threshold crossings. Debounced per
       // (budget, period, severity) so users don't get spammed. Phase 15.1 — a
@@ -3245,6 +3296,7 @@ export async function createApp(
         }
         const executed = await runWorkflowExecution({
           ...run,
+          spendAttempt: context,
           ...(mcpPlan ? { mcpPlan } : {}),
           hooks: queueJobHooks(context, progressHooks)
         });
@@ -3338,6 +3390,11 @@ export async function createApp(
    * signed-in user, else the trigger's name as usage records it) and, for a gateway call's run, the client and the
    * toolset's project.
    */
+  /** A run's budget user from its trigger's name (paused states written before the subject was kept). */
+  const budgetSubjectOf = (triggeredBy: string | undefined): { userEmail: string | null; userId: string | null } => {
+    const user = usageUserOf(triggeredBy, undefined);
+    return { userEmail: user.email, userId: user.id };
+  };
   const runBudgetContext = (run: Pick<DispatchedRunInput, "workflow" | "triggeredBy" | "policyActor" | "gatewayUsage">): BudgetCheckContext => {
     const by = typeof run.triggeredBy === "string" ? run.triggeredBy : null;
     return {
@@ -3349,6 +3406,50 @@ export async function createApp(
         ? { client: { id: run.gatewayUsage.clientId, name: run.gatewayUsage.clientName }, toolsetProjectId: run.gatewayUsage.toolsetProjectId }
         : {})
     };
+  };
+  /**
+   * A sub-workflow (Execute Workflow, Workflow Tool) is refused while a used-up `block` budget applies to its run:
+   * matched as the run was admitted (the top-level run's workflow, project and client, and the user who started it,
+   * also after an approval: not the approver), counting what the run's earlier children spent and a reservation for
+   * each child still running beside it (sub-workflow-spend.ts). The check and the child's reservation are one step
+   * per execution (`admitIf`), so children admitted at once cannot together pass the cap. Not for the runs that are
+   * never refused (golden-run replays, eval runs, resumed or not). With no block budget no usage is read and every
+   * child starts. Returns the child's admission, settled when it stops running.
+   */
+  const admitSubWorkflowBudget = async (
+    run: Pick<RunWorkflowExecutionInput, "workflow" | "triggerType" | "triggeredBy" | "policyActor" | "gatewayUsage" | "guardRunSource" | "budgetSubject">,
+    child: Workflow,
+    request: SubWorkflowAdmissionRequest,
+    spend: RunSubWorkflowSpend | undefined,
+    /** The run's signal: a check still waiting its turn stops when the run is stopped. */
+    signal?: AbortSignal
+  ): Promise<SubWorkflowAdmission | void> => {
+    const exempt = Boolean(run.triggerType && (BUDGET_EXEMPT_TRIGGER_TYPES.has(run.triggerType) || run.triggerType === "eval")) || run.guardRunSource === "eval";
+    if (!exempt) {
+      const ctx: BudgetCheckContext = { ...runBudgetContext(run), ...(run.budgetSubject ?? {}) };
+      const notStarted = (reason: string) => new Error(`Sub-workflow '${child.name}' was not started: ${reason}`);
+      const refusal: { blocked: BudgetExceededError | null } = { blocked: null };
+      const fits = async (pending?: () => Spend): Promise<boolean> => {
+        if (!(await budgetService.appliesBlock(ctx))) return true;
+        refusal.blocked = await budgetService.checkBlock(ctx, pending);
+        return !refusal.blocked;
+      };
+      let admission: SubWorkflowAdmission | undefined;
+      try {
+        if (spend) admission = await spend.admitIf(request, fits, signal);
+        else await withinBudgetCheckTime(fits(), subWorkflowSpend.checkTimeoutMs);
+      } catch (error) {
+        throw notStarted(error instanceof Error ? error.message : String(error));
+      }
+      const blocked = refusal.blocked;
+      if (blocked) {
+        blocked.run = { workflowId: run.workflow.id, projectId: run.workflow.projectId ?? null, triggerType: "sub_workflow" };
+        await noteRefusedRun(blocked, { subWorkflowId: child.id });
+        throw notStarted(blocked.message);
+      }
+      return admission;
+    }
+    return spend?.admit(request);
   };
   /**
    * 12.6 (D8) — a used-up `block` budget refuses every run a trigger starts, not only `POST /api/workflows/:id/execute`:
@@ -3383,14 +3484,23 @@ export async function createApp(
     }
   };
   const noteRefusedHttpRun = async (error: BudgetExceededError, request: FastifyRequest): Promise<void> => {
+    await noteRefusedRun(error, { url: request.url });
+  };
+  /**
+   * A run (or a sub-workflow, trigger type `sub_workflow`) a budget refused: logged and audited as `budget.run_refused`
+   * once per workflow, trigger type, budget and period on this instance.
+   */
+  const noteRefusedRun = async (error: BudgetExceededError, details: { url?: string; subWorkflowId?: string }): Promise<void> => {
     if (!error.run) return;
     const key = JSON.stringify([error.run.workflowId, error.run.triggerType, error.budget.id, error.periodStart]);
     if (refusedRunsNoted.has(key)) return;
     if (refusedRunsNoted.size >= 10_000) refusedRunsNoted.clear();
     refusedRunsNoted.add(key);
     app.log.warn(
-      { workflowId: error.run.workflowId, triggerType: error.run.triggerType, budgetId: error.budget.id, periodStart: error.periodStart, url: request.url },
-      "A budget refused a run (HTTP 402); later refusals this period are not logged again"
+      { workflowId: error.run.workflowId, triggerType: error.run.triggerType, budgetId: error.budget.id, periodStart: error.periodStart, ...details },
+      error.run.triggerType === "sub_workflow"
+        ? "A budget refused a sub-workflow; later refusals this period are not logged again"
+        : "A budget refused a run (HTTP 402); later refusals this period are not logged again"
     );
     try {
       await auditService.record({
@@ -3404,6 +3514,7 @@ export async function createApp(
         projectId: error.run.projectId,
         metadata: {
           triggerType: error.run.triggerType,
+          ...(details.subWorkflowId ? { subWorkflowId: details.subWorkflowId } : {}),
           budgetId: error.budget.id,
           budgetName: error.budget.name,
           period: error.budget.period,
@@ -3939,30 +4050,38 @@ export async function createApp(
   // default `<workflowId>:<nodeId>` and its literal custom namespaces. Only
   // read when a run falls back to an unprefixed row; rebuilt when any
   // workflow changes.
-  let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]> } | null = null;
-  const legacyNamespaceOwners = async (): Promise<Map<string, string[]>> => {
+  // 13.3 — `defaults` holds the default namespaces alone: the retention purge gives an older key to a project only
+  // when it is exactly one of that project's workflows' own `<workflowId>:<nodeId>` and no other project claims it.
+  let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]>; defaults: Map<string, string[]> } | null = null;
+  const legacyNamespaceIndexNow = async () => {
     const items = await store.listWorkflows();
     const fingerprint = items.map((item) => `${item.id}|${item.updatedAt}|${item.workflowVersion}|${item.projectId ?? DEFAULT_PROJECT_ID}`).join("\n");
-    if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex.owners;
+    if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex;
     const owners = new Map<string, string[]>();
-    const claim = (namespace: string, projectId: string) => {
-      const list = owners.get(namespace) ?? [];
+    const defaults = new Map<string, string[]>();
+    const claim = (index: Map<string, string[]>, namespace: string, projectId: string) => {
+      const list = index.get(namespace) ?? [];
       if (!list.includes(projectId)) list.push(projectId);
-      owners.set(namespace, list);
+      index.set(namespace, list);
     };
+    const defaultKeys: string[] = [];
     for (const item of items) {
       const workflow = await store.getWorkflow(item.id);
       if (!workflow) continue;
       const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
       for (const node of workflow.nodes) {
-        claim(`${workflow.id}:${node.id}`, projectId);
+        defaultKeys.push(`${workflow.id}:${node.id}`);
+        claim(owners, `${workflow.id}:${node.id}`, projectId);
         const custom = (node.config as Record<string, unknown> | undefined)?.namespace;
-        if (typeof custom === "string" && custom.trim() && !custom.includes("{{")) claim(custom.trim(), projectId);
+        if (typeof custom === "string" && custom.trim() && !custom.includes("{{")) claim(owners, custom.trim(), projectId);
       }
     }
-    legacyNamespaceIndex = { fingerprint, owners };
-    return owners;
+    // Every project that claims a default namespace, also as another workflow's literal custom namespace.
+    for (const namespace of defaultKeys) defaults.set(namespace, owners.get(namespace) ?? []);
+    legacyNamespaceIndex = { fingerprint, owners, defaults };
+    return legacyNamespaceIndex;
   };
+  const legacyNamespaceOwners = async (): Promise<Map<string, string[]>> => (await legacyNamespaceIndexNow()).owners;
   // What a run can reach once it is going: sub-workflows, secrets, knowledge
   // bases and session state of its own project (see run-scope.ts).
   const runScope = createRunScope({
@@ -4696,6 +4815,11 @@ export async function createApp(
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
   });
   const budgetService = new BudgetService(store);
+  const subWorkflowSpend = new SubWorkflowSpendTracker({
+    usageService,
+    budgetService,
+    logger: { warn: (fields, message) => app.log.warn(fields, message) }
+  });
   budgetService.setLogger({
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
@@ -4839,6 +4963,7 @@ export async function createApp(
     settings: resolveRetentionSettings(config),
     executionHistoryDays: config.EXECUTION_HISTORY_RETENTION_DAYS,
     evalRunDays: config.EVAL_RUN_RETENTION_DAYS,
+    legacyMemoryOwners: async () => (await legacyNamespaceIndexNow()).defaults,
     intervalMs: config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS,
     instanceId: leaderElection.getInstanceId(),
     isLeader: () => leaderElection.isLeader(),
@@ -4867,6 +4992,32 @@ export async function createApp(
       events: c.events
     }))
   );
+
+  // 13.2 — credential.expiring: the leader warns (at most once a day per credential) about API keys and gateway
+  // clients that stop working soon, and old keys still in use as their rotation grace window ends.
+  const credentialExpiryService = new CredentialExpiryService({
+    store,
+    notify: async (event) => await notificationService.notify(event),
+    subscribed: async () => await notificationService.subscribes(CREDENTIAL_EXPIRING_EVENT),
+    isLeader: () => runsBackgroundWorkers && leaderElection.isLeader()
+  });
+  const sweepCredentialExpiry = async () => {
+    try {
+      const sent = await credentialExpiryService.sweep();
+      if (sent > 0) app.log.info({ sent }, "Sent credential expiry warnings");
+    } catch (err) {
+      app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to sweep expiring credentials");
+    }
+  };
+  // promise-ok: the sweep catches and logs its own errors
+  const credentialExpiryTimer = setInterval(async () => await sweepCredentialExpiry(), CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS);
+  credentialExpiryTimer.unref?.();
+  app.addHook("onReady", async () => {
+    void sweepCredentialExpiry();
+  });
+  app.addHook("onClose", async () => {
+    clearInterval(credentialExpiryTimer);
+  });
 
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
   const approvalResumes = new ApprovalResumeRunner();
@@ -4942,6 +5093,10 @@ export async function createApp(
   const abandonQueueStoppedRun = (executionId: string, workflowId: string, job: QueueJobContext) => {
     runReleases.delete(executionId);
     dropCapture(executionId, "skipped_not_stored");
+    // The run leaves no usage row; what its sub-workflows spent is still recorded.
+    subWorkflowSpend.abandon(executionId, "stopped by the queue", job).catch((error: unknown) => {
+      app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record a stopped run's sub-workflow spend");
+    });
     app.log.warn({ executionId, workflowId, reason: String(job.signal.reason) }, "Queued run stopped by the queue");
   };
 
@@ -5064,9 +5219,12 @@ export async function createApp(
           : null;
         const result = await runWorkflowExecution({
           ...(hooks ? { hooks } : {}),
+          ...(queueJob ? { spendAttempt: queueJob } : {}),
           ...(gatewayGuard ? { gatewayGuard } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           ...(state.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
+          // Sub-workflows the resumed part starts are checked against the budgets of the user who started the run.
+          budgetSubject: state.budgetSubject ?? budgetSubjectOf(pending.triggeredBy ?? undefined),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
@@ -5100,8 +5258,18 @@ export async function createApp(
         });
         return result;
       } catch (error) {
-        // Stopped by the queue: the decision stands and the queue's policy decides who resumes it.
-        if (queueJob?.signal.aborted) throw error;
+        // Stopped by the queue: the decision stands and the queue's policy decides who resumes it. What this attempt's
+        // sub-workflows spent is recorded now (the next attempt starts its own).
+        if (queueJob?.signal.aborted) {
+          await subWorkflowSpend.abandon(job.executionId, "the resume was stopped by the queue", queueJob).catch((spendError: unknown) => {
+            app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a stopped resume's sub-workflow spend");
+          });
+          throw error;
+        }
+        // What the failed resume's sub-workflows spent is still recorded.
+        await subWorkflowSpend.abandon(job.executionId, "the resume failed").catch((spendError: unknown) => {
+          app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a failed resume's sub-workflow spend");
+        });
         // The decision is kept for a new try: the run waits again and the request is pending again.
         await approvalService.reopenAfterFailedResume(job);
         throw error;
@@ -7598,22 +7766,53 @@ export async function createApp(
       }
       if (!await requireStepUp(request, reply, "user.create")) return;
     } else if (existingUsers > 0 && config.AUTH_ALLOW_PUBLIC_REGISTER) {
+      // Public registration is for people: a request carrying an L2M API key (well-formed, valid or not) is refused
+      // rather than treated as signed out or as the key's owner. Any other Bearer value (an auth proxy's own token) is
+      // not an L2M credential and is ignored, as on other routes. Admins create users with a session or a key while
+      // public registration is off.
+      if (hasApiKeyBearer(request.headers.authorization)) {
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.register",
+          action: "register",
+          outcome: "denied",
+          metadata: {
+            email: parsed.data.email,
+            role: parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer"),
+            reason: "api_key"
+          }
+        });
+        reply.code(403);
+        return { error: "API keys cannot be used for public registration" };
+      }
       // 13.2 — a session restricted by MFA_REQUIRED_ROLES registers as anyone else would (as a viewer).
       actor = await unrestrictedSessionUser(request);
     }
 
     const requestedRole: UserRole = parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer");
-    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action.
-    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
     let role: UserRole = requestedRole;
     if (existingUsers === 0) {
       role = parsed.data.role ?? "admin";
     } else if (!actor) {
+      // A signed-out caller always gets the lowest role, whatever it asked for.
       role = "viewer";
-    } else if (role === "admin" && actor.role !== "admin") {
+    } else if (rolePriority[role] > rolePriority[actor.role]) {
+      // A signed-in caller cannot create a user with a role above its own.
+      await audit(request, actor, {
+        category: "auth",
+        eventType: "user.register",
+        action: "register",
+        outcome: "denied",
+        metadata: { email: parsed.data.email, role, reason: "role_above_actor", actorEmail: actor.email, actorRole: actor.role }
+      });
       reply.code(403);
-      return { error: "Only admins can create admin users" };
+      return {
+        error: role === "admin" ? "Only admins can create admin users" : `Your role (${actor.role}) cannot create a user with the ${role} role`
+      };
     }
+    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action. It
+    // runs after the role check, so a role above the caller's own is refused and audited first.
+    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
 
     try {
       const user = await authService.register({
@@ -8199,6 +8398,63 @@ export async function createApp(
       resourceId: request.params.id
     });
     return { ok: true };
+  });
+
+  /**
+   * 13.2 — rotates one of the caller's own keys: a new key (shown once) with the same name, scope and limits, and the
+   * old key keeps working for the grace window (graceHours, 24 by default, 0 ends it now). Only the owner rotates a
+   * personal key (an admin would otherwise receive someone else's credential); a scoped key may rotate only itself; a
+   * key made this way ends no later than the calling key, as on create.
+   */
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/auth/api-keys/:id/rotate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const owner = await store.getUserById(user.id);
+    if (owner?.kind === "service" || user.serviceAccount) {
+      reply.code(403);
+      return { error: "A service account's API keys are rotated by an admin under Settings > Service Accounts, not with its own key" };
+    }
+    const auth = sessionService.getRequestAuth(request);
+    if (auth?.credential === "api_key" && isStructuredScope(auth.keyScope) && auth.apiKeyId !== request.params.id) {
+      reply.code(403);
+      return { error: "A scoped API key can rotate only itself; sign in, or use an unscoped key" };
+    }
+    // As on create: for an owner whose role requires MFA, a new key always needs a recent MFA check.
+    const ownerRole = safeUserRole(owner?.role ?? user.role);
+    const keyStepUp = mfaRequiredFor(mfaPolicy, ownerRole) ? mfaPolicy.stepUpMaxAgeMinutes || LISTED_ROLE_KEY_MFA_MINUTES : undefined;
+    if (!await requireStepUp(request, reply, "api_key.rotate", keyStepUp === undefined ? {} : { maxAgeMinutes: keyStepUp })) return;
+    const parsed = credentialRotateBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid rotation payload", details: parsed.error.issues };
+    }
+    const callerKey = auth?.credential === "api_key" ? await apiKeyService.get(auth.apiKeyId, user.id) : null;
+    const graceHours = parsed.data.graceHours ?? KEY_ROTATION_GRACE_HOURS.default;
+    const rotated = await apiKeyService.rotate({ id: request.params.id, userId: user.id, graceHours, notAfter: callerKey?.expiresAt ?? null });
+    if (!rotated.ok) {
+      const refusal = apiKeyRotationRefusal(rotated.reason);
+      reply.code(refusal.status);
+      return refusal.body;
+    }
+    await audit(request, user, {
+      category: "api_key",
+      eventType: "api_key.rotate",
+      action: "update",
+      resourceType: "api_key",
+      resourceId: rotated.previous.id,
+      metadata: {
+        name: rotated.record.name,
+        newKeyId: rotated.record.id,
+        keyPrefix: rotated.record.keyPrefix,
+        previousKeyPrefix: rotated.previous.keyPrefix,
+        graceHours,
+        previousExpiresAt: rotated.previous.expiresAt,
+        expiresAt: rotated.record.expiresAt,
+        ownerKind: "human",
+        ...(callerKey ? { rotatedWithApiKeyId: callerKey.id } : {})
+      }
+    });
+    return { key: rotated.plaintext, record: rotated.record, previous: rotated.previous };
   });
 
   // ---------------------------------------------------------------------------
@@ -9373,10 +9629,14 @@ export async function createApp(
       reply.code(400);
       return { error: "role must be project_admin, editor, viewer, or custom" };
     }
-    // 13.3 — a role that grants a deployment-wide permission (data-subject requests) is an admin's to hand out.
+    // 13.3 — a role that grants a deployment-wide permission (legal holds, data-subject requests) is an admin's to hand out.
     if (role === "custom" && parsed.data.customRoleId && user.role !== "admin" && (await rbacService.grantsDeploymentPermission(parsed.data.customRoleId))) {
       reply.code(403);
-      return { error: "Only an admin can give a role that grants a deployment-wide permission." };
+      return { error: "Only an admin can give a role that grants a deployment-wide permission (legal holds, data-subject requests)." };
+    }
+    if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(parsed.data.userId, project.id))) {
+      reply.code(403);
+      return { error: "Only an admin can change the membership of someone whose role grants a deployment-wide permission." };
     }
     try {
       await rbacService.addMember({
@@ -9423,6 +9683,11 @@ export async function createApp(
         return { error: "Insufficient permissions to remove members" };
       }
       if (!await requireStepUp(request, reply, "project_member.change")) return;
+      // 13.3 — a membership that grants a deployment-wide permission (legal holds) is an admin's to take away.
+      if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(request.params.userId, project.id))) {
+        reply.code(403);
+        return { error: "Only an admin can remove someone whose role manages legal holds." };
+      }
       const ok = await rbacService.removeMember(request.params.userId, project.id);
       if (!ok) {
         reply.code(404);
@@ -9961,6 +10226,8 @@ export async function createApp(
     try {
       deleted = await store.deleteWorkflow(request.params.id, { refuseIfGateEnforced: user.role !== "admin" });
     } catch (error) {
+      // 13.3 — answered 409 `legal_hold` by the error handler, naming the holds.
+      if (error instanceof LegalHoldError) throw error;
       if (!(error instanceof ReleaseGateEnforcedError)) {
         reply.code(400);
         return { error: error instanceof Error ? error.message : "Failed to delete workflow" };
@@ -10431,6 +10698,7 @@ export async function createApp(
         reply.code(409);
         return { error: error.message, ...error.counts };
       }
+      if (error instanceof LegalHoldError) throw error;
       reply.code(400);
       return { error: error instanceof Error ? error.message : "Failed to delete project" };
     }
@@ -14009,6 +14277,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
   registerRetentionRoutes({ app, retention, requireRole: (request, reply, roles) => requireRole(request, reply, roles) });
+  registerProjectRetentionRoutes({
+    app,
+    store,
+    retention,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    projectAccess: (user, projectId) => runAccess.project(user, projectId, "workflow:read"),
+    canManageProject: (user, projectId) => rbacService.can(user, projectId, "project:manage"),
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
+    audit: (request, user, event) => audit(request, user, event)
+  });
   registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, audit: async (request, user, event) => await audit(request, user, event) });
 
   // Phase 15.1 — golden runs and replay.
@@ -14228,6 +14506,25 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     audit: async (request, user, event) => await audit(request, user, event)
   });
 
+  // 13.3 — legal holds: placed and released by hold managers; every purge and delete of held data honours them.
+  registerLegalHoldRoutes({
+    app,
+    store,
+    service: (request, user) =>
+      new LegalHoldService({
+        store,
+        audit: async (event) => await audit(request, user, event),
+        notify: async (event) => await notificationService.notify(event),
+        ...(captureAvailable ? { findSubject: async (query) => await captureService.findSubject(query) } : {}),
+        logger: { warn: (fields, message) => app.log.warn(fields, message) }
+      }),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    canManage: async (user) => await rbacService.canDeployment(user, "legal_hold:manage"),
+    runAccess,
+    viaApiKey: (request) => sessionService.getRequestAuth(request)?.credential === "api_key"
+  });
+
   // Phase 15.5 — golden-set files.
   registerGoldenSetFileRoutes({
     app,
@@ -14433,6 +14730,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const hooks = queueJobHooks(context, progressHooks);
     const result = await runWorkflowExecution({
       ...(hooks ? { hooks } : {}),
+      spendAttempt: context,
       policyActor: enqueuedBy,
       elicitationsForWorkflow: true,
       workflow,
@@ -14821,8 +15119,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const auth = sessionService.getRequestAuth(request);
       return auth?.credential === "api_key" ? auth.keyScope : null;
     },
+    requestApiKeyId: (request) => {
+      const auth = sessionService.getRequestAuth(request);
+      return auth?.credential === "api_key" ? auth.apiKeyId : null;
+    },
     disconnectMcpOAuth: async (userId) => await mcpOAuthService.disconnectUserEverywhere(userId),
-    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action)
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    keyMaxAgeDays: config.SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS ?? 0
   });
 
   registerUserInviteRoutes({
@@ -15325,6 +15628,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     // Roadmap 7.3 — a malformed page or pageSize on a list route.
     if (error instanceof PaginationQueryError) {
       reply.code(400).send({ error: error.message });
+      return;
+    }
+
+    // 13.3 — a delete refused because a legal hold keeps what it would remove.
+    if (error instanceof LegalHoldError) {
+      reply.code(409).send({ error: error.message, code: "legal_hold", holds: error.holds });
       return;
     }
 

@@ -2,6 +2,7 @@
  * 13.3 — data retention: the classes the retention service purges, in the order one purge takes them, and the admin
  * view of `GET /api/admin/retention`. Every class keeps its data until a setting gives it a number of days.
  */
+import type { ProjectRetentionOverride } from "./retention-policy";
 
 /** The purge classes, in the order one purge runs them. */
 export const RETENTION_PURGE_CLASSES = [
@@ -82,4 +83,6 @@ export interface RetentionAdminView {
   /** When the next interval purge is due, from the last recorded one; null before the first. */
   nextRunAt: string | null;
   runs: RetentionRunView[];
+  /** Projects with retention values of their own (per-project retention). */
+  projectOverrides: ProjectRetentionOverride[];
 }

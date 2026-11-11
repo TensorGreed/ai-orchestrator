@@ -1447,6 +1447,7 @@ function StudioApp() {
       if (typeof usage.outputTokens === "number") entry.outputTokens = usage.outputTokens as number;
       if (typeof usage.totalTokens === "number") entry.totalTokens = usage.totalTokens as number;
       if (typeof usage.cachedInputTokens === "number") entry.cachedInputTokens = usage.cachedInputTokens as number;
+      if (t.usageEstimated === true) entry.usageEstimated = true;
       if (Object.keys(entry).length > 0) map.set(nodeResult.nodeId, entry);
     }
     return map;

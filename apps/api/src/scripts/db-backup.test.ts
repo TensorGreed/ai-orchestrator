@@ -342,6 +342,26 @@ describe("db:export records the audit verdict; db:import refuses a restore that 
     expect(withoutHistory.auditVerdict).toBeUndefined();
   });
 
+  it("13.3: --replace is refused while the destination has an active legal hold, unless allowReplaceHeld", async () => {
+    const source = await SqliteStore.create(sourcePath);
+    await source.upsertWorkflow({ id: "wf-new", name: "New", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
+    await source.close();
+    const dump = await exportFrom(sourcePath);
+    await destinationWithData();
+    const dest = await SqliteStore.create(destPath);
+    await dest.ensureDefaultProject();
+    await dest.placeLegalHold({
+      id: "lh", name: "Matter", reason: "r", matterRef: null, scopeType: "workflow", scopeId: "wf-before", endsAt: null,
+      createdBy: null, createdAt: new Date().toISOString(), items: []
+    });
+    await dest.close();
+    const refused = await importInto(destPath, dump, { replace: true }).then(() => undefined, (e: unknown) => e as Error);
+    expect(refused?.message).toMatch(/1 active legal hold/);
+    expect((await destinationState()).workflows).toEqual(["wf-before"]);
+    await importInto(destPath, dump, { replace: true, allowReplaceHeld: true });
+    expect((await destinationState()).workflows).toEqual(["wf-new"]);
+  });
+
   it("refuses and rolls back a restore whose chain breaks where the backup recorded it intact (an edited backup file)", async () => {
     const store = await SqliteStore.create(sourcePath);
     await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success", message: "approved by alice" });

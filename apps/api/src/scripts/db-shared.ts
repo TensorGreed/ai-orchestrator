@@ -54,6 +54,8 @@ export interface BackupAdapter {
   countRows(table: string): Promise<number>;
   /** audit_logs rows the chain walks (entry_hash set); unchained pre-Phase-8.4 rows do not count. */
   countChainedAuditRows(): Promise<number>;
+  /** 13.3 — active legal holds (0 on a schema without the table). */
+  countActiveLegalHolds(): Promise<number>;
   /**
    * Runs `fn` in one transaction: every read sees one snapshot (`readOnly`, for db:export), or every write commits
    * together and a throw rolls all of them back (db:import).
@@ -177,6 +179,9 @@ export const EXPORTED_TABLES = [
   "ai_gateway_requests",
   // 13.3 — retention values per project
   "retention_policies",
+  // 13.3 — legal holds and the rows they name
+  "legal_holds",
+  "legal_hold_items",
   // 13.3 — data-subject requests: the subject key (sealed; references keep matching after a restore), the references
   // (keyed hashes) and the requests (their trail; a value is sealed only while a lookup runs)
   "subject_ref_keys",
@@ -315,6 +320,15 @@ class SqliteAdapter implements BackupAdapter {
 
   async countChainedAuditRows(): Promise<number> {
     return Number((this.db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE entry_hash IS NOT NULL`).get() as { n: number | bigint }).n);
+  }
+
+  async countActiveLegalHolds(): Promise<number> {
+    try {
+      return Number((this.db.prepare(`SELECT COUNT(*) AS n FROM legal_holds WHERE status = 'active'`).get() as { n: number | bigint }).n);
+    } catch (error) {
+      if (isMissingTableError(error)) return 0;
+      throw error;
+    }
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
@@ -482,6 +496,14 @@ class PostgresAdapter implements BackupAdapter {
     return Number(r.rows[0]?.n ?? 0);
   }
 
+  async countActiveLegalHolds(): Promise<number> {
+    // to_regclass: a schema without the table counts 0 without failing the transaction.
+    const exists = await this.q<{ t: string | null }>(`SELECT to_regclass('legal_holds')::text AS t`);
+    if (!exists.rows[0]?.t) return 0;
+    const r = await this.q<{ n: string | number }>(`SELECT COUNT(*) AS n FROM legal_holds WHERE status = 'active'`);
+    return Number(r.rows[0]?.n ?? 0);
+  }
+
   async verifyAuditChain(): Promise<AuditChainResult> {
     // A cursor needs a transaction: inside the caller's when one is open, else a read-only one of its own.
     if (this.client) return verifyPostgresAuditChainByCursor(this.client);
@@ -605,6 +627,11 @@ export interface ImportOptions {
    */
   replace?: boolean;
   /**
+   * 13.3 — let `replace` go ahead although the destination has active legal holds (refused by default: emptying it
+   * would delete the held data and the holds).
+   */
+  allowReplaceHeld?: boolean;
+  /**
    * Restore even though the restored audit chain's verdict differs from the one the backup recorded (refused by
    * default, rolled back). Both verdicts are logged and the report carries `audit.changedWarning`.
    */
@@ -694,6 +721,15 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
             `db:import restores into an empty database: restore before the first start of the API, or pass --replace to ` +
             `replace everything in it with the backup (every exported table is emptied first, including ones the backup ` +
             `does not hold). Nothing was changed.`
+        );
+      }
+    }
+    if (options.replace && !options.allowReplaceHeld) {
+      const holds = await adapter.countActiveLegalHolds();
+      if (holds > 0) {
+        throw new ImportRefusal(
+          `The destination has ${holds} active legal hold${holds === 1 ? "" : "s"}: --replace would delete the held data and the ` +
+            `holds. Release them first, or pass --allow-replace-held after keeping a copy of the destination. Nothing was changed.`
         );
       }
     }

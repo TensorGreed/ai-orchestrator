@@ -27,6 +27,8 @@ import type {
   ReleaseGateRecord,
   WorkflowReleaseRecord
 } from "../database.js";
+import { refuseIfHeld } from "./legal-holds.js";
+import { LEGAL_HOLD_LOCK_SHARED_SQL } from "../legal-hold-sql.js";
 import type { PgContext } from "./context.js";
 
 type Row = Record<string, unknown>;
@@ -766,6 +768,8 @@ export async function saveReleaseGate(
 export async function updateReleaseGateCases(ctx: PgContext, change: ReleaseGateCasesChange): Promise<"ok" | "decided" | "changed"> {
   try {
     return await ctx.withTransaction(async (client) => {
+      // 13.3 — the legal-hold lock before any row lock, as every hold-checked delete takes it.
+      if ((change.deleteFixtureIds ?? []).length > 0) await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
       if (change.decideRequest && !(await decideGateCaseRequestOn(client, change.decideRequest))) throw new Refused("decided");
       if (change.expectedAdmittedFixtureIds !== undefined) {
         const gate = await readReleaseGate(client, change.workflowId, true);
@@ -773,6 +777,10 @@ export async function updateReleaseGateCases(ctx: PgContext, change: ReleaseGate
       }
       if (change.admittedFixtureIds !== undefined) {
         await writeReleaseGateAdmission(client, change.workflowId, change.admittedFixtureIds, change.updatedAt, change.updatedBy);
+      }
+      // 13.3 — a case under a legal hold stays: the whole change is refused (LegalHoldError, 409) before anything goes.
+      for (const fixtureId of change.deleteFixtureIds ?? []) {
+        await refuseIfHeld(client, { kind: "row", table: "eval_fixtures", id: fixtureId }, "This golden-set case", "removed");
       }
       for (const fixtureId of change.deleteFixtureIds ?? []) {
         await client.query(`DELETE FROM eval_fixtures WHERE id = $1`, [fixtureId]);

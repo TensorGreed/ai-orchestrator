@@ -669,8 +669,12 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext({ GOLDEN_SET_IMPORT_MAX_BYTES: "65536" });
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    await context.store.upsertWorkflow(setWorkflow(counter.base));
-    const setId = await suite(context, builder.cookie, "wf-set", 30);
+    // Each recording carries ~20 KB of output, so four cases pass the 64 KiB floor of the cap (the setting cannot go
+    // lower): the file is over the cap with a handful of runs instead of the thirty small ones this once needed.
+    const fat = setWorkflow(counter.base);
+    fat.nodes.find((node) => node.id === "label")!.config = { assignments: [{ key: "answer", valueTemplate: "x".repeat(20_000) }] };
+    await context.store.upsertWorkflow(fat);
+    const setId = await suite(context, builder.cookie, "wf-set", 5);
     const response = await call(context, "GET", `/api/eval/datasets/${setId}/export`, builder.cookie);
     expect(response.statusCode, response.body.slice(0, 200)).toBe(413);
     expect(response.json<{ error: string }>().error).toContain("GOLDEN_SET_IMPORT_MAX_BYTES");

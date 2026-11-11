@@ -3,7 +3,8 @@
  *
  * Admins create a client (name, toolsets, role, expiry) and see its token
  * exactly once, with copy-paste configuration for common MCP clients.
- * Clients can be revoked; usage comes from the gateway's call telemetry.
+ * Clients can be revoked, or rotated (a new token; the old one keeps working for a grace window). Usage comes from
+ * the gateway's call telemetry.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -19,13 +20,15 @@ import {
   fetchMcpClientSessions,
   fetchMcpClientUsage,
   fetchMcpToolsets,
-  revokeMcpClient
+  revokeMcpClient,
+  rotateMcpClient
 } from "../lib/api";
 import { buildMcpClientSnippets, snippetServerName, toolsetEndpointUrl } from "../lib/mcp-client-snippets";
 import { CopyButton } from "./McpToolsetsView";
 import { DataLabelChips } from "./DataLabelChips";
 import { ClientGovernance } from "./McpGatewayGovernance";
 import { ClientNetwork, describeClientNetwork } from "./McpClientNetwork";
+import { CredentialExpiry, RotateCredentialButton, rotatedNotice } from "./CredentialRotation";
 
 const ROLES: McpPolicyRole[] = ["viewer", "operator", "builder", "admin"];
 
@@ -80,7 +83,7 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [revealed, setRevealed] = useState<{ client: McpClientView; token: string } | null>(null);
+  const [revealed, setRevealed] = useState<{ client: McpClientView; token: string; rotatedNote?: string } | null>(null);
   const [usageFor, setUsageFor] = useState<string | null>(null);
   const [sessionsFor, setSessionsFor] = useState<string | null>(null);
   const [governanceFor, setGovernanceFor] = useState<string | null>(null);
@@ -126,6 +129,20 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
     }
   };
 
+  const rotate = async (client: McpClientView, graceHours: number) => {
+    setBusyId(client.id);
+    setError(null);
+    try {
+      const result = await rotateMcpClient(client.id, graceHours);
+      setClients((current) => current.map((entry) => (entry.id === client.id ? { ...entry, ...result.client } : entry)));
+      setRevealed({ client: result.client, token: result.token, rotatedNote: rotatedNotice("token", result.client.previousExpiresAt) });
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <div className="mcp-gateway">
       {error && <div className="settings-error">{error}</div>}
@@ -136,6 +153,7 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
           token={revealed.token}
           toolsets={toolsets.filter((toolset) => revealed.client.toolsetIds.includes(toolset.id))}
           gatewayBaseUrl={gatewayBaseUrl}
+          {...(revealed.rotatedNote ? { rotatedNote: revealed.rotatedNote } : {})}
           onDone={() => setRevealed(null)}
         />
       )}
@@ -211,8 +229,18 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                   </div>
                   <div>
                     <dt>Expires</dt>
-                    <dd>{client.expiresAt ? formatDate(client.expiresAt) : "never"}</dd>
+                    <dd>
+                      <CredentialExpiry expiresAt={client.expiresAt} revoked={Boolean(client.revokedAt)} />
+                    </dd>
                   </div>
+                  {client.previousTokenPrefix && client.previousExpiresAt && Date.parse(client.previousExpiresAt) > Date.now() && (
+                    <div>
+                      <dt>Previous token</dt>
+                      <dd>
+                        <code>{client.previousTokenPrefix}…</code> works until {formatDate(client.previousExpiresAt)}
+                      </dd>
+                    </div>
+                  )}
                   <div>
                     <dt>Created by</dt>
                     <dd>{client.createdByEmail ?? "unknown"}</dd>
@@ -265,6 +293,15 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                   >
                     {networkFor === client.id ? "Hide network" : "Network"}
                   </button>
+                  {isAdmin && client.status === "active" && !revealed && (
+                    <RotateCredentialButton
+                      what="token"
+                      name={client.name}
+                      buttonClassName="pg-btn ghost"
+                      disabled={busyId === client.id}
+                      onRotate={(graceHours) => rotate(client, graceHours)}
+                    />
+                  )}
                   {isAdmin && client.status === "active" && (
                     <button
                       type="button"
@@ -399,12 +436,15 @@ function TokenReveal({
   token,
   toolsets,
   gatewayBaseUrl,
+  rotatedNote,
   onDone
 }: {
   client: McpClientView;
   token: string;
   toolsets: McpToolsetView[];
   gatewayBaseUrl: string | null;
+  /** 13.2 — after a rotation: how long the old token keeps working. */
+  rotatedNote?: string;
   onDone: () => void;
 }) {
   const [toolsetId, setToolsetId] = useState(toolsets[0]?.id ?? "");
@@ -431,6 +471,7 @@ function TokenReveal({
         </button>
       </div>
       <p className="mcp-warning">This is the only time the token is shown. Store it in your client now; L2M keeps only a hash.</p>
+      {rotatedNote && <p className="kb-subtle">{rotatedNote}</p>}
       <div className="mcp-endpoint">
         <code className="mcp-endpoint-url" data-testid="client-token">
           {token}

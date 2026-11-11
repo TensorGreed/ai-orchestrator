@@ -31,6 +31,7 @@ import type { PoolClient } from "pg";
 import type { ReplayRecordingInsert, ReplayRecordingRecord } from "../database.js";
 import { type ReplayRecordingLimits, type ReplayRecordingRefusal, type Store } from "../store.js";
 import type { PgContext } from "./context.js";
+import { refuseIfHeld } from "./legal-holds.js";
 import { toNum, toStr } from "./helpers.js";
 
 /**
@@ -215,8 +216,11 @@ export async function mcpCassetteBadgesForExecutions(ctx: PgContext, ...[executi
 }
 
 export async function deleteMcpCassette(ctx: PgContext, ...[id]: Parameters<Store["deleteMcpCassette"]>): ReturnType<Store["deleteMcpCassette"]> {
-  const result = await ctx.pool.query(`DELETE FROM mcp_cassettes WHERE id = $1`, [id]);
-  return (result.rowCount ?? 0) > 0;
+  return await ctx.withTransaction(async (client) => {
+    await refuseIfHeld(client, { kind: "row", table: "mcp_cassettes", id }, "This cassette");
+    const result = await client.query(`DELETE FROM mcp_cassettes WHERE id = $1`, [id]);
+    return (result.rowCount ?? 0) > 0;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -448,8 +452,11 @@ export async function replayGoldenBadgesForExecutions(ctx: PgContext, ...[execut
 }
 
 export async function deleteReplayRecording(ctx: PgContext, ...[id]: Parameters<Store["deleteReplayRecording"]>): ReturnType<Store["deleteReplayRecording"]> {
-  const result = await ctx.pool.query(`DELETE FROM replay_recordings WHERE id = $1`, [id]);
-  return (result.rowCount ?? 0) > 0;
+  return await ctx.withTransaction(async (client) => {
+    await refuseIfHeld(client, { kind: "row", table: "replay_recordings", id }, "This recording");
+    const result = await client.query(`DELETE FROM replay_recordings WHERE id = $1`, [id]);
+    return (result.rowCount ?? 0) > 0;
+  });
 }
 
 // ---------------------------------------------------------------------------

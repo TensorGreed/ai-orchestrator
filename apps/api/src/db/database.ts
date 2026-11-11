@@ -1,3 +1,4 @@
+import { SUB_WORKFLOW_USAGE_TRIGGER, USAGE_AVG_DURATION, USAGE_EXECS, USAGE_EXECUTION_ROW } from "./usage-sql.js";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -57,7 +58,7 @@ import type {
   ReplayCaptureStatus,
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
-import type { RetentionRunView } from "@ai-orchestrator/shared";
+import type { LegalHoldItemView, LegalHoldRef, LegalHoldStatus, LegalHoldView, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
 import { parseStoredGatewayRateLimit, type BudgetScopeType, type McpGatewayRateLimit } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
@@ -77,15 +78,33 @@ import {
   toMcpToolPolicyEffect
 } from "./store-shared.js";
 import {
+  RELEASE_EVIDENCE_RUN_IDS_SQL,
   RETENTION_BATCH_ROWS,
   isRetentionTable,
+  retentionPolicyFromRow,
   retentionRunFromRow,
-  retentionWhere,
+  retentionScopeWhere,
   yieldToEventLoop,
+  type RetentionPolicyRow,
   type RetentionRunRow,
   type RetentionScope,
   type RetentionTable
 } from "./retention-tables.js";
+import {
+  ITEM_KIND_TABLES,
+  LEGAL_HOLD_COLUMNS,
+  LegalHoldError,
+  holdRefs,
+  legalHoldFromRow,
+  legalHoldItemFromRow,
+  legalHoldsOnSql,
+  notHeldSql,
+  heldRowSql,
+  mergeHeldMemory,
+  type LegalHoldInsert,
+  type LegalHoldRow,
+  type LegalHoldTarget
+} from "./legal-hold-sql.js";
 import { GATEWAY_APPROVAL_ONE_PENDING_INDEX, ONE_PENDING_APPROVAL_INDEX, POLICY_SUGGESTION_ONE_OPEN_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
 import {
   normalizeMcpRuntimeLimits,
@@ -114,6 +133,7 @@ import {
   wellFormedAuditText
 } from "./audit-chain.js";
 import type {
+  ApiKeyRotationOutcome,
   ApprovalDecisionInput,
   CancelExecutionResult,
   ClusterInstanceHeartbeat,
@@ -141,6 +161,7 @@ import type {
   SessionAuthMethod,
   SessionEndReason,
   Store,
+  StoredApiKey,
   StoredUser,
   StoredUserKind,
   StoredUserSummary,
@@ -921,11 +942,53 @@ interface McpClientRow {
   allowed_ips_json?: string | null;
   cert_fingerprints_json?: string | null;
   cert_subject?: string | null;
+  previous_token_prefix?: string | null;
+  previous_token_hash?: string | null;
+  previous_expires_at?: string | null;
+  rotated_at?: string | null;
 }
 
-/** A client row including the token hash; only the credential check reads the hash. */
+interface ApiKeyRow {
+  id: string;
+  user_id: string;
+  name: string;
+  key_prefix: string;
+  scopes_json: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  superseded_by: string | null;
+  rotated_at: string | null;
+}
+
+function mapApiKeyRow(row: ApiKeyRow): StoredApiKey {
+  return {
+    id: toString(row.id),
+    userId: toString(row.user_id),
+    name: toString(row.name),
+    keyPrefix: toString(row.key_prefix),
+    scopes: parseJsonArray(row.scopes_json),
+    lastUsedAt: row.last_used_at ? toString(row.last_used_at) : null,
+    expiresAt: row.expires_at ? toString(row.expires_at) : null,
+    revokedAt: row.revoked_at ? toString(row.revoked_at) : null,
+    createdAt: toString(row.created_at),
+    supersededBy: row.superseded_by ? toString(row.superseded_by) : null,
+    rotatedAt: row.rotated_at ? toString(row.rotated_at) : null
+  };
+}
+
+/** A client row including the token hashes; only the credential check reads them. */
 export interface McpClientSecretRecord extends McpClient {
   tokenHash: string;
+  /** 13.2 — the hash of the token a rotation replaced, while its grace window runs; null otherwise. */
+  previousTokenHash: string | null;
+}
+
+/** The client without its token hashes (what every caller but the credential check gets). */
+export function withoutMcpClientHashes(record: McpClientSecretRecord): McpClient {
+  const { tokenHash: _hash, previousTokenHash: _previous, ...client } = record;
+  return client;
 }
 
 function mapMcpToolsetMember(row: McpToolsetMemberRow): McpToolsetMember | null {
@@ -979,7 +1042,11 @@ function mapMcpClient(row: McpClientRow): McpClientSecretRecord {
     rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null),
     allowedIps: jsonStringList(row.allowed_ips_json),
     certFingerprints: jsonStringList(row.cert_fingerprints_json),
-    certSubject: row.cert_subject ? toString(row.cert_subject) : null
+    certSubject: row.cert_subject ? toString(row.cert_subject) : null,
+    previousTokenPrefix: row.previous_token_prefix ? toString(row.previous_token_prefix) : null,
+    previousTokenHash: row.previous_token_hash ? toString(row.previous_token_hash) : null,
+    previousExpiresAt: row.previous_expires_at ? toString(row.previous_expires_at) : null,
+    rotatedAt: row.rotated_at ? toString(row.rotated_at) : null
   };
 }
 
@@ -4288,6 +4355,17 @@ export class SqliteStore implements Store {
     this.exec(`CREATE INDEX IF NOT EXISTS idx_users_kind ON users(kind)`);
     // 13.2 (v63) — the last TOTP time step accepted per user, so a code is accepted once.
     this.ensureColumn("mfa_secrets", "last_totp_step", "INTEGER");
+    // 13.2 (v64) — key and gateway client rotation with a grace window, and the last expiry warning per credential.
+    this.ensureColumn("api_keys", "superseded_by", "TEXT");
+    this.ensureColumn("api_keys", "rotated_at", "TEXT");
+    this.ensureColumn("api_keys", "expiry_notified_at", "TEXT");
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at)`);
+    this.ensureColumn("mcp_clients", "previous_token_prefix", "TEXT");
+    this.ensureColumn("mcp_clients", "previous_token_hash", "TEXT");
+    this.ensureColumn("mcp_clients", "previous_expires_at", "TEXT");
+    this.ensureColumn("mcp_clients", "rotated_at", "TEXT");
+    this.ensureColumn("mcp_clients", "expiry_notified_at", "TEXT");
+    this.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_clients_previous_token_prefix ON mcp_clients(previous_token_prefix)`);
     // 13.3 (v65) — retention: per-scope policies (read from R1 on), the purge log, and indexes for purging by age.
     this.exec(`
       CREATE TABLE IF NOT EXISTS retention_policies (
@@ -4318,6 +4396,33 @@ export class SqliteStore implements Store {
       CREATE INDEX IF NOT EXISTS idx_session_memory_updated ON session_memory(updated_at);
       CREATE INDEX IF NOT EXISTS idx_session_artifacts_updated ON session_artifacts(updated_at);
       CREATE INDEX IF NOT EXISTS idx_session_tool_cache_created ON session_tool_cache(created_at);
+    `);
+    // 13.3 (v66) — legal holds and the rows they name one by one.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS legal_holds (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        matter_ref TEXT,
+        scope_type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        ends_at TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        released_by TEXT,
+        released_at TEXT,
+        release_reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_legal_holds_status_scope ON legal_holds(status, scope_type, scope_id);
+      CREATE TABLE IF NOT EXISTS legal_hold_items (
+        hold_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        row_id TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        PRIMARY KEY (hold_id, kind, row_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_legal_hold_items_kind_row ON legal_hold_items(kind, row_id);
     `);
     // 13.3 (v67) — data-subject requests: subject references, requests, sealed exports and the subject key.
     ensureSubjectSchema(this.db);
@@ -4542,6 +4647,11 @@ export class SqliteStore implements Store {
       createdAt,
       updatedAt
     };
+    // 13.3 — a held workflow's runs reach their project through the workflow, so it cannot leave a held project (or
+    // move at all while a hold covers it or its rows).
+    if (existing && (existing.projectId ?? DEFAULT_PROJECT_ID) !== payload.projectId) {
+      this.refuseIfHeldSync({ kind: "workflow", id: workflow.id }, "This workflow", "moved to another project");
+    }
 
     this.exec(
       `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id, created_by)
@@ -4584,6 +4694,8 @@ export class SqliteStore implements Store {
     // The whole delete runs synchronously, so nothing can change the gate between this read and the last delete. A
     // workflow that is already gone is not refused: the delete finds nothing and the caller answers 404.
     if (options.refuseIfGateEnforced && this.queryOne(`SELECT id FROM workflows WHERE id = ?`, [id])) this.gateStateForWriteSync(id, true);
+    // 13.3 — nothing goes while a legal hold keeps the workflow, its project, or any of its runs or golden runs.
+    this.refuseIfHeldSync({ kind: "workflow", id }, "This workflow");
     const hasTable = (tableName: string): boolean => {
       const row = this.queryOne<{ count: number }>(
         `SELECT COUNT(*) as count FROM sqlite_master WHERE type = 'table' AND name = ?`,
@@ -5298,6 +5410,11 @@ export class SqliteStore implements Store {
     );
     const now = new Date().toISOString();
     const createdAt = existing ? toString(existing.created_at) : now;
+    // 13.3 — under a legal hold the stored history only grows (the runtime saves its last messages only).
+    const held = existing
+      ? this.queryOne(`SELECT 1 AS held FROM session_memory WHERE namespace = ? AND session_id = ? AND ${heldRowSql("session_memory")}`, [namespace, sessionId])
+      : null;
+    const toStore = held ? mergeHeldMemory(parseJsonList<ChatMessage>(existing!.messages_json), messages) : messages;
 
     if (labels) {
       const merged = mergeDataLabels([parseStoredDataLabels(existing?.labels_json ?? null), labels].filter((entry): entry is DataLabels => Boolean(entry)));
@@ -5309,7 +5426,7 @@ export class SqliteStore implements Store {
            messages_json = excluded.messages_json,
            labels_json = excluded.labels_json,
            updated_at = excluded.updated_at`,
-        [namespace, sessionId, JSON.stringify(messages), labelsJson, createdAt, now]
+        [namespace, sessionId, JSON.stringify(toStore), labelsJson, createdAt, now]
       );
     } else {
       // An untracked run loads the stored messages and saves them again with its turn: the labels stay, plus
@@ -5322,7 +5439,7 @@ export class SqliteStore implements Store {
            messages_json = excluded.messages_json,
            labels_json = excluded.labels_json,
            updated_at = excluded.updated_at`,
-        [namespace, sessionId, JSON.stringify(messages), kept ? JSON.stringify(kept) : null, createdAt, now]
+        [namespace, sessionId, JSON.stringify(toStore), kept ? JSON.stringify(kept) : null, createdAt, now]
       );
     }
 
@@ -5393,7 +5510,7 @@ export class SqliteStore implements Store {
          WHERE namespace = ? AND session_id = ?
          ORDER BY created_at DESC
          LIMIT -1 OFFSET ?
-       )`,
+       ) AND ${notHeldSql("session_tool_cache")}`,
       [input.namespace, input.sessionId, MAX_SESSION_TOOL_CACHE_RECORDS]
     );
 
@@ -6133,26 +6250,27 @@ export class SqliteStore implements Store {
     return result;
   }
 
+  /** The pre-13.3 whole purge, kept as the reference the retention tests compare against; it keeps held rows too. */
   async pruneExecutionHistory(input: { before: string }): Promise<number> {
     const before = this.queryOne<{ count: number }>(
-      `SELECT COUNT(*) as count FROM execution_history WHERE started_at < ?`,
+      `SELECT COUNT(*) as count FROM execution_history WHERE started_at < ? AND ${notHeldSql("execution_history")}`,
       [input.before]
     );
-    this.exec(`DELETE FROM execution_history WHERE started_at < ?`, [input.before]);
+    this.exec(`DELETE FROM execution_history WHERE started_at < ? AND ${notHeldSql("execution_history")}`, [input.before]);
     // Phase 10.1 — tool-call telemetry follows the execution-history retention.
-    this.exec(`DELETE FROM mcp_tool_calls WHERE started_at < ?`, [input.before]);
+    this.exec(`DELETE FROM mcp_tool_calls WHERE started_at < ? AND ${notHeldSql("mcp_tool_calls")}`, [input.before]);
     // Phase 12.4 — and gateway approval requests (their argument previews).
-    this.exec(`DELETE FROM mcp_gateway_approvals WHERE requested_at < ?`, [input.before]);
+    this.exec(`DELETE FROM mcp_gateway_approvals WHERE requested_at < ? AND ${notHeldSql("mcp_gateway_approvals")}`, [input.before]);
     // Phase 10.8 — so do cassettes recorded from those runs.
-    this.exec(`DELETE FROM mcp_cassettes WHERE created_at < ?`, [input.before]);
+    this.exec(`DELETE FROM mcp_cassettes WHERE created_at < ? AND ${notHeldSql("mcp_cassettes")}`, [input.before]);
     // Phase 12.1 — and so do guard events.
-    this.exec(`DELETE FROM guard_events WHERE created_at < ?`, [input.before]);
+    this.exec(`DELETE FROM guard_events WHERE created_at < ? AND ${notHeldSql("guard_events")}`, [input.before]);
     // Phase 11.2 — and decided approval requests; pending ones stay with their paused run.
-    this.exec(`DELETE FROM approval_requests WHERE status <> 'pending' AND created_at < ?`, [input.before]);
+    this.exec(`DELETE FROM approval_requests WHERE status <> 'pending' AND created_at < ? AND ${notHeldSql("approval_requests")}`, [input.before]);
     // Phase 13.1 — and finished queue jobs and dead-letter entries: their payloads (a dispatched run's spec, with its
     // input) and stored results never outlive the history.
-    this.exec(`DELETE FROM execution_queue WHERE (status = 'completed' OR status = 'dead') AND updated_at < ?`, [input.before]);
-    this.exec(`DELETE FROM execution_queue_dlq WHERE failed_at < ?`, [input.before]);
+    this.exec(`DELETE FROM execution_queue WHERE (status = 'completed' OR status = 'dead') AND updated_at < ? AND ${notHeldSql("execution_queue")}`, [input.before]);
+    this.exec(`DELETE FROM execution_queue_dlq WHERE failed_at < ? AND ${notHeldSql("execution_queue_dlq")}`, [input.before]);
     const deleted = before ? toNumber(before.count) : 0;
     if (deleted > 0) {
       this.persist();
@@ -6166,13 +6284,14 @@ export class SqliteStore implements Store {
     if (!Number.isFinite(limit) || limit <= 0) return 0;
     // Batches by rowid (every table here has one), each its own statement, so a large purge never holds the event loop
     // for longer than one batch: it yields between batches and other requests run in between.
-    const statement = this.db.prepare(
-      `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${retentionWhere(table, "?")} LIMIT ?)`
-    );
+    // retentionWhere (inside retentionScopeWhere) leaves out rows a legal hold keeps; each batch tests the holds as
+    // they are when it runs.
+    const where = retentionScopeWhere(table, scope, "sqlite");
+    const statement = this.db.prepare(`DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${where.sql} LIMIT ?)`);
     let total = 0;
     while (total < limit) {
       const batch = Math.min(RETENTION_BATCH_ROWS, limit - total);
-      const deleted = statement.run(scope.before, batch).changes;
+      const deleted = statement.run(...where.params, batch).changes;
       total += deleted;
       if (deleted < batch) break;
       await yieldToEventLoop();
@@ -6180,12 +6299,13 @@ export class SqliteStore implements Store {
     return total;
   }
 
-  async countRetentionDue(table: RetentionTable, input: { before: string; cap: number }): Promise<number> {
+  async countRetentionDue(table: RetentionTable, input: Parameters<Store["countRetentionDue"]>[1]): Promise<number> {
     if (!isRetentionTable(table)) throw new Error(`Not a retention table: ${String(table)}`);
-    const row = this.queryOne<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${table} WHERE ${retentionWhere(table, "?")} LIMIT ?)`,
-      [input.before, Math.max(0, Math.floor(input.cap))]
-    );
+    const where = retentionScopeWhere(table, input, "sqlite");
+    const row = this.queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${table} WHERE ${where.sql} LIMIT ?)`, [
+      ...where.params,
+      Math.max(0, Math.floor(input.cap))
+    ]);
     return row ? toNumber(row.n) : 0;
   }
 
@@ -6203,6 +6323,118 @@ export class SqliteStore implements Store {
        FROM retention_runs ORDER BY started_at DESC, id DESC LIMIT ?`,
       [Math.max(1, Math.min(500, Math.floor(limit)))]
     ).map(retentionRunFromRow);
+  }
+  async placeLegalHold(input: LegalHoldInsert): Promise<LegalHoldView> {
+    const hold = this.transaction(() => {
+      this.exec(
+        `INSERT INTO legal_holds (id, name, reason, matter_ref, scope_type, scope_id, status, ends_at, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+        [input.id, input.name, input.reason, input.matterRef, input.scopeType, input.scopeId, input.endsAt, input.createdBy, input.createdAt]
+      );
+      const insertItem = this.db.prepare(`INSERT OR IGNORE INTO legal_hold_items (hold_id, kind, row_id, added_at) VALUES (?, ?, ?, ?)`);
+      for (const item of input.items) insertItem.run(input.id, item.kind, item.rowId, input.createdAt);
+      return this.getLegalHoldSync(input.id)!;
+    });
+    this.persist();
+    return hold;
+  }
+
+  async releaseLegalHold(input: { id: string; releasedBy: string | null; reason: string; releasedAt: string }): Promise<LegalHoldView | null> {
+    const changed = this.db
+      .prepare(`UPDATE legal_holds SET status = 'released', released_by = ?, released_at = ?, release_reason = ? WHERE id = ? AND status = 'active'`)
+      .run(input.releasedBy, input.releasedAt, input.reason, input.id).changes;
+    if (changed > 0) this.persist();
+    return this.getLegalHoldSync(input.id);
+  }
+
+  async getLegalHold(id: string): Promise<LegalHoldView | null> {
+    return this.getLegalHoldSync(id);
+  }
+
+  private getLegalHoldSync(id: string): LegalHoldView | null {
+    const row = this.queryOne<LegalHoldRow>(`SELECT ${LEGAL_HOLD_COLUMNS} FROM legal_holds h WHERE h.id = ?`, [id]);
+    return row ? legalHoldFromRow(row) : null;
+  }
+
+  async listLegalHolds(options: { status?: LegalHoldStatus } = {}): Promise<LegalHoldView[]> {
+    const rows = options.status
+      ? this.queryAll<LegalHoldRow>(`SELECT ${LEGAL_HOLD_COLUMNS} FROM legal_holds h WHERE h.status = ? ORDER BY h.created_at DESC, h.id DESC`, [options.status])
+      : this.queryAll<LegalHoldRow>(`SELECT ${LEGAL_HOLD_COLUMNS} FROM legal_holds h ORDER BY h.created_at DESC, h.id DESC`);
+    return rows.map(legalHoldFromRow);
+  }
+
+  async listLegalHoldItems(holdId: string, page: { offset: number; limit: number }): Promise<{ items: LegalHoldItemView[]; total: number }> {
+    const total = toNumber(this.queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM legal_hold_items WHERE hold_id = ?`, [holdId])?.n ?? 0);
+    const rows = this.queryAll<{ kind: string; row_id: string; added_at: string }>(
+      `SELECT kind, row_id, added_at FROM legal_hold_items WHERE hold_id = ? ORDER BY added_at, kind, row_id LIMIT ? OFFSET ?`,
+      [holdId, Math.max(1, Math.min(500, Math.floor(page.limit))), Math.max(0, Math.floor(page.offset))]
+    );
+    return { items: rows.map(legalHoldItemFromRow), total };
+  }
+
+  async legalHoldsOn(target: LegalHoldTarget): Promise<LegalHoldRef[]> {
+    return this.legalHoldsOnSync(target);
+  }
+
+  private legalHoldsOnSync(target: LegalHoldTarget): LegalHoldRef[] {
+    const { sql, params } = legalHoldsOnSql(target);
+    return holdRefs(this.queryAll<{ id: string; name: string }>(sql, params));
+  }
+
+  /** Throws LegalHoldError when a hold keeps anything deleting `target` would remove. */
+  private refuseIfHeldSync(target: LegalHoldTarget, what: string, refused?: string): void {
+    const holds = this.legalHoldsOnSync(target);
+    if (holds.length > 0) throw new LegalHoldError(what, holds, refused);
+  }
+
+
+  async listRetentionPolicies(filter: { scopeId?: string } = {}): Promise<RetentionPolicyRecord[]> {
+    const rows =
+      filter.scopeId === undefined
+        ? this.queryAll<RetentionPolicyRow>(
+            `SELECT scope_type, scope_id, data_class, days, updated_by, updated_at FROM retention_policies
+             WHERE scope_type = 'project' ORDER BY scope_id, data_class`
+          )
+        : this.queryAll<RetentionPolicyRow>(
+            `SELECT scope_type, scope_id, data_class, days, updated_by, updated_at FROM retention_policies
+             WHERE scope_type = 'project' AND scope_id = ? ORDER BY data_class`,
+            [filter.scopeId]
+          );
+    return rows.map(retentionPolicyFromRow).filter((row): row is RetentionPolicyRecord => row !== null);
+  }
+
+  async setRetentionPolicies(input: Parameters<Store["setRetentionPolicies"]>[0]): Promise<RetentionPolicyRecord[]> {
+    const before = await this.listRetentionPolicies({ scopeId: input.scopeId });
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      for (const [dataClass, days] of Object.entries(input.values)) {
+        if (days === undefined) continue;
+        if (days === null) {
+          this.exec(`DELETE FROM retention_policies WHERE scope_type = 'project' AND scope_id = ? AND data_class = ?`, [input.scopeId, dataClass]);
+        } else {
+          this.exec(
+            `INSERT INTO retention_policies (id, scope_type, scope_id, data_class, days, updated_by, updated_at)
+             VALUES (?, 'project', ?, ?, ?, ?, ?)
+             ON CONFLICT (scope_type, scope_id, data_class) DO UPDATE SET days = excluded.days, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+            [randomUUID(), input.scopeId, dataClass, days, input.updatedBy, now]
+          );
+        }
+      }
+    });
+    this.persist();
+    return before;
+  }
+
+  async listExistingExecutionIds(executionIds: readonly string[]): Promise<string[]> {
+    const ids = [...new Set(executionIds)];
+    const found: string[] = [];
+    for (let index = 0; index < ids.length; index += 500) {
+      const chunk = ids.slice(index, index + 500);
+      for (const row of this.queryAll<{ id: string }>(`SELECT id FROM execution_history WHERE id IN (${chunk.map(() => "?").join(", ")})`, chunk)) {
+        found.push(toString(row.id));
+      }
+    }
+    return found;
   }
 
   async saveWorkflowExecutionState(input: {
@@ -7377,6 +7609,7 @@ export class SqliteStore implements Store {
     }
     const existing = this.getProjectSync(id);
     if (!existing) return false;
+    this.refuseIfHeldSync({ kind: "project", id }, "This project");
     // Never move a project's workflows or secrets into the default project:
     // that would hand them to everyone who can use the default project.
     const count = (table: string) => toNumber(this.queryOne<{ count: number }>(`SELECT COUNT(*) as count FROM ${table} WHERE project_id = ?`, [id])?.count ?? 0);
@@ -7398,6 +7631,8 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM custom_roles WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM workflow_shares WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM secret_shares WHERE project_id = ?`, [id]);
+    // 13.3 — and its retention values (a re-created project inherits the deployment's).
+    this.exec(`DELETE FROM retention_policies WHERE scope_type = 'project' AND scope_id = ?`, [id]);
     this.exec(`DELETE FROM projects WHERE id = ?`, [id]);
     this.persist();
     return true;
@@ -7525,102 +7760,22 @@ export class SqliteStore implements Store {
     this.persist();
   }
 
-  async listApiKeys(userId?: string): Promise<Array<{
-    id: string;
-    userId: string;
-    name: string;
-    keyPrefix: string;
-    scopes: string[];
-    lastUsedAt: string | null;
-    expiresAt: string | null;
-    revokedAt: string | null;
-    createdAt: string;
-  }>> {
+  async listApiKeys(userId?: string): Promise<StoredApiKey[]> {
+    const columns = `id, user_id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at, superseded_by, rotated_at`;
     const rows = userId
-      ? this.queryAll<{
-          id: string;
-          user_id: string;
-          name: string;
-          key_prefix: string;
-          scopes_json: string;
-          last_used_at: string | null;
-          expires_at: string | null;
-          revoked_at: string | null;
-          created_at: string;
-        }>(
-          `SELECT id, user_id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at
-           FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`,
-          [userId]
-        )
-      : this.queryAll<{
-          id: string;
-          user_id: string;
-          name: string;
-          key_prefix: string;
-          scopes_json: string;
-          last_used_at: string | null;
-          expires_at: string | null;
-          revoked_at: string | null;
-          created_at: string;
-        }>(
-          `SELECT id, user_id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at
-           FROM api_keys ORDER BY created_at DESC`
-        );
-
-    return rows.map((row) => ({
-      id: toString(row.id),
-      userId: toString(row.user_id),
-      name: toString(row.name),
-      keyPrefix: toString(row.key_prefix),
-      scopes: parseJsonArray(row.scopes_json),
-      lastUsedAt: row.last_used_at ? toString(row.last_used_at) : null,
-      expiresAt: row.expires_at ? toString(row.expires_at) : null,
-      revokedAt: row.revoked_at ? toString(row.revoked_at) : null,
-      createdAt: toString(row.created_at)
-    }));
+      ? this.queryAll<ApiKeyRow>(`SELECT ${columns} FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`, [userId])
+      : this.queryAll<ApiKeyRow>(`SELECT ${columns} FROM api_keys ORDER BY created_at DESC`);
+    return rows.map(mapApiKeyRow);
   }
 
-  async findApiKeyByPrefix(prefix: string): Promise<{
-    id: string;
-    userId: string;
-    name: string;
-    keyPrefix: string;
-    keyHash: string;
-    scopes: string[];
-    lastUsedAt: string | null;
-    expiresAt: string | null;
-    revokedAt: string | null;
-    createdAt: string;
-  } | null> {
-    const row = this.queryOne<{
-      id: string;
-      user_id: string;
-      name: string;
-      key_prefix: string;
-      key_hash: string;
-      scopes_json: string;
-      last_used_at: string | null;
-      expires_at: string | null;
-      revoked_at: string | null;
-      created_at: string;
-    }>(
-      `SELECT id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at
+  async findApiKeyByPrefix(prefix: string): Promise<(StoredApiKey & { keyHash: string }) | null> {
+    const row = this.queryOne<ApiKeyRow & { key_hash: string }>(
+      `SELECT id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at, superseded_by, rotated_at
        FROM api_keys WHERE key_prefix = ? AND revoked_at IS NULL`,
       [prefix]
     );
     if (!row) return null;
-    return {
-      id: toString(row.id),
-      userId: toString(row.user_id),
-      name: toString(row.name),
-      keyPrefix: toString(row.key_prefix),
-      keyHash: toString(row.key_hash),
-      scopes: parseJsonArray(row.scopes_json),
-      lastUsedAt: row.last_used_at ? toString(row.last_used_at) : null,
-      expiresAt: row.expires_at ? toString(row.expires_at) : null,
-      revokedAt: row.revoked_at ? toString(row.revoked_at) : null,
-      createdAt: toString(row.created_at)
-    };
+    return { ...mapApiKeyRow(row), keyHash: toString(row.key_hash) };
   }
 
   async touchApiKey(id: string): Promise<void> {
@@ -7633,9 +7788,63 @@ export class SqliteStore implements Store {
       ? this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ? AND user_id = ?`, [id, userId])
       : this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ?`, [id]);
     if (!existing) return false;
-    this.exec(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.exec(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, [now, id]);
+      // 13.2 — the keys this one replaced and that still work (a rotation's grace window) end with it, back along the chain.
+      let frontier = [id];
+      for (let depth = 0; frontier.length > 0 && depth < 64; depth += 1) {
+        const marks = frontier.map(() => "?").join(", ");
+        const live = this.queryAll<{ id: string }>(
+          `SELECT id FROM api_keys WHERE superseded_by IN (${marks}) AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at > ?`,
+          [...frontier, now]
+        ).map((row) => String(row.id));
+        for (const liveId of live) this.exec(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, [now, liveId]);
+        frontier = live;
+      }
+    }).immediate();
     this.persist();
     return true;
+  }
+
+  async rotateApiKey(input: Parameters<Store["rotateApiKey"]>[0]): ReturnType<Store["rotateApiKey"]> {
+    // IMMEDIATE: the check and both writes happen under the write lock, so two rotations cannot both see the key unrotated.
+    const outcome = this.db
+      .transaction((): ApiKeyRotationOutcome => {
+        const old = this.queryOne<{ name: string; scopes_json: string; expires_at: string | null; revoked_at: string | null; superseded_by: string | null }>(
+          `SELECT name, scopes_json, expires_at, revoked_at, superseded_by FROM api_keys WHERE id = ? AND user_id = ?`,
+          [input.id, input.userId]
+        );
+        if (!old) return { status: "not_found" };
+        if (old.superseded_by) return { status: "already_rotated", supersededBy: toString(old.superseded_by) };
+        if (old.revoked_at || (old.expires_at && Date.parse(toString(old.expires_at)) <= Date.parse(input.now))) return { status: "inactive" };
+        const previousExpiresAt =
+          old.expires_at && Date.parse(toString(old.expires_at)) < Date.parse(input.graceUntil) ? toString(old.expires_at) : input.graceUntil;
+        this.exec(
+          `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)`,
+          [input.next.id, input.userId, toString(old.name), input.next.keyPrefix, input.next.keyHash, toString(old.scopes_json), input.next.expiresAt, input.now]
+        );
+        this.exec(`UPDATE api_keys SET expires_at = ?, superseded_by = ?, rotated_at = ?, expiry_notified_at = NULL WHERE id = ?`, [
+          previousExpiresAt,
+          input.next.id,
+          input.now,
+          input.id
+        ]);
+        return { status: "rotated", previousExpiresAt };
+      })
+      .immediate();
+    if (outcome.status === "rotated") this.persist();
+    return outcome;
+  }
+
+  async claimCredentialExpiryNotice(kind: "api_key" | "mcp_client", id: string, now: string, notBefore: string): Promise<boolean> {
+    const table = kind === "api_key" ? "api_keys" : "mcp_clients";
+    const result = this.db
+      .prepare(`UPDATE ${table} SET expiry_notified_at = ? WHERE id = ? AND (expiry_notified_at IS NULL OR expiry_notified_at <= ?)`)
+      .run(now, id, notBefore);
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
   }
 
   // ---------------------------------------------------------------------------
@@ -9350,6 +9559,8 @@ export class SqliteStore implements Store {
 
   private pruneWorkflowVersionsSync(workflowId: string, keep: number): number {
     if (keep <= 0) return 0;
+    // 13.3 — nothing is pruned while a legal hold covers the workflow (the definitions behind held runs).
+    if (this.legalHoldsOnSync({ kind: "workflow", id: workflowId }).length > 0) return 0;
     const toDelete = this.queryAll<{ id: string }>(
       `SELECT id FROM workflow_versions WHERE workflow_id = ? AND pinned = 0 ORDER BY version DESC LIMIT -1 OFFSET ?`,
       [workflowId, keep]
@@ -10718,6 +10929,7 @@ export class SqliteStore implements Store {
   }
 
   async deleteEvalDataset(id: string): Promise<boolean> {
+    this.refuseIfHeldSync({ kind: "dataset", id }, "This golden set");
     this.exec(`DELETE FROM eval_results WHERE run_id IN (SELECT id FROM eval_runs WHERE dataset_id = ?)`, [id]);
     this.exec(`DELETE FROM eval_runs WHERE dataset_id = ?`, [id]);
     this.exec(`DELETE FROM eval_fixtures WHERE dataset_id = ?`, [id]);
@@ -10812,6 +11024,7 @@ export class SqliteStore implements Store {
   }
 
   async deleteEvalFixture(id: string): Promise<boolean> {
+    this.refuseIfHeldSync({ kind: "row", table: "eval_fixtures", id }, "This golden-set case");
     return this.deleteEvalFixtureSync(id);
   }
 
@@ -10896,7 +11109,8 @@ export class SqliteStore implements Store {
     );
     const newest = new Set<string>();
     const newestFinished = new Set<string>();
-    const keep = new Set<string>();
+    // 13.3 — the eval runs behind a workflow's current or previous published version stay whatever their age.
+    const keep = new Set<string>(this.queryAll<{ replay_run_id: string }>(RELEASE_EVIDENCE_RUN_IDS_SQL).map((row) => toString(row.replay_run_id)));
     const doomed: string[] = [];
     for (const row of rows) {
       const id = toString(row.id);
@@ -10921,14 +11135,37 @@ export class SqliteStore implements Store {
       }
       if (finished && !keep.has(id) && toString(row.started_at) < input.before) doomed.push(id);
     }
+    // In chunks, each one transaction that leaves out runs a legal hold keeps (tested when the chunk runs), with a turn
+    // of the event loop between chunks.
+    let deleted = 0;
     for (let index = 0; index < doomed.length; index += 200) {
+      if (index > 0) await yieldToEventLoop();
       const chunk = doomed.slice(index, index + 200);
-      const marks = chunk.map(() => "?").join(", ");
-      this.exec(`DELETE FROM eval_results WHERE run_id IN (${marks})`, chunk);
-      this.exec(`DELETE FROM eval_runs WHERE id IN (${marks})`, chunk);
+      deleted += this.transaction(() => this.deleteUnheldEvalRunsSync(chunk, false));
     }
-    if (doomed.length > 0) this.persist();
-    return doomed.length;
+    if (deleted > 0) this.persist();
+    return deleted;
+  }
+
+  /**
+   * Deletes the eval runs and replay jobs among `ids` that no legal hold keeps, with their case results; with
+   * `finishedOnly`, only finished ones. Returns the ids deleted. Call inside a transaction.
+   */
+  private deleteUnheldEvalRunsSync(ids: readonly string[], finishedOnly: true): string[];
+  private deleteUnheldEvalRunsSync(ids: readonly string[], finishedOnly: false): number;
+  private deleteUnheldEvalRunsSync(ids: readonly string[], finishedOnly: boolean): string[] | number {
+    if (ids.length === 0) return finishedOnly ? [] : 0;
+    const marks = ids.map(() => "?").join(", ");
+    const unheld = this.queryAll<{ id: string }>(
+      `SELECT id FROM eval_runs WHERE id IN (${marks})${finishedOnly ? " AND status NOT IN ('queued', 'running')" : ""} AND ${notHeldSql("eval_runs")}`,
+      [...ids]
+    ).map((row) => toString(row.id));
+    if (unheld.length > 0) {
+      const unheldMarks = unheld.map(() => "?").join(", ");
+      this.exec(`DELETE FROM eval_results WHERE run_id IN (${unheldMarks})`, unheld);
+      this.exec(`DELETE FROM eval_runs WHERE id IN (${unheldMarks})`, unheld);
+    }
+    return finishedOnly ? unheld : unheld.length;
   }
 
   async finalizeEvalRun(input: {
@@ -11343,11 +11580,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT strftime('${fmt}', created_at) AS bucket,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY bucket
          ORDER BY bucket ASC
@@ -11374,11 +11611,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT workflow_id, MAX(workflow_name) AS workflow_name,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY workflow_id
          ORDER BY cost DESC, tt DESC
@@ -11407,11 +11644,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT user_id, MAX(user_email) AS user_email,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY user_id
          ORDER BY cost DESC, tt DESC
@@ -11440,11 +11677,11 @@ export class SqliteStore implements Store {
         cost: number; calls: number; avgd: number;
       }>(
         `SELECT project_id,
-                COUNT(*) AS execs,
+                ${USAGE_EXECS} AS execs,
                 SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
                 SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
                 SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-                AVG(duration_ms) AS avgd
+                ${USAGE_AVG_DURATION} AS avgd
          FROM usage_events ${where}
          GROUP BY project_id
          ORDER BY cost DESC, tt DESC
@@ -11472,11 +11709,11 @@ export class SqliteStore implements Store {
     const rows = this.queryAll<{
       providers_json: string | null;
       ti: number; to: number; ci: number; tt: number;
-      cost: number; calls: number; duration: number;
+      cost: number; calls: number; duration: number; trigger_type: string | null;
     }>(
       `SELECT providers_json, input_tokens AS ti, output_tokens AS "to",
               cached_input_tokens AS ci, total_tokens AS tt,
-              cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration
+              cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration, trigger_type
        FROM usage_events ${where}`,
       params
     );
@@ -11501,14 +11738,15 @@ export class SqliteStore implements Store {
           executions: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0,
           totalTokens: 0, costUsd: 0, llmCallCount: 0, totalDurationMs: 0
         };
-        cur.executions += 1;
+        const execution = r.trigger_type !== SUB_WORKFLOW_USAGE_TRIGGER;
+        if (execution) cur.executions += 1;
         cur.inputTokens += Math.round(toNumber(r.ti ?? 0) * share);
         cur.outputTokens += Math.round(toNumber(r.to ?? 0) * share);
         cur.cachedInputTokens += Math.round(toNumber(r.ci ?? 0) * share);
         cur.totalTokens += Math.round(toNumber(r.tt ?? 0) * share);
         cur.costUsd += Number(r.cost ?? 0) * share;
         cur.llmCallCount += p.calls || 0;
-        cur.totalDurationMs += Math.round(toNumber(r.duration ?? 0) * share);
+        if (execution) cur.totalDurationMs += Math.round(toNumber(r.duration ?? 0) * share);
         agg.set(key, cur);
       }
     }
@@ -11565,11 +11803,11 @@ export class SqliteStore implements Store {
       execs: number; ti: number; to: number; ci: number; tt: number;
       cost: number; calls: number; avgd: number;
     }>(
-      `SELECT COUNT(*) AS execs,
+      `SELECT ${USAGE_EXECS} AS execs,
               SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
               SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
               SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
-              AVG(duration_ms) AS avgd
+              ${USAGE_AVG_DURATION} AS avgd
        FROM usage_events WHERE ${filters.join(" AND ")}`,
       params
     );
@@ -11598,12 +11836,13 @@ export class SqliteStore implements Store {
     providers: Array<{ providerId: string; model: string; calls: number }>;
     createdAt: string;
   }>> {
-    const filters: string[] = [];
+    // Recent executions: a sub-workflow's own row is not one (its spend counts in the totals).
+    const filters: string[] = [USAGE_EXECUTION_ROW];
     const params: Array<string | number> = [];
     if (input.workflowId) { filters.push("workflow_id = ?"); params.push(input.workflowId); }
     if (input.userId) { filters.push("user_id = ?"); params.push(input.userId); }
     if (input.projectId) { filters.push("project_id = ?"); params.push(input.projectId); }
-    const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    const where = `WHERE ${filters.join(" AND ")}`;
     const limit = clampLimit(input.limit, { fallback: 50, max: LIMIT_MAX.usageEvents });
     const rows = this.queryAll<{
       id: string; execution_id: string; workflow_id: string; workflow_name: string | null;
@@ -12497,7 +12736,8 @@ export class SqliteStore implements Store {
     this.db.transaction(() => {
       this.exec(`DELETE FROM mcp_server_probes WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_snapshots WHERE server_id = ?`, [id]);
-      this.exec(`DELETE FROM mcp_tool_calls WHERE registry_server_id = ?`, [id]);
+      // 13.3 — tool calls under a legal hold stay, with a dangling server id (as after retention).
+      this.exec(`DELETE FROM mcp_tool_calls WHERE registry_server_id = ? AND ${notHeldSql("mcp_tool_calls")}`, [id]);
       this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_open_world_overrides WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = ?`, [id]);
@@ -13336,11 +13576,14 @@ export class SqliteStore implements Store {
     })();
   }
 
-  /** Phase 12.4 — expires pending requests past their expiry and deletes decided ones past the retention. */
+  /** Phase 12.4 — expires pending requests past their expiry and deletes decided ones past the retention (13.3: unless held). */
   private sweepMcpGatewayApprovals(now: string): void {
     this.exec(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`, [now]);
     const cutoff = mcpGatewayApprovalRetentionCutoff(now);
-    this.exec(`DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < ? AND expires_at < ?`, [cutoff, cutoff]);
+    this.exec(
+      `DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < ? AND expires_at < ? AND ${notHeldSql("mcp_gateway_approvals")}`,
+      [cutoff, cutoff]
+    );
   }
 
   private getMcpGatewayApprovalSync(id: string): McpGatewayApproval | null {
@@ -13655,13 +13898,12 @@ export class SqliteStore implements Store {
   private getMcpClientSync(id: string): McpClient | null {
     const row = this.queryOne<McpClientRow>(`SELECT * FROM mcp_clients WHERE id = ?`, [id]);
     if (!row) return null;
-    const { tokenHash: _hash, ...client } = mapMcpClient(row);
-    return client;
+    return withoutMcpClientHashes(mapMcpClient(row));
   }
 
-  /** With the token hash; for the credential check only. */
+  /** With the token hashes; for the credential check only. 13.2: also finds a client by its previous token's prefix. */
   async findMcpClientByTokenPrefix(prefix: string): Promise<McpClientSecretRecord | null> {
-    const row = this.queryOne<McpClientRow>(`SELECT * FROM mcp_clients WHERE token_prefix = ?`, [prefix]);
+    const row = this.queryOne<McpClientRow>(`SELECT * FROM mcp_clients WHERE token_prefix = ? OR previous_token_prefix = ? LIMIT 1`, [prefix, prefix]);
     return row ? mapMcpClient(row) : null;
   }
 
@@ -13670,10 +13912,7 @@ export class SqliteStore implements Store {
   }
 
   private listMcpClientsSync(): McpClient[] {
-    return this.queryAll<McpClientRow>(`SELECT * FROM mcp_clients ORDER BY created_at DESC, rowid DESC`).map((row) => {
-      const { tokenHash: _hash, ...client } = mapMcpClient(row);
-      return client;
-    });
+    return this.queryAll<McpClientRow>(`SELECT * FROM mcp_clients ORDER BY created_at DESC, rowid DESC`).map((row) => withoutMcpClientHashes(mapMcpClient(row)));
   }
 
   async revokeMcpClient(id: string): Promise<McpClient | null> {
@@ -13698,6 +13937,38 @@ export class SqliteStore implements Store {
 
   async touchMcpClient(id: string, at: string): Promise<void> {
     this.exec(`UPDATE mcp_clients SET last_used_at = ? WHERE id = ?`, [at, id]);
+  }
+
+  async rotateMcpClient(input: Parameters<Store["rotateMcpClient"]>[0]): ReturnType<Store["rotateMcpClient"]> {
+    // One UPDATE, conditional on the current prefix: of two rotations racing, the second finds the prefix changed.
+    const keepPrevious = input.previousExpiresAt !== null;
+    const result = this.db
+      .prepare(
+        `UPDATE mcp_clients
+            SET previous_token_prefix = CASE WHEN ? THEN token_prefix ELSE NULL END,
+                previous_token_hash = CASE WHEN ? THEN token_hash ELSE NULL END,
+                previous_expires_at = ?,
+                token_prefix = ?,
+                token_hash = ?,
+                rotated_at = ?
+          WHERE id = ? AND token_prefix = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`
+      )
+      .run(
+        keepPrevious ? 1 : 0,
+        keepPrevious ? 1 : 0,
+        input.previousExpiresAt,
+        input.tokenPrefix,
+        input.tokenHash,
+        input.now,
+        input.id,
+        input.expectedTokenPrefix,
+        input.now
+      );
+    if (result.changes > 0) return { status: "rotated", client: this.getMcpClientSync(input.id)! };
+    const existing = this.getMcpClientSync(input.id);
+    if (!existing) return { status: "not_found" };
+    if (existing.revokedAt || (existing.expiresAt && existing.expiresAt <= input.now)) return { status: "inactive" };
+    return { status: "conflict" };
   }
 
   async updateMcpClient(id: string, patch: { name?: string; rateLimit?: McpGatewayRateLimit | null }): Promise<McpClient | null> {
@@ -13841,6 +14112,7 @@ export class SqliteStore implements Store {
   }
 
   async deleteMcpCassette(id: string): Promise<boolean> {
+    this.refuseIfHeldSync({ kind: "row", table: "mcp_cassettes", id }, "This cassette");
     return this.deleteMcpCassetteSync(id);
   }
 
@@ -14496,17 +14768,28 @@ export class SqliteStore implements Store {
   async oldestReplayCaptureIds(workflowId: string, count: number): Promise<string[]> {
     if (count <= 0) return [];
     return this.queryAll<{ id: string }>(
-      `SELECT id FROM replay_recordings WHERE workflow_id = ? AND status = 'candidate' ORDER BY captured_at ASC, rowid ASC LIMIT ?`,
+      `SELECT id FROM replay_recordings WHERE workflow_id = ? AND status = 'candidate' AND ${notHeldSql("replay_recordings")} ORDER BY captured_at ASC, rowid ASC LIMIT ?`,
       [workflowId, count]
     ).map((row) => toString(row.id));
   }
 
-  /** Deletes candidates captured before `before` (retention). Golden runs are never touched. */
+  /**
+   * Deletes candidates captured before `before` (retention). Golden runs are never touched, nor candidates a legal hold
+   * keeps. In batches by rowid, yielding to the event loop between them.
+   */
   async pruneReplayCaptures(before: string): Promise<number> {
-    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE status = 'candidate' AND captured_at < ?`, [before]);
-    const count = row ? toNumber(row.count) : 0;
-    if (count > 0) this.exec(`DELETE FROM replay_recordings WHERE status = 'candidate' AND captured_at < ?`, [before]);
-    return count;
+    const statement = this.db.prepare(
+      `DELETE FROM replay_recordings WHERE rowid IN (SELECT rowid FROM replay_recordings
+         WHERE status = 'candidate' AND captured_at < ? AND ${notHeldSql("replay_recordings")} LIMIT ?)`
+    );
+    let total = 0;
+    for (;;) {
+      const deleted = statement.run(before, RETENTION_BATCH_ROWS).changes;
+      total += deleted;
+      if (deleted < RETENTION_BATCH_ROWS) break;
+      await yieldToEventLoop();
+    }
+    return total;
   }
 
   /** Promote: the candidate becomes golden with its re-scrubbed content. Returns false when it is no longer a candidate. */
@@ -14610,9 +14893,16 @@ export class SqliteStore implements Store {
    * Deletes one row the data-subject lookup found. A golden run takes the
    * golden-set cases made from it, and the results of those cases, with it.
    */
-  async deleteSubjectRow(kind: SubjectStoreKind, id: string): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }> }> {
-    // The row and what it cascades to go together, or not at all.
-    return this.transaction(() => this.deleteSubjectRowSync(kind, id));
+  async deleteSubjectRow(
+    kind: SubjectStoreKind,
+    id: string
+  ): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }>; heldBy?: LegalHoldRef[] }> {
+    // The row and what it cascades to go together, or not at all. A row a legal hold keeps stays (13.3).
+    return this.transaction(() => {
+      const heldBy = this.legalHoldsOnSync({ kind: "row", table: ITEM_KIND_TABLES[kind], id });
+      if (heldBy.length > 0) return { deleted: false, cascaded: [], heldBy };
+      return this.deleteSubjectRowSync(kind, id);
+    });
   }
 
   private deleteSubjectRowSync(kind: SubjectStoreKind, id: string): { deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }> } {
@@ -14667,7 +14957,7 @@ export class SqliteStore implements Store {
   /** The oldest candidates of a workflow with their sizes, oldest first (byte-budget eviction). */
   async oldestReplayCaptures(workflowId: string, limit: number): Promise<Array<{ id: string; bytes: number }>> {
     return this.queryAll<{ id: string; bytes: number }>(
-      `SELECT id, bytes FROM replay_recordings WHERE workflow_id = ? AND status = 'candidate' ORDER BY captured_at ASC, rowid ASC LIMIT ?`,
+      `SELECT id, bytes FROM replay_recordings WHERE workflow_id = ? AND status = 'candidate' AND ${notHeldSql("replay_recordings")} ORDER BY captured_at ASC, rowid ASC LIMIT ?`,
       [workflowId, Math.max(1, limit)]
     ).map((row) => ({ id: toString(row.id), bytes: toNumber(row.bytes) }));
   }
@@ -14722,7 +15012,13 @@ export class SqliteStore implements Store {
 
   /** Golden-set cases made from a recording (their input is a copy of the recording's). */
   async deleteEvalFixturesForRecording(recordingId: string): Promise<number> {
-    return this.deleteEvalFixturesForRecordingSync(recordingId);
+    return this.transaction(() => {
+      // 13.3 — refused (deleting nothing) while a legal hold covers any of the cases.
+      for (const { id } of this.queryAll<{ id: string }>(`SELECT id FROM eval_fixtures WHERE recording_id = ?`, [recordingId])) {
+        this.refuseIfHeldSync({ kind: "row", table: "eval_fixtures", id: toString(id) }, "A golden-set case of this golden run");
+      }
+      return this.deleteEvalFixturesForRecordingSync(recordingId);
+    });
   }
 
   private deleteEvalFixturesForRecordingSync(recordingId: string): number {
@@ -14751,6 +15047,7 @@ export class SqliteStore implements Store {
   }
 
   async deleteReplayRecording(id: string): Promise<boolean> {
+    this.refuseIfHeldSync({ kind: "row", table: "replay_recordings", id }, "This recording");
     return this.deleteReplayRecordingSync(id);
   }
 
@@ -14869,26 +15166,51 @@ export class SqliteStore implements Store {
 
   /** Deletes simulations created before `before`, with their replay jobs and case results. Returns how many simulations were deleted. */
   async pruneGuardSimulations(input: { before: string }): Promise<number> {
-    const rows = this.queryAll<{ id: string; job_ids_json: string | null }>(`SELECT id, job_ids_json FROM guard_simulations WHERE created_at < ?`, [input.before]);
-    if (rows.length === 0) return 0;
-    const jobIds: string[] = [];
-    for (const row of rows) {
-      const parsed = row.job_ids_json ? safeJsonParse(toString(row.job_ids_json)) : null;
-      if (Array.isArray(parsed)) jobIds.push(...parsed.map((entry) => String(entry)));
+    const SIMULATION_PRUNE_CHUNK = 50;
+    const ids = this.queryAll<{ id: string }>(`SELECT id FROM guard_simulations WHERE created_at < ? ORDER BY created_at, id`, [input.before]).map((row) =>
+      toString(row.id)
+    );
+    // In chunks of simulations, each one transaction, with a turn of the event loop between chunks. A simulation one of
+    // whose finished jobs a legal hold keeps stays, with that job, so its job list is never lost while the job remains.
+    let deleted = 0;
+    for (let index = 0; index < ids.length; index += SIMULATION_PRUNE_CHUNK) {
+      if (index > 0) await yieldToEventLoop();
+      const chunk = ids.slice(index, index + SIMULATION_PRUNE_CHUNK);
+      deleted += this.transaction(() => {
+        const marks = chunk.map(() => "?").join(", ");
+        const rows = this.queryAll<{ id: string; job_ids_json: string | null }>(
+          `SELECT id, job_ids_json FROM guard_simulations WHERE id IN (${marks}) AND created_at < ?`,
+          [...chunk, input.before]
+        );
+        const jobsOf = new Map<string, string[]>();
+        for (const row of rows) {
+          const parsed = row.job_ids_json ? safeJsonParse(toString(row.job_ids_json)) : null;
+          jobsOf.set(toString(row.id), Array.isArray(parsed) ? parsed.map((entry) => String(entry)) : []);
+        }
+        const jobIds = [...new Set([...jobsOf.values()].flat())];
+        const gone = new Set<string>();
+        for (let start = 0; start < jobIds.length; start += 200) {
+          for (const id of this.deleteUnheldEvalRunsSync(jobIds.slice(start, start + 200), true)) gone.add(id);
+        }
+        const kept = jobIds.filter((id) => !gone.has(id));
+        const left = new Set<string>();
+        for (let start = 0; start < kept.length; start += 200) {
+          const part = kept.slice(start, start + 200);
+          for (const row of this.queryAll<{ id: string }>(
+            `SELECT id FROM eval_runs WHERE id IN (${part.map(() => "?").join(", ")}) AND status NOT IN ('queued', 'running')`,
+            part
+          )) {
+            left.add(toString(row.id));
+          }
+        }
+        const doomed = [...jobsOf].filter(([, jobs]) => !jobs.some((job) => left.has(job))).map(([id]) => id);
+        if (doomed.length === 0) return 0;
+        this.exec(`DELETE FROM guard_simulations WHERE id IN (${doomed.map(() => "?").join(", ")})`, doomed);
+        return doomed.length;
+      });
     }
-    for (let index = 0; index < jobIds.length; index += 200) {
-      const chunk = jobIds.slice(index, index + 200);
-      const marks = chunk.map(() => "?").join(", ");
-      this.exec(`DELETE FROM eval_results WHERE run_id IN (${marks})`, chunk);
-      this.exec(`DELETE FROM eval_runs WHERE id IN (${marks}) AND status NOT IN ('queued', 'running')`, chunk);
-    }
-    const ids = rows.map((row) => toString(row.id));
-    for (let index = 0; index < ids.length; index += 200) {
-      const chunk = ids.slice(index, index + 200);
-      this.exec(`DELETE FROM guard_simulations WHERE id IN (${chunk.map(() => "?").join(", ")})`, chunk);
-    }
-    this.persist();
-    return ids.length;
+    if (deleted > 0) this.persist();
+    return deleted;
   }
 
   /** MCP tool-call telemetry rows of one execution, oldest first. */
@@ -15214,6 +15536,10 @@ export class SqliteStore implements Store {
         }
         if (change.admittedFixtureIds !== undefined) {
           this.setReleaseGateAdmissionSync(change.workflowId, change.admittedFixtureIds, change.updatedAt, change.updatedBy);
+        }
+        // 13.3 — a case under a legal hold stays: the whole change is refused (LegalHoldError, 409) before anything goes.
+        for (const fixtureId of change.deleteFixtureIds ?? []) {
+          this.refuseIfHeldSync({ kind: "row", table: "eval_fixtures", id: fixtureId }, "This golden-set case", "removed");
         }
         for (const fixtureId of change.deleteFixtureIds ?? []) this.deleteEvalFixtureSync(fixtureId);
         if (change.required) this.setEvalFixtureRequiredSync(change.required.fixtureId, change.required.required);

@@ -553,6 +553,11 @@ export interface WorkflowExecutionState {
    */
   guardRunSource?: "eval";
   /**
+   * The user the run's budgets are matched against (who started it), so the sub-workflows of the resumed part are
+   * checked against that user's budgets, not the approver's. Written and read only by the API.
+   */
+  budgetSubject?: { userEmail: string | null; userId: string | null };
+  /**
    * Phase 16 — the run's data labels, beside `nodeOutputs`: the input's
    * labels, every completed node's labels, and whether labels are tracked
    * (stored and scanned). A resumed run carries on with them.
@@ -1943,6 +1948,12 @@ export interface McpClient {
   certFingerprints: string[];
   /** 13.2 — optional pin on the certificate's subject CN or a subject alternative name. */
   certSubject: string | null;
+  /** 13.2 — after a rotation: the old token's prefix, which keeps working until previousExpiresAt; null otherwise. */
+  previousTokenPrefix?: string | null;
+  /** 13.2 — when the old token stops working (the end of the rotation's grace window). */
+  previousExpiresAt?: string | null;
+  /** 13.2 — when the token was last rotated; null when it never was. */
+  rotatedAt?: string | null;
 }
 
 /** One tool a toolset exposes, as an MCP client would list it. */

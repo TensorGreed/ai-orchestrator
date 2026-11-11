@@ -2653,7 +2653,41 @@ export const MIGRATIONS: Migration[] = [
     `
   },
   {
-    // Provisional number: v64 belongs to the key-rotation change; renumber at merge if that lands later.
+    version: 64,
+    description: "13.2 — key and gateway client rotation with a grace window, and expiry warnings sent once a day",
+    // Every column is nullable, so keys and clients from before the upgrade behave as before (no backfill).
+    // api_keys: a rotated key names the key that replaced it (superseded_by) and when (rotated_at); its expires_at was
+    // already moved to the end of the grace window, so it needs no new check. mcp_clients: the old token's prefix and
+    // hash stay in previous_* until previous_expires_at. expiry_notified_at records the last credential.expiring alert
+    // so the leader sends at most one per credential per day, across instances and restarts.
+    up: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS superseded_by TEXT;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expiry_notified_at TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_token_prefix TEXT;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_token_hash TEXT;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_expires_at TIMESTAMPTZ;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS expiry_notified_at TIMESTAMPTZ;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_clients_previous_token_prefix ON mcp_clients(previous_token_prefix);
+    `,
+    // Rolling back ends every old gateway token still in its grace window (the previous_* columns go); rotated API
+    // keys keep the shortened expires_at, so nothing is widened.
+    down: `
+      DROP INDEX IF EXISTS idx_mcp_clients_previous_token_prefix;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS expiry_notified_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS rotated_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_expires_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_token_hash;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_token_prefix;
+      DROP INDEX IF EXISTS idx_api_keys_expires_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS expiry_notified_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS rotated_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS superseded_by;
+    `
+  },
+  {
     version: 65,
     description: "13.3 — retention: per-scope policies, the purge log, and indexes for purging by age",
     // retention_policies is read from per-project retention on; scope_type is 'project' (other scopes are refused by
@@ -2704,7 +2738,44 @@ export const MIGRATIONS: Migration[] = [
     `
   },
   {
-    // Provisional number: v66 belongs to legal hold; renumber at merge if the order changes.
+    // Provisional number, like v65: renumber at merge if the numbers before it change.
+    version: 66,
+    description: "13.3 — legal holds and the rows they name one by one",
+    // A hold covers a project or a workflow (scope_id), or the rows listed in legal_hold_items (a list of runs, or the
+    // rows a data-subject lookup found). Every purge and hold-checked delete tests both tables (db/legal-hold-sql.ts);
+    // the index on (kind, row_id) serves that test. Both tables are exported in backups.
+    up: `
+      CREATE TABLE IF NOT EXISTS legal_holds (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        matter_ref TEXT,
+        scope_type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        ends_at TIMESTAMPTZ,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        released_by TEXT,
+        released_at TIMESTAMPTZ,
+        release_reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_legal_holds_status_scope ON legal_holds(status, scope_type, scope_id);
+      CREATE TABLE IF NOT EXISTS legal_hold_items (
+        hold_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        row_id TEXT NOT NULL,
+        added_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (hold_id, kind, row_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_legal_hold_items_kind_row ON legal_hold_items(kind, row_id);
+    `,
+    down: `
+      DROP TABLE IF EXISTS legal_hold_items;
+      DROP TABLE IF EXISTS legal_holds;
+    `
+  },
+  {
     version: 67,
     description: "13.3 — data-subject requests: subject references (keyed hashes), requests, sealed exports and the subject key",
     // subject_ref_keys holds the key subject references are hashed with, sealed with the master key (db:import
