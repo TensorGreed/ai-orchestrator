@@ -631,6 +631,12 @@ export function summarizeNode(node: { type: string; config?: unknown }): string 
       ]);
     case "guard_protection":
       return join([str(c.providerId) ?? "mask", Array.isArray(c.dataClasses) ? c.dataClasses.map(String).join(", ") : "all classes"]);
+    case "guard_reveal":
+      return join([
+        !c.profileId || c.profileId === "effective" ? "effective rule set" : `rule set ${String(c.profileId)}`,
+        `field ${str(c.inputField) ?? "text"}`,
+        c.onRefused === "fail" ? "fail on refused" : null
+      ]);
     case "input_validator": {
       const n = Array.isArray(c.rules) ? c.rules.length : 0;
       return join([`${n} rule${n === 1 ? "" : "s"}`, str(c.onFail) ? `on fail ${String(c.onFail)}` : null]);

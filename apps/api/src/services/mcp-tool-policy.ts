@@ -10,6 +10,7 @@ import {
   type McpToolPolicyRule,
   type McpToolPolicySubject
 } from "@ai-orchestrator/shared";
+import { isServiceAccountEmail } from "./auth-service.js";
 import { openWorldOverrideFor, resolveOpenWorldFor, type McpOpenWorldContext } from "./mcp-open-world.js";
 
 /**
@@ -21,7 +22,7 @@ import { openWorldOverrideFor, resolveOpenWorldFor, type McpOpenWorldContext } f
 /** The store reads the subject resolution needs. */
 export interface McpToolPolicySubjectStore {
   getWorkflowCreatedBy(workflowId: string): Promise<string | null>;
-  getUserById(id: string): Promise<{ id: string; email: string; role: string } | null>;
+  getUserById(id: string): Promise<{ id: string; email: string; role: string; kind?: string } | null>;
 }
 
 /**
@@ -35,7 +36,19 @@ export async function resolveMcpToolPolicySubject(
   actor?: { id: string; email: string; role: McpPolicyRole; apiKeyId?: string } | null
 ): Promise<McpToolPolicySubject> {
   if (actor) {
-    return { role: actor.role, source: "user", userId: actor.id, email: actor.email, ...(actor.apiKeyId ? { apiKeyId: actor.apiKeyId } : {}) };
+    // Phase 12 coverage — a service account that started the run is marked from the stored user kind (the queue
+    // worker, resumes and replays rebuild the actor from the store and may not carry the request's flag). Only for
+    // runs it started: a webhook or schedule run of a workflow it created is the owner's run and stays unmarked.
+    const stored = await store.getUserById(actor.id);
+    const serviceAccount = stored ? stored.kind === "service" : isServiceAccountEmail(actor.email);
+    return {
+      role: actor.role,
+      source: "user",
+      userId: actor.id,
+      email: actor.email,
+      ...(actor.apiKeyId ? { apiKeyId: actor.apiKeyId } : {}),
+      ...(serviceAccount || isServiceAccountEmail(actor.email) ? { serviceAccountId: actor.id } : {})
+    };
   }
   const ownerId = await store.getWorkflowCreatedBy(workflowId);
   if (!ownerId) {

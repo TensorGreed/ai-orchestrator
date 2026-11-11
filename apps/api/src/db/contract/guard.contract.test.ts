@@ -252,10 +252,24 @@ describeStoreContract("store contract: guard", (ctx) => {
     await store.putGuardVault({ token: "tok", dataClass: "email", valueHash: "vh2", valueSealed: "sealed-2", createdAt: "2026-10-01T00:00:00.000Z" });
     await store.putGuardVault({ token: "tok-2", dataClass: "email", valueHash: "vh", valueSealed: "sealed-3", createdAt: "2026-10-01T00:00:00.000Z" });
     await store.putGuardVault({ token: "random", dataClass: "phone", valueHash: null, valueSealed: "sealed-4", createdAt: "2026-10-01T00:00:00.000Z" });
-    expect(await store.getGuardVaultByToken("tok")).toEqual({ token: "tok", data_class: "email", value_hash: "vh", value_sealed: "sealed-1", created_at: "2026-10-01T00:00:00.000Z" });
+    expect(await store.getGuardVaultByToken("tok")).toEqual({
+      token: "tok",
+      data_class: "email",
+      value_hash: "vh",
+      value_sealed: "sealed-1",
+      created_at: "2026-10-01T00:00:00.000Z",
+      project_id: null,
+      execution_id: null
+    });
     expect(await store.getGuardVaultByToken("tok-2")).toBeNull();
     expect((await store.getGuardVaultByHash("vh"))?.token).toBe("tok");
     expect(await store.getGuardVaultByToken("random")).toMatchObject({ value_hash: null, value_sealed: "sealed-4" });
     expect(await store.getGuardVaultByHash("missing")).toBeNull();
+  });
+
+  it("Phase 12 coverage (v68): the vault records the project and run that issued a token", async () => {
+    const store = ctx.store();
+    await store.putGuardVault({ token: "tok-scoped", dataClass: "email", valueHash: null, valueSealed: "sealed", createdAt: "2026-10-01T00:00:00.000Z", projectId: "proj-a", executionId: "exec-1" });
+    expect(await store.getGuardVaultByToken("tok-scoped")).toMatchObject({ project_id: "proj-a", execution_id: "exec-1" });
   });
 });

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { secretReferenceSchema } from "./schemas";
-import { PROVENANCE_LABELS, GATEWAY_GUARD_CUSTOM_DATA_KEY } from "./data-labels";
+import { PROVENANCE_LABELS, GATEWAY_GUARD_CUSTOM_DATA_KEY, dataClassNameSchema } from "./data-labels";
 
 /**
  * Phase 12.1 — the workflow contract for content rules: the `guard` DAG node,
@@ -12,6 +12,8 @@ import { PROVENANCE_LABELS, GATEWAY_GUARD_CUSTOM_DATA_KEY } from "./data-labels"
 
 export const GUARD_NODE_TYPE = "guard";
 export const GUARD_PROTECTION_NODE_TYPE = "guard_protection";
+/** Phase 12 coverage — the Reveal node: turns protection tokens back into values, as the rule set's reveal rules allow. */
+export const GUARD_REVEAL_NODE_TYPE = "guard_reveal";
 
 /** Output handles of a guard node on DAG edges. */
 export const GUARD_OUTPUT_HANDLES = ["pass", "blocked", "review"] as const;
@@ -69,6 +71,17 @@ export function parseGuardPlacement(value: unknown): GuardPlacementValue {
 
 export const GUARD_ACTION_VALUES = ["allow", "block", "redact", "mask", "protect", "transform", "require_approval", "review"] as const;
 export type GuardActionValue = (typeof GUARD_ACTION_VALUES)[number];
+
+/**
+ * Phase 12 coverage — actions a rule event can carry: every rule action plus `reveal` (a Reveal node turned tokens
+ * back into values). `reveal` is never a rule action a rule set author picks; only the Reveal node records it.
+ */
+export const GUARD_EVENT_ACTION_VALUES = [...GUARD_ACTION_VALUES, "reveal"] as const;
+export type GuardEventActionValue = (typeof GUARD_EVENT_ACTION_VALUES)[number];
+
+/** Phase 12 coverage — channels a rule event can carry: the rule set channels plus `reveal` (a Reveal node's events). */
+export const GUARD_EVENT_CHANNEL_VALUES = [...GUARD_PROFILE_CHANNEL_VALUES, "reveal"] as const;
+export type GuardEventChannelValue = (typeof GUARD_EVENT_CHANNEL_VALUES)[number];
 
 /** Phase 15.6: the list lives in data-labels.ts. */
 export const GUARD_PROVENANCE_VALUES = PROVENANCE_LABELS;
@@ -291,8 +304,8 @@ export interface GuardEventView {
   nodeId: string;
   /** Agent loop iteration, when the verdict came from an agent's guard port or automatic profile. */
   iteration?: number | null;
-  /** Phase 16: `egress` for the outbound checkpoint (HTTP, connectors, senders). */
-  channel: GuardProfileChannelValue;
+  /** Phase 16: `egress` for the outbound checkpoint (HTTP, connectors, senders). Phase 12 coverage: `reveal` for a Reveal node's events. */
+  channel: GuardEventChannelValue;
   /**
    * Where the guard sat: a DAG guard node, an agent hook, or a delegated worker. 12.6 — `gateway`: a server tool called
    * through the MCP gateway (`executionId` is the call's `mcpgw_*` id, `nodeId` the tool name, no workflow).
@@ -304,10 +317,11 @@ export interface GuardEventView {
   category?: string | null;
   dataClass?: string | null;
   score?: number | null;
-  requestedAction: GuardActionValue;
-  effectiveAction: GuardActionValue;
+  /** Phase 12 coverage — `reveal` on a Reveal node's events (a refused reveal records `block` as its effective action). */
+  requestedAction: GuardEventActionValue;
+  effectiveAction: GuardEventActionValue;
   /** The verdict's overall action this event belongs to. */
-  verdictAction: GuardActionValue;
+  verdictAction: GuardEventActionValue;
   shadow: boolean;
   evidence: GuardFindingView[];
   profileId: string;
@@ -379,4 +393,88 @@ export function revealRuleAllows(rule: RevealRuleLike, request: { subject: Revea
 /** The first rule that allows the reveal, or undefined: reveal is denied unless a rule matches. */
 export function findRevealRule<T extends RevealRuleLike>(rules: readonly T[], request: { subject: RevealSubject | null | undefined; dataClass: string; workflowId?: string | null }): T | undefined {
   return rules.find((rule) => revealRuleAllows(rule, request));
+}
+
+/**
+ * Phase 12 coverage — the reveal subject of a run: who started it, as the reveal rules see it. `serviceAccountId`
+ * marks a run a service account started; such a run matches only rules that name the service account, never a role
+ * or user rule.
+ */
+export function revealSubjectOf(
+  subject: { source: string; role?: string; userId?: string; email?: string; serviceAccountId?: string } | null | undefined
+): RevealSubject | undefined {
+  if (!subject) return undefined;
+  if (subject.serviceAccountId) return { source: "service_account", serviceAccountId: subject.serviceAccountId };
+  // A service account's sign-in address is `…@service.invalid`: such a subject is a service account even when the
+  // id was not carried over (a run paused before the subject recorded it), so it never matches a role or user rule.
+  if (subject.email && /@service\.invalid$/i.test(subject.email.trim())) {
+    return subject.userId ? { source: "service_account", serviceAccountId: subject.userId } : { source: "service_account" };
+  }
+  return { source: subject.source, ...(subject.role ? { role: subject.role } : {}), ...(subject.userId ? { userId: subject.userId } : {}) };
+}
+
+/** Phase 12 coverage — a signed-in admin started the run: only such a run may reveal tokens issued before tokens were scoped to a project. */
+export function revealSubjectIsAdmin(subject: RevealSubject | null | undefined): boolean {
+  return Boolean(subject && subject.source === "user" && subject.role === "admin" && !subject.serviceAccountId);
+}
+
+/** Phase 12 coverage — the detector id and category a Reveal node's rule events carry. */
+export const REVEAL_EVENT_DETECTOR_ID = "reveal";
+
+/**
+ * Phase 12 coverage — the Reveal node (a DAG step). It reads one field of the incoming item and turns the protection
+ * tokens in it back into values, for the data classes a reveal rule allows the run's subject. Reveal is denied unless
+ * a rule matches. Revealed values carry the `sensitive` label and their data class again, so destination rules and
+ * outbound checks decide where they may go next.
+ */
+export const guardRevealNodeConfigSchema = z.object({
+  /** The stored rule set whose reveal rules apply, or `effective` for the run's rule sets (enforced and bound). */
+  profileId: z.string().min(1).default(GUARD_EFFECTIVE_PROFILE_REF),
+  /** Dot path of the field to reveal in the incoming item (falls back to run inputs). */
+  inputField: z.string().min(1).default("text"),
+  /**
+   * Keys (secret ids) of encrypted values (`enc:` tokens) this node may decrypt. Empty: encrypted values stay as they
+   * are. Token vault tokens need no key.
+   */
+  keySecretRefs: z.array(secretReferenceSchema).max(10).default([]),
+  /**
+   * Data classes whose format-preserving vault tokens (they look like real values, such as a Luhn-valid card number)
+   * are looked for. Empty: only `tok_` tokens are found.
+   */
+  formatPreservingClasses: z.array(dataClassNameSchema).max(20).default([]),
+  /** A token the rules do not allow: `keep` leaves it in place (default), `fail` fails the node. */
+  onRefused: z.enum(["keep", "fail"]).default("keep"),
+  /** Shown to the approver when a matching rule asks for approval. */
+  approvalMessage: z.string().max(2000).optional(),
+  /** An undecided approval is rejected after this long (default one day). */
+  timeoutMinutes: z.number().int().positive().max(10_080).default(1_440)
+});
+export type GuardRevealNodeConfig = z.output<typeof guardRevealNodeConfigSchema>;
+
+/** Phase 12 coverage — why a token was not revealed. */
+export const REVEAL_REFUSAL_REASONS = ["no_rule", "other_project", "unscoped_token", "unknown_token", "key_not_allowed", "not_decryptable"] as const;
+export type RevealRefusalReason = (typeof REVEAL_REFUSAL_REASONS)[number];
+
+/** Phase 12 coverage — what a Reveal node reports per data class (counts and token hashes, never values). */
+export interface RevealClassSummary {
+  /** Absent when the class could not be told (an encrypted value no allowed class opens, or an unknown token). */
+  dataClass?: string;
+  count: number;
+  /** First 16 hex characters of the sha256 of each token, at most 50. */
+  tokenHashes: string[];
+  /** Set on refused entries. */
+  reason?: RevealRefusalReason;
+  /** The rule set and rule that allowed it, on revealed entries. */
+  rule?: { profileId: string; version: number; index: number; name?: string };
+}
+
+/** Phase 12 coverage — the `reveal` field of a Reveal node's output. */
+export interface RevealNodeSummary {
+  field: string;
+  revealed: RevealClassSummary[];
+  refused: RevealClassSummary[];
+  /** A replay, eval run or rule simulation: nothing was revealed and the input passed through. */
+  skipped?: "replay";
+  /** A person approved this reveal (a matching rule asked for approval). */
+  approved?: boolean;
 }

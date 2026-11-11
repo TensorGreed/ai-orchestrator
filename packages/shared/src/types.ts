@@ -77,6 +77,7 @@ export type WorkflowNodeType =
   | "output_guardrail"
   | "guard"
   | "guard_protection"
+  | "guard_reveal"
   | "basic_llm_chain"
   | "qa_chain"
   | "summarization_chain"
@@ -1278,6 +1279,11 @@ export interface McpToolPolicySubject {
   clientName?: string;
   /** For `source: "user"`: the API key the run was started with, when it was (its limits are already in `role`). */
   apiKeyId?: string;
+  /**
+   * Phase 12 coverage — set when a service account started the run. Reveal rules then match only rules that name
+   * this service account, never a role or user rule.
+   */
+  serviceAccountId?: string;
 }
 
 /** Admin override of a registry tool's read-only classification. */

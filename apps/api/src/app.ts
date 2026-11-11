@@ -78,6 +78,7 @@ import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./
 import {
   executeCodeNodeSandbox,
   executeWorkflow,
+  runRevealedValues,
   evaluateExpression,
   exportWorkflowToJson,
   importWorkflowFromJson,
@@ -1602,7 +1603,12 @@ export async function createApp(
     logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
     // Phase 16 — destination rows are read when a run first needs them.
     destinationRows: async () => await store.listDataDestinations(),
-    ...(runtimeMasterKey.length === 32 ? { surrogateKey: deriveCaptureSurrogateKey(runtimeMasterKey) } : {})
+    ...(runtimeMasterKey.length === 32 ? { surrogateKey: deriveCaptureSurrogateKey(runtimeMasterKey) } : {}),
+    // Phase 12 coverage — a Reveal node's audit entry (the audit service is set up further down; runs start later).
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
+    }
   });
   await guardService.ensureBuiltIns();
   const connectorRegistry = createDefaultConnectorRegistry();
@@ -2528,6 +2534,12 @@ export async function createApp(
         replayCapture?.abandon(captureTicket, "skipped_paused");
         captureHandedOff = true;
       }
+      // Phase 12 coverage — a run whose Reveal node revealed something is never captured: its recorded tool calls
+      // and model calls may hold the revealed values (the run's history keeps only the tokens).
+      if (captureTicket && !captureHandedOff && runRevealedValues(result)) {
+        replayCapture?.abandon(captureTicket, "skipped_reveal");
+        captureHandedOff = true;
+      }
       // Otherwise the capture is taken once the run's final history is stored (persistExecutionHistoryRecord).
       if (captureTicket && runPlan && !captureHandedOff && input.executionId) {
         sweepStaleCaptures();
@@ -2602,7 +2614,11 @@ export async function createApp(
   ): Promise<T> => {
     if (!plan) return result;
     let next: T = result;
-    if (plan.recorder) {
+    // Phase 12 coverage — a run that revealed values keeps no cassette: its recorded tool and model calls may hold
+    // them (the run's history keeps only the tokens).
+    if (plan.recorder && runRevealedValues(result)) {
+      app.log.info({ executionId: meta.executionId }, "A Reveal node revealed values in this run, so its MCP cassette is not stored");
+    } else if (plan.recorder) {
       try {
         const summary = await mcpCassetteService.persist({
           plan,

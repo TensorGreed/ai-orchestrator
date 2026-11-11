@@ -4,6 +4,7 @@ import {
   approvalGateConfigSchema,
   guardNodeConfigSchema,
   guardProtectionNodeConfigSchema,
+  guardRevealNodeConfigSchema,
   OUTPUT_GUARDRAIL_CHECK_VALUES,
   parseIpAllowlist,
   workflowSchema,
@@ -1330,6 +1331,14 @@ function validateGuardPlacement(workflow: Workflow): WorkflowValidationIssue[] {
             message: "A Content Rules node on an agent's content rules port cannot also sit on DAG edges. Use a second Content Rules node for the DAG.",
             nodeId: node.id
           });
+        }
+      }
+    }
+    if (node.type === "guard_reveal") {
+      const parsed = guardRevealNodeConfigSchema.safeParse(node.config ?? {});
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) {
+          issues.push({ code: "invalid_reveal_config", message: `Reveal ${issue.path.join(".") || "config"}: ${issue.message}`, nodeId: node.id });
         }
       }
     }

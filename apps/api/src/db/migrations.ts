@@ -2841,6 +2841,22 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS subject_refs;
       DROP TABLE IF EXISTS subject_ref_keys;
     `
+  },
+  {
+    version: 68,
+    description: "Phase 12 coverage — reveal: the project and run that issued each token vault token",
+    // A Reveal node reveals only tokens issued in the run's project. Rows written before this migration keep a null
+    // project and can be revealed only by a run a signed-in admin started. The index serves per-project lookups.
+    up: `
+      ALTER TABLE guard_token_vault ADD COLUMN IF NOT EXISTS project_id TEXT;
+      ALTER TABLE guard_token_vault ADD COLUMN IF NOT EXISTS execution_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_guard_token_vault_project ON guard_token_vault(project_id);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_guard_token_vault_project;
+      ALTER TABLE guard_token_vault DROP COLUMN IF EXISTS execution_id;
+      ALTER TABLE guard_token_vault DROP COLUMN IF EXISTS project_id;
+    `
   }
 ];
 

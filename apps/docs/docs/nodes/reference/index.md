@@ -1,5 +1,5 @@
 ---
-description: "Reference for all 140 L2M node types across 8 categories, generated from the node definitions: every config field and default value."
+description: "Reference for all 141 L2M node types across 8 categories, generated from the node definitions: every config field and default value."
 ---
 
 <!--
@@ -14,7 +14,7 @@ Auto-generated from the canonical `nodeDefinitions` registry in
 config field, every default value — kept in lock-step with the running
 code by the docs build.
 
-140 node types across 8 categories.
+141 node types across 8 categories.
 
 ## Categories
 
@@ -24,5 +24,5 @@ code by the docs build.
 - [MCP](/nodes/reference/mcp) — Model Context Protocol clients and the workflow-as-MCP-tool exposure node. (1 node)
 - [RAG](/nodes/reference/rag) — Retrieval-Augmented Generation: embedders, vector stores, document loaders, retrievers. (5 nodes)
 - [Connector](/nodes/reference/connector) — External system integrations — HTTP, SQL, NoSQL, cloud SDKs, SaaS APIs. (41 nodes)
-- [Utility](/nodes/reference/utility) — DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait. (43 nodes)
+- [Utility](/nodes/reference/utility) — DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait. (44 nodes)
 - [Output](/nodes/reference/output) — Terminal nodes that shape the workflow's response payload. (5 nodes)

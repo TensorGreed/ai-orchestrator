@@ -27,7 +27,7 @@ import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
-import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields";
+import { GuardNodeFields, GuardProtectionFields, GuardRevealFields } from "./GuardNodeConfigFields";
 import { OutputGuardrailFields } from "./OutputGuardrailFields";
 import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
@@ -6697,6 +6697,8 @@ export function NodeInspector({
         );
       case "guard_protection":
         return <GuardProtectionFields config={config} setConfig={setConfig} secrets={availableSecrets} />;
+      case "guard_reveal":
+        return <GuardRevealFields config={config} setConfig={setConfig} secrets={availableSecrets} />;
       case "approval_gate":
         return <ApprovalGateNodeFields config={config} setConfig={setConfig} />;
       case "human_approval":

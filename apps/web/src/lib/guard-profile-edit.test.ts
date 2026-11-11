@@ -116,6 +116,22 @@ describe("fields the form does not show", () => {
   });
 });
 
+describe("reveal rules (Phase 12 coverage)", () => {
+  it("reads, writes and describes reveal rules, and drops the block when the last rule goes", async () => {
+    const { revealRulesOf, setRevealRules, revealRuleLine } = await import("./guard-profile-edit");
+    const document = { id: "x", name: "X", version: "1" };
+    expect(revealRulesOf(document)).toEqual([]);
+    const withRule = setRevealRules(document, [
+      { name: " CRM ", dataClasses: ["email"], roles: [], users: [], serviceAccounts: ["sa-crm"], workflows: ["wf-1"], requireApproval: false }
+    ]);
+    expect(withRule.reveal).toEqual({ rules: [{ name: "CRM", dataClasses: ["email"], subjects: { serviceAccounts: ["sa-crm"] }, workflows: ["wf-1"] }] });
+    expect(document).not.toHaveProperty("reveal");
+    const [rule] = revealRulesOf(withRule);
+    expect(revealRuleLine(rule!)).toBe("CRM: service account sa-crm may reveal email in workflow wf-1.");
+    expect(setRevealRules(withRule, [])).not.toHaveProperty("reveal");
+  });
+});
+
 describe("Check responses preset", () => {
   it("copies the final answer channel into the response channel, rules and extra fields included", () => {
     const withFinal = {

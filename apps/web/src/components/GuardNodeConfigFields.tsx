@@ -301,3 +301,136 @@ export function GuardProtectionFields({ config, setConfig, secrets }: { config: 
     </>
   );
 }
+
+/**
+ * Phase 12 coverage — config fields for the Reveal node: the rule set whose reveal rules apply, the field to reveal,
+ * the encryption keys it may use, the classes of format-preserving tokens to look for, and what a refused token does.
+ * Keys are picked from the secret store; the config holds secret ids only.
+ */
+export function GuardRevealFields({ config, setConfig, secrets }: { config: Config; setConfig: SetConfig; secrets: SecretListItem[] }) {
+  const [profiles, setProfiles] = useState<GuardProfileSummary[]>([]);
+  const profileId = str(config.profileId, "effective");
+  const keyIds = Array.isArray(config.keySecretRefs)
+    ? config.keySecretRefs.map((ref) => str((ref as { secretId?: unknown } | null)?.secretId)).filter(Boolean)
+    : [];
+  const classes = Array.isArray(config.formatPreservingClasses) ? config.formatPreservingClasses.map(String) : [];
+  const [classText, setClassText] = useState(classes.join(", "));
+
+  useEffect(() => {
+    fetchGuardProfiles()
+      .then((response) => setProfiles(response.profiles))
+      .catch(() => setProfiles([]));
+  }, []);
+
+  return (
+    <>
+      <div className="cfg-tip">
+        Turns protected tokens in one field back into the original values, only for the data classes the rule set&apos;s reveal rules allow whoever started
+        the run. Nobody may reveal unless a rule says so. Webhook, chat and schedule runs never match role or user rules. Revealed values count as sensitive
+        again, so destination rules decide where they may go. Only the following steps of this run see the values: run history keeps the tokens.
+        Replays never reveal.
+      </div>
+      <div className="cfg-field">
+        <label className="cfg-label" htmlFor="guard-reveal-profile">
+          Rule set
+        </label>
+        <select id="guard-reveal-profile" className="cfg-input" value={profileId} onChange={(event) => setConfig((current) => ({ ...current, profileId: event.target.value }))}>
+          <option value="effective">Effective rule set (workflow / project binding)</option>
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.name} · v{profile.latestVersion}
+            </option>
+          ))}
+          {profileId !== "effective" && !profiles.some((profile) => profile.id === profileId) && <option value={profileId}>{profileId}</option>}
+        </select>
+        <div className="cfg-help">
+          Only rule sets bound to this workflow or its project count: a rule set chosen here reveals nothing unless it is bound. Its reveal rules
+          decide who may reveal which data classes. Only an admin can write reveal rules.
+        </div>
+      </div>
+      <div className="cfg-field">
+        <label className="cfg-label" htmlFor="guard-reveal-field">
+          Field to reveal
+        </label>
+        <input id="guard-reveal-field" className="cfg-input" value={str(config.inputField, "text")} placeholder="text" onChange={(event) => setConfig((current) => ({ ...current, inputField: event.target.value }))} />
+        <div className="cfg-help">The field of the incoming item. Tokens in nested values are revealed too.</div>
+      </div>
+      <fieldset className="cfg-field">
+        <legend className="cfg-label">Encryption keys it may use</legend>
+        {secrets.length === 0 && <div className="cfg-help">No secrets yet. Token vault tokens need no key.</div>}
+        {secrets.map((secret) => (
+          <label key={secret.id} className="guard-check">
+            <input
+              type="checkbox"
+              checked={keyIds.includes(secret.id)}
+              onChange={(event) =>
+                setConfig((current) => {
+                  const next = event.target.checked ? [...new Set([...keyIds, secret.id])] : keyIds.filter((id) => id !== secret.id);
+                  return { ...current, keySecretRefs: next.map((secretId) => ({ secretId })) };
+                })
+              }
+            />
+            <span>{secret.name}</span>
+          </label>
+        ))}
+        <div className="cfg-help">Only for values protected with Encrypt (AES-256-GCM). Values encrypted under other keys stay as they are.</div>
+      </fieldset>
+      <div className="cfg-field">
+        <label className="cfg-label" htmlFor="guard-reveal-fp">
+          Format-preserving token classes
+        </label>
+        <input
+          id="guard-reveal-fp"
+          className="cfg-input"
+          value={classText}
+          placeholder="card_number, phone"
+          onChange={(event) => {
+            setClassText(event.target.value);
+            const next = event.target.value
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean);
+            setConfig((current) => ({ ...current, formatPreservingClasses: next }));
+          }}
+        />
+        <div className="cfg-help">Format-preserving tokens look like real values; list their classes to look them up in the vault. Empty finds tok_ tokens only.</div>
+      </div>
+      <div className="cfg-field">
+        <label className="cfg-label" htmlFor="guard-reveal-refused">
+          When a token may not be revealed
+        </label>
+        <select id="guard-reveal-refused" className="cfg-input" value={str(config.onRefused, "keep")} onChange={(event) => setConfig((current) => ({ ...current, onRefused: event.target.value }))}>
+          <option value="keep">Keep it protected and continue</option>
+          <option value="fail">Fail the step (nothing is revealed)</option>
+        </select>
+      </div>
+      <div className="cfg-field">
+        <label className="cfg-label" htmlFor="guard-reveal-approval">
+          Approval message
+        </label>
+        <textarea
+          id="guard-reveal-approval"
+          className="cfg-input"
+          rows={2}
+          value={str(config.approvalMessage)}
+          placeholder="Approve revealing these values?"
+          onChange={(event) => setConfig((current) => ({ ...current, approvalMessage: event.target.value }))}
+        />
+        <div className="cfg-help">Used when a reveal rule asks for approval. The approver sees data classes and counts, never values.</div>
+      </div>
+      <div className="cfg-field">
+        <label className="cfg-label" htmlFor="guard-reveal-timeout">
+          Approval timeout (minutes)
+        </label>
+        <input
+          id="guard-reveal-timeout"
+          type="number"
+          min={1}
+          className="cfg-input"
+          value={num(config.timeoutMinutes, 1440)}
+          onChange={(event) => setConfig((current) => ({ ...current, timeoutMinutes: Math.max(1, Number(event.target.value) || 1) }))}
+        />
+      </div>
+    </>
+  );
+}

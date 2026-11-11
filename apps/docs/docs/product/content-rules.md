@@ -147,6 +147,37 @@ With **protectMatches** (on by default), rules that would allow, mask or redact 
 
 If a finding should be protected but no provider covers its class, the key is missing or the provider fails, the rule set's `protection.fallback` applies. It defaults to `block`.
 
+## Reveal node
+
+A **Reveal** node turns protection tokens in one field of the incoming item back into the original values. It is a normal DAG step: put it right before the step that truly needs the value (a CRM write, a reply to the customer), not earlier.
+
+Nobody may reveal unless a rule set that applies to the run says so. A rule set's `reveal` block lists who may reveal which data classes:
+
+```json
+"reveal": {
+  "rules": [
+    { "name": "Billing admins", "dataClasses": ["card_number"], "subjects": { "roles": ["admin"] }, "requireApproval": true },
+    { "dataClasses": ["email"], "subjects": { "serviceAccounts": ["sa-crm"] }, "workflows": ["wf-crm-sync"] }
+  ]
+}
+```
+
+- **Only an admin can save a rule set with reveal rules.** A builder's save of one answers 403, and a node's inline override can never add or remove them.
+- **Which rule sets count.** Only rule sets that apply to the run: the project's enforced rule set, the workflow and project bindings, the deployment's rule sets and, for a gateway-triggered run, the toolset's and client's. Choosing a rule set on the node only narrows that choice; a rule set that is not bound to the run contributes nothing, so its tokens stay protected. When the project's enforced rule set has a `reveal` block, it is the only source of reveal rules in that project (an empty `rules` list turns reveal off there).
+- **Who matches.** Roles and users match only runs a signed-in person started. Webhook, chat, schedule and form runs act as the workflow's owner and gateway runs as the MCP client, so a role or user rule never matches them, whoever the owner is. A service account matches only a rule that names its id under `serviceAccounts`, whatever its role, and only for runs it started with its key (a webhook or schedule run of a workflow it created is not its run). Saving a rule set refuses a service account listed under `users` and a person listed under `serviceAccounts`. `workflows` limits a rule to those workflows.
+- **Which tokens.** Token vault tokens (`tok_<class>_…`), found by shape; format-preserving vault tokens for the classes the node lists, found by the data detectors and then looked up exactly in the vault; and encrypted values (`enc:<key>:…`) under the keys the node lists. A vault token issued in another project is never revealed; tokens issued before tokens were scoped to a project are revealed only for a run a signed-in admin started. Tokens a gateway toolset or route set without a project issues are scoped to that toolset or route set, so no workflow run reveals them. Mask, keyed hash and surrogate are one-way and never reveal.
+- **Encrypted values follow their key.** An `enc:` value opens under the key secret that sealed it, for its data class. Sharing that key secret with another project shares the ability to reveal its values there (still only as that project's reveal rules allow).
+- **What the node does with the rest.** A token no rule allows stays as it is. With **When a token may not be revealed: Fail the step** one refused token fails the node and nothing is revealed.
+- **Approval.** A matching rule with `requireApproval` pauses the run until an admin approves; the person who started the run cannot approve their own reveal, and a rejection needs a reason. The approver sees data classes and counts, never values. Approving runs the node again for exactly those tokens, and the audit entry names the approver.
+- **Where revealed data may go.** Revealed values carry the `sensitive` label and their data class again, so [destination rules](./data-labels-and-destinations.md) and outbound checks decide where they can be sent next.
+- **Revealed values are not kept.** Steps after the Reveal node in the same run get the values. Everything the run keeps or sends outside holds the tokens again: the run history (every step's input and output, errors and activity), the live run view, a paused run's saved state, the error workflow's input, and agent memory, the session tool cache and session artifacts. A value is put back as its token wherever it appears unchanged; a value a step reformatted (cut, re-spaced, re-encoded) is not found, so let destination rules decide where it may go. A run that pauses after a Reveal node continues with the tokens. A run that revealed something is never captured for replay and stores no MCP cassette or model tape. A [`response` channel](#responses-to-external-callers) checks what the caller receives, so it judges the tokens.
+- **Sub-workflows.** A sub-workflow in the same project reveals under the run's rule sets. One in another project never reveals, and the tokens its Protect steps issue belong to its own project.
+- **Replays never reveal.** In a replay, an eval run or a rule simulation the node passes its input through untouched and records nothing.
+
+Each Reveal step that revealed or refused something writes rule events with placement, channel and action `reveal` (a refused class records `block` as its effective action), with the first 16 hex characters of each token's sha256 as evidence, and one audit log entry `content_rules.reveal` with who started the run, the workflow, the node and the counts. Neither ever holds a value or a token. The audit entry goes to log streaming like every other audit entry; for a run nobody signed in to start, the system is its actor and the run's subject is in its details. If the audit entry or the events cannot be written, nothing is revealed.
+
+Equal values protected in two projects that share a key secret get the same token, which only the issuing project can reveal. Keep a separate key per project; scoping the stored value hash per project is a planned follow-up.
+
 ## Responses to external callers
 
 A rule set with a `response` channel checks what external callers receive, with no Content Rules node in the workflow. It applies to runs started from `/webhook/<path>` and `/webhook-test/<path>` (the chat widget included), `/api/chat/<id>` and `/api/mcp-server/<path>/invoke`. Editor runs, schedules, the builder routes and sub-workflow runs are not checked. MCP gateway calls are checked by the gateway's own `tool_result` rules on a toolset or client binding, not by the `response` channel. The built-in rule set has no `response` channel, so nothing changes until you add one: open a rule set, choose the **Response** tab and use **Check responses** to copy the final answer rules.
@@ -196,4 +227,4 @@ Rows never hold the content that was checked, the raw matched value, protection 
 - **Sub-workflows** run under the calling workflow's rule set resolution, not their own bindings. **Error-handler workflows** run under their own workflow and project bindings.
 - **Read scoping.** Rule events, the Security page counts and the bindings listed on a rule set are limited to the workflows and projects the user can read. Rule sets and their versions are instance-wide: every signed-in user can read every rule set. Run history itself is filtered by role only.
 - **Custom patterns.** The nested-quantifier check catches the common catastrophic shapes but not every slow pattern (overlapping alternations such as `(a|aa)+` pass). Patterns run over the whole checked text and the latency budget cannot interrupt a regular expression that is already running, so keep dictionary patterns simple and anchored.
-- **Token vault.** `guard_token_vault` rows are not covered by run retention and are not scoped to a project: a token resolves for any run on the instance, and rows stay until they are deleted. Sealing binds each value to the vault's purpose but not to its token or row. Keys for deterministic tokens and keyed hashes must be at least 16 bytes.
+- **Token vault.** `guard_token_vault` rows are not covered by run retention, and rows stay until they are deleted. Each row records the project and run that issued it (rows from before this was recorded have none); a Reveal node reveals only its own project's tokens, while a Content Rules node reuses a deterministic token for an equal value whichever project issued it. Sealing binds each value to the vault's purpose but not to its token or row. Keys for deterministic tokens and keyed hashes must be at least 16 bytes.

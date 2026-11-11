@@ -22,6 +22,8 @@ export * from "./guard-runtime";
 export * from "./response-boundary";
 export * from "./replay-plan";
 export { executeGuardNodeStep, type GuardNodeSummary } from "./guard-node";
+export { executeRevealNodeStep, parseRevealNodeConfig, revealApprovalKey, revealApprovalRequest, revealRuleProfiles } from "./reveal-node";
+export { RevealRedactor, REVEAL_REDACTION_MIN_LENGTH } from "./reveal-redaction";
 export * from "./code-sandbox";
 export { configureExpressionSandbox, expressionSandboxLimits, EXPRESSION_SANDBOX_DEFAULTS, ExpressionSandboxError, isExpressionSandboxFailure } from "./expression-sandbox";
 export { runWithSandboxOwner } from "./quickjs-sandbox";

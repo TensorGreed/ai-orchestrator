@@ -4,9 +4,10 @@
 
 import type { GuardEventView, GuardPlacementValue } from "@ai-orchestrator/shared";
 
-export type GuardActionName = "allow" | "transform" | "mask" | "redact" | "protect" | "review" | "require_approval" | "block";
+/** Phase 12 coverage — `reveal`: a Reveal node's events (an event action, never a rule action). */
+export type GuardActionName = "allow" | "reveal" | "transform" | "mask" | "redact" | "protect" | "review" | "require_approval" | "block";
 
-const SEVERITY: GuardActionName[] = ["allow", "transform", "mask", "redact", "protect", "review", "require_approval", "block"];
+const SEVERITY: GuardActionName[] = ["allow", "reveal", "transform", "mask", "redact", "protect", "review", "require_approval", "block"];
 
 export function mostSevere(actions: string[]): GuardActionName {
   return actions.reduce<GuardActionName>((best, next) => (SEVERITY.indexOf(next as GuardActionName) > SEVERITY.indexOf(best) ? (next as GuardActionName) : best), "allow");
@@ -14,6 +15,7 @@ export function mostSevere(actions: string[]): GuardActionName {
 
 export const GUARD_ACTION_LABEL: Record<GuardActionName, string> = {
   allow: "Allowed",
+  reveal: "Revealed",
   transform: "Transformed",
   mask: "Masked",
   redact: "Redacted",
@@ -31,7 +33,8 @@ export const GUARD_CHANNEL_LABEL: Record<string, string> = {
   final_output: "Final answer",
   egress: "Outbound (egress)",
   response: "Response",
-  trigger_input: "Trigger input"
+  trigger_input: "Trigger input",
+  reveal: "Reveal"
 };
 
 export function actionLabel(action: string): string {
@@ -455,6 +458,8 @@ export function dailySeries(daily: Array<{ day: string; action: string; count: n
     const position = index.get(row.day);
     if (position === undefined) continue;
     const bucket = out[position]!;
+    // Phase 12 coverage — reveals are not rule verdicts; the events list and "By action" show them.
+    if (row.action === "reveal") continue;
     if (row.action === "block") bucket.blocked += row.count;
     else if (row.action === "review" || row.action === "require_approval") bucket.review += row.count;
     else if (row.action === "allow") bucket.allowed += row.count;
@@ -487,6 +492,11 @@ export function verdictReasonLine(event: Pick<GuardEventView, "effectiveAction" 
     return reason ? `${verb}: ${reason}.` : `${verb} by a destination rule.`;
   }
   if (!event.detectorId) return null;
+  // Phase 12 coverage — a refused reveal: the token stayed protected.
+  if (event.detectorId === "reveal") {
+    const what = event.dataClass ? event.dataClass.replace(/_/g, " ") : "a token";
+    return `Reveal refused: ${what} stayed protected.`;
+  }
   const what = event.dataClass ? event.dataClass.replace(/_/g, " ") : event.category ?? "a finding";
   return `${verb}: ${what} found in the ${channelLabel(event.channel).toLowerCase()}.`;
 }
