@@ -59,7 +59,7 @@ export type OutputGuardrailCheckValue = (typeof OUTPUT_GUARDRAIL_CHECK_VALUES)[n
 export const CONTENT_SAFETY_CATEGORY_VALUES = ["self_harm", "violence", "sexual", "sexual_minors", "hate"] as const;
 export type ContentSafetyCategoryValue = (typeof CONTENT_SAFETY_CATEGORY_VALUES)[number];
 
-export const GUARD_PLACEMENT_VALUES = ["node", "agent", "gateway", "response", "retrieval", "reveal"] as const;
+export const GUARD_PLACEMENT_VALUES = ["node", "agent", "gateway", "response", "retrieval", "reveal", "request"] as const;
 export type GuardPlacementValue = (typeof GUARD_PLACEMENT_VALUES)[number];
 
 /** A stored placement read back; unknown values read as `node`, as before. */

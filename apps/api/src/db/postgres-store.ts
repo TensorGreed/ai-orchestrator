@@ -1037,6 +1037,9 @@ export class PostgresStore implements Store {
   async anyGuardProfileUsesLabels(...args: Parameters<Store["anyGuardProfileUsesLabels"]>): ReturnType<Store["anyGuardProfileUsesLabels"]> {
     return guard.anyGuardProfileUsesLabels(this.ctx, ...args);
   }
+  async anyGuardProfileHasChannel(...args: Parameters<Store["anyGuardProfileHasChannel"]>): ReturnType<Store["anyGuardProfileHasChannel"]> {
+    return guard.anyGuardProfileHasChannel(this.ctx, ...args);
+  }
   async countObservedDestinationBlocks(...args: Parameters<Store["countObservedDestinationBlocks"]>): ReturnType<Store["countObservedDestinationBlocks"]> {
     return guard.countObservedDestinationBlocks(this.ctx, ...args);
   }

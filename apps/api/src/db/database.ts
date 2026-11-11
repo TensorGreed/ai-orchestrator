@@ -1609,7 +1609,7 @@ export interface GuardEventFilters {
   since?: string;
   onlyFindings?: boolean;
   /** 12.6 — `gateway`: only MCP gateway server tool calls; `run`: only workflow runs. */
-  placement?: "gateway" | "run";
+  placement?: "gateway" | "run" | "response" | "request";
   /** 12.7 — leave out verdicts eval runs and replay jobs recorded (`run_source = 'eval'`). */
   excludeEvalRuns?: boolean;
 }
@@ -14151,6 +14151,7 @@ export class SqliteStore implements Store {
 
   private guardProfileRevisionStatement: { pluck(): { get(): unknown } } | null = null;
   private guardProfileLabelsCache: { revision: number; value: boolean } | null = null;
+  private guardProfileChannelCache = new Map<string, { revision: number; value: boolean }>();
 
   /**
    * Phase 16 — the guard profile revision: a counter in the database that
@@ -14199,6 +14200,22 @@ export class SqliteStore implements Store {
     );
     const value = Boolean(row);
     if (revision !== undefined) this.guardProfileLabelsCache = { revision, value };
+    return value;
+  }
+
+  async anyGuardProfileHasChannel(channel: "response" | "trigger_input"): Promise<boolean> {
+    if (channel !== "response" && channel !== "trigger_input") return false;
+    const revision = this.guardProfileRevisionSync();
+    const cached = this.guardProfileChannelCache.get(channel);
+    if (revision !== undefined && cached?.revision === revision) return cached.value;
+    const row = this.queryOne<{ found: number }>(
+      `SELECT 1 AS found FROM guard_profile_versions
+        WHERE json_valid(document_json) AND json_type(document_json, ?) = 'object'
+        LIMIT 1`,
+      [`$.channels.${channel}`]
+    );
+    const value = Boolean(row);
+    if (revision !== undefined) this.guardProfileChannelCache.set(channel, { revision, value });
     return value;
   }
 
@@ -14415,6 +14432,8 @@ export class SqliteStore implements Store {
     if (filters.onlyFindings) clauses.push("detector_id IS NOT NULL");
     if (filters.placement === "gateway") clauses.push("placement = 'gateway'");
     if (filters.placement === "run") clauses.push("placement <> 'gateway'");
+    if (filters.placement === "response") clauses.push("placement = 'response'");
+    if (filters.placement === "request") clauses.push("placement = 'request'");
     if (filters.excludeEvalRuns) clauses.push("(run_source IS NULL OR run_source <> 'eval')");
     return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }

@@ -40,6 +40,7 @@ import {
 import {
   GUARD_EDITOR_ACTIONS,
   GUARD_EDITOR_CHANNELS,
+  applyResponsePreset,
   channelOf,
   duplicateDocument,
   setActionRule,
@@ -503,6 +504,19 @@ function GuardProfileEditor({
           <input type="checkbox" checked={Boolean(view)} disabled={readOnly} onChange={(event) => update(setChannelEnabled(document, channel, event.target.checked))} />
           <span>Check the {channelLabel(channel).toLowerCase()} channel</span>
         </label>
+        {channel === "response" && (
+          <div className="guard-response-preset">
+            <p className="kb-subtle">
+              Optional. Checks what webhook, chat widget, chat API and MCP trigger callers receive, once at the end of the run. A blocked response is
+              withheld (HTTP 422, code content_filter); the run still succeeds and a rule event records why. Editor runs and schedules are not checked.
+            </p>
+            {!readOnly && (
+              <button type="button" className="pg-btn small" onClick={() => update(applyResponsePreset(document))}>
+                Check responses (copy the final answer rules)
+              </button>
+            )}
+          </div>
+        )}
         {view && (
           <div className="guard-channel">
             <div className="mcp-table-scroll">

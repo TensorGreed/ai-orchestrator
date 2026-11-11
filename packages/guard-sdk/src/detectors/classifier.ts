@@ -43,7 +43,7 @@ export function createInjectionClassifierDetector(classifier: GuardClassifier = 
     id: INJECTION_CLASSIFIER_DETECTOR_ID,
     tier: "classifier",
     description: `Injection classifier (${classifier.id} ${classifier.version}); the rule pack stands in when no model is registered.`,
-    channels: ["prompt", "tool_result", "model_output", "final_output"],
+    channels: ["prompt", "tool_result", "model_output", "final_output", "response", "trigger_input"],
     categories: ["prompt_injection", "indirect_injection"],
     async detect(input: GuardInput, context: DetectorContext) {
       const result = await classifier.classify(context.text, input.channel);

@@ -147,11 +147,31 @@ With **protectMatches** (on by default), rules that would allow, mask or redact 
 
 If a finding should be protected but no provider covers its class, the key is missing or the provider fails, the rule set's `protection.fallback` applies. It defaults to `block`.
 
+## Responses to external callers
+
+A rule set with a `response` channel checks what external callers receive, with no Content Rules node in the workflow. It applies to runs started from `/webhook/<path>` and `/webhook-test/<path>` (the chat widget included), `/api/chat/<id>` and `/api/mcp-server/<path>/invoke`. Editor runs, schedules, the builder routes and sub-workflow runs are not checked. MCP gateway calls are checked by the gateway's own `tool_result` rules on a toolset or client binding, not by the `response` channel. The built-in rule set has no `response` channel, so nothing changes until you add one: open a rule set, choose the **Response** tab and use **Check responses** to copy the final answer rules.
+
+- **Rewritten.** The caller gets the rewritten output, and the run history and the idempotency store keep that version. Node results keep what ran, for builders.
+- **Blocked, review or approval.** The caller cannot wait for a person, so the output is withheld. Webhooks and chat answer `422` with `{ "error": "The response was withheld by content rules.", "code": "content_filter", "executionId": "…" }` (chat adds `session_id`). MCP invoke answers a tool error result. The run itself ends `success`. A check that cannot run withholds the output too.
+- **Paused runs.** A run that pauses for approval answers only `{ "waitingForApproval": true, "executionId": "…" }`, without the approval message, because that message can quote any step's data. Approvers still read the message.
+- **Failed runs.** The caller reads `The workflow run failed.` and the execution id. The error text, which can quote run data, stays in the run history.
+- **Webhook Response replies** are checked on the headers and body they send.
+- **Run views.** While any rule set has a `response` channel, viewers and operators reading such a run (`GET /api/executions/<id>` and its event stream) see each step's status and timing but not its data. The run's own output is the checked one. Builders and admins see everything. Audit bundle exports and golden run recordings are not masked: they hold the run as it ran.
+- **Queued runs** go only to workers that can check responses. While a worker of the pool cannot, these runs execute inline and count in `dispatch_inline_runs_total{reason="capability:content-rules-response-v1"}`. A result returned without the check is withheld.
+
+An optional `trigger_input` channel checks webhook payloads at the route, before anything is reserved or run. A block answers `400` with `{ "error": "The request was refused by content rules.", "code": "content_filter" }`. A rewrite is what the run receives. These checks are recorded with the placement `request`. A refused request never runs, so the Security page shows "request refused, no run" instead of a run link. The check also runs on idempotent retries that are answered from the store. It does not run on `/api/chat` or MCP invoke.
+
+Things to expect when you add a `response` channel:
+
+- Idempotent retries stored before the channel existed are answered unchecked until they expire.
+- Golden runs recorded from these triggers before the channel existed show a diff on replay, because replays apply the same check.
+- The history output is the checked version for runs that never paused. A run resumed after an approval stores the output it produced, unchecked; nobody external is waiting for it.
+
 ## What gets recorded
 
 Every check writes rows to `guard_events`: one per applied action, or one row for a clean verdict. A row holds:
 
-- the run, workflow, project and node, the placement (`node`, `agent`, `retrieval` for the [model boundary](#outside-content-at-the-model-boundary), or `gateway` for an [MCP gateway call](./mcp-gateway.md#content-rules-on-the-gateway)), the agent step and the tool name;
+- the run, workflow, project and node, the placement (`node`, `agent`, `retrieval` for the [model boundary](#outside-content-at-the-model-boundary), `response` or `request` for [external callers](#responses-to-external-callers), or `gateway` for an [MCP gateway call](./mcp-gateway.md#content-rules-on-the-gateway)), the agent step and the tool name;
 - the channel, detector, category, data class and score;
 - the requested action, the action that applied, the verdict's overall action, and whether the rule was in shadow mode;
 - masked evidence (for example `j•••@e••••••.com`) and the detector's message;
@@ -163,7 +183,7 @@ Rows never hold the content that was checked, the raw matched value, protection 
 
 - **Trace.** On the Runs page, an expanded run shows a **Content rules** panel: per Content Rules node and per agent step, the channel, tool, action, a shadow badge when shadow rules would have done more, masked evidence, the slowest detectors and the rule sets with their versions and source.
 - **Run tape.** Steps where the rules blocked, held for review, waited for approval or rewrote content carry a marker.
-- **Security page.** Verdict totals, verdicts per day by outcome, counts by action, category and channel, the detectors that fire most, what shadow rules would have blocked, and the latest events with links to their runs. Filter by project, workflow, rule set, source (workflow runs or MCP gateway calls) and window.
+- **Security page.** Verdict totals, verdicts per day by outcome, counts by action, category and channel, the detectors that fire most, what shadow rules would have blocked, and the latest events with links to their runs. Filter by project, workflow, rule set, source (workflow runs, responses to callers, incoming requests or MCP gateway calls) and window.
 - **Canvas.** Content Rules cards show their `pass`, `blocked` and `review` outputs and an empty protection slot; agents show a rules slot. The canvas key lists the rules and protection port colours.
 
 ## Limits and deployment notes

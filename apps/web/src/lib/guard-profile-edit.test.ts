@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  GUARD_EDITOR_CHANNELS,
+  applyResponsePreset,
   channelOf,
   duplicateDocument,
   setActionRule,
@@ -111,5 +113,41 @@ describe("fields the form does not show", () => {
     const view = channelOf(next, "final_output")!;
     expect(view.actions.ungrounded).toEqual({ action: "review", stream: "buffer", futureField: { keep: true } });
     expect(view.defaultAction).toMatchObject({ action: "review", stream: "buffer", providerId: "token_vault" });
+  });
+});
+
+describe("Check responses preset", () => {
+  it("copies the final answer channel into the response channel, rules and extra fields included", () => {
+    const withFinal = {
+      ...doc(),
+      channels: {
+        ...doc().channels,
+        final_output: {
+          detectors: [{ id: "dlp.patterns", threshold: 0.6 }],
+          actions: { credential: { action: "redact" }, ungrounded: { action: "block", stream: "buffer" } },
+          defaultAction: { action: "block" }
+        }
+      }
+    };
+    const next = applyResponsePreset(withFinal);
+    expect((next.channels as Record<string, unknown>).response).toEqual(withFinal.channels.final_output);
+    // A copy, not a shared reference: editing one channel leaves the other alone.
+    const edited = setDetector(next, "response", "injection.hidden_unicode", true);
+    expect(channelOf(edited, "final_output")!.detectors.map((entry) => entry.id)).toEqual(["dlp.patterns"]);
+    expect(withFinal.channels).not.toHaveProperty("response");
+  });
+
+  it("falls back to the data detector when there is no final answer channel", () => {
+    const next = applyResponsePreset(doc());
+    const response = channelOf(next, "response")!;
+    expect(response.detectors.map((entry) => entry.id)).toEqual(["dlp.patterns"]);
+    expect(response.actions.credential!.action).toBe("redact");
+    expect(response.actions.card_number!.action).toBe("mask");
+    expect(channelOf(next, "prompt")).toEqual(channelOf(doc(), "prompt"));
+  });
+
+  it("offers the response channel in the editor", () => {
+    expect(GUARD_EDITOR_CHANNELS).toContain("response");
+    expect(channelOf(doc(), "response")).toBeNull();
   });
 });

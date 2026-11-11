@@ -36,7 +36,7 @@ export function createCanaryDetector(): GuardDetector {
     id: CANARY_DETECTOR_ID,
     tier: "rule",
     description: "Canary tokens planted in the system prompt showing up in model output, tool arguments or the final answer.",
-    channels: ["model_output", "final_output", "tool_arguments"],
+    channels: ["model_output", "final_output", "tool_arguments", "response"],
     categories: ["canary_leak"],
     detect(input: GuardInput, context: DetectorContext) {
       const canaries = [...(input.canaries ?? []), ...(Array.isArray(context.options.canaries) ? (context.options.canaries as string[]) : [])];

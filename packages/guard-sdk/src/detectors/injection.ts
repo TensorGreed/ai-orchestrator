@@ -102,7 +102,7 @@ export function createDirectInjectionDetector(): GuardDetector {
     id: DIRECT_INJECTION_DETECTOR_ID,
     tier: "rule",
     description: "Instruction override, jailbreak personas, system-prompt extraction and encoded payloads in user input and model output.",
-    channels: ["prompt", "model_output", "final_output"],
+    channels: ["prompt", "model_output", "final_output", "response", "trigger_input"],
     categories: ["prompt_injection"],
     detect(_input: GuardInput, context: DetectorContext) {
       const hits = scanInjectionPatterns(context.text, patternsFromOptions(DIRECT_INJECTION_PATTERNS, context.options));
