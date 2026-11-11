@@ -349,6 +349,7 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "DELETE", url: "/api/log-streams/ls_x" },
       { method: "POST", url: `/api/projects/${project.id}/members`, payload: { userId: other.id, role: "project_admin" } },
       { method: "DELETE", url: `/api/projects/${project.id}/members/${other.id}` },
+      { method: "PUT", url: `/api/projects/${project.id}/retention`, payload: { classes: { runs: 30 } } },
       { method: "POST", url: "/api/custom-roles", payload: {} },
       { method: "PUT", url: "/api/custom-roles/role_x", payload: {} },
       { method: "DELETE", url: "/api/custom-roles/role_x" },

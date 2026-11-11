@@ -520,6 +520,15 @@ export class PostgresStore implements Store {
   async listRetentionRuns(...args: Parameters<Store["listRetentionRuns"]>): ReturnType<Store["listRetentionRuns"]> {
     return retention.listRetentionRuns(this.ctx, ...args);
   }
+  async listRetentionPolicies(...args: Parameters<Store["listRetentionPolicies"]>): ReturnType<Store["listRetentionPolicies"]> {
+    return retention.listRetentionPolicies(this.ctx, ...args);
+  }
+  async setRetentionPolicies(...args: Parameters<Store["setRetentionPolicies"]>): ReturnType<Store["setRetentionPolicies"]> {
+    return retention.setRetentionPolicies(this.ctx, ...args);
+  }
+  async listExistingExecutionIds(...args: Parameters<Store["listExistingExecutionIds"]>): ReturnType<Store["listExistingExecutionIds"]> {
+    return retention.listExistingExecutionIds(this.ctx, ...args);
+  }
   async saveWorkflowExecutionState(...args: Parameters<Store["saveWorkflowExecutionState"]>): ReturnType<Store["saveWorkflowExecutionState"]> {
     return executions.saveWorkflowExecutionState(this.ctx, ...args);
   }

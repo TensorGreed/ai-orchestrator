@@ -130,7 +130,7 @@ Every check writes rows to `guard_events`: one per applied action, or one row fo
 - masked evidence (for example `j•••@e••••••.com`) and the detector's message;
 - the rule set id, version and hash, the verdict's latency, whether the budget ran out and which detectors it skipped.
 
-Rows never hold the content that was checked, the raw matched value, protection tokens or keys. Evidence is masked inside the engine before it reaches the workflow engine, so nothing raw is available to write. Pattern detectors (egress, exfiltration, SQL, command and path) keep a short excerpt: URL query strings and fragments are dropped (scheme, host and path stay), SQL string literals are blanked, and anything the data rule patterns recognise in the excerpt or in a parser error is masked. Events follow `EXECUTION_HISTORY_RETENTION_DAYS` and are deleted with their workflow.
+Rows never hold the content that was checked, the raw matched value, protection tokens or keys. Evidence is masked inside the engine before it reaches the workflow engine, so nothing raw is available to write. Pattern detectors (egress, exfiltration, SQL, command and path) keep a short excerpt: URL query strings and fragments are dropped (scheme, host and path stay), SQL string literals are blanked, and anything the data rule patterns recognise in the excerpt or in a parser error is masked. Events follow `EXECUTION_HISTORY_RETENTION_DAYS` and are deleted with their workflow. A project can keep its rule events longer or shorter than its runs ([per-project retention](../operations/data-retention.md#per-project-retention)), for example a year for an audit; an event that outlives its run shows "Run no longer stored" on the Security page instead of a run link.
 
 ## Where verdicts show up
 

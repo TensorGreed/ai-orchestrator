@@ -131,6 +131,7 @@ import { CredentialExpiry, RotateCredentialButton, rotatedNotice } from "./Crede
 import { AuditSigningKeysSection } from "./AuditSigningKeysSection";
 import { NetworkSettingsTab } from "./NetworkSettingsTab";
 import { DataProtectionTab } from "./DataProtectionTab";
+import { ProjectRetentionTab } from "./ProjectRetentionTab";
 import { ServiceAccountsTab } from "./ServiceAccountsTab";
 import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
 import { describeKeyScopes } from "../lib/key-scopes";
@@ -142,6 +143,7 @@ type SettingsTab =
   | "users"
   | "api-keys"
   | "members"
+  | "project-retention"
   | "roles"
   | "sso"
   | "external-secrets"
@@ -207,6 +209,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
       label: "Workspace",
       tabs: [
         { id: "members", label: "Project Members" },
+        { id: "project-retention", label: "Data retention" },
         { id: "variables", label: "Variables" },
         { id: "source-control", label: "Source Control", restricted: !isAdmin }
       ]
@@ -301,6 +304,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
             currentUserRole={authUser.role}
           />
         )}
+        {tab === "project-retention" && <ProjectRetentionTab projects={projects} initialProjectId={activeProjectId} />}
         {tab === "users" && isAdmin && <UsersAdminTab currentUserId={authUser.id} />}
         {tab === "roles" && isAdmin && <CustomRolesTab projects={projects} initialProjectId={activeProjectId} />}
         {tab === "sso" && isAdmin && <SsoMappingsTab projects={projects} />}

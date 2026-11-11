@@ -790,6 +790,7 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Import MCP servers (creates secrets) | `POST /api/mcp/servers/import` |
 | Add or remove a project member | `POST /api/projects/:id/members`, `DELETE /api/projects/:id/members/:userId` |
 | Create, change or delete a custom role | `POST /api/custom-roles`, `PUT /api/custom-roles/:id`, `DELETE /api/custom-roles/:id` |
+| Change a project's data retention | `PUT /api/projects/:id/retention` |
 
 **API keys.** With step-up on, personal API keys are refused on these actions with `403 step_up_required`
 (`stepUp.credential: "api_key"`): a key cannot answer a code, and a stolen personal key should not mint more keys or

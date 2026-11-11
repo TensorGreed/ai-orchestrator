@@ -15,14 +15,27 @@
  * when rows went, one `retention.purged` audit row. After-run purges write neither: their counts are added to the next
  * recorded purge. Every purge adds what it deleted to the `<prefix>_retention_deleted_total{class}` counter.
  *
- * Seams for later steps: `effectiveRetention(projectId, class)` resolves a class's days (deployment only today;
- * per-project values slot in between), and every class is a step, so another deletion source registers as one.
+ * Per project: runs, tool calls, rule events and agent memory can be set per project (`retention_policies`, within
+ * RETENTION_MIN_DAYS and RETENTION_MAX_DAYS). A purge of such a class runs one pass per project with a value of its
+ * own, then one at the deployment's cutoff for every other row; `effectiveRetention(projectId, class)` resolves the
+ * same way. Every class is a step, so another deletion source registers as one.
  */
 import crypto from "node:crypto";
 import {
   GUARD_SIMULATION_RETENTION_DAYS,
+  RETENTION_DATA_CLASSES,
+  RETENTION_DATA_CLASS_LABELS,
+  RETENTION_DATA_CLASS_PURGES,
+  RETENTION_ADMIN_TO_SHORTEN,
+  RETENTION_EXEMPTIONS_TEXT,
   RETENTION_PURGE_CLASSES,
   RETENTION_PURGE_CLASS_LABELS,
+  clampRetentionDays,
+  retentionDataClassOf,
+  type ProjectRetentionOverride,
+  type ProjectRetentionView,
+  type RetentionBounds,
+  type RetentionDataClass,
   type RetentionAdminView,
   type RetentionClassView,
   type RetentionPurgeClass,
@@ -45,6 +58,29 @@ const DEFAULT_NUDGE_INTERVAL_MS = 60_000;
 const DEFAULT_LEASE_TTL_MS = 15 * 60_000;
 const MAX_ERROR_LENGTH = 1000;
 
+/**
+ * What one purge reads about projects: per class a project can set, each project with a value of its own (its days
+ * within the bounds); and, when agent memory has project values, which projects claim each older session key.
+ */
+interface ProjectOverrides {
+  byClass: Map<RetentionDataClass, Map<string, number>>;
+  legacyMemoryOwners: ReadonlyMap<string, readonly string[]>;
+}
+
+const NO_OVERRIDES: ProjectOverrides = { byClass: new Map(), legacyMemoryOwners: new Map() };
+
+/**
+ * One cutoff of a per-project purge (13.3 R1): one project's rows before its own cutoff, or everyone else's
+ * (`excludeProjects`: the projects with a value of their own, which their own passes cover) before the deployment's.
+ */
+export interface RetentionPass {
+  before: string;
+  projectId?: string;
+  excludeProjects?: readonly string[];
+  /** Agent memory: older session keys by exact value (RetentionScope.legacyNamespaces). */
+  legacyNamespaces?: readonly string[];
+}
+
 /** One class of a purge. */
 export interface RetentionStep {
   class: RetentionPurgeClass;
@@ -52,10 +88,19 @@ export interface RetentionStep {
   setting: string;
   /** Days kept; 0 = kept forever (the step is skipped). */
   days(): number;
-  /** Deletes what is due before `before`, at most `limit` rows per table. */
-  run(input: { before: string; limit: number }): Promise<{ deleted: number; capped: boolean }>;
-  /** Rows due before `before`, up to `cap`; absent when the class cannot count cheaply. */
-  countDue?(input: { before: string; cap: number }): Promise<number>;
+  /**
+   * Whether the step honours `passes` (per-project cutoffs). A class that projects can set but whose step does not is
+   * skipped while any project has a value for it, so a project that keeps longer never loses rows to the deployment's
+   * cutoff.
+   */
+  scoped?: boolean;
+  /**
+   * Deletes what is due before `before`, at most `limit` rows per table. A scoped step gets `passes` instead (each
+   * table's `limit` shared across them); `before` is then the deployment's cutoff, or the earliest pass's.
+   */
+  run(input: { before: string; limit: number; passes?: readonly RetentionPass[] }): Promise<{ deleted: number; capped: boolean }>;
+  /** Rows due before `before` (or in `passes`), up to `cap`; absent when the class cannot count cheaply. */
+  countDue?(input: { before: string; cap: number; passes?: readonly RetentionPass[] }): Promise<number>;
 }
 
 export interface RetentionMetrics {
@@ -74,6 +119,11 @@ export interface RetentionServiceOptions {
   executionHistoryDays: number;
   /** EVAL_RUN_RETENTION_DAYS (0 = keep). */
   evalRunDays: number;
+  /**
+   * Which projects claim each older session key (a workflow's own default namespace, `<workflowId>:<nodeId>`). Read
+   * only when a project has its own agent-memory value; without it, older keys belong to no project.
+   */
+  legacyMemoryOwners?: () => Promise<ReadonlyMap<string, readonly string[]>>;
   /** EXECUTION_HISTORY_PRUNE_INTERVAL_MS. */
   intervalMs: number;
   instanceId: string;
@@ -105,21 +155,42 @@ function tableStep(
     class: retentionClass,
     setting,
     days,
-    async run({ before, limit }) {
+    scoped: true,
+    async run({ before, limit, passes }) {
       let deleted = 0;
       let capped = false;
+      const list = passes ?? [{ before }];
       for (const table of tables) {
-        const n = await store.pruneRetentionTable(table, { before, limit });
-        deleted += n;
-        if (n >= limit) capped = true;
+        // One cap per table for the whole purge. Each pass first gets an equal share, so one project's backlog cannot
+        // take the whole cap from the others; what a pass leaves unused then goes to the passes still capped, in order.
+        let remaining = limit;
+        const share = Math.max(1, Math.ceil(limit / list.length));
+        const full: RetentionPass[] = [];
+        for (const pass of list) {
+          if (remaining <= 0) break;
+          const allowed = Math.min(share, remaining);
+          const n = await store.pruneRetentionTable(table, { ...pass, limit: allowed });
+          deleted += n;
+          remaining -= n;
+          if (n >= allowed) full.push(pass);
+        }
+        for (const pass of full) {
+          if (remaining <= 0) break;
+          const n = await store.pruneRetentionTable(table, { ...pass, limit: remaining });
+          deleted += n;
+          remaining -= n;
+        }
+        if (remaining <= 0) capped = true;
       }
       return { deleted, capped };
     },
-    async countDue({ before, cap }) {
+    async countDue({ before, cap, passes }) {
       let total = 0;
       for (const table of tables) {
-        if (total >= cap) break;
-        total += await store.countRetentionDue(table, { before, cap: cap - total });
+        for (const pass of passes ?? [{ before }]) {
+          if (total >= cap) break;
+          total += await store.countRetentionDue(table, { ...pass, cap: cap - total });
+        }
       }
       return Math.min(total, cap);
     }
@@ -186,13 +257,105 @@ export class RetentionService {
   }
 
   /**
-   * The days `retentionClass` keeps rows of `projectId` (null: rows of no project). Deployment values only for now;
-   * per-project values are resolved here, between the deployment value and the result.
+   * The days `retentionClass` keeps rows of `projectId` (null: rows of no project): the project's own value for the
+   * class it follows (within the deployment's bounds), else the deployment's. One function walks the scopes, so a
+   * scope between project and deployment slots in here.
    */
-  async effectiveRetention(_projectId: string | null, retentionClass: RetentionPurgeClass): Promise<{ days: number; source: "deployment"; setting: string } | null> {
+  async effectiveRetention(
+    projectId: string | null,
+    retentionClass: RetentionPurgeClass
+  ): Promise<{ days: number; source: "deployment" | "project"; setting: string } | null> {
     const step = this.steps.get(retentionClass);
     if (!step) return null;
+    const dataClass = retentionDataClassOf(retentionClass);
+    if (projectId !== null && dataClass) {
+      const own = (await this.options.store.listRetentionPolicies({ scopeId: projectId })).find((policy) => policy.dataClass === dataClass);
+      if (own) return { days: clampRetentionDays(own.days, this.bounds()), source: "project", setting: "project" };
+    }
     return { days: sanitizeDays(step.days()), source: "deployment", setting: step.setting };
+  }
+
+  /** The range a project's value must fall in (RETENTION_MIN_DAYS, RETENTION_MAX_DAYS). */
+  bounds(): RetentionBounds {
+    return { minDays: this.options.settings.minDays, maxDays: this.options.settings.maxDays };
+  }
+
+  /** The deployment's value for a per-project class (from the purge class it is named after) and its setting. */
+  deploymentRetention(dataClass: RetentionDataClass): { days: number; setting: string } {
+    const step = this.steps.get(RETENTION_DATA_CLASS_PURGES[dataClass][0]);
+    return step ? { days: sanitizeDays(step.days()), setting: step.setting } : { days: 0, setting: "" };
+  }
+
+  /** A project's values, with what each class inherits and what purges apply (`GET /api/projects/:id/retention`). */
+  async projectView(projectId: string, canEdit: boolean, deploymentAdmin = false): Promise<ProjectRetentionView> {
+    const bounds = this.bounds();
+    const own = new Map((await this.options.store.listRetentionPolicies({ scopeId: projectId })).map((policy) => [policy.dataClass, policy]));
+    return {
+      projectId,
+      bounds,
+      exemptions: RETENTION_EXEMPTIONS_TEXT,
+      canEdit,
+      deploymentAdmin,
+      classes: RETENTION_DATA_CLASSES.map((dataClass) => {
+        const deployment = this.deploymentRetention(dataClass);
+        const policy = own.get(dataClass);
+        const effectiveDays = policy ? clampRetentionDays(policy.days, bounds) : deployment.days;
+        return {
+          class: dataClass,
+          ...RETENTION_DATA_CLASS_LABELS[dataClass],
+          deploymentDays: deployment.days,
+          deploymentSetting: deployment.setting,
+          days: policy ? policy.days : null,
+          effectiveDays,
+          clamped: policy ? effectiveDays !== policy.days : false,
+          shortenNeedsAdmin: RETENTION_ADMIN_TO_SHORTEN.includes(dataClass),
+          updatedBy: policy?.updatedBy ?? null,
+          updatedAt: policy?.updatedAt ?? null
+        };
+      })
+    };
+  }
+
+  /**
+   * The cutoffs one purge of `retentionClass` runs with: one pass per project with its own value (kept forever: no
+   * pass), then one for everyone else at the deployment's cutoff. Classes projects cannot set get the deployment's
+   * cutoff alone. Empty when nothing of the class is due.
+   */
+  private passesFor(retentionClass: RetentionPurgeClass, deploymentDays: number, overrides: ProjectOverrides, now: number): RetentionPass[] {
+    const cutoff = (days: number) => new Date(now - days * DAY_MS).toISOString();
+    const dataClass = retentionDataClassOf(retentionClass);
+    const own = dataClass ? overrides.byClass.get(dataClass) : undefined;
+    if (!own || own.size === 0) return deploymentDays > 0 ? [{ before: cutoff(deploymentDays) }] : [];
+    // Agent memory: an older session key goes with a project only when that project alone claims it (as run-scope.ts
+    // reads it); the deployment pass leaves every key an excluded project claims, even one shared with another project.
+    const memory = dataClass === "agent_memory";
+    const legacyOf = (keep: (owners: readonly string[]) => boolean): string[] =>
+      memory ? [...overrides.legacyMemoryOwners].filter(([, owners]) => keep(owners)).map(([namespace]) => namespace) : [];
+    const passes: RetentionPass[] = [];
+    for (const [projectId, days] of own) {
+      if (days <= 0) continue;
+      const legacy = legacyOf((owners) => owners.length === 1 && owners[0] === projectId);
+      passes.push({ before: cutoff(days), projectId, ...(legacy.length > 0 ? { legacyNamespaces: legacy } : {}) });
+    }
+    if (deploymentDays > 0) {
+      const legacy = legacyOf((owners) => owners.some((owner) => own.has(owner)));
+      passes.push({ before: cutoff(deploymentDays), excludeProjects: [...own.keys()], ...(legacy.length > 0 ? { legacyNamespaces: legacy } : {}) });
+    }
+    return passes;
+  }
+
+  /** Every project's values, per class, clamped to the bounds (one read per purge). */
+  private async loadOverrides(): Promise<ProjectOverrides> {
+    const bounds = this.bounds();
+    const byClass: ProjectOverrides["byClass"] = new Map();
+    for (const policy of await this.options.store.listRetentionPolicies()) {
+      let own = byClass.get(policy.dataClass);
+      if (!own) byClass.set(policy.dataClass, (own = new Map()));
+      own.set(policy.scopeId, clampRetentionDays(policy.days, bounds));
+    }
+    // Older session keys matter only once a project has its own agent-memory value.
+    const memoryOwners = byClass.has("agent_memory") && this.options.legacyMemoryOwners ? await this.options.legacyMemoryOwners() : new Map();
+    return { byClass, legacyMemoryOwners: memoryOwners };
   }
 
   /** Starts the interval purges and runs the start-up purge. */
@@ -270,16 +433,33 @@ export class RetentionService {
     const capped: RetentionPurgeClass[] = [];
     const errors: string[] = [];
     let deleted = 0;
+    // Projects' own values, read once. Unreadable: the classes projects can set are skipped this time, since the
+    // deployment's cutoff alone would delete rows a project keeps longer.
+    let overrides: ProjectOverrides | null;
+    try {
+      overrides = await this.loadOverrides();
+    } catch (error) {
+      overrides = null;
+      errors.push(`project values: ${this.message(error)}`);
+      this.options.logger?.warn({ reason, error: this.message(error) }, "Retention purge could not read project values");
+    }
     try {
       for (const retentionClass of RETENTION_PURGE_CLASSES) {
         if (this.stopped) break;
         const step = this.steps.get(retentionClass);
         if (!step) continue;
-        const days = sanitizeDays(step.days());
-        if (days <= 0) continue;
-        const before = new Date(this.now().getTime() - days * DAY_MS).toISOString();
+        const projectSettable = retentionDataClassOf(retentionClass) !== null;
+        if (projectSettable && overrides === null) continue;
+        const passes = this.passesFor(retentionClass, sanitizeDays(step.days()), overrides ?? NO_OVERRIDES, this.now().getTime());
+        if (passes.length === 0) continue;
+        const scopedPasses = passes.some((pass) => pass.projectId !== undefined || pass.excludeProjects !== undefined);
+        if (scopedPasses && !step.scoped) {
+          errors.push(`${retentionClass}: skipped, its purge cannot apply project values`);
+          continue;
+        }
+        const before = passes.reduce((earliest, pass) => (pass.before < earliest ? pass.before : earliest), passes[0].before);
         try {
-          const result = await step.run({ before, limit: this.options.settings.maxRowsPerTick });
+          const result = await step.run({ before, limit: this.options.settings.maxRowsPerTick, ...(scopedPasses ? { passes } : {}) });
           if (result.deleted > 0) {
             counts[retentionClass] = result.deleted;
             deleted += result.deleted;
@@ -389,15 +569,27 @@ export class RetentionService {
   async view(options: { runs?: number } = {}): Promise<RetentionAdminView> {
     const now = this.now().getTime();
     const classes: RetentionClassView[] = [];
+    // Project values unreadable: the page still renders, without a backlog for the classes projects can set.
+    let overrides: ProjectOverrides | null;
+    try {
+      overrides = await this.loadOverrides();
+    } catch (error) {
+      overrides = null;
+      this.options.logger?.warn({ error: this.message(error) }, "Failed to read project retention values");
+    }
     for (const retentionClass of RETENTION_PURGE_CLASSES) {
       const step = this.steps.get(retentionClass);
       if (!step) continue;
       const days = sanitizeDays(step.days());
       const cutoff = days > 0 ? new Date(now - days * DAY_MS).toISOString() : null;
+      // The backlog counts what the next purge would take: projects' own cutoffs included.
+      const unknown = overrides === null && retentionDataClassOf(retentionClass) !== null;
+      const passes = unknown ? [] : this.passesFor(retentionClass, days, overrides ?? NO_OVERRIDES, now);
+      const scopedPasses = passes.some((pass) => pass.projectId !== undefined || pass.excludeProjects !== undefined);
       let backlog: number | null = null;
-      if (cutoff && step.countDue) {
+      if (passes.length > 0 && step.countDue && (!scopedPasses || step.scoped)) {
         try {
-          backlog = await step.countDue({ before: cutoff, cap: RETENTION_BACKLOG_CAP });
+          backlog = await step.countDue({ before: passes[0].before, cap: RETENTION_BACKLOG_CAP, ...(scopedPasses ? { passes } : {}) });
         } catch (error) {
           this.options.logger?.warn({ class: retentionClass, error: this.message(error) }, "Failed to count the retention backlog");
         }
@@ -422,8 +614,22 @@ export class RetentionService {
       classes,
       lastRun: runs[0] ?? null,
       nextRunAt: lastScheduled ? new Date(Date.parse(lastScheduled.startedAt) + this.options.intervalMs).toISOString() : null,
-      runs
+      runs,
+      projectOverrides: overrides === null ? [] : await this.projectOverrides().catch(() => [])
     };
+  }
+
+  /** The projects with values of their own, with their names, for the admin page. */
+  private async projectOverrides(): Promise<ProjectRetentionOverride[]> {
+    const byProject = new Map<string, ProjectRetentionOverride["classes"]>();
+    for (const policy of await this.options.store.listRetentionPolicies()) {
+      const classes = byProject.get(policy.scopeId) ?? {};
+      classes[policy.dataClass] = policy.days;
+      byProject.set(policy.scopeId, classes);
+    }
+    if (byProject.size === 0) return [];
+    const names = new Map((await this.options.store.listProjects()).map((project) => [project.id, project.name]));
+    return [...byProject.entries()].map(([projectId, classes]) => ({ projectId, projectName: names.get(projectId) ?? null, classes }));
   }
 
   private activeClassCount(): number {
