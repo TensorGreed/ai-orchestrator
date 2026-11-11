@@ -14342,13 +14342,18 @@ export class SqliteStore implements Store {
   async getGatewayGuardBindings(
     toolsetId: string,
     clientId: string,
-    setScope: "toolset" | "ai_route_set" = "toolset"
-  ): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }> {
+    setScope: "toolset" | "ai_route_set" = "toolset",
+    projectId?: string | null
+  ): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null; project: GuardBindingRecord | null }> {
     const rows = this.queryAll<GuardBindingRow>(
-      `SELECT * FROM guard_bindings WHERE (scope = ? AND scope_id = ?) OR (scope = 'mcp_client' AND scope_id = ?)`,
-      [setScope, toolsetId, clientId]
+      `SELECT * FROM guard_bindings WHERE (scope = ? AND scope_id = ?) OR (scope = 'mcp_client' AND scope_id = ?) OR (scope = 'project' AND scope_id = ?)`,
+      [setScope, toolsetId, clientId, projectId ?? null]
     ).map(mapGuardBindingRow);
-    return { toolset: rows.find((row) => row.scope === setScope) ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
+    return {
+      toolset: rows.find((row) => row.scope === setScope) ?? null,
+      client: rows.find((row) => row.scope === "mcp_client") ?? null,
+      project: projectId ? (rows.find((row) => row.scope === "project") ?? null) : null
+    };
   }
 
   async listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]> {

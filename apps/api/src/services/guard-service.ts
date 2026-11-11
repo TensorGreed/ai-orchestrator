@@ -109,6 +109,11 @@ const RESERVED_GUARD_PROFILE_IDS: ReadonlySet<string> = new Set([GUARD_DESTINATI
 export interface GuardServiceOptions {
   /** Apply the built-in default profile when nothing is bound (GUARD_AUTO_APPLY). */
   autoApply: boolean;
+  /**
+   * Phase 12 coverage (D13, GATEWAY_RULES_WITHOUT_BINDING) — the project's enforced rule set and the deployment's
+   * destination rules check gateway calls with no toolset, route set or client binding. Default true.
+   */
+  gatewayRulesWithoutBinding?: boolean;
   logger?: (message: string, metadata?: Record<string, unknown>) => void;
   /** Phase 16 — the deployment's data destination rows, read when a run first needs them (once per run). */
   destinationRows?: () => Promise<DataDestinationRow[]>;
@@ -224,6 +229,8 @@ const GATEWAY_MODEL_CHECK_MESSAGE = "Checks that call a model (safety by model, 
 export class GuardService {
   private readonly parsedProfiles = new Map<string, GuardProfile>();
   private readonly loadedProfiles = new Map<string, { revision: number; value: ResolvedGuardProfile | undefined }>();
+  /** The deployment's destination rules profile, per guard profile revision (read on every gateway call). */
+  private deploymentProfileCache: { revision: number; value: ResolvedGuardProfile | undefined } | undefined;
 
   constructor(
     private readonly store: Store,
@@ -771,9 +778,11 @@ export class GuardService {
    *   4. the deployment's destination rules, last.
    * Stacked like a run's: the most severe action wins, so each later profile only tightens.
    *
-   * Only a toolset or client binding turns this on: with neither, `refs` is empty and the gateway runs no Guard at
-   * all, exactly as before (a project's enforced profile or GUARD_AUTO_APPLY alone never start checking gateway
-   * calls). `refs`: the profiles a workflow tool's run carries (pinned; the deployment's rules apply to runs anyway).
+   * With neither a toolset nor a client binding, the project's enforced rule set and the deployment's destination
+   * rules still apply (Phase 12 coverage, D13: an admin who enforces a rule set on a project expects its gateways
+   * covered too). With none of the four, the stack is empty and the gateway runs no content rules, exactly as before.
+   * GUARD_AUTO_APPLY and the built-in rule set never apply to gateway calls. `refs`: the profiles a workflow tool's run
+   * carries (pinned; the deployment's rules apply to runs anyway).
    */
   async resolveGateway(context: {
     toolsetId: string;
@@ -782,8 +791,9 @@ export class GuardService {
     /** 12.6b — `ai_route_set`: `toolsetId` is an AI gateway route set, whose binding stands where a toolset's does. */
     setScope?: "toolset" | "ai_route_set";
   }): Promise<{ resolution: GuardRunResolution; refs: GatewayGuardProfileRef[] }> {
-    // One read for both bindings: a deployment with no gateway binding pays one indexed lookup per call, no more.
-    const bindings = await this.store.getGatewayGuardBindings(context.toolsetId, context.clientId, context.setScope ?? "toolset");
+    // One read for the three bindings (toolset or route set, client, project); the deployment's destination rules are
+    // kept per profile revision (D13).
+    const bindings = await this.store.getGatewayGuardBindings(context.toolsetId, context.clientId, context.setScope ?? "toolset", context.projectId);
     const asBinding = (record: GuardBindingRecord | null) =>
       record ? { mode: record.mode as GuardBindingMode, profileId: record.profileId } : { mode: "inherit" as GuardBindingMode, profileId: null };
     const toolset = asBinding(bindings.toolset);
@@ -792,14 +802,20 @@ export class GuardService {
     const clientProfile = client.mode === "override" && client.profileId ? await this.loadProfile(client.profileId) : undefined;
     const chain: GuardBindingLevel[] = [];
     const level = (entry: GuardBindingLevel, resolved?: ResolvedGuardProfile) => chain.push({ ...entry, ...(resolved ? { version: resolved.version } : {}) });
-    if (!toolsetProfile && !clientProfile) {
+    if (!toolsetProfile && !clientProfile && this.options.gatewayRulesWithoutBinding === false) {
       level({ level: "toolset", mode: toolset.mode, profileId: toolset.profileId });
       level({ level: "mcp_client", mode: client.mode, profileId: client.profileId });
       return { resolution: { source: "none", stack: [], chain }, refs: [] };
     }
     // A toolset without a project has no project floor (its tool rules see no project either).
-    const project = context.projectId ? await this.getBinding("project", context.projectId) : null;
+    const project = context.projectId ? asBinding(bindings.project) : null;
     const enforced = project?.mode === "enforced" && project.profileId ? await this.loadProfile(project.profileId) : undefined;
+    const deployment = await this.deploymentProfile();
+    if (!toolsetProfile && !clientProfile && !enforced && !deployment) {
+      level({ level: "toolset", mode: toolset.mode, profileId: toolset.profileId });
+      level({ level: "mcp_client", mode: client.mode, profileId: client.profileId });
+      return { resolution: { source: "none", stack: [], chain }, refs: [] };
+    }
     if (project) level({ level: "project", mode: project.mode === "enforced" ? "enforced" : "inherit", profileId: project.mode === "enforced" ? project.profileId : null }, enforced);
     level({ level: "toolset", mode: toolset.mode, profileId: toolset.profileId }, toolsetProfile);
     level({ level: "mcp_client", mode: client.mode, profileId: client.profileId }, clientProfile);
@@ -811,8 +827,8 @@ export class GuardService {
       stack.push(entry);
       refs.push({ profileId: entry.profileId, version: entry.version, level: at });
     }
-    const source: GuardRunResolution["source"] = enforced ? "enforced" : toolsetProfile ? "toolset" : "mcp_client";
-    return { resolution: GuardService.withDeployment({ source, ...(enforced ? { enforced } : {}), stack, chain }, await this.deploymentProfile()), refs };
+    const source: GuardRunResolution["source"] = enforced ? "enforced" : toolsetProfile ? "toolset" : clientProfile ? "mcp_client" : "none";
+    return { resolution: GuardService.withDeployment({ source, ...(enforced ? { enforced } : {}), stack, chain }, deployment), refs };
   }
 
   /** 12.6 — the engine's Guard dependencies for one gateway server tool call, for a resolution from `resolveGateway`. */
@@ -833,9 +849,17 @@ export class GuardService {
    * one up and it has rules; undefined otherwise (nothing changes then).
    */
   async deploymentProfile(): Promise<ResolvedGuardProfile | undefined> {
-    if (!await this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) return undefined;
-    const loaded = await this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
-    return loaded && profileHasDestinationRules(loaded.profile) ? loaded : undefined;
+    // Kept per guard profile revision (bumped by every profile write, from any process), so a gateway call with no
+    // destination rules set up costs one revision read here, not a profile lookup.
+    const revision = await this.store.guardProfileRevision?.();
+    if (revision !== undefined && this.deploymentProfileCache?.revision === revision) return this.deploymentProfileCache.value;
+    let value: ResolvedGuardProfile | undefined;
+    if (await this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) {
+      const loaded = await this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
+      value = loaded && profileHasDestinationRules(loaded.profile) ? loaded : undefined;
+    }
+    if (revision !== undefined) this.deploymentProfileCache = { revision, value };
+    return value;
   }
 
   /** Appends the deployment's destination rules profile after a resolution's own profiles (never replacing one). */

@@ -110,6 +110,7 @@ export function guardVerdictMemoKey(profileHashes: readonly string[], input: Gua
     ignoredValues: input.ignoredValues ? [...input.ignoredValues].sort() : undefined,
     destinationOnly: input.destinationOnly,
     sources: input.sources,
+    streamWindow: input.streamWindow,
     // Absent unless set, so keys of complete checks are unchanged.
     partial: input.partial === true ? true : undefined
   };

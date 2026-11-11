@@ -104,10 +104,17 @@ function contentOf(content: unknown, at: string): { text: string; images: ChatMe
   return { text: texts.join("\n"), images };
 }
 
-/** Maps OpenAI messages onto the provider registry's: `developer` is a system message; tool call arguments parsed. */
-export function toChatMessages(messages: OpenAiChatMessage[]): { messages: ChatMessage[]; hasImages: boolean } {
+/**
+ * Maps OpenAI messages onto the provider registry's: `developer` is a system message; tool call arguments parsed.
+ * `untrusted`: the indexes of `user` messages marked `l2m: { untrusted: true }` (D17). The mark, like every field the
+ * mapping does not name, is never sent upstream.
+ */
+export function toChatMessages(messages: OpenAiChatMessage[]): { messages: ChatMessage[]; hasImages: boolean; untrusted: number[] } {
   let hasImages = false;
+  const untrusted: number[] = [];
   const out = messages.map((message, index): ChatMessage => {
+    const mark = (message as { l2m?: unknown }).l2m;
+    if (message.role === "user" && mark && typeof mark === "object" && (mark as { untrusted?: unknown }).untrusted === true) untrusted.push(index);
     const at = `messages[${index}].content`;
     const { text, images } = contentOf((message as { content?: unknown }).content, at);
     if (images.length > 0 && message.role !== "user") throw aiGatewayErrors.invalidRequest("Only user messages may carry images.", at);
@@ -130,7 +137,7 @@ export function toChatMessages(messages: OpenAiChatMessage[]): { messages: ChatM
         return { role: "tool", content: text, toolCallId: message.tool_call_id };
     }
   });
-  return { messages: out, hasImages };
+  return { messages: out, hasImages, untrusted };
 }
 
 export function toToolDefinitions(request: OpenAiChatCompletionRequest): ToolDefinition[] | undefined {

@@ -88,6 +88,8 @@ export interface GuardStackResult {
   content: unknown;
   transformed: boolean;
   verdicts: GuardVerdict[];
+  /** Phase 12 coverage — with `GuardInput.streamWindow`: the released part in the coordinates of `content`. */
+  window?: GuardSpan;
 }
 
 /**
@@ -104,9 +106,12 @@ export async function evaluateGuardStack(
   const verdicts: GuardVerdict[] = [];
   let content = input.content;
   let transformed = false;
+  // Phase 12 coverage — a stream window moves with each profile's rewrites (they all lie inside it).
+  let window = input.streamWindow;
   for (const profile of profiles) {
-    const verdict = await evaluateGuard(profile, { ...input, content }, options);
+    const verdict = await evaluateGuard(profile, { ...input, content, ...(window ? { streamWindow: window } : {}) }, options);
     verdicts.push(verdict);
+    if (verdict.window) window = verdict.window;
     if (verdict.blocked) break;
     if (verdict.transformed) {
       content = verdict.content;
@@ -114,7 +119,13 @@ export async function evaluateGuardStack(
     }
   }
   const action = mostSevereAction(verdicts.map((verdict) => verdict.action));
-  return { action, content: action === "block" ? input.content : content, transformed: action !== "block" && transformed, verdicts };
+  return {
+    action,
+    content: action === "block" ? input.content : content,
+    transformed: action !== "block" && transformed,
+    verdicts,
+    ...(input.streamWindow && window && action !== "block" ? { window } : {})
+  };
 }
 
 /**

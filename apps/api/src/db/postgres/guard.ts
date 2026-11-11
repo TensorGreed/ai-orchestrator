@@ -312,12 +312,20 @@ export async function getGatewayGuardBindings(
   ctx: PgContext,
   toolsetId: string,
   clientId: string,
-  setScope: "toolset" | "ai_route_set" = "toolset"
-): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }> {
+  setScope: "toolset" | "ai_route_set" = "toolset",
+  projectId?: string | null
+): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null; project: GuardBindingRecord | null }> {
   const rows = (
-    await ctx.query<Row>(`SELECT * FROM guard_bindings WHERE (scope = $1 AND scope_id = $2) OR (scope = 'mcp_client' AND scope_id = $3)`, [setScope, toolsetId, clientId])
+    await ctx.query<Row>(
+      `SELECT * FROM guard_bindings WHERE (scope = $1 AND scope_id = $2) OR (scope = 'mcp_client' AND scope_id = $3) OR (scope = 'project' AND scope_id = $4)`,
+      [setScope, toolsetId, clientId, projectId ?? null]
+    )
   ).map(mapGuardBindingRow);
-  return { toolset: rows.find((row) => row.scope === setScope) ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
+  return {
+    toolset: rows.find((row) => row.scope === setScope) ?? null,
+    client: rows.find((row) => row.scope === "mcp_client") ?? null,
+    project: projectId ? (rows.find((row) => row.scope === "project") ?? null) : null
+  };
 }
 
 export async function listGuardBindingsForProfile(ctx: PgContext, profileId: string): Promise<GuardBindingRecord[]> {

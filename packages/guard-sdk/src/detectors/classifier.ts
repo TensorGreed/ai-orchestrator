@@ -45,6 +45,10 @@ export function createInjectionClassifierDetector(classifier: GuardClassifier = 
     description: `Injection classifier (${classifier.id} ${classifier.version}); the rule pack stands in when no model is registered.`,
     channels: ["prompt", "tool_result", "model_output", "final_output", "response", "trigger_input"],
     categories: ["prompt_injection", "indirect_injection"],
+    // One score for the whole text: checked a piece at a time (a conversation's turns), it could miss what only the
+    // whole shows, so a clean result is never reused for a piece, and it never judges part of a stream on its own.
+    memoisable: false,
+    nonStreamLocal: true,
     async detect(input: GuardInput, context: DetectorContext) {
       const result = await classifier.classify(context.text, input.channel);
       const score = clampScore(result.score);
