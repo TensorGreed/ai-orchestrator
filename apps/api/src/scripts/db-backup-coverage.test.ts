@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SqliteStore } from "../db/database.js";
 import { AuthService } from "../services/auth-service.js";
 import { SecretService } from "../services/secret-service.js";
+import { SubjectRequestService } from "../services/subject-request-service.js";
 import {
   ENCRYPTED_COLUMNS,
   EXPORTED_TABLES,
@@ -135,6 +136,53 @@ describe("db:export table coverage", () => {
       const check = new Database(dest, { readonly: true });
       expect(check.prepare(`SELECT COUNT(*) AS n FROM knowledge_base_chunks_fts WHERE knowledge_base_chunks_fts MATCH 'refund'`).get()).toEqual({ n: 1 });
       check.close();
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it("keeps subject references matching across a master-key change: the subject key is re-sealed, exports stay out", async () => {
+    const source = path.join(dir, "subject-source.db");
+    const store = await SqliteStore.create(source);
+    const before = new SubjectRequestService({
+      store,
+      secrets: new SecretService(store, KEY_A),
+      matcher: async () => ({ classesTried: [], match: () => null }),
+      instanceId: "a",
+      isLeader: () => false,
+      dueDays: 30,
+      exportTtlHours: 72
+    });
+    const hash = await before.hashValue("CUST-1");
+    await store.addSubjectRefs([{ hash, kind: "run", rowId: "run-1", projectId: null, workflowId: "wf", createdAt: "2026-11-01T00:00:00.000Z" }]);
+    await store.createSubjectRequest({
+      id: "dsr_1", type: "export", subjectKind: "end_user", queryHash: hash, valueSealed: new SecretService(store, KEY_A).sealValue("subject-request-value", "CUST-1"),
+      scan: true, revealTokens: false, status: "searching", dueAt: "2026-12-01T00:00:00.000Z", dueNotifiedAt: null, counts: {}, progress: {}, deferred: [],
+      createdBy: "a@example.com", createdByUserId: "u", createdAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-01T00:00:00.000Z", error: null
+    });
+    await store.saveSubjectExport({ id: "dsx_1", requestId: "dsr_0", sealedBlob: "v1.x.y.z", bytes: 1, sha256: "s", createdAt: "2026-11-01T00:00:00.000Z", expiresAt: "2026-11-02T00:00:00.000Z" });
+    await store.close();
+
+    const dump = await exportFrom(source);
+    expect(dump.tables.subject_exports).toBeUndefined();
+    const dest = path.join(dir, "subject-dest.db");
+    await importInto(dest, dump, { prepare: (table, rows) => reencryptRows(table, rows, KEY_A_BYTES, KEY_B_BYTES) });
+    const restored = await SqliteStore.create(dest);
+    try {
+      const after = new SubjectRequestService({
+        store: restored,
+        secrets: new SecretService(restored, KEY_B),
+        matcher: async () => ({ classesTried: [], match: () => null }),
+        instanceId: "b",
+        isLeader: () => false,
+        dueDays: 30,
+        exportTtlHours: 72
+      });
+      expect(await after.hashValue("cust-1")).toBe(hash);
+      expect((await restored.listSubjectRefs(hash, 10)).map((ref) => ref.rowId)).toEqual(["run-1"]);
+      const request = await restored.getSubjectRequest("dsr_1");
+      expect(new SecretService(restored, KEY_B).openValue("subject-request-value", request!.valueSealed!)).toBe("CUST-1");
+      expect(await restored.getSubjectExport("dsr_0")).toBeNull();
     } finally {
       await restored.close();
     }
@@ -347,6 +395,9 @@ describe("db:import re-encryption", () => {
   it("uses the purposes the services seal with", () => {
     const guard = fs.readFileSync(path.join(API_ROOT, "src", "services", "guard-service.ts"), "utf8");
     expect(guard).toContain(`const VAULT_PURPOSE = "${SEALED_COLUMNS.guard_token_vault!.purpose}";`);
+    const subject = fs.readFileSync(path.join(API_ROOT, "src", "services", "subject-request-service.ts"), "utf8");
+    expect(subject).toContain(`export const SUBJECT_KEY_PURPOSE = "${SEALED_COLUMNS.subject_ref_keys!.purpose}";`);
+    expect(subject).toContain(`export const REQUEST_VALUE_PURPOSE = "${SEALED_COLUMNS.subject_requests!.purpose}";`);
     const app = fs.readFileSync(path.join(API_ROOT, "src", "app.ts"), "utf8");
     expect(app).toContain(`const TOOL_RESULTS_PURPOSE = "${JSON_SEALED_FIELDS[0]!.purpose}";`);
     expect(app).toContain(`${JSON_SEALED_FIELDS[0]!.key}: secretService.sealValue(TOOL_RESULTS_PURPOSE`);
@@ -362,6 +413,10 @@ describe("db:import re-encryption", () => {
     "services/mfa-service.ts": { calls: 1, handling: "mfa_secrets (ENCRYPTED_COLUMNS)" },
     "services/log-streaming-service.ts": { calls: 1, handling: "log_stream_destinations (ENCRYPTED_COLUMNS)" },
     "services/guard-service.ts": { calls: 1, handling: "guard_token_vault.value_sealed (SEALED_COLUMNS)" },
+    "services/subject-request-service.ts": {
+      calls: 3,
+      handling: "subject_ref_keys.key_sealed and subject_requests.value_sealed (SEALED_COLUMNS); subject_exports (NOT_EXPORTED_TABLES)"
+    },
     "app.ts": { calls: 1, handling: "workflow_executions.state_json approvedToolResultsSealed (JSON_SEALED_FIELDS)" },
     "services/challenge-store.ts": { calls: 2, handling: "pending_challenges (NOT_EXPORTED_TABLES)" },
     "services/mcp-elicitation-service.ts": { calls: 1, handling: "an answer sent over the cluster bus, never stored" },

@@ -228,6 +228,12 @@ export interface WorkflowSettings {
    * read-only in the tool policy; every other tool counts as a write tool.
    */
   writeToolApproval?: WriteToolApprovalSettings;
+  /**
+   * 13.3 — data protection: up to three subject references (`{{input.customerId}}`, `{{session_id}}`, ...) naming the
+   * person a run is about. Each run stores a keyed hash of each value, so a data-subject request finds the person's
+   * runs and memory without reading every run. Unset: nothing is stored.
+   */
+  dataProtection?: { subjectRefs?: string[] };
 }
 
 export interface WriteToolApprovalSettings {

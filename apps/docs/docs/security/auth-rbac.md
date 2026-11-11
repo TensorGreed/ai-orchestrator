@@ -249,6 +249,9 @@ on top of the global role:
   or remove or change the membership that carries it. Holds on a data subject are admin-only (placing one runs the
   data-subject lookup), and releasing a hold needs a signed-in person, not an API key. See
   [Legal holds](../operations/legal-hold.md).
+- Data-subject requests are made by admins and by users with a deployment-wide custom role (one with no project)
+  granting `data_subject:manage`. The permission does nothing in a project role, and only an admin can assign a role
+  that grants it. See [Data-subject requests](./data-subject-requests.md).
 
 ## What a running workflow can reach
 
@@ -797,6 +800,8 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Create, change or delete a custom role | `POST /api/custom-roles`, `PUT /api/custom-roles/:id`, `DELETE /api/custom-roles/:id` |
 | Place or release a legal hold | `POST /api/legal-holds`, `POST /api/legal-holds/:id/release` |
 | Change a project's data retention | `PUT /api/projects/:id/retention` |
+| Make a data-subject export that reveals tokenised values | `POST /api/data-protection/requests` with `revealTokens: true` |
+| Download a data-subject export | `GET /api/data-protection/requests/:id/export` |
 
 **API keys.** With step-up on, personal API keys are refused on these actions with `403 step_up_required`
 (`stepUp.credential: "api_key"`): a key cannot answer a code, and a stolen personal key should not mint more keys or

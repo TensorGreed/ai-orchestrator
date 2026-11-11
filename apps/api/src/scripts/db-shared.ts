@@ -181,7 +181,12 @@ export const EXPORTED_TABLES = [
   "retention_policies",
   // 13.3 — legal holds and the rows they name
   "legal_holds",
-  "legal_hold_items"
+  "legal_hold_items",
+  // 13.3 — data-subject requests: the subject key (sealed; references keep matching after a restore), the references
+  // (keyed hashes) and the requests (their trail; a value is sealed only while a lookup runs)
+  "subject_ref_keys",
+  "subject_refs",
+  "subject_requests"
 ] as const;
 
 /** Tables db:export leaves out on purpose, and why (the runbook lists them as safe to lose). */
@@ -201,6 +206,7 @@ export const NOT_EXPORTED_TABLES: Record<string, string> = {
   cluster_run_owners: "which live instance runs a run",
   log_stream_events: "log stream delivery history",
   retention_runs: "retention purge log (counts only), kept 90 days; the next purge writes a new one",
+  subject_exports: "short-lived data-subject export files (personal data), downloaded once or expired within SUBJECT_EXPORT_TTL_HOURS",
   guard_profile_revision: "a change counter the guard tables' triggers bump; caches only compare it",
   knowledge_base_chunks_fts: "SQLite full-text index, rebuilt from knowledge_base_chunks",
   knowledge_base_chunks_fts_config: "SQLite full-text index storage",
@@ -232,7 +238,10 @@ export const ENCRYPTED_COLUMNS: Record<string, { iv: string; authTag: string; ci
  * one the service seals with (guard-service.ts VAULT_PURPOSE; db-backup-coverage.test.ts checks it).
  */
 export const SEALED_COLUMNS: Record<string, { column: string; purpose: string }> = {
-  guard_token_vault: { column: "value_sealed", purpose: "guard-token-vault" }
+  guard_token_vault: { column: "value_sealed", purpose: "guard-token-vault" },
+  // 13.3 — subject-request-service.ts SUBJECT_KEY_PURPOSE and REQUEST_VALUE_PURPOSE.
+  subject_ref_keys: { column: "key_sealed", purpose: "subject-ref" },
+  subject_requests: { column: "value_sealed", purpose: "subject-request-value" }
 };
 
 /**

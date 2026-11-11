@@ -118,6 +118,7 @@ import {
   resolveQueueSettings,
   resolveExecutionDispatch,
   resolveRetentionSettings,
+  resolveSubjectRequestSettings,
   ssoPostLoginUrl,
   toolArgumentSummariesEnabled,
   type AppConfig
@@ -227,6 +228,8 @@ import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-ser
 import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerRetentionRoutes } from "./retention-routes.js";
+import { registerDataProtectionRoutes } from "./data-protection-routes.js";
+import { SubjectRequestService, runSessionId } from "./services/subject-request-service.js";
 import { registerLegalHoldRoutes } from "./legal-hold-routes.js";
 import { LegalHoldService } from "./services/legal-hold-service.js";
 import { LegalHoldError } from "./db/legal-hold-sql.js";
@@ -1932,6 +1935,8 @@ export async function createApp(
   // 13.3 — every purge by age goes through the retention service (created below, once the leader election, audit and
   // log streaming exist; started when the app is ready). A finished run nudges it.
   let retentionService: RetentionService | null = null;
+  // 13.3 — data-subject requests: set once the service exists (it needs the capture lookup); runs store their subject references through it.
+  let subjectRequests: SubjectRequestService | null = null;
 
   if (clusterMode) {
     // Phase 13.1 — the shared flow state expires on the database clock; the session cleanup tick removes what expired.
@@ -2821,6 +2826,20 @@ export async function createApp(
 
     if (persisted) {
       await deleteWorkflowExecutionSafely(input.executionId, input.workflow.id);
+      // 13.3 — subject references (opt-in per workflow): keyed hashes of the values naming the run's subject. Never fails the run.
+      if (subjectRequests && (input.workflow.settings?.dataProtection?.subjectRefs?.length ?? 0) > 0) {
+        await subjectRequests.recordRunRefs({
+          executionId: input.executionId,
+          workflow: input.workflow,
+          run: {
+            input: input.requestInput,
+            output: input.result.output,
+            customData: input.customData ?? input.result.customData,
+            sessionId: runSessionId(input.requestInput, input.customData ?? input.result.customData),
+            triggeredBy: input.triggeredBy ?? null
+          }
+        });
+      }
       // Phase 11.1 — what the run's signed manifest describes: the workflow as it ran and its MCP servers.
       try {
         await auditBundleService.captureRunContext(input.executionId, input.workflow);
@@ -9627,14 +9646,14 @@ export async function createApp(
       reply.code(400);
       return { error: "role must be project_admin, editor, viewer, or custom" };
     }
-    // 13.3 — a role that grants a deployment-wide permission (legal holds) is an admin's to hand out.
+    // 13.3 — a role that grants a deployment-wide permission (legal holds, data-subject requests) is an admin's to hand out.
     if (role === "custom" && parsed.data.customRoleId && user.role !== "admin" && (await rbacService.grantsDeploymentPermission(parsed.data.customRoleId))) {
       reply.code(403);
-      return { error: "Only an admin can give a role that manages legal holds." };
+      return { error: "Only an admin can give a role that grants a deployment-wide permission (legal holds, data-subject requests)." };
     }
     if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(parsed.data.userId, project.id))) {
       reply.code(403);
-      return { error: "Only an admin can change the membership of someone whose role manages legal holds." };
+      return { error: "Only an admin can change the membership of someone whose role grants a deployment-wide permission." };
     }
     try {
       await rbacService.addMember({
@@ -14465,6 +14484,48 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     available: captureAvailable,
     // Release gate admission: an erasure is never refused, but admitted cases it takes are audited and stale jobs marked.
     subjectRowRemoval: async (user, row) => await releaseService.dataSubjectRemoval(user, row)
+  });
+
+  // 13.3 — data-subject requests and subject references. The lookup runs on the leader (its own lease), a page at a
+  // time, and resumes after a restart; exports are sealed and downloaded once.
+  const subjectRequestSettings = resolveSubjectRequestSettings(config);
+  const subjectRequestService = new SubjectRequestService({
+    store,
+    secrets: secretService,
+    matcher: async (query) => await captureService.subjectMatcher(query),
+    revealToken: async (token) => (await guardService.vault.getByToken(token))?.value ?? null,
+    instanceId: leaderElection.getInstanceId(),
+    isLeader: () => leaderElection.isLeader(),
+    dueDays: subjectRequestSettings.dueDays,
+    exportTtlHours: subjectRequestSettings.exportTtlHours,
+    exportMaxBytes: subjectRequestSettings.exportMaxBytes,
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
+    },
+    notify: async (event) => await notificationService.notify(event),
+    logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },
+    redact: (text) => String(secretService.redact(text))
+  });
+  if (captureAvailable) {
+    subjectRequests = subjectRequestService;
+    app.addHook("onReady", async () => {
+      subjectRequestService.start();
+    });
+    app.addHook("onClose", async () => {
+      await subjectRequestService.stop();
+    });
+  }
+  registerDataProtectionRoutes({
+    app,
+    store,
+    requests: subjectRequestService,
+    available: captureAvailable,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    canManage: async (user) => await rbacService.canDeployment(user, "data_subject:manage"),
+    runAccess,
+    audit: async (request, user, event) => await audit(request, user, event)
   });
 
   // 13.3 — legal holds: placed and released by hold managers; every purge and delete of held data honours them.

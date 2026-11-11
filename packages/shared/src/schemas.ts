@@ -3,6 +3,7 @@ import { MCP_POLICY_TEXT_OPS, WORKFLOW_SCHEMA_VERSION } from "./types";
 import { writeToolApprovalSettingsSchema } from "./approval-gate";
 import { MCP_POLICY_PATH_MAX_LENGTH, parseMcpPolicyPath } from "./mcp-tool-policy";
 import { mcpGatewayRateLimitSchema } from "./gateway-limits";
+import { workflowDataProtectionSchema } from "./data-subject";
 import { stripReservedCustomData, SENSITIVE_OUTPUT_CONFIG_KEY, storedTriggerTrustBinding, TRIGGER_TRUST_BINDING_KEY, TRIGGER_TRUST_CONFIG_KEY, TRIGGER_TRUST_LEVELS } from "./data-labels";
 
 export const secretReferenceSchema = z.object({
@@ -216,7 +217,9 @@ export const workflowSettingsSchema = z
     /** Phase 10.2 — block every MCP write tool for agents and MCP Tool nodes in this workflow. */
     noWriteTools: z.boolean().optional(),
     /** Phase 11.2 — agents pause for approval before calling an MCP write tool. */
-    writeToolApproval: writeToolApprovalSettingsSchema.optional()
+    writeToolApproval: writeToolApprovalSettingsSchema.optional(),
+    /** 13.3 — subject references: which values of a run name the person it is about (stored as keyed hashes only). */
+    dataProtection: workflowDataProtectionSchema.optional()
   })
   .passthrough();
 

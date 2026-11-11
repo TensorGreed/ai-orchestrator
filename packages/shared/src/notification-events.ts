@@ -9,7 +9,8 @@ export const NOTIFICATION_EVENT_TYPES = [
   "network.break_glass_used",
   "auth.break_glass_used",
   "credential.expiring",
-  "data.legal_hold_changed"
+  "data.legal_hold_changed",
+  "data.subject_request_due"
 ] as const;
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
@@ -22,7 +23,8 @@ export const NOTIFICATION_EVENT_LABELS: Record<NotificationEventType, string> = 
   "network.break_glass_used": "Break-glass access used",
   "auth.break_glass_used": "Break-glass sign-in",
   "credential.expiring": "Credential expiring",
-  "data.legal_hold_changed": "Legal hold placed or released"
+  "data.legal_hold_changed": "Legal hold placed or released",
+  "data.subject_request_due": "Data-subject request overdue"
 };
 
 /** Names an earlier settings UI stored for channels; they map to the names the server emits. */

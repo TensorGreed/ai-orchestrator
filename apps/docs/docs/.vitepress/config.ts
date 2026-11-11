@@ -184,7 +184,8 @@ export default defineConfig({
           { text: "Code Execution", link: "/security/code-execution" },
           { text: "Outbound URL checks", link: "/security/outbound-url-checks" },
           { text: "Model Allowlists", link: "/security/model-allowlists" },
-          { text: "Network Controls", link: "/security/network-controls" }
+          { text: "Network Controls", link: "/security/network-controls" },
+          { text: "Data-subject requests", link: "/security/data-subject-requests" }
         ]
       },
       {
