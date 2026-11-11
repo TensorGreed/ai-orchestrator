@@ -1,7 +1,7 @@
 /**
  * Phase 12 coverage — the controlled reveal step over the API:
  *
- * - migration v69: the token vault records the project and run that issued each token;
+ * - migration v68: the token vault records the project and run that issued each token;
  * - a run's vault writes its project, and a Reveal node reveals only that project's tokens;
  * - a reveal writes rule events (placement and action `reveal`, token hashes, never values) and an audit entry;
  * - a signed-in admin's run reveals; a webhook run of the same workflow does not (role rules never match it);
@@ -171,11 +171,11 @@ async function setUp(context: TestContext, admin: string, options: { rules?: Rec
   return { token, workflow, protect };
 }
 
-describe("migration v69", () => {
+describe("migration v68", () => {
   it("adds the issuing project and run to the token vault, with a rollback, in both stores", async () => {
     const versions = MIGRATIONS.map((entry) => entry.version).sort((a, b) => a - b);
     expect(versions).toEqual(contiguousMigrationVersions(versions));
-    const migration = MIGRATIONS.find((entry) => entry.version === 69)!;
+    const migration = MIGRATIONS.find((entry) => entry.version === 68)!;
     expect(migration.up).toContain("ALTER TABLE guard_token_vault ADD COLUMN IF NOT EXISTS project_id TEXT");
     expect(migration.up).toContain("CREATE INDEX IF NOT EXISTS idx_guard_token_vault_project");
     expect(migration.down).toContain("DROP COLUMN IF EXISTS project_id");

@@ -1,4 +1,4 @@
-import { normalizeNotificationEvents } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRING_EVENT, normalizeNotificationEvents, type CredentialExpiryReason, type CredentialKind } from "@ai-orchestrator/shared";
 import type { AppConfig } from "../config";
 
 interface NotificationChannel {
@@ -46,6 +46,27 @@ export interface NotificationEvent {
     /** Ended: why (logout, expired, admin, ...). */
     reason?: string;
   };
+  /** 13.3 — set for data.legal_hold_changed: which hold was placed or released, and by whom. Never a subject value. */
+  legalHold?: {
+    change: "placed" | "released";
+    id: string;
+    name: string;
+    scopeType: string;
+    /** The project or workflow id (null for runs and subject holds). */
+    scopeId: string | null;
+    itemCount: number;
+    by: string | null;
+  };
+  /** 13.2 — set for credential.expiring: which key or gateway client stops working, and when. Never the secret. */
+  credential?: {
+    kind: CredentialKind;
+    reason: CredentialExpiryReason;
+    id: string;
+    name: string;
+    prefix: string;
+    expiresAt: string;
+    owner: string | null;
+  };
 }
 
 /** Phase 13.2 — an address outside the ui/api allowlist was admitted because it is in NETWORK_BREAK_GLASS_CIDRS. */
@@ -56,6 +77,18 @@ export const NETWORK_NOTIFICATION_EVENTS = ["network.break_glass_used"] as const
  * says which). The same name as BREAK_GLASS_SIGN_IN_EVENT in @ai-orchestrator/shared.
  */
 export const AUTH_NOTIFICATION_EVENTS = ["auth.break_glass_used"] as const;
+
+/** 13.3 — a legal hold was placed or released. The same name as LEGAL_HOLD_CHANGED_EVENT in @ai-orchestrator/shared. */
+export const DATA_PROTECTION_NOTIFICATION_EVENTS = ["data.legal_hold_changed"] as const;
+
+/** 13.2 — a key or gateway client stops working soon; channels set in the environment take it with NOTIFICATIONS_CREDENTIAL_EVENTS=true. */
+export const CREDENTIAL_NOTIFICATION_EVENTS = [CREDENTIAL_EXPIRING_EVENT] as const;
+
+const CREDENTIAL_KIND_LABEL: Record<CredentialKind, string> = {
+  api_key: "API key",
+  service_account_key: "Service account key",
+  mcp_client: "Gateway client"
+};
 
 /** Phase 11.2 — approval events channels subscribe to alongside execution events. */
 export const APPROVAL_NOTIFICATION_EVENTS = ["approval.requested", "approval.timed_out"] as const;
@@ -86,6 +119,47 @@ const BREAK_GLASS_STAGE_TEXT: Record<NonNullable<NotificationEvent["auth"]>["sta
 };
 
 function describeEvent(event: NotificationEvent): NotificationContent {
+  if (event.type === "data.legal_hold_changed" && event.legalHold) {
+    const hold = event.legalHold;
+    const placed = hold.change === "placed";
+    const facts: NotificationContent["facts"] = [
+      { name: "Hold", value: hold.name },
+      { name: "Covers", value: hold.scopeId ? `${hold.scopeType} ${hold.scopeId}` : `${hold.itemCount} ${hold.scopeType === "runs" ? "runs" : "rows"}` }
+    ];
+    if (hold.by) facts.push({ name: placed ? "Placed by" : "Released by", value: hold.by });
+    facts.push({ name: "Time", value: event.timestamp });
+    return {
+      title: placed ? "Legal hold placed" : "Legal hold released",
+      icon: placed ? "\u{1F512}" : "\u{1F513}",
+      color: placed ? "F2B705" : "8A8F98",
+      facts,
+      text: placed
+        ? "Data under this hold is kept from every deletion until the hold is released. Settings > Data protection lists it."
+        : "Data this hold kept is deleted again by retention and by people, as before the hold."
+    };
+  }
+  if (event.type === CREDENTIAL_EXPIRING_EVENT && event.credential) {
+    const credential = event.credential;
+    const label = CREDENTIAL_KIND_LABEL[credential.kind];
+    const facts: NotificationContent["facts"] = [
+      { name: label, value: `${credential.name} (${credential.prefix})` },
+      ...(credential.owner ? [{ name: credential.kind === "mcp_client" ? "Created by" : "Owner", value: credential.owner }] : []),
+      { name: "Stops working", value: credential.expiresAt },
+      { name: "Time", value: event.timestamp }
+    ];
+    const rotationGrace = credential.reason === "rotation_grace";
+    return {
+      title: rotationGrace ? `Rotated key still in use: ${credential.name}` : `${label} expiring: ${credential.name}`,
+      icon: "\u23F3",
+      color: "F2B705",
+      facts,
+      text: rotationGrace
+        ? "This key was rotated and its grace window ends soon, but something still signs in with the old key. Switch that caller to the new key before it stops working."
+        : credential.kind === "mcp_client"
+          ? "This gateway client stops working soon. Create a new client, or rotate this one and give its callers the new token."
+          : "This key stops working soon. Rotate it (Settings) and give its callers the new key."
+    };
+  }
   if (event.type === "auth.break_glass_used" && event.auth) {
     const stage = BREAK_GLASS_STAGE_TEXT[event.auth.stage];
     const facts: NotificationContent["facts"] = [{ name: "Account", value: event.auth.email }];
@@ -211,7 +285,21 @@ export class NotificationService {
   private envChannelEvents(): string[] {
     const events = this.config.NOTIFICATIONS_APPROVAL_EVENTS ? ["execution.failure", ...APPROVAL_NOTIFICATION_EVENTS] : ["execution.failure"];
     // Phase 13.2 — break-glass alerts reach the env channels too (they only fire when an allowlist is set).
-    return [...events, ...NETWORK_NOTIFICATION_EVENTS, ...AUTH_NOTIFICATION_EVENTS];
+    // 13.3 — legal-hold changes are not sent here by default: a hold's name can name a matter, so only channels made in
+    // the settings that pick data.legal_hold_changed receive them.
+    // 13.2 — credential expiry warnings only when asked for, so an install that sets nothing sees no new alerts.
+    const credential = this.config.NOTIFICATIONS_CREDENTIAL_EVENTS ? CREDENTIAL_NOTIFICATION_EVENTS : [];
+    return [...events, ...NETWORK_NOTIFICATION_EVENTS, ...AUTH_NOTIFICATION_EVENTS, ...credential];
+  }
+
+  /** 13.2 — whether any enabled channel takes this event now (a sweep with no audience claims and sends nothing). */
+  async subscribes(eventType: string): Promise<boolean> {
+    try {
+      await this.loaded;
+    } catch {
+      // A failed load keeps the previous channels.
+    }
+    return this.channels.some((channel) => channel.enabled && channel.events.includes(eventType));
   }
 
   /** Reloads the channels from the stored configs (plus the env-configured defaults). */

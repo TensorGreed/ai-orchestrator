@@ -8,9 +8,9 @@
  * migration to main's highest version + 1 (a one-line change of its `version`) and empties this set; a branch never
  * merges with a version at or below main's highest. Postgres refuses to start on a database that recorded a version
  * above one it never applied (MigrationGapError), so a mistake is loud rather than a silently skipped migration.
- * Reserved now: v61-v68 (open and planned changes that merge separately; reveal takes v69).
+ * Reserved now: v67 (an open change that merges separately; reveal takes v68).
  */
-const RESERVED_UNTIL_MERGED = new Set<number>([64, 65, 66, 67, 68]);
+const RESERVED_UNTIL_MERGED = new Set<number>([67]);
 
 export function contiguousMigrationVersions(versions: readonly number[]): number[] {
   const max = Math.max(0, ...versions);

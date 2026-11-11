@@ -26,6 +26,8 @@ import * as model_allowlist from "./postgres/model-allowlist.js";
 import * as queue from "./postgres/queue.js";
 import * as release from "./postgres/release.js";
 import * as replay from "./postgres/replay.js";
+import * as retention from "./postgres/retention.js";
+import * as legalHolds from "./postgres/legal-holds.js";
 import * as schedules from "./postgres/schedules.js";
 import * as secrets from "./postgres/secrets.js";
 import * as sessions from "./postgres/sessions.js";
@@ -72,6 +74,8 @@ export interface PostgresStoreConfig {
  *                     connection's token is re-read and refreshed (services/mcp-oauth-service.ts, cluster mode).
  *   0x4c3243 ("L2C")  replay-capture reservations — key: hashtext(schema:workflow id), held for the reserving
  *                     transaction (pg_advisory_xact_lock); see postgres/flow-state.ts.
+ *   0x4c3248 ("L2H")  13.3 legal holds — key: hashtext(current_schema()), held for the transaction: shared by every
+ *                     purge batch and hold-checked delete, exclusive while a hold is placed; see db/legal-hold-sql.ts.
  *   0x4c3250 ("L2P")  MCP gateway approval requests — key: hashtext(schema:client id), held for the creating
  *                     transaction (pg_advisory_xact_lock) so the per-client pending cap holds; see postgres/mcp.ts.
  * Add a new class here rather than reusing one.
@@ -506,6 +510,45 @@ export class PostgresStore implements Store {
   }
   async pruneExecutionHistory(...args: Parameters<Store["pruneExecutionHistory"]>): ReturnType<Store["pruneExecutionHistory"]> {
     return executions.pruneExecutionHistory(this.ctx, ...args);
+  }
+  async pruneRetentionTable(...args: Parameters<Store["pruneRetentionTable"]>): ReturnType<Store["pruneRetentionTable"]> {
+    return retention.pruneRetentionTable(this.ctx, ...args);
+  }
+  async countRetentionDue(...args: Parameters<Store["countRetentionDue"]>): ReturnType<Store["countRetentionDue"]> {
+    return retention.countRetentionDue(this.ctx, ...args);
+  }
+  async saveRetentionRun(...args: Parameters<Store["saveRetentionRun"]>): ReturnType<Store["saveRetentionRun"]> {
+    return retention.saveRetentionRun(this.ctx, ...args);
+  }
+  async listRetentionRuns(...args: Parameters<Store["listRetentionRuns"]>): ReturnType<Store["listRetentionRuns"]> {
+    return retention.listRetentionRuns(this.ctx, ...args);
+  }
+  async placeLegalHold(...args: Parameters<Store["placeLegalHold"]>): ReturnType<Store["placeLegalHold"]> {
+    return legalHolds.placeLegalHold(this.ctx, ...args);
+  }
+  async releaseLegalHold(...args: Parameters<Store["releaseLegalHold"]>): ReturnType<Store["releaseLegalHold"]> {
+    return legalHolds.releaseLegalHold(this.ctx, ...args);
+  }
+  async getLegalHold(...args: Parameters<Store["getLegalHold"]>): ReturnType<Store["getLegalHold"]> {
+    return legalHolds.getLegalHold(this.ctx, ...args);
+  }
+  async listLegalHolds(...args: Parameters<Store["listLegalHolds"]>): ReturnType<Store["listLegalHolds"]> {
+    return legalHolds.listLegalHolds(this.ctx, ...args);
+  }
+  async listLegalHoldItems(...args: Parameters<Store["listLegalHoldItems"]>): ReturnType<Store["listLegalHoldItems"]> {
+    return legalHolds.listLegalHoldItems(this.ctx, ...args);
+  }
+  async legalHoldsOn(...args: Parameters<Store["legalHoldsOn"]>): ReturnType<Store["legalHoldsOn"]> {
+    return legalHolds.legalHoldsOn(this.ctx, ...args);
+  }
+  async listRetentionPolicies(...args: Parameters<Store["listRetentionPolicies"]>): ReturnType<Store["listRetentionPolicies"]> {
+    return retention.listRetentionPolicies(this.ctx, ...args);
+  }
+  async setRetentionPolicies(...args: Parameters<Store["setRetentionPolicies"]>): ReturnType<Store["setRetentionPolicies"]> {
+    return retention.setRetentionPolicies(this.ctx, ...args);
+  }
+  async listExistingExecutionIds(...args: Parameters<Store["listExistingExecutionIds"]>): ReturnType<Store["listExistingExecutionIds"]> {
+    return retention.listExistingExecutionIds(this.ctx, ...args);
   }
   async saveWorkflowExecutionState(...args: Parameters<Store["saveWorkflowExecutionState"]>): ReturnType<Store["saveWorkflowExecutionState"]> {
     return executions.saveWorkflowExecutionState(this.ctx, ...args);
@@ -965,6 +1008,10 @@ export class PostgresStore implements Store {
   async revokeMcpClient(...args: Parameters<Store["revokeMcpClient"]>): ReturnType<Store["revokeMcpClient"]> {
     return mcp.revokeMcpClient(this.ctx, ...args);
   }
+
+  async rotateMcpClient(...args: Parameters<Store["rotateMcpClient"]>): ReturnType<Store["rotateMcpClient"]> {
+    return mcp.rotateMcpClient(this.ctx, ...args);
+  }
   async updateMcpClientNetwork(...args: Parameters<Store["updateMcpClientNetwork"]>): ReturnType<Store["updateMcpClientNetwork"]> {
     return mcp.updateMcpClientNetwork(this.ctx, ...args);
   }
@@ -1409,6 +1456,14 @@ export class PostgresStore implements Store {
   }
   async revokeApiKey(...args: Parameters<Store["revokeApiKey"]>): ReturnType<Store["revokeApiKey"]> {
     return auth.revokeApiKey(this.ctx, ...args);
+  }
+
+  async rotateApiKey(...args: Parameters<Store["rotateApiKey"]>): ReturnType<Store["rotateApiKey"]> {
+    return auth.rotateApiKey(this.ctx, ...args);
+  }
+
+  async claimCredentialExpiryNotice(...args: Parameters<Store["claimCredentialExpiryNotice"]>): ReturnType<Store["claimCredentialExpiryNotice"]> {
+    return auth.claimCredentialExpiryNotice(this.ctx, ...args);
   }
   async getMfaSecret(...args: Parameters<Store["getMfaSecret"]>): ReturnType<Store["getMfaSecret"]> {
     return auth.getMfaSecret(this.ctx, ...args);

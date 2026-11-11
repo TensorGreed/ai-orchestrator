@@ -110,6 +110,12 @@ import type {
   McpClientBudgetUsage,
   McpGatewayRateLimit,
   NetworkSettingsView,
+  ProjectRetentionUpdate,
+  ProjectRetentionView,
+  RetentionAdminView,
+  LegalHoldPlaceInput,
+  LegalHoldStatus,
+  LegalHoldView,
   McpGatewaySessionView,
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -1574,6 +1580,16 @@ export interface ApiKeyRecord {
   expiresAt: string | null;
   revokedAt: string | null;
   createdAt: string;
+  /** 13.2 — the key that replaced this one in a rotation (its expiresAt is then the end of the grace window). */
+  supersededBy?: string | null;
+  rotatedAt?: string | null;
+}
+
+/** 13.2 — what a rotation returns: the new key (shown once), its record, and the old key with its new expiry. */
+export interface ApiKeyRotation {
+  key: string;
+  record: ApiKeyRecord;
+  previous: ApiKeyRecord;
 }
 
 export async function fetchApiKeys() {
@@ -1590,6 +1606,14 @@ export async function createApiKey(payload: { name: string; scopes?: string[]; e
   return apiRequest<{ key: string; record: ApiKeyRecord }>("/api/auth/api-keys", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+/** 13.2 — rotates one of your keys; the old key keeps working for graceHours (default 24, 0 = stop now). */
+export async function rotateApiKey(id: string, graceHours: number) {
+  return apiRequest<ApiKeyRotation>(`/api/auth/api-keys/${encodeURIComponent(id)}/rotate`, {
+    method: "POST",
+    body: JSON.stringify({ graceHours })
   });
 }
 
@@ -1646,6 +1670,14 @@ export async function createServiceAccountKey(id: string, payload: { name: strin
   return apiRequest<{ key: string; record: ApiKeyRecord }>(`/api/service-accounts/${encodeURIComponent(id)}/keys`, {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+/** 13.2 — rotates a service account's key (admin); the old key keeps working for graceHours. */
+export async function rotateServiceAccountKey(id: string, keyId: string, graceHours: number) {
+  return apiRequest<ApiKeyRotation>(`/api/service-accounts/${encodeURIComponent(id)}/keys/${encodeURIComponent(keyId)}/rotate`, {
+    method: "POST",
+    body: JSON.stringify({ graceHours })
   });
 }
 
@@ -3831,6 +3863,14 @@ export async function fetchMcpClientBudgets(id: string) {
   return apiRequest<{ clientId: string; budgets: McpClientBudgetUsage[] }>(`/api/mcp/clients/${encodeURIComponent(id)}/budgets`);
 }
 
+/** 13.2 — rotates a client's token (admin); the old token keeps working for graceHours (0 = stop now). */
+export async function rotateMcpClient(id: string, graceHours: number) {
+  return apiRequest<{ client: McpClientView; token: string }>(`/api/mcp/clients/${encodeURIComponent(id)}/rotate`, {
+    method: "POST",
+    body: JSON.stringify({ graceHours })
+  });
+}
+
 export async function revokeMcpClient(id: string) {
   return apiRequest<{ client: McpClientView }>(`/api/mcp/clients/${encodeURIComponent(id)}/revoke`, {
     method: "POST"
@@ -3851,6 +3891,56 @@ export async function updateMcpClientNetwork(
 /** 13.2 — the deployment's network allowlists (read-only) and how this browser's address fares (admin). */
 export async function fetchNetworkSettings() {
   return apiRequest<NetworkSettingsView>("/api/settings/network");
+}
+
+/** 13.3 — the deployment's retention per class, the backlog and the latest purges (admin, read-only). */
+export async function fetchRetention() {
+  return apiRequest<RetentionAdminView>("/api/admin/retention");
+}
+
+/** 13.3 — legal holds, newest first (hold managers). */
+export async function fetchLegalHolds(status?: LegalHoldStatus) {
+  return apiRequest<{ holds: LegalHoldView[] }>(`/api/legal-holds${status ? `?status=${status}` : ""}`);
+}
+
+/** 13.3 — place a legal hold (step-up when it is on). */
+export async function placeLegalHold(payload: LegalHoldPlaceInput) {
+  return apiRequest<{ hold: LegalHoldView }>("/api/legal-holds", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+/** 13.3 — release a legal hold, with a reason (step-up when it is on). */
+export async function releaseLegalHold(id: string, reason: string) {
+  return apiRequest<{ hold: LegalHoldView }>(`/api/legal-holds/${encodeURIComponent(id)}/release`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason })
+  });
+}
+
+/** 13.3 — whether a workflow, project or run is under legal hold (hold names only for hold managers). */
+export async function fetchLegalHoldStatus(target: { workflowId: string } | { projectId: string } | { executionId: string }) {
+  const [key, value] = Object.entries(target)[0]!;
+  return apiRequest<{ held: boolean; holds: Array<{ id: string; name: string }> }>(
+    `/api/legal-holds/status?${key}=${encodeURIComponent(value)}`,
+    { headers: { [BACKGROUND_HEADER]: "1" } }
+  );
+}
+
+/** 13.3 — a project's retention per class, what it inherits, and the bounds. */
+export async function fetchProjectRetention(projectId: string) {
+  return apiRequest<ProjectRetentionView>(`/api/projects/${encodeURIComponent(projectId)}/retention`);
+}
+
+/** 13.3 — sets a project's values: days per class, null to inherit the deployment's again. */
+export async function updateProjectRetention(projectId: string, classes: ProjectRetentionUpdate["classes"]) {
+  return apiRequest<ProjectRetentionView>(`/api/projects/${encodeURIComponent(projectId)}/retention`, {
+    method: "PUT",
+    body: JSON.stringify({ classes })
+  });
 }
 
 /** 12.2 — a client's open sessions on the instance that answers, with the labels each has collected. */
@@ -4415,7 +4505,8 @@ export async function fetchExecutionGuardEvents(executionId: string) {
 }
 
 export async function fetchGuardEvents(filter: GuardEventFilter = {}) {
-  return apiRequest<{ events: Array<GuardEventView & { workflowName?: string }>; total: number }>(`/api/guard/events${guardQuery(filter)}`);
+  // `runDeleted`: the run is no longer stored (retention, a delete) while its rule event is kept.
+  return apiRequest<{ events: Array<GuardEventView & { workflowName?: string; runDeleted?: boolean }>; total: number }>(`/api/guard/events${guardQuery(filter)}`);
 }
 
 export async function fetchGuardStats(filter: GuardEventFilter = {}) {

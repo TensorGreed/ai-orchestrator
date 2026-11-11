@@ -162,6 +162,8 @@ sign-in session ids; `db:export` leaves sessions out.
        emptied first, including ones the backup does not hold, and so are the destination's sign-in sessions, so
        everyone signs in again. `--merge` adds the backup's rows instead (best-effort;
        a conflicting row aborts it);
+     - `--replace` into a destination with active [legal holds](./legal-hold.md): emptying it would delete the held
+       data and the holds. Release them, or keep a copy of the destination and pass `--allow-replace-held`;
      - a backup whose secrets or MFA enrolments `SECRET_MASTER_KEY_BASE64` cannot open: it was written with another
        key. Give that key with `--source-master-key-file` (see [Change the master key](#change-the-master-key-planned-rotation)),
        or, when it is lost, pass `--allow-key-mismatch` and recover as in
@@ -354,7 +356,8 @@ What moves the numbers:
   and hold the data in memory, so they slow down and need more memory as the database grows.
 - **Backup interval.** The RPO of every scheduled method is its interval. Only WAL archiving gets below minutes.
 - **Run history and the audit log** are usually the largest tables. `EXECUTION_HISTORY_RETENTION_DAYS` and
-  `AUDIT_LOG_RETENTION_DAYS` bound them; `db:export --exclude-history` leaves them out.
+  `AUDIT_LOG_RETENTION_DAYS` bound them; `db:export --exclude-history` leaves them out. Every retention setting is
+  listed in [Data retention](./data-retention.md).
 - **Where the backup lives.** Fetching it from another region or from cold storage adds to the RTO.
 
 ## The restore drill

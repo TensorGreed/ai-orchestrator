@@ -11,6 +11,9 @@ import { type Store } from "../store.js";
 import type { PgContext } from "./context.js";
 import { toNum, toStr } from "./helpers.js";
 import { deleteRunsWhole } from "./prune.js";
+import { refuseIfHeld } from "./legal-holds.js";
+import { LEGAL_HOLD_LOCK_SHARED_SQL } from "../legal-hold-sql.js";
+import { RELEASE_EVIDENCE_RUN_IDS_SQL } from "../retention-tables.js";
 
 function rowCount(result: { rowCount: number | null }): number {
   return result.rowCount ?? 0;
@@ -69,6 +72,7 @@ export async function getEvalDataset(ctx: PgContext, ...[id]: Parameters<Store["
 
 export async function deleteEvalDataset(ctx: PgContext, ...[id]: Parameters<Store["deleteEvalDataset"]>): ReturnType<Store["deleteEvalDataset"]> {
   return ctx.withTransaction(async (client) => {
+    await refuseIfHeld(client, { kind: "dataset", id }, "This golden set");
     // Lock the set first: a promotion or import adding a case holds it FOR SHARE, so this delete waits for that case
     // (and removes it below), and one that starts after this lock finds the set gone.
     await client.query(`SELECT id FROM eval_datasets WHERE id = $1 FOR UPDATE`, [id]);
@@ -140,7 +144,10 @@ export async function getEvalFixtureDatasetId(ctx: PgContext, ...[id]: Parameter
 }
 
 export async function deleteEvalFixture(ctx: PgContext, ...[id]: Parameters<Store["deleteEvalFixture"]>): ReturnType<Store["deleteEvalFixture"]> {
-  return rowCount(await ctx.pool.query(`DELETE FROM eval_fixtures WHERE id = $1`, [id])) > 0;
+  return await ctx.withTransaction(async (client) => {
+    await refuseIfHeld(client, { kind: "row", table: "eval_fixtures", id }, "This golden-set case");
+    return rowCount(await client.query(`DELETE FROM eval_fixtures WHERE id = $1`, [id])) > 0;
+  });
 }
 
 export async function setEvalFixtureRequired(ctx: PgContext, ...[id, required]: Parameters<Store["setEvalFixtureRequired"]>): ReturnType<Store["setEvalFixtureRequired"]> {
@@ -197,7 +204,9 @@ export async function pruneEvalRuns(ctx: PgContext, ...[input]: Parameters<Store
   );
   const newest = new Set<string>();
   const newestFinished = new Set<string>();
-  const keep = new Set<string>();
+  // 13.3 — the eval runs behind a workflow's current or previous published version stay whatever their age: they never
+  // reach deleteRunsWhole's candidate list.
+  const keep = new Set<string>((await ctx.query<{ replay_run_id: string }>(RELEASE_EVIDENCE_RUN_IDS_SQL)).map((row) => toStr(row.replay_run_id)));
   const doomed: string[] = [];
   for (const row of rows) {
     const id = toStr(row.id);
@@ -405,5 +414,12 @@ export async function evalRunIdsForResults(ctx: PgContext, ...[input]: Parameter
 }
 
 export async function deleteEvalFixturesForRecording(ctx: PgContext, ...[recordingId]: Parameters<Store["deleteEvalFixturesForRecording"]>): ReturnType<Store["deleteEvalFixturesForRecording"]> {
-  return rowCount(await ctx.pool.query(`DELETE FROM eval_fixtures WHERE recording_id = $1`, [recordingId]));
+  return ctx.withTransaction(async (client) => {
+    // 13.3 — refused (deleting nothing) while a legal hold covers any of the cases.
+    await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+    for (const { id } of (await client.query<{ id: string }>(`SELECT id FROM eval_fixtures WHERE recording_id = $1`, [recordingId])).rows) {
+      await refuseIfHeld(client, { kind: "row", table: "eval_fixtures", id: toStr(id) }, "A golden-set case of this golden run");
+    }
+    return rowCount(await client.query(`DELETE FROM eval_fixtures WHERE recording_id = $1`, [recordingId]));
+  });
 }

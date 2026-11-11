@@ -73,6 +73,8 @@ import {
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
 import { BUDGET_SCOPE_TYPES, isBudgetScopeType, type BudgetScopeType } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
 import {
   executeCodeNodeSandbox,
   executeWorkflow,
@@ -115,6 +117,7 @@ import {
   resolveMfaPolicy,
   resolveQueueSettings,
   resolveExecutionDispatch,
+  resolveRetentionSettings,
   ssoPostLoginUrl,
   toolArgumentSummariesEnabled,
   type AppConfig
@@ -136,7 +139,7 @@ import { NonRetryableQueueError, QueueFullError, QueueProducer, QueueService, ty
 import { AppLifecycle } from "./services/app-lifecycle.js";
 import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError, resumeEffectFreeNodeId } from "./db/queue-leases.js";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
-import { ApiKeyService } from "./services/api-key-service";
+import { ApiKeyService, apiKeyRotationRefusal } from "./services/api-key-service";
 import type { RequestAuthContext, SessionRejectReason } from "./services/session-service.js";
 import { apiKeyCreateBodySchema, isStructuredScope, keyBoundUser, keyMayCallRoute, keyMayManageAccount, parseKeyScopes, resolveNewKeyScope, scopedKeyUser } from "./services/key-scopes.js";
 import { MfaService } from "./services/mfa-service";
@@ -187,6 +190,7 @@ import {
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GIT_SYNC_LOCK_WAIT_MS, GitSyncService } from "./services/git-sync-service.js";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
+import { RetentionService, captureStep, ruleSimulationStep, usageRetentionWarning } from "./services/retention-service.js";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
@@ -203,7 +207,7 @@ import { TracingService, parseKeyValueList, parseTraceparent } from "./services/
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
-import { SubWorkflowSpendTracker, usageUserOf, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
+import { SubWorkflowSpendTracker, usageUserOf, withinBudgetCheckTime, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
@@ -222,6 +226,11 @@ import { McpPolicySimulationService } from "./services/mcp-policy-simulation-ser
 import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-service.js";
 import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
+import { registerRetentionRoutes } from "./retention-routes.js";
+import { registerLegalHoldRoutes } from "./legal-hold-routes.js";
+import { LegalHoldService } from "./services/legal-hold-service.js";
+import { LegalHoldError } from "./db/legal-hold-sql.js";
+import { registerProjectRetentionRoutes } from "./project-retention-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
@@ -231,7 +240,7 @@ import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
+import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
 import { registerServiceAccountRoutes } from "./service-account-routes.js";
@@ -324,7 +333,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
-import { NetworkControls, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
+import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
 import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
@@ -1920,67 +1929,9 @@ export async function createApp(
     if (clusterMode) announce({ t: "workflow_changed", id: workflowId });
   };
 
-  const pruneExecutionHistory = async (reason: "startup" | "interval" | "write") => {
-    const retentionDays = config.EXECUTION_HISTORY_RETENTION_DAYS;
-    if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
-      return 0;
-    }
-    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const deleted = await store.pruneExecutionHistory({ before: cutoff });
-      if (deleted > 0) {
-        app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned execution history");
-      }
-      return deleted;
-    } catch (error) {
-      app.log.warn(
-        {
-          cutoff,
-          retentionDays,
-          reason,
-          error: secretService.redact(error instanceof Error ? error.message : String(error))
-        },
-        "Failed to prune execution history"
-      );
-      return 0;
-    }
-  };
-
-  // Phase 15.2 — finished eval runs and replay jobs, on the same timer. The
-  // newest run of every set is kept.
-  const pruneEvalRuns = async (reason: "startup" | "interval") => {
-    const retentionDays = config.EVAL_RUN_RETENTION_DAYS;
-    if (retentionDays <= 0) return 0;
-    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const deleted = await store.pruneEvalRuns({ before: cutoff });
-      if (deleted > 0) app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned eval runs and replay jobs");
-      return deleted;
-    } catch (error) {
-      app.log.warn(
-        { cutoff, retentionDays, reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) },
-        "Failed to prune eval runs and replay jobs"
-      );
-      return 0;
-    }
-  };
-
-  await pruneExecutionHistory("startup");
-  await pruneEvalRuns("startup");
-  const retentionTimer = config.EXECUTION_HISTORY_RETENTION_DAYS > 0 || config.EVAL_RUN_RETENTION_DAYS > 0
-    // promise-ok: both prunes catch and log their own errors
-    ? setInterval(async () => {
-        await pruneExecutionHistory("interval");
-        await pruneEvalRuns("interval");
-      }, config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS)
-    : null;
-  if (retentionTimer) {
-    const timerWithUnref = retentionTimer as { unref?: () => void };
-    timerWithUnref.unref?.();
-    app.addHook("onClose", async () => {
-      clearInterval(retentionTimer);
-    });
-  }
+  // 13.3 — every purge by age goes through the retention service (created below, once the leader election, audit and
+  // log streaming exist; started when the app is ready). A finished run nudges it.
+  let retentionService: RetentionService | null = null;
 
   if (clusterMode) {
     // Phase 13.1 — the shared flow state expires on the database clock; the session cleanup tick removes what expired.
@@ -2168,7 +2119,7 @@ export async function createApp(
       }
       if (meta.phase === "final") {
         handOffCapture(meta.executionId);
-        await pruneExecutionHistory("write");
+        retentionService?.nudge();
         // Phase 15.1 — replays are experiments, not traffic: they stay out of execution metrics and SLOs.
         if (meta.triggerType !== REPLAY_TRIGGER_TYPE) {
           const status = meta.status === "success" ? "success" : meta.status === "canceled" ? "canceled" : "error";
@@ -2237,7 +2188,7 @@ export async function createApp(
             projectId: input.workflow.projectId ?? null,
             ...(typeof input.triggeredBy === "string" ? { triggeredBy: input.triggeredBy } : {}),
             ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {})
-          })
+          }, input.spendAttempt)
         : undefined;
     // Phase 15.6 — sampled for production capture: the run records like a "Record calls" run.
     const captureTicket =
@@ -2323,6 +2274,7 @@ export async function createApp(
           customData: input.customData,
           executionTimeoutMs,
           triggerType: input.triggerType,
+          ...(input.inputTriggerType ? { inputTriggerType: input.inputTriggerType } : {}),
           triggeredBy: input.triggeredBy,
           toolPolicySubject: input.policySubject ?? await resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
@@ -2362,9 +2314,15 @@ export async function createApp(
             ? {}
             : {
                 admitSubWorkflow: async (child: Workflow, request: SubWorkflowAdmissionRequest) =>
-                  await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend)
+                  await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend, runController.signal)
               }),
-          ...(runSubWorkflowSpend ? { onSubWorkflowUsage: async (usage: SubWorkflowUsage) => await runSubWorkflowSpend.report(usage) } : {}),
+          ...(runSubWorkflowSpend
+            ? {
+                onSubWorkflowUsage: async (usage: SubWorkflowUsage) => await runSubWorkflowSpend.report(usage),
+                // A streamed model call that failed, was cancelled or timed out is charged its estimate in the run's row.
+                onUnrecordedModelUsage: async (telemetry: Record<string, unknown>) => await runSubWorkflowSpend.reportModelUsage(telemetry)
+              }
+            : {}),
           // Phase 9.1 — built-in persistent vector store, limited to the
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
@@ -3336,6 +3294,7 @@ export async function createApp(
         }
         const executed = await runWorkflowExecution({
           ...run,
+          spendAttempt: context,
           ...(mcpPlan ? { mcpPlan } : {}),
           hooks: queueJobHooks(context, progressHooks)
         });
@@ -3459,7 +3418,9 @@ export async function createApp(
     run: Pick<RunWorkflowExecutionInput, "workflow" | "triggerType" | "triggeredBy" | "policyActor" | "gatewayUsage" | "guardRunSource" | "budgetSubject">,
     child: Workflow,
     request: SubWorkflowAdmissionRequest,
-    spend: RunSubWorkflowSpend | undefined
+    spend: RunSubWorkflowSpend | undefined,
+    /** The run's signal: a check still waiting its turn stops when the run is stopped. */
+    signal?: AbortSignal
   ): Promise<SubWorkflowAdmission | void> => {
     const exempt = Boolean(run.triggerType && (BUDGET_EXEMPT_TRIGGER_TYPES.has(run.triggerType) || run.triggerType === "eval")) || run.guardRunSource === "eval";
     if (!exempt) {
@@ -3473,8 +3434,8 @@ export async function createApp(
       };
       let admission: SubWorkflowAdmission | undefined;
       try {
-        if (spend) admission = await spend.admitIf(request, fits);
-        else await fits();
+        if (spend) admission = await spend.admitIf(request, fits, signal);
+        else await withinBudgetCheckTime(fits(), subWorkflowSpend.checkTimeoutMs);
       } catch (error) {
         throw notStarted(error instanceof Error ? error.message : String(error));
       }
@@ -4073,44 +4034,52 @@ export async function createApp(
   // Test and discovery routes resolve a secretRef the caller typed in. They
   // may only use a secret the caller could use in a run: `secret:use` in the
   // secret's project or in a project it is shared to.
+  const userCanUseSecret = async (user: SafeUser, row: { id: string; projectId?: string | null }): Promise<boolean> =>
+    await rbacService.can(user, row.projectId ?? DEFAULT_PROJECT_ID, "secret:use") ||
+    await someAsync(await rbacService.listSecretShares(row.id), (share) => rbacService.can(user, share.projectId, "secret:use"));
   const resolveSecretForUser = (user: SafeUser) => async (secretRef?: SecretReference): Promise<string | undefined> => {
     if (!secretRef?.secretId) return undefined;
     const row = await store.getSecret(secretRef.secretId);
     if (!row) return undefined;
-    const usable =
-      await rbacService.can(user, row.projectId ?? DEFAULT_PROJECT_ID, "secret:use") ||
-      await someAsync(await rbacService.listSecretShares(row.id), (share) => rbacService.can(user, share.projectId, "secret:use"));
-    if (!usable) throw new Error(`Secret '${secretRef.secretId}' is not available to you.`);
+    if (!await userCanUseSecret(user, row)) throw new Error(`Secret '${secretRef.secretId}' is not available to you.`);
     return secretService.resolveSecret(secretRef);
   };
   // Which projects claim a pre-scoping session namespace: each workflow's
   // default `<workflowId>:<nodeId>` and its literal custom namespaces. Only
   // read when a run falls back to an unprefixed row; rebuilt when any
   // workflow changes.
-  let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]> } | null = null;
-  const legacyNamespaceOwners = async (): Promise<Map<string, string[]>> => {
+  // 13.3 — `defaults` holds the default namespaces alone: the retention purge gives an older key to a project only
+  // when it is exactly one of that project's workflows' own `<workflowId>:<nodeId>` and no other project claims it.
+  let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]>; defaults: Map<string, string[]> } | null = null;
+  const legacyNamespaceIndexNow = async () => {
     const items = await store.listWorkflows();
     const fingerprint = items.map((item) => `${item.id}|${item.updatedAt}|${item.workflowVersion}|${item.projectId ?? DEFAULT_PROJECT_ID}`).join("\n");
-    if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex.owners;
+    if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex;
     const owners = new Map<string, string[]>();
-    const claim = (namespace: string, projectId: string) => {
-      const list = owners.get(namespace) ?? [];
+    const defaults = new Map<string, string[]>();
+    const claim = (index: Map<string, string[]>, namespace: string, projectId: string) => {
+      const list = index.get(namespace) ?? [];
       if (!list.includes(projectId)) list.push(projectId);
-      owners.set(namespace, list);
+      index.set(namespace, list);
     };
+    const defaultKeys: string[] = [];
     for (const item of items) {
       const workflow = await store.getWorkflow(item.id);
       if (!workflow) continue;
       const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
       for (const node of workflow.nodes) {
-        claim(`${workflow.id}:${node.id}`, projectId);
+        defaultKeys.push(`${workflow.id}:${node.id}`);
+        claim(owners, `${workflow.id}:${node.id}`, projectId);
         const custom = (node.config as Record<string, unknown> | undefined)?.namespace;
-        if (typeof custom === "string" && custom.trim() && !custom.includes("{{")) claim(custom.trim(), projectId);
+        if (typeof custom === "string" && custom.trim() && !custom.includes("{{")) claim(owners, custom.trim(), projectId);
       }
     }
-    legacyNamespaceIndex = { fingerprint, owners };
-    return owners;
+    // Every project that claims a default namespace, also as another workflow's literal custom namespace.
+    for (const namespace of defaultKeys) defaults.set(namespace, owners.get(namespace) ?? []);
+    legacyNamespaceIndex = { fingerprint, owners, defaults };
+    return legacyNamespaceIndex;
   };
+  const legacyNamespaceOwners = async (): Promise<Map<string, string[]>> => (await legacyNamespaceIndexNow()).owners;
   // What a run can reach once it is going: sub-workflows, secrets, knowledge
   // bases and session state of its own project (see run-scope.ts).
   const runScope = createRunScope({
@@ -4976,11 +4945,41 @@ export async function createApp(
     bufferSize: config.LOG_STREAM_BUFFER_SIZE,
     retryMaxAttempts: config.LOG_STREAM_RETRY_MAX_ATTEMPTS,
     eventRetentionDays: config.LOG_STREAM_EVENT_RETENTION_DAYS,
-    eventPruneIntervalMs: config.LOG_STREAM_EVENT_PRUNE_INTERVAL_MS
+    eventPruneIntervalMs: config.LOG_STREAM_EVENT_PRUNE_INTERVAL_MS,
+    // 13.3 — only the leader prunes delivery history.
+    shouldPrune: () => leaderElection.isLeader()
   });
   logStreamingService.start();
   app.addHook("onClose", async () => {
     await logStreamingService.stop();
+  });
+
+  // 13.3 — the retention service: leader-only, one instance at a time (its lease), batched, recorded. Captured runs and
+  // rule simulations register their steps further down, once their services exist.
+  const retention = new RetentionService({
+    store,
+    settings: resolveRetentionSettings(config),
+    executionHistoryDays: config.EXECUTION_HISTORY_RETENTION_DAYS,
+    evalRunDays: config.EVAL_RUN_RETENTION_DAYS,
+    legacyMemoryOwners: async () => (await legacyNamespaceIndexNow()).defaults,
+    intervalMs: config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS,
+    instanceId: leaderElection.getInstanceId(),
+    isLeader: () => leaderElection.isLeader(),
+    metrics: metricsService,
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
+    },
+    logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },
+    redact: (text) => String(secretService.redact(text))
+  });
+  retentionService = retention;
+  // 13.3 — usage retention is applied since 13.3. An .env copied from an older .env.example still sets 365; say loudly
+  // what that now deletes, so an operator who wants to keep chargeback history removes it or sets 0.
+  const usageWarning = usageRetentionWarning(config.USAGE_EVENTS_RETENTION_DAYS);
+  if (usageWarning) app.log.warn(usageWarning.fields, usageWarning.message);
+  app.addHook("onClose", async () => {
+    await retention.stop();
   });
 
   const notificationService = new NotificationService(config, async () =>
@@ -4991,6 +4990,32 @@ export async function createApp(
       events: c.events
     }))
   );
+
+  // 13.2 — credential.expiring: the leader warns (at most once a day per credential) about API keys and gateway
+  // clients that stop working soon, and old keys still in use as their rotation grace window ends.
+  const credentialExpiryService = new CredentialExpiryService({
+    store,
+    notify: async (event) => await notificationService.notify(event),
+    subscribed: async () => await notificationService.subscribes(CREDENTIAL_EXPIRING_EVENT),
+    isLeader: () => runsBackgroundWorkers && leaderElection.isLeader()
+  });
+  const sweepCredentialExpiry = async () => {
+    try {
+      const sent = await credentialExpiryService.sweep();
+      if (sent > 0) app.log.info({ sent }, "Sent credential expiry warnings");
+    } catch (err) {
+      app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to sweep expiring credentials");
+    }
+  };
+  // promise-ok: the sweep catches and logs its own errors
+  const credentialExpiryTimer = setInterval(async () => await sweepCredentialExpiry(), CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS);
+  credentialExpiryTimer.unref?.();
+  app.addHook("onReady", async () => {
+    void sweepCredentialExpiry();
+  });
+  app.addHook("onClose", async () => {
+    clearInterval(credentialExpiryTimer);
+  });
 
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
   const approvalResumes = new ApprovalResumeRunner();
@@ -5067,7 +5092,7 @@ export async function createApp(
     runReleases.delete(executionId);
     dropCapture(executionId, "skipped_not_stored");
     // The run leaves no usage row; what its sub-workflows spent is still recorded.
-    subWorkflowSpend.abandon(executionId, "stopped by the queue").catch((error: unknown) => {
+    subWorkflowSpend.abandon(executionId, "stopped by the queue", job).catch((error: unknown) => {
       app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record a stopped run's sub-workflow spend");
     });
     app.log.warn({ executionId, workflowId, reason: String(job.signal.reason) }, "Queued run stopped by the queue");
@@ -5192,6 +5217,7 @@ export async function createApp(
           : null;
         const result = await runWorkflowExecution({
           ...(hooks ? { hooks } : {}),
+          ...(queueJob ? { spendAttempt: queueJob } : {}),
           ...(gatewayGuard ? { gatewayGuard } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           ...(state.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
@@ -5233,13 +5259,15 @@ export async function createApp(
         // Stopped by the queue: the decision stands and the queue's policy decides who resumes it. What this attempt's
         // sub-workflows spent is recorded now (the next attempt starts its own).
         if (queueJob?.signal.aborted) {
-          await subWorkflowSpend.abandon(job.executionId, "the resume was stopped by the queue").catch((spendError: unknown) => {
+          await subWorkflowSpend.abandon(job.executionId, "the resume was stopped by the queue", queueJob).catch((spendError: unknown) => {
             app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a stopped resume's sub-workflow spend");
           });
           throw error;
         }
         // What the failed resume's sub-workflows spent is still recorded.
-        await subWorkflowSpend.abandon(job.executionId, "the resume failed");
+        await subWorkflowSpend.abandon(job.executionId, "the resume failed").catch((spendError: unknown) => {
+          app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a failed resume's sub-workflow spend");
+        });
         // The decision is kept for a new try: the run waits again and the request is pending again.
         await approvalService.reopenAfterFailedResume(job);
         throw error;
@@ -5400,9 +5428,11 @@ export async function createApp(
     return { channel: "draft" };
   };
 
+  // 13.3 — the leader prunes (every instance did before); HA off, every instance is its own leader, as before.
   const pruneAuditLogs = async (reason: "startup" | "interval") => {
     const retentionDays = config.AUDIT_LOG_RETENTION_DAYS;
     if (!Number.isFinite(retentionDays) || retentionDays <= 0) return 0;
+    if (!leaderElection.isLeader()) return 0;
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
     try {
       const deleted = await auditService.purge({ before: cutoff });
@@ -5418,7 +5448,7 @@ export async function createApp(
       return 0;
     }
   };
-  await pruneAuditLogs("startup");
+  // The start-up audit prune runs with the start-up retention purge (below), once leadership is known.
   const auditRetentionTimer = config.AUDIT_LOG_RETENTION_DAYS > 0
     // promise-ok: the task catches and logs its own errors
     ? setInterval(async () => await pruneAuditLogs("interval"), config.AUDIT_LOG_PRUNE_INTERVAL_MS)
@@ -7734,22 +7764,53 @@ export async function createApp(
       }
       if (!await requireStepUp(request, reply, "user.create")) return;
     } else if (existingUsers > 0 && config.AUTH_ALLOW_PUBLIC_REGISTER) {
+      // Public registration is for people: a request carrying an L2M API key (well-formed, valid or not) is refused
+      // rather than treated as signed out or as the key's owner. Any other Bearer value (an auth proxy's own token) is
+      // not an L2M credential and is ignored, as on other routes. Admins create users with a session or a key while
+      // public registration is off.
+      if (hasApiKeyBearer(request.headers.authorization)) {
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.register",
+          action: "register",
+          outcome: "denied",
+          metadata: {
+            email: parsed.data.email,
+            role: parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer"),
+            reason: "api_key"
+          }
+        });
+        reply.code(403);
+        return { error: "API keys cannot be used for public registration" };
+      }
       // 13.2 — a session restricted by MFA_REQUIRED_ROLES registers as anyone else would (as a viewer).
       actor = await unrestrictedSessionUser(request);
     }
 
     const requestedRole: UserRole = parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer");
-    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action.
-    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
     let role: UserRole = requestedRole;
     if (existingUsers === 0) {
       role = parsed.data.role ?? "admin";
     } else if (!actor) {
+      // A signed-out caller always gets the lowest role, whatever it asked for.
       role = "viewer";
-    } else if (role === "admin" && actor.role !== "admin") {
+    } else if (rolePriority[role] > rolePriority[actor.role]) {
+      // A signed-in caller cannot create a user with a role above its own.
+      await audit(request, actor, {
+        category: "auth",
+        eventType: "user.register",
+        action: "register",
+        outcome: "denied",
+        metadata: { email: parsed.data.email, role, reason: "role_above_actor", actorEmail: actor.email, actorRole: actor.role }
+      });
       reply.code(403);
-      return { error: "Only admins can create admin users" };
+      return {
+        error: role === "admin" ? "Only admins can create admin users" : `Your role (${actor.role}) cannot create a user with the ${role} role`
+      };
     }
+    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action. It
+    // runs after the role check, so a role above the caller's own is refused and audited first.
+    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
 
     try {
       const user = await authService.register({
@@ -8335,6 +8396,63 @@ export async function createApp(
       resourceId: request.params.id
     });
     return { ok: true };
+  });
+
+  /**
+   * 13.2 — rotates one of the caller's own keys: a new key (shown once) with the same name, scope and limits, and the
+   * old key keeps working for the grace window (graceHours, 24 by default, 0 ends it now). Only the owner rotates a
+   * personal key (an admin would otherwise receive someone else's credential); a scoped key may rotate only itself; a
+   * key made this way ends no later than the calling key, as on create.
+   */
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/auth/api-keys/:id/rotate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const owner = await store.getUserById(user.id);
+    if (owner?.kind === "service" || user.serviceAccount) {
+      reply.code(403);
+      return { error: "A service account's API keys are rotated by an admin under Settings > Service Accounts, not with its own key" };
+    }
+    const auth = sessionService.getRequestAuth(request);
+    if (auth?.credential === "api_key" && isStructuredScope(auth.keyScope) && auth.apiKeyId !== request.params.id) {
+      reply.code(403);
+      return { error: "A scoped API key can rotate only itself; sign in, or use an unscoped key" };
+    }
+    // As on create: for an owner whose role requires MFA, a new key always needs a recent MFA check.
+    const ownerRole = safeUserRole(owner?.role ?? user.role);
+    const keyStepUp = mfaRequiredFor(mfaPolicy, ownerRole) ? mfaPolicy.stepUpMaxAgeMinutes || LISTED_ROLE_KEY_MFA_MINUTES : undefined;
+    if (!await requireStepUp(request, reply, "api_key.rotate", keyStepUp === undefined ? {} : { maxAgeMinutes: keyStepUp })) return;
+    const parsed = credentialRotateBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid rotation payload", details: parsed.error.issues };
+    }
+    const callerKey = auth?.credential === "api_key" ? await apiKeyService.get(auth.apiKeyId, user.id) : null;
+    const graceHours = parsed.data.graceHours ?? KEY_ROTATION_GRACE_HOURS.default;
+    const rotated = await apiKeyService.rotate({ id: request.params.id, userId: user.id, graceHours, notAfter: callerKey?.expiresAt ?? null });
+    if (!rotated.ok) {
+      const refusal = apiKeyRotationRefusal(rotated.reason);
+      reply.code(refusal.status);
+      return refusal.body;
+    }
+    await audit(request, user, {
+      category: "api_key",
+      eventType: "api_key.rotate",
+      action: "update",
+      resourceType: "api_key",
+      resourceId: rotated.previous.id,
+      metadata: {
+        name: rotated.record.name,
+        newKeyId: rotated.record.id,
+        keyPrefix: rotated.record.keyPrefix,
+        previousKeyPrefix: rotated.previous.keyPrefix,
+        graceHours,
+        previousExpiresAt: rotated.previous.expiresAt,
+        expiresAt: rotated.record.expiresAt,
+        ownerKind: "human",
+        ...(callerKey ? { rotatedWithApiKeyId: callerKey.id } : {})
+      }
+    });
+    return { key: rotated.plaintext, record: rotated.record, previous: rotated.previous };
   });
 
   // ---------------------------------------------------------------------------
@@ -9509,6 +9627,15 @@ export async function createApp(
       reply.code(400);
       return { error: "role must be project_admin, editor, viewer, or custom" };
     }
+    // 13.3 — a role that grants a deployment-wide permission (legal holds) is an admin's to hand out.
+    if (role === "custom" && parsed.data.customRoleId && user.role !== "admin" && (await rbacService.grantsDeploymentPermission(parsed.data.customRoleId))) {
+      reply.code(403);
+      return { error: "Only an admin can give a role that manages legal holds." };
+    }
+    if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(parsed.data.userId, project.id))) {
+      reply.code(403);
+      return { error: "Only an admin can change the membership of someone whose role manages legal holds." };
+    }
     try {
       await rbacService.addMember({
         userId: parsed.data.userId,
@@ -9554,6 +9681,11 @@ export async function createApp(
         return { error: "Insufficient permissions to remove members" };
       }
       if (!await requireStepUp(request, reply, "project_member.change")) return;
+      // 13.3 — a membership that grants a deployment-wide permission (legal holds) is an admin's to take away.
+      if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(request.params.userId, project.id))) {
+        reply.code(403);
+        return { error: "Only an admin can remove someone whose role manages legal holds." };
+      }
       const ok = await rbacService.removeMember(request.params.userId, project.id);
       if (!ok) {
         reply.code(404);
@@ -10092,6 +10224,8 @@ export async function createApp(
     try {
       deleted = await store.deleteWorkflow(request.params.id, { refuseIfGateEnforced: user.role !== "admin" });
     } catch (error) {
+      // 13.3 — answered 409 `legal_hold` by the error handler, naming the holds.
+      if (error instanceof LegalHoldError) throw error;
       if (!(error instanceof ReleaseGateEnforcedError)) {
         reply.code(400);
         return { error: error instanceof Error ? error.message : "Failed to delete workflow" };
@@ -10562,6 +10696,7 @@ export async function createApp(
         reply.code(409);
         return { error: error.message, ...error.counts };
       }
+      if (error instanceof LegalHoldError) throw error;
       reply.code(400);
       return { error: error instanceof Error ? error.message : "Failed to delete project" };
     }
@@ -14139,6 +14274,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     environmentSecretValues: () => environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
+  registerRetentionRoutes({ app, retention, requireRole: (request, reply, roles) => requireRole(request, reply, roles) });
+  registerProjectRetentionRoutes({
+    app,
+    store,
+    retention,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    projectAccess: (user, projectId) => runAccess.project(user, projectId, "workflow:read"),
+    canManageProject: (user, projectId) => rbacService.can(user, projectId, "project:manage"),
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
+    audit: (request, user, event) => audit(request, user, event)
+  });
   registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, audit: async (request, user, event) => await audit(request, user, event) });
 
   // Phase 15.1 — golden runs and replay.
@@ -14183,6 +14329,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
         channel: "draft",
         ...replayRunInputFor(replay.recording.sourceTriggerType, storedInput),
+        // Phase 12 coverage — whether the recorded input was a caller's own words is decided by the recording's trigger
+        // (never an imported file's claim of one).
+        ...(replay.recording.sourceTriggerType && replay.recording.capabilities.origin !== "imported"
+          ? { inputTriggerType: replay.recording.sourceTriggerType }
+          : {}),
         // Phase 16 (Q7) — the recording's input origin (replays, gate cases and simulations alike), not the starter's.
         // A golden run imported from a file always counts as outside content as well (its trigger is the file's claim).
         inputLabels: recordedInputLabels({
@@ -14285,19 +14436,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   });
   if (captureAvailable) {
     replayCapture = captureService;
-    // Retention for captured runs nobody promoted, on the execution-history timer's interval.
-    const pruneCaptures = async (reason: "startup" | "interval") => {
-      try {
-        const deleted = await captureService.pruneExpired();
-        if (deleted > 0) app.log.info({ deleted, reason, retentionDays: captureService.deployment.retentionDays }, "Pruned captured runs past retention");
-      } catch (error) {
-        app.log.warn({ reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Failed to prune captured runs");
-      }
-    };
-    await pruneCaptures("startup");
-    // promise-ok: the task catches and logs its own errors
-    const captureRetentionTimer = setInterval(async () => await pruneCaptures("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
-    (captureRetentionTimer as { unref?: () => void }).unref?.();
+    // 13.3 — captured runs nobody promoted are purged by the retention service (REPLAY_CAPTURE_RETENTION_DAYS).
+    retention.register(captureStep(() => captureService.deployment.retentionDays, async (before) => await store.pruneReplayCaptures(before)));
     // Tickets of runs that never wrote their final history are given back on this timer too (the sweep is cheap).
     const captureSweepTimer = setInterval(() => {
       sweepStaleCaptures();
@@ -14310,7 +14450,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }, CAPTURE_SWEEP_INTERVAL_MS);
     (captureSweepTimer as { unref?: () => void }).unref?.();
     app.addHook("onClose", async () => {
-      clearInterval(captureRetentionTimer);
       clearInterval(captureSweepTimer);
       replayCapture = null;
       await captureService.idle();
@@ -14326,6 +14465,25 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     available: captureAvailable,
     // Release gate admission: an erasure is never refused, but admitted cases it takes are audited and stale jobs marked.
     subjectRowRemoval: async (user, row) => await releaseService.dataSubjectRemoval(user, row)
+  });
+
+  // 13.3 — legal holds: placed and released by hold managers; every purge and delete of held data honours them.
+  registerLegalHoldRoutes({
+    app,
+    store,
+    service: (request, user) =>
+      new LegalHoldService({
+        store,
+        audit: async (event) => await audit(request, user, event),
+        notify: async (event) => await notificationService.notify(event),
+        ...(captureAvailable ? { findSubject: async (query) => await captureService.findSubject(query) } : {}),
+        logger: { warn: (fields, message) => app.log.warn(fields, message) }
+      }),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    canManage: async (user) => await rbacService.canDeployment(user, "legal_hold:manage"),
+    runAccess,
+    viaApiKey: (request) => sessionService.getRequestAuth(request)?.credential === "api_key"
   });
 
   // Phase 15.5 — golden-set files.
@@ -14361,6 +14519,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runAccess,
     canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
     canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    canUseSecret: async (user, secretId) => {
+      const row = await store.getSecret(secretId);
+      return Boolean(row) && await userCanUseSecret(user, row!);
+    },
     audit: async (request, user, event) => await audit(request, user, event)
   });
 
@@ -14424,22 +14586,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to finish interrupted guard simulations");
     }
   }
-  // Kept GUARD_SIMULATION_RETENTION_DAYS, pruned on the execution-history timer with their replay jobs.
-  const pruneGuardSimulations = async (reason: "startup" | "interval") => {
-    const cutoff = new Date(Date.now() - GUARD_SIMULATION_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const deleted = await guardSimulationService.prune(cutoff);
-      if (deleted > 0) app.log.info({ deleted, cutoff, reason }, "Pruned guard simulations");
-    } catch (err) {
-      app.log.warn({ cutoff, reason, err: err instanceof Error ? err.message : String(err) }, "Failed to prune guard simulations");
-    }
-  };
-  await pruneGuardSimulations("startup");
-  // promise-ok: the task catches and logs its own errors
-  const simulationPruneTimer = setInterval(async () => await pruneGuardSimulations("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
-  (simulationPruneTimer as { unref?: () => void }).unref?.();
-  app.addHook("onClose", async () => {
-    clearInterval(simulationPruneTimer);
+  // Kept GUARD_SIMULATION_RETENTION_DAYS, purged by the retention service with their replay jobs.
+  retention.register(ruleSimulationStep(async (before) => await guardSimulationService.prune(before)));
+  // 13.3 — every step is registered: the start-up purges run once the leader is known.
+  // The leader election has started by now (an earlier onReady hook), so an HA leader purges at start-up too.
+  app.addHook("onReady", async () => {
+    await pruneAuditLogs("startup");
+    await retention.start();
   });
 
   registerMcpTestingRoutes({
@@ -14542,6 +14695,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const hooks = queueJobHooks(context, progressHooks);
     const result = await runWorkflowExecution({
       ...(hooks ? { hooks } : {}),
+      spendAttempt: context,
       policyActor: enqueuedBy,
       elicitationsForWorkflow: true,
       workflow,
@@ -14930,8 +15084,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const auth = sessionService.getRequestAuth(request);
       return auth?.credential === "api_key" ? auth.keyScope : null;
     },
+    requestApiKeyId: (request) => {
+      const auth = sessionService.getRequestAuth(request);
+      return auth?.credential === "api_key" ? auth.apiKeyId : null;
+    },
     disconnectMcpOAuth: async (userId) => await mcpOAuthService.disconnectUserEverywhere(userId),
-    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action)
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    keyMaxAgeDays: config.SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS ?? 0
   });
 
   registerUserInviteRoutes({
@@ -15434,6 +15593,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     // Roadmap 7.3 — a malformed page or pageSize on a list route.
     if (error instanceof PaginationQueryError) {
       reply.code(400).send({ error: error.message });
+      return;
+    }
+
+    // 13.3 — a delete refused because a legal hold keeps what it would remove.
+    if (error instanceof LegalHoldError) {
+      reply.code(409).send({ error: error.message, code: "legal_hold", holds: error.holds });
       return;
     }
 

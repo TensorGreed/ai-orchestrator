@@ -6,6 +6,10 @@ import { createDlpDetector, type NationalIdSpec } from "./detectors/dlp";
 import { createEgressGuardDetector, type DnsResolver } from "./detectors/egress-guard";
 import { createExfiltrationDetector } from "./detectors/exfiltration";
 import { createHiddenUnicodeDetector } from "./detectors/hidden-unicode";
+import { createOutputGroundingDetector } from "./detectors/output-grounding";
+import { createOutputSafetyDetector, type GuardSafetyClassifier } from "./detectors/output-safety";
+import { createOutputSchemaDetector } from "./detectors/output-schema";
+import { createOutputTopicDetector } from "./detectors/output-topic";
 import { createDirectInjectionDetector, createIndirectInjectionDetector } from "./detectors/injection";
 import { createPathGuardDetector, type RealpathFn } from "./detectors/path-guard";
 import { createSqlGuardDetector } from "./detectors/sql-guard";
@@ -31,6 +35,12 @@ export * from "./detectors/command-guard";
 export * from "./detectors/path-guard";
 export * from "./detectors/egress-guard";
 export * from "./detectors/argument-validation";
+export * from "./detectors/output-model";
+export * from "./detectors/output-schema";
+export * from "./detectors/output-topic";
+export * from "./detectors/output-safety";
+export * from "./detectors/output-grounding";
+export * from "./output-checks";
 export * from "./protection/index";
 export * from "./wiring";
 export * from "./verdict-memo";
@@ -48,6 +58,8 @@ export interface DefaultGuardRegistryOptions {
   nationalIds?: NationalIdSpec[];
   /** Local classifier for the classifier tier; the rule pack stands in when omitted. */
   classifier?: GuardClassifier;
+  /** Phase 12 coverage — local content safety classifier; the rule pack stands in when omitted. */
+  safetyClassifier?: GuardSafetyClassifier;
 }
 
 /** Every built-in detector. Register more with `registry.register(...)`, or swap one with `replace`. */
@@ -66,5 +78,10 @@ export function createDefaultGuardRegistry(options: DefaultGuardRegistryOptions 
   registry.register(createPathGuardDetector({ realpath: options.realpath }));
   registry.register(createEgressGuardDetector({ resolver: options.resolver }));
   registry.register(createArgumentValidationDetector());
+  // Phase 12 coverage — output checks. No built-in rule set uses them; a rule set opts in by listing them.
+  registry.register(createOutputSchemaDetector());
+  registry.register(createOutputTopicDetector());
+  registry.register(createOutputSafetyDetector(options.safetyClassifier));
+  registry.register(createOutputGroundingDetector());
   return registry;
 }

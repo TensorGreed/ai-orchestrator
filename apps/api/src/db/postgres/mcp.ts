@@ -11,6 +11,7 @@
  *   members and gateway clients. `seq` never changes on UPDATE or VACUUM, unlike `xmin` / `ctid`.
  */
 import { randomUUID } from "node:crypto";
+import { LEGAL_HOLD_LOCK_SHARED_SQL, notHeldSql } from "../legal-hold-sql.js";
 import { parseRecordedCallLabels, parseStoredGatewayRateLimit } from "@ai-orchestrator/shared";
 import {
   MCP_POLICY_KINDS,
@@ -404,7 +405,11 @@ function mapMcpClient(row: Row): McpClientSecretRecord {
     rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null),
     allowedIps: stringList(row.allowed_ips_json),
     certFingerprints: stringList(row.cert_fingerprints_json),
-    certSubject: row.cert_subject ? toStr(row.cert_subject) : null
+    certSubject: row.cert_subject ? toStr(row.cert_subject) : null,
+    previousTokenPrefix: row.previous_token_prefix ? toStr(row.previous_token_prefix) : null,
+    previousTokenHash: row.previous_token_hash ? toStr(row.previous_token_hash) : null,
+    previousExpiresAt: row.previous_expires_at ? toStr(row.previous_expires_at) : null,
+    rotatedAt: row.rotated_at ? toStr(row.rotated_at) : null
   };
 }
 
@@ -415,7 +420,7 @@ function stringList(value: unknown): string[] {
 }
 
 function withoutHash(record: McpClientSecretRecord): McpClient {
-  const { tokenHash: _hash, ...client } = record;
+  const { tokenHash: _hash, previousTokenHash: _previous, ...client } = record;
   return client;
 }
 
@@ -496,11 +501,13 @@ export async function updateMcpServer(ctx: PgContext, ...[id, patch]: Parameters
 
 export async function deleteMcpServer(ctx: PgContext, ...[id]: Parameters<Store["deleteMcpServer"]>): ReturnType<Store["deleteMcpServer"]> {
   return ctx.withTransaction(async (client) => {
+    // 13.3 — the legal-hold lock first (before any row lock): tool calls under a hold stay, with a dangling server id.
+    await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
     const existing = await one(client, `SELECT id FROM mcp_servers WHERE id = $1 FOR UPDATE`, [id]);
     if (!existing) return false;
     await client.query(`DELETE FROM mcp_server_probes WHERE server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_tool_snapshots WHERE server_id = $1`, [id]);
-    await client.query(`DELETE FROM mcp_tool_calls WHERE registry_server_id = $1`, [id]);
+    await client.query(`DELETE FROM mcp_tool_calls WHERE registry_server_id = $1 AND ${notHeldSql("mcp_tool_calls")}`, [id]);
     await client.query(`DELETE FROM mcp_tool_classifications WHERE server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_tool_open_world_overrides WHERE server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = $1`, [id]);
@@ -1284,11 +1291,18 @@ export async function deleteMcpToolPolicy(ctx: PgContext, ...[id]: Parameters<St
  */
 export const ADVISORY_LOCK_CLASS_GATEWAY_APPROVALS = 0x4c3250;
 
-/** Expires pending requests past their expiry and deletes decided ones past MCP_GATEWAY_APPROVAL_RETENTION_MS. */
-async function sweepMcpGatewayApprovals(executor: Queryable, now: string): Promise<void> {
-  await executor.query(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= $1`, [now]);
+/**
+ * Expires pending requests past their expiry and deletes decided ones past MCP_GATEWAY_APPROVAL_RETENTION_MS, except
+ * those under a legal hold. `client` is in a transaction: the legal-hold lock it takes is held to commit.
+ */
+async function sweepMcpGatewayApprovals(client: Queryable, now: string): Promise<void> {
+  await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+  await client.query(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= $1`, [now]);
   const cutoff = mcpGatewayApprovalRetentionCutoff(now);
-  await executor.query(`DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < $1 AND expires_at < $1`, [cutoff]);
+  await client.query(
+    `DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < $1 AND expires_at < $1 AND ${notHeldSql("mcp_gateway_approvals")}`,
+    [cutoff]
+  );
 }
 
 /** One pending request per identical call: the partial unique index (v47) makes a concurrent second insert a no-op. */
@@ -1367,7 +1381,7 @@ export async function getMcpGatewayApproval(ctx: PgContext, ...[id]: Parameters<
 }
 
 export async function listMcpGatewayApprovals(ctx: PgContext, ...[filter, now]: Parameters<Store["listMcpGatewayApprovals"]>): ReturnType<Store["listMcpGatewayApprovals"]> {
-  await sweepMcpGatewayApprovals(ctx.pool, now);
+  await ctx.withTransaction(async (client) => sweepMcpGatewayApprovals(client, now));
   const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
   const result = filter.status
     ? await ctx.query<Row>(
@@ -1632,7 +1646,8 @@ export async function getMcpClient(ctx: PgContext, ...[id]: Parameters<Store["ge
 
 /** With the token hash; for the credential check only. */
 export async function findMcpClientByTokenPrefix(ctx: PgContext, ...[prefix]: Parameters<Store["findMcpClientByTokenPrefix"]>): ReturnType<Store["findMcpClientByTokenPrefix"]> {
-  const row = await ctx.queryOne<Row>(`SELECT * FROM mcp_clients WHERE token_prefix = $1`, [prefix]);
+  // 13.2 — a client is also found by its previous token's prefix while a rotation's grace window runs.
+  const row = await ctx.queryOne<Row>(`SELECT * FROM mcp_clients WHERE token_prefix = $1 OR previous_token_prefix = $1 LIMIT 1`, [prefix]);
   return row ? mapMcpClient(row) : null;
 }
 
@@ -1652,6 +1667,28 @@ export async function updateMcpClientNetwork(ctx: PgContext, ...[id, input]: Par
     [JSON.stringify(input.allowedIps), JSON.stringify(input.certFingerprints), input.certSubject, id]
   );
   return row ? withoutHash(mapMcpClient(row)) : null;
+}
+
+/** 13.2 (v64) — see Store.rotateMcpClient: one UPDATE, conditional on the current prefix. */
+export async function rotateMcpClient(ctx: PgContext, ...[input]: Parameters<Store["rotateMcpClient"]>): ReturnType<Store["rotateMcpClient"]> {
+  const keepPrevious = input.previousExpiresAt !== null;
+  const row = await ctx.queryOne<Row>(
+    `UPDATE mcp_clients
+        SET previous_token_prefix = CASE WHEN $1::boolean THEN token_prefix ELSE NULL END,
+            previous_token_hash = CASE WHEN $1::boolean THEN token_hash ELSE NULL END,
+            previous_expires_at = $2,
+            token_prefix = $3,
+            token_hash = $4,
+            rotated_at = $5
+      WHERE id = $6 AND token_prefix = $7 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $5)
+      RETURNING *`,
+    [keepPrevious, tsOrNull(input.previousExpiresAt), input.tokenPrefix, input.tokenHash, input.now, input.id, input.expectedTokenPrefix]
+  );
+  if (row) return { status: "rotated", client: withoutHash(mapMcpClient(row)) };
+  const existing = await getMcpClientOn(ctx.pool, input.id);
+  if (!existing) return { status: "not_found" };
+  if (existing.revokedAt || (existing.expiresAt && Date.parse(existing.expiresAt) <= Date.parse(input.now))) return { status: "inactive" };
+  return { status: "conflict" };
 }
 
 export async function touchMcpClient(ctx: PgContext, ...[id, at]: Parameters<Store["touchMcpClient"]>): ReturnType<Store["touchMcpClient"]> {

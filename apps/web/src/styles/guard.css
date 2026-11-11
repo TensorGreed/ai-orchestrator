@@ -622,6 +622,38 @@
   color: var(--fg-muted);
   padding: 0 4px;
 }
+/* Phase 12 coverage — settings of an output check (schema, topics, safety, grounding). */
+.guard-output-check {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+}
+.guard-output-check legend {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  padding: 0 4px;
+}
+.guard-output-check > label:not(.guard-check) {
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-sm);
+}
+.guard-output-categories,
+.guard-output-model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  font-size: var(--fs-sm);
+}
+.guard-output-model input {
+  min-width: 0;
+  flex: 1 1 160px;
+}
 .guard-channel-tabs {
   flex-wrap: wrap;
   margin-bottom: 10px;

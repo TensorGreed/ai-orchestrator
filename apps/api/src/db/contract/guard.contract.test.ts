@@ -267,7 +267,7 @@ describeStoreContract("store contract: guard", (ctx) => {
     expect(await store.getGuardVaultByHash("missing")).toBeNull();
   });
 
-  it("Phase 12 coverage (v69): the vault records the project and run that issued a token", async () => {
+  it("Phase 12 coverage (v68): the vault records the project and run that issued a token", async () => {
     const store = ctx.store();
     await store.putGuardVault({ token: "tok-scoped", dataClass: "email", valueHash: null, valueSealed: "sealed", createdAt: "2026-10-01T00:00:00.000Z", projectId: "proj-a", executionId: "exec-1" });
     expect(await store.getGuardVaultByToken("tok-scoped")).toMatchObject({ project_id: "proj-a", execution_id: "exec-1" });

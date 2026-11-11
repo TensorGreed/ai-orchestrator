@@ -94,7 +94,7 @@ test("limits a client to its addresses from the client's Network panel", async (
   await sidebarItem("Clients").click();
   const row = page.getByRole("list", { name: "MCP clients" }).getByRole("listitem").filter({ hasText: made.clientName! });
   await expect(row.getByTestId("client-network-summary")).toHaveText("any address");
-  await row.getByRole("button", { name: "Network" }).click();
+  await row.getByRole("button", { name: "Network", exact: true }).click();
   const panel = row.getByRole("form", { name: "Client network" });
   const addresses = panel.getByLabel("Allowed addresses");
   page.once("dialog", (dialog) => void dialog.accept());

@@ -1,5 +1,6 @@
 import type { NodeDefinition } from "./types";
 import { withCredentialSpecs } from "./node-credentials";
+import { CONTENT_SAFETY_CATEGORY_VALUES, OUTPUT_GUARDRAIL_CHECK_VALUES } from "./guard";
 
 const baseNodeDefinitions: NodeDefinition[] = [
   {
@@ -1313,7 +1314,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "output_guardrail",
     label: "Output Guardrail",
     category: "Utility",
-    description: "Validates and optionally retries model output when guardrail checks fail.",
+    description:
+      "Validates and optionally retries model output when guardrail checks fail: personal data, a JSON Schema, topics, content safety and grounding in retrieved sources.",
     configSchema: {
       type: "object",
       properties: {
@@ -1321,11 +1323,26 @@ const baseNodeDefinitions: NodeDefinition[] = [
           type: "array",
           items: {
             type: "string",
-            enum: ["no_pii", "no_profanity", "must_contain_json", "matches_schema"]
+            enum: [...OUTPUT_GUARDRAIL_CHECK_VALUES]
           }
         },
         onFail: { type: "string", enum: ["retry", "error"] },
-        inputKey: { type: "string" }
+        inputKey: { type: "string" },
+        /** Phase 12 coverage — how `no_pii` finds personal data: the original patterns (default) or the content rules data detector. */
+        piiDetection: { type: "string", enum: ["patterns", "data_classes"] },
+        /** Phase 12 coverage — the JSON Schema `matches_schema` validates the whole answer against (without one it only parses JSON). */
+        schema: { type: "object" },
+        /** Phase 12 coverage — `topic`: topics to deny, or the only ones allowed (a name, or { name, phrases }). */
+        topics: { type: "object", properties: { deny: { type: "array" }, allow: { type: "array" } } },
+        /** Phase 12 coverage — `safety`: categories to check, and `mode: "model"` to ask a chat model. */
+        safety: {
+          type: "object",
+          properties: { categories: { type: "array", items: { type: "string", enum: [...CONTENT_SAFETY_CATEGORY_VALUES] } }, mode: { type: "string", enum: ["rules", "model"] } }
+        },
+        /** Phase 12 coverage — `grounding`: minimum support, required citations, a model judge for borderline sentences. */
+        grounding: { type: "object", properties: { minSupport: { type: "number" }, requireCitations: { type: "boolean" }, judge: { type: "boolean" } } },
+        /** Phase 12 coverage — the chat model of model-backed checks; the upstream model when absent. */
+        checkModel: { type: "object" }
       },
       required: ["checks", "onFail"]
     },

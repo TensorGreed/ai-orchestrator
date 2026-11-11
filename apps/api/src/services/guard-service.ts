@@ -27,6 +27,10 @@ import {
   profileHasDestinationRules,
   profileUsesLabels,
   serializeGuardProfile,
+  outputCheckCustomEndpoints,
+  outputCheckModelUses,
+  outputCheckOptionIssues,
+  outputCheckSecretRefs,
   unsafeDictionaryPattern,
   type GuardProfile,
   type GuardProfileChange,
@@ -220,6 +224,17 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+/** Who saves a rule set, for the checks that depend on it (secrets a check's model may use, custom model addresses). */
+export interface GuardSaveActor {
+  admin: boolean;
+  /** True when this user may use the secret in a run (`secret:use` in its project or a project it is shared to). */
+  canUseSecret: (secretId: string) => Promise<boolean>;
+}
+
+/** Bindings that check /v1 AI gateway answers. */
+const GATEWAY_ANSWER_SCOPES: ReadonlySet<string> = new Set(["ai_route_set", "mcp_client"]);
+const GATEWAY_MODEL_CHECK_MESSAGE = "Checks that call a model (safety by model, topics by meaning, the grounding judge) do not run on AI gateway answers yet";
+
 export class GuardService {
   private readonly parsedProfiles = new Map<string, GuardProfile>();
   private readonly loadedProfiles = new Map<string, { revision: number; value: ResolvedGuardProfile | undefined }>();
@@ -272,7 +287,7 @@ export class GuardService {
   }
 
   /** Validates a profile document with the guard-sdk schema; field-level issues on failure. */
-  async validateDocument(document: unknown, idOverride?: string): Promise<GuardProfile> {
+  async validateDocument(document: unknown, idOverride?: string, actor?: GuardSaveActor): Promise<GuardProfile> {
     const candidate =
       document && typeof document === "object" && !Array.isArray(document)
         ? { ...(document as Record<string, unknown>), ...(idOverride ? { id: idOverride } : {}) }
@@ -318,6 +333,21 @@ export class GuardService {
         }
       }
     }
+    // Phase 12 coverage — output checks: a schema that compiles, topics that name this rule set's dictionaries, model
+    // configs that name stored secrets (never raw keys).
+    issues.push(...outputCheckOptionIssues(result.data));
+    // A check's model runs with the key it names whenever the rule set runs, for whoever starts the run: the person
+    // saving it must be allowed to use that key (one message for missing and not allowed, so ids cannot be probed).
+    for (const ref of outputCheckSecretRefs(result.data)) {
+      const usable = (await this.store.getSecret(ref.secretId)) !== null && (!actor || (await actor.canUseSecret(ref.secretId)));
+      if (!usable) issues.push({ path: ref.path, message: "secretId must name a stored secret you may use" });
+    }
+    // A custom address would receive that key: only an admin may set one.
+    if (actor && !actor.admin) {
+      for (const endpoint of outputCheckCustomEndpoints(result.data)) {
+        issues.push({ path: endpoint.path, message: "Only an admin can send a check's model calls to a custom address; leave it out to use the provider's own endpoint" });
+      }
+    }
     if (issues.length > 0) throw new GuardValidationError("Invalid rule set", issues);
     return result.data;
   }
@@ -342,7 +372,11 @@ export class GuardService {
     return record ? this.versionView(record) : null;
   }
 
-  async createProfile(input: { id?: string; document: Record<string, unknown>; note?: string }, actorId: string | null, options: { reserved?: boolean } = {}): Promise<GuardProfileSummary> {
+  async createProfile(
+    input: { id?: string; document: Record<string, unknown>; note?: string },
+    actorId: string | null,
+    options: { reserved?: boolean; actor?: GuardSaveActor } = {}
+  ): Promise<GuardProfileSummary> {
     const id = input.id ?? (typeof input.document.id === "string" ? input.document.id : undefined);
     if (!id || !/^[a-z0-9][a-z0-9_-]{1,62}$/.test(id)) {
       throw new GuardValidationError("Invalid rule set", [{ path: "id", message: "Use 2–63 lowercase letters, digits, dashes or underscores" }]);
@@ -356,7 +390,7 @@ export class GuardService {
     if (id === GUARD_BUILTIN_PROFILE_ID || await this.store.getGuardProfile(id)) {
       throw new GuardConflictError(`A rule set with id '${id}' already exists`);
     }
-    const profile = await this.validateDocument(input.document, id);
+    const profile = await this.validateDocument(input.document, id, options.actor);
     const record = await this.store.insertGuardProfile({
       id,
       name: profile.name,
@@ -370,10 +404,16 @@ export class GuardService {
   }
 
   /** Appends a version. An unchanged document (same hash) returns the latest version without adding one. */
-  async updateProfile(id: string, input: { document: Record<string, unknown>; note?: string }, actorId: string | null): Promise<{ version: GuardProfileVersionView; changed: boolean }> {
+  async updateProfile(
+    id: string,
+    input: { document: Record<string, unknown>; note?: string },
+    actorId: string | null,
+    actor?: GuardSaveActor
+  ): Promise<{ version: GuardProfileVersionView; changed: boolean }> {
     const record = await this.requireProfile(id);
     if (record.builtIn) throw new GuardConflictError("The built-in rule set is read-only; duplicate it to change it");
-    const profile = await this.validateDocument(input.document, id);
+    const profile = await this.validateDocument(input.document, id, actor);
+    await this.refuseModelChecksOnGateway(id, profile);
     const hash = hashGuardProfile(profile);
     if (hash === record.latestHash) {
       return { version: this.versionView((await this.store.getGuardProfileVersion(id))!), changed: false };
@@ -388,6 +428,22 @@ export class GuardService {
       createdBy: actorId
     });
     return { version: this.versionView(version), changed: true };
+  }
+
+  /**
+   * Phase 12 coverage — model-backed output checks do not run on /v1 AI gateway answers yet (the gateway offers no
+   * model calls, so they would fail every answer): a rule set bound to an AI route set or a client cannot gain one.
+   */
+  private async refuseModelChecksOnGateway(id: string, profile: GuardProfile): Promise<void> {
+    const uses = outputCheckModelUses(profile);
+    if (uses.length === 0) return;
+    const bound = await filterAsync(
+      (await this.store.listGuardBindingsForProfile(id)).filter((binding) => binding.mode !== "inherit" && GATEWAY_ANSWER_SCOPES.has(binding.scope)),
+      async (binding) => await this.bindingInForce(binding)
+    );
+    if (bound.length === 0) return;
+    const where = bound.map((binding) => `${binding.scope} '${binding.scopeId}'`).join(", ");
+    throw new GuardValidationError("Invalid rule set", uses.map((use) => ({ path: use.path, message: `${GATEWAY_MODEL_CHECK_MESSAGE}; the rule set is bound to ${where}` })));
   }
 
   async deleteProfile(id: string): Promise<void> {
@@ -420,7 +476,11 @@ export class GuardService {
   }
 
   /** Creates the profile, or appends a version when it exists. The document's `id` names the profile. */
-  async importProfile(input: { document: Record<string, unknown>; note?: string }, actorId: string | null): Promise<{ profile: GuardProfileSummary; created: boolean; changed: boolean }> {
+  async importProfile(
+    input: { document: Record<string, unknown>; note?: string },
+    actorId: string | null,
+    actor?: GuardSaveActor
+  ): Promise<{ profile: GuardProfileSummary; created: boolean; changed: boolean }> {
     const id = typeof input.document.id === "string" ? input.document.id : "";
     if (RESERVED_GUARD_PROFILE_IDS.has(id)) {
       throw new GuardValidationError("Invalid rule set", [
@@ -429,10 +489,10 @@ export class GuardService {
     }
     const existing = id ? await this.store.getGuardProfile(id) : null;
     if (!existing) {
-      const profile = await this.createProfile({ document: input.document, ...(input.note ? { note: input.note } : {}) }, actorId);
+      const profile = await this.createProfile({ document: input.document, ...(input.note ? { note: input.note } : {}) }, actorId, actor ? { actor } : {});
       return { profile, created: true, changed: true };
     }
-    const result = await this.updateProfile(id, { document: input.document, note: input.note ?? "Imported" }, actorId);
+    const result = await this.updateProfile(id, { document: input.document, note: input.note ?? "Imported" }, actorId, actor);
     return { profile: await this.summaryOf((await this.store.getGuardProfile(id))!), created: false, changed: result.changed };
   }
 
@@ -458,6 +518,13 @@ export class GuardService {
     const profileId = input.mode === "inherit" ? null : input.profileId ?? null;
     if (profileId && !await this.store.getGuardProfile(profileId)) {
       throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: `Rule set '${profileId}' does not exist` }]);
+    }
+    if (profileId && GATEWAY_ANSWER_SCOPES.has(scope)) {
+      const loaded = await this.loadProfile(profileId);
+      const uses = loaded ? outputCheckModelUses(loaded.profile) : [];
+      if (uses.length > 0) {
+        throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: `${GATEWAY_MODEL_CHECK_MESSAGE} (${[...new Set(uses.map((use) => use.detectorId))].join(", ")})` }]);
+      }
     }
     return await this.store.setGuardBinding({ scope, scopeId, mode: input.mode, profileId, updatedBy: actorId });
   }

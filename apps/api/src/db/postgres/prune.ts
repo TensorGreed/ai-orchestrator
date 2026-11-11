@@ -27,6 +27,7 @@
  * synchronously to its end, so no prune and delete ever interleave.
  */
 import type { PoolClient } from "pg";
+import { LEGAL_HOLD_LOCK_SHARED_SQL, notHeldSql } from "../legal-hold-sql.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -34,21 +35,34 @@ type Queryable = Pick<PoolClient, "query">;
 export const PRUNE_BATCH_ROWS = 1000;
 
 /**
- * Deletes the rows of `table` (keyed by `id`) that match `where`, in batches of `batchRows`, skipping rows another
- * transaction holds; returns how many it deleted. `where` is trusted SQL over `params` ($1, $2, …).
+ * Deletes the rows of `table` that match `where`, in batches of `batchRows`, skipping rows another transaction holds;
+ * returns how many it deleted. `where` is trusted SQL over `params` ($1, $2, …). Rows are named by `id`, or by `ctid`
+ * for a table keyed by several columns (`key: "ctid"`; the row is locked in the same statement, so its ctid holds).
+ * With `maxRows` it stops once that many are deleted.
  */
-export async function deleteUnlockedInBatches(db: Queryable, table: string, where: string, params: unknown[], batchRows = PRUNE_BATCH_ROWS): Promise<number> {
+export async function deleteUnlockedInBatches(
+  db: Queryable,
+  table: string,
+  where: string,
+  params: unknown[],
+  batchRows = PRUNE_BATCH_ROWS,
+  options: { key?: "id" | "ctid"; maxRows?: number } = {}
+): Promise<number> {
+  const key = options.key ?? "id";
+  const maxRows = options.maxRows ?? Number.POSITIVE_INFINITY;
   let total = 0;
-  for (;;) {
+  while (total < maxRows) {
+    const batch = Math.min(batchRows, maxRows - total);
     const result = await db.query(
-      `WITH doomed AS (SELECT id FROM ${table} WHERE ${where} LIMIT ${batchRows} FOR UPDATE SKIP LOCKED)
-       DELETE FROM ${table} USING doomed WHERE ${table}.id = doomed.id`,
+      `WITH doomed AS (SELECT ${key} AS k FROM ${table} WHERE ${where} LIMIT ${batch} FOR UPDATE SKIP LOCKED)
+       DELETE FROM ${table} USING doomed WHERE ${table}.${key} = doomed.k`,
       params
     );
     const deleted = result.rowCount ?? 0;
     total += deleted;
-    if (deleted < batchRows) return total;
+    if (deleted < batch) return total;
   }
+  return total;
 }
 
 /**
@@ -68,9 +82,11 @@ export async function deleteUnlockedInBatches(db: Queryable, table: string, wher
  */
 export async function deleteRunsWhole(tx: Queryable, runIds: readonly string[]): Promise<Set<string>> {
   if (runIds.length === 0) return new Set();
+  // 13.3 — the legal-hold lock, shared, before any row lock; a run a hold keeps is never taken.
+  await tx.query(LEGAL_HOLD_LOCK_SHARED_SQL);
   const locked = (
     await tx.query<{ id: string }>(
-      `SELECT id FROM eval_runs WHERE id = ANY($1::text[]) AND status NOT IN ('queued', 'running') ORDER BY id FOR UPDATE SKIP LOCKED`,
+      `SELECT id FROM eval_runs WHERE id = ANY($1::text[]) AND status NOT IN ('queued', 'running') AND ${notHeldSql("eval_runs")} ORDER BY id FOR UPDATE SKIP LOCKED`,
       [runIds]
     )
   ).rows.map((row) => String(row.id));

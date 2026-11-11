@@ -80,15 +80,19 @@ export const STEP_UP_ACTIONS = {
   "user.sessions_revoke": "Sign another user out (end their sessions)",
   "mfa.disable": "Turn your own MFA off",
   "api_key.create": "Create an API key",
+  "api_key.rotate": "Rotate an API key",
   "mcp_client.create": "Create a gateway client",
+  "mcp_client.rotate": "Rotate a gateway client's token",
   "secret.create": "Create a secret",
   "secret.update": "Change a secret's settings or sharing",
   "secret.delete": "Delete a secret",
   "sso_mapping.change": "Create or delete an SSO group mapping",
   "project_member.change": "Add or remove a project member",
   "custom_role.change": "Create, change or delete a custom role",
+  "project_retention.change": "Change a project's data retention",
   "notification_channel.change": "Create or delete a notification channel",
-  "audit_export.change": "Create, change or delete an audit export destination or log stream"
+  "audit_export.change": "Create, change or delete an audit export destination or log stream",
+  "legal_hold.change": "Place or release a legal hold"
 } as const;
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS;

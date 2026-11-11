@@ -755,7 +755,7 @@ Pass-through node that performs no operation. Useful as a placeholder or visual 
 
 ### `output_guardrail` — Output Guardrail
 
-Validates and optionally retries model output when guardrail checks fail.
+Validates and optionally retries model output when guardrail checks fail: personal data, a JSON Schema, topics, content safety and grounding in retrieved sources.
 
 **Config fields**
 
@@ -764,6 +764,12 @@ Validates and optionally retries model output when guardrail checks fail.
 | `checks` | `array<string>` | yes | — |
 | `onFail` | `string` | yes | `retry` \| `error` |
 | `inputKey` | `string` | no | — |
+| `piiDetection` | `string` | no | `patterns` \| `data_classes` |
+| `schema` | `object` | no | — |
+| `topics` | `object` | no | — |
+| `safety` | `object` | no | — |
+| `grounding` | `object` | no | — |
+| `checkModel` | `object` | no | — |
 
 **Example config**
 

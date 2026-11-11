@@ -106,6 +106,9 @@ import type {
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
+import type { LegalHoldItemView, LegalHoldRef, LegalHoldStatus, LegalHoldView, RetentionDataClass, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
+import type { RetentionScope, RetentionTable } from "./retention-tables.js";
+import type { LegalHoldInsert, LegalHoldTarget } from "./legal-hold-sql.js";
 
 /** The decision `decideApprovalRequest` records. */
 export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0];
@@ -120,6 +123,37 @@ export type GateCaseDecisionRecordInput = Parameters<Store["decideGateCaseReques
 export type StoredUserKind = "human" | "service";
 
 /** A user row as the store reads it (the password hash included). */
+/** An API key row as listed (never the hash). */
+export interface StoredApiKey {
+  id: string;
+  userId: string;
+  name: string;
+  keyPrefix: string;
+  scopes: string[];
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  /** 13.2 (v64) — the key that replaced this one in a rotation; null when it was never rotated. */
+  supersededBy: string | null;
+  /** 13.2 (v64) — when this key was rotated (its expiresAt then marks the end of the grace window). */
+  rotatedAt: string | null;
+}
+
+/** 13.2 — what `Store.rotateApiKey` did. */
+export type ApiKeyRotationOutcome =
+  | { status: "rotated"; previousExpiresAt: string }
+  | { status: "not_found" }
+  | { status: "inactive" }
+  | { status: "already_rotated"; supersededBy: string };
+
+/** 13.2 — what `Store.rotateMcpClient` did. */
+export type McpClientRotationOutcome =
+  | { status: "rotated"; client: McpClient }
+  | { status: "not_found" }
+  | { status: "inactive" }
+  | { status: "conflict" };
+
 export interface StoredUser {
   id: string;
   email: string;
@@ -515,7 +549,10 @@ export interface Store extends AiGatewayStore {
   listGuardSimulations(options: { profileId: string; limit?: number; offset?: number }): Promise<GuardSimulationRecord[]>;
   /** Simulations still running (a stopped server left them so). */
   listRunningGuardSimulations(): Promise<GuardSimulationRecord[]>;
-  /** Deletes simulations created before `before`, with their replay jobs and case results. Returns how many simulations were deleted. */
+  /**
+   * Deletes simulations created before `before`, with their replay jobs and case results. A simulation with a replay
+   * job under a legal hold is kept. Returns how many simulations were deleted.
+   */
   pruneGuardSimulations(input: { before: string }): Promise<number>;
 
   // ---- 12.7 Content rules benchmarks
@@ -552,6 +589,7 @@ export interface Store extends AiGatewayStore {
   }>;
   /** Runs-page badges: the newest cassette per execution id. */
   mcpCassetteBadgesForExecutions(executionIds: string[]): Promise<Map<string, McpCassetteBadge>>;
+  /** Throws `LegalHoldError` while a legal hold covers the cassette. */
   deleteMcpCassette(id: string): Promise<boolean>;
 
   // ---- MCP registry, probes, telemetry, OAuth, elicitations, policies, toolsets and clients
@@ -811,6 +849,20 @@ export interface Store extends AiGatewayStore {
   /** 13.2 — replaces the client's address list and certificate pin; null when the client does not exist. */
   updateMcpClientNetwork(id: string, input: { allowedIps: string[]; certFingerprints: string[]; certSubject: string | null }): Promise<McpClient | null>;
   touchMcpClient(id: string, at: string): Promise<void>;
+  /**
+   * 13.2 (v64) — rotates a gateway client's token in one UPDATE: the current prefix and hash move to previous_* (valid
+   * until `previousExpiresAt`; null ends the old token at once) and the new ones take their place. It applies only
+   * while the client's current prefix is still `expectedTokenPrefix`, so of two rotations racing on any instances
+   * exactly one succeeds and the other reads `conflict`. A revoked or expired client is `inactive`.
+   */
+  rotateMcpClient(input: {
+    id: string;
+    expectedTokenPrefix: string;
+    tokenPrefix: string;
+    tokenHash: string;
+    previousExpiresAt: string | null;
+    now: string;
+  }): Promise<McpClientRotationOutcome>;
   /** 12.6 — an admin's change of a client's name or rate limit (null removes it); null when the client does not exist. */
   updateMcpClient(id: string, patch: { name?: string; rateLimit?: McpGatewayRateLimit | null }): Promise<McpClient | null>;
   /** MCP tool-call telemetry rows of one execution, oldest first. */
@@ -1013,6 +1065,7 @@ export interface Store extends AiGatewayStore {
   }): Promise<void>;
   listEvalDatasets(options?: { projectId?: string; workflowId?: string; id?: string }): Promise<EvalDatasetRecord[]>;
   getEvalDataset(id: string): Promise<EvalDatasetRecord | null>;
+  /** Throws `LegalHoldError` while a legal hold covers the set, its cases or its runs. */
   deleteEvalDataset(id: string): Promise<boolean>;
   createEvalFixture(input: {
     id: string; datasetId: string; name: string;
@@ -1025,6 +1078,7 @@ export interface Store extends AiGatewayStore {
   /** Phase 15.2 — whether a golden set already holds this golden run. */
   findEvalFixtureByRecording(datasetId: string, recordingId: string): Promise<EvalFixtureRecord | null>;
   getEvalFixtureDatasetId(id: string): Promise<string | null>;
+  /** Throws `LegalHoldError` while a legal hold covers the case. */
   deleteEvalFixture(id: string): Promise<boolean>;
   /** Migration 36 — marks a case required (or not); false when it does not exist. */
   setEvalFixtureRequired(id: string, required: boolean): Promise<boolean>;
@@ -1051,7 +1105,7 @@ export interface Store extends AiGatewayStore {
    * Phase 15.2 — deletes finished eval runs and replay jobs (with their case
    * results) that started before `before`. The newest run of every dataset
    * or golden set, and its newest finished one, are always kept, so a set
-   * never loses its last verdict. Returns how many runs were deleted.
+   * never loses its last verdict. Runs under a legal hold are kept. Returns how many runs were deleted.
    */
   pruneEvalRuns(input: { before: string }): Promise<number>;
   finalizeEvalRun(input: {
@@ -1123,9 +1177,9 @@ export interface Store extends AiGatewayStore {
   }): Promise<{ items: ReplayRecordingSummary[]; total: number }>;
   /** Runs captured for a workflow since `since` (ISO), promoted or not: the daily limit counts these. */
   countReplayCapturesSince(workflowId: string, since: string): Promise<number>;
-  /** The oldest `count` candidates of a workflow (eviction order). */
+  /** The oldest `count` candidates of a workflow (eviction order), leaving out those under a legal hold. */
   oldestReplayCaptureIds(workflowId: string, count: number): Promise<string[]>;
-  /** Deletes candidates captured before `before` (retention). Golden runs are never touched. */
+  /** Deletes candidates captured before `before` (retention). Golden runs and held candidates are never touched. */
   pruneReplayCaptures(before: string): Promise<number>;
   /** Promote: the candidate becomes golden with its re-scrubbed content. Returns false when it is no longer a candidate. */
   promoteReplayCapture(id: string, input: Pick<ReplayRecordingInsert, "name" | "capturedWorkflowJson" | "inputJson" | "nodeOutputsJson" | "factsJson" | "mcpCassetteJson" | "modelTapeJson" | "memorySeedJson" | "bytes" | "workflowHash"> & {
@@ -1145,13 +1199,17 @@ export interface Store extends AiGatewayStore {
    * Deletes one row the data-subject lookup found. A golden run takes the
    * golden-set cases made from it, and the results of those cases, with it.
    */
-  deleteSubjectRow(kind: SubjectStoreKind, id: string): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }> }>;
+  deleteSubjectRow(
+    kind: SubjectStoreKind,
+    id: string
+  ): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }>; heldBy?: LegalHoldRef[] }>;
   /** Bytes one workflow's captured candidates use (REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW). */
   sumReplayCaptureBytesForWorkflow(workflowId: string): Promise<number>;
-  /** The oldest candidates of a workflow with their sizes, oldest first (byte-budget eviction). */
+  /** The oldest candidates of a workflow with their sizes, oldest first (byte-budget eviction), held ones left out. */
   oldestReplayCaptures(workflowId: string, limit: number): Promise<Array<{ id: string; bytes: number }>>;
   /** Runs-page badges: how many golden runs were saved from each execution. */
   replayGoldenBadgesForExecutions(executionIds: string[]): Promise<Map<string, ReplayGoldenBadge>>;
+  /** Throws `LegalHoldError` while a legal hold covers the golden or captured run. */
   deleteReplayRecording(id: string): Promise<boolean>;
 
   // ---- Workflow versions
@@ -1398,7 +1456,8 @@ export interface Store extends AiGatewayStore {
   /**
    * With `refuseIfGateEnforced` (a caller who is not an admin) the release gate row is read before anything is
    * deleted, in the same transaction, and when the gate is on and enforced the call throws `ReleaseGateEnforcedError`
-   * and deletes nothing.
+   * and deletes nothing. Throws `LegalHoldError` (deleting nothing) while a legal hold covers the workflow, its
+   * project or any of its rows.
    */
   deleteWorkflow(id: string, options?: { refuseIfGateEnforced?: boolean }): Promise<boolean>;
   countWorkflows(): Promise<number>;
@@ -1429,6 +1488,7 @@ export interface Store extends AiGatewayStore {
     description?: string;
     createdBy?: string;
   }): Promise<Project>;
+  /** Throws `LegalHoldError` (deleting nothing) while a legal hold covers the project or anything in it. */
   deleteProject(id: string): Promise<boolean>;
   listFolders(projectId?: string): Promise<Folder[]>;
   getFolder(id: string): Promise<Folder | null>;
@@ -1563,31 +1623,30 @@ export interface Store extends AiGatewayStore {
     scopes?: string[];
     expiresAt?: string | null;
   }): Promise<void>;
-  listApiKeys(userId?: string): Promise<Array<{
-    id: string;
-    userId: string;
-    name: string;
-    keyPrefix: string;
-    scopes: string[];
-    lastUsedAt: string | null;
-    expiresAt: string | null;
-    revokedAt: string | null;
-    createdAt: string;
-  }>>;
-  findApiKeyByPrefix(prefix: string): Promise<{
-    id: string;
-    userId: string;
-    name: string;
-    keyPrefix: string;
-    keyHash: string;
-    scopes: string[];
-    lastUsedAt: string | null;
-    expiresAt: string | null;
-    revokedAt: string | null;
-    createdAt: string;
-  } | null>;
+  listApiKeys(userId?: string): Promise<StoredApiKey[]>;
+  findApiKeyByPrefix(prefix: string): Promise<(StoredApiKey & { keyHash: string }) | null>;
   touchApiKey(id: string): Promise<void>;
   revokeApiKey(id: string, userId?: string): Promise<boolean>;
+  /**
+   * 13.2 (v64) — rotates the user's key `id`: inserts `next` with the old key's name and scopes (copied inside the
+   * transaction, so the new key can never be wider), moves the old key's expires_at to min(its expiry, graceUntil) and
+   * records superseded_by and rotated_at. Atomic across instances: Postgres locks the old row (`FOR UPDATE`), SQLite
+   * runs one immediate write transaction, so of two rotations of one key exactly one succeeds and the other reads
+   * `already_rotated`. A revoked or expired key is `inactive`; a key of another user is `not_found`.
+   */
+  rotateApiKey(input: {
+    id: string;
+    userId: string;
+    next: { id: string; keyPrefix: string; keyHash: string; expiresAt: string | null };
+    graceUntil: string;
+    now: string;
+  }): Promise<ApiKeyRotationOutcome>;
+  /**
+   * 13.2 (v64) — records that an expiry alert for the credential goes out now, unless one went out after `notBefore`.
+   * True when this caller claimed it (exactly one of several instances racing wins), false otherwise or when the
+   * credential does not exist.
+   */
+  claimCredentialExpiryNotice(kind: "api_key" | "mcp_client", id: string, now: string, notBefore: string): Promise<boolean>;
   getMfaSecret(userId: string): Promise<{
     userId: string;
     secretIv: string;
@@ -2006,7 +2065,51 @@ export interface Store extends AiGatewayStore {
     deletePausedState?: boolean;
     cancelClaimed?: boolean;
   }): Promise<CancelExecutionResult>;
+  /**
+   * The whole history retention in one call, without a row cap: history, tool calls, cassettes, rule events, decided
+   * approvals, gateway approvals and finished queue rows before the cut-off. The retention service prunes the same rows
+   * table by table (pruneRetentionTable); this stays as the reference its equivalence test compares against.
+   */
   pruneExecutionHistory(input: { before: string }): Promise<number>;
+  /**
+   * 13.3 — deletes `table`'s rows aged before `scope.before` (see RETENTION_TABLES), at most `scope.limit` of them, in
+   * batches of RETENTION_BATCH_ROWS; returns how many it deleted. SQLite yields to the event loop between batches, so a
+   * large purge never blocks it for long; Postgres skips rows another transaction holds (postgres/prune.ts).
+   */
+  pruneRetentionTable(table: RetentionTable, scope: RetentionScope): Promise<number>;
+  /** 13.3 — `table`'s rows aged before `before` (of one project, or but those of some: RetentionScope), counted up to `cap`. */
+  countRetentionDue(table: RetentionTable, input: Omit<RetentionScope, "limit"> & { cap: number }): Promise<number>;
+  /** 13.3 — records one retention purge (counts only). */
+  saveRetentionRun(run: RetentionRunView): Promise<void>;
+  /** 13.3 — the latest retention purges, newest first. */
+  listRetentionRuns(limit: number): Promise<RetentionRunView[]>;
+  /**
+   * 13.3 — places a legal hold with its items, in one transaction. On Postgres it takes the legal-hold advisory lock
+   * exclusively first, so it waits for purge batches and hold-checked deletes under way and every later one sees it.
+   */
+  placeLegalHold(input: LegalHoldInsert): Promise<LegalHoldView>;
+  /** 13.3 — releases an active hold; null when there is no such hold, the hold as it is when already released. */
+  releaseLegalHold(input: { id: string; releasedBy: string | null; reason: string; releasedAt: string }): Promise<LegalHoldView | null>;
+  getLegalHold(id: string): Promise<LegalHoldView | null>;
+  /** 13.3 — holds, newest first; only those of `status` when given. */
+  listLegalHolds(options?: { status?: LegalHoldStatus }): Promise<LegalHoldView[]>;
+  /** 13.3 — a page of a hold's items, in the order they were added. */
+  listLegalHoldItems(holdId: string, page: { offset: number; limit: number }): Promise<{ items: LegalHoldItemView[]; total: number }>;
+  /** 13.3 — the active holds that keep anything deleting `target` would remove (empty: nothing held). */
+  legalHoldsOn(target: LegalHoldTarget): Promise<LegalHoldRef[]>;
+  /** 13.3 R1 — stored per-project retention values, all of them or one project's. */
+  listRetentionPolicies(filter?: { scopeId?: string }): Promise<RetentionPolicyRecord[]>;
+  /**
+   * 13.3 R1 — sets a project's values in one transaction: a number of days replaces the class's value, null removes it
+   * (the class inherits the deployment's again). Returns the project's values before the change.
+   */
+  setRetentionPolicies(input: {
+    scopeId: string;
+    values: Partial<Record<RetentionDataClass, number | null>>;
+    updatedBy: string | null;
+  }): Promise<RetentionPolicyRecord[]>;
+  /** 13.3 R1 — which of these run ids still have run history (a rule event or tool call may outlive its run). */
+  listExistingExecutionIds(executionIds: readonly string[]): Promise<string[]>;
   saveWorkflowExecutionState(input: {
     id: string;
     workflowId: string;

@@ -93,9 +93,15 @@ longer than it are signed out on their next request; users sign in again. Loweri
 - Workflow create/update/delete: `builder`, `admin`
 - Execute workflow/webhook API trigger: `builder`, `admin`
 - Secrets list/create: `builder`, `admin`
-- User registration:
-  - first-user bootstrap or public registration (as configured)
-  - `admin` can create admin users
+- User registration (`POST /api/auth/register`):
+  - the first user is the bootstrap admin
+  - with `AUTH_ALLOW_PUBLIC_REGISTER=false` (the default) only an `admin`, signed in or with an API key, creates
+    users, with any role
+  - with `AUTH_ALLOW_PUBLIC_REGISTER=true`, a signed-out caller always gets `viewer`, whatever role it asks for; a
+    signed-in user can give a role up to their own (a `viewer` creates viewers, a `builder` up to `builder`, an
+    `admin` any role) and gets `403` above it; a request with an L2M API key (`Authorization: Bearer ao_...`,
+    valid or not) gets `403`, while any other Bearer value (an auth proxy's own token, for example) is ignored.
+    Refusals are audited as `user.register` with outcome `denied`.
   - `admin` can invite a user by email (see [User invites](#user-invites))
 
 ## User invites
@@ -238,6 +244,11 @@ on top of the global role:
   `workflow:execute` on it may answer them.
 - Session-mode chat and form triggers only answer users who can read the
   workflow's project.
+- Legal holds are managed by admins and by users with a deployment-wide custom role (one with no project) granting
+  `legal_hold:manage`. The permission does nothing in a project role. Only an admin can assign a role that grants it,
+  or remove or change the membership that carries it. Holds on a data subject are admin-only (placing one runs the
+  data-subject lookup), and releasing a hold needs a signed-in person, not an API key. See
+  [Legal holds](../operations/legal-hold.md).
 
 ## What a running workflow can reach
 
@@ -774,7 +785,9 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Sign another user out | `POST /api/users/:id/sessions/revoke` (not when it names your own account) |
 | Turn your own MFA off | `POST /api/auth/mfa/disable` |
 | Create an API key | `POST /api/auth/api-keys`, `POST /api/service-accounts/:id/keys` |
+| Rotate an API key | `POST /api/auth/api-keys/:id/rotate`, `POST /api/service-accounts/:id/keys/:keyId/rotate` |
 | Create a gateway client | `POST /api/mcp/clients` |
+| Rotate a gateway client's token | `POST /api/mcp/clients/:id/rotate` |
 | Create, change or delete a secret | `POST /api/secrets`, `PUT /api/secrets/:id/sensitive-output`, `POST /api/secrets/:id/shares`, `DELETE /api/secrets/:id/shares/:projectId`, `DELETE /api/secrets/:id` |
 | Change SSO group mappings | `POST /api/auth/sso/mappings`, `DELETE /api/auth/sso/mappings/:id` |
 | Change notification channels | `POST /api/notifications`, `DELETE /api/notifications/:id` |
@@ -782,6 +795,8 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Import MCP servers (creates secrets) | `POST /api/mcp/servers/import` |
 | Add or remove a project member | `POST /api/projects/:id/members`, `DELETE /api/projects/:id/members/:userId` |
 | Create, change or delete a custom role | `POST /api/custom-roles`, `PUT /api/custom-roles/:id`, `DELETE /api/custom-roles/:id` |
+| Place or release a legal hold | `POST /api/legal-holds`, `POST /api/legal-holds/:id/release` |
+| Change a project's data retention | `PUT /api/projects/:id/retention` |
 
 **API keys.** With step-up on, personal API keys are refused on these actions with `403 step_up_required`
 (`stepUp.credential: "api_key"`): a key cannot answer a code, and a stolen personal key should not mint more keys or
@@ -846,6 +861,8 @@ If the only admin loses their authenticator and backup codes:
 - `POST /api/auth/step-up` (`{ code }`, TOTP or backup code; refreshes the session's MFA check)
 - `POST /api/auth/mfa/enroll` (`{ password? }`; the password is needed more than 10 minutes after signing in)
 - `POST /api/users/:id/mfa/reset` (admin, step-up)
+- `POST /api/auth/api-keys/:id/rotate` (your own key; `{ graceHours? }`, step-up; see
+  [Rotating keys](./service-accounts.md#rotating-keys))
 - `GET /api/auth/oidc/metadata` (public; `{ "enabled": false }` when OIDC is off)
 - `GET /api/auth/oidc/login` (browser navigation; redirects to the IdP)
 - `GET /api/auth/oidc/callback` (IdP redirect target)
@@ -863,6 +880,7 @@ If the only admin loses their authenticator and backup codes:
   (a session restricted by `MFA_REQUIRED_ROLES`), `step_up_required` (a security action needs a recent MFA check),
   `mfa_code_invalid` (a wrong step-up code), `mfa_reauth_required` (setting up MFA needs the password or a fresh
   sign-in)
-- `409` `last_admin` (demoting or deleting the only admin who is a person), `mfa_required_for_role` (turning MFA off in a listed role)
+- `409` `last_admin` (demoting or deleting the only admin who is a person), `mfa_required_for_role` (turning MFA off in a listed role),
+  `already_rotated` / `inactive` (rotating a key that was already rotated, or is revoked or expired)
 - `429` `mfa_locked` (too many wrong MFA codes; `lockedUntil` and `Retry-After` say when to try again)
 - `404` not found, or in a project you cannot read

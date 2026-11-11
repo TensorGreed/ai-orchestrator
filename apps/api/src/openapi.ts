@@ -116,6 +116,68 @@ export const openApiSpec = {
       }
     },
 
+    "/api/admin/retention": {
+      get: {
+        tags: ["Observability"],
+        summary:
+          "Data retention (admin, read-only): days kept per class and the setting each comes from (0 = kept forever), the rows due now (counted up to backlogCap), the latest purges with their counts, and when the next interval purge is due",
+        responses: {
+          "200": { description: "Retention view" },
+          "403": { description: "Not an admin" }
+        }
+      }
+    },
+
+    "/api/legal-holds": {
+      get: {
+        tags: ["Observability"],
+        summary: "Legal holds, newest first (admins, or a role with legal_hold:manage); ?status=active|released",
+        responses: { "200": { description: "{ holds }" }, "403": { description: "Not a hold manager" } }
+      },
+      post: {
+        tags: ["Observability"],
+        summary:
+          "Place a legal hold on a project, a workflow, a list of runs (executionIds) or a data subject (subject: the rows the data-subject lookup finds now). Held data is kept from every purge and delete until the hold is released. Step-up when it is on; audited (legal_hold.placed) and sent as data.legal_hold_changed",
+        responses: {
+          "201": { description: "{ hold }" },
+          "400": { description: "Invalid payload, or a subject the lookup found nothing for" },
+          "403": { description: "Not a hold manager, or step-up required" },
+          "404": { description: "The project, workflow or runs do not exist" }
+        }
+      }
+    },
+    "/api/legal-holds/status": {
+      get: {
+        tags: ["Observability"],
+        summary: "Whether a workflow, project or run (one of workflowId, projectId, executionId) is under legal hold; hold names only for hold managers",
+        responses: { "200": { description: "{ held, holds }" }, "404": { description: "Not found or not readable" } }
+      }
+    },
+    "/api/legal-holds/{id}": {
+      get: {
+        tags: ["Observability"],
+        summary: "One legal hold",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ hold }" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/legal-holds/{id}/items": {
+      get: {
+        tags: ["Observability"],
+        summary: "The rows a runs or subject hold names (kind, rowId), paged with offset and limit (at most 500)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ items, total, offset, limit }" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/legal-holds/{id}/release": {
+      post: {
+        tags: ["Observability"],
+        summary: "Release a legal hold, with a reason. The next purge deletes what was due. Step-up when it is on; audited (legal_hold.released)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ hold }" }, "404": { description: "Not found" }, "409": { description: "Already released" } }
+      }
+    },
+
     // ── Auth ───────────────────────────────────────────────────────────────
     "/api/auth/register": {
       post: {
@@ -140,7 +202,8 @@ export const openApiSpec = {
         responses: {
           "200": { description: "User created", content: { "application/json": { schema: { type: "object", properties: { user: { $ref: "#/components/schemas/SafeUser" } } } } } },
           "400": { description: "Validation error" },
-          "403": { description: "Insufficient permissions" }
+          "401": { description: "Public registration is off and no admin is signed in" },
+          "403": { description: "A role above the caller's own, a non-admin caller while public registration is off, or an API key on public registration" }
         }
       }
     },
@@ -330,6 +393,22 @@ export const openApiSpec = {
         responses: {
           "200": { description: "Key revoked" },
           "404": { description: "Key not found" }
+        }
+      }
+    },
+    "/api/auth/api-keys/{id}/rotate": {
+      post: {
+        tags: ["Auth"],
+        summary:
+          "Rotate one of your own API keys: a new key (returned once) with the same name, scope and limits; the old key keeps working for graceHours (default 24, 0 ends it now). A scoped key may rotate only itself; a key rotated with a key expires no later than the calling key. Needs step-up when it is on (api_key.rotate).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: {
+          "200": { description: "{ key, record, previous }: the new key (plaintext once), its record, and the old key's record with its new expiresAt" },
+          "400": { description: "Invalid graceHours" },
+          "403": { description: "A scoped key rotating another key, a service account's key, or step-up required (code: step_up_required)" },
+          "404": { description: "No such key of yours" },
+          "409": { description: "Already rotated (code: already_rotated), or revoked or expired (code: inactive)" }
         }
       }
     },
@@ -540,6 +619,25 @@ export const openApiSpec = {
           { name: "keyId", in: "path", required: true, schema: { type: "string" } }
         ],
         responses: { "200": { description: "Revoked" }, "404": { description: "Service account or key not found" } }
+      }
+    },
+    "/api/service-accounts/{id}/keys/{keyId}/rotate": {
+      post: {
+        tags: ["Users"],
+        summary:
+          "Rotate a service account's API key (admin): a new key (returned once) with the same name and scope; the old key keeps working for graceHours (default 24, 0 ends it now). SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS caps the new key's expiry. Needs step-up when it is on (api_key.rotate).",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "keyId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: {
+          "200": { description: "{ key, record, previous }" },
+          "400": { description: "Invalid graceHours" },
+          "403": { description: "Step-up required (code: step_up_required)" },
+          "404": { description: "Service account or key not found" },
+          "409": { description: "Already rotated (code: already_rotated), or revoked or expired (code: inactive)" }
+        }
       }
     },
     "/api/users/{id}/sessions": {
@@ -1124,6 +1222,53 @@ export const openApiSpec = {
           { name: "userId", in: "path", required: true, schema: { type: "string" } }
         ],
         responses: { "200": { description: "Member removed" } }
+      }
+    },
+    "/api/projects/{id}/retention": {
+      get: {
+        tags: ["Projects"],
+        summary:
+          "A project's data retention (project members): days per class (runs, tool_calls, rule_events, agent_memory), null where the deployment's value is inherited, what applies now, and the bounds a value must fall in",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Project retention view" }, "404": { description: "Project not found or not readable" } }
+      },
+      put: {
+        tags: ["Projects"],
+        summary:
+          "Set or clear a project's retention (admins and the project's admins; step-up when it is on). A number of days within RETENTION_MIN_DAYS..RETENTION_MAX_DAYS (0 = keep forever, only without a maximum), or null to inherit the deployment's value; audited as project.retention.update",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["classes"],
+                properties: {
+                  classes: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      runs: { type: "integer", minimum: 0, nullable: true },
+                      tool_calls: { type: "integer", minimum: 0, nullable: true },
+                      rule_events: { type: "integer", minimum: 0, nullable: true },
+                      agent_memory: { type: "integer", minimum: 0, nullable: true }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "The updated project retention view" },
+          "400": { description: "Invalid body, or a value outside the deployment's bounds (retention_out_of_bounds)" },
+          "403": {
+            description:
+              "Not an admin of the project, step_up_required, or retention_admin_required (only an admin may set tool_calls or rule_events shorter than the deployment's value)"
+          },
+          "404": { description: "Project not found or not readable" }
+        }
       }
     },
     "/api/folders": {
@@ -3415,6 +3560,22 @@ export const openApiSpec = {
         responses: { "200": { description: "Revoked client" }, "404": { description: "Not found" } }
       }
     },
+    "/api/mcp/clients/{id}/rotate": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "Rotate a client's token (admin): a new token (returned once); the old token keeps working for graceHours (default 24, 0 ends it now, never past the client's own expiry). While an old token is still in its grace window, only a rotation with graceHours 0 is taken (it ends every old token now). Name, role, toolsets, limits and live sessions are kept. Needs step-up when it is on (mcp_client.rotate).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: {
+          "200": { description: "{ client, token }: client.previousTokenPrefix and previousExpiresAt describe the old token" },
+          "400": { description: "Invalid graceHours" },
+          "403": { description: "Step-up required (code: step_up_required)" },
+          "404": { description: "Not found" },
+          "409": { description: "Revoked or expired (code: inactive), an old token still in its grace window (code: rotation_pending), or rotated at the same moment by another request (code: rotation_conflict)" }
+        }
+      }
+    },
     "/api/mcp/clients/{id}/network": {
       put: {
         tags: ["MCP"],
@@ -3554,6 +3715,14 @@ export const openApiSpec = {
           projects: { type: "array", items: { type: "string" }, maxItems: 50, nullable: true },
           scopes: { type: "array", items: { type: "string", maxLength: 160 } },
           expiresInDays: { type: "integer", minimum: 0 }
+        }
+      },
+      CredentialRotate: {
+        type: "object",
+        description:
+          "How long the old key or token keeps working after a rotation, in hours (0 to 168; default 24; 0 ends it at once). The new credential keeps the old one's name, scope and limits.",
+        properties: {
+          graceHours: { type: "integer", minimum: 0, maximum: 168 }
         }
       },
       SafeUser: {

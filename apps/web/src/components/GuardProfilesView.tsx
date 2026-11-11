@@ -48,6 +48,8 @@ import {
   setChannelEnabled,
   setDefaultAction,
   setDetector,
+  setDetectorOptions,
+  setRuleStreamBuffer,
   setLatencyBudget,
   setProtectionFallback,
   setShadowForAction,
@@ -66,6 +68,8 @@ import { GuardSimulationCard, useGuardSimulation } from "./GuardSimulationPanel"
 import { simulateDenial } from "../lib/guard-simulation";
 import { benchmarkDraftDenial } from "../lib/guard-benchmark";
 import { GuardBenchmarkResultCard } from "./GuardBenchmarkView";
+import { OutputCheckOptions } from "./OutputCheckOptions";
+import { OUTPUT_CHECK_CATEGORY, isOutputCheck, type OutputCheckId } from "../lib/output-check-edit";
 
 type Role = "admin" | "builder" | "operator" | "viewer";
 
@@ -546,6 +550,19 @@ function GuardProfileEditor({
                 </tbody>
               </table>
             </div>
+            {view.detectors
+              .filter((entry) => isOutputCheck(entry.id))
+              .map((entry) => (
+                <OutputCheckOptions
+                  key={`${summary.id}:${channel}:${entry.id}`}
+                  detectorId={entry.id as OutputCheckId}
+                  options={entry.options ?? {}}
+                  readOnly={readOnly}
+                  buffered={view.actions[OUTPUT_CHECK_CATEGORY[entry.id as OutputCheckId]]?.stream === "buffer"}
+                  onChange={(options) => update(setDetectorOptions(document, channel, entry.id, options))}
+                  onBuffered={(buffered) => update(setRuleStreamBuffer(document, channel, OUTPUT_CHECK_CATEGORY[entry.id as OutputCheckId], buffered))}
+                />
+              ))}
             <ActionRules
               key={channel}
               rules={view.actions}

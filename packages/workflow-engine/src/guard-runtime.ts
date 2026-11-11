@@ -16,9 +16,13 @@ import {
   DEFAULT_DATAMARK,
   evaluateGuardStack,
   generateCanaryToken,
+  GUARD_ACTIONS,
   guardCheckIsMemoisable,
   guardVerdictMemoKey,
   hashGuardProfile,
+  profilesUseGrounding,
+  isRetrievalTool,
+  OUTPUT_GROUNDING_DETECTOR_ID,
   isMemoisableVerdict,
   mergeGuardProfileOverride,
   PROMPT_HARDENING_TEXT,
@@ -31,7 +35,9 @@ import {
   type GuardAction,
   type GuardChannel,
   type GuardInput,
+  type GuardModelServices,
   type GuardProfile,
+  type GuardSource,
   type GuardRegistry,
   type GuardToolContext,
   type GuardVerdictMemo,
@@ -234,6 +240,21 @@ export interface GuardEvalScope {
    * runs and records, as before.
    */
   memo?: GuardVerdictMemo<GuardCheckResult["verdicts"]>;
+  /**
+   * Phase 12 coverage — model calls the output checks may make here (a
+   * semantic topic check, a model safety check, the grounding judge). The
+   * node counts their usage. Absent: a check that needs a model fails, and
+   * the rule set's failure policy decides.
+   */
+  models?: GuardModelServices;
+  /**
+   * Phase 12 coverage — the built-in rule set judges this check in shadow:
+   * its findings and actions are recorded, nothing is blocked or rewritten,
+   * and a latency overrun lets the content through. Other rule sets in the
+   * stack act as written. Set where a new checkpoint observes zero-config
+   * runs before it enforces (LLM Call nodes at the model boundary).
+   */
+  shadowUnderBuiltin?: boolean;
 }
 
 export interface GuardCheckResult {
@@ -269,6 +290,34 @@ const resolutionCache = new WeakMap<GuardRuntimeDependencies, Promise<GuardRunRe
 const issuedCache = new WeakMap<GuardRuntimeDependencies, Set<string>>();
 const rowsCache = new WeakMap<GuardRuntimeDependencies, Promise<DataDestinationRow[]>>();
 const memoCache = new WeakMap<object, GuardVerdictMemo<GuardCheckResult["verdicts"]>>();
+const shadowCopies = new WeakMap<GuardProfile, GuardProfile>();
+
+/**
+ * Phase 12 coverage — the profile with every action observed only: each
+ * action rule and default action in shadow, every action shadowed at the
+ * profile level, and a latency overrun failing open. Detection is unchanged.
+ */
+export function shadowedGuardProfile(profile: GuardProfile): GuardProfile {
+  let copy = shadowCopies.get(profile);
+  if (!copy) {
+    const channels: GuardProfile["channels"] = {};
+    for (const [channel, entry] of Object.entries(profile.channels) as Array<[GuardChannel, NonNullable<GuardProfile["channels"][GuardChannel]>]>) {
+      channels[channel] = {
+        ...entry,
+        actions: Object.fromEntries(Object.entries(entry.actions).map(([key, rule]) => [key, { ...rule, shadow: true }])),
+        defaultAction: { ...entry.defaultAction, shadow: true }
+      };
+    }
+    copy = {
+      ...profile,
+      channels,
+      shadow: Object.fromEntries(GUARD_ACTIONS.map((action) => [action, true])) as GuardProfile["shadow"],
+      latencyBudget: { ...profile.latencyBudget, onExceeded: "fail_open" }
+    };
+    shadowCopies.set(profile, copy);
+  }
+  return copy;
+}
 
 /**
  * Phase 12 coverage — the run's memo of clean checks, never shared across
@@ -477,10 +526,14 @@ export async function runGuardCheck(
   const issued = issuedSurrogatesOf(scope.guard);
   const subject = scope.subject ? { role: scope.subject.role, ...(scope.subject.userId ? { userId: scope.subject.userId } : {}) } : undefined;
   const evaluated: GuardInput = { ...input, ...(subject && !input.subject ? { subject } : {}), ...(input.issuedSurrogates ? {} : { issuedSurrogates: issued }) };
+  // Phase 12 coverage — the built-in rule set only observes here; the recorded profile is still the built-in one.
+  const judged = scope.shadowUnderBuiltin
+    ? profiles.map((entry) => (entry.profileId === GUARD_BUILTIN_PROFILE_ID ? shadowedGuardProfile(entry.profile) : entry.profile))
+    : profiles.map((entry) => entry.profile);
   // Phase 12 coverage — the same clean check earlier in this run: reuse it, record nothing new.
   // Only content checks: never tool arguments, outbound requests, destinations or detectors that read DNS or the filesystem.
   const memoKey =
-    scope.memo && profiles.length > 0 && guardCheckIsMemoisable(evaluated, profiles.map((entry) => entry.profile), registry)
+    scope.memo && profiles.length > 0 && guardCheckIsMemoisable(evaluated, judged, registry)
       ? guardVerdictMemoKey(profiles.map((entry) => entry.hash), evaluated)
       : undefined;
   if (memoKey && scope.memo) {
@@ -488,9 +541,9 @@ export async function runGuardCheck(
     if (hit) return { action: "allow", content: input.content, transformed: false, verdicts: hit, memoHit: true };
   }
   const stack = await evaluateGuardStack(
-    profiles.map((entry) => entry.profile),
+    judged,
     evaluated,
-    { registry, protection }
+    { registry, protection, ...(scope.models ? { models: scope.models } : {}) }
   );
   // Phase 16 — remember the surrogates this check issued: later checks and capture masking leave them alone.
   if (!stack.verdicts.some((verdict) => verdict.blocked)) {
@@ -618,6 +671,8 @@ export function needsApproval(action: GuardAction): boolean {
 export interface AgentGuardTraceEntry {
   iteration: number;
   channel: GuardChannel;
+  /** Phase 12 coverage — `retrieval` for checks on outside content in the prompts before the first model call. */
+  placement?: "retrieval";
   toolName?: string;
   action: GuardAction;
   approved?: boolean;
@@ -626,6 +681,10 @@ export interface AgentGuardTraceEntry {
 
 export interface AgentGuardSession {
   hooks: AgentGuardHooks;
+  /** The profiles this agent's checks evaluate (the port's, or the run's automatic stack). */
+  profiles: ResolvedGuardProfile[];
+  /** Phase 12 coverage — adds a check made outside the loop (the model boundary) to the trace. */
+  note(entry: AgentGuardTraceEntry): void;
   /** The approval request behind the last `pause` decision (this agent's or a delegated worker's). */
   takePendingApproval(): ApprovalHandoffRequest | undefined;
   /** A delegated worker paused: its request pauses this agent too. */
@@ -657,6 +716,12 @@ export async function createAgentGuardSession(input: {
   modelDestination?: DestinationRef | null;
   /** Phase 16 — where a tool call goes (its MCP server), by exposed tool name; null for workers and offline servers. */
   toolDestination?: (exposedName: string) => DestinationRef | null;
+  /**
+   * Phase 12 coverage — documents the agent's answer drew on before the loop
+   * (retrieval nodes upstream). The tool results of this run are added to
+   * them. Read only when a rule set runs the grounding check.
+   */
+  groundingSources?: () => GuardSource[];
 }): Promise<AgentGuardSession | undefined> {
   const { scope } = input;
   let profiles: ResolvedGuardProfile[];
@@ -705,6 +770,18 @@ export async function createAgentGuardSession(input: {
       entry.approved = true;
     }
     return result.transformed ? { outcome: "rewrite", content: result.content, declassified: declassifiedClasses(result) } : { outcome: "allow" };
+  };
+  // Phase 12 coverage — grounding sources for the answer: upstream documents plus this run's tool results, kept only when checked.
+  const groundingChannels = new Set<GuardChannel>((["final_output", "model_output"] as GuardChannel[]).filter((channel) => profilesUseGrounding(profiles.map((entry) => entry.profile), channel)));
+  const toolSources: GuardSource[] = [];
+  // Only retrieval tools' answers count as sources unless a grounding rule asks for all tool results: a web fetch or
+  // search can echo anything, so its result would "ground" any claim.
+  const allToolSources = profiles.some((entry) =>
+    Object.values(entry.profile.channels).some((config) => config?.detectors.some((detector) => detector.id === OUTPUT_GROUNDING_DETECTOR_ID && detector.options.toolSources === "all"))
+  );
+  const sourcesFor = (channel: GuardChannel): GuardSource[] | undefined => {
+    if (!groundingChannels.has(channel)) return undefined;
+    return [...(input.groundingSources?.() ?? []), ...toolSources];
   };
   const boundary = `DATA-${randomBytes(6).toString("hex").toUpperCase()}`;
   const verdictLog: AgentGuardTraceEntry[] = [];
@@ -768,12 +845,14 @@ export async function createAgentGuardSession(input: {
           : check.channel === "tool_arguments" && check.tool
             ? await destinationOf(input.toolDestination?.(check.tool.name))
             : undefined;
+      const sources = sourcesFor(check.channel);
       const result = await runGuardCheck(
         scope,
         profiles,
         {
           content: check.content,
           channel: check.channel,
+          ...(sources ? { sources } : {}),
           // Propagated labels add to the checkpoint's fixed ones: a check never sees weaker labels than with the switch off.
           labels: (propagatedLabels && check.dataLabels ? orderedProvenance([...check.labels, ...check.dataLabels.provenance]) : check.labels) as ProvenanceLabel[],
           ...(tool ? { tool } : {}),
@@ -790,12 +869,20 @@ export async function createAgentGuardSession(input: {
         verdicts: result.verdicts
       };
       verdictLog.push(entry);
+      if (check.channel === "tool_result" && groundingChannels.size > 0 && result.action !== "block" && toolSources.length < 50 && (allToolSources || isRetrievalTool(tool))) {
+        const content = result.transformed ? result.content : check.content;
+        toolSources.push({ id: `tool:${check.iteration}:${toolSources.length + 1}`, text: typeof content === "string" ? content : JSON.stringify(content ?? "") });
+      }
       return decide(check.channel, result, entry, check.iteration, tool);
     }
   };
 
   return {
     hooks,
+    profiles,
+    note: (entry) => {
+      verdictLog.push(entry);
+    },
     takePendingApproval: () => {
       const pending = pendingApproval;
       pendingApproval = undefined;

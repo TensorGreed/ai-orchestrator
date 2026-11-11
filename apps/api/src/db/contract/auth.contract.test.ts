@@ -213,7 +213,9 @@ describeStoreContract("store contract: users and auth", (ctx) => {
       lastUsedAt: null,
       expiresAt,
       revokedAt: null,
-      createdAt: k1.createdAt
+      createdAt: k1.createdAt,
+      supersededBy: null,
+      rotatedAt: null
     });
     expect(k1.createdAt).toMatch(ISO);
     expect(k1).not.toHaveProperty("keyHash");
@@ -230,6 +232,83 @@ describeStoreContract("store contract: users and auth", (ctx) => {
     expect(await store.revokeApiKey("k2")).toBe(true);
     expect(await store.revokeApiKey("missing")).toBe(false);
     expect((await store.listApiKeys("u2"))[0].scopes).toEqual([]);
+  });
+
+  it("13.2 rotateApiKey: copies name and scopes, shortens the old key to the grace window, refuses a second rotation", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    await user(store, "u2");
+    const now = new Date();
+    const at = (ms: number) => new Date(now.getTime() + ms).toISOString();
+    await store.saveApiKey({ id: "k1", userId: "u1", name: "deploy", keyPrefix: "pfx1", keyHash: "hash1", scopes: ["role:operator", "project:p1"], expiresAt: at(30 * 86_400_000) });
+    const next = (id: string, prefix: string, expiresAt: string | null = null) => ({ id, keyPrefix: prefix, keyHash: `hash-${id}`, expiresAt });
+
+    // Another user's key reads as missing.
+    expect(await store.rotateApiKey({ id: "k1", userId: "u2", next: next("k2", "pfx2"), graceUntil: at(3_600_000), now: now.toISOString() })).toEqual({ status: "not_found" });
+    expect(await store.findApiKeyByPrefix("pfx2")).toBeNull();
+
+    const rotated = await store.rotateApiKey({ id: "k1", userId: "u1", next: next("k2", "pfx2", at(60_000_000)), graceUntil: at(3_600_000), now: now.toISOString() });
+    expect(rotated).toEqual({ status: "rotated", previousExpiresAt: at(3_600_000) });
+    const fresh = await store.findApiKeyByPrefix("pfx2");
+    expect(fresh).toMatchObject({ id: "k2", userId: "u1", name: "deploy", keyHash: "hash-k2", scopes: ["role:operator", "project:p1"], expiresAt: at(60_000_000), supersededBy: null, rotatedAt: null, revokedAt: null });
+    const old = (await store.listApiKeys("u1")).find((key) => key.id === "k1");
+    expect(old).toMatchObject({ expiresAt: at(3_600_000), supersededBy: "k2", rotatedAt: now.toISOString(), revokedAt: null });
+    // The old key is still found (verify checks its expiry); a second rotation of it is refused.
+    expect(await store.findApiKeyByPrefix("pfx1")).toMatchObject({ id: "k1", supersededBy: "k2" });
+    expect(await store.rotateApiKey({ id: "k1", userId: "u1", next: next("k3", "pfx3"), graceUntil: at(0), now: now.toISOString() })).toEqual({ status: "already_rotated", supersededBy: "k2" });
+    expect(await store.findApiKeyByPrefix("pfx3")).toBeNull();
+
+    // The grace window never lengthens a key that ends sooner.
+    await store.saveApiKey({ id: "k4", userId: "u1", name: "short", keyPrefix: "pfx4", keyHash: "hash4", expiresAt: at(600_000) });
+    expect(await store.rotateApiKey({ id: "k4", userId: "u1", next: next("k5", "pfx5"), graceUntil: at(3_600_000), now: now.toISOString() })).toEqual({ status: "rotated", previousExpiresAt: at(600_000) });
+    // Revoked or expired keys are inactive.
+    await store.saveApiKey({ id: "k6", userId: "u1", name: "gone", keyPrefix: "pfx6", keyHash: "hash6", expiresAt: at(-1000) });
+    expect(await store.rotateApiKey({ id: "k6", userId: "u1", next: next("k7", "pfx7"), graceUntil: at(0), now: now.toISOString() })).toEqual({ status: "inactive" });
+    await store.revokeApiKey("k5");
+    expect(await store.rotateApiKey({ id: "k5", userId: "u1", next: next("k8", "pfx8"), graceUntil: at(0), now: now.toISOString() })).toEqual({ status: "inactive" });
+    expect(await store.findApiKeyByPrefix("pfx7")).toBeNull();
+    expect(await store.findApiKeyByPrefix("pfx8")).toBeNull();
+  });
+
+  it("13.2 two rotations of one key at once: exactly one succeeds, one new key exists", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    for (let round = 0; round < 5; round += 1) {
+      await store.saveApiKey({ id: `r${round}`, userId: "u1", name: `race${round}`, keyPrefix: `rp${round}`, keyHash: "h" });
+      const now = new Date().toISOString();
+      const graceUntil = new Date(Date.now() + 3_600_000).toISOString();
+      const results = await Promise.all([
+        store.rotateApiKey({ id: `r${round}`, userId: "u1", next: { id: `r${round}a`, keyPrefix: `rp${round}a`, keyHash: "ha", expiresAt: null }, graceUntil, now }),
+        store.rotateApiKey({ id: `r${round}`, userId: "u1", next: { id: `r${round}b`, keyPrefix: `rp${round}b`, keyHash: "hb", expiresAt: null }, graceUntil, now })
+      ]);
+      expect(results.filter((result) => result.status === "rotated")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "already_rotated")).toHaveLength(1);
+      const keys = (await store.listApiKeys("u1")).filter((key) => key.name === `race${round}`);
+      expect(keys).toHaveLength(2);
+      const winner = results[0]!.status === "rotated" ? `r${round}a` : `r${round}b`;
+      expect(keys.find((key) => key.id === `r${round}`)?.supersededBy).toBe(winner);
+    }
+  });
+
+  it("13.2 expiry notices for API keys: claimed at most once per window; a rotation clears the claim", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    const now = Date.now();
+    const iso = (ms: number) => new Date(now + ms).toISOString();
+    const day = 86_400_000;
+    await store.saveApiKey({ id: "k1", userId: "u1", name: "n", keyPrefix: "pfx1", keyHash: "h", expiresAt: iso(3 * day) });
+    expect(await store.claimCredentialExpiryNotice("api_key", "k1", iso(0), iso(-day))).toBe(true);
+    expect(await store.claimCredentialExpiryNotice("api_key", "k1", iso(1000), iso(1000 - day))).toBe(false);
+    expect(await store.claimCredentialExpiryNotice("api_key", "k1", iso(day), iso(0))).toBe(true);
+    expect(await store.claimCredentialExpiryNotice("api_key", "missing", iso(0), iso(-day))).toBe(false);
+    await store.rotateApiKey({ id: "k1", userId: "u1", next: { id: "k2", keyPrefix: "pfx2", keyHash: "h2", expiresAt: null }, graceUntil: iso(day + 3_600_000), now: iso(day + 1000) });
+    expect(await store.claimCredentialExpiryNotice("api_key", "k1", iso(day + 2000), iso(2000))).toBe(true);
+    // Two claims at once: exactly one wins.
+    const results = await Promise.all([
+      store.claimCredentialExpiryNotice("api_key", "k2", iso(0), iso(-day)),
+      store.claimCredentialExpiryNotice("api_key", "k2", iso(0), iso(-day))
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
   });
 
   it("MFA secrets: upsert keeps creation time, backup codes compare-and-set, delete once", async () => {

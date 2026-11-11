@@ -98,6 +98,7 @@ import { inputProvenance, type CaptureInputOrigin } from "./capture-masking.js";
 import type { McpCassetteRunPlan } from "./mcp-cassette-service.js";
 import { ReplayRecordingError, type ReplayRecordingService } from "./replay-recording-service.js";
 import type { Store } from "../db/store.js";
+import { ITEM_KIND_TABLES, LegalHoldError } from "../db/legal-hold-sql.js";
 
 /** HKDF info for the surrogate key: one deployment-stable key derived from the master key. */
 export const CAPTURE_SURROGATE_HKDF_INFO = "l2m/capture-surrogate/v1";
@@ -148,6 +149,7 @@ function captureFailureOutcome(error: unknown): string {
   if (error instanceof ReplayCaptureError && error.code === "conflict") return "discarded_disabled";
   if (error instanceof ReplayCaptureError && error.code === "not_found") return "discarded_source_deleted";
   if (error instanceof ReplayRecordingError && error.code === "too_large") return "skipped_too_large";
+  if ((error instanceof ReplayCaptureError && error.code === "held_budget") || error instanceof LegalHoldError) return "held_budget";
   return "failed";
 }
 
@@ -170,7 +172,7 @@ export function captureErrorLog(error: unknown, redact: (text: string) => string
 export class ReplayCaptureError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "invalid" | "forbidden" | "conflict" | "too_large" | "limit"
+    readonly code: "not_found" | "invalid" | "forbidden" | "conflict" | "too_large" | "limit" | "held_budget"
   ) {
     super(message);
     this.name = "ReplayCaptureError";
@@ -670,7 +672,9 @@ export class ReplayCaptureService {
   /**
    * Makes room for one more candidate of `bytes`: the oldest go first, while
    * the workflow is at its candidate count or over its byte budget. A
-   * candidate larger than the whole budget is refused.
+   * candidate larger than the whole budget is refused. Candidates a legal
+   * hold keeps are never evicted: when only they are left and there is still
+   * no room, the new run is not captured (`held_budget`).
    */
   private async evictFor(workflowId: string, bytes: number): Promise<void> {
     const store = this.options.store;
@@ -689,6 +693,9 @@ export class ReplayCaptureService {
         count -= 1;
         used -= candidate.bytes;
       }
+    }
+    if (count + 1 > maxPerWorkflow || used + bytes > maxBytesPerWorkflow) {
+      throw new ReplayCaptureError("The workflow's capture budget is full of captured runs under legal hold; the run was not captured.", "held_budget");
     }
   }
 
@@ -1012,7 +1019,10 @@ export class ReplayCaptureService {
       else if (!match) skipped.push({ kind: target.kind, id: target.id, reason: "no_match" });
       // A possible match may be another person's number: never deleted unless the admin confirmed this row.
       else if (match.certainty !== "exact" && target.confirmPossible !== true) skipped.push({ kind: target.kind, id: target.id, reason: "possible_match_unconfirmed" });
-      else confirmed.push({ kind: target.kind, id: target.id, certainty: match.certainty });
+      // 13.3 — a row under legal hold is left out of the delete (and of its intent audit); the store checks again.
+      else if ((await store.legalHoldsOn({ kind: "row", table: ITEM_KIND_TABLES[target.kind], id: target.id })).length > 0) {
+        skipped.push({ kind: target.kind, id: target.id, reason: "held" });
+      } else confirmed.push({ kind: target.kind, id: target.id, certainty: match.certainty });
       checked += 1;
       if (checked % FIND_SUBJECT_PAGE === 0) await new Promise<void>((resolve) => setImmediate(resolve));
     }
@@ -1026,7 +1036,10 @@ export class ReplayCaptureService {
       const afterDelete = (await hooks.beforeRowDelete?.({ kind: target.kind, id: target.id })) ?? null;
       const outcome = await store.deleteSubjectRow(target.kind, target.id);
       if (outcome.deleted) await afterDelete?.();
-      if (outcome.deleted) {
+      if (outcome.heldBy && outcome.heldBy.length > 0) {
+        // 13.3 — a legal hold outranks erasure (GDPR Art. 17(3)(e)): the row stays and is reported as held.
+        skipped.push({ kind: target.kind, id: target.id, reason: "held" });
+      } else if (outcome.deleted) {
         gone.add(`${target.kind}:${target.id}`);
         deleted[target.kind] += 1;
         removed.push({ kind: target.kind, id: target.id });

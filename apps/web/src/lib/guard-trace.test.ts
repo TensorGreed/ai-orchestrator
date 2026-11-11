@@ -100,6 +100,28 @@ describe("guard trace", () => {
     expect(node!.verdicts[1]!.toolName).toBe("search");
   });
 
+  it("marks an agent's checks on outside content in its prompts as retrieval, not as a tool result", () => {
+    const [node] = extractGuardTrace([
+      {
+        nodeId: "agent",
+        output: {
+          _guard: {
+            source: "instance",
+            profiles: [{ profileId: "default", version: 1 }],
+            chain: [],
+            canary: false,
+            verdicts: [
+              { iteration: 0, channel: "tool_result", placement: "retrieval", action: "block", verdicts: [{ profile: { profileId: "default", version: 1 }, summary: summary({ action: "block" }) }] },
+              { iteration: 1, channel: "tool_result", toolName: "search", action: "allow", verdicts: [{ profile: { profileId: "default", version: 1 }, summary: summary() }] }
+            ]
+          }
+        }
+      }
+    ]);
+    expect(node!.placement).toBe("agent");
+    expect(node!.verdicts.map((verdict) => verdict.placement)).toEqual(["retrieval", "agent"]);
+  });
+
   it("lists an enforced profile and its tightened copy once, with each finding and detector once", () => {
     const timings = (direct: number, dlp: number) => ({
       totalMs: direct + dlp,

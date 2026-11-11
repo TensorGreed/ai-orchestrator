@@ -1,6 +1,8 @@
+import { profilesUseGrounding, type GuardSource } from "@ai-orchestrator/guard-sdk";
 import type { GuardOutputHandle, WorkflowNode } from "@ai-orchestrator/shared";
 import { ApprovalHandoffSignal } from "./approval-handoff";
 import type { NodeLabelScope } from "./data-labels";
+import { withoutUsage } from "./usage-ownership";
 import {
   needsApproval,
   parseGuardNodeConfig,
@@ -113,6 +115,8 @@ export async function executeGuardNodeStep(input: {
   connectedHandles: Set<string>;
   /** Phase 16 — the node's labels: its input's provenance (when a profile asks for it), and the classes it rewrites away. */
   labelScope?: NodeLabelScope;
+  /** Phase 12 coverage — documents the checked content drew on; read only when a rule set runs the grounding check. */
+  groundingSources?: () => GuardSource[];
 }): Promise<Record<string, unknown>> {
   const config = parseGuardNodeConfig(input.node);
   const { profiles, resolution } = await resolveGuardNodeProfiles(input.scope.guard, config, protectionBindingsFromNodes(input.protectionNodes));
@@ -121,14 +125,22 @@ export async function executeGuardNodeStep(input: {
   const fromItem = readPath(input.merged, config.inputField);
   const value = fromItem !== undefined ? fromItem : readPath(input.globals, config.inputField);
   const propagated = input.labelScope && profilesUsePropagatedLabels(profiles) ? input.labelScope.inputLabels().provenance : undefined;
-  const result = await runGuardCheck(input.scope, profiles, { content: value ?? "", channel: config.channel, labels: guardNodeLabels(config, propagated) });
+  const sources = input.groundingSources && profilesUseGrounding(profiles.map((entry) => entry.profile), config.channel) ? input.groundingSources() : undefined;
+  const result = await runGuardCheck(input.scope, profiles, {
+    content: value ?? "",
+    channel: config.channel,
+    labels: guardNodeLabels(config, propagated),
+    ...(sources ? { sources } : {})
+  });
   // A redacted, masked or protected class is gone from the inspected field (on tracked runs the output scan finds any left elsewhere in the item).
   input.labelScope?.declassify(declassifiedClasses(result));
 
   const parentIds = new Set(input.parentIds);
   const itemWithoutParentCopies = Object.fromEntries(Object.entries(input.merged).filter(([key]) => !parentIds.has(key)));
+  // The item passes on without the parents' model usage, which stays on the node that made the call (also when the
+  // output is stored for an approval and set on resume, outside the node's run).
   const passOutput = (summary: GuardNodeSummary) => ({
-    ...writePath(itemWithoutParentCopies, config.inputField, result.transformed ? result.content : value ?? ""),
+    ...withoutUsage(writePath(itemWithoutParentCopies, config.inputField, result.transformed ? result.content : value ?? "")),
     guard: summary,
     _branchHandle: "pass"
   });

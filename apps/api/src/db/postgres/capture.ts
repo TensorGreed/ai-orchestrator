@@ -18,7 +18,8 @@ import {
 import type { ReplayCaptureSettingsRecord } from "../database.js";
 import { type Store } from "../store.js";
 import type { PgContext } from "./context.js";
-import { deleteUnlockedInBatches } from "./prune.js";
+import { deleteUnheldInBatches } from "./retention.js";
+import { notHeldSql } from "../legal-hold-sql.js";
 import { storedJsonb, toNum, toStr } from "./helpers.js";
 
 const REPLAY_RECORDING_SUMMARY_COLUMNS =
@@ -156,7 +157,7 @@ export async function countReplayCapturesSince(ctx: PgContext, ...[workflowId, s
 export async function oldestReplayCaptureIds(ctx: PgContext, ...[workflowId, count]: Parameters<Store["oldestReplayCaptureIds"]>): ReturnType<Store["oldestReplayCaptureIds"]> {
   if (count <= 0) return [];
   const rows = await ctx.query<{ id: string }>(
-    `SELECT id FROM replay_recordings WHERE workflow_id = $1 AND status = 'candidate' ORDER BY captured_at ASC, seq ASC LIMIT $2`,
+    `SELECT id FROM replay_recordings WHERE workflow_id = $1 AND status = 'candidate' AND ${notHeldSql("replay_recordings")} ORDER BY captured_at ASC, seq ASC LIMIT $2`,
     [workflowId, count]
   );
   return rows.map((row) => toStr(row.id));
@@ -164,7 +165,8 @@ export async function oldestReplayCaptureIds(ctx: PgContext, ...[workflowId, cou
 
 export async function pruneReplayCaptures(ctx: PgContext, ...[before]: Parameters<Store["pruneReplayCaptures"]>): ReturnType<Store["pruneReplayCaptures"]> {
   // Never waits for a row lock (see prune.ts): a capture a workflow delete or a promotion holds is left for a later run.
-  return await deleteUnlockedInBatches(ctx.pool, "replay_recordings", "status = 'candidate' AND captured_at < $1", [before]);
+  // 13.3 — and never a candidate a legal hold keeps; each batch takes the legal-hold lock shared (retention.ts).
+  return await deleteUnheldInBatches(ctx, "replay_recordings", `status = 'candidate' AND captured_at < $1 AND ${notHeldSql("replay_recordings")}`, [before]);
 }
 
 export async function promoteReplayCapture(ctx: PgContext, ...[id, input]: Parameters<Store["promoteReplayCapture"]>): ReturnType<Store["promoteReplayCapture"]> {
@@ -236,7 +238,7 @@ export async function sumReplayCaptureBytesForWorkflow(ctx: PgContext, ...[workf
 
 export async function oldestReplayCaptures(ctx: PgContext, ...[workflowId, limit]: Parameters<Store["oldestReplayCaptures"]>): ReturnType<Store["oldestReplayCaptures"]> {
   const rows = await ctx.query<{ id: string; bytes: number }>(
-    `SELECT id, bytes FROM replay_recordings WHERE workflow_id = $1 AND status = 'candidate' ORDER BY captured_at ASC, seq ASC LIMIT $2`,
+    `SELECT id, bytes FROM replay_recordings WHERE workflow_id = $1 AND status = 'candidate' AND ${notHeldSql("replay_recordings")} ORDER BY captured_at ASC, seq ASC LIMIT $2`,
     [workflowId, Math.max(1, limit)]
   );
   return rows.map((row) => ({ id: toStr(row.id), bytes: toNum(row.bytes) }));

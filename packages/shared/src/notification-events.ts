@@ -7,7 +7,9 @@ export const NOTIFICATION_EVENT_TYPES = [
   "approval.requested",
   "approval.timed_out",
   "network.break_glass_used",
-  "auth.break_glass_used"
+  "auth.break_glass_used",
+  "credential.expiring",
+  "data.legal_hold_changed"
 ] as const;
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
@@ -18,7 +20,9 @@ export const NOTIFICATION_EVENT_LABELS: Record<NotificationEventType, string> = 
   "approval.requested": "Approval requested",
   "approval.timed_out": "Approval timed out",
   "network.break_glass_used": "Break-glass access used",
-  "auth.break_glass_used": "Break-glass sign-in"
+  "auth.break_glass_used": "Break-glass sign-in",
+  "credential.expiring": "Credential expiring",
+  "data.legal_hold_changed": "Legal hold placed or released"
 };
 
 /** Names an earlier settings UI stored for channels; they map to the names the server emits. */
