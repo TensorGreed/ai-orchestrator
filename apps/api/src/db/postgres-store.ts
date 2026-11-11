@@ -30,6 +30,7 @@ import * as retention from "./postgres/retention.js";
 import * as legalHolds from "./postgres/legal-holds.js";
 import * as schedules from "./postgres/schedules.js";
 import * as secrets from "./postgres/secrets.js";
+import * as subject from "./postgres/subject.js";
 import * as sessions from "./postgres/sessions.js";
 import * as webhooks from "./postgres/webhooks.js";
 import * as workflows from "./postgres/workflows.js";
@@ -1056,6 +1057,69 @@ export class PostgresStore implements Store {
   }
   async getGuardBinding(...args: Parameters<Store["getGuardBinding"]>): ReturnType<Store["getGuardBinding"]> {
     return guard.getGuardBinding(this.ctx, ...args);
+  }
+  // 13.3 — data-subject requests (postgres/subject.ts).
+  async getSubjectRefKey(...args: Parameters<Store["getSubjectRefKey"]>): ReturnType<Store["getSubjectRefKey"]> {
+    return subject.getSubjectRefKey(this.ctx, ...args);
+  }
+  async initSubjectRefKey(...args: Parameters<Store["initSubjectRefKey"]>): ReturnType<Store["initSubjectRefKey"]> {
+    return subject.initSubjectRefKey(this.ctx, ...args);
+  }
+  async addSubjectRefs(...args: Parameters<Store["addSubjectRefs"]>): ReturnType<Store["addSubjectRefs"]> {
+    return subject.addSubjectRefs(this.ctx, ...args);
+  }
+  async listSubjectRefs(...args: Parameters<Store["listSubjectRefs"]>): ReturnType<Store["listSubjectRefs"]> {
+    return subject.listSubjectRefs(this.ctx, ...args);
+  }
+  async pruneOrphanSubjectRefs(...args: Parameters<Store["pruneOrphanSubjectRefs"]>): ReturnType<Store["pruneOrphanSubjectRefs"]> {
+    return subject.pruneOrphanSubjectRefs(this.ctx, ...args);
+  }
+  async createSubjectRequest(...args: Parameters<Store["createSubjectRequest"]>): ReturnType<Store["createSubjectRequest"]> {
+    return subject.createSubjectRequest(this.ctx, ...args);
+  }
+  async getSubjectRequest(...args: Parameters<Store["getSubjectRequest"]>): ReturnType<Store["getSubjectRequest"]> {
+    return subject.getSubjectRequest(this.ctx, ...args);
+  }
+  async listSubjectRequests(...args: Parameters<Store["listSubjectRequests"]>): ReturnType<Store["listSubjectRequests"]> {
+    return subject.listSubjectRequests(this.ctx, ...args);
+  }
+  async updateSubjectRequest(...args: Parameters<Store["updateSubjectRequest"]>): ReturnType<Store["updateSubjectRequest"]> {
+    return subject.updateSubjectRequest(this.ctx, ...args);
+  }
+  async saveSubjectExport(...args: Parameters<Store["saveSubjectExport"]>): ReturnType<Store["saveSubjectExport"]> {
+    return subject.saveSubjectExport(this.ctx, ...args);
+  }
+  async completeSubjectRequest(...args: Parameters<Store["completeSubjectRequest"]>): ReturnType<Store["completeSubjectRequest"]> {
+    return subject.completeSubjectRequest(this.ctx, ...args);
+  }
+  async listOverdueSubjectRequests(...args: Parameters<Store["listOverdueSubjectRequests"]>): ReturnType<Store["listOverdueSubjectRequests"]> {
+    return subject.listOverdueSubjectRequests(this.ctx, ...args);
+  }
+  async expireReadySubjectRequestsWithoutExport(
+    ...args: Parameters<Store["expireReadySubjectRequestsWithoutExport"]>
+  ): ReturnType<Store["expireReadySubjectRequestsWithoutExport"]> {
+    return subject.expireReadySubjectRequestsWithoutExport(this.ctx, ...args);
+  }
+  async getSubjectExport(...args: Parameters<Store["getSubjectExport"]>): ReturnType<Store["getSubjectExport"]> {
+    return subject.getSubjectExport(this.ctx, ...args);
+  }
+  async claimSubjectExport(...args: Parameters<Store["claimSubjectExport"]>): ReturnType<Store["claimSubjectExport"]> {
+    return subject.claimSubjectExport(this.ctx, ...args);
+  }
+  async expireSubjectExports(...args: Parameters<Store["expireSubjectExports"]>): ReturnType<Store["expireSubjectExports"]> {
+    return subject.expireSubjectExports(this.ctx, ...args);
+  }
+  async subjectScanPage(...args: Parameters<Store["subjectScanPage"]>): ReturnType<Store["subjectScanPage"]> {
+    return subject.subjectScanPage(this.ctx, ...args);
+  }
+  async subjectScanRow(...args: Parameters<Store["subjectScanRow"]>): ReturnType<Store["subjectScanRow"]> {
+    return subject.subjectScanRow(this.ctx, ...args);
+  }
+  async memorySessionSubjectRows(...args: Parameters<Store["memorySessionSubjectRows"]>): ReturnType<Store["memorySessionSubjectRows"]> {
+    return subject.memorySessionSubjectRows(this.ctx, ...args);
+  }
+  async staffSubjectRows(...args: Parameters<Store["staffSubjectRows"]>): ReturnType<Store["staffSubjectRows"]> {
+    return subject.staffSubjectRows(this.ctx, ...args);
   }
   // 12.6b — the /v1 AI gateway tables (postgres/ai-gateway.ts).
   async listAiGatewayRouteSets(...args: Parameters<Store["listAiGatewayRouteSets"]>): ReturnType<Store["listAiGatewayRouteSets"]> {

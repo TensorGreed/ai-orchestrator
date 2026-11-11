@@ -444,3 +444,41 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* 13.3 — the workflow's subject references dialog and the data-subject request form. */
+.subject-ref-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.subject-ref-row .cfg-input {
+  flex: 1;
+  min-width: 0;
+}
+.subject-ref-check {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.subject-ref-preview {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.subject-request-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+.subject-request-form .cfg-field {
+  width: min(480px, 100%);
+}
+.subject-request-form fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}

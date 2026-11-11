@@ -51,6 +51,9 @@ export interface StudioHudProps {
   /** Phase 11.2 — the workflow's "Ask before write tools" setting (agents pause for approval before an MCP write tool); the item opens its settings. */
   writeToolApproval?: boolean;
   onEditWriteToolApproval?: () => void;
+  /** 13.3 — the workflow's subject references (stored as keyed hashes for data-subject requests); the item opens their settings. */
+  subjectRefsSet?: boolean;
+  onEditSubjectRefs?: () => void;
   /** Phase 10.8 — record the MCP calls of manual runs into a cassette; the menu item shows only when the toggle handler is set. */
   recordMcp?: boolean;
   onToggleRecordMcp?: () => void;
@@ -118,6 +121,8 @@ export function StudioHud({
   onToggleNoWriteTools,
   writeToolApproval = false,
   onEditWriteToolApproval,
+  subjectRefsSet = false,
+  onEditSubjectRefs,
   recordMcp = false,
   onToggleRecordMcp,
   extraItems = NO_EXTRA_ITEMS,
@@ -504,6 +509,24 @@ export function StudioHud({
                       {writeToolApproval ? "✓" : ""}
                     </span>
                     Ask before write tools…
+                  </button>
+                )}
+                {onEditSubjectRefs && (
+                  <button
+                    type="button"
+                    className="hud-dropdown-item hud-dropdown-check"
+                    role="menuitemcheckbox"
+                    aria-checked={subjectRefsSet}
+                    title="Store keyed hashes of the values that identify the person a run is about, so data-subject requests can find its runs"
+                    onClick={() => {
+                      setOverflowOpen(false);
+                      onEditSubjectRefs();
+                    }}
+                  >
+                    <span className="hud-check-box" aria-hidden="true">
+                      {subjectRefsSet ? "✓" : ""}
+                    </span>
+                    Subject references…
                   </button>
                 )}
                 {onToggleRecordMcp && (
