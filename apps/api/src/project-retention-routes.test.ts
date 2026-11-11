@@ -124,11 +124,14 @@ describe("per-project retention routes", () => {
       `SELECT metadata_json, project_id FROM audit_logs WHERE event_type = 'project.retention.update' ORDER BY created_at, id`
     );
     expect(audits).toHaveLength(2);
-    expect(audits.map((row) => JSON.parse(row.metadata_json))).toEqual([
-      { before: {}, after: { runs: 7, rule_events: 400 } },
-      { before: { runs: 7, rule_events: 400 }, after: { runs: null, agent_memory: 0 } }
-    ]);
-    expect(audits[0]!.project_id).toBe("proj-a");
+    // Rows written in the same millisecond order by their random ids: compare without the order.
+    expect(audits.map((row) => JSON.parse(row.metadata_json))).toEqual(
+      expect.arrayContaining([
+        { before: {}, after: { runs: 7, rule_events: 400 } },
+        { before: { runs: 7, rule_events: 400 }, after: { runs: null, agent_memory: 0 } }
+      ])
+    );
+    expect(audits.every((row) => row.project_id === "proj-a")).toBe(true);
 
     // The admin page lists the project.
     const adminView = (await context.app.inject({ method: "GET", url: "/api/admin/retention", headers: { cookie: admin.cookie } })).json<RetentionAdminView>();
@@ -245,8 +248,10 @@ describe("per-project retention routes", () => {
       `SELECT metadata_json, outcome FROM audit_logs WHERE event_type = 'project.retention.update_denied' ORDER BY created_at, id`
     );
     expect(denied).toHaveLength(3);
-    expect(JSON.parse(denied[0]!.metadata_json)).toMatchObject({ refused: ["rule_events"], requested: { rule_events: 7 } });
-    expect(denied[0]!.outcome).toBe("failure");
+    // Rows written in the same millisecond order by their random ids: find the first refusal by what it asked for.
+    const first = denied.find((row) => (JSON.parse(row.metadata_json) as { requested?: Record<string, number> }).requested?.rule_events === 7)!;
+    expect(JSON.parse(first.metadata_json)).toMatchObject({ refused: ["rule_events"], requested: { rule_events: 7 } });
+    expect(denied.every((row) => row.outcome === "failure")).toBe(true);
 
     // Raising them, matching the deployment, shortening runs and setting memory (kept forever by the deployment) are fine.
     expect((await put(context, owner.cookie, { rule_events: 400, tool_calls: 30, runs: 1, agent_memory: 3 })).statusCode).toBe(200);
