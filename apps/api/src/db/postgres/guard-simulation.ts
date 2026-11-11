@@ -8,6 +8,7 @@ import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { deleteRunsWhole } from "./prune.js";
+import { LEGAL_HOLD_LOCK_SHARED_SQL } from "../legal-hold-sql.js";
 
 type Row = Record<string, unknown>;
 
@@ -138,6 +139,8 @@ export async function pruneGuardSimulations(ctx: PgContext, input: { before: str
   for (let index = 0; index < candidates.length; index += SIMULATION_PRUNE_CHUNK) {
     const chunk = candidates.slice(index, index + SIMULATION_PRUNE_CHUNK);
     deleted += await ctx.withTransaction(async (client) => {
+      // 13.3 — the legal-hold lock, shared, before any row lock (deleteRunsWhole leaves out held jobs).
+      await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
       const rows = (
         await client.query<{ id: string; job_ids_json: string | null }>(
           `SELECT id, job_ids_json FROM guard_simulations WHERE id = ANY($1::text[]) AND created_at < $2 ORDER BY id FOR UPDATE SKIP LOCKED`,

@@ -72,6 +72,35 @@ export function setDetector(document: GuardDocument, channel: string, detectorId
   });
 }
 
+/** Phase 12 coverage — replace a detector's options (an output check's schema, topics, model). Empty options are dropped. */
+export function setDetectorOptions(document: GuardDocument, channel: string, detectorId: string, options: Record<string, unknown>): GuardDocument {
+  return withChannel(document, channel, (current) => ({
+    ...current,
+    detectors: current.detectors.map((entry) => {
+      if (entry.id !== detectorId) return entry;
+      const { options: _old, ...rest } = entry;
+      return Object.keys(options).length > 0 ? { ...rest, options } : rest;
+    })
+  }));
+}
+
+/**
+ * Phase 12 coverage — `stream: "buffer"` on the rule for a finding category: a streamed answer is generated and
+ * checked in full before any of it is sent. A category without its own rule gets one with the default action.
+ */
+export function setRuleStreamBuffer(document: GuardDocument, channel: string, key: string, buffer: boolean): GuardDocument {
+  return withChannel(document, channel, (current) => {
+    const actions = { ...current.actions };
+    const existing = actions[key];
+    if (buffer) actions[key] = { ...(existing ?? { action: current.defaultAction.action }), stream: "buffer" };
+    else if (existing) {
+      const { stream: _stream, ...rest } = existing;
+      actions[key] = rest as ActionRuleView;
+    }
+    return { ...current, actions };
+  });
+}
+
 export function setActionRule(document: GuardDocument, channel: string, key: string, rule: { action: string; shadow?: boolean } | null): GuardDocument {
   return withChannel(document, channel, (current) => {
     const actions = { ...current.actions };

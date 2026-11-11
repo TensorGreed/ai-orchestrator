@@ -6,7 +6,7 @@ import { DataProtectionTab } from "./DataProtectionTab";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, fetchRetention: vi.fn() };
+  return { ...actual, fetchRetention: vi.fn(), fetchLegalHolds: vi.fn(async () => ({ holds: [] })) };
 });
 
 afterEach(() => {
@@ -82,7 +82,9 @@ describe("DataProtectionTab", () => {
     expect(last).toContain("Runs: 1,200, Tool calls: 3");
     expect(last).toContain("usage: failed");
     expect(screen.getByRole("table", { name: "Recent purges" }).textContent).toContain("Nothing due");
-    expect(screen.queryByRole("button")).toBeNull();
+    // Retention is read-only: the only controls belong to the legal-holds section.
+    for (const table of screen.getAllByRole("table")) expect(table.querySelector("button, input, select")).toBeNull();
+    expect(screen.getByRole("region", { name: "Legal holds" })).toBeTruthy();
   });
 
   it("before the first purge, and on an error", async () => {

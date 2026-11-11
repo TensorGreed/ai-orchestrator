@@ -12,6 +12,9 @@ Admins see the values in effect, what is due now and the latest purges under **S
 protection** (read-only), or from `GET /api/admin/retention`. A project can keep some kinds of data for a different
 time than the deployment: see [Per-project retention](#per-project-retention).
 
+Nothing under a [legal hold](./legal-hold.md) is purged, whatever its age. Held rows wait for the first purge after
+the hold is released.
+
 ## What each setting deletes
 
 `0` means "keep forever" wherever a setting accepts it.
@@ -67,9 +70,8 @@ under-count monthly budgets. There is no upper limit.
 - **How much.** Each purge deletes at most `RETENTION_MAX_ROWS_PER_TICK` rows per table (default 50 000), in batches
   of 1000. Whatever is left goes on the next purge. On SQLite the purge yields to other requests between batches and
   between classes, so a large first purge of runs, tool calls, rule events, cassettes, approvals, queue rows, agent
-  memory, usage or gateway requests does not hold them up. Eval runs, captured runs and rule simulations are still
-  purged without a row cap, as before 13.3, so on SQLite a very large first purge of those can still pause requests
-  while it runs. On Postgres a batch never waits for a row lock: rows another transaction holds (a workflow delete
+  memory, usage or gateway requests does not hold them up. Eval runs, captured runs and rule simulations are deleted in
+  batches too, yielding between them on SQLite, but still without a row cap per purge. On Postgres a batch never waits for a row lock: rows another transaction holds (a workflow delete
   under way, an approval being decided) are skipped and go on a later purge.
 - **Records.** Each start-up and scheduled purge is recorded with its counts per class (never row contents) for 90
   days, and, when it deleted rows, writes one `retention.purged` audit entry with the counts. Purges after finished

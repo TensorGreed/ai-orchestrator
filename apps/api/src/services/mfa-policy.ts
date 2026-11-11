@@ -91,7 +91,8 @@ export const STEP_UP_ACTIONS = {
   "custom_role.change": "Create, change or delete a custom role",
   "project_retention.change": "Change a project's data retention",
   "notification_channel.change": "Create or delete a notification channel",
-  "audit_export.change": "Create, change or delete an audit export destination or log stream"
+  "audit_export.change": "Create, change or delete an audit export destination or log stream",
+  "legal_hold.change": "Place or release a legal hold"
 } as const;
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS;

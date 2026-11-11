@@ -244,6 +244,11 @@ on top of the global role:
   `workflow:execute` on it may answer them.
 - Session-mode chat and form triggers only answer users who can read the
   workflow's project.
+- Legal holds are managed by admins and by users with a deployment-wide custom role (one with no project) granting
+  `legal_hold:manage`. The permission does nothing in a project role. Only an admin can assign a role that grants it,
+  or remove or change the membership that carries it. Holds on a data subject are admin-only (placing one runs the
+  data-subject lookup), and releasing a hold needs a signed-in person, not an API key. See
+  [Legal holds](../operations/legal-hold.md).
 
 ## What a running workflow can reach
 
@@ -790,6 +795,7 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Import MCP servers (creates secrets) | `POST /api/mcp/servers/import` |
 | Add or remove a project member | `POST /api/projects/:id/members`, `DELETE /api/projects/:id/members/:userId` |
 | Create, change or delete a custom role | `POST /api/custom-roles`, `PUT /api/custom-roles/:id`, `DELETE /api/custom-roles/:id` |
+| Place or release a legal hold | `POST /api/legal-holds`, `POST /api/legal-holds/:id/release` |
 | Change a project's data retention | `PUT /api/projects/:id/retention` |
 
 **API keys.** With step-up on, personal API keys are refused on these actions with `403 step_up_required`

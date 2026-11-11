@@ -1,10 +1,11 @@
 /**
  * 13.3 — Settings > Data protection: how long the deployment keeps each kind of data (read-only, from the environment),
- * what is due for deletion now, and the latest purges.
+ * what is due for deletion now, the latest purges, and legal holds (kept from every deletion until released).
  */
 import { useEffect, useState } from "react";
 import { RETENTION_PURGE_CLASS_LABELS, type RetentionAdminView, type RetentionRunView } from "@ai-orchestrator/shared";
 import { ApiError, fetchRetention } from "../lib/api";
+import { LegalHoldsSection } from "./LegalHoldsSection";
 import { ProjectRetentionOverrides } from "./ProjectRetentionTab";
 
 function formatError(err: unknown): string {
@@ -68,7 +69,8 @@ export function DataProtectionTab() {
       <h3>Data protection</h3>
       <p className="settings-muted">
         How long this deployment keeps each kind of data. The values come from environment variables and are shown here
-        read-only. Golden runs, golden-set cases, paused runs and pending approvals are never deleted by age.
+        read-only. Golden runs, golden-set cases, paused runs and pending approvals are never deleted by age, and nothing
+        under a legal hold is deleted at all.
       </p>
       {error && <div className="settings-error">{error}</div>}
       {!view && !error && <div className="settings-loading">Loading…</div>}
@@ -151,6 +153,7 @@ export function DataProtectionTab() {
           )}
         </>
       )}
+      <LegalHoldsSection />
     </section>
   );
 }
