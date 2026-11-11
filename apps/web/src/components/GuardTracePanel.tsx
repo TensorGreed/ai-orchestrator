@@ -122,8 +122,14 @@ function GuardVerdictRow({ verdict }: { verdict: GuardTraceVerdict }) {
         <span className="execution-row-caret" aria-hidden="true">
           {open ? "▾" : "▸"}
         </span>
-        {typeof verdict.iteration === "number" && <span className="mono-cell guard-verdict-step">step {verdict.iteration}</span>}
-        <span className="guard-verdict-channel">{channelLabel(verdict.channel)}</span>
+        {verdict.placement === "retrieval" ? (
+          <span className="guard-verdict-channel">Outside content in the prompt</span>
+        ) : (
+          <>
+            {typeof verdict.iteration === "number" && <span className="mono-cell guard-verdict-step">step {verdict.iteration}</span>}
+            <span className="guard-verdict-channel">{channelLabel(verdict.channel)}</span>
+          </>
+        )}
         {verdict.toolName && <span className="mono-cell guard-verdict-tool">{verdict.toolName}</span>}
         <span className={`guard-action guard-action-${verdict.action}`}>{actionLabel(verdict.action)}</span>
         {verdict.approved && <span className="guard-chip guard-chip-ok">approved</span>}

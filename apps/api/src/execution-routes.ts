@@ -682,6 +682,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
       channel: "draft",
       ...replayRunInputFor(source.triggerType, storedInput),
+      ...(source.triggerType ? { inputTriggerType: source.triggerType } : {}),
       // Phase 16 — the source run's input origin, not the user replaying it (12.2: recorded on this run's trigger
       // result too, so a replay of this replay keeps it).
       inputLabels: historyInputLabels(source, workflow),
