@@ -26,6 +26,8 @@ export interface QueuedExecutionPayload {
   triggeredBy?: string;
   /** The signed-in user who enqueued the job; their access is checked again when it runs. */
   enqueuedByUserId?: string;
+  /** 13.2 — the API key that enqueued it: the job runs with that key's limits, and is refused once the key is revoked. */
+  enqueuedByApiKeyId?: string;
   executionTimeoutMs?: number;
   customData?: Record<string, unknown>;
   /** Phase 11.2 — resume a paused run with a recorded approval decision instead of starting one. */

@@ -22,6 +22,8 @@ export async function createStore(config?: {
   env?: Record<string, string | undefined>;
   /** Where startup notes and warnings go (never containing the password). Defaults to the console. */
   log?: { info(message: string): void; warn(message: string): void };
+  /** SQLite: how long a statement waits for another process's write lock (a CLI beside a running API). */
+  sqliteBusyTimeoutMs?: number;
 }): Promise<Store> {
   const env = config?.env ?? process.env;
   const log = config?.log ?? {
@@ -44,7 +46,7 @@ export async function createStore(config?: {
 
   // Default: SQLite
   const dbFilePath = config?.dbFilePath ?? env.DB_SQLITE_PATH ?? "./data/orchestrator.db";
-  const store = await SqliteStore.create(dbFilePath);
+  const store = await SqliteStore.create(dbFilePath, { busyTimeoutMs: config?.sqliteBusyTimeoutMs });
   for (const note of store.upgradeNotes) log.info(`Database: ${note}`);
   return store;
 }

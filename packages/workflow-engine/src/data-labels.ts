@@ -367,7 +367,7 @@ export function createLabelScanner(dictionaries: readonly GuardDictionary[], iss
 
 /** Globals that are not run input: workflow variables and the run's own bookkeeping. */
 /** Run globals that are not the run's input (12.2: exported so an approval can tell what the input holds). */
-export const NON_INPUT_GLOBALS: ReadonlySet<string> = new Set(["vars", "execution_id", "execution_custom_data", "trigger_type", "scheduled_at", "_loop_index"]);
+export const NON_INPUT_GLOBALS: ReadonlySet<string> = new Set(["vars", "execution_id", "execution_custom_data", "trigger_type", "input_trigger_type", "scheduled_at", "_loop_index"]);
 
 export interface RunLabelOptions {
   /** Labels of the run's input (the trigger's provenance, or an Execute Workflow node's input labels). */
@@ -399,6 +399,20 @@ interface ActiveEndorsement {
 export interface ApprovalShown {
   nodeIds: string[];
   input: boolean;
+}
+
+/**
+ * Phase 12 coverage — what a finished node's output was made from: its DAG
+ * parents, the nodes it read through templates (all nodes that had run when
+ * it read everything), whether it read the run input, and whether it took
+ * content from anywhere else (labels its handler learned or replaced).
+ */
+export interface NodeDerivation {
+  nodeType: string;
+  parentIds: readonly string[];
+  nodeIds: readonly string[];
+  input: boolean;
+  other: boolean;
 }
 
 export class RunLabelState {
@@ -500,6 +514,18 @@ export class RunLabelState {
     return this.tracked || this.recordInput || this.recorded.size > 0 || this.endorsements.length > 0 || showsSomething;
   }
 
+  private readonly derivations = new Map<string, NodeDerivation>();
+
+  /** Phase 12 coverage — remember what a finished node's output was made from (its latest run). */
+  noteDerivation(nodeId: string, derivation: NodeDerivation): void {
+    this.derivations.set(nodeId, derivation);
+  }
+
+  /** What a finished node's output was made from; undefined for nodes that did not finish in this process (pinned, before a pause). */
+  derivationOf(nodeId: string): NodeDerivation | undefined {
+    return this.derivations.get(nodeId);
+  }
+
   /** The nodes that have labels so far. */
   nodeIds(): IterableIterator<string> {
     return this.nodes.keys();
@@ -596,7 +622,7 @@ export class RunLabelState {
   }
 
   /** A scope for one node about to run. */
-  scope(input: { nodeId: string; nodeType: string; parents: ReadonlyArray<DataLabels | undefined>; merged?: Record<string, unknown>; globals?: Record<string, unknown> }): NodeLabelScope {
+  scope(input: ConstructorParameters<typeof NodeLabelScope>[1]): NodeLabelScope {
     return new NodeLabelScope(this, input);
   }
 }
@@ -628,12 +654,25 @@ export class NodeLabelScope {
   private readonly added: DataLabels[] = [];
   private replaced?: DataLabels;
   private readonly declassified = new Set<string>();
+  /** The DAG parents' ids, when the caller named them (else the parents are unknown sources). */
+  private readonly parentIds?: readonly string[];
+  private readonly rootReadsInput: boolean;
 
   constructor(
     run: RunLabelState,
-    input: { nodeId: string; nodeType: string; parents: ReadonlyArray<DataLabels | undefined>; merged?: Record<string, unknown>; globals?: Record<string, unknown> }
+    input: {
+      nodeId: string;
+      nodeType: string;
+      parents: ReadonlyArray<DataLabels | undefined>;
+      /** The ids of `parents`, in the same order (Phase 12 coverage: the model boundary's run-input check). */
+      parentIds?: readonly string[];
+      merged?: Record<string, unknown>;
+      globals?: Record<string, unknown>;
+    }
   ) {
     this.run = run;
+    if (input.parents.length === 0) this.parentIds = [];
+    else if (input.parentIds && input.parentIds.length === input.parents.length) this.parentIds = input.parentIds;
     this.nodeId = input.nodeId;
     this.nodeType = input.nodeType;
     this.merged = input.merged ?? {};
@@ -641,7 +680,8 @@ export class NodeLabelScope {
     this.target = this.reads;
     const source = nodeContentSource(input.nodeType);
     if (source === "input" && run.recordsInput) run.recordInputNode(input.nodeId, input.nodeType);
-    const own = source === "input" || input.parents.length === 0 ? run.inputFor(input.nodeId) : undefined;
+    this.rootReadsInput = source === "input" || input.parents.length === 0;
+    const own = this.rootReadsInput ? run.inputFor(input.nodeId) : undefined;
     this.base = unionLabels([own, source === "external" ? labelsOf(["untrusted_external"]) : undefined, ...input.parents]);
   }
 
@@ -796,8 +836,17 @@ export class NodeLabelScope {
     return withoutDataClasses(this.replaced ?? this.inputLabels(), [...this.declassified]);
   }
 
-  /** The output's final labels (scanned on tracked runs). */
+  /** The output's final labels (scanned on tracked runs). Also notes what the output was made from. */
   finish(output: unknown): DataLabels {
+    const all = [this.reads, ...this.segments.values()];
+    const readAll = all.some((reads) => reads.all);
+    this.run.noteDerivation(this.nodeId, {
+      nodeType: this.nodeType,
+      parentIds: this.parentIds ?? [],
+      nodeIds: readAll ? [...this.run.nodeIds()].filter((id) => id !== this.nodeId) : [...new Set(all.flatMap((reads) => [...reads.nodes]))],
+      input: this.rootReadsInput || all.some((reads) => reads.input),
+      other: this.parentIds === undefined || this.added.length > 0 || this.replaced !== undefined
+    });
     return this.run.finalize(this.replaced ?? this.inputLabels(), output, [...this.declassified]);
   }
 }

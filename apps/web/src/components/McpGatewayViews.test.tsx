@@ -26,6 +26,7 @@ vi.mock("../lib/api", async () => {
     fetchMcpClients: vi.fn(),
     createMcpClient: vi.fn(),
     revokeMcpClient: vi.fn(),
+    rotateMcpClient: vi.fn(),
     fetchMcpClientUsage: vi.fn(),
     fetchMcpClientSessions: vi.fn(),
     fetchGuardProfiles: vi.fn(),
@@ -595,6 +596,30 @@ describe("MCP gateway views", () => {
     await waitFor(() => expect(api.revokeMcpClient).toHaveBeenCalledWith("mcc_1"));
     expect((await within(list).findAllByText("Revoked"))[0]).toHaveClass("mcp-status-down");
     expect(within(list).queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+
+  it("rotates a client's token with a grace window, shows the new token once and the old token's end", async () => {
+    const user = userEvent.setup();
+    const previousExpiresAt = new Date(Date.now() + 3 * 3_600_000).toISOString();
+    vi.mocked(api.rotateMcpClient).mockResolvedValue({
+      client: { ...activeClient, tokenPrefix: "l2m_mcp_new", previousTokenPrefix: activeClient.tokenPrefix, previousExpiresAt, rotatedAt: new Date().toISOString() },
+      token: "l2m_mcp_new.rotated-secret"
+    });
+    render(<McpServersPage view="clients" isAdmin activeProjectId={null} />);
+    const list = await screen.findByRole("list", { name: "MCP clients" });
+    await user.click(within(list).getByRole("button", { name: `Rotate ${activeClient.name}` }));
+    const group = within(list).getByRole("group", { name: `Rotate ${activeClient.name}` });
+    // 24 hours unless the admin picks another window.
+    expect(within(group).getByLabelText("Old token keeps working for")).toHaveValue("24");
+    await user.selectOptions(within(group).getByLabelText("Old token keeps working for"), "1");
+    await user.click(within(group).getByRole("button", { name: "Rotate now" }));
+    await waitFor(() => expect(api.rotateMcpClient).toHaveBeenCalledWith("mcc_1", 1));
+    const reveal = await screen.findByRole("region", { name: "New client token" });
+    expect(within(reveal).getByTestId("client-token")).toHaveTextContent("l2m_mcp_new.rotated-secret");
+    expect(reveal.textContent).toContain("The old token keeps working until");
+    expect(within(list).getByText("Previous token")).toBeInTheDocument();
+    await user.click(within(reveal).getByRole("button", { name: "I've stored the token" }));
+    expect(document.body.textContent).not.toContain("rotated-secret");
   });
 
   it("sets a client's rate limit in its Governance section and shows every budget that applies, labelled by scope", async () => {

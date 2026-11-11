@@ -21,6 +21,8 @@ import { SecretService } from "./services/secret-service.js";
 
 const CLIENT_SECRET = "oidc-client-secret-do-not-echo";
 const WEB = "http://localhost:5173";
+// A JWT's header and payload both start with "eyJ" (base64 of '{"'); a bare "eyJ" also turns up in random request ids.
+const JWT_SHAPE = /eyJ[A-Za-z0-9_-]*\.eyJ/;
 
 interface TestContext {
   app: FastifyInstance;
@@ -440,7 +442,8 @@ describe("OIDC linking, sessions and failure paths", () => {
       resourceId: existing.id,
       metadata: { provider: "oidc", email: "totp@example.com", mfaEnrolled: true }
     });
-    expect(JSON.stringify(linked.items)).not.toMatch(/at_kc-totp|eyJ/);
+    expect(JSON.stringify(linked.items)).not.toMatch(/at_kc-totp/);
+    expect(JSON.stringify(linked.items)).not.toMatch(JWT_SHAPE);
 
     // A JIT-created user is not a link to an existing account.
     context.provider.user = { sub: "kc-new", email: "brand-new@example.com", email_verified: true };
@@ -464,7 +467,8 @@ describe("OIDC linking, sessions and failure paths", () => {
     expect(me.statusCode).toBe(200);
     const logText = context.logs.join("");
     expect(logText).toContain("OIDC link audit not recorded");
-    expect(logText).not.toMatch(/at_kc-linkfail|eyJ/);
+    expect(logText).not.toMatch(/at_kc-linkfail/);
+    expect(logText).not.toMatch(JWT_SHAPE);
     const failures = await context.store.listAuditLogs({ eventType: "user.login", outcome: "failure" });
     expect(failures.items).toHaveLength(0);
   });
@@ -514,9 +518,10 @@ describe("OIDC linking, sessions and failure paths", () => {
 
     const logText = context.logs.join("");
     expect(logText).toContain("/api/auth/oidc/callback?code=REDACTED&state=REDACTED");
-    for (const secret of [code, state, CLIENT_SECRET, "at_user-1", "eyJ"]) {
+    for (const secret of [code, state, CLIENT_SECRET, "at_user-1"]) {
       expect(logText).not.toContain(secret);
     }
+    expect(logText).not.toMatch(JWT_SHAPE);
 
     const traces = await context.app.inject({ method: "GET", url: "/api/observability/traces?limit=200", cookies: { ao_session: admin } });
     expect(traces.statusCode).toBe(200);

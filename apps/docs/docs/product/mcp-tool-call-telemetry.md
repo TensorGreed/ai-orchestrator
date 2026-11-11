@@ -117,7 +117,7 @@ The project on a row is a label taken when the call ran, not a link: after a pro
 
 ## Retention
 
-Telemetry rows, summaries included, are pruned with execution history (`EXECUTION_HISTORY_RETENTION_DAYS`, default 30 days) and deleted with their run.
+Telemetry rows, summaries included, are kept as long as execution history (`EXECUTION_HISTORY_RETENTION_DAYS`, default 30 days) and deleted with their workflow. A project can keep its tool calls for a different time than its runs ([per-project retention](../operations/data-retention.md#per-project-retention)); a tool call kept longer then outlives the run it came from.
 
 ## Switching it off
 

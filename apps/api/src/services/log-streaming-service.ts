@@ -107,6 +107,8 @@ export interface LogStreamingOptions {
   retryMaxAttempts?: number;
   eventRetentionDays?: number;
   eventPruneIntervalMs?: number;
+  /** 13.3 — whether this instance prunes delivery history now (the leader); unset: always, as before. */
+  shouldPrune?: () => boolean;
 }
 
 interface QueueEntry {
@@ -124,6 +126,7 @@ export class LogStreamingService {
   private readonly retryMaxAttempts: number;
   private readonly eventRetentionDays: number;
   private readonly eventPruneIntervalMs: number;
+  private readonly shouldPrune: () => boolean;
   private readonly enabled: boolean;
 
   private flushTimer: NodeJS.Timeout | null = null;
@@ -143,6 +146,7 @@ export class LogStreamingService {
     this.retryMaxAttempts = options.retryMaxAttempts ?? 3;
     this.eventRetentionDays = options.eventRetentionDays ?? 14;
     this.eventPruneIntervalMs = options.eventPruneIntervalMs ?? 3600000;
+    this.shouldPrune = options.shouldPrune ?? (() => true);
 
     this.registerAdapter(syslogAdapter);
     this.registerAdapter(webhookAdapter);
@@ -162,6 +166,7 @@ export class LogStreamingService {
     if (this.eventRetentionDays > 0) {
       // promise-ok: the prune catches its own errors
       this.pruneTimer = setInterval(async () => {
+        if (!this.shouldPrune()) return;
         const before = new Date(Date.now() - this.eventRetentionDays * 86400000).toISOString();
         try {
           await this.store.pruneLogStreamEvents({ before });

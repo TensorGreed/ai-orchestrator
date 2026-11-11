@@ -479,6 +479,12 @@ export interface WorkflowExecutionResult {
   };
 }
 
+/** Phase 12 coverage — per node: the SHA-256 of a rendered text and the layout of its pieces (see `boundaryRenderings`). */
+export type ModelBoundaryRenderings = Record<
+  string,
+  Array<{ sha256: string; pieces: Array<{ length: number; untrusted?: true; fromInput?: true; expression?: string; sourceNodeId?: string }> }>
+>;
+
 export interface WorkflowExecutionState {
   workflow: Workflow;
   nodeOrder: string[];
@@ -523,6 +529,17 @@ export interface WorkflowExecutionState {
    * again on resume. Written and read only by the API.
    */
   approvedToolResultsSealed?: string;
+  /**
+   * Phase 12 coverage — how prompts that earlier nodes rendered are made up (piece lengths and trust, never text),
+   * so a resumed run's model boundary judges the same pieces as before the pause. Written and read only by the engine.
+   */
+  boundaryRenderings?: ModelBoundaryRenderings;
+  /**
+   * Phase 12 coverage — nodes finished before the pause whose output is only the caller's own input (webhook,
+   * API, chat, form and MCP server runs), so the resumed run's model boundary treats their reads as before.
+   * Written and read only by the engine.
+   */
+  boundaryCallerInput?: string[];
   /**
    * Phase 15.4 — the release channel the run started on. A resumed
    * production run keeps calling the published versions of its
@@ -1242,6 +1259,8 @@ export interface McpToolPolicySubject {
   /** MCP client credential id and name, for `source: "client"`. */
   clientId?: string;
   clientName?: string;
+  /** For `source: "user"`: the API key the run was started with, when it was (its limits are already in `role`). */
+  apiKeyId?: string;
 }
 
 /** Admin override of a registry tool's read-only classification. */
@@ -1940,6 +1959,12 @@ export interface McpClient {
   certFingerprints: string[];
   /** 13.2 — optional pin on the certificate's subject CN or a subject alternative name. */
   certSubject: string | null;
+  /** 13.2 — after a rotation: the old token's prefix, which keeps working until previousExpiresAt; null otherwise. */
+  previousTokenPrefix?: string | null;
+  /** 13.2 — when the old token stops working (the end of the rotation's grace window). */
+  previousExpiresAt?: string | null;
+  /** 13.2 — when the token was last rotated; null when it never was. */
+  rotatedAt?: string | null;
 }
 
 /** One tool a toolset exposes, as an MCP client would list it. */

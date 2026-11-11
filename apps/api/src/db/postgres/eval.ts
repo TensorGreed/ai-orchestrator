@@ -11,6 +11,7 @@ import { type Store } from "../store.js";
 import type { PgContext } from "./context.js";
 import { toNum, toStr } from "./helpers.js";
 import { deleteRunsWhole } from "./prune.js";
+import { RELEASE_EVIDENCE_RUN_IDS_SQL } from "../retention-tables.js";
 
 function rowCount(result: { rowCount: number | null }): number {
   return result.rowCount ?? 0;
@@ -197,7 +198,9 @@ export async function pruneEvalRuns(ctx: PgContext, ...[input]: Parameters<Store
   );
   const newest = new Set<string>();
   const newestFinished = new Set<string>();
-  const keep = new Set<string>();
+  // 13.3 — the eval runs behind a workflow's current or previous published version stay whatever their age: they never
+  // reach deleteRunsWhole's candidate list.
+  const keep = new Set<string>((await ctx.query<{ replay_run_id: string }>(RELEASE_EVIDENCE_RUN_IDS_SQL)).map((row) => toStr(row.replay_run_id)));
   const doomed: string[] = [];
   for (const row of rows) {
     const id = toStr(row.id);

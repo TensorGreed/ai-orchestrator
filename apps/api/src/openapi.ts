@@ -116,6 +116,18 @@ export const openApiSpec = {
       }
     },
 
+    "/api/admin/retention": {
+      get: {
+        tags: ["Observability"],
+        summary:
+          "Data retention (admin, read-only): days kept per class and the setting each comes from (0 = kept forever), the rows due now (counted up to backlogCap), the latest purges with their counts, and when the next interval purge is due",
+        responses: {
+          "200": { description: "Retention view" },
+          "403": { description: "Not an admin" }
+        }
+      }
+    },
+
     // ── Auth ───────────────────────────────────────────────────────────────
     "/api/auth/register": {
       post: {
@@ -140,7 +152,8 @@ export const openApiSpec = {
         responses: {
           "200": { description: "User created", content: { "application/json": { schema: { type: "object", properties: { user: { $ref: "#/components/schemas/SafeUser" } } } } } },
           "400": { description: "Validation error" },
-          "403": { description: "Insufficient permissions" }
+          "401": { description: "Public registration is off and no admin is signed in" },
+          "403": { description: "A role above the caller's own, a non-admin caller while public registration is off, or an API key on public registration" }
         }
       }
     },
@@ -208,8 +221,42 @@ export const openApiSpec = {
         tags: ["Auth"],
         summary: "Get current authenticated user info",
         responses: {
-          "200": { description: "Current user, MFA status, project memberships" },
-          "401": { description: "Not authenticated" }
+          "200": {
+            description:
+              "Current user, MFA status, project memberships, and `session` (null for an API key): handle, createdAt, expiresAt, idleTimeoutMinutes (null when none), idleExpiresAt, breakGlass"
+          },
+          "401": { description: "Not authenticated; `reason` (idle, expired, evicted, admin, logout, policy) says why a session ended" }
+        }
+      }
+    },
+    "/api/auth/sessions": {
+      get: {
+        tags: ["Auth"],
+        summary: "List your signed-in sessions (live only, newest first) and the session policy for your role",
+        description:
+          "Each session: handle (never the session ID), current, authMethod, ipAddress, userAgent, createdAt, lastSeenAt, expiresAt, mfaVerified, breakGlass. policy: idleTimeoutMinutes, absoluteTimeoutHours, absoluteTimeoutConfigured, maxPerUser. Requests with `X-L2M-Background: 1` never count as activity for the idle timeout.",
+        responses: { "200": { description: "Sessions and policy" }, "401": { description: "Not authenticated" } }
+      }
+    },
+    "/api/auth/sessions/{handle}": {
+      delete: {
+        tags: ["Auth"],
+        summary: "Sign out one of your sessions; ending the current one clears the cookie",
+        parameters: [{ name: "handle", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ ok, current }" },
+          "403": { description: "Called with an API key: needs a signed-in browser session; nothing is ended" },
+          "404": { description: "No live session of yours has this handle" }
+        }
+      }
+    },
+    "/api/auth/sessions/revoke-others": {
+      post: {
+        tags: ["Auth"],
+        summary: "Sign out all your other sessions (keeps this one)",
+        responses: {
+          "200": { description: "{ revoked: number }" },
+          "403": { description: "Called with an API key: needs a signed-in browser session; nothing is ended" }
         }
       }
     },
@@ -249,6 +296,23 @@ export const openApiSpec = {
         responses: { "200": { description: "MFA disabled" } }
       }
     },
+    "/api/auth/step-up": {
+      post: {
+        tags: ["Auth"],
+        summary:
+          "Step-up: verify a TOTP or backup code to refresh the session's MFA check (STEP_UP_MAX_AGE_MINUTES), or to lift a session restricted by MFA_REQUIRED_ROLES",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["code"], properties: { code: { type: "string" } } } } }
+        },
+        responses: {
+          "200": { description: "{ ok, mfaVerifiedAt, stepUpMaxAgeMinutes }" },
+          "400": { description: "No code, or not a browser session" },
+          "403": { description: "Invalid code (code: mfa_code_invalid)" },
+          "409": { description: "No authenticator set up (code: mfa_not_enrolled)" }
+        }
+      }
+    },
     "/api/auth/api-keys": {
       get: {
         tags: ["Auth"],
@@ -258,24 +322,17 @@ export const openApiSpec = {
       },
       post: {
         tags: ["Auth"],
-        summary: "Create a new API key",
+        summary:
+          "Create a new API key, optionally with a role ceiling and a project list. A key made with another key expires no later than that key; a service account's own keys cannot create keys.",
         requestBody: {
           required: true,
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                required: ["name"],
-                properties: {
-                  name: { type: "string" },
-                  scopes: { type: "array", items: { type: "string" } },
-                  expiresInDays: { type: "integer" }
-                }
-              }
-            }
-          }
+          content: { "application/json": { schema: { $ref: "#/components/schemas/ApiKeyCreate" } } }
         },
-        responses: { "200": { description: "API key created (plaintext returned once)" } }
+        responses: {
+          "200": { description: "API key created (plaintext returned once)" },
+          "400": { description: "Invalid scope, unknown project, or admin ceiling with a project list" },
+          "403": { description: "Ceiling above your role, outside the scope of the API key making the request, or the caller is a service account" }
+        }
       }
     },
     "/api/auth/api-keys/{id}": {
@@ -286,6 +343,22 @@ export const openApiSpec = {
         responses: {
           "200": { description: "Key revoked" },
           "404": { description: "Key not found" }
+        }
+      }
+    },
+    "/api/auth/api-keys/{id}/rotate": {
+      post: {
+        tags: ["Auth"],
+        summary:
+          "Rotate one of your own API keys: a new key (returned once) with the same name, scope and limits; the old key keeps working for graceHours (default 24, 0 ends it now). A scoped key may rotate only itself; a key rotated with a key expires no later than the calling key. Needs step-up when it is on (api_key.rotate).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: {
+          "200": { description: "{ key, record, previous }: the new key (plaintext once), its record, and the old key's record with its new expiresAt" },
+          "400": { description: "Invalid graceHours" },
+          "403": { description: "A scoped key rotating another key, a service account's key, or step-up required (code: step_up_required)" },
+          "404": { description: "No such key of yours" },
+          "409": { description: "Already rotated (code: already_rotated), or revoked or expired (code: inactive)" }
         }
       }
     },
@@ -343,6 +416,21 @@ export const openApiSpec = {
         }
       }
     },
+    "/api/auth/break-glass": {
+      post: {
+        tags: ["Auth"],
+        summary: "Confirm a one-time break-glass sign-in link minted on the host with admin:break-glass (a one-hour admin session). Same-origin only",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["token"], properties: { token: { type: "string" } } } } }
+        },
+        responses: {
+          "200": { description: "Signed in: the session cookie is set; answers the user and when the session ends" },
+          "401": { description: "The link is invalid, expired or already used" },
+          "403": { description: "Cross-site request (Origin or Sec-Fetch-Site), or refused by a network allowlist" }
+        }
+      }
+    },
     "/api/auth/ldap/login": {
       post: {
         tags: ["Auth"],
@@ -388,8 +476,156 @@ export const openApiSpec = {
       get: {
         tags: ["Users"],
         summary: "List users (admin); pending invited users carry pending and inviteExpiresAt",
-        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
+        parameters: [
+          { $ref: "#/components/parameters/Page" },
+          { $ref: "#/components/parameters/PageSize" },
+          { name: "kind", in: "query", required: false, schema: { type: "string", enum: ["human", "service"] }, description: "People (default) or service accounts" }
+        ],
         responses: { "200": { description: "User list" } }
+      }
+    },
+    "/api/service-accounts": {
+      get: {
+        tags: ["Users"],
+        summary: "List service accounts (admin), with their project roles and number of live keys",
+        responses: { "200": { description: "{ serviceAccounts }" } }
+      },
+      post: {
+        tags: ["Users"],
+        summary: "Create a service account (admin): a machine identity that acts only through API keys",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name"],
+                properties: {
+                  name: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,62}$", description: "Its email becomes <name>+<random>@service.invalid" },
+                  role: { type: "string", enum: ["admin", "builder", "operator", "viewer"], default: "viewer" },
+                  description: { type: "string", nullable: true, maxLength: 500 }
+                }
+              }
+            }
+          }
+        },
+        responses: { "201": { description: "{ serviceAccount }" }, "400": { description: "Invalid payload" }, "409": { description: "Name taken" } }
+      }
+    },
+    "/api/service-accounts/{id}": {
+      patch: {
+        tags: ["Users"],
+        summary: "Change a service account's role and/or description (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  role: { type: "string", enum: ["admin", "builder", "operator", "viewer"] },
+                  description: { type: "string", nullable: true, maxLength: 500 }
+                }
+              }
+            }
+          }
+        },
+        responses: { "200": { description: "{ serviceAccount }" }, "404": { description: "No service account with this id" } }
+      },
+      delete: {
+        tags: ["Users"],
+        summary: "Delete a service account with its keys and project roles (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Deleted" }, "404": { description: "No service account with this id" } }
+      }
+    },
+    "/api/service-accounts/{id}/keys": {
+      get: {
+        tags: ["Users"],
+        summary: "List a service account's API keys (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ keys }" }, "404": { description: "No service account with this id" } }
+      },
+      post: {
+        tags: ["Users"],
+        summary: "Create an API key for a service account (admin); the key is returned once",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/ApiKeyCreate" } } } },
+        responses: {
+          "201": { description: "{ key, record }" },
+          "400": { description: "Invalid scope, unknown project, or admin ceiling with a project list" },
+          "403": { description: "Ceiling above the service account's role" },
+          "404": { description: "No service account with this id" }
+        }
+      }
+    },
+    "/api/service-accounts/{id}/keys/{keyId}": {
+      delete: {
+        tags: ["Users"],
+        summary: "Revoke a service account's API key (admin)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "keyId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "Revoked" }, "404": { description: "Service account or key not found" } }
+      }
+    },
+    "/api/service-accounts/{id}/keys/{keyId}/rotate": {
+      post: {
+        tags: ["Users"],
+        summary:
+          "Rotate a service account's API key (admin): a new key (returned once) with the same name and scope; the old key keeps working for graceHours (default 24, 0 ends it now). SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS caps the new key's expiry. Needs step-up when it is on (api_key.rotate).",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "keyId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: {
+          "200": { description: "{ key, record, previous }" },
+          "400": { description: "Invalid graceHours" },
+          "403": { description: "Step-up required (code: step_up_required)" },
+          "404": { description: "Service account or key not found" },
+          "409": { description: "Already rotated (code: already_rotated), or revoked or expired (code: inactive)" }
+        }
+      }
+    },
+    "/api/users/{id}/sessions": {
+      get: {
+        tags: ["Users"],
+        summary: "List a user's signed-in sessions (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ sessions }" }, "404": { description: "User not found" } }
+      }
+    },
+    "/api/users/{id}/sessions/revoke": {
+      post: {
+        tags: ["Users"],
+        summary: "Sign a user out everywhere, or end one session by handle (admin; your own current session is kept)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", additionalProperties: false, properties: { handle: { type: "string" } } } } }
+        },
+        responses: {
+          "200": { description: "{ revoked: number }" },
+          "403": { description: "Not an admin, or step-up required for another user's sessions (code: step_up_required)" },
+          "404": { description: "User or session not found" }
+        }
+      }
+    },
+    "/api/users/{id}/mfa/reset": {
+      post: {
+        tags: ["Users"],
+        summary:
+          "Reset a user's MFA (admin, step-up): deletes the authenticator and backup codes and ends the user's sessions. Not on yourself outside a break-glass session.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ ok, userId, hadMfa, sessionsEnded }" },
+          "400": { description: "Your own account" },
+          "403": { description: "Not an admin, or step-up required (code: step_up_required)" },
+          "404": { description: "User not found" }
+        }
       }
     },
     "/api/users/invite": {
@@ -936,6 +1172,53 @@ export const openApiSpec = {
           { name: "userId", in: "path", required: true, schema: { type: "string" } }
         ],
         responses: { "200": { description: "Member removed" } }
+      }
+    },
+    "/api/projects/{id}/retention": {
+      get: {
+        tags: ["Projects"],
+        summary:
+          "A project's data retention (project members): days per class (runs, tool_calls, rule_events, agent_memory), null where the deployment's value is inherited, what applies now, and the bounds a value must fall in",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Project retention view" }, "404": { description: "Project not found or not readable" } }
+      },
+      put: {
+        tags: ["Projects"],
+        summary:
+          "Set or clear a project's retention (admins and the project's admins; step-up when it is on). A number of days within RETENTION_MIN_DAYS..RETENTION_MAX_DAYS (0 = keep forever, only without a maximum), or null to inherit the deployment's value; audited as project.retention.update",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["classes"],
+                properties: {
+                  classes: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      runs: { type: "integer", minimum: 0, nullable: true },
+                      tool_calls: { type: "integer", minimum: 0, nullable: true },
+                      rule_events: { type: "integer", minimum: 0, nullable: true },
+                      agent_memory: { type: "integer", minimum: 0, nullable: true }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "The updated project retention view" },
+          "400": { description: "Invalid body, or a value outside the deployment's bounds (retention_out_of_bounds)" },
+          "403": {
+            description:
+              "Not an admin of the project, step_up_required, or retention_admin_required (only an admin may set tool_calls or rule_events shorter than the deployment's value)"
+          },
+          "404": { description: "Project not found or not readable" }
+        }
       }
     },
     "/api/folders": {
@@ -3227,6 +3510,22 @@ export const openApiSpec = {
         responses: { "200": { description: "Revoked client" }, "404": { description: "Not found" } }
       }
     },
+    "/api/mcp/clients/{id}/rotate": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "Rotate a client's token (admin): a new token (returned once); the old token keeps working for graceHours (default 24, 0 ends it now, never past the client's own expiry). While an old token is still in its grace window, only a rotation with graceHours 0 is taken (it ends every old token now). Name, role, toolsets, limits and live sessions are kept. Needs step-up when it is on (mcp_client.rotate).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: {
+          "200": { description: "{ client, token }: client.previousTokenPrefix and previousExpiresAt describe the old token" },
+          "400": { description: "Invalid graceHours" },
+          "403": { description: "Step-up required (code: step_up_required)" },
+          "404": { description: "Not found" },
+          "409": { description: "Revoked or expired (code: inactive), an old token still in its grace window (code: rotation_pending), or rotated at the same moment by another request (code: rotation_conflict)" }
+        }
+      }
+    },
     "/api/mcp/clients/{id}/network": {
       put: {
         tags: ["MCP"],
@@ -3355,6 +3654,27 @@ export const openApiSpec = {
       }
     },
     schemas: {
+      ApiKeyCreate: {
+        type: "object",
+        required: ["name"],
+        description:
+          "A key with no role and no projects acts with its owner's role in every project. role caps the role it acts with (never above the owner's); projects limits it to those projects, caps it at builder, and lets it call only the workflow, run and approval routes. scopes takes the stored strings directly (role:<role>, project:<id>; any other string is kept as a legacy scope and enforces nothing).",
+        properties: {
+          name: { type: "string", maxLength: 120 },
+          role: { type: "string", enum: ["admin", "builder", "operator", "viewer"], nullable: true },
+          projects: { type: "array", items: { type: "string" }, maxItems: 50, nullable: true },
+          scopes: { type: "array", items: { type: "string", maxLength: 160 } },
+          expiresInDays: { type: "integer", minimum: 0 }
+        }
+      },
+      CredentialRotate: {
+        type: "object",
+        description:
+          "How long the old key or token keeps working after a rotation, in hours (0 to 168; default 24; 0 ends it at once). The new credential keeps the old one's name, scope and limits.",
+        properties: {
+          graceHours: { type: "integer", minimum: 0, maximum: 168 }
+        }
+      },
       SafeUser: {
         type: "object",
         properties: {

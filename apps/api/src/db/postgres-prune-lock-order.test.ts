@@ -16,6 +16,8 @@ import type { PostgresStore } from "./postgres-store.js";
 import type { Store } from "./store.js";
 import { deleteUnlockedInBatches } from "./postgres/prune.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "../test-support/test-store.js";
+import { RetentionService, captureStep, ruleSimulationStep } from "../services/retention-service.js";
+import { resolveRetentionSettings } from "../config.js";
 import { delay, limitLockWaits, pauseAfter, resumeAllPaused, stillPending, waitsOnBackend } from "../test-support/pg-interleave.js";
 
 const run = testPostgresUrl() ? describe : describe.skip;
@@ -201,6 +203,67 @@ run("Postgres: retention pruning never waits behind a workflow delete", () => {
     await admin.pruneExecutionHistory({ before: CUT });
     await admin.pruneGuardSimulations({ before: CUT });
     for (const id of ids) expect(await left(id)).toEqual({});
+  }, 60_000);
+
+  it("13.3: the retention service's batched purge never waits behind a workflow delete, and the next purge takes the rest", async () => {
+    const { admin, builder } = await open();
+    const wf = "wf-retention-held";
+    const other = "wf-retention-other";
+    for (const id of [wf, other]) {
+      await admin.upsertWorkflow(workflow(id));
+      await seed(oldRows(id, { history: true, jobs: true }));
+    }
+    const retention = new RetentionService({
+      store: admin,
+      // A small cap: several batches per table.
+      settings: resolveRetentionSettings({ USAGE_EVENTS_RETENTION_DAYS: 0, RETENTION_MAX_ROWS_PER_TICK: 1_000 }),
+      executionHistoryDays: 30,
+      evalRunDays: 30,
+      intervalMs: 3_600_000,
+      instanceId: "retention-lock-order",
+      isLeader: () => true
+    });
+    retention.register(captureStep(() => 14, async (before) => await admin.pruneReplayCaptures(before)));
+    retention.register(ruleSimulationStep(async (before) => await admin.pruneGuardSimulations({ before })));
+
+    const pause = pauseAfter(builder, /DELETE FROM eval_runs WHERE workflow_id/);
+    const removal = builder.deleteWorkflow(wf);
+    removal.catch(() => undefined);
+    const pid = await pause.reached;
+    const [waited, outcome] = await Promise.all([waitsOnBackend(sql!, pid), within(retention.tick("interval"), 10_000)]);
+    expect(waited).toBe(false);
+    expect(outcome.waiting).toBeUndefined();
+    expect(outcome.error).toBeUndefined();
+    const first = outcome.value;
+    expect(first?.status === "ran" && first.run).toMatchObject({
+      outcome: "ok",
+      counts: { runs: 1, rule_events: 1, cassettes_approvals: 2, eval_runs: 2, captures: 1, simulations: 1 }
+    });
+    expect(await left(other)).toEqual({ eval_runs: [`job-${other}-3`], eval_results: [`res-${other}-3`] });
+
+    pause.resume();
+    expect(await removal).toBe(true);
+    const second = await retention.tick("interval");
+    expect(second.status === "ran" && second.run.counts).toMatchObject({ cassettes_approvals: 1, simulations: 1 });
+    expect(await left(wf)).toEqual({});
+  }, 60_000);
+
+  it("13.3: batches by ctid on tables keyed by several columns, with a row cap, skipping a held row", async () => {
+    await open();
+    for (let index = 0; index < 5; index += 1) {
+      await sql!.query(`INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at) VALUES ('ns', $1, '[]', $2, $2)`, [`s-${index}`, OLD]);
+    }
+    const holder = await sql!.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT session_id FROM session_memory WHERE session_id = 's-2' FOR UPDATE`);
+      expect(await deleteUnlockedInBatches(sql!, "session_memory", "updated_at < $1", [CUT], 2, { key: "ctid", maxRows: 3 })).toBe(3);
+      expect(await deleteUnlockedInBatches(sql!, "session_memory", "updated_at < $1", [CUT], 2, { key: "ctid" })).toBe(1);
+      await holder.query("COMMIT");
+    } finally {
+      holder.release();
+    }
+    expect((await sql!.query(`SELECT session_id FROM session_memory`)).rows.map((row: { session_id: string }) => row.session_id)).toEqual(["s-2"]);
   }, 60_000);
 
   /** Runs `body` while a third connection holds `FOR UPDATE` locks from `locks` (plain SELECTs), then commits. */

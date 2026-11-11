@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { fetchMcpElicitations, type ExecutionHistoryDetail, type ExecutionHistorySummary, type McpReplayMode } from "../lib/api";
+import { fetchMcpElicitations, inBackground, type ExecutionHistoryDetail, type ExecutionHistorySummary, type McpReplayMode } from "../lib/api";
 import type { McpElicitationView, WorkflowListItem } from "@ai-orchestrator/shared";
 import { McpCassetteViewer } from "./McpCassetteViewer";
 import { McpElicitationForm } from "./McpElicitationForm";
@@ -23,7 +23,7 @@ function PendingElicitations({ onAnswered }: { onAnswered?: () => void }) {
   useEffect(() => {
     let cancelled = false;
     const load = () => {
-      fetchMcpElicitations({ status: "pending" })
+      inBackground(() => fetchMcpElicitations({ status: "pending" }))
         .then((response) => {
           if (cancelled) return;
           setItems(response.items);

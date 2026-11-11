@@ -73,6 +73,8 @@ import {
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
 import { BUDGET_SCOPE_TYPES, isBudgetScopeType, type BudgetScopeType } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
+import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
 import {
   executeCodeNodeSandbox,
   executeWorkflow,
@@ -111,8 +113,10 @@ import {
   toFastifyTrustProxy,
   resolveNetworkSettings,
   resolveSsoMfaSettings,
+  resolveMfaPolicy,
   resolveQueueSettings,
   resolveExecutionDispatch,
+  resolveRetentionSettings,
   ssoPostLoginUrl,
   toolArgumentSummariesEnabled,
   type AppConfig
@@ -126,14 +130,17 @@ import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
 import { EVAL_RUN_STALE_MS, EvalService, REPLAY_JOB_MAX_EXECUTIONS_DEFAULT, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
 import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
-import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
+import { AuthService, isServiceAccountEmail, type SafeUser, type UserRole } from "./services/auth-service";
+import { isBackgroundRequest, isPolicyExempt, sessionHandle } from "./services/session-service.js";
 import { SchedulerService } from "./services/scheduler-service";
 import { RunWriteChains } from "./services/run-write-chains.js";
 import { NonRetryableQueueError, QueueFullError, QueueProducer, QueueService, type QueueJobContext } from "./services/queue-service";
 import { AppLifecycle } from "./services/app-lifecycle.js";
 import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError, resumeEffectFreeNodeId } from "./db/queue-leases.js";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
-import { ApiKeyService } from "./services/api-key-service";
+import { ApiKeyService, apiKeyRotationRefusal } from "./services/api-key-service";
+import type { RequestAuthContext, SessionRejectReason } from "./services/session-service.js";
+import { apiKeyCreateBodySchema, isStructuredScope, keyBoundUser, keyMayCallRoute, keyMayManageAccount, parseKeyScopes, resolveNewKeyScope, scopedKeyUser } from "./services/key-scopes.js";
 import { MfaService } from "./services/mfa-service";
 import {
   SAML_REQUEST_COOKIE_NAME,
@@ -148,6 +155,18 @@ import {
   type SamlClientFactory
 } from "./services/saml-service.js";
 import { decideSsoMfa, evaluateOidcMfa, evaluateSamlMfa, projectSsoRole, type SsoMfaEvidence } from "./services/sso-policy.js";
+import {
+  MFA_GATE_ERRORS,
+  STEP_UP_ACTIONS,
+  decideStepUp,
+  mfaGateAllows,
+  mfaRequiredFor,
+  sessionMfaGate,
+  sessionOwesMfa,
+  type SessionMfaGate,
+  type StepUpAction
+} from "./services/mfa-policy.js";
+import type { LoginSession } from "./services/session-service.js";
 import { LdapService } from "./services/ldap-service";
 import {
   OIDC_FLOW_COOKIE_NAME,
@@ -170,6 +189,7 @@ import {
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GIT_SYNC_LOCK_WAIT_MS, GitSyncService } from "./services/git-sync-service.js";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
+import { RetentionService, captureStep, ruleSimulationStep, usageRetentionWarning } from "./services/retention-service.js";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
@@ -177,6 +197,8 @@ import { clusterCancelReason, REMOTE_CANCEL_REASON, startClusterSignals, type Cl
 import { DEAD_EXECUTOR_RUN_ERROR, InstanceRegistry, RunOwnerTracker, SelfFencedAbortError, type ClusterWarning } from "./services/instance-registry.js";
 import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC, ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH } from "./db/postgres/cluster.js";
 import { DbChallengeStore, MemoryChallengeStore, type ChallengeStore } from "./services/challenge-store.js";
+import { BREAK_GLASS_ALERT_TIMEOUT_MS, BreakGlassService } from "./services/break-glass-service.js";
+import { registerBreakGlassRoutes } from "./break-glass-routes.js";
 import { createSharedRateLimitStore, SHARED_RATE_LIMIT_BUCKET, type SharedRateLimitBucket } from "./services/shared-rate-limit-store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
@@ -184,7 +206,7 @@ import { TracingService, parseKeyValueList, parseTraceparent } from "./services/
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
-import { SubWorkflowSpendTracker, usageUserOf, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
+import { SubWorkflowSpendTracker, usageUserOf, withinBudgetCheckTime, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
@@ -203,6 +225,8 @@ import { McpPolicySimulationService } from "./services/mcp-policy-simulation-ser
 import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-service.js";
 import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
+import { registerRetentionRoutes } from "./retention-routes.js";
+import { registerProjectRetentionRoutes } from "./project-retention-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
@@ -212,9 +236,10 @@ import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
+import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
+import { registerServiceAccountRoutes } from "./service-account-routes.js";
 import { asRecord, isExecutionTimeoutAbort, normalizeExecutionTimeoutMs, normalizeSessionId, retryAfterSeconds } from "./run-helpers.js";
 import { registerReleaseRoutes } from "./release-routes.js";
 import { registerGateAdmissionRoutes } from "./gate-admission-routes.js";
@@ -235,7 +260,9 @@ import { environmentSecretValues, scrubExemptionWarnings } from "./services/audi
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
-import { startSseHeartbeat } from "./sse-heartbeat.js";
+import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
+import { idleExpiresAt, idleMinutesFor, maxSessionsFor, parseSessionPolicy } from "./services/session-policy.js";
+import { registerSessionRoutes } from "./session-routes.js";
 import {
   cronQueueItemId,
   DISPATCH_SPEC_VERSION,
@@ -302,7 +329,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
-import { NetworkControls, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
+import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
 import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
@@ -1424,6 +1451,11 @@ interface PendingMfaChallenge {
   userId: string;
   createdAt: number;
   sso?: PendingSsoLogin;
+  /**
+   * 13.2 — an LDAP sign-in waiting for the TOTP step: the account is provisioned (group mappings applied) only once
+   * the code passes, and the session records method `ldap`.
+   */
+  ldap?: SsoProvisionInput;
 }
 
 function safeUserRole(role: string): UserRole {
@@ -1888,67 +1920,9 @@ export async function createApp(
     if (clusterMode) announce({ t: "workflow_changed", id: workflowId });
   };
 
-  const pruneExecutionHistory = async (reason: "startup" | "interval" | "write") => {
-    const retentionDays = config.EXECUTION_HISTORY_RETENTION_DAYS;
-    if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
-      return 0;
-    }
-    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const deleted = await store.pruneExecutionHistory({ before: cutoff });
-      if (deleted > 0) {
-        app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned execution history");
-      }
-      return deleted;
-    } catch (error) {
-      app.log.warn(
-        {
-          cutoff,
-          retentionDays,
-          reason,
-          error: secretService.redact(error instanceof Error ? error.message : String(error))
-        },
-        "Failed to prune execution history"
-      );
-      return 0;
-    }
-  };
-
-  // Phase 15.2 — finished eval runs and replay jobs, on the same timer. The
-  // newest run of every set is kept.
-  const pruneEvalRuns = async (reason: "startup" | "interval") => {
-    const retentionDays = config.EVAL_RUN_RETENTION_DAYS;
-    if (retentionDays <= 0) return 0;
-    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const deleted = await store.pruneEvalRuns({ before: cutoff });
-      if (deleted > 0) app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned eval runs and replay jobs");
-      return deleted;
-    } catch (error) {
-      app.log.warn(
-        { cutoff, retentionDays, reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) },
-        "Failed to prune eval runs and replay jobs"
-      );
-      return 0;
-    }
-  };
-
-  await pruneExecutionHistory("startup");
-  await pruneEvalRuns("startup");
-  const retentionTimer = config.EXECUTION_HISTORY_RETENTION_DAYS > 0 || config.EVAL_RUN_RETENTION_DAYS > 0
-    // promise-ok: both prunes catch and log their own errors
-    ? setInterval(async () => {
-        await pruneExecutionHistory("interval");
-        await pruneEvalRuns("interval");
-      }, config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS)
-    : null;
-  if (retentionTimer) {
-    const timerWithUnref = retentionTimer as { unref?: () => void };
-    timerWithUnref.unref?.();
-    app.addHook("onClose", async () => {
-      clearInterval(retentionTimer);
-    });
-  }
+  // 13.3 — every purge by age goes through the retention service (created below, once the leader election, audit and
+  // log streaming exist; started when the app is ready). A finished run nudges it.
+  let retentionService: RetentionService | null = null;
 
   if (clusterMode) {
     // Phase 13.1 — the shared flow state expires on the database clock; the session cleanup tick removes what expired.
@@ -1963,6 +1937,8 @@ export async function createApp(
     );
   }
   authService.sessions.setLogger(app.log);
+  // 13.2 — idle and absolute timeouts and the per-user session limit (SESSION_*; unset keeps today's behaviour).
+  authService.sessions.setPolicy(parseSessionPolicy(config));
   authService.startSessionCleanup();
   app.addHook("onClose", async () => {
     authService.stopSessionCleanup();
@@ -2134,7 +2110,7 @@ export async function createApp(
       }
       if (meta.phase === "final") {
         handOffCapture(meta.executionId);
-        await pruneExecutionHistory("write");
+        retentionService?.nudge();
         // Phase 15.1 — replays are experiments, not traffic: they stay out of execution metrics and SLOs.
         if (meta.triggerType !== REPLAY_TRIGGER_TYPE) {
           const status = meta.status === "success" ? "success" : meta.status === "canceled" ? "canceled" : "error";
@@ -2203,7 +2179,7 @@ export async function createApp(
             projectId: input.workflow.projectId ?? null,
             ...(typeof input.triggeredBy === "string" ? { triggeredBy: input.triggeredBy } : {}),
             ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {})
-          })
+          }, input.spendAttempt)
         : undefined;
     // Phase 15.6 — sampled for production capture: the run records like a "Record calls" run.
     const captureTicket =
@@ -2289,6 +2265,7 @@ export async function createApp(
           customData: input.customData,
           executionTimeoutMs,
           triggerType: input.triggerType,
+          ...(input.inputTriggerType ? { inputTriggerType: input.inputTriggerType } : {}),
           triggeredBy: input.triggeredBy,
           toolPolicySubject: input.policySubject ?? await resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
@@ -2328,9 +2305,15 @@ export async function createApp(
             ? {}
             : {
                 admitSubWorkflow: async (child: Workflow, request: SubWorkflowAdmissionRequest) =>
-                  await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend)
+                  await admitSubWorkflowBudget(input, child, request, runSubWorkflowSpend, runController.signal)
               }),
-          ...(runSubWorkflowSpend ? { onSubWorkflowUsage: async (usage: SubWorkflowUsage) => await runSubWorkflowSpend.report(usage) } : {}),
+          ...(runSubWorkflowSpend
+            ? {
+                onSubWorkflowUsage: async (usage: SubWorkflowUsage) => await runSubWorkflowSpend.report(usage),
+                // A streamed model call that failed, was cancelled or timed out is charged its estimate in the run's row.
+                onUnrecordedModelUsage: async (telemetry: Record<string, unknown>) => await runSubWorkflowSpend.reportModelUsage(telemetry)
+              }
+            : {}),
           // Phase 9.1 — built-in persistent vector store, limited to the
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
@@ -3292,6 +3275,7 @@ export async function createApp(
         }
         const executed = await runWorkflowExecution({
           ...run,
+          spendAttempt: context,
           ...(mcpPlan ? { mcpPlan } : {}),
           hooks: queueJobHooks(context, progressHooks)
         });
@@ -3415,7 +3399,9 @@ export async function createApp(
     run: Pick<RunWorkflowExecutionInput, "workflow" | "triggerType" | "triggeredBy" | "policyActor" | "gatewayUsage" | "guardRunSource" | "budgetSubject">,
     child: Workflow,
     request: SubWorkflowAdmissionRequest,
-    spend: RunSubWorkflowSpend | undefined
+    spend: RunSubWorkflowSpend | undefined,
+    /** The run's signal: a check still waiting its turn stops when the run is stopped. */
+    signal?: AbortSignal
   ): Promise<SubWorkflowAdmission | void> => {
     const exempt = Boolean(run.triggerType && (BUDGET_EXEMPT_TRIGGER_TYPES.has(run.triggerType) || run.triggerType === "eval")) || run.guardRunSource === "eval";
     if (!exempt) {
@@ -3429,8 +3415,8 @@ export async function createApp(
       };
       let admission: SubWorkflowAdmission | undefined;
       try {
-        if (spend) admission = await spend.admitIf(request, fits);
-        else await fits();
+        if (spend) admission = await spend.admitIf(request, fits, signal);
+        else await withinBudgetCheckTime(fits(), subWorkflowSpend.checkTimeoutMs);
       } catch (error) {
         throw notStarted(error instanceof Error ? error.message : String(error));
       }
@@ -3467,12 +3453,11 @@ export async function createApp(
   /** True only for a request that authenticates (API key or session) as an admin; any failure counts as not admin. */
   const requestIsAdmin = async (request: FastifyRequest): Promise<boolean> => {
     try {
-      const apiKeyUser = await authenticateApiKey(request.headers as Record<string, unknown>);
-      if (apiKeyUser) return apiKeyUser.role === "admin";
-      const sessionId = getSessionIdFromRequest(request);
-      if (!sessionId) return false;
-      const user = await authService.getSessionUser(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
-      return user?.role === "admin";
+      // 13.2 — the shared credential path: an API key acts with its capped role (a key limited to projects is never admin).
+      const auth = await resolveRequestAuth(request);
+      if (auth?.user.role !== "admin") return false;
+      // A session restricted by MFA_REQUIRED_ROLES (MFA not passed yet) is not treated as an admin here either.
+      return auth.credential !== "session" || (await sessionMfaGateFor(auth.user, auth.session)) === "none";
     } catch {
       return false;
     }
@@ -4044,30 +4029,38 @@ export async function createApp(
   // default `<workflowId>:<nodeId>` and its literal custom namespaces. Only
   // read when a run falls back to an unprefixed row; rebuilt when any
   // workflow changes.
-  let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]> } | null = null;
-  const legacyNamespaceOwners = async (): Promise<Map<string, string[]>> => {
+  // 13.3 — `defaults` holds the default namespaces alone: the retention purge gives an older key to a project only
+  // when it is exactly one of that project's workflows' own `<workflowId>:<nodeId>` and no other project claims it.
+  let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]>; defaults: Map<string, string[]> } | null = null;
+  const legacyNamespaceIndexNow = async () => {
     const items = await store.listWorkflows();
     const fingerprint = items.map((item) => `${item.id}|${item.updatedAt}|${item.workflowVersion}|${item.projectId ?? DEFAULT_PROJECT_ID}`).join("\n");
-    if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex.owners;
+    if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex;
     const owners = new Map<string, string[]>();
-    const claim = (namespace: string, projectId: string) => {
-      const list = owners.get(namespace) ?? [];
+    const defaults = new Map<string, string[]>();
+    const claim = (index: Map<string, string[]>, namespace: string, projectId: string) => {
+      const list = index.get(namespace) ?? [];
       if (!list.includes(projectId)) list.push(projectId);
-      owners.set(namespace, list);
+      index.set(namespace, list);
     };
+    const defaultKeys: string[] = [];
     for (const item of items) {
       const workflow = await store.getWorkflow(item.id);
       if (!workflow) continue;
       const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
       for (const node of workflow.nodes) {
-        claim(`${workflow.id}:${node.id}`, projectId);
+        defaultKeys.push(`${workflow.id}:${node.id}`);
+        claim(owners, `${workflow.id}:${node.id}`, projectId);
         const custom = (node.config as Record<string, unknown> | undefined)?.namespace;
-        if (typeof custom === "string" && custom.trim() && !custom.includes("{{")) claim(custom.trim(), projectId);
+        if (typeof custom === "string" && custom.trim() && !custom.includes("{{")) claim(owners, custom.trim(), projectId);
       }
     }
-    legacyNamespaceIndex = { fingerprint, owners };
-    return owners;
+    // Every project that claims a default namespace, also as another workflow's literal custom namespace.
+    for (const namespace of defaultKeys) defaults.set(namespace, owners.get(namespace) ?? []);
+    legacyNamespaceIndex = { fingerprint, owners, defaults };
+    return legacyNamespaceIndex;
   };
+  const legacyNamespaceOwners = async (): Promise<Map<string, string[]>> => (await legacyNamespaceIndexNow()).owners;
   // What a run can reach once it is going: sub-workflows, secrets, knowledge
   // bases and session state of its own project (see run-scope.ts).
   const runScope = createRunScope({
@@ -4206,6 +4199,9 @@ export async function createApp(
     return await runScope.canUseSecretFor(scope, user, secretId);
   };
 
+  /** 13.2 — see keyBoundUser: a run decided or started with an API key keeps that key's limits. */
+  const backgroundRunUser = async (userId: string, apiKeyId?: string | null): Promise<SafeUser | null> => await keyBoundUser(store, userId, apiKeyId);
+
   // Phase 9.5 / 15.2 — the LLM judge for judge scorers (faithfulness,
   // answer_relevance, llm_judge). EVAL_JUDGE_ENABLED=false turns every judge
   // call off. A judge authenticates with its scorer's secretRef, which must
@@ -4222,7 +4218,7 @@ export async function createApp(
     const context = judgeInput.context;
     const workflow = context ? await store.getWorkflow(context.workflowId) : null;
     const projectId = workflow?.projectId ?? DEFAULT_PROJECT_ID;
-    const actor = context?.actorUserId && context.actorEmail ? await evalPolicyActor(context.actorUserId, context.actorEmail) : null;
+    const actor = context?.actorUserId && context.actorEmail ? await evalPolicyActor(context.actorUserId, context.actorEmail, context.actorApiKeyId) : null;
     if (judgeInput.secretRef) {
       if (!workflow || !actor || !await canUseJudgeSecret(actor, judgeInput.secretRef.secretId, workflow)) {
         throw new Error(`the judge's secret ${judgeInput.secretRef.secretId} cannot be used by the user who started this run in this workflow's project`);
@@ -4299,11 +4295,11 @@ export async function createApp(
     );
 
   // The starting user, found by id; a deleted user whose email a new account
-  // took over is not the same user.
-  const evalPolicyActor = async (userId: string, email: string): Promise<SafeUser | null> => {
-    const found = await store.getUserById(userId);
+  // took over is not the same user. A run an API key started keeps that key's limits.
+  const evalPolicyActor = async (userId: string, email: string, apiKeyId?: string | null): Promise<SafeUser | null> => {
+    const found = await backgroundRunUser(userId, apiKeyId);
     if (!found || found.email.toLowerCase() !== email.toLowerCase() || !MCP_POLICY_ROLES.includes(found.role as McpPolicyRole)) return null;
-    return { id: found.id, email: found.email, role: found.role as UserRole };
+    return found;
   };
 
   /**
@@ -4337,8 +4333,8 @@ export async function createApp(
    * the workflow (the same rule as queued runs). The run then executes with
    * their policy and project scope (run-scope.ts).
    */
-  const evalRunActor = async (userId: string, email: string, workflowId: string, permission: "workflow:read" | "workflow:execute" | "workflow:write" = "workflow:execute"): Promise<SafeUser | null> => {
-    const actor = await evalPolicyActor(userId, email);
+  const evalRunActor = async (userId: string, email: string, workflowId: string, permission: "workflow:read" | "workflow:execute" | "workflow:write" = "workflow:execute", apiKeyId?: string): Promise<SafeUser | null> => {
+    const actor = await evalPolicyActor(userId, email, apiKeyId);
     // Phase 15.6 — a guard policy simulation replays in projects its starter can read (models from the tape, no side effects).
     if (permission === "workflow:read") return actor && (await runAccess.workflow(actor, workflowId, "workflow:read")).ok ? actor : null;
     if (!actor || !(await runAccess.workflow(actor, workflowId, "workflow:execute")).ok) return null;
@@ -4350,7 +4346,7 @@ export async function createApp(
     if (!workflow) {
       return { output: null, error: `Workflow not found: ${input.workflowId}` };
     }
-    const policyActor = await evalRunActor(input.triggeredByUserId, input.triggeredBy, workflow.id);
+    const policyActor = await evalRunActor(input.triggeredByUserId, input.triggeredBy, workflow.id, "workflow:execute", input.triggeredByApiKeyId);
     if (!policyActor) {
       return { output: null, error: `The user who started this run (${input.triggeredBy}) can no longer run this workflow.` };
     }
@@ -4483,7 +4479,7 @@ export async function createApp(
       baselineFor: async (recording) => await replayService.baselineFor(recording),
       priceCall: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
       // Phase 15.3 — an inline or overridden candidate keeps needing workflow:write for every case.
-      actorFor: async (userId, email, workflowId, permission) => await evalRunActor(userId, email, workflowId, permission)
+      actorFor: async (userId, email, workflowId, permission, apiKeyId) => await evalRunActor(userId, email, workflowId, permission, apiKeyId)
     },
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
@@ -4930,11 +4926,41 @@ export async function createApp(
     bufferSize: config.LOG_STREAM_BUFFER_SIZE,
     retryMaxAttempts: config.LOG_STREAM_RETRY_MAX_ATTEMPTS,
     eventRetentionDays: config.LOG_STREAM_EVENT_RETENTION_DAYS,
-    eventPruneIntervalMs: config.LOG_STREAM_EVENT_PRUNE_INTERVAL_MS
+    eventPruneIntervalMs: config.LOG_STREAM_EVENT_PRUNE_INTERVAL_MS,
+    // 13.3 — only the leader prunes delivery history.
+    shouldPrune: () => leaderElection.isLeader()
   });
   logStreamingService.start();
   app.addHook("onClose", async () => {
     await logStreamingService.stop();
+  });
+
+  // 13.3 — the retention service: leader-only, one instance at a time (its lease), batched, recorded. Captured runs and
+  // rule simulations register their steps further down, once their services exist.
+  const retention = new RetentionService({
+    store,
+    settings: resolveRetentionSettings(config),
+    executionHistoryDays: config.EXECUTION_HISTORY_RETENTION_DAYS,
+    evalRunDays: config.EVAL_RUN_RETENTION_DAYS,
+    legacyMemoryOwners: async () => (await legacyNamespaceIndexNow()).defaults,
+    intervalMs: config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS,
+    instanceId: leaderElection.getInstanceId(),
+    isLeader: () => leaderElection.isLeader(),
+    metrics: metricsService,
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
+    },
+    logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },
+    redact: (text) => String(secretService.redact(text))
+  });
+  retentionService = retention;
+  // 13.3 — usage retention is applied since 13.3. An .env copied from an older .env.example still sets 365; say loudly
+  // what that now deletes, so an operator who wants to keep chargeback history removes it or sets 0.
+  const usageWarning = usageRetentionWarning(config.USAGE_EVENTS_RETENTION_DAYS);
+  if (usageWarning) app.log.warn(usageWarning.fields, usageWarning.message);
+  app.addHook("onClose", async () => {
+    await retention.stop();
   });
 
   const notificationService = new NotificationService(config, async () =>
@@ -4945,6 +4971,32 @@ export async function createApp(
       events: c.events
     }))
   );
+
+  // 13.2 — credential.expiring: the leader warns (at most once a day per credential) about API keys and gateway
+  // clients that stop working soon, and old keys still in use as their rotation grace window ends.
+  const credentialExpiryService = new CredentialExpiryService({
+    store,
+    notify: async (event) => await notificationService.notify(event),
+    subscribed: async () => await notificationService.subscribes(CREDENTIAL_EXPIRING_EVENT),
+    isLeader: () => runsBackgroundWorkers && leaderElection.isLeader()
+  });
+  const sweepCredentialExpiry = async () => {
+    try {
+      const sent = await credentialExpiryService.sweep();
+      if (sent > 0) app.log.info({ sent }, "Sent credential expiry warnings");
+    } catch (err) {
+      app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to sweep expiring credentials");
+    }
+  };
+  // promise-ok: the sweep catches and logs its own errors
+  const credentialExpiryTimer = setInterval(async () => await sweepCredentialExpiry(), CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS);
+  credentialExpiryTimer.unref?.();
+  app.addHook("onReady", async () => {
+    void sweepCredentialExpiry();
+  });
+  app.addHook("onClose", async () => {
+    clearInterval(credentialExpiryTimer);
+  });
 
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
   const approvalResumes = new ApprovalResumeRunner();
@@ -5021,7 +5073,7 @@ export async function createApp(
     runReleases.delete(executionId);
     dropCapture(executionId, "skipped_not_stored");
     // The run leaves no usage row; what its sub-workflows spent is still recorded.
-    subWorkflowSpend.abandon(executionId, "stopped by the queue").catch((error: unknown) => {
+    subWorkflowSpend.abandon(executionId, "stopped by the queue", job).catch((error: unknown) => {
       app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record a stopped run's sub-workflow spend");
     });
     app.log.warn({ executionId, workflowId, reason: String(job.signal.reason) }, "Queued run stopped by the queue");
@@ -5064,9 +5116,12 @@ export async function createApp(
         const timedOut = decided === "timeout";
         const actorUserId = timedOut ? request.requestedByUserId : request.decidedByUserId;
         const actorEmail = timedOut ? request.requestedBy : request.decidedBy;
+        // 13.2 — a decision (or a run) made with an API key resumes with that key's limits, and is refused like a
+        // deleted user once the key is revoked or has expired.
+        const actorApiKeyId = timedOut ? request.requestedByApiKeyId : request.decidedByApiKeyId;
         if (actorUserId) {
-          const actorRecord = await store.getUserById(actorUserId);
-          actor = actorRecord && actorRecord.email === actorEmail ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
+          const actorRecord = await backgroundRunUser(actorUserId, actorApiKeyId);
+          actor = actorRecord && actorRecord.email === actorEmail ? actorRecord : null;
           const check = actor
             ? await approvalPersonCheck(request, actor, async (user, workflowId, permission) => await runAccess.run(user, { id: workflowId, workflowId }, permission), {
                 skipSelfApproval: true,
@@ -5143,6 +5198,7 @@ export async function createApp(
           : null;
         const result = await runWorkflowExecution({
           ...(hooks ? { hooks } : {}),
+          ...(queueJob ? { spendAttempt: queueJob } : {}),
           ...(gatewayGuard ? { gatewayGuard } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           ...(state.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
@@ -5184,13 +5240,15 @@ export async function createApp(
         // Stopped by the queue: the decision stands and the queue's policy decides who resumes it. What this attempt's
         // sub-workflows spent is recorded now (the next attempt starts its own).
         if (queueJob?.signal.aborted) {
-          await subWorkflowSpend.abandon(job.executionId, "the resume was stopped by the queue").catch((spendError: unknown) => {
+          await subWorkflowSpend.abandon(job.executionId, "the resume was stopped by the queue", queueJob).catch((spendError: unknown) => {
             app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a stopped resume's sub-workflow spend");
           });
           throw error;
         }
         // What the failed resume's sub-workflows spent is still recorded.
-        await subWorkflowSpend.abandon(job.executionId, "the resume failed");
+        await subWorkflowSpend.abandon(job.executionId, "the resume failed").catch((spendError: unknown) => {
+          app.log.warn({ executionId: job.executionId, error: spendError instanceof Error ? spendError.message : String(spendError) }, "Failed to record a failed resume's sub-workflow spend");
+        });
         // The decision is kept for a new try: the run waits again and the request is pending again.
         await approvalService.reopenAfterFailedResume(job);
         throw error;
@@ -5237,8 +5295,9 @@ export async function createApp(
       await store.getWorkflow(workflow.id)
         ? (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok
         : (await runAccess.project(user, workflow.projectId, "workflow:execute")).ok,
+    // 13.2 — people only: a service account is never an approver.
     listUsers: async () =>
-      (await store.listUsers()).map((entry) => ({
+      (await store.listUsers({ kind: "human" })).map((entry) => ({
         id: entry.id,
         email: entry.email,
         role: entry.role === "admin" || entry.role === "builder" || entry.role === "operator" ? entry.role : "viewer"
@@ -5342,7 +5401,7 @@ export async function createApp(
     if (asked !== undefined && asked !== "draft") {
       return { ok: false, status: 400, error: "channel can only be draft" };
     }
-    const viaKey = Boolean(await authenticateApiKey(request.headers as Record<string, unknown>));
+    const viaKey = (await resolveRequestAuth(request))?.credential === "api_key";
     if (!viaKey) return { channel: "draft" };
     if (asked === undefined) return { channel: "production" };
     const write = await runAccess.workflow(user, workflowId, "workflow:write");
@@ -5350,9 +5409,11 @@ export async function createApp(
     return { channel: "draft" };
   };
 
+  // 13.3 — the leader prunes (every instance did before); HA off, every instance is its own leader, as before.
   const pruneAuditLogs = async (reason: "startup" | "interval") => {
     const retentionDays = config.AUDIT_LOG_RETENTION_DAYS;
     if (!Number.isFinite(retentionDays) || retentionDays <= 0) return 0;
+    if (!leaderElection.isLeader()) return 0;
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
     try {
       const deleted = await auditService.purge({ before: cutoff });
@@ -5368,7 +5429,7 @@ export async function createApp(
       return 0;
     }
   };
-  await pruneAuditLogs("startup");
+  // The start-up audit prune runs with the start-up retention purge (below), once leadership is known.
   const auditRetentionTimer = config.AUDIT_LOG_RETENTION_DAYS > 0
     // promise-ok: the task catches and logs its own errors
     ? setInterval(async () => await pruneAuditLogs("interval"), config.AUDIT_LOG_PRUNE_INTERVAL_MS)
@@ -5401,12 +5462,17 @@ export async function createApp(
     overrides?: Partial<AuditActor>
   ): AuditActor => {
     const { ipAddress, userAgent } = extractIpAndUa(request);
+    // 13.2 — a request authenticated with an API key records the key's id (and whether a service account owns it).
+    const auth = sessionService.getRequestAuth(request);
+    const keyFields: Partial<AuditActor> =
+      auth?.credential === "api_key" ? { apiKeyId: auth.apiKeyId, ...(auth.serviceAccount ? { serviceAccount: true } : {}) } : {};
     return {
       userId: user?.id ?? null,
       email: user?.email ?? null,
-      type: request.headers["authorization"] ? "api_key" : "user",
+      type: auth ? (auth.credential === "api_key" ? "api_key" : "user") : request.headers["authorization"] ? "api_key" : "user",
       ipAddress,
       userAgent,
+      ...keyFields,
       ...overrides
     };
   };
@@ -5442,6 +5508,19 @@ export async function createApp(
   };
   // Phase 13.2 — MFA on SSO (SSO_MFA, `off` unless set) and the optional SAML issuer pin / allow-lists.
   const ssoMfaSettings = resolveSsoMfaSettings(config);
+  // 13.2 — MFA required per role (MFA_REQUIRED_ROLES; MFA_ENFORCE=true adds admin) and step-up (STEP_UP_MAX_AGE_MINUTES).
+  const mfaPolicy = resolveMfaPolicy(config);
+  for (const note of mfaPolicy.notes) app.log.warn({}, note);
+  const ssoEnabled = config.OIDC_ENABLED === true || config.SAML_ENABLED === true;
+  // With a role list, SSO sign-ins of those roles need MFA even when SSO_MFA is off (they run as idp_or_local), so the
+  // IdP's MFA claims are read whenever either is set.
+  const ssoMfaChecked = ssoMfaSettings.mode !== "off" || mfaPolicy.requiredRoles.length > 0;
+  if (ssoEnabled && ssoMfaSettings.mode === "off" && mfaPolicy.requiredRoles.length > 0) {
+    app.log.warn(
+      { requiredRoles: mfaPolicy.requiredRoles },
+      "SSO_MFA is off, but MFA_REQUIRED_ROLES is set: SSO sign-ins of those roles need IdP-asserted MFA or the local TOTP step, else they get a session that can only set up MFA"
+    );
+  }
   const samlSettings = resolveSamlSettings(config);
   const samlService = new SamlService(
     store,
@@ -5455,7 +5534,7 @@ export async function createApp(
       idpIssuer: samlSettings?.idpIssuer,
       allowedEmailDomains: samlSettings?.allowedEmailDomains,
       allowedGroups: samlSettings?.allowedGroups,
-      reportActualAuthnContext: ssoMfaSettings.mode !== "off",
+      reportActualAuthnContext: ssoMfaChecked,
       requireInResponseTo: samlSettings?.requireInResponseTo ?? false,
       requestCookieKey: deriveSamlRequestKey(config.SECRET_MASTER_KEY_BASE64)
     },
@@ -5484,13 +5563,13 @@ export async function createApp(
   // An SSO login that ends in the TOTP step carries what it still has to do once the code passes (link the identity,
   // apply group mappings, audit). It holds no token or assertion. Phase 13.1 — kept in the challenge store: in this
   // process outside cluster mode, in the database (sealed, id hashed) in cluster mode.
-  const issueMfaChallenge = async (userId: string, sso?: PendingSsoLogin): Promise<string> => {
+  const issueMfaChallenge = async (userId: string, sso?: PendingSsoLogin, ldap?: SsoProvisionInput): Promise<string> => {
     const challengeId = `mfa_${crypto.randomUUID()}`;
     await challengeStore.issue<PendingMfaChallenge>({
       kind: sso ? "sso_mfa" : "mfa_login",
       id: challengeId,
       userId,
-      payload: { userId, createdAt: Date.now(), ...(sso ? { sso } : {}) },
+      payload: { userId, createdAt: Date.now(), ...(sso ? { sso } : {}), ...(ldap ? { ldap } : {}) },
       ttlMs: MFA_CHALLENGE_TTL_MS
     });
     return challengeId;
@@ -5539,40 +5618,74 @@ export async function createApp(
     }
   };
 
-  /** The user, key id and scopes a request's API key names, or null. */
+  /**
+   * The user a request's API key acts as, with the key's id and scope, or null. 13.2: the owner's role is capped by
+   * the key's role ceiling (and at builder for a key limited to projects), and the project list rides on the user
+   * (`projectScope`) so every RBAC check honours it. A key without a structured scope acts with its owner's role.
+   */
   const authenticateApiKeyCredential = async (
     headers: Record<string, unknown>
-  ): Promise<{ user: SafeUser; apiKeyId: string; keyScopes: string[] } | null> => {
+  ): Promise<Omit<Extract<RequestAuthContext, { credential: "api_key" }>, "credential"> | null> => {
     const token = extractBearerToken(headers);
     if (!token) return null;
     const verified = await apiKeyService.verify(token);
     if (!verified) return null;
-    const user = await store.getUserById(verified.userId);
-    if (!user) return null;
+    const owner = await store.getUserById(verified.userId);
+    if (!owner) return null;
+    const keyScope = parseKeyScopes(verified.scopes);
     return {
-      user: {
-        id: user.id,
-        email: user.email,
-        role:
-          user.role === "admin" || user.role === "builder" || user.role === "operator" || user.role === "viewer"
-            ? user.role
-            : "viewer"
-      },
+      user: scopedKeyUser({ id: owner.id, email: owner.email, role: safeUserRole(owner.role), ...(owner.kind === "service" ? { serviceAccount: true as const } : {}) }, keyScope, verified.keyId),
       apiKeyId: verified.keyId,
-      keyScopes: verified.scopes
+      keyScopes: verified.scopes,
+      keyScope,
+      serviceAccount: owner.kind === "service"
     };
   };
 
-  const authenticateApiKey = async (headers: Record<string, unknown>): Promise<SafeUser | null> =>
-    (await authenticateApiKeyCredential(headers))?.user ?? null;
+  /**
+   * 13.2 — the one place a request's credential is resolved: an API key (Authorization: Bearer) first, then the
+   * session cookie. The result is recorded as the request's sign-in context, so it is resolved once per request and
+   * later checks read it (`sessionService.getRequestAuth`). requireRole, requestIsAdmin and executeChannelFor all go
+   * through here. Null when the request carries no valid credential.
+   */
+  const resolveRequestCredential = async (request: {
+    cookies: Record<string, string | undefined>;
+    headers: Record<string, unknown>;
+  }): Promise<{ auth: RequestAuthContext } | { auth: null; reason?: SessionRejectReason }> => {
+    const known = sessionService.getRequestAuth(request);
+    if (known) return { auth: known };
+    const apiKey = await authenticateApiKeyCredential(request.headers);
+    if (apiKey) {
+      const context: RequestAuthContext = { credential: "api_key", ...apiKey };
+      sessionService.setRequestAuth(request, context);
+      return { auth: context };
+    }
+    const sessionId = getSessionIdFromRequest(request);
+    if (!sessionId) return { auth: null };
+    // 13.2 — idle and absolute timeouts are applied here; background traffic never counts as activity.
+    const resolved = await authService.resolveSession(sessionId, await getRequestSession(request, sessionId).catch(() => undefined), {
+      background: isBackgroundRequest(request.headers)
+    });
+    if (!resolved.ok) return { auth: null, reason: resolved.reason };
+    const context: RequestAuthContext = { credential: "session", user: resolved.user, session: resolved.session };
+    sessionService.setRequestAuth(request, context);
+    return { auth: context };
+  };
 
-  const setSessionCookie = (reply: FastifyReply, sessionId: string) => {
+  const resolveRequestAuth = async (request: {
+    cookies: Record<string, string | undefined>;
+    headers: Record<string, unknown>;
+  }): Promise<RequestAuthContext | null> => (await resolveRequestCredential(request)).auth;
+
+  /** Sets the session cookie; it lives as long as the session (`expiresAt`), never longer. */
+  const setSessionCookie = (reply: FastifyReply, sessionId: string, expiresAt: string) => {
+    const remainingSeconds = Math.floor((Date.parse(expiresAt) - Date.now()) / 1000);
     reply.setCookie(config.SESSION_COOKIE_NAME, sessionId, {
       path: "/",
       httpOnly: true,
       sameSite: "lax",
       secure: config.COOKIE_SECURE,
-      maxAge: config.SESSION_TTL_HOURS * 60 * 60
+      maxAge: Number.isFinite(remainingSeconds) ? Math.max(1, remainingSeconds) : config.SESSION_TTL_HOURS * 60 * 60
     });
   };
 
@@ -5590,43 +5703,226 @@ export async function createApp(
   };
 
   const requireRole = async (
-    request: { cookies: Record<string, string | undefined>; headers: Record<string, unknown> },
+    request: {
+      cookies: Record<string, string | undefined>;
+      headers: Record<string, unknown>;
+      method?: string;
+      routeOptions?: { url?: string };
+    },
     reply: FastifyReply,
     allowedRoles: UserRole[]
   ): Promise<SafeUser | null> => {
-    // Allow API key authentication (Phase 5.1) as a first-class alternative to session cookies.
-    const apiKey = await authenticateApiKeyCredential(request.headers as Record<string, unknown>);
-    if (apiKey) {
-      // 13.2 — the request's sign-in context, for checks that run after this one.
-      sessionService.setRequestAuth(request, { credential: "api_key", ...apiKey });
-      if (!hasRequiredRole(apiKey.user, allowedRoles)) {
-        deny(reply, 403, "Insufficient permissions");
+    // An API key (Phase 5.1) or the session cookie; 13.2: resolved once per request through resolveRequestAuth.
+    const credential = await resolveRequestCredential(request);
+    const auth = credential.auth;
+    if (!auth) {
+      if (getSessionIdFromRequest(request)) {
+        clearSessionCookie(reply);
+        // 13.2 — say why (idle, expired, evicted, admin, ...) so the studio can tell the user; nothing for an unknown ID.
+        const reason = credential.auth === null ? credential.reason : undefined;
+        reply.code(401).send(!reason || reason === "invalid" ? { error: "Session expired or invalid" } : { error: "Session expired or invalid", reason });
+      } else {
+        deny(reply, 401, "Authentication required");
+      }
+      return null;
+    }
+
+    // 13.2 — a key limited to projects calls only the routes that check projects (key-scopes.ts); the rest fail closed.
+    if (auth.credential === "api_key" && !keyMayCallRoute(auth.keyScope, request.method, request.routeOptions?.url)) {
+      deny(reply, 403, "This API key is limited to projects and cannot call this route");
+      return null;
+    }
+    // 13.2 — a scoped key cannot change its owner's account security (MFA): that needs a session or an unscoped key.
+    if (auth.credential === "api_key" && !keyMayManageAccount(auth.keyScope, request.method, request.routeOptions?.url)) {
+      deny(reply, 403, "A scoped API key cannot change its owner's account security; sign in, or use an unscoped key");
+      return null;
+    }
+
+    // 13.2 — a personal key of an owner whose role requires MFA works only while the owner has MFA set up (the owner's
+    // own role counts, not the key's ceiling). A service-account key is not a person's key.
+    if (auth.credential === "api_key" && !auth.serviceAccount && mfaPolicy.requiredRoles.length > 0) {
+      const owner = await store.getUserById(auth.user.id);
+      const ownerRole = owner ? safeUserRole(owner.role) : auth.user.role;
+      if (mfaRequiredFor(mfaPolicy, ownerRole) && !(await mfaService.status(auth.user.id)).enabled) {
+        reply.code(403).send({
+          code: "mfa_enrollment_required",
+          error: "Your role requires multi-factor authentication: your API keys work again once you set up an authenticator app."
+        });
         return null;
       }
-      return apiKey.user;
     }
 
-    const sessionId = getSessionIdFromRequest(request);
-    if (!sessionId) {
-      deny(reply, 401, "Authentication required");
-      return null;
+    // 13.2 — a role that requires MFA, on a session that has not passed it, may only set up or verify MFA. A
+    // break-glass session is exempt (sessionOwesMfa), never from its expiry, which resolveSession already applied.
+    if (auth.credential === "session") {
+      const gate = await sessionMfaGateFor(auth.user, auth.session);
+      if (gate !== "none" && !mfaGateAllows(gate, requestMethodOf(request), requestRouteOf(request))) {
+        reply.code(403).send(MFA_GATE_ERRORS[gate]);
+        return null;
+      }
     }
 
-    const resolved = await authService.getSessionAuth(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
-    if (!resolved) {
-      clearSessionCookie(reply);
-      deny(reply, 401, "Session expired or invalid");
-      return null;
-    }
-    const user = resolved.user;
-    sessionService.setRequestAuth(request, { credential: "session", user, session: resolved.session });
-
-    if (!hasRequiredRole(user, allowedRoles)) {
+    if (!hasRequiredRole(auth.user, allowedRoles)) {
       deny(reply, 403, "Insufficient permissions");
       return null;
     }
 
-    return user;
+    return auth.user;
+  };
+
+  /**
+   * 13.2 — what an SSE stream checks about the session that opened it: the stream closes when the session is signed
+   * out, revoked, evicted, idle or expired. The checks are background traffic (they never count as activity). API-key
+   * streams have no session to watch.
+   */
+  const streamSessionWatch = (request: object, onEnded: (reason: string) => void): SseSessionWatch | undefined => {
+    const context = sessionService.getRequestAuth(request);
+    if (context?.credential !== "session") return undefined;
+    const sessionId = context.session.id;
+    return {
+      check: async () => {
+        const resolved = await authService.resolveSession(sessionId, undefined, { background: true });
+        return resolved.ok ? null : resolved.reason;
+      },
+      onEnded
+    };
+  };
+
+  /** The route pattern a request matched (`/api/users/:id`), else its path without the query. */
+  const requestRouteOf = (request: object): string => {
+    const routed = (request as { routeOptions?: { url?: string } }).routeOptions?.url;
+    if (typeof routed === "string" && routed) return routed;
+    const raw = (request as { url?: string }).url ?? "";
+    return raw.split("?")[0] ?? "";
+  };
+  const requestMethodOf = (request: object): string => String((request as { method?: string }).method ?? "GET");
+
+  /**
+   * 13.2 — what a session may do under MFA_REQUIRED_ROLES: `none`, or restricted to setting up (no TOTP yet) or
+   * verifying (TOTP enrolled) MFA. The enrolment is looked up only for a listed role on a session without an MFA check.
+   */
+  const sessionMfaGateFor = async (user: SafeUser, session: LoginSession): Promise<SessionMfaGate> => {
+    const owes = sessionOwesMfa(mfaPolicy, user.role, session);
+    if (!owes) return "none";
+    return sessionMfaGate(true, (await mfaService.status(user.id)).enabled);
+  };
+
+  /**
+   * The user of a request's browser session, for routes that also serve signed-out callers (public registration), or
+   * null; records the request context like requireRole. API keys never count here, and a session restricted by
+   * MFA_REQUIRED_ROLES counts as signed out.
+   */
+  const unrestrictedSessionUser = async (request: FastifyRequest): Promise<SafeUser | null> => {
+    const sessionId = getSessionIdFromRequest(request);
+    if (!sessionId) return null;
+    const resolved = await authService.getSessionAuth(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
+    if (!resolved) return null;
+    if ((await sessionMfaGateFor(resolved.user, resolved.session)) !== "none") return null;
+    sessionService.setRequestAuth(request, { credential: "session", user: resolved.user, session: resolved.session });
+    return resolved.user;
+  };
+
+  /**
+   * 13.2 — step-up (STEP_UP_MAX_AGE_MINUTES) for a security-admin action, after requireRole passed. Off: always true.
+   * On: a session needs an MFA check within the window (else 403 `step_up_required`, and the studio asks for a code
+   * and retries); a personal API key is refused; a service-account key with `role:admin` passes; break-glass passes.
+   */
+  const requireStepUp = async (
+    request: object,
+    reply: FastifyReply,
+    action: StepUpAction,
+    options: { maxAgeMinutes?: number; targetUserId?: string } = {}
+  ): Promise<boolean> => {
+    const context = sessionService.getRequestAuth(request);
+    const maxAgeMinutes = options.maxAgeMinutes ?? mfaPolicy.stepUpMaxAgeMinutes;
+    // 13.2 — an action on a person's account needs a person: a service-account key is refused there even with an
+    // admin ceiling. The target is looked up only when it can matter.
+    const targetsPerson =
+      maxAgeMinutes > 0 && context?.credential === "api_key" && context.serviceAccount && options.targetUserId
+        ? (await store.getUserById(options.targetUserId))?.kind === "human"
+        : false;
+    const decision = decideStepUp({ maxAgeMinutes, context, now: Date.now(), targetsPerson });
+    if (decision.kind === "allow") return true;
+    if (decision.kind === "unauthenticated") {
+      deny(reply, 401, "Authentication required");
+      return false;
+    }
+    if (decision.kind === "key_refused" && decision.reason === "person_target") {
+      reply.code(403).send({
+        error: `${STEP_UP_ACTIONS[action]} on a person's account needs a person who has passed a second factor; a service account's key cannot do it. Use a signed-in session.`,
+        code: "step_up_required",
+        stepUp: { required: true, action, credential: "api_key", target: "person" }
+      });
+      return false;
+    }
+    if (decision.kind === "key_refused") {
+      reply.code(403).send({
+        error: `${STEP_UP_ACTIONS[action]} needs a recent MFA check, which a personal API key cannot give. Use a signed-in session.`,
+        code: "step_up_required",
+        stepUp: { required: true, action, credential: "api_key" }
+      });
+      return false;
+    }
+    const enrolled = context ? (await mfaService.status(context.user.id)).enabled : false;
+    reply.code(403).send({
+      error: enrolled
+        ? `${STEP_UP_ACTIONS[action]} needs a recent MFA check. Enter a code from your authenticator app.`
+        : `${STEP_UP_ACTIONS[action]} needs a recent MFA check. Set up an authenticator app in Settings > Security first.`,
+      code: "step_up_required",
+      stepUp: { required: true, action, method: "totp", enrolled, maxAgeMinutes }
+    });
+    return false;
+  };
+
+  // 13.2 — MFA code guessing: MFA_FAILURE_LIMIT wrong codes for one user within MFA_LOCK_MINUTES lock step-up and
+  // the sign-in code step for that user until the window passes. Counted from the audit log (`mfa.code_failed`), so
+  // the count holds across instances and restarts.
+  const MFA_FAILURE_LIMIT = 5;
+  /** 13.2 — how recent an MFA check must be for a role that requires MFA to create an API key, when step-up is off. */
+  const LISTED_ROLE_KEY_MFA_MINUTES = 15;
+  const MFA_LOCK_MINUTES = 15;
+
+  /** When the user's MFA lock ends, or null when they are not locked. */
+  const mfaLockedUntil = async (userId: string): Promise<string | null> => {
+    const windowMs = MFA_LOCK_MINUTES * 60_000;
+    const from = new Date(Date.now() - windowMs).toISOString();
+    const { items } = await store.listAuditLogs({
+      eventType: "mfa.code_failed",
+      resourceType: "user",
+      resourceId: userId,
+      from,
+      page: 1,
+      pageSize: MFA_FAILURE_LIMIT
+    });
+    if (items.length < MFA_FAILURE_LIMIT) return null;
+    const oldestCounted = Math.min(...items.map((item) => Date.parse(item.createdAt)));
+    return new Date(oldestCounted + windowMs).toISOString();
+  };
+
+  const mfaLockedAnswer = (reply: FastifyReply, lockedUntil: string) => {
+    reply.code(429);
+    reply.header("retry-after", String(Math.max(1, Math.ceil((Date.parse(lockedUntil) - Date.now()) / 1000))));
+    return {
+      error: `Too many wrong codes. Multi-factor verification for this account is locked until ${lockedUntil}.`,
+      code: "mfa_locked",
+      lockedUntil
+    };
+  };
+
+  /** Records a wrong MFA code for the user; true when this failure locked them (then `mfa.locked` is audited). */
+  const recordMfaFailure = async (request: FastifyRequest, user: SafeUser | null, userId: string, via: string): Promise<boolean> => {
+    const target = { category: "mfa" as const, resourceType: "user", resourceId: userId };
+    await audit(request, user, { ...target, eventType: "mfa.code_failed", action: "verify", outcome: "failure", metadata: { via } });
+    const lockedUntil = await mfaLockedUntil(userId);
+    if (!lockedUntil) return false;
+    await audit(request, user, {
+      ...target,
+      eventType: "mfa.locked",
+      action: "lock",
+      outcome: "failure",
+      metadata: { via, failures: MFA_FAILURE_LIMIT, minutes: MFA_LOCK_MINUTES, lockedUntil }
+    });
+    return true;
   };
 
   const requirePermission = async (
@@ -5651,6 +5947,10 @@ export async function createApp(
     // was deleted meanwhile, refuse rather than create a fresh account by email.
     if (input.userId && !storeUser) {
       throw new Error("The account this sign-in belongs to no longer exists");
+    }
+    // 13.2 — a service account never signs in (SSO, LDAP or otherwise); only its API keys authenticate.
+    if (storeUser?.kind === "service" || (!storeUser && isServiceAccountEmail(normalizedEmail))) {
+      throw new Error("Service accounts cannot sign in");
     }
     let created = false;
     const ssoRoles = input.provider === "saml" ? samlService : input.provider === "ldap" ? ldapService : oidcService;
@@ -5746,6 +6046,26 @@ export async function createApp(
     return { user, created };
   };
 
+  // 13.2 — break-glass sign-in. Its links always live in the database (they are minted by another process, the
+  // admin:break-glass command), whatever the deployment. Its audit rows are written even with AUDIT_LOG_ENABLED=false:
+  // a break-glass session is only acceptable because everything it does is recorded.
+  const breakGlassAudit = new AuditService(store, { enabled: true });
+  const recordBreakGlassAudit = async (event: AuditEventInput) => {
+    await breakGlassAudit.record(event);
+    await logStreamingService.dispatchAudit(event);
+  };
+  const breakGlassService = new BreakGlassService({
+    store,
+    challenges: new DbChallengeStore(store, secretService, { warn: (message, fields) => app.log.warn(fields ?? {}, message) }),
+    audit: recordBreakGlassAudit,
+    notify: async (event) => await notificationService.notifyWithResults(event, { timeoutMs: BREAK_GLASS_ALERT_TIMEOUT_MS }),
+    warn: (message, fields) => app.log.warn(fields ?? {}, message)
+  });
+  // The end of a break-glass session (expiry, or ended by an admin) is reported by the cleanup tick, once overall.
+  authService.addCleanupTask(async () => await breakGlassService.sweepEnded());
+  // Outside cluster mode nothing else prunes the shared flow-state table, which then holds only break-glass rows.
+  if (!clusterMode) authService.addCleanupTask(async () => await store.prunePendingChallenges());
+
   /** 13.2 — issues a session through the session service (the only path that saves one) and sets the cookie. */
   const issueSessionForUser = async (
     request: FastifyRequest,
@@ -5753,14 +6073,34 @@ export async function createApp(
     user: SafeUser,
     options: { method: SessionAuthMethod; mfaVerified: boolean }
   ): Promise<{ expiresAt: string }> => {
+    // The browser's previous session (if any) ends first, so signing in again here never counts against the session
+    // limit or evicts the user's session on another device.
+    const previousSessionId = getSessionIdFromRequest(request);
+    if (previousSessionId) {
+      await sessionService.endSession(previousSessionId, "logout").catch((revokeError: unknown) => {
+        request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
+      });
+    }
     const issued = await sessionService.issueSession({
       user,
       method: options.method,
       request,
-      mfaVerified: options.mfaVerified,
-      ttlHours: config.SESSION_TTL_HOURS
+      mfaVerified: options.mfaVerified
     });
-    setSessionCookie(reply, issued.sessionId);
+    setSessionCookie(reply, issued.sessionId, issued.expiresAt);
+    // SESSION_MAX_PER_USER — every session this sign-in ended is audited; a failing audit never fails the sign-in.
+    if (issued.evictedSessionIds.length > 0) {
+      await audit(request, user, {
+        category: "auth",
+        eventType: "session.evicted",
+        action: "revoke",
+        resourceType: "user",
+        resourceId: user.id,
+        metadata: { sessions: issued.evictedSessionIds.map(sessionHandle), limit: maxSessionsFor(sessionService.policy, user.role) }
+      }).catch((auditError: unknown) => {
+        request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "Session eviction not audited");
+      });
+    }
     return { expiresAt: issued.expiresAt };
   };
 
@@ -5798,12 +6138,7 @@ export async function createApp(
       request.log.info({ provider: "saml" }, "Legacy SAML identity upgraded to the IdP-scoped key");
     }
     const { user, created } = await provisionSsoUser(input.provision);
-    const previousSessionId = getSessionIdFromRequest(request);
-    if (previousSessionId) {
-      await sessionService.endSession(previousSessionId, "logout").catch((revokeError: unknown) => {
-        request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
-      });
-    }
+    // issueSessionForUser ends the browser's previous session.
     const { expiresAt } = await issueSessionForUser(request, reply, user, {
       method: input.method,
       mfaVerified: input.mfa === "local_totp" || (input.mfa !== null && typeof input.mfa === "object")
@@ -5871,7 +6206,7 @@ export async function createApp(
     }
   ): Promise<SsoLoginOutcome> => {
     const firstLink = !input.provision.userId;
-    if (ssoMfaSettings.mode === "off" || input.evidence) {
+    const signInNow = async (): Promise<SsoLoginOutcome> => {
       const session = await completeSsoSession(request, reply, {
         method: input.method,
         provision: input.provision,
@@ -5879,20 +6214,24 @@ export async function createApp(
         mfa: input.evidence ? { evidence: input.evidence } : null
       });
       return { kind: "session", ...session };
-    }
+    };
+    if (input.evidence || !ssoMfaChecked) return await signInNow();
     // No IdP MFA. The account the login resolves to: the linked user, else the one its email would link to.
     const target = input.provision.userId
       ? await store.getUserById(input.provision.userId)
       : await store.getUserByEmail(input.provision.email.trim().toLowerCase());
-    const localTotp = target ? (await mfaService.status(target.id)).enabled : false;
     const ssoRoles = input.method === "saml" ? samlService : oidcService;
     const projectedRole = projectSsoRole(target ? safeUserRole(target.role) : null, await ssoRoles.resolveGlobalRole(input.provision.groups));
+    // 13.2 (D6) — with SSO_MFA off, a role listed in MFA_REQUIRED_ROLES signs in as under idp_or_local; others as before.
+    const roleRequiresMfa = mfaRequiredFor(mfaPolicy, projectedRole);
+    if (ssoMfaSettings.mode === "off" && !roleRequiresMfa) return await signInNow();
+    const localTotp = target ? (await mfaService.status(target.id)).enabled : false;
     const decision = decideSsoMfa({
-      mode: ssoMfaSettings.mode,
+      mode: ssoMfaSettings.mode === "off" ? "idp_or_local" : ssoMfaSettings.mode,
       evidence: null,
       localTotp,
-      // The password login's rule: MFA_ENFORCE applies to admins.
-      mfaEnforcedForRole: config.MFA_ENFORCE && projectedRole === "admin"
+      // The password login's rule: MFA is required for the role the login ends up with.
+      mfaEnforcedForRole: roleRequiresMfa
     });
     if (decision.kind === "local_totp" && target) {
       const challengeId = await issueMfaChallenge(target.id, {
@@ -6078,13 +6417,17 @@ export async function createApp(
       "/api/auth/login",
       "/api/auth/register",
       "/api/auth/invite",
+      // 13.2 — a break-glass link's confirm POST (each attempt is audited).
+      "/api/auth/break-glass",
       "/api/auth/saml/login",
       "/api/auth/saml/callback",
       "/api/auth/ldap/login",
       "/api/auth/oidc/login",
       "/api/auth/oidc/callback",
+      "/api/auth/mfa/enroll",
       "/api/auth/mfa/activate",
-      "/api/auth/mfa/disable"
+      "/api/auth/mfa/disable",
+      "/api/auth/step-up"
     ];
     const WEBHOOK_PREFIXES = ["/webhook/", "/webhook-test/", "/api/webhooks/"];
     const PROBE_URLS = new Set(["/health", "/ready", "/metrics"]);
@@ -6562,6 +6905,7 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/audit-export/destinations", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const body = request.body as Partial<{
       name: string;
       kind: "http" | "file";
@@ -6615,6 +6959,7 @@ export async function createApp(
   app.put<{ Params: { id: string }; Body: unknown }>("/api/audit-export/destinations/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const existing = await store.getAuditExportDestination(request.params.id);
     if (!existing) {
       reply.code(404);
@@ -6647,6 +6992,7 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/audit-export/destinations/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const existing = await store.getAuditExportDestination(request.params.id);
     if (!existing) {
       reply.code(404);
@@ -7299,6 +7645,7 @@ export async function createApp(
     canUseSecret: canUseJudgeSecret,
     audit: async (request, user, event) => await audit(request, user, event),
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
+    streamSessionWatch: (request, onEnded) => streamSessionWatch(request, onEnded),
     strictIsolation: config.PROJECT_ISOLATION === "strict",
     goldenSetChangeDenial: async (user, datasetId, change, target) => await releaseService.goldenSetChangeDenial(user, datasetId, change, target),
     releaseGateAdmission: async (run) => await releaseService.jobGateAdmission(run),
@@ -7396,8 +7743,29 @@ export async function createApp(
       if (!actor) {
         return;
       }
+      if (!await requireStepUp(request, reply, "user.create")) return;
     } else if (existingUsers > 0 && config.AUTH_ALLOW_PUBLIC_REGISTER) {
-      actor = await authService.getSessionUser(getSessionIdFromRequest(request));
+      // Public registration is for people: a request carrying an L2M API key (well-formed, valid or not) is refused
+      // rather than treated as signed out or as the key's owner. Any other Bearer value (an auth proxy's own token) is
+      // not an L2M credential and is ignored, as on other routes. Admins create users with a session or a key while
+      // public registration is off.
+      if (hasApiKeyBearer(request.headers.authorization)) {
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.register",
+          action: "register",
+          outcome: "denied",
+          metadata: {
+            email: parsed.data.email,
+            role: parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer"),
+            reason: "api_key"
+          }
+        });
+        reply.code(403);
+        return { error: "API keys cannot be used for public registration" };
+      }
+      // 13.2 — a session restricted by MFA_REQUIRED_ROLES registers as anyone else would (as a viewer).
+      actor = await unrestrictedSessionUser(request);
     }
 
     const requestedRole: UserRole = parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer");
@@ -7405,11 +7773,25 @@ export async function createApp(
     if (existingUsers === 0) {
       role = parsed.data.role ?? "admin";
     } else if (!actor) {
+      // A signed-out caller always gets the lowest role, whatever it asked for.
       role = "viewer";
-    } else if (role === "admin" && actor.role !== "admin") {
+    } else if (rolePriority[role] > rolePriority[actor.role]) {
+      // A signed-in caller cannot create a user with a role above its own.
+      await audit(request, actor, {
+        category: "auth",
+        eventType: "user.register",
+        action: "register",
+        outcome: "denied",
+        metadata: { email: parsed.data.email, role, reason: "role_above_actor", actorEmail: actor.email, actorRole: actor.role }
+      });
       reply.code(403);
-      return { error: "Only admins can create admin users" };
+      return {
+        error: role === "admin" ? "Only admins can create admin users" : `Your role (${actor.role}) cannot create a user with the ${role} role`
+      };
     }
+    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action. It
+    // runs after the role check, so a role above the caller's own is refused and audited first.
+    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
 
     try {
       const user = await authService.register({
@@ -7459,14 +7841,14 @@ export async function createApp(
 
     try {
       const user = await authService.verifyCredentials(parsed.data.email, parsed.data.password);
-      // MFA gate: if the user has MFA enabled (or MFA_ENFORCE is on for admin), require a challenge step.
-      // 13.2 — a session is issued only once no MFA step is pending, so a password alone never creates one.
+      // MFA gate: if the user has MFA enabled (or their role requires it, MFA_REQUIRED_ROLES / MFA_ENFORCE), require a
+      // challenge step. 13.2 — a session is issued only once no MFA step is pending, so a password alone never creates one.
       const mfaStatus = await mfaService.status(user.id);
-      const mustProvideMfa = mfaStatus.enabled || (config.MFA_ENFORCE && user.role === "admin");
+      const mustProvideMfa = mfaStatus.enabled || mfaRequiredFor(mfaPolicy, user.role);
       if (mustProvideMfa) {
         if (!mfaStatus.enabled) {
-          // MFA enforced but not enrolled — still issue the session so user can enrol immediately,
-          // but flag it so the UI can redirect to the MFA enrolment flow.
+          // MFA required but not enrolled: the session can only set up MFA until the code is activated (requireRole
+          // enforces it); the flag sends the studio to the enrolment screen.
           const result = await issuePasswordSession(request, reply, user);
           await audit(request, result.user, {
             category: "auth",
@@ -7543,7 +7925,11 @@ export async function createApp(
       return { error: "MFA challenge expired or invalid" };
     }
     const userId = challenge.userId;
+    // 13.2 — too many wrong codes for this user lately: no more guesses until the lock ends.
+    const lockedUntil = await mfaLockedUntil(userId);
+    if (lockedUntil) return mfaLockedAnswer(reply, lockedUntil);
     if (!await mfaService.verify(userId, code)) {
+      await recordMfaFailure(request, null, userId, "sign_in");
       if (challenge.sso) {
         await audit(request, null, {
           category: "auth",
@@ -7574,6 +7960,19 @@ export async function createApp(
         return { error: "Sign-in could not be completed. Try again." };
       }
     }
+    if (challenge.ldap) {
+      // The LDAP sign-in passed its TOTP step: only now are the account and its group mappings updated.
+      try {
+        const { user } = await provisionSsoUser(challenge.ldap);
+        if (user.id !== userId) throw new Error("The LDAP account resolved to another user than the one that passed the code step");
+        const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: true });
+        return { user, expiresAt };
+      } catch (error) {
+        request.log.warn({ reason: error instanceof Error ? error.message : "unknown" }, "LDAP sign-in failed after the MFA step");
+        reply.code(401);
+        return { error: "Sign-in could not be completed. Try again." };
+      }
+    }
     const storeUser = await store.getUserById(userId);
     if (!storeUser) {
       reply.code(401);
@@ -7599,6 +7998,9 @@ export async function createApp(
     const sessionUser = sessionId ? await authService.getSessionUser(sessionId) : null;
     if (sessionId) {
       await authService.logout(sessionId);
+      // 13.2 — a break-glass session's end is audited and alerted (once; the cleanup sweep skips it afterwards).
+      const ended = await getRequestSession(request, sessionId).catch(() => null);
+      if (ended?.breakGlass) await breakGlassService.reportEnded(ended, "logout").catch(() => false);
     }
     clearSessionCookie(reply);
     if (sessionUser) {
@@ -7619,8 +8021,47 @@ export async function createApp(
       return;
     }
     const mfa = await mfaService.status(user.id);
-    const memberships = await rbacService.listUserProjects(user.id);
-    return { user, mfa, memberships };
+    // 13.2 — a key limited to projects sees only those memberships.
+    const memberships = (await rbacService.listUserProjects(user.id)).filter((m) => !user.projectScope || user.projectScope.includes(m.projectId));
+    // 13.2 — the session's lifetime and idle deadline, so the studio can warn before an idle sign-out.
+    const context = sessionService.getRequestAuth(request);
+    const session =
+      context?.credential === "session"
+        ? {
+            handle: sessionHandle(context.session.id),
+            createdAt: context.session.createdAt,
+            expiresAt: context.session.expiresAt,
+            idleTimeoutMinutes: isPolicyExempt(context.session) ? null : idleMinutesFor(sessionService.policy, user.role),
+            idleExpiresAt: idleExpiresAt(
+              sessionService.policy,
+              { createdAt: context.session.createdAt, lastSeenAt: sessionService.recordedActivityAt(context.session) },
+              user.role,
+              { exempt: isPolicyExempt(context.session) }
+            ),
+            breakGlass: context.session.breakGlass
+          }
+        : null;
+    // 13.2 — a session restricted by MFA_REQUIRED_ROLES says which step it needs, so the studio can open it.
+    const gate = context?.credential === "session" ? sessionMfaGate(sessionOwesMfa(mfaPolicy, user.role, context.session), mfa.enabled) : "none";
+    return {
+      user,
+      mfa,
+      memberships,
+      session,
+      ...(gate === "enrollment_required" ? { mfaEnrollmentRequired: true } : {}),
+      ...(gate === "verification_required" ? { mfaVerificationRequired: true } : {})
+    };
+  });
+
+  // 13.2 — signed-in sessions (own, and an admin's view of another user's).
+  registerSessionRoutes({
+    app,
+    store,
+    sessions: sessionService,
+    requireRole: async (request, reply, roles) => await requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event),
+    clearSessionCookie,
+    requireStepUp: async (request, reply, action, targetUserId) => await requireStepUp(request, reply, action, { targetUserId })
   });
 
   // ---------------------------------------------------------------------------
@@ -7630,16 +8071,64 @@ export async function createApp(
   app.get("/api/auth/mfa/status", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    return await mfaService.status(user.id);
+    // 13.2 — whether the user's role requires MFA, and the step-up window (0 = off), for Settings > Security.
+    return {
+      ...(await mfaService.status(user.id)),
+      requiredForRole: mfaRequiredFor(mfaPolicy, user.role),
+      stepUpMaxAgeMinutes: mfaPolicy.stepUpMaxAgeMinutes
+    };
   });
 
-  app.post("/api/auth/mfa/enroll", async (request, reply) => {
+  // 13.2 — setting up an authenticator binds the account's second factor, so a stolen session cookie must not be
+  // enough: it needs a sign-in within MFA_ENROLL_FRESH_MINUTES, or the account password again. An SSO account (no
+  // local password) signs in again through its identity provider instead.
+  const MFA_ENROLL_FRESH_MINUTES = 10;
+
+  app.post<{ Body: unknown }>("/api/auth/mfa/enroll", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    const context = sessionService.getRequestAuth(request);
+    if (context?.credential !== "session") {
+      reply.code(400);
+      return { error: "Set up MFA from a signed-in browser session, not with an API key" };
+    }
     const existing = await mfaService.status(user.id);
     if (existing.enabled) {
       reply.code(409);
       return { error: "MFA is already enabled for this account. Disable it first to re-enrol." };
+    }
+    const signedInAt = Date.parse(context.session.createdAt);
+    const fresh = isPolicyExempt(context.session) || (Number.isFinite(signedInAt) && Date.now() - signedInAt <= MFA_ENROLL_FRESH_MINUTES * 60_000);
+    if (!fresh) {
+      const password = typeof asRecord(request.body).password === "string" ? String(asRecord(request.body).password) : "";
+      const passwordOk = password
+        ? await authService.verifyCredentials(user.email, password).then(
+            (checked) => checked.id === user.id,
+            () => false
+          )
+        : false;
+      if (!passwordOk) {
+        const sso = context.session.authMethod === "oidc" || context.session.authMethod === "saml";
+        await audit(request, user, {
+          category: "mfa",
+          eventType: "mfa.enroll",
+          action: "enroll",
+          outcome: "failure",
+          resourceType: "user",
+          resourceId: user.id,
+          metadata: { reason: password ? "password_invalid" : "reauth_required" }
+        });
+        reply.code(403);
+        return {
+          code: "mfa_reauth_required",
+          sso,
+          error: sso
+            ? "To set up MFA, sign out and sign in again through your identity provider, then set it up within 10 minutes."
+            : password
+              ? "That password is not correct."
+              : "To set up MFA, enter your password again (or sign in again and set it up within 10 minutes)."
+        };
+      }
     }
     const enrollment = await mfaService.enroll(user.id, user.email);
     await audit(request, user, {
@@ -7678,6 +8167,8 @@ export async function createApp(
       reply.code(401);
       return { error: "Invalid activation code" };
     }
+    // 13.2 — activating with a valid code is an MFA check: it lifts an enrolment-only restriction on this session.
+    await markRequestSessionMfaVerified(request, user);
     await audit(request, user, {
       category: "mfa",
       eventType: "mfa.activate",
@@ -7691,35 +8182,106 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/auth/mfa/disable", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    const context = sessionService.getRequestAuth(request);
+    const breakGlass = context?.credential === "session" && isPolicyExempt(context.session);
+    // 13.2 — a role that requires MFA cannot turn it off (a lost device goes through an admin's MFA reset).
+    if (mfaRequiredFor(mfaPolicy, user.role) && !breakGlass) {
+      reply.code(409);
+      return {
+        error: "Your role requires MFA, so it cannot be turned off. If you lost your authenticator, ask an admin to reset your MFA.",
+        code: "mfa_required_for_role"
+      };
+    }
+    if (!await requireStepUp(request, reply, "mfa.disable")) return;
     const body = asRecord(request.body);
     const code = typeof body.code === "string" ? body.code.trim() : "";
     const status = await mfaService.status(user.id);
     if (status.enabled) {
+      const lockedUntil = await mfaLockedUntil(user.id);
+      if (lockedUntil) return mfaLockedAnswer(reply, lockedUntil);
       if (!code || !await mfaService.verify(user.id, code)) {
+        if (code) await recordMfaFailure(request, user, user.id, "disable");
         reply.code(401);
         return { error: "A valid MFA code is required to disable MFA" };
       }
     }
     await mfaService.disable(user.id);
+    // 13.2 — the current session loses its MFA check at once, and the user's other sessions end.
+    const currentSessionId = context?.credential === "session" ? context.session.id : undefined;
+    if (currentSessionId) await store.clearSessionMfaVerified(currentSessionId);
+    const sessionsEnded = await store.revokeUserSessions(user.id, { reason: "policy", ...(currentSessionId ? { exceptId: currentSessionId } : {}) });
     await audit(request, user, {
       category: "mfa",
       eventType: "mfa.disable",
       action: "disable",
       resourceType: "user",
+      resourceId: user.id,
+      metadata: { sessionsEnded }
+    });
+    return { ok: true, sessionsEnded };
+  });
+
+  /** 13.2 — records an MFA check on the request's session (no-op for an API key). */
+  const markRequestSessionMfaVerified = async (request: object, user: SafeUser): Promise<string | null> => {
+    const context = sessionService.getRequestAuth(request);
+    if (context?.credential !== "session") return null;
+    const at = new Date().toISOString();
+    return (await store.markSessionMfaVerified(context.session.id, { userId: user.id, at })) ? at : null;
+  };
+
+  // 13.2 — step-up: a TOTP (or backup) code refreshes the session's MFA check. Also the way a session restricted to
+  // verification (MFA_REQUIRED_ROLES, TOTP already enrolled) is lifted.
+  app.post<{ Body: unknown }>("/api/auth/step-up", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    if (sessionService.getRequestAuth(request)?.credential !== "session") {
+      reply.code(400);
+      return { error: "Step-up applies to a signed-in browser session, not an API key" };
+    }
+    const body = asRecord(request.body);
+    const code = typeof body.code === "string" ? body.code.trim() : "";
+    if (!code) {
+      reply.code(400);
+      return { error: "code is required" };
+    }
+    if (!(await mfaService.status(user.id)).enabled) {
+      reply.code(409);
+      return { error: "Set up an authenticator app in Settings > Security first", code: "mfa_not_enrolled" };
+    }
+    const lockedUntil = await mfaLockedUntil(user.id);
+    if (lockedUntil) return mfaLockedAnswer(reply, lockedUntil);
+    if (!await mfaService.verify(user.id, code)) {
+      if (await recordMfaFailure(request, user, user.id, "step_up")) {
+        // The guesses that reached the limit came through this session: end it, as a stolen cookie would.
+        const context = sessionService.getRequestAuth(request);
+        if (context?.credential === "session") await sessionService.endSession(context.session.id, "policy");
+        clearSessionCookie(reply);
+        return mfaLockedAnswer(reply, (await mfaLockedUntil(user.id)) ?? new Date(Date.now() + MFA_LOCK_MINUTES * 60_000).toISOString());
+      }
+      // 403, not 401: the session is still signed in.
+      reply.code(403);
+      return { error: "Invalid MFA code", code: "mfa_code_invalid" };
+    }
+    const verifiedAt = await markRequestSessionMfaVerified(request, user);
+    if (!verifiedAt) {
+      deny(reply, 401, "Session expired or invalid");
+      return;
+    }
+    await audit(request, user, {
+      category: "mfa",
+      eventType: "mfa.step_up",
+      action: "verify",
+      resourceType: "user",
       resourceId: user.id
     });
-    return { ok: true };
+    return { ok: true, mfaVerifiedAt: verifiedAt, stepUpMaxAgeMinutes: mfaPolicy.stepUpMaxAgeMinutes };
   });
 
   // ---------------------------------------------------------------------------
   // Phase 5.1 — API keys
   // ---------------------------------------------------------------------------
 
-  const apiKeyCreateSchema = z.object({
-    name: z.string().min(1).max(120),
-    scopes: z.array(z.string().min(1).max(64)).optional(),
-    expiresInDays: z.number().int().nonnegative().optional()
-  });
+  const apiKeyCreateSchema = apiKeyCreateBodySchema;
 
   app.get("/api/auth/api-keys", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
@@ -7733,16 +8295,45 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/auth/api-keys", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    const owner = await store.getUserById(user.id);
+    // 13.2 — a service account's keys come only from the admin route (POST /api/service-accounts/:id/keys), so an
+    // admin decides each one and its expiry; its own keys cannot mint more.
+    if (owner?.kind === "service" || user.serviceAccount) {
+      reply.code(403);
+      return { error: "A service account's API keys are created by an admin under Settings > Service Accounts, not with its own key" };
+    }
+    // 13.2 — for an owner whose role requires MFA (the owner's own role, not a calling key's ceiling), a new key always
+    // needs a recent MFA check (the step-up window, or LISTED_ROLE_KEY_MFA_MINUTES when step-up is off), since the key
+    // then works without one.
+    const ownerRole = safeUserRole(owner?.role ?? user.role);
+    const keyStepUp = mfaRequiredFor(mfaPolicy, ownerRole) ? mfaPolicy.stepUpMaxAgeMinutes || LISTED_ROLE_KEY_MFA_MINUTES : undefined;
+    if (!await requireStepUp(request, reply, "api_key.create", keyStepUp === undefined ? {} : { maxAgeMinutes: keyStepUp })) return;
     const parsed = apiKeyCreateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid API key payload", details: parsed.error.issues };
     }
+    // 13.2 — the ceiling may not exceed the owner's role, and a key made with a scoped key reaches no further than it.
+    const auth = sessionService.getRequestAuth(request);
+    // 13.2 — a key made with another key ends no later than the calling key.
+    const callerKey =
+      auth?.credential === "api_key" ? (await apiKeyService.list(user.id)).find((entry) => entry.id === auth.apiKeyId) ?? null : null;
+    const scope = await resolveNewKeyScope(parsed.data, {
+      ownerRole,
+      callerRole: user.role,
+      callerScope: auth?.credential === "api_key" ? auth.keyScope : null,
+      projectExists: async (projectId) => projectId === DEFAULT_PROJECT_ID || Boolean(await store.getProject(projectId))
+    });
+    if (!scope.ok) {
+      reply.code(scope.status);
+      return { error: scope.error };
+    }
     const { plaintext, record } = await apiKeyService.create({
       userId: user.id,
       name: parsed.data.name,
-      scopes: parsed.data.scopes,
-      expiresInDays: parsed.data.expiresInDays ?? null
+      scopes: scope.scopes,
+      expiresInDays: parsed.data.expiresInDays ?? null,
+      notAfter: callerKey?.expiresAt ?? null
     });
     await audit(request, user, {
       category: "api_key",
@@ -7750,7 +8341,13 @@ export async function createApp(
       action: "create",
       resourceType: "api_key",
       resourceId: record.id,
-      metadata: { name: record.name, scopes: record.scopes, keyPrefix: record.keyPrefix }
+      metadata: {
+        name: record.name,
+        scopes: record.scopes,
+        keyPrefix: record.keyPrefix,
+        ownerKind: owner?.kind ?? "human",
+        ...(callerKey ? { createdWithApiKeyId: callerKey.id } : {})
+      }
     });
     return {
       key: plaintext,
@@ -7761,6 +8358,12 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/auth/api-keys/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    // 13.2 — a scoped key may revoke itself, and no other key (its owner's or, for an admin, anyone's).
+    const auth = sessionService.getRequestAuth(request);
+    if (auth?.credential === "api_key" && isStructuredScope(auth.keyScope) && auth.apiKeyId !== request.params.id) {
+      reply.code(403);
+      return { error: "A scoped API key can revoke only itself; sign in, or use an unscoped key" };
+    }
     const ok = await apiKeyService.revoke(request.params.id, user.role === "admin" ? undefined : user.id);
     if (!ok) {
       reply.code(404);
@@ -7774,6 +8377,63 @@ export async function createApp(
       resourceId: request.params.id
     });
     return { ok: true };
+  });
+
+  /**
+   * 13.2 — rotates one of the caller's own keys: a new key (shown once) with the same name, scope and limits, and the
+   * old key keeps working for the grace window (graceHours, 24 by default, 0 ends it now). Only the owner rotates a
+   * personal key (an admin would otherwise receive someone else's credential); a scoped key may rotate only itself; a
+   * key made this way ends no later than the calling key, as on create.
+   */
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/auth/api-keys/:id/rotate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const owner = await store.getUserById(user.id);
+    if (owner?.kind === "service" || user.serviceAccount) {
+      reply.code(403);
+      return { error: "A service account's API keys are rotated by an admin under Settings > Service Accounts, not with its own key" };
+    }
+    const auth = sessionService.getRequestAuth(request);
+    if (auth?.credential === "api_key" && isStructuredScope(auth.keyScope) && auth.apiKeyId !== request.params.id) {
+      reply.code(403);
+      return { error: "A scoped API key can rotate only itself; sign in, or use an unscoped key" };
+    }
+    // As on create: for an owner whose role requires MFA, a new key always needs a recent MFA check.
+    const ownerRole = safeUserRole(owner?.role ?? user.role);
+    const keyStepUp = mfaRequiredFor(mfaPolicy, ownerRole) ? mfaPolicy.stepUpMaxAgeMinutes || LISTED_ROLE_KEY_MFA_MINUTES : undefined;
+    if (!await requireStepUp(request, reply, "api_key.rotate", keyStepUp === undefined ? {} : { maxAgeMinutes: keyStepUp })) return;
+    const parsed = credentialRotateBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid rotation payload", details: parsed.error.issues };
+    }
+    const callerKey = auth?.credential === "api_key" ? await apiKeyService.get(auth.apiKeyId, user.id) : null;
+    const graceHours = parsed.data.graceHours ?? KEY_ROTATION_GRACE_HOURS.default;
+    const rotated = await apiKeyService.rotate({ id: request.params.id, userId: user.id, graceHours, notAfter: callerKey?.expiresAt ?? null });
+    if (!rotated.ok) {
+      const refusal = apiKeyRotationRefusal(rotated.reason);
+      reply.code(refusal.status);
+      return refusal.body;
+    }
+    await audit(request, user, {
+      category: "api_key",
+      eventType: "api_key.rotate",
+      action: "update",
+      resourceType: "api_key",
+      resourceId: rotated.previous.id,
+      metadata: {
+        name: rotated.record.name,
+        newKeyId: rotated.record.id,
+        keyPrefix: rotated.record.keyPrefix,
+        previousKeyPrefix: rotated.previous.keyPrefix,
+        graceHours,
+        previousExpiresAt: rotated.previous.expiresAt,
+        expiresAt: rotated.record.expiresAt,
+        ownerKind: "human",
+        ...(callerKey ? { rotatedWithApiKeyId: callerKey.id } : {})
+      }
+    });
+    return { key: rotated.plaintext, record: rotated.record, previous: rotated.previous };
   });
 
   // ---------------------------------------------------------------------------
@@ -7878,7 +8538,7 @@ export async function createApp(
               ...(linkedUser && identity?.legacySubject ? { legacySubject: identity.legacySubject } : {})
             }
           },
-          evidence: ssoMfaSettings.mode === "off" ? null : evaluateSamlMfa(profile.authnContexts, ssoMfaSettings),
+          evidence: ssoMfaChecked ? evaluateSamlMfa(profile.authnContexts, ssoMfaSettings) : null,
           refusalDetails: { identityKey, authnContext: profile.authnContexts.join(" ") }
         });
         if (outcome.kind === "challenge") {
@@ -7951,14 +8611,36 @@ export async function createApp(
     }
     try {
       const profile = await ldapService.authenticate(email, password);
-      const { user, created } = await provisionSsoUser({
+      const provision: SsoProvisionInput = {
         provider: "ldap",
         subject: profile.dn || profile.email,
         email: profile.email,
         groups: profile.groups
-      });
+      };
+      // 13.2 — the password login's MFA rules apply: a user with TOTP gets the code step (completed at
+      // /api/auth/login/mfa), and nothing about the account changes until it passes; a role that requires MFA
+      // without TOTP gets a session that can only set it up.
+      const existing = await store.getUserByEmail(profile.email.trim().toLowerCase());
+      if (existing && (await mfaService.status(existing.id)).enabled) {
+        const challengeId = await issueMfaChallenge(existing.id, undefined, provision);
+        await audit(request, { id: existing.id, email: existing.email, role: safeUserRole(existing.role) }, {
+          category: "auth",
+          eventType: "user.login.mfa_challenge",
+          action: "login",
+          resourceType: "user",
+          resourceId: existing.id,
+          metadata: { method: "ldap", mfaChallengeIssued: true }
+        });
+        return { mfaChallenge: challengeId, expiresInSeconds: Math.floor(MFA_CHALLENGE_TTL_MS / 1000) };
+      }
+      const { user, created } = await provisionSsoUser(provision);
       const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: false });
-      return { user, expiresAt, provisioned: created };
+      return {
+        user,
+        expiresAt,
+        provisioned: created,
+        ...(mfaRequiredFor(mfaPolicy, user.role) ? { mfaEnrollmentRequired: true } : {})
+      };
     } catch (error) {
       const err = error as Error & { code?: string };
       reply.code(err.code === "CONFIGURATION_ERROR" ? 503 : 401);
@@ -8064,7 +8746,7 @@ export async function createApp(
           userId: linkedUser?.id,
           oidc: { issuer: profile.issuer, sub: profile.subject }
         },
-        evidence: ssoMfaSettings.mode === "off" ? null : evaluateOidcMfa(profile, ssoMfaSettings),
+        evidence: ssoMfaChecked ? evaluateOidcMfa(profile, ssoMfaSettings) : null,
         refusalDetails: {
           identityKey: profile.identityKey,
           amr: profile.amr.join(" "),
@@ -8117,6 +8799,7 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/auth/sso/mappings", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "sso_mapping.change")) return;
     const parsed = ssoMappingSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -8135,12 +8818,25 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/auth/sso/mappings/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "sso_mapping.change")) return;
     const ok = await rbacService.deleteSsoGroupMapping(request.params.id);
     if (!ok) {
       reply.code(404);
       return { error: "SSO mapping not found" };
     }
     return { ok: true };
+  });
+
+  // ---------------------------------------------------------------------------
+  // 13.2 — break-glass sign-in (links minted on the host with admin:break-glass; break-glass-service.ts)
+  // ---------------------------------------------------------------------------
+
+  registerBreakGlassRoutes(app, {
+    config,
+    breakGlass: breakGlassService,
+    sessions: sessionService,
+    requestActor: (request) => extractIpAndUa(request),
+    audit: recordBreakGlassAudit
   });
 
   // ---------------------------------------------------------------------------
@@ -8403,6 +9099,7 @@ export async function createApp(
   app.post("/api/log-streams", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const parsed = logStreamCreateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -8431,6 +9128,7 @@ export async function createApp(
   app.put<{ Params: { id: string }; Body: unknown }>("/api/log-streams/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const parsed = logStreamUpdateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -8460,6 +9158,7 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/log-streams/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "audit_export.change")) return;
     const existing = await logStreamingService.getDestination(request.params.id);
     if (!existing) {
       reply.code(404);
@@ -8893,6 +9592,7 @@ export async function createApp(
       reply.code(403);
       return { error: "Insufficient permissions to manage members" };
     }
+    if (!await requireStepUp(request, reply, "project_member.change")) return;
     const parsed = projectMemberSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -8952,6 +9652,7 @@ export async function createApp(
         reply.code(403);
         return { error: "Insufficient permissions to remove members" };
       }
+      if (!await requireStepUp(request, reply, "project_member.change")) return;
       const ok = await rbacService.removeMember(request.params.userId, project.id);
       if (!ok) {
         reply.code(404);
@@ -9000,6 +9701,7 @@ export async function createApp(
   app.post<{ Body: unknown }>("/api/custom-roles", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "custom_role.change")) return;
     const parsed = customRoleSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -9027,6 +9729,7 @@ export async function createApp(
   app.put<{ Params: { id: string }; Body: unknown }>("/api/custom-roles/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "custom_role.change")) return;
     const parsed = customRoleSchema.partial().safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -9048,6 +9751,7 @@ export async function createApp(
   app.delete<{ Params: { id: string } }>("/api/custom-roles/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "custom_role.change")) return;
     const ok = await rbacService.deleteCustomRole(request.params.id);
     if (!ok) {
       reply.code(404);
@@ -9202,6 +9906,7 @@ export async function createApp(
   app.post<{ Params: { id: string }; Body: unknown }>("/api/secrets/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "secret.update")) return;
     const secret = await shareableSecret(request.params.id);
     if (!secret) {
       reply.code(404);
@@ -9239,6 +9944,7 @@ export async function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
+      if (!await requireStepUp(request, reply, "secret.update")) return;
       const secret = await shareableSecret(request.params.id);
       if (!secret) {
         reply.code(404);
@@ -10184,6 +10890,7 @@ export async function createApp(
     store,
     config,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    streamSessionWatch: (request, onEnded) => streamSessionWatch(request, onEnded),
     runAccess,
     denyRunAccess,
     executeChannelFor,
@@ -11328,6 +12035,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     redact: (value) => String(secretService.redact(value)),
     resolveRegisteredMcpServer,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
     auditUser: async (request, user, event) => await audit(request, user, event),
     auditRaw: async (event) => {
       await auditService.record(event);
@@ -11539,7 +12247,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (typeof reply.raw.flushHeaders === "function") {
       reply.raw.flushHeaders();
     }
-    const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => streamClosed);
+    const stopHeartbeat = startSseHeartbeat(
+      reply.raw,
+      config.SSE_HEARTBEAT_INTERVAL_MS,
+      () => streamClosed,
+      streamSessionWatch(request, () => {
+        // The run goes on without this client, as when the client goes away.
+        streamClosed = true;
+        markClientGone();
+      })
+    );
 
     sendSseEvent("execution_started", {
       executionId,
@@ -11999,6 +12716,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!user) {
       return;
     }
+    if (!await requireStepUp(request, reply, "secret.create")) return;
 
     const parsed = secretCreateSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -12094,6 +12812,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.put<{ Params: { id: string }; Body: unknown }>("/api/secrets/:id/sensitive-output", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "secret.update")) return;
     const parsed = z.object({ sensitiveOutput: z.boolean() }).strict().safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
@@ -12130,6 +12849,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/secrets/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "secret.delete")) return;
     const row = await store.getSecret(request.params.id);
     if (!row || isInternalSecretProvider(row.provider)) {
       // Phase 10.5 — MCP OAuth secrets are managed from the MCP servers page only.
@@ -13459,6 +14179,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     store,
     mcpRegistry,
     catalog: mcpCatalogService,
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
     createSecret: async (input) => await secretService.createSecret(input),
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
     redact: (value) => String(secretService.redact(value)),
@@ -13517,6 +14238,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     environmentSecretValues: () => environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
+  registerRetentionRoutes({ app, retention, requireRole: (request, reply, roles) => requireRole(request, reply, roles) });
+  registerProjectRetentionRoutes({
+    app,
+    store,
+    retention,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    projectAccess: (user, projectId) => runAccess.project(user, projectId, "workflow:read"),
+    canManageProject: (user, projectId) => rbacService.can(user, projectId, "project:manage"),
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
+    audit: (request, user, event) => audit(request, user, event)
+  });
   registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, audit: async (request, user, event) => await audit(request, user, event) });
 
   // Phase 15.1 — golden runs and replay.
@@ -13561,6 +14293,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
         channel: "draft",
         ...replayRunInputFor(replay.recording.sourceTriggerType, storedInput),
+        // Phase 12 coverage — whether the recorded input was a caller's own words is decided by the recording's trigger
+        // (never an imported file's claim of one).
+        ...(replay.recording.sourceTriggerType && replay.recording.capabilities.origin !== "imported"
+          ? { inputTriggerType: replay.recording.sourceTriggerType }
+          : {}),
         // Phase 16 (Q7) — the recording's input origin (replays, gate cases and simulations alike), not the starter's.
         // A golden run imported from a file always counts as outside content as well (its trigger is the file's claim).
         inputLabels: recordedInputLabels({
@@ -13663,19 +14400,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   });
   if (captureAvailable) {
     replayCapture = captureService;
-    // Retention for captured runs nobody promoted, on the execution-history timer's interval.
-    const pruneCaptures = async (reason: "startup" | "interval") => {
-      try {
-        const deleted = await captureService.pruneExpired();
-        if (deleted > 0) app.log.info({ deleted, reason, retentionDays: captureService.deployment.retentionDays }, "Pruned captured runs past retention");
-      } catch (error) {
-        app.log.warn({ reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Failed to prune captured runs");
-      }
-    };
-    await pruneCaptures("startup");
-    // promise-ok: the task catches and logs its own errors
-    const captureRetentionTimer = setInterval(async () => await pruneCaptures("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
-    (captureRetentionTimer as { unref?: () => void }).unref?.();
+    // 13.3 — captured runs nobody promoted are purged by the retention service (REPLAY_CAPTURE_RETENTION_DAYS).
+    retention.register(captureStep(() => captureService.deployment.retentionDays, async (before) => await store.pruneReplayCaptures(before)));
     // Tickets of runs that never wrote their final history are given back on this timer too (the sweep is cheap).
     const captureSweepTimer = setInterval(() => {
       sweepStaleCaptures();
@@ -13688,7 +14414,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }, CAPTURE_SWEEP_INTERVAL_MS);
     (captureSweepTimer as { unref?: () => void }).unref?.();
     app.addHook("onClose", async () => {
-      clearInterval(captureRetentionTimer);
       clearInterval(captureSweepTimer);
       replayCapture = null;
       await captureService.idle();
@@ -13806,22 +14531,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to finish interrupted guard simulations");
     }
   }
-  // Kept GUARD_SIMULATION_RETENTION_DAYS, pruned on the execution-history timer with their replay jobs.
-  const pruneGuardSimulations = async (reason: "startup" | "interval") => {
-    const cutoff = new Date(Date.now() - GUARD_SIMULATION_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const deleted = await guardSimulationService.prune(cutoff);
-      if (deleted > 0) app.log.info({ deleted, cutoff, reason }, "Pruned guard simulations");
-    } catch (err) {
-      app.log.warn({ cutoff, reason, err: err instanceof Error ? err.message : String(err) }, "Failed to prune guard simulations");
-    }
-  };
-  await pruneGuardSimulations("startup");
-  // promise-ok: the task catches and logs its own errors
-  const simulationPruneTimer = setInterval(async () => await pruneGuardSimulations("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
-  (simulationPruneTimer as { unref?: () => void }).unref?.();
-  app.addHook("onClose", async () => {
-    clearInterval(simulationPruneTimer);
+  // Kept GUARD_SIMULATION_RETENTION_DAYS, purged by the retention service with their replay jobs.
+  retention.register(ruleSimulationStep(async (before) => await guardSimulationService.prune(before)));
+  // 13.3 — every step is registered: the start-up purges run once the leader is known.
+  // The leader election has started by now (an earlier onReady hook), so an HA leader purges at start-up too.
+  app.addHook("onReady", async () => {
+    await pruneAuditLogs("startup");
+    await retention.start();
   });
 
   registerMcpTestingRoutes({
@@ -13883,14 +14599,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       throw new Error(await releaseService.productionRefusal(payload.workflowId) ?? `Workflow not found: ${payload.workflowId}`);
     }
     // A job a user enqueued runs only if that user may still run the
-    // workflow: a revoked membership or a deleted account stops it.
-    // Retrying cannot fix that, so the job goes straight to the DLQ.
+    // workflow: a revoked membership or a deleted account stops it, and so
+    // does a revoked or expired key when an API key queued it (the job runs
+    // with that key's limits). Retrying cannot fix that, so the job goes
+    // straight to the DLQ.
     let enqueuedBy: SafeUser | null = null;
     if (payload.enqueuedByUserId) {
-      const found = await store.getUserById(payload.enqueuedByUserId);
-      enqueuedBy = found ? { id: found.id, email: found.email, role: found.role as UserRole } : null;
+      enqueuedBy = await backgroundRunUser(payload.enqueuedByUserId, payload.enqueuedByApiKeyId);
       if (!enqueuedBy || !(await runAccess.workflow(enqueuedBy, workflow.id, "workflow:execute")).ok) {
-        const reason = enqueuedBy ? "no_execute_permission" : "user_not_found";
+        const reason = enqueuedBy ? "no_execute_permission" : payload.enqueuedByApiKeyId ? "user_or_key_not_found" : "user_not_found";
         await auditService.record({
           category: "workflow",
           eventType: "queue.job_refused",
@@ -13923,6 +14640,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const hooks = queueJobHooks(context, progressHooks);
     const result = await runWorkflowExecution({
       ...(hooks ? { hooks } : {}),
+      spendAttempt: context,
       policyActor: enqueuedBy,
       elicitationsForWorkflow: true,
       workflow,
@@ -14157,6 +14875,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             // Who queued it comes from the session, never from the body.
             triggeredBy: user.email,
             enqueuedByUserId: user.id,
+            ...(user.apiKeyId ? { enqueuedByApiKeyId: user.apiKeyId } : {}),
             executionTimeoutMs: typeof body.executionTimeoutMs === "number" ? body.executionTimeoutMs : undefined,
             customData: (() => {
               const custom = body.customData && typeof body.customData === "object" && !Array.isArray(body.customData)
@@ -14300,10 +15019,30 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   // ── Phase 7.3: User management (admin only) ─────────────────────────
 
+  registerServiceAccountRoutes({
+    app,
+    store,
+    apiKeyService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event),
+    requestKeyScope: (request) => {
+      const auth = sessionService.getRequestAuth(request);
+      return auth?.credential === "api_key" ? auth.keyScope : null;
+    },
+    requestApiKeyId: (request) => {
+      const auth = sessionService.getRequestAuth(request);
+      return auth?.credential === "api_key" ? auth.apiKeyId : null;
+    },
+    disconnectMcpOAuth: async (userId) => await mcpOAuthService.disconnectUserEverywhere(userId),
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    keyMaxAgeDays: config.SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS ?? 0
+  });
+
   registerUserInviteRoutes({
     app,
     store,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
     audit: async (request, user, event) => await audit(request, user, event),
     webBaseUrl: config.APP_PUBLIC_URL || ssoPostLoginUrl(config.WEB_ORIGIN),
     sendEmail: async (message) => await notificationService.sendDirectEmail(message)
@@ -14319,17 +15058,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const invite = invites.get(u.id);
       return { id: u.id, email: u.email, role: u.role, createdAt: u.createdAt, ...(invite ? { pending: true, inviteExpiresAt: invite.expiresAt } : {}) };
     };
+    // 13.2 — people by default; `?kind=service` lists the service accounts.
+    const kind = asRecord(request.query).kind === "service" ? "service" : "human";
     if (pageRequest) {
-      const { items, total } = await store.listUsersPage({ limit: pageRequest.pageSize, offset: pageRequest.offset });
+      const { items, total } = await store.listUsersPage({ limit: pageRequest.pageSize, offset: pageRequest.offset, kind });
       return pageEnvelope(items.map(userView), total, pageRequest);
     }
-    const users = await store.listUsers();
+    const users = await store.listUsers({ kind });
     return { users: users.map(userView) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/users/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "user.role_change", { targetUserId: request.params.id })) return;
     const schema = z.object({ role: z.enum(["admin", "builder", "operator", "viewer"]) });
     const parsed = schema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -14341,10 +15083,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(404);
       return { error: "User not found" };
     }
-    const updated = await store.updateUserRole(request.params.id, parsed.data.role);
-    if (!updated) {
-      reply.code(500);
-      return { error: "Failed to update user" };
+    // 13.2 — never leave the workspace without an accepted admin (counted and written in one transaction).
+    const outcome = await store.updateUserRoleKeepingAdmin(request.params.id, parsed.data.role);
+    if (outcome === "not_found") {
+      reply.code(404);
+      return { error: "User not found" };
+    }
+    if (outcome === "last_admin") {
+      reply.code(409);
+      return { error: "This is the only admin. Make another user an admin first.", code: "last_admin" };
     }
     await audit(request, user, {
       category: "auth",
@@ -14360,6 +15107,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/users/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "user.delete", { targetUserId: request.params.id })) return;
     if (user.id === request.params.id) {
       reply.code(400);
       return { error: "Cannot delete your own account" };
@@ -14369,12 +15117,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(404);
       return { error: "User not found" };
     }
+    // 13.2 — never remove the last person who is an admin (a service account never counts). The store counts and
+    // deletes in one transaction; this early look only keeps a refused delete from dropping the MCP connections.
+    const lastAdminAnswer = (reply: FastifyReply) => {
+      reply.code(409);
+      return { error: "This is the only admin who can sign in. Make another person an admin first.", code: "last_admin" };
+    };
+    if (targetUser.role === "admin" && targetUser.kind === "human") {
+      const pending = new Set((await store.listOpenUserInvites()).map((invite) => invite.userId));
+      const otherAdmins = (await store.listUsers({ kind: "human" })).filter((u) => u.role === "admin" && u.id !== targetUser.id && !pending.has(u.id));
+      if (!pending.has(targetUser.id) && otherAdmins.length === 0) return lastAdminAnswer(reply);
+    }
     // Phase 10.7 — a deleted user's own MCP connections (and their tokens) go with them.
     await mcpOAuthService.disconnectUserEverywhere(request.params.id);
-    const deleted = await store.deleteUser(request.params.id);
-    if (!deleted) {
-      reply.code(500);
-      return { error: "Failed to delete user" };
+    const deleted = await store.deleteUserKeepingAdmin(request.params.id);
+    if (deleted === "last_admin") return lastAdminAnswer(reply);
+    if (deleted === "not_found") {
+      reply.code(404);
+      return { error: "User not found" };
     }
     await audit(request, user, {
       category: "auth",
@@ -14385,6 +15145,39 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       metadata: { email: targetUser.email }
     });
     return { ok: true, userId: request.params.id };
+  });
+
+  // 13.2 — an admin resets another user's MFA (a lost authenticator): the TOTP secret and backup codes are deleted and
+  // the user's sessions end, so the next sign-in sets MFA up again (enrolment-only if the role requires it). Not on
+  // yourself, except from a break-glass session.
+  app.post<{ Params: { id: string } }>("/api/users/:id/mfa/reset", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    if (!await requireStepUp(request, reply, "user.mfa_reset", { targetUserId: request.params.id })) return;
+    const context = sessionService.getRequestAuth(request);
+    if (user.id === request.params.id && !(context?.credential === "session" && isPolicyExempt(context.session))) {
+      reply.code(400);
+      return { error: "You cannot reset your own MFA. Ask another admin, or use a break-glass sign-in." };
+    }
+    const targetUser = await store.getUserById(request.params.id);
+    if (!targetUser) {
+      reply.code(404);
+      return { error: "User not found" };
+    }
+    const hadMfa = await mfaService.disable(targetUser.id);
+    const sessionsEnded = await store.revokeUserSessions(targetUser.id, {
+      reason: "admin",
+      ...(context?.credential === "session" && user.id === targetUser.id ? { exceptId: context.session.id } : {})
+    });
+    await audit(request, user, {
+      category: "mfa",
+      eventType: "mfa.reset",
+      action: "reset",
+      resourceType: "user",
+      resourceId: targetUser.id,
+      metadata: { email: targetUser.email, role: targetUser.role, hadMfa, sessionsEnded }
+    });
+    return { ok: true, userId: targetUser.id, hadMfa, sessionsEnded };
   });
 
   // ── Phase 7.4: Workflow Templates & Sharing ───────────────────────────
@@ -14639,6 +15432,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post("/api/notifications", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "notification_channel.change")) return;
     const body = request.body as Record<string, unknown> | null;
     if (!body) { reply.code(400); return { error: "Missing body" }; }
     const id = typeof body.id === "string" && body.id ? body.id : crypto.randomUUID();
@@ -14667,6 +15461,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/notifications/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (!await requireStepUp(request, reply, "notification_channel.change")) return;
     const deleted = await store.deleteNotificationConfig(request.params.id);
     if (!deleted) { reply.code(404); return { error: "Notification config not found" }; }
     await notificationService.reload();

@@ -41,6 +41,50 @@ describeStoreContract("store contract: users and auth", (ctx) => {
     expect(await store.getUserById("u1")).toMatchObject({ role: "viewer", passwordHash: "h2" });
   });
 
+  it("13.2 service accounts: created with kind service and an unusable hash, listed by kind, updated, never re-kinded by saveUser", async () => {
+    const store = ctx.store();
+    const person = await user(store, "u1");
+    expect(person).toMatchObject({ id: "u1" });
+    expect(await store.getUserById("u1")).toMatchObject({ kind: "human", description: null, createdBy: null });
+    await tick();
+    const created = await store.createServiceAccount({ id: "svc1", email: "Bot@Service.Invalid", role: "operator", description: "nightly", createdBy: "u1" });
+    expect(created).toMatchObject({ id: "svc1", email: "bot@service.invalid", role: "operator", kind: "service", description: "nightly", createdBy: "u1" });
+    expect(created).not.toHaveProperty("passwordHash");
+    expect(created?.createdAt).toMatch(ISO);
+    expect(await store.getUserById("svc1")).toMatchObject({ kind: "service", passwordHash: "!" });
+    expect(await store.getUserByEmail("BOT@service.invalid")).toMatchObject({ id: "svc1", kind: "service" });
+    // The email is taken (by anyone): null, nothing written.
+    expect(await store.createServiceAccount({ id: "svc2", email: "bot@service.invalid", role: "viewer", description: null, createdBy: null })).toBeNull();
+    expect(await store.createServiceAccount({ id: "svc3", email: "u1@example.com", role: "viewer", description: null, createdBy: null })).toBeNull();
+    expect(await store.getUserById("svc2")).toBeNull();
+
+    expect(await store.countUsers()).toBe(2);
+    expect((await store.listUsers()).map((u) => u.id)).toEqual(["svc1", "u1"]);
+    expect((await store.listUsers({ kind: "human" })).map((u) => u.id)).toEqual(["u1"]);
+    expect(await store.listUsers({ kind: "service" })).toEqual([expect.objectContaining({ id: "svc1", kind: "service", description: "nightly" })]);
+    expect(await store.listUsersPage({ limit: 10, offset: 0, kind: "service" })).toMatchObject({ total: 1, items: [{ id: "svc1" }] });
+    expect(await store.listUsersPage({ limit: 10, offset: 0, kind: "human" })).toMatchObject({ total: 1, items: [{ id: "u1" }] });
+    expect((await store.listUsersPage({ limit: 1, offset: 1 })).total).toBe(2);
+
+    expect(await store.updateServiceAccount("svc1", { role: "builder" })).toMatchObject({ role: "builder", description: "nightly" });
+    expect(await store.updateServiceAccount("svc1", { description: null })).toMatchObject({ role: "builder", description: null });
+    expect(await store.updateServiceAccount("svc1", { description: "again" })).toMatchObject({ description: "again" });
+    // People are not service accounts.
+    expect(await store.updateServiceAccount("u1", { role: "admin" })).toBeNull();
+    expect(await store.getUserById("u1")).toMatchObject({ role: "builder" });
+    expect(await store.updateServiceAccount("missing", { role: "admin" })).toBeNull();
+
+    // saveUser on an existing row keeps its kind, description and creator.
+    await store.saveUser({ id: "svc1", email: "bot@service.invalid", passwordHash: "!", role: "viewer" });
+    expect(await store.getUserById("svc1")).toMatchObject({ kind: "service", role: "viewer", description: "again", createdBy: "u1" });
+
+    // Deleting the creator leaves the account.
+    expect(await store.deleteUser("u1")).toBe(true);
+    expect(await store.getUserById("svc1")).toMatchObject({ kind: "service", createdBy: "u1" });
+    expect(await store.deleteUser("svc1")).toBe(true);
+    expect(await store.listUsers({ kind: "service" })).toEqual([]);
+  });
+
   it("deleteUser removes the user's sessions, API keys, MFA secret, SSO identities and project roles", async () => {
     const store = ctx.store();
     await user(store, "u1");
@@ -169,7 +213,9 @@ describeStoreContract("store contract: users and auth", (ctx) => {
       lastUsedAt: null,
       expiresAt,
       revokedAt: null,
-      createdAt: k1.createdAt
+      createdAt: k1.createdAt,
+      supersededBy: null,
+      rotatedAt: null
     });
     expect(k1.createdAt).toMatch(ISO);
     expect(k1).not.toHaveProperty("keyHash");
@@ -186,6 +232,83 @@ describeStoreContract("store contract: users and auth", (ctx) => {
     expect(await store.revokeApiKey("k2")).toBe(true);
     expect(await store.revokeApiKey("missing")).toBe(false);
     expect((await store.listApiKeys("u2"))[0].scopes).toEqual([]);
+  });
+
+  it("13.2 rotateApiKey: copies name and scopes, shortens the old key to the grace window, refuses a second rotation", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    await user(store, "u2");
+    const now = new Date();
+    const at = (ms: number) => new Date(now.getTime() + ms).toISOString();
+    await store.saveApiKey({ id: "k1", userId: "u1", name: "deploy", keyPrefix: "pfx1", keyHash: "hash1", scopes: ["role:operator", "project:p1"], expiresAt: at(30 * 86_400_000) });
+    const next = (id: string, prefix: string, expiresAt: string | null = null) => ({ id, keyPrefix: prefix, keyHash: `hash-${id}`, expiresAt });
+
+    // Another user's key reads as missing.
+    expect(await store.rotateApiKey({ id: "k1", userId: "u2", next: next("k2", "pfx2"), graceUntil: at(3_600_000), now: now.toISOString() })).toEqual({ status: "not_found" });
+    expect(await store.findApiKeyByPrefix("pfx2")).toBeNull();
+
+    const rotated = await store.rotateApiKey({ id: "k1", userId: "u1", next: next("k2", "pfx2", at(60_000_000)), graceUntil: at(3_600_000), now: now.toISOString() });
+    expect(rotated).toEqual({ status: "rotated", previousExpiresAt: at(3_600_000) });
+    const fresh = await store.findApiKeyByPrefix("pfx2");
+    expect(fresh).toMatchObject({ id: "k2", userId: "u1", name: "deploy", keyHash: "hash-k2", scopes: ["role:operator", "project:p1"], expiresAt: at(60_000_000), supersededBy: null, rotatedAt: null, revokedAt: null });
+    const old = (await store.listApiKeys("u1")).find((key) => key.id === "k1");
+    expect(old).toMatchObject({ expiresAt: at(3_600_000), supersededBy: "k2", rotatedAt: now.toISOString(), revokedAt: null });
+    // The old key is still found (verify checks its expiry); a second rotation of it is refused.
+    expect(await store.findApiKeyByPrefix("pfx1")).toMatchObject({ id: "k1", supersededBy: "k2" });
+    expect(await store.rotateApiKey({ id: "k1", userId: "u1", next: next("k3", "pfx3"), graceUntil: at(0), now: now.toISOString() })).toEqual({ status: "already_rotated", supersededBy: "k2" });
+    expect(await store.findApiKeyByPrefix("pfx3")).toBeNull();
+
+    // The grace window never lengthens a key that ends sooner.
+    await store.saveApiKey({ id: "k4", userId: "u1", name: "short", keyPrefix: "pfx4", keyHash: "hash4", expiresAt: at(600_000) });
+    expect(await store.rotateApiKey({ id: "k4", userId: "u1", next: next("k5", "pfx5"), graceUntil: at(3_600_000), now: now.toISOString() })).toEqual({ status: "rotated", previousExpiresAt: at(600_000) });
+    // Revoked or expired keys are inactive.
+    await store.saveApiKey({ id: "k6", userId: "u1", name: "gone", keyPrefix: "pfx6", keyHash: "hash6", expiresAt: at(-1000) });
+    expect(await store.rotateApiKey({ id: "k6", userId: "u1", next: next("k7", "pfx7"), graceUntil: at(0), now: now.toISOString() })).toEqual({ status: "inactive" });
+    await store.revokeApiKey("k5");
+    expect(await store.rotateApiKey({ id: "k5", userId: "u1", next: next("k8", "pfx8"), graceUntil: at(0), now: now.toISOString() })).toEqual({ status: "inactive" });
+    expect(await store.findApiKeyByPrefix("pfx7")).toBeNull();
+    expect(await store.findApiKeyByPrefix("pfx8")).toBeNull();
+  });
+
+  it("13.2 two rotations of one key at once: exactly one succeeds, one new key exists", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    for (let round = 0; round < 5; round += 1) {
+      await store.saveApiKey({ id: `r${round}`, userId: "u1", name: `race${round}`, keyPrefix: `rp${round}`, keyHash: "h" });
+      const now = new Date().toISOString();
+      const graceUntil = new Date(Date.now() + 3_600_000).toISOString();
+      const results = await Promise.all([
+        store.rotateApiKey({ id: `r${round}`, userId: "u1", next: { id: `r${round}a`, keyPrefix: `rp${round}a`, keyHash: "ha", expiresAt: null }, graceUntil, now }),
+        store.rotateApiKey({ id: `r${round}`, userId: "u1", next: { id: `r${round}b`, keyPrefix: `rp${round}b`, keyHash: "hb", expiresAt: null }, graceUntil, now })
+      ]);
+      expect(results.filter((result) => result.status === "rotated")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "already_rotated")).toHaveLength(1);
+      const keys = (await store.listApiKeys("u1")).filter((key) => key.name === `race${round}`);
+      expect(keys).toHaveLength(2);
+      const winner = results[0]!.status === "rotated" ? `r${round}a` : `r${round}b`;
+      expect(keys.find((key) => key.id === `r${round}`)?.supersededBy).toBe(winner);
+    }
+  });
+
+  it("13.2 expiry notices for API keys: claimed at most once per window; a rotation clears the claim", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    const now = Date.now();
+    const iso = (ms: number) => new Date(now + ms).toISOString();
+    const day = 86_400_000;
+    await store.saveApiKey({ id: "k1", userId: "u1", name: "n", keyPrefix: "pfx1", keyHash: "h", expiresAt: iso(3 * day) });
+    expect(await store.claimCredentialExpiryNotice("api_key", "k1", iso(0), iso(-day))).toBe(true);
+    expect(await store.claimCredentialExpiryNotice("api_key", "k1", iso(1000), iso(1000 - day))).toBe(false);
+    expect(await store.claimCredentialExpiryNotice("api_key", "k1", iso(day), iso(0))).toBe(true);
+    expect(await store.claimCredentialExpiryNotice("api_key", "missing", iso(0), iso(-day))).toBe(false);
+    await store.rotateApiKey({ id: "k1", userId: "u1", next: { id: "k2", keyPrefix: "pfx2", keyHash: "h2", expiresAt: null }, graceUntil: iso(day + 3_600_000), now: iso(day + 1000) });
+    expect(await store.claimCredentialExpiryNotice("api_key", "k1", iso(day + 2000), iso(2000))).toBe(true);
+    // Two claims at once: exactly one wins.
+    const results = await Promise.all([
+      store.claimCredentialExpiryNotice("api_key", "k2", iso(0), iso(-day)),
+      store.claimCredentialExpiryNotice("api_key", "k2", iso(0), iso(-day))
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
   });
 
   it("MFA secrets: upsert keeps creation time, backup codes compare-and-set, delete once", async () => {
@@ -210,6 +333,133 @@ describeStoreContract("store contract: users and auth", (ctx) => {
 
     expect(await store.deleteMfaSecret("u1")).toBe(true);
     expect(await store.deleteMfaSecret("u1")).toBe(false);
+  });
+
+  it("TOTP steps: each step is accepted once and never one at or before the last (v63)", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    expect(await store.markTotpStepUsed("u1", 100)).toBe(false);
+    await store.upsertMfaSecret({ userId: "u1", secretIv: "iv", secretAuthTag: "tag", secretCiphertext: "ct", backupCodes: [], enabled: true, activatedAt: null });
+    expect(await store.markTotpStepUsed("u1", 100)).toBe(true);
+    expect(await store.markTotpStepUsed("u1", 100)).toBe(false);
+    expect(await store.markTotpStepUsed("u1", 99)).toBe(false);
+    expect(await store.markTotpStepUsed("u1", 59_000_000)).toBe(true);
+    // Re-saving the secret (activation) keeps the step; a two-way race on one step has one winner.
+    await store.upsertMfaSecret({ userId: "u1", secretIv: "iv", secretAuthTag: "tag", secretCiphertext: "ct", backupCodes: [], enabled: true, activatedAt: null });
+    expect(await store.markTotpStepUsed("u1", 59_000_000)).toBe(false);
+    const raced = await Promise.all([store.markTotpStepUsed("u1", 59_000_001), store.markTotpStepUsed("u1", 59_000_001)]);
+    expect(raced.filter(Boolean)).toHaveLength(1);
+    // A new authenticator (secret deleted, then set up again) starts with no step recorded.
+    await store.deleteMfaSecret("u1");
+    await store.upsertMfaSecret({ userId: "u1", secretIv: "iv", secretAuthTag: "tag", secretCiphertext: "ct", backupCodes: [], enabled: true, activatedAt: null });
+    expect(await store.markTotpStepUsed("u1", 100)).toBe(true);
+  });
+
+  it("updateUserRoleKeepingAdmin never demotes the last accepted admin; invited admins do not count", async () => {
+    const store = ctx.store();
+    await store.saveUser({ id: "a1", email: "a1@example.com", passwordHash: "h", role: "admin" });
+    expect(await store.updateUserRoleKeepingAdmin("missing", "viewer")).toBe("not_found");
+    expect(await store.updateUserRoleKeepingAdmin("a1", "viewer")).toBe("last_admin");
+    expect(await store.updateUserRoleKeepingAdmin("a1", "admin")).toBe("updated");
+    // An invited admin who never accepted cannot sign in: not counted, and can itself be demoted.
+    const now = new Date();
+    const invite = (inviteId: string, userId: string, email: string) =>
+      store.createUserInvite({
+        inviteId,
+        userId,
+        email,
+        role: "admin",
+        tokenHash: `hash-${inviteId}`,
+        createdBy: "a1",
+        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 3_600_000).toISOString()
+      });
+    expect(await invite("inv1", "a2", "a2@example.com")).toMatchObject({ created: true });
+    expect(await store.updateUserRoleKeepingAdmin("a1", "builder")).toBe("last_admin");
+    expect(await store.updateUserRoleKeepingAdmin("a2", "viewer")).toBe("updated");
+    expect(await store.getUserById("a2")).toMatchObject({ role: "viewer" });
+    // Once an invited admin accepts, they count.
+    await store.updateUserRole("a2", "admin");
+    expect(await store.acceptUserInvite({ tokenHash: "hash-inv1", passwordHash: "h2", now: now.toISOString() })).toMatchObject({ id: "a2" });
+    expect(await store.updateUserRoleKeepingAdmin("a1", "builder")).toBe("updated");
+    expect(await store.getUserById("a1")).toMatchObject({ role: "builder" });
+    expect(await store.updateUserRoleKeepingAdmin("a2", "operator")).toBe("last_admin");
+    // Non-admin changes are never checked.
+    expect(await store.updateUserRoleKeepingAdmin("a1", "viewer")).toBe("updated");
+  });
+
+  it("updateUserRoleKeepingAdmin: an admin service account is not an admin who can recover the deployment", async () => {
+    const store = ctx.store();
+    await store.saveUser({ id: "a1", email: "a1@example.com", passwordHash: "h", role: "admin" });
+    expect(await store.createServiceAccount({ id: "svc-admin", email: "ci@service.invalid", role: "admin", description: null, createdBy: "a1" })).not.toBeNull();
+    // The only person who is an admin stays one, even with an admin service account next to it.
+    expect(await store.updateUserRoleKeepingAdmin("a1", "viewer")).toBe("last_admin");
+    // The service account itself is never the "last admin".
+    expect(await store.updateUserRoleKeepingAdmin("svc-admin", "viewer")).toBe("updated");
+    expect(await store.getUserById("svc-admin")).toMatchObject({ role: "viewer", kind: "service" });
+  });
+
+  it("deleteUserKeepingAdmin never deletes the last person who is an admin; service accounts and pending invites do not count", async () => {
+    const store = ctx.store();
+    await store.saveUser({ id: "a1", email: "a1@example.com", passwordHash: "h", role: "admin" });
+    expect(await store.createServiceAccount({ id: "svc-admin", email: "ci@service.invalid", role: "admin", description: null, createdBy: "a1" })).not.toBeNull();
+    expect(await store.deleteUserKeepingAdmin("missing")).toBe("not_found");
+    expect(await store.deleteUserKeepingAdmin("a1")).toBe("last_admin");
+    expect(await store.getUserById("a1")).toMatchObject({ role: "admin" });
+    // An invited admin who never accepted cannot sign in: not counted, and can itself be deleted.
+    const now = new Date();
+    expect(
+      await store.createUserInvite({
+        inviteId: "inv-del",
+        userId: "a2",
+        email: "a2@example.com",
+        role: "admin",
+        tokenHash: "hash-inv-del",
+        createdBy: "a1",
+        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 3_600_000).toISOString()
+      })
+    ).toMatchObject({ created: true });
+    expect(await store.deleteUserKeepingAdmin("a1")).toBe("last_admin");
+    expect(await store.deleteUserKeepingAdmin("a2")).toBe("deleted");
+    // A service account, admin or not, is never the last admin.
+    expect(await store.deleteUserKeepingAdmin("svc-admin")).toBe("deleted");
+    expect(await store.getUserById("svc-admin")).toBeNull();
+    // With a second person who is an admin, either one can go, not both.
+    await store.saveUser({ id: "a3", email: "a3@example.com", passwordHash: "h", role: "admin" });
+    await store.saveUser({ id: "v1", email: "v1@example.com", passwordHash: "h", role: "viewer" });
+    expect(await store.deleteUserKeepingAdmin("v1")).toBe("deleted");
+    expect(await store.deleteUserKeepingAdmin("a3")).toBe("deleted");
+    expect(await store.deleteUserKeepingAdmin("a1")).toBe("last_admin");
+  });
+
+  it("two last admins deleted at once: at most one delete wins, an admin always remains", async () => {
+    const store = ctx.store();
+    for (let round = 0; round < 5; round += 1) {
+      await store.saveUser({ id: `dx${round}`, email: `dx${round}@example.com`, passwordHash: "h", role: "admin" });
+      await store.saveUser({ id: `dy${round}`, email: `dy${round}@example.com`, passwordHash: "h", role: "admin" });
+      const results = await Promise.all([store.deleteUserKeepingAdmin(`dx${round}`), store.deleteUserKeepingAdmin(`dy${round}`)]);
+      expect(results.filter((result) => result === "deleted")).toHaveLength(1);
+      expect(results.filter((result) => result === "last_admin")).toHaveLength(1);
+      expect((await store.listUsers()).filter((u) => u.role === "admin")).toHaveLength(1);
+      for (const u of await store.listUsers()) if (u.role === "admin") await store.updateUserRole(u.id, "viewer");
+    }
+  });
+
+  it("two admins demoting each other at once: at most one wins, an admin always remains", async () => {
+    const store = ctx.store();
+    for (let round = 0; round < 5; round += 1) {
+      await store.saveUser({ id: `x${round}`, email: `x${round}@example.com`, passwordHash: "h", role: "admin" });
+      await store.saveUser({ id: `y${round}`, email: `y${round}@example.com`, passwordHash: "h", role: "admin" });
+      const results = await Promise.all([
+        store.updateUserRoleKeepingAdmin(`x${round}`, "viewer"),
+        store.updateUserRoleKeepingAdmin(`y${round}`, "viewer")
+      ]);
+      expect(results.filter((result) => result === "updated")).toHaveLength(1);
+      expect((await store.listUsers()).filter((u) => u.role === "admin")).toHaveLength(1);
+      // Leave one admin standing for the next round's pair.
+      for (const u of await store.listUsers()) if (u.role === "admin") await store.updateUserRole(u.id, "viewer");
+    }
   });
 
   it("two backup-code spends of the same stored codes at once: exactly one wins", async () => {

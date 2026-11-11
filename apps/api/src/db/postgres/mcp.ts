@@ -404,7 +404,11 @@ function mapMcpClient(row: Row): McpClientSecretRecord {
     rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null),
     allowedIps: stringList(row.allowed_ips_json),
     certFingerprints: stringList(row.cert_fingerprints_json),
-    certSubject: row.cert_subject ? toStr(row.cert_subject) : null
+    certSubject: row.cert_subject ? toStr(row.cert_subject) : null,
+    previousTokenPrefix: row.previous_token_prefix ? toStr(row.previous_token_prefix) : null,
+    previousTokenHash: row.previous_token_hash ? toStr(row.previous_token_hash) : null,
+    previousExpiresAt: row.previous_expires_at ? toStr(row.previous_expires_at) : null,
+    rotatedAt: row.rotated_at ? toStr(row.rotated_at) : null
   };
 }
 
@@ -415,7 +419,7 @@ function stringList(value: unknown): string[] {
 }
 
 function withoutHash(record: McpClientSecretRecord): McpClient {
-  const { tokenHash: _hash, ...client } = record;
+  const { tokenHash: _hash, previousTokenHash: _previous, ...client } = record;
   return client;
 }
 
@@ -1632,7 +1636,8 @@ export async function getMcpClient(ctx: PgContext, ...[id]: Parameters<Store["ge
 
 /** With the token hash; for the credential check only. */
 export async function findMcpClientByTokenPrefix(ctx: PgContext, ...[prefix]: Parameters<Store["findMcpClientByTokenPrefix"]>): ReturnType<Store["findMcpClientByTokenPrefix"]> {
-  const row = await ctx.queryOne<Row>(`SELECT * FROM mcp_clients WHERE token_prefix = $1`, [prefix]);
+  // 13.2 — a client is also found by its previous token's prefix while a rotation's grace window runs.
+  const row = await ctx.queryOne<Row>(`SELECT * FROM mcp_clients WHERE token_prefix = $1 OR previous_token_prefix = $1 LIMIT 1`, [prefix]);
   return row ? mapMcpClient(row) : null;
 }
 
@@ -1652,6 +1657,28 @@ export async function updateMcpClientNetwork(ctx: PgContext, ...[id, input]: Par
     [JSON.stringify(input.allowedIps), JSON.stringify(input.certFingerprints), input.certSubject, id]
   );
   return row ? withoutHash(mapMcpClient(row)) : null;
+}
+
+/** 13.2 (v64) — see Store.rotateMcpClient: one UPDATE, conditional on the current prefix. */
+export async function rotateMcpClient(ctx: PgContext, ...[input]: Parameters<Store["rotateMcpClient"]>): ReturnType<Store["rotateMcpClient"]> {
+  const keepPrevious = input.previousExpiresAt !== null;
+  const row = await ctx.queryOne<Row>(
+    `UPDATE mcp_clients
+        SET previous_token_prefix = CASE WHEN $1::boolean THEN token_prefix ELSE NULL END,
+            previous_token_hash = CASE WHEN $1::boolean THEN token_hash ELSE NULL END,
+            previous_expires_at = $2,
+            token_prefix = $3,
+            token_hash = $4,
+            rotated_at = $5
+      WHERE id = $6 AND token_prefix = $7 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $5)
+      RETURNING *`,
+    [keepPrevious, tsOrNull(input.previousExpiresAt), input.tokenPrefix, input.tokenHash, input.now, input.id, input.expectedTokenPrefix]
+  );
+  if (row) return { status: "rotated", client: withoutHash(mapMcpClient(row)) };
+  const existing = await getMcpClientOn(ctx.pool, input.id);
+  if (!existing) return { status: "not_found" };
+  if (existing.revokedAt || (existing.expiresAt && Date.parse(existing.expiresAt) <= Date.parse(input.now))) return { status: "inactive" };
+  return { status: "conflict" };
 }
 
 export async function touchMcpClient(ctx: PgContext, ...[id, at]: Parameters<Store["touchMcpClient"]>): ReturnType<Store["touchMcpClient"]> {

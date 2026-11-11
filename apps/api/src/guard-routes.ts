@@ -729,7 +729,18 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     for (const event of events) {
       if (event.workflowId && !names.has(event.workflowId)) names.set(event.workflowId, (await store.getWorkflow(event.workflowId))?.name ?? event.workflowId);
     }
-    return { events: events.map((event) => ({ ...event, workflowName: event.workflowId ? names.get(event.workflowId) : undefined })), total };
+    // 13.3 — a rule event can outlive its run (a project keeps rule events longer than runs): say the run is gone instead of linking
+    // to a run that is gone. Gateway events name a gateway call, not a run.
+    const runIds = [...new Set(events.filter((event) => event.placement !== "gateway").map((event) => event.executionId))];
+    const existing = new Set(runIds.length > 0 ? await store.listExistingExecutionIds(runIds) : []);
+    return {
+      events: events.map((event) => ({
+        ...event,
+        workflowName: event.workflowId ? names.get(event.workflowId) : undefined,
+        ...(event.placement !== "gateway" && !existing.has(event.executionId) ? { runDeleted: true } : {})
+      })),
+      total
+    };
   });
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/guard/stats", async (request, reply) => {
