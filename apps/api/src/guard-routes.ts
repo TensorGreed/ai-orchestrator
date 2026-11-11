@@ -83,7 +83,7 @@ function eventFilters(query: Record<string, unknown>): GuardEventFilters & { lim
     ...(since && !Number.isNaN(Date.parse(since)) ? { since: new Date(since).toISOString() } : {}),
     ...(query.findings === "true" || query.findings === "1" ? { onlyFindings: true } : {}),
     // 12.6 — gateway server tool calls, or workflow runs only.
-    ...(query.placement === "gateway" || query.placement === "run" ? { placement: query.placement } : {}),
+    ...(query.placement === "gateway" || query.placement === "run" || query.placement === "response" || query.placement === "request" ? { placement: query.placement } : {}),
     // 12.7 — eval runs and replay jobs (red-team suites among them) stay out unless asked for.
     ...(query.includeEval === "true" || query.includeEval === "1" ? {} : { excludeEvalRuns: true }),
     ...(Number.isFinite(limit) ? { limit } : {}),

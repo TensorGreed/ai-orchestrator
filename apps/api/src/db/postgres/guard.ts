@@ -166,6 +166,35 @@ export async function anyGuardProfileUsesLabels(ctx: PgContext): Promise<boolean
   return value;
 }
 
+/** Per store (context) and channel: the last anyGuardProfileHasChannel answer and the revision it was read at. */
+const channelCache = new WeakMap<PgContext, Map<string, { revision: number; value: boolean }>>();
+
+export async function anyGuardProfileHasChannel(ctx: PgContext, channel: "response" | "trigger_input"): Promise<boolean> {
+  if (channel !== "response" && channel !== "trigger_input") return false;
+  const revision = await guardProfileRevision(ctx);
+  let perChannel = channelCache.get(ctx);
+  if (!perChannel) {
+    perChannel = new Map();
+    channelCache.set(ctx, perChannel);
+  }
+  const cached = perChannel.get(channel);
+  if (revision !== undefined && cached?.revision === revision) return cached.value;
+  // As anyGuardProfileUsesLabels: read as JSON, a document that is not a JSON object never matches.
+  const row = await ctx.queryOne<{ found: number }>(
+    `SELECT 1 AS found FROM (
+        SELECT CASE WHEN document_json IS JSON OBJECT THEN ${storedJsonb("document_json")} END AS doc
+          FROM guard_profile_versions
+         OFFSET 0
+      ) v
+      WHERE v.doc IS NOT NULL AND jsonb_typeof(v.doc -> 'channels' -> $1) = 'object'
+      LIMIT 1`,
+    [channel]
+  );
+  const value = Boolean(row);
+  if (revision !== undefined) perChannel.set(channel, { revision, value });
+  return value;
+}
+
 export async function countObservedDestinationBlocks(ctx: PgContext, profileId: string, since: string): Promise<number> {
   const triggers = SUBJECT_EXECUTION_TRIGGERS.map((_, index) => `$${index + 3}`).join(", ");
   const row = await ctx.queryOne<{ total: unknown }>(
@@ -283,12 +312,20 @@ export async function getGatewayGuardBindings(
   ctx: PgContext,
   toolsetId: string,
   clientId: string,
-  setScope: "toolset" | "ai_route_set" = "toolset"
-): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }> {
+  setScope: "toolset" | "ai_route_set" = "toolset",
+  projectId?: string | null
+): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null; project: GuardBindingRecord | null }> {
   const rows = (
-    await ctx.query<Row>(`SELECT * FROM guard_bindings WHERE (scope = $1 AND scope_id = $2) OR (scope = 'mcp_client' AND scope_id = $3)`, [setScope, toolsetId, clientId])
+    await ctx.query<Row>(
+      `SELECT * FROM guard_bindings WHERE (scope = $1 AND scope_id = $2) OR (scope = 'mcp_client' AND scope_id = $3) OR (scope = 'project' AND scope_id = $4)`,
+      [setScope, toolsetId, clientId, projectId ?? null]
+    )
   ).map(mapGuardBindingRow);
-  return { toolset: rows.find((row) => row.scope === setScope) ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
+  return {
+    toolset: rows.find((row) => row.scope === setScope) ?? null,
+    client: rows.find((row) => row.scope === "mcp_client") ?? null,
+    project: projectId ? (rows.find((row) => row.scope === "project") ?? null) : null
+  };
 }
 
 export async function listGuardBindingsForProfile(ctx: PgContext, profileId: string): Promise<GuardBindingRecord[]> {
@@ -392,6 +429,8 @@ function guardEventWhere(filters: GuardEventFilters): { where: string; params: u
   if (filters.onlyFindings) clauses.push("detector_id IS NOT NULL");
   if (filters.placement === "gateway") clauses.push("placement = 'gateway'");
   if (filters.placement === "run") clauses.push("placement <> 'gateway'");
+  if (filters.placement === "response") clauses.push("placement = 'response'");
+  if (filters.placement === "request") clauses.push("placement = 'request'");
   if (filters.excludeEvalRuns) clauses.push("(run_source IS NULL OR run_source <> 'eval')");
   return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
 }

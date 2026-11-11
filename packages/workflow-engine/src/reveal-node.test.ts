@@ -5,7 +5,7 @@ import { createAesGcmProvider, hashGuardProfile, InMemoryTokenVaultStorage, pars
 import { createDefaultMCPRegistry, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { resolvePendingApproval, type McpToolPolicySubject, type Workflow, type WorkflowExecutionState, type WorkflowNode } from "@ai-orchestrator/shared";
-import { executeWorkflow, resumeWorkflowExecution, runRevealedValues, type WorkflowExecutionDependencies } from "./executor";
+import { executeWorkflow, outputLabelsOf, resumeWorkflowExecution, runRevealedValues, type WorkflowExecutionDependencies } from "./executor";
 import { builtInGuardProfile, type GuardRevealEvent, type GuardRunResolution, type ResolvedGuardProfile } from "./guard-runtime";
 import { validateWorkflowGraph } from "./validation";
 
@@ -44,7 +44,19 @@ const PROFILES: Record<string, ResolvedGuardProfile> = {
   scoped: resolved("scoped", { ...base("scoped"), reveal: { rules: [{ dataClasses: ["card_number"], subjects: { roles: ["admin"] }, workflows: ["another-workflow"] }] } }),
   // An enforced rule set with a reveal block and no rules: the ceiling, no reveal at all in its project.
   ceiling: resolved("ceiling", { ...base("ceiling"), reveal: { rules: [] } }),
-  plain: resolved("plain", base("plain"))
+  plain: resolved("plain", base("plain")),
+  // Reveals emails to admins, and checks what external callers receive (emails redacted).
+  responses: resolved("responses", {
+    ...base("responses"),
+    reveal: { rules: [{ dataClasses: ["email"], subjects: { roles: ["admin"] } }] },
+    channels: {
+      response: {
+        detectors: [{ id: "dlp.patterns", threshold: 0.5 }],
+        actions: { email: { action: "redact" }, sensitive_data: { action: "allow" } },
+        defaultAction: { action: "allow" }
+      }
+    }
+  })
 };
 
 async function vault() {
@@ -440,6 +452,26 @@ describe("Reveal node", () => {
     expect(sent.at(-1)?.text).toBe(`${CARD_TOKEN} 5555 5555 5555 4444`);
     expect(childGuard.reveals[0]?.refused).toEqual([expect.objectContaining({ reason: "other_project" })]);
     expect(JSON.stringify(scoped)).not.toContain("5555 5555 5555 4444");
+  });
+
+  it("checks the tokens, never the revealed values, when the run answers an external caller", async () => {
+    const guarded = await guardDeps({ stack: ["responses"] });
+    const workflow = revealWorkflow();
+    // The run answers with what the sink echoed: the revealed email, inside the run.
+    const answering = { ...workflow, nodes: workflow.nodes.map((entry) => (entry.id === "out" ? { ...entry, config: { responseTemplate: "{{tool_output.echoed}}" } } : entry)) };
+    sent = [];
+    const result = await executeWorkflow(
+      { workflow: answering, executionId: "exec-r", webhookPayload: { text: `Mail ${EMAIL_TOKEN}` }, toolPolicySubject: ADMIN, responseBoundary: { surface: "webhook" } },
+      deps(guarded.guard)
+    );
+    expect(sent.at(-1)?.text).toBe(`Mail ${EMAIL}`);
+    expect(runRevealedValues(result)).toBe(true);
+    // The caller receives the token, so the response check judges the token: nothing to redact, no email in its events.
+    expect(result.responseCheck).toMatchObject({ withheld: false, transformed: false });
+    expect(JSON.stringify(result)).not.toContain(EMAIL);
+    expect(JSON.stringify(result.output)).toContain(EMAIL_TOKEN);
+    // The output's labels survive the copy that puts the tokens back (a queue worker stores them for the parent run).
+    expect(outputLabelsOf(result)?.provenance).toContain("sensitive");
   });
 
   it("validates the node configuration", () => {

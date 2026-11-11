@@ -45,6 +45,26 @@ export function channelLabel(channel: string): string {
   return GUARD_CHANNEL_LABEL[channel] ?? channel;
 }
 
+/** Where a check ran, as a trace card names it. */
+export function placementLabel(placement: string): string {
+  switch (placement) {
+    case "agent":
+      return "agent";
+    case "response":
+      return "response check";
+    case "request":
+      return "request check";
+    case "gateway":
+      return "MCP gateway";
+    case "retrieval":
+      return "model boundary";
+    case "reveal":
+      return "reveal";
+    default:
+      return "Content Rules node";
+  }
+}
+
 export interface GuardTraceFinding {
   detectorId: string;
   category: string;
@@ -335,20 +355,28 @@ export function extractGuardTrace(nodeResults: unknown[]): GuardTraceNode[] {
 /**
  * Nodes that have guard events but no trace in their output (for example an
  * agent whose final answer was blocked, which fails the node) are rebuilt
- * from the events, one verdict per verdict id.
+ * from the events, one verdict per verdict id. Phase 12 coverage — the
+ * run-end response check is never in a node's output, so its events always
+ * make a card of their own (placement `response`), next to the node's.
  */
 export function traceFromEvents(events: GuardEventView[], known: Set<string>): GuardTraceNode[] {
   const byNode = new Map<string, Map<string, GuardEventView[]>>();
+  const nodeOf = new Map<string, string>();
   for (const event of events) {
-    if (known.has(event.nodeId)) continue;
-    const verdicts = byNode.get(event.nodeId) ?? new Map<string, GuardEventView[]>();
+    // The checks at the route (`request`) and the run-end check (`response`) are never in a node's output.
+    const own = event.placement === "response" || event.placement === "request";
+    if (known.has(event.nodeId) && !own) continue;
+    const group = own ? `${event.nodeId}\u0000${event.placement}` : event.nodeId;
+    nodeOf.set(group, event.nodeId);
+    const verdicts = byNode.get(group) ?? new Map<string, GuardEventView[]>();
     const rows = verdicts.get(event.verdictId) ?? [];
     rows.push(event);
     verdicts.set(event.verdictId, rows);
-    byNode.set(event.nodeId, verdicts);
+    byNode.set(group, verdicts);
   }
   const out: GuardTraceNode[] = [];
-  for (const [nodeId, verdicts] of byNode) {
+  for (const [group, verdicts] of byNode) {
+    const nodeId = nodeOf.get(group) ?? group;
     const nodeVerdicts: GuardTraceVerdict[] = [];
     const profiles: GuardTraceProfile[] = [];
     for (const [verdictId, rows] of verdicts) {

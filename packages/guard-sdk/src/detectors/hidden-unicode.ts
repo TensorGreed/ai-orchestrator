@@ -101,7 +101,7 @@ export function createHiddenUnicodeDetector(): GuardDetector {
     id: HIDDEN_UNICODE_DETECTOR_ID,
     tier: "rule",
     description: "Unicode tag characters, bidi overrides and zero-width runs that hide or reorder text.",
-    channels: ["prompt", "tool_result", "tool_arguments", "model_output", "final_output"],
+    channels: ["prompt", "tool_result", "tool_arguments", "model_output", "final_output", "response", "trigger_input"],
     categories: ["hidden_payload"],
     detect(_input: GuardInput, context: DetectorContext) {
       const runs = findHiddenRuns(context.text);

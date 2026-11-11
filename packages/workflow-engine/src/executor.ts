@@ -89,6 +89,7 @@ import type {
   NodeActivity,
   NodeActivityEvent,
   NodeExecutionResult,
+  ResponseBoundary,
   SecretReference,
   Workflow,
   WorkflowExecutionResult,
@@ -172,6 +173,7 @@ import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffS
 import { executeGuardNodeStep } from "./guard-node";
 import { executeRevealNodeStep } from "./reveal-node";
 import { childGuardFor, redactingDependencies, redactingSessionStores, RevealRedactor } from "./reveal-redaction";
+import { checkRunResponse, sealRunReply } from "./response-boundary";
 import {
   createGuardModelServices,
   groundingSourcesFor,
@@ -713,6 +715,13 @@ export interface ExecuteWorkflowRequest {
   approvalDecision?: ApprovalDecisionInput;
   executionTimeoutMs?: number;
   maxConcurrency?: number;
+  /**
+   * Phase 12 coverage — the run answers an external caller (a webhook, `/api/chat`, an MCP trigger's invoke): its
+   * output is checked on the `response` channel at the end of the run (response-boundary.ts). Set by the API for
+   * those triggers only. A request, not a dependency, so sub-workflow runs (which build their own requests) and
+   * resumed runs (whose caller was answered when they paused) never check.
+   */
+  responseBoundary?: ResponseBoundary;
 }
 
 /**
@@ -8725,7 +8734,7 @@ export async function executeWorkflow(
 ): Promise<WorkflowExecutionResult> {
   // Sandbox sessions started by this run count against its workflow's circuit breaker (see quickjs-sandbox.ts).
   const owner = (request.resumeState?.workflow ?? request.workflow)?.id;
-  const run = async (): Promise<WorkflowExecutionResult> => {
+  const execute = async (): Promise<WorkflowExecutionResult> => {
     // A sub-workflow run reuses its parent's dependencies: its nodes report nothing of their own.
     // Its template reads belong to its own nodes, never to the parent node that started it.
     if (dependencies.activityRecorder) {
@@ -8741,8 +8750,23 @@ export async function executeWorkflow(
     const result = await executeWorkflowRun(request, { ...redacting, activityRecorder: recorder, revealRedactor: redactor });
     attachNodeActivity(result.nodeResults, recorder);
     const redacted = redactor.redact(result);
-    if (redactor.active) Object.defineProperty(redacted, REVEALED_VALUES, { value: true, enumerable: true });
+    if (redactor.active) {
+      Object.defineProperty(redacted, REVEALED_VALUES, { value: true, enumerable: true });
+      const labels = runOutputLabels.get(result);
+      if (labels) runOutputLabels.set(redacted, labels);
+    }
     return redacted;
+  };
+  // Phase 12 coverage — a run with a response boundary is stamped whatever its status (a paused run's reply is sealed).
+  const run = async (): Promise<WorkflowExecutionResult> => {
+    const result = await execute();
+    if (!request.responseBoundary || request.resumeState) return result;
+    return await sealRunReply({
+      result,
+      boundary: request.responseBoundary,
+      guard: dependencies.guard,
+      ...(dependencies.logger ? { logger: dependencies.logger } : {})
+    });
   };
   return owner ? runWithSandboxOwner(`workflow:${owner}`, run) : run();
 }
@@ -10427,8 +10451,24 @@ async function executeWorkflowRun(
     ...(clarificationFromAgent ? { clarification: clarificationFromAgent } : {})
   };
   const finalLabels = labelState.outputNodeId ? labelState.get(labelState.outputNodeId) : undefined;
-  if (finalLabels) runOutputLabels.set(completedResult, finalLabels);
-  return completedResult;
+  // Phase 12 coverage — what an external caller receives is checked once, before the run is stored and answered.
+  const answered = request.responseBoundary && !request.resumeState
+    ? await checkRunResponse({
+        // Revealed values never reach the caller (the run's result keeps tokens), so the check judges the tokens.
+        result: dependencies.revealRedactor ? dependencies.revealRedactor.redact(completedResult) : completedResult,
+        boundary: request.responseBoundary,
+        guard: dependencies.guard,
+        resolveSecret: dependencies.resolveSecret,
+        executionId: request.executionId ?? "",
+        workflowId: workflow.id,
+        nodeId: labelState.outputNodeId ?? nodeOrder[nodeOrder.length - 1] ?? workflow.id,
+        ...(toolPolicySubject ? { subject: toolPolicySubject } : {}),
+        ...(finalLabels ? { labels: finalLabels } : {}),
+        ...(dependencies.logger ? { logger: dependencies.logger } : {})
+      })
+    : completedResult;
+  if (finalLabels) runOutputLabels.set(answered, finalLabels);
+  return answered;
 }
 
 /**

@@ -44,6 +44,7 @@ export * from "./output-checks";
 export * from "./protection/index";
 export * from "./wiring";
 export * from "./verdict-memo";
+export * from "./stream-local";
 export * from "./capture-mask";
 export * from "./phone";
 export * from "./destinations";

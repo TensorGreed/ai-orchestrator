@@ -892,6 +892,13 @@ export interface Store extends AiGatewayStore, SubjectStore {
    */
   anyGuardProfileUsesLabels(): Promise<boolean>;
   /**
+   * Phase 12 coverage — whether any stored version of any rule set configures this channel (`response`: the
+   * run-end check of what external callers receive; `trigger_input`: the webhook route's check of incoming payloads).
+   * Read from the stored JSON and cached per rule set revision like `anyGuardProfileUsesLabels`, so a webhook
+   * request in a deployment with no such rule set pays one primary-key read.
+   */
+  anyGuardProfileHasChannel(channel: "response" | "trigger_input"): Promise<boolean>;
+  /**
    * Phase 16 — observed destination verdicts that would have stopped content:
    * verdicts since `since` with a shadow destination-rule finding of this
    * profile whose action blocks, waits for review or for approval. One per
@@ -934,11 +941,13 @@ export interface Store extends AiGatewayStore, SubjectStore {
   getGuardBinding(scope: GuardBindingScope, scopeId: string): Promise<GuardBindingRecord | null>;
   /** 12.6 — a gateway call's toolset and client Guard bindings, in one read (null where there is none). */
   /** 12.6b — `setScope` `ai_route_set`: the binding of an AI gateway route set (in `toolset`) instead of a toolset's. */
+  /** Phase 12 coverage — with `projectId`, the project's binding comes back in the same read. */
   getGatewayGuardBindings(
     toolsetId: string,
     clientId: string,
-    setScope?: "toolset" | "ai_route_set"
-  ): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }>;
+    setScope?: "toolset" | "ai_route_set",
+    projectId?: string | null
+  ): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null; project: GuardBindingRecord | null }>;
   listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]>;
   setGuardBinding(input: { scope: GuardBindingScope; scopeId: string; mode: string; profileId: string | null; updatedBy: string | null }): Promise<GuardBindingRecord>;
   insertGuardEvents(rows: GuardEventInsert[]): Promise<void>;

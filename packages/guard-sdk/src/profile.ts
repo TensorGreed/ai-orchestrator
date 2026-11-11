@@ -21,11 +21,15 @@ export const actionRuleSchema = z.object({
   /** For `protect`: the provider to use instead of the data-class mapping. */
   providerId: z.string().min(1).optional(),
   /**
-   * Phase 12 coverage — `buffer`: a streamed answer this rule applies to is
-   * generated in full and checked before any of it is sent. Absent: the rule
-   * follows the stream's normal mode (whole-answer checks run at the end).
+   * Phase 12 coverage — how a streamed answer handles this rule.
+   * `buffer`: the answer is generated in full and checked before any of it is
+   * sent. `window`: a redact, mask or transform rule is applied to each part of
+   * the stream as it is released (opt-in; ignored, and the stream buffered,
+   * when the rule could apply to a finding that is not local to a stretch of
+   * text, such as a key block). Absent: a rewrite rule buffers the stream; any
+   * other rule follows the stream's normal mode (whole-answer checks at the end).
    */
-  stream: z.literal("buffer").optional()
+  stream: z.enum(["buffer", "window"]).optional()
 });
 
 export const detectorEntrySchema = z.object({

@@ -159,6 +159,12 @@ export interface GuardRuntimeDependencies {
    */
   mayUseLabels?(): boolean | Promise<boolean>;
   /**
+   * Phase 12 coverage — a cheap check before a response or incoming-payload check resolves the run's profiles: false
+   * when no profile this run could resolve configures the channel, so the check is skipped without a resolution.
+   * Absent or failing: the check resolves (fail open to the full path, which itself fails closed).
+   */
+  mayCheckChannel?(channel: "response" | "trigger_input"): boolean | Promise<boolean>;
+  /**
    * Phase 16 — the deployment's data destination rows (admin
    * classifications), read once per run when a check needs them. Absent:
    * only the built-in rows apply.
@@ -264,6 +270,8 @@ export interface GuardCheckResult {
   verdicts: Array<{ profile: GuardProfileRef; summary: GuardVerdictSummary }>;
   /** Phase 12 coverage — the result came from the scope's memo: nothing ran and nothing was recorded. */
   memoHit?: true;
+  /** Phase 12 coverage — with `GuardInput.streamWindow`: the released part in the coordinates of `content`. */
+  window?: { start: number; end: number };
 }
 
 export class GuardBlockedError extends Error {
@@ -506,6 +514,34 @@ export async function resolveGuardNodeProfiles(
   return { profiles: dedupeByHash(profiles), resolution };
 }
 
+function registryOf(guard: GuardRuntimeDependencies): GuardRegistry {
+  return guard.registry ?? (defaultRegistry ??= createDefaultGuardRegistry({ resolver: systemDnsResolver }));
+}
+
+function scopeSubjectOf(scope: Pick<GuardEvalScope, "subject">): GuardInput["subject"] {
+  return scope.subject ? { role: scope.subject.role, ...(scope.subject.userId ? { userId: scope.subject.userId } : {}) } : undefined;
+}
+
+/**
+ * Phase 12 coverage — the memo key of a check as `runGuardCheck` computes it (the scope's subject included), or
+ * undefined when the check may not use a memo (`guardCheckIsMemoisable`). For callers that keep their own memo of
+ * pieces they check together, such as the `/v1` gateway's history of conversation turns.
+ */
+export function guardCheckMemoKey(
+  scope: Pick<GuardEvalScope, "guard" | "subject">,
+  profiles: ResolvedGuardProfile[],
+  input: GuardInput,
+  /** The profiles as evaluated, when they differ from the stored ones (the built-in one shadowed). */
+  judged: GuardProfile[] = profiles.map((entry) => entry.profile)
+): string | undefined {
+  if (profiles.length === 0) return undefined;
+  const subject = scopeSubjectOf(scope);
+  const evaluated: GuardInput = { ...input, ...(subject && !input.subject ? { subject } : {}) };
+  return guardCheckIsMemoisable(evaluated, judged, registryOf(scope.guard))
+    ? guardVerdictMemoKey(profiles.map((entry) => entry.hash), evaluated)
+    : undefined;
+}
+
 /** Key material for a key id (a secret id), resolved through the run's secret scope. */
 export function keyResolverFor(scope: Pick<GuardEvalScope, "resolveSecret">) {
   return async (keyId: string) => decodeGuardKeyMaterial(await scope.resolveSecret({ secretId: keyId }));
@@ -518,13 +554,13 @@ export async function runGuardCheck(
   input: GuardInput,
   meta: { iteration?: number; toolName?: string; onlyFindings?: boolean } = {}
 ): Promise<GuardCheckResult> {
-  const registry = scope.guard.registry ?? (defaultRegistry ??= createDefaultGuardRegistry({ resolver: systemDnsResolver }));
+  const registry = registryOf(scope.guard);
   const protection = createDefaultProtectionRegistry({ keys: keyResolverFor(scope), ...(scope.guard.vault ? { vault: scope.guard.vault } : {}) });
   // Phase 16 — runtime surrogates use the deployment key (the capture key), so lookups find them.
   const surrogateKey = scope.guard.surrogateKey;
   if (surrogateKey) protection.replace(createSurrogateProvider({ keys: async () => surrogateKey, defaultKeyId: "deployment" }));
   const issued = issuedSurrogatesOf(scope.guard);
-  const subject = scope.subject ? { role: scope.subject.role, ...(scope.subject.userId ? { userId: scope.subject.userId } : {}) } : undefined;
+  const subject = scopeSubjectOf(scope);
   const evaluated: GuardInput = { ...input, ...(subject && !input.subject ? { subject } : {}), ...(input.issuedSurrogates ? {} : { issuedSurrogates: issued }) };
   // Phase 12 coverage — the built-in rule set only observes here; the recorded profile is still the built-in one.
   const judged = scope.shadowUnderBuiltin
@@ -532,13 +568,10 @@ export async function runGuardCheck(
     : profiles.map((entry) => entry.profile);
   // Phase 12 coverage — the same clean check earlier in this run: reuse it, record nothing new.
   // Only content checks: never tool arguments, outbound requests, destinations or detectors that read DNS or the filesystem.
-  const memoKey =
-    scope.memo && profiles.length > 0 && guardCheckIsMemoisable(evaluated, judged, registry)
-      ? guardVerdictMemoKey(profiles.map((entry) => entry.hash), evaluated)
-      : undefined;
+  const memoKey = scope.memo ? guardCheckMemoKey(scope, profiles, input, judged) : undefined;
   if (memoKey && scope.memo) {
     const hit = scope.memo.get(memoKey);
-    if (hit) return { action: "allow", content: input.content, transformed: false, verdicts: hit, memoHit: true };
+    if (hit) return { action: "allow", content: input.content, transformed: false, verdicts: hit, memoHit: true, ...(input.streamWindow ? { window: { ...input.streamWindow } } : {}) };
   }
   const stack = await evaluateGuardStack(
     judged,
@@ -589,7 +622,7 @@ export async function runGuardCheck(
       scope.logger?.("Failed to record guard verdict", { nodeId: scope.nodeId, error: error instanceof Error ? error.message : String(error) });
     }
   }
-  return { action: stack.action, content: stack.content, transformed: stack.transformed, verdicts };
+  return { action: stack.action, content: stack.content, transformed: stack.transformed, verdicts, ...(stack.window ? { window: stack.window } : {}) };
 }
 
 /** Phase 16 — a verdict worth a row: a finding, an action (shadow too), a rewrite or a detector skipped for budget. */

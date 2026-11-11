@@ -347,6 +347,13 @@ const envSchema = z.object({
    * ports still apply when this is off.
    */
   GUARD_AUTO_APPLY: booleanFromEnv.default(true),
+  /**
+   * Phase 12 coverage (D13) — the project's enforced rule set and the
+   * deployment's destination rules also check gateway calls (/v1 and the MCP
+   * gateway) with no route set, toolset or client binding. False: only once a
+   * rule set is bound there, as before.
+   */
+  GATEWAY_RULES_WITHOUT_BINDING: booleanFromEnv.default(true),
   // Phase 10.7 — MCP runtime safety.
   /** Sandbox mode for stdio servers that do not choose one: `none` (on the host) or `container`. */
   MCP_SANDBOX_DEFAULT: z.enum(["none", "container"]).default("none"),

@@ -107,6 +107,16 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     trace.push({ at: Math.round((now() - started) * 1000) / 1000, kind, message, ...(data ? { data } : {}) });
   };
   const text = contentText(input.content);
+  // Phase 12 coverage — a streamed answer's window: only the released part is judged and rewritten.
+  const win = streamWindowOf(input, text);
+  let windowEnd = win?.end ?? text.length;
+  /** Findings with a span that began in the text already sent (clipped to the window's start). */
+  const startsBeforeWindow = new WeakSet<GuardFinding>();
+  const inWindow = (finding: GuardFinding): GuardFinding | null => {
+    const windowed = windowedFinding(finding, win!);
+    if (windowed && finding.spans.some((span) => span.start < win!.start && span.end > win!.start)) startsBeforeWindow.add(windowed);
+    return windowed;
+  };
   const channel = profile.channels[input.channel];
   const profileRef = { id: profile.id, version: profile.version, hash: hashGuardProfile(profile) };
   const budget = { limitMs: profile.latencyBudget.ms, exceeded: false, policy: profile.latencyBudget.onExceeded };
@@ -124,7 +134,12 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
   });
 
   // Phase 16 — destination rules: the scan of the outgoing content (issued surrogates dropped) plus its labels.
-  const destinationEntries = evaluateDestinationStep();
+  const destinationEntries = win
+    ? evaluateDestinationStep().flatMap((entry) => {
+        const finding = inWindow(entry.finding);
+        return finding ? [{ ...entry, finding }] : [];
+      })
+    : evaluateDestinationStep();
   const runDetectors = !input.destinationOnly && Boolean(channel && channel.detectors.length > 0);
 
   if (!runDetectors && destinationEntries.length === 0) {
@@ -229,6 +244,10 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
         message: withoutIgnoredValues(finding.message, ignored)
       }));
     }
+    if (win) result = result.flatMap((finding) => {
+      const inside = inWindow(finding);
+      return inside ? [inside] : [];
+    });
     for (const finding of result) {
       if (finding.score >= entry.threshold) kept.push(finding);
       else suppressed.push(finding);
@@ -250,6 +269,12 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       if (effective === "transform" && !detector.transform) {
         effective = "block";
         reason = `${detector.id} has no transform; the finding blocks instead`;
+        log("coerced", reason, { detectorId: finding.detectorId });
+      }
+      // Phase 12 coverage — part of this value was already sent: rewriting the rest would hide that, so it blocks.
+      if (win && startsBeforeWindow.has(finding) && (effective === "redact" || effective === "mask" || effective === "protect")) {
+        effective = "block";
+        reason = `part of this ${finding.dataClass ?? finding.category} was already sent; the stream stops`;
         log("coerced", reason, { detectorId: finding.detectorId });
       }
       const shadow = shadowFor(rule, effective);
@@ -300,6 +325,25 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     return finish("block");
   }
 
+  // A rewrite that runs past the window's end would send part of a value: the window ends where it starts instead.
+  if (win) {
+    const rewriting = findings.filter((_, index) => {
+      const action = applied[index];
+      return Boolean(action && !action.shadow && REWRITE_ACTIONS.has(action.effective));
+    });
+    for (let moved = true; moved; ) {
+      moved = false;
+      for (const finding of rewriting) {
+        for (const span of finding.spans) {
+          if (span.start < windowEnd && span.end > windowEnd) {
+            windowEnd = Math.max(win.start, span.start);
+            moved = true;
+          }
+        }
+      }
+    }
+  }
+
   // Content transforms for non-shadow redact, mask, protect and transform actions.
   const replacements: Replacement[] = [];
   const protectedTokens: GuardVerdict["protectedTokens"] = [];
@@ -307,7 +351,10 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
   let fallbackBlock = false;
 
   for (let i = 0; i < findings.length; i += 1) {
-    const finding = findings[i]!;
+    const whole = findings[i]!;
+    // In a window, only spans that end inside it are rewritten; a finding with none there waits for a later window.
+    const finding = win ? { ...whole, spans: whole.spans.filter((span) => span.end <= windowEnd) } : whole;
+    if (win && whole.spans.length > 0 && finding.spans.length === 0) continue;
     const action = applied[i];
     if (!action || action.shadow) continue;
     switch (action.effective) {
@@ -357,7 +404,15 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     const detector = options.registry.get(detectorId);
     if (!detector?.transform) continue;
     const before = transformedText;
-    transformedText = detector.transform(transformedText, list, { text: transformedText, options: {}, now });
+    if (win) {
+      // Everything rewritten so far lies inside the window, so its end has moved by the change in length.
+      const regionEnd = windowEnd + (before.length - text.length);
+      const region = before.slice(win.start, regionEnd);
+      const shifted = list.map((finding) => ({ ...finding, spans: finding.spans.map((span) => ({ start: span.start - win.start, end: span.end - win.start })) }));
+      transformedText = before.slice(0, win.start) + detector.transform(region, shifted, { text: region, options: {}, now }) + before.slice(regionEnd);
+    } else {
+      transformedText = detector.transform(transformedText, list, { text: transformedText, options: {}, now });
+    }
     if (transformedText !== before) {
       transformed = true;
       log("transform", `${detectorId} transformed the content`, { removedChars: before.length - transformedText.length });
@@ -415,7 +470,8 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       trace,
       profile: profileRef,
       channel: input.channel,
-      ...(input.destination && profileHasDestinationRules(profile) ? { destination: { ...input.destination.summary } } : {})
+      ...(input.destination && profileHasDestinationRules(profile) ? { destination: { ...input.destination.summary } } : {}),
+      ...(win ? { window: { start: win.start, end: windowEnd + (transformed && typeof content === "string" ? content.length - text.length : 0) } } : {})
     };
   }
 
@@ -473,6 +529,33 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     }
     return out;
   }
+}
+
+const REWRITE_ACTIONS: ReadonlySet<GuardAction> = new Set(["redact", "mask", "protect", "transform"]);
+
+/** The input's stream window, clamped to the text; none for JSON content or a window that is not a pair of numbers. */
+function streamWindowOf(input: GuardInput, text: string): GuardSpan | undefined {
+  const window = input.streamWindow;
+  if (!window || typeof input.content !== "string" || !Number.isFinite(window.start) || !Number.isFinite(window.end)) return undefined;
+  const start = Math.min(Math.max(0, Math.floor(window.start)), text.length);
+  const end = Math.min(Math.max(start, Math.floor(window.end)), text.length);
+  return { start, end };
+}
+
+/**
+ * A finding as a window sees it: spans wholly before the window (sent already) are dropped, and a span that began
+ * before the window starts at the window's start. Spans in the held-back text stay (they count, but only spans that end
+ * inside the window are rewritten). Null when no span is left; a finding without spans (about the text as a whole)
+ * stays as it is.
+ */
+function windowedFinding(finding: GuardFinding, window: GuardSpan): GuardFinding | null {
+  if (finding.spans.length === 0) return finding;
+  const spans: GuardSpan[] = [];
+  for (const span of finding.spans) {
+    if (span.end <= window.start) continue;
+    spans.push({ start: Math.max(span.start, window.start), end: span.end });
+  }
+  return spans.length > 0 ? { ...finding, spans } : null;
 }
 
 /** Phase 12 coverage — the time limit of a check that calls a model: `options.timeoutMs`, default 30 s, at most 5 minutes. */

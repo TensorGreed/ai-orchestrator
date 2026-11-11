@@ -613,6 +613,49 @@ run("queue dispatch across replicas on one Postgres database", () => {
     expect(events.some((event) => event.profileId === "gw-email" && event.effectiveAction === "block")).toBe(true);
   }, 60_000);
 
+  it("a webhook run's response is checked on its worker: the 422 envelope and the checked idempotency body come back (Phase 12 coverage)", async () => {
+    const { worker, api, admin } = await cluster();
+    await api.store.ensureDefaultProject();
+    const hook = chain("wf-q-response", [
+      node("hook", "webhook_input", { path: "wf-q-response", method: "POST", idempotencyEnabled: true, idempotencyHeaderName: "idempotency-key" }),
+      node("out", "output", { responseTemplate: "{{user_prompt}}" })
+    ]);
+    hook.projectId = "default";
+    await save(api, admin, hook);
+    const rules = {
+      id: "q-callers",
+      name: "Callers",
+      version: "1",
+      channels: {
+        response: {
+          detectors: [{ id: "dlp.patterns", threshold: 0.5 }],
+          actions: { credential: { action: "block" }, email: { action: "redact" }, sensitive_data: { action: "allow" } },
+          defaultAction: { action: "allow" }
+        }
+      }
+    };
+    const inject = (method: "POST" | "PUT", url: string, payload: Record<string, unknown>) => api.app.inject({ method, url, headers: { cookie: admin }, payload });
+    expect((await inject("POST", "/api/guard/profiles", { document: rules })).statusCode).toBe(201);
+    expect((await inject("PUT", "/api/guard/bindings/projects/default", { mode: "override", profileId: "q-callers" })).statusCode).toBe(200);
+    const send = (key: string, prompt: string) =>
+      api.app.inject({ method: "POST", url: "/webhook/wf-q-response", headers: { "idempotency-key": key }, payload: { user_prompt: prompt } });
+
+    const blocked = await send("q-1", "key sk-live-abcdefghijklmnopqrstuvwxyz123456");
+    expect(blocked.statusCode, blocked.body).toBe(422);
+    const envelope = blocked.json<{ executionId: string; code: string }>();
+    expect(envelope.code).toBe("content_filter");
+    expect(worker.ran).toContain(envelope.executionId);
+    expect((await send("q-1", "key sk-live-abcdefghijklmnopqrstuvwxyz123456")).json()).toEqual(envelope);
+    expect(await api.store.getExecutionHistory(envelope.executionId)).toMatchObject({ status: "success", output: { code: "content_filter" } });
+
+    const redacted = await send("q-2", "write to jane.doe@example.com");
+    expect(redacted.statusCode).toBe(200);
+    expect(redacted.body).not.toContain("jane.doe@example.com");
+    const stored = await sql<{ result_json: string }>(`SELECT result_json FROM webhook_idempotency`);
+    expect(JSON.stringify(stored)).not.toContain("jane.doe@example.com");
+    expect(JSON.stringify(stored)).not.toContain("sk-live-");
+  }, 60_000);
+
   it("a queued gateway run that pauses for an approval resumes on a worker under the toolset's Guard profile (12.6)", async () => {
     const { worker, api, admin } = await cluster();
     await api.store.ensureDefaultProject();

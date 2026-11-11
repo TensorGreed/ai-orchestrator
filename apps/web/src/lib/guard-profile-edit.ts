@@ -4,7 +4,7 @@
 
 export type GuardDocument = Record<string, unknown>;
 
-export const GUARD_EDITOR_CHANNELS = ["prompt", "tool_arguments", "tool_result", "model_output", "final_output"] as const;
+export const GUARD_EDITOR_CHANNELS = ["prompt", "tool_arguments", "tool_result", "model_output", "final_output", "response"] as const;
 export const GUARD_EDITOR_ACTIONS = ["allow", "block", "review", "require_approval", "redact", "mask", "protect", "transform"] as const;
 
 /** An action rule as the editor sees it. Fields the form does not show (such as `stream`) are carried through untouched. */
@@ -109,6 +109,30 @@ export function setActionRule(document: GuardDocument, channel: string, key: str
     if (rule && !rule.shadow && actions[key]) delete actions[key]!.shadow;
     return { ...current, actions };
   });
+}
+
+/**
+ * Phase 12 coverage — the "Check responses" preset: the response channel (what webhook, chat and MCP trigger callers
+ * receive) gets a copy of the final answer channel's detectors and actions. Without a final answer channel it gets the
+ * data detector, with credentials and private keys redacted and card numbers masked. An existing response channel is
+ * replaced.
+ */
+export function applyResponsePreset(document: GuardDocument): GuardDocument {
+  const finalAnswer = channelOf(document, "final_output");
+  const preset: ChannelView = finalAnswer
+    ? cloneDocument(finalAnswer as unknown as GuardDocument) as unknown as ChannelView
+    : {
+        detectors: [{ id: "dlp.patterns", threshold: 0.6 }],
+        actions: {
+          credential: { action: "redact" },
+          private_key: { action: "redact" },
+          jwt: { action: "redact" },
+          card_number: { action: "mask" },
+          sensitive_data: { action: "allow" }
+        },
+        defaultAction: { action: "block" }
+      };
+  return withChannel(document, "response", () => preset);
 }
 
 export function setDefaultAction(document: GuardDocument, channel: string, action: string): GuardDocument {
