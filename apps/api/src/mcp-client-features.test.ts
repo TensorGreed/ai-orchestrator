@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import type { McpElicitationView, McpToolPolicyRule, Workflow } from "@ai-orchestrator/shared";
@@ -142,6 +142,15 @@ async function waitFor<T>(probe: () => T | undefined | Promise<T | undefined>, t
     if (Date.now() - started > timeoutMs) throw new Error("Timed out waiting");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+/** Yields to the event loop (without timers, so it also works under fake ones) until the condition holds. */
+async function waitForEvent(condition: () => boolean, attempts = 5_000): Promise<void> {
+  for (let i = 0; i < attempts; i += 1) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error("Timed out waiting for the event");
 }
 
 // ---------------------------------------------------------------------------
@@ -539,7 +548,18 @@ describe("elicitation", () => {
 
     const events: string[] = [];
     const unsubscribe = service.subscribe("exec_t", (event) => events.push(`${event.phase}:${event.elicitation.status}`));
-    const timedOut = await service.ask({ ...base, executionId: "exec_t", timeoutMs: 1 });
+    // The service never waits less than a second; fake only the timer functions so the wait costs no real time and
+    // the store's own I/O keeps running. Advance once the request is announced (its timer is armed by then).
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let timedOut: Awaited<ReturnType<McpElicitationService["ask"]>>;
+    try {
+      const timedOutAsk = service.ask({ ...base, executionId: "exec_t", timeoutMs: 1 });
+      await waitForEvent(() => events.includes("created:pending"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      timedOut = await timedOutAsk;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(timedOut).toMatchObject({ action: "decline", source: "timeout" });
     expect(events).toEqual(["created:pending", "settled:expired"]);
     unsubscribe();

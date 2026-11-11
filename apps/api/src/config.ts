@@ -135,6 +135,8 @@ const envSchema = z.object({
 
   // Phase 5.1 — Authentication enhancements
   API_KEY_DEFAULT_EXPIRY_DAYS: z.coerce.number().int().nonnegative().default(0),
+  // 13.2 — a service account's keys expire within this many days (new keys and rotated ones). 0 or unset = no limit.
+  SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS: optionalIntFromEnv(0, 3650),
   // MFA_ENABLED has no effect (TOTP is always available); a boot note says so when it is set.
   MFA_ENABLED: booleanFromEnv.default(false),
   // 13.2 — MFA_ENFORCE=true is an alias for MFA_REQUIRED_ROLES=admin (see resolveMfaPolicy).
@@ -588,6 +590,8 @@ const envSchema = z.object({
   NOTIFICATIONS_ENABLED: booleanFromEnv.default(false),
   /** Phase 11.2 — channels set from the environment also send approval.requested and approval.timed_out. */
   NOTIFICATIONS_APPROVAL_EVENTS: booleanFromEnv.default(true),
+  /** 13.2 — channels set from the environment also send credential.expiring (keys and gateway clients about to stop working). Off unless set. */
+  NOTIFICATIONS_CREDENTIAL_EVENTS: optionalBooleanFromEnv,
   NOTIFICATION_SMTP_HOST: z.string().optional(),
   NOTIFICATION_SMTP_PORT: z.coerce.number().int().positive().default(587),
   NOTIFICATION_SMTP_SECURE: booleanFromEnv.default(false),
@@ -892,7 +896,9 @@ export function parseTrustProxy(raw: string | undefined): boolean | number | str
     const family = net.isIP(address ?? "");
     const prefixOk =
       prefix === undefined || (/^\d+$/.test(prefix) && Number(prefix) <= (family === 6 ? 128 : 32));
-    if (family === 0 || !prefixOk || extra !== undefined) {
+    // A /0 range matches every address, which proxy-addr refuses; say so by name rather than failing at boot.
+    const matchesAll = prefix !== undefined && /^0+$/.test(prefix);
+    if (family === 0 || !prefixOk || extra !== undefined || matchesAll) {
       throw new Error(
         `Invalid environment configuration: TRUST_PROXY entry "${entry}" is not an IP address, a CIDR range, ` +
           "loopback, linklocal or uniquelocal (or use true, false or a hop count)"
@@ -900,6 +906,19 @@ export function parseTrustProxy(raw: string | undefined): boolean | number | str
     }
   }
   return entries;
+}
+
+/**
+ * The value handed to Fastify's `trustProxy`. Booleans and address lists pass through. A hop count becomes a function:
+ * Fastify 5.12 and later treat a bare number as "trust nothing" (it cannot check who the immediate peer is), which
+ * would silently turn `TRUST_PROXY=1` off. The function keeps the meaning this setting has always had: the first N
+ * addresses on the path (the connecting socket, then entries of X-Forwarded-For from the right) are trusted, so the
+ * client is the address just beyond them. As before, the API port must be reachable only through the proxy.
+ */
+export function toFastifyTrustProxy(value: boolean | number | string[]): boolean | string[] | ((address: string, hop: number) => boolean) {
+  if (typeof value !== "number") return value;
+  if (value <= 0) return false;
+  return (address, hop) => address != null && hop < value;
 }
 
 // ---------------------------------------------------------------------------

@@ -118,6 +118,32 @@ describeStoreContract("legal holds: other deletion paths", (ctx) => {
     expect((await store.loadSessionMemory("free:agent", "s1")).map((m) => m.content)).toEqual(["two", "three", "four"]);
   });
 
+  it("agent memory under project-scoped session keys is held by a project or workflow hold (per-project purge too)", async () => {
+    const store = ctx.store();
+    await store.upsertProject({ id: "proj", name: "P" });
+    await store.upsertProject({ id: "pq", name: "Q" });
+    await store.upsertWorkflow(workflow("wf", "proj"));
+    await store.upsertWorkflow(workflow("wq", "pq"));
+    const key = (projectId: string, namespace: string) => `project:${projectId.length}:${projectId}:${namespace}`;
+    const rows: Array<[string, string]> = [
+      ["m-proj-custom", key("proj", "support")],
+      ["m-wq", key("pq", "wq:agent")],
+      ["m-wq-other", key("pq", "other:agent")]
+    ];
+    for (const [id, namespace] of rows) {
+      await sql().run(insert("session_memory", id, OLD));
+      await sql().run(`UPDATE session_memory SET namespace = '${namespace}' WHERE session_id = '${id}'`);
+    }
+    await hold(store, "project", "proj");
+    await hold(store, "workflow", "wq");
+    // Per-project purges (13.3 R1 scopes) and the deployment-wide one both leave held rows.
+    expect(await store.pruneRetentionTable("session_memory", { before: CUT, limit: 100, projectId: "proj" })).toBe(0);
+    expect(await store.pruneRetentionTable("session_memory", { before: CUT, limit: 100, projectId: "pq" })).toBe(1);
+    expect(await store.pruneRetentionTable("session_memory", { before: CUT, limit: 100 })).toBe(0);
+    const left = (await sql().all<{ session_id: string }>(`SELECT session_id FROM session_memory ORDER BY session_id`)).map((row) => row.session_id);
+    expect(left).toEqual(["m-proj-custom", "m-wq"]);
+  });
+
   it("workflow versions are not pruned while a hold covers the workflow", async () => {
     const store = ctx.store();
     await store.upsertProject({ id: "proj", name: "P" });

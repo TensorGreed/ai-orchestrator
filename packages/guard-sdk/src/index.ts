@@ -33,6 +33,7 @@ export * from "./detectors/egress-guard";
 export * from "./detectors/argument-validation";
 export * from "./protection/index";
 export * from "./wiring";
+export * from "./verdict-memo";
 export * from "./capture-mask";
 export * from "./phone";
 export * from "./destinations";

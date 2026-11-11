@@ -3,7 +3,9 @@
  * backlog count, and the purge log. Purges never wait for a row lock (prune.ts): a row another transaction holds is
  * skipped and goes on a later purge.
  */
-import type { RetentionRunView } from "@ai-orchestrator/shared";
+import crypto from "node:crypto";
+import type { RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
+import type { Store } from "../store.js";
 import type { PgContext } from "./context.js";
 import { deleteUnlockedInBatches } from "./prune.js";
 import { LEGAL_HOLD_LOCK_SHARED_SQL } from "../legal-hold-sql.js";
@@ -11,8 +13,10 @@ import {
   RETENTION_BATCH_ROWS,
   RETENTION_TABLES,
   isRetentionTable,
+  retentionPolicyFromRow,
   retentionRunFromRow,
-  retentionWhere,
+  retentionScopeWhere,
+  type RetentionPolicyRow,
   type RetentionRunRow,
   type RetentionScope,
   type RetentionTable
@@ -22,7 +26,9 @@ export async function pruneRetentionTable(ctx: PgContext, table: RetentionTable,
   if (!isRetentionTable(table)) throw new Error(`Not a retention table: ${String(table)}`);
   const limit = Math.floor(scope.limit);
   if (!Number.isFinite(limit) || limit <= 0) return 0;
-  return await deleteUnheldInBatches(ctx, table, retentionWhere(table, "$1"), [scope.before], {
+  const where = retentionScopeWhere(table, scope, "postgres");
+  // Each batch is its own short transaction under the legal-hold lock (where leaves held rows out).
+  return await deleteUnheldInBatches(ctx, table, where.sql, where.params, {
     key: RETENTION_TABLES[table].key === "row" ? "ctid" : "id",
     maxRows: limit
   });
@@ -55,11 +61,12 @@ export async function deleteUnheldInBatches(
   return total;
 }
 
-export async function countRetentionDue(ctx: PgContext, table: RetentionTable, input: { before: string; cap: number }): Promise<number> {
+export async function countRetentionDue(ctx: PgContext, table: RetentionTable, input: Parameters<Store["countRetentionDue"]>[1]): Promise<number> {
   if (!isRetentionTable(table)) throw new Error(`Not a retention table: ${String(table)}`);
+  const where = retentionScopeWhere(table, input, "postgres");
   const row = await ctx.queryOne<{ n: string | number }>(
-    `SELECT count(*) AS n FROM (SELECT 1 FROM ${table} WHERE ${retentionWhere(table, "$1")} LIMIT $2) AS due`,
-    [input.before, Math.max(0, Math.floor(input.cap))]
+    `SELECT count(*) AS n FROM (SELECT 1 FROM ${table} WHERE ${where.sql} LIMIT $${where.params.length + 1}) AS due`,
+    [...where.params, Math.max(0, Math.floor(input.cap))]
   );
   return row ? Number(row.n) : 0;
 }
@@ -79,4 +86,55 @@ export async function listRetentionRuns(ctx: PgContext, limit: number): Promise<
     [Math.max(1, Math.min(500, Math.floor(limit)))]
   );
   return rows.map(retentionRunFromRow);
+}
+
+export async function listRetentionPolicies(ctx: PgContext, filter: { scopeId?: string } = {}): Promise<RetentionPolicyRecord[]> {
+  const rows =
+    filter.scopeId === undefined
+      ? await ctx.query<RetentionPolicyRow>(
+          `SELECT scope_type, scope_id, data_class, days, updated_by, updated_at FROM retention_policies
+           WHERE scope_type = 'project' ORDER BY scope_id COLLATE "C", data_class COLLATE "C"`
+        )
+      : await ctx.query<RetentionPolicyRow>(
+          `SELECT scope_type, scope_id, data_class, days, updated_by, updated_at FROM retention_policies
+           WHERE scope_type = 'project' AND scope_id = $1 ORDER BY data_class COLLATE "C"`,
+          [filter.scopeId]
+        );
+  return rows.map(retentionPolicyFromRow).filter((row): row is RetentionPolicyRecord => row !== null);
+}
+
+export async function setRetentionPolicies(ctx: PgContext, input: Parameters<Store["setRetentionPolicies"]>[0]): Promise<RetentionPolicyRecord[]> {
+  return await ctx.withTransaction(async (client) => {
+    const before = (
+      await client.query<RetentionPolicyRow>(
+        `SELECT scope_type, scope_id, data_class, days, updated_by, updated_at FROM retention_policies
+         WHERE scope_type = 'project' AND scope_id = $1 ORDER BY data_class COLLATE "C" FOR UPDATE`,
+        [input.scopeId]
+      )
+    ).rows
+      .map(retentionPolicyFromRow)
+      .filter((row): row is RetentionPolicyRecord => row !== null);
+    const now = new Date().toISOString();
+    for (const [dataClass, days] of Object.entries(input.values)) {
+      if (days === undefined) continue;
+      if (days === null) {
+        await client.query(`DELETE FROM retention_policies WHERE scope_type = 'project' AND scope_id = $1 AND data_class = $2`, [input.scopeId, dataClass]);
+      } else {
+        await client.query(
+          `INSERT INTO retention_policies (id, scope_type, scope_id, data_class, days, updated_by, updated_at)
+           VALUES ($1, 'project', $2, $3, $4, $5, $6)
+           ON CONFLICT (scope_type, scope_id, data_class) DO UPDATE SET days = EXCLUDED.days, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at`,
+          [crypto.randomUUID(), input.scopeId, dataClass, days, input.updatedBy, now]
+        );
+      }
+    }
+    return before;
+  });
+}
+
+export async function listExistingExecutionIds(ctx: PgContext, executionIds: readonly string[]): Promise<string[]> {
+  const ids = [...new Set(executionIds)];
+  if (ids.length === 0) return [];
+  const rows = await ctx.query<{ id: string }>(`SELECT id FROM execution_history WHERE id = ANY($1::text[])`, [ids]);
+  return rows.map((row) => String(row.id));
 }

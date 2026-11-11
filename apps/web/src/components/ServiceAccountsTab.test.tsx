@@ -16,6 +16,7 @@ vi.mock("../lib/api", async () => {
     fetchServiceAccountKeys: vi.fn(),
     createServiceAccountKey: vi.fn(),
     revokeServiceAccountKey: vi.fn(),
+    rotateServiceAccountKey: vi.fn(),
     addProjectMember: vi.fn(),
     removeProjectMember: vi.fn()
   };
@@ -97,6 +98,30 @@ describe("Service accounts tab", () => {
     await user.click(screen.getByRole("button", { name: "Generate key" }));
     expect(api.createServiceAccountKey).toHaveBeenCalledWith("usr_svc", { name: "gha", role: "operator", projects: ["alpha"] });
     expect(await screen.findByText("ao_new.secret")).toBeInTheDocument();
+  });
+
+  it("rotates a key with the default 24-hour window and shows the new key once; a rotated key shows when it ends", async () => {
+    const user = userEvent.setup();
+    const ends = new Date(Date.now() + 24 * 3_600_000).toISOString();
+    vi.mocked(api.fetchServiceAccountKeys).mockResolvedValue({
+      keys: [key({}), key({ id: "apk_old", name: "old-ci", supersededBy: "apk_1", rotatedAt: "2026-11-09T00:00:00.000Z", expiresAt: ends })]
+    });
+    vi.mocked(api.rotateServiceAccountKey).mockResolvedValue({
+      key: "ao_rot.secret",
+      record: key({ id: "apk_9" }),
+      previous: key({ supersededBy: "apk_9", expiresAt: ends })
+    });
+    render(<ServiceAccountsTab projects={projects} />);
+    await user.click(await screen.findByRole("button", { name: "Manage" }));
+    const keys = await screen.findByRole("table", { name: "Keys of deployer" });
+    // The rotated key cannot be rotated again and says when it stops working.
+    expect(within(keys).queryByRole("button", { name: "Rotate old-ci" })).not.toBeInTheDocument();
+    expect(within(keys).getByText("rotated")).toBeInTheDocument();
+    await user.click(within(keys).getByRole("button", { name: "Rotate ci" }));
+    await user.click(within(keys).getByRole("button", { name: "Rotate now" }));
+    expect(api.rotateServiceAccountKey).toHaveBeenCalledWith("usr_svc", "apk_1", 24);
+    expect(await screen.findByText("ao_rot.secret")).toBeInTheDocument();
+    expect(screen.getByText(/The old key keeps working until/)).toBeInTheDocument();
   });
 
   it("adds the account to a project through the project member route", async () => {

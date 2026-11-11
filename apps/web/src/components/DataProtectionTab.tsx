@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { RETENTION_PURGE_CLASS_LABELS, type RetentionAdminView, type RetentionRunView } from "@ai-orchestrator/shared";
 import { ApiError, fetchRetention } from "../lib/api";
 import { LegalHoldsSection } from "./LegalHoldsSection";
+import { ProjectRetentionOverrides } from "./ProjectRetentionTab";
 
 function formatError(err: unknown): string {
   if (err instanceof ApiError) return err.message;
@@ -110,6 +111,7 @@ export function DataProtectionTab() {
               ))}
             </tbody>
           </table>
+          <ProjectRetentionOverrides overrides={view.projectOverrides ?? []} />
           <table className="settings-table" aria-label="Purges">
             <tbody>
               <tr data-testid="retention-last-run">

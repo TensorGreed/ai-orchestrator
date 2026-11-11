@@ -105,7 +105,7 @@ import type {
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
-import type { LegalHoldItemView, LegalHoldRef, LegalHoldStatus, LegalHoldView, RetentionRunView } from "@ai-orchestrator/shared";
+import type { LegalHoldItemView, LegalHoldRef, LegalHoldStatus, LegalHoldView, RetentionDataClass, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
 import type { RetentionScope, RetentionTable } from "./retention-tables.js";
 import type { LegalHoldInsert, LegalHoldTarget } from "./legal-hold-sql.js";
 
@@ -122,6 +122,37 @@ export type GateCaseDecisionRecordInput = Parameters<Store["decideGateCaseReques
 export type StoredUserKind = "human" | "service";
 
 /** A user row as the store reads it (the password hash included). */
+/** An API key row as listed (never the hash). */
+export interface StoredApiKey {
+  id: string;
+  userId: string;
+  name: string;
+  keyPrefix: string;
+  scopes: string[];
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  /** 13.2 (v64) — the key that replaced this one in a rotation; null when it was never rotated. */
+  supersededBy: string | null;
+  /** 13.2 (v64) — when this key was rotated (its expiresAt then marks the end of the grace window). */
+  rotatedAt: string | null;
+}
+
+/** 13.2 — what `Store.rotateApiKey` did. */
+export type ApiKeyRotationOutcome =
+  | { status: "rotated"; previousExpiresAt: string }
+  | { status: "not_found" }
+  | { status: "inactive" }
+  | { status: "already_rotated"; supersededBy: string };
+
+/** 13.2 — what `Store.rotateMcpClient` did. */
+export type McpClientRotationOutcome =
+  | { status: "rotated"; client: McpClient }
+  | { status: "not_found" }
+  | { status: "inactive" }
+  | { status: "conflict" };
+
 export interface StoredUser {
   id: string;
   email: string;
@@ -817,6 +848,20 @@ export interface Store extends AiGatewayStore {
   /** 13.2 — replaces the client's address list and certificate pin; null when the client does not exist. */
   updateMcpClientNetwork(id: string, input: { allowedIps: string[]; certFingerprints: string[]; certSubject: string | null }): Promise<McpClient | null>;
   touchMcpClient(id: string, at: string): Promise<void>;
+  /**
+   * 13.2 (v64) — rotates a gateway client's token in one UPDATE: the current prefix and hash move to previous_* (valid
+   * until `previousExpiresAt`; null ends the old token at once) and the new ones take their place. It applies only
+   * while the client's current prefix is still `expectedTokenPrefix`, so of two rotations racing on any instances
+   * exactly one succeeds and the other reads `conflict`. A revoked or expired client is `inactive`.
+   */
+  rotateMcpClient(input: {
+    id: string;
+    expectedTokenPrefix: string;
+    tokenPrefix: string;
+    tokenHash: string;
+    previousExpiresAt: string | null;
+    now: string;
+  }): Promise<McpClientRotationOutcome>;
   /** 12.6 — an admin's change of a client's name or rate limit (null removes it); null when the client does not exist. */
   updateMcpClient(id: string, patch: { name?: string; rateLimit?: McpGatewayRateLimit | null }): Promise<McpClient | null>;
   /** MCP tool-call telemetry rows of one execution, oldest first. */
@@ -1577,31 +1622,30 @@ export interface Store extends AiGatewayStore {
     scopes?: string[];
     expiresAt?: string | null;
   }): Promise<void>;
-  listApiKeys(userId?: string): Promise<Array<{
-    id: string;
-    userId: string;
-    name: string;
-    keyPrefix: string;
-    scopes: string[];
-    lastUsedAt: string | null;
-    expiresAt: string | null;
-    revokedAt: string | null;
-    createdAt: string;
-  }>>;
-  findApiKeyByPrefix(prefix: string): Promise<{
-    id: string;
-    userId: string;
-    name: string;
-    keyPrefix: string;
-    keyHash: string;
-    scopes: string[];
-    lastUsedAt: string | null;
-    expiresAt: string | null;
-    revokedAt: string | null;
-    createdAt: string;
-  } | null>;
+  listApiKeys(userId?: string): Promise<StoredApiKey[]>;
+  findApiKeyByPrefix(prefix: string): Promise<(StoredApiKey & { keyHash: string }) | null>;
   touchApiKey(id: string): Promise<void>;
   revokeApiKey(id: string, userId?: string): Promise<boolean>;
+  /**
+   * 13.2 (v64) — rotates the user's key `id`: inserts `next` with the old key's name and scopes (copied inside the
+   * transaction, so the new key can never be wider), moves the old key's expires_at to min(its expiry, graceUntil) and
+   * records superseded_by and rotated_at. Atomic across instances: Postgres locks the old row (`FOR UPDATE`), SQLite
+   * runs one immediate write transaction, so of two rotations of one key exactly one succeeds and the other reads
+   * `already_rotated`. A revoked or expired key is `inactive`; a key of another user is `not_found`.
+   */
+  rotateApiKey(input: {
+    id: string;
+    userId: string;
+    next: { id: string; keyPrefix: string; keyHash: string; expiresAt: string | null };
+    graceUntil: string;
+    now: string;
+  }): Promise<ApiKeyRotationOutcome>;
+  /**
+   * 13.2 (v64) — records that an expiry alert for the credential goes out now, unless one went out after `notBefore`.
+   * True when this caller claimed it (exactly one of several instances racing wins), false otherwise or when the
+   * credential does not exist.
+   */
+  claimCredentialExpiryNotice(kind: "api_key" | "mcp_client", id: string, now: string, notBefore: string): Promise<boolean>;
   getMfaSecret(userId: string): Promise<{
     userId: string;
     secretIv: string;
@@ -2032,8 +2076,8 @@ export interface Store extends AiGatewayStore {
    * large purge never blocks it for long; Postgres skips rows another transaction holds (postgres/prune.ts).
    */
   pruneRetentionTable(table: RetentionTable, scope: RetentionScope): Promise<number>;
-  /** 13.3 — `table`'s rows aged before `before`, counted up to `cap` (the admin page's backlog). */
-  countRetentionDue(table: RetentionTable, input: { before: string; cap: number }): Promise<number>;
+  /** 13.3 — `table`'s rows aged before `before` (of one project, or but those of some: RetentionScope), counted up to `cap`. */
+  countRetentionDue(table: RetentionTable, input: Omit<RetentionScope, "limit"> & { cap: number }): Promise<number>;
   /** 13.3 — records one retention purge (counts only). */
   saveRetentionRun(run: RetentionRunView): Promise<void>;
   /** 13.3 — the latest retention purges, newest first. */
@@ -2052,6 +2096,19 @@ export interface Store extends AiGatewayStore {
   listLegalHoldItems(holdId: string, page: { offset: number; limit: number }): Promise<{ items: LegalHoldItemView[]; total: number }>;
   /** 13.3 — the active holds that keep anything deleting `target` would remove (empty: nothing held). */
   legalHoldsOn(target: LegalHoldTarget): Promise<LegalHoldRef[]>;
+  /** 13.3 R1 — stored per-project retention values, all of them or one project's. */
+  listRetentionPolicies(filter?: { scopeId?: string }): Promise<RetentionPolicyRecord[]>;
+  /**
+   * 13.3 R1 — sets a project's values in one transaction: a number of days replaces the class's value, null removes it
+   * (the class inherits the deployment's again). Returns the project's values before the change.
+   */
+  setRetentionPolicies(input: {
+    scopeId: string;
+    values: Partial<Record<RetentionDataClass, number | null>>;
+    updatedBy: string | null;
+  }): Promise<RetentionPolicyRecord[]>;
+  /** 13.3 R1 — which of these run ids still have run history (a rule event or tool call may outlive its run). */
+  listExistingExecutionIds(executionIds: readonly string[]): Promise<string[]>;
   saveWorkflowExecutionState(input: {
     id: string;
     workflowId: string;

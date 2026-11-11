@@ -171,9 +171,12 @@ export function holdMatchSql(table: HoldableTable, ref: string, lh = "lh"): stri
   if (anchors.workflows?.length) parts.push(`(${lh}.scope_type = 'workflow' AND ${lh}.scope_id IN (${anchors.workflows.join(", ")}))`);
   if (anchors.namespace) {
     const ns = anchors.namespace;
+    // Session keys are `project:<length>:<projectId>:<namespace>` (run-scope.ts projectSessionNamespace), where the
+    // namespace is by default `<workflowId>:<nodeId>`; older keys are that namespace alone.
+    const projectKey = (projectId: string) => `('project:' || length(${projectId}) || ':' || ${projectId})`;
     parts.push(
-      `(${lh}.scope_type = 'project' AND (${hasPrefix(ns, `${lh}.scope_id`)} OR EXISTS (SELECT 1 FROM workflows lhw WHERE lhw.project_id = ${lh}.scope_id AND ${hasPrefix(ns, "lhw.id")})))`,
-      `(${lh}.scope_type = 'workflow' AND (${hasPrefix(ns, `${lh}.scope_id`)} OR EXISTS (SELECT 1 FROM workflows lhw WHERE lhw.id = ${lh}.scope_id AND ${hasPrefix(ns, "lhw.project_id || ':' || lhw.id")})))`
+      `(${lh}.scope_type = 'project' AND (${hasPrefix(ns, projectKey(`${lh}.scope_id`))} OR ${hasPrefix(ns, `${lh}.scope_id`)} OR EXISTS (SELECT 1 FROM workflows lhw WHERE lhw.project_id = ${lh}.scope_id AND ${hasPrefix(ns, "lhw.id")})))`,
+      `(${lh}.scope_type = 'workflow' AND (${hasPrefix(ns, `${lh}.scope_id`)} OR EXISTS (SELECT 1 FROM workflows lhw WHERE lhw.id = ${lh}.scope_id AND (${hasPrefix(ns, `(${projectKey("lhw.project_id")} || ':' || lhw.id)`)} OR ${hasPrefix(ns, "lhw.project_id || ':' || lhw.id")}))))`
     );
   }
   const itemConditions = [

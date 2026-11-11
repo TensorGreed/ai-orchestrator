@@ -9,7 +9,7 @@ changes who may read the data; it only stops deletion.
 
 While a hold is active, the data it covers is kept from:
 
-- **Retention purges.** Run history, tool calls, rule events, approvals, cassettes, agent memory, usage, gateway
+- **Retention purges**, with the deployment's values and with a project's own. Run history, tool calls, rule events, approvals, cassettes, agent memory, usage, gateway
   requests, queue rows, eval runs, captured runs, rule simulations and the session tool cache all leave held rows out.
   They are purged by the first purge after the hold is released. The gateway's own sweep of decided approvals keeps
   held ones too.

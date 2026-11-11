@@ -272,6 +272,8 @@ export function createEgressGuardDetector(defaults: { resolver?: DnsResolver } =
     description: "Checks URL arguments against an allowlist after DNS resolution; blocks private, loopback, link-local and metadata addresses and redirects to them.",
     channels: ["tool_arguments"],
     categories: ["egress"],
+    // Resolves hosts at check time: a clean answer can turn into a block after a DNS change.
+    memoisable: false,
     async detect(input: GuardInput, context: DetectorContext) {
       const options: EgressOptions = {
         allowedHosts: Array.isArray(context.options.allowedHosts) ? (context.options.allowedHosts as string[]) : undefined,

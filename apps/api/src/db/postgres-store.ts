@@ -541,6 +541,15 @@ export class PostgresStore implements Store {
   async legalHoldsOn(...args: Parameters<Store["legalHoldsOn"]>): ReturnType<Store["legalHoldsOn"]> {
     return legalHolds.legalHoldsOn(this.ctx, ...args);
   }
+  async listRetentionPolicies(...args: Parameters<Store["listRetentionPolicies"]>): ReturnType<Store["listRetentionPolicies"]> {
+    return retention.listRetentionPolicies(this.ctx, ...args);
+  }
+  async setRetentionPolicies(...args: Parameters<Store["setRetentionPolicies"]>): ReturnType<Store["setRetentionPolicies"]> {
+    return retention.setRetentionPolicies(this.ctx, ...args);
+  }
+  async listExistingExecutionIds(...args: Parameters<Store["listExistingExecutionIds"]>): ReturnType<Store["listExistingExecutionIds"]> {
+    return retention.listExistingExecutionIds(this.ctx, ...args);
+  }
   async saveWorkflowExecutionState(...args: Parameters<Store["saveWorkflowExecutionState"]>): ReturnType<Store["saveWorkflowExecutionState"]> {
     return executions.saveWorkflowExecutionState(this.ctx, ...args);
   }
@@ -999,6 +1008,10 @@ export class PostgresStore implements Store {
   async revokeMcpClient(...args: Parameters<Store["revokeMcpClient"]>): ReturnType<Store["revokeMcpClient"]> {
     return mcp.revokeMcpClient(this.ctx, ...args);
   }
+
+  async rotateMcpClient(...args: Parameters<Store["rotateMcpClient"]>): ReturnType<Store["rotateMcpClient"]> {
+    return mcp.rotateMcpClient(this.ctx, ...args);
+  }
   async updateMcpClientNetwork(...args: Parameters<Store["updateMcpClientNetwork"]>): ReturnType<Store["updateMcpClientNetwork"]> {
     return mcp.updateMcpClientNetwork(this.ctx, ...args);
   }
@@ -1443,6 +1456,14 @@ export class PostgresStore implements Store {
   }
   async revokeApiKey(...args: Parameters<Store["revokeApiKey"]>): ReturnType<Store["revokeApiKey"]> {
     return auth.revokeApiKey(this.ctx, ...args);
+  }
+
+  async rotateApiKey(...args: Parameters<Store["rotateApiKey"]>): ReturnType<Store["rotateApiKey"]> {
+    return auth.rotateApiKey(this.ctx, ...args);
+  }
+
+  async claimCredentialExpiryNotice(...args: Parameters<Store["claimCredentialExpiryNotice"]>): ReturnType<Store["claimCredentialExpiryNotice"]> {
+    return auth.claimCredentialExpiryNotice(this.ctx, ...args);
   }
   async getMfaSecret(...args: Parameters<Store["getMfaSecret"]>): ReturnType<Store["getMfaSecret"]> {
     return auth.getMfaSecret(this.ctx, ...args);
