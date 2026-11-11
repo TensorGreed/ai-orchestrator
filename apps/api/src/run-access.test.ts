@@ -1365,6 +1365,31 @@ describe("project authorization: refused queued jobs (N6)", () => {
   });
 });
 
+describe("13.2 — a job queued with an API key runs with that key's limits", () => {
+  it("is refused outside the key's projects, and once the key is revoked, where its admin owner alone would run", async () => {
+    const { context, admin } = await seed({ queuePollMs: 20 });
+    const minted = await context.app.inject({ method: "POST", url: "/api/auth/api-keys", headers: { cookie: admin.cookie }, payload: { name: "ci", projects: ["default"] } });
+    expect(minted.statusCode, minted.body).toBe(200);
+    const keyId = minted.json<{ record: { id: string } }>().record.id;
+    const deadFor = async (id: string) => {
+      for (let attempt = 0; attempt < 200 && !(await context.store.listDlqItems(50)).some((item) => item.originalId === id); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return (await context.store.listDlqItems(50)).find((item) => item.originalId === id);
+    };
+    // The key reaches only the default project: a job for a workflow in "hidden" is refused.
+    await context.store.enqueueExecution({ id: "job-key-hidden", workflowId: "wf-hidden", payload: { workflowId: "wf-hidden", executionId: "exec-key-hidden", enqueuedByUserId: admin.id, enqueuedByApiKeyId: keyId }, maxAttempts: 3 });
+    expect(await deadFor("job-key-hidden")).toMatchObject({ attempts: 1, finalError: expect.stringContaining("can no longer run workflow wf-hidden") });
+    // Revoked: refused even in its own project.
+    expect((await context.store.revokeApiKey(keyId))).toBe(true);
+    await context.store.enqueueExecution({ id: "job-key-revoked", workflowId: "wf-open", payload: { workflowId: "wf-open", executionId: "exec-key-revoked", enqueuedByUserId: admin.id, enqueuedByApiKeyId: keyId }, maxAttempts: 3 });
+    expect(await deadFor("job-key-revoked")).toMatchObject({ attempts: 1, finalError: expect.stringContaining("can no longer run workflow wf-open") });
+    const reasons = (await context.store.listAuditLogs({ eventType: "queue.job_refused", pageSize: 10 })).items.map((entry) => (entry.metadata as { reason?: string }).reason).sort();
+    expect(reasons).toEqual(["no_execute_permission", "user_or_key_not_found"]);
+    expect(await context.store.getExecutionHistory("exec-key-hidden")).toBeFalsy();
+  });
+});
+
 describe("project authorization: editors create secrets (F1)", () => {
   it("role: an editor member creates a secret in their project and a workflow there uses it; a viewer member cannot; an editor cannot delete another's secret", async () => {
     const context = await createTestContext();

@@ -2574,6 +2574,168 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS ai_gateway_routes;
       DROP TABLE IF EXISTS ai_gateway_route_sets;
     `
+  },
+  {
+    version: 61,
+    description: "13.2 — sign-in sessions record how they were issued, their MFA time, a break-glass flag and why they ended",
+    // Every column is nullable or has a default, so sessions issued before the upgrade stay valid (no backfill).
+    // auth_method: password | oidc | saml | ldap | break_glass. ended_reason: logout | expired | idle | evicted |
+    // admin | policy. idx_sessions_user_live serves the per-user session list and the concurrent-session limit.
+    up: `
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_method TEXT;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ip_address TEXT;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS mfa_verified_at TIMESTAMPTZ NULL;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS break_glass INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ended_reason TEXT;
+      CREATE INDEX IF NOT EXISTS idx_sessions_user_live ON sessions(user_id, revoked_at, expires_at);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_sessions_user_live;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS ended_reason;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS break_glass;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS mfa_verified_at;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS user_agent;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS ip_address;
+      ALTER TABLE sessions DROP COLUMN IF EXISTS auth_method;
+    `
+  },
+  {
+    version: 62,
+    description: "13.2 — service accounts (users.kind, description, created_by) and the API key behind an approval decision",
+    // Existing users are people (kind defaults to 'human'; any other value is refused, and the code reads anything but
+    // 'human' as a service account). created_by is plain text, not a foreign key: deleting the admin who created a
+    // service account leaves the account working. Key scopes stay in api_keys.scopes_json. approval_requests records
+    // the API key that decided a request, or that started the run that asked, so the resumed run keeps that key's limits.
+    up: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'human';
+      ALTER TABLE users DROP CONSTRAINT IF EXISTS users_kind_check;
+      ALTER TABLE users ADD CONSTRAINT users_kind_check CHECK (kind IN ('human', 'service'));
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS description TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS created_by TEXT;
+      CREATE INDEX IF NOT EXISTS idx_users_kind ON users(kind);
+      ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS requested_by_api_key_id TEXT;
+      ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS decided_by_api_key_id TEXT;
+    `,
+    // A build before v62 reads every key scope as free text and every user as a person, so rolling back would widen
+    // limited keys to their owner's full role and leave service accounts usable. The down migration closes that first:
+    // it revokes every key of a service account and every key whose scopes name a role ceiling or a project, then
+    // disables each service account (viewer role, no project roles, no usable password, an email no sign-in can name)
+    // before it drops the columns. Nothing is widened; revoked keys have to be issued again.
+    down: `
+      UPDATE api_keys SET revoked_at = NOW()
+        WHERE revoked_at IS NULL
+          AND (user_id IN (SELECT id FROM users WHERE kind <> 'human')
+               OR scopes_json LIKE '%"role:%'
+               OR scopes_json LIKE '%"project:%');
+      DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE kind <> 'human');
+      DELETE FROM user_project_roles WHERE user_id IN (SELECT id FROM users WHERE kind <> 'human');
+      UPDATE users SET email = id || '@disabled.invalid', password_hash = '!', role = 'viewer', updated_at = NOW()
+        WHERE kind <> 'human';
+      ALTER TABLE approval_requests DROP COLUMN IF EXISTS decided_by_api_key_id;
+      ALTER TABLE approval_requests DROP COLUMN IF EXISTS requested_by_api_key_id;
+      DROP INDEX IF EXISTS idx_users_kind;
+      ALTER TABLE users DROP COLUMN IF EXISTS created_by;
+      ALTER TABLE users DROP COLUMN IF EXISTS description;
+      ALTER TABLE users DROP CONSTRAINT IF EXISTS users_kind_check;
+      ALTER TABLE users DROP COLUMN IF EXISTS kind;
+    `
+  },
+  {
+    version: 63,
+    description: "13.2 — the last TOTP time step accepted per user, so a code is accepted once",
+    // Nullable: an authenticator set up before the upgrade has no step recorded, and its next code is accepted as before.
+    up: `
+      ALTER TABLE mfa_secrets ADD COLUMN IF NOT EXISTS last_totp_step INTEGER;
+    `,
+    down: `
+      ALTER TABLE mfa_secrets DROP COLUMN IF EXISTS last_totp_step;
+    `
+  },
+  {
+    version: 64,
+    description: "13.2 — key and gateway client rotation with a grace window, and expiry warnings sent once a day",
+    // Every column is nullable, so keys and clients from before the upgrade behave as before (no backfill).
+    // api_keys: a rotated key names the key that replaced it (superseded_by) and when (rotated_at); its expires_at was
+    // already moved to the end of the grace window, so it needs no new check. mcp_clients: the old token's prefix and
+    // hash stay in previous_* until previous_expires_at. expiry_notified_at records the last credential.expiring alert
+    // so the leader sends at most one per credential per day, across instances and restarts.
+    up: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS superseded_by TEXT;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expiry_notified_at TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_token_prefix TEXT;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_token_hash TEXT;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_expires_at TIMESTAMPTZ;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS expiry_notified_at TIMESTAMPTZ;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_clients_previous_token_prefix ON mcp_clients(previous_token_prefix);
+    `,
+    // Rolling back ends every old gateway token still in its grace window (the previous_* columns go); rotated API
+    // keys keep the shortened expires_at, so nothing is widened.
+    down: `
+      DROP INDEX IF EXISTS idx_mcp_clients_previous_token_prefix;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS expiry_notified_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS rotated_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_expires_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_token_hash;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_token_prefix;
+      DROP INDEX IF EXISTS idx_api_keys_expires_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS expiry_notified_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS rotated_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS superseded_by;
+    `
+  },
+  {
+    version: 65,
+    description: "13.3 — retention: per-scope policies, the purge log, and indexes for purging by age",
+    // retention_policies is read from per-project retention on; scope_type is 'project' (other scopes are refused by
+    // the API). retention_runs keeps counts only, for 90 days. The indexes serve purging and counting by age.
+    // On a large install the execution_history index can take minutes to build, and CREATE INDEX blocks writes to the
+    // table meanwhile. To avoid that, build it beforehand with
+    //   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_execution_history_workflow_started ON execution_history(workflow_id, started_at);
+    // (and the same for the others): IF NOT EXISTS then skips each one here.
+    up: `
+      CREATE TABLE IF NOT EXISTS retention_policies (
+        id TEXT PRIMARY KEY,
+        scope_type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        data_class TEXT NOT NULL,
+        days INTEGER NOT NULL,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_retention_policies_scope ON retention_policies(scope_type, scope_id, data_class);
+      CREATE TABLE IF NOT EXISTS retention_runs (
+        id TEXT PRIMARY KEY,
+        started_at TIMESTAMPTZ NOT NULL,
+        finished_at TIMESTAMPTZ NOT NULL,
+        instance_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        counts_json TEXT NOT NULL DEFAULT '{}',
+        capped_json TEXT NOT NULL DEFAULT '[]',
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_retention_runs_started ON retention_runs(started_at);
+      CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_started ON execution_history(workflow_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_project_started ON mcp_tool_calls(project_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_project_created ON guard_events(project_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_session_memory_updated ON session_memory(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_session_artifacts_updated ON session_artifacts(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_session_tool_cache_created ON session_tool_cache(created_at);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_session_tool_cache_created;
+      DROP INDEX IF EXISTS idx_session_artifacts_updated;
+      DROP INDEX IF EXISTS idx_session_memory_updated;
+      DROP INDEX IF EXISTS idx_guard_events_project_created;
+      DROP INDEX IF EXISTS idx_mcp_tool_calls_project_started;
+      DROP INDEX IF EXISTS idx_execution_history_workflow_started;
+      DROP TABLE IF EXISTS retention_runs;
+      DROP TABLE IF EXISTS retention_policies;
+    `
   }
 ];
 

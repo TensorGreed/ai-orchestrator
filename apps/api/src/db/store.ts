@@ -105,6 +105,8 @@ import type {
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
+import type { RetentionDataClass, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
+import type { RetentionScope, RetentionTable } from "./retention-tables.js";
 
 /** The decision `decideApprovalRequest` records. */
 export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0];
@@ -114,6 +116,102 @@ export type ReleaseApprovalDecisionInput = Parameters<Store["decideReleaseApprov
 export type GateCaseDecisionRecordInput = Parameters<Store["decideGateCaseRequest"]>[0];
 
 /** Phase 13.1 — the claim a queued run's writes are fenced on. */
+/** 13.2 (v61) — how a sign-in session was issued (`sessions.auth_method`; null on rows from before v61). */
+/** 13.2 (v62) — `users.kind`: a person, or a service account (no password, signs in only with API keys). */
+export type StoredUserKind = "human" | "service";
+
+/** A user row as the store reads it (the password hash included). */
+/** An API key row as listed (never the hash). */
+export interface StoredApiKey {
+  id: string;
+  userId: string;
+  name: string;
+  keyPrefix: string;
+  scopes: string[];
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  /** 13.2 (v64) — the key that replaced this one in a rotation; null when it was never rotated. */
+  supersededBy: string | null;
+  /** 13.2 (v64) — when this key was rotated (its expiresAt then marks the end of the grace window). */
+  rotatedAt: string | null;
+}
+
+/** 13.2 — what `Store.rotateApiKey` did. */
+export type ApiKeyRotationOutcome =
+  | { status: "rotated"; previousExpiresAt: string }
+  | { status: "not_found" }
+  | { status: "inactive" }
+  | { status: "already_rotated"; supersededBy: string };
+
+/** 13.2 — what `Store.rotateMcpClient` did. */
+export type McpClientRotationOutcome =
+  | { status: "rotated"; client: McpClient }
+  | { status: "not_found" }
+  | { status: "inactive" }
+  | { status: "conflict" };
+
+export interface StoredUser {
+  id: string;
+  email: string;
+  passwordHash: string;
+  role: string;
+  kind: StoredUserKind;
+  /** Service accounts: what the account is for. */
+  description: string | null;
+  /** Service accounts: the admin who created it (kept as text; deleting that admin leaves the account working). */
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A user row without the password hash (listings). */
+export type StoredUserSummary = Omit<StoredUser, "passwordHash">;
+
+/** 13.2 — a new service account: stored with kind `service` and an unusable password hash. */
+export interface ServiceAccountCreate {
+  id: string;
+  email: string;
+  role: string;
+  description: string | null;
+  createdBy: string | null;
+}
+
+export type SessionAuthMethod = "password" | "oidc" | "saml" | "ldap" | "break_glass";
+
+/** 13.2 (v61) — why a session ended (`sessions.ended_reason`; null while live, and on rows revoked before v61). */
+export type SessionEndReason = "logout" | "expired" | "idle" | "evicted" | "admin" | "policy";
+
+/** 13.2 — a sign-in session row as both stores return it. */
+export interface LoginSession {
+  id: string;
+  userId: string;
+  expiresAt: string;
+  createdAt: string;
+  lastSeenAt: string;
+  revokedAt: string | null;
+  authMethod: SessionAuthMethod | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  /** When the session last passed an MFA check (TOTP or IdP-asserted MFA); null when it never did. */
+  mfaVerifiedAt: string | null;
+  breakGlass: boolean;
+  endedReason: SessionEndReason | null;
+}
+
+/** 13.2 — what saveSession writes. Everything after `expiresAt` is optional, so a session can still be saved bare. */
+export interface LoginSessionInput {
+  id: string;
+  userId: string;
+  expiresAt: string;
+  authMethod?: SessionAuthMethod | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  mfaVerifiedAt?: string | null;
+  breakGlass?: boolean;
+}
+
 export interface QueueClaimFence {
   queueItemId: string;
   claimToken: string;
@@ -207,6 +305,15 @@ export interface PendingChallengeInput {
   payloadSealed: string;
   /** Lifetime from now, on the store's clock (the database's on Postgres). */
   ttlMs: number;
+}
+
+/** 13.2 — a pending challenge as listed (still stored). */
+export interface PendingChallengeRow {
+  idHash: string;
+  userId: string | null;
+  scope: string | null;
+  payloadSealed: string;
+  expired: boolean;
 }
 
 /** Phase 13.1 — a pending challenge taken out of the store (it is gone afterwards, whatever the caller does with it). */
@@ -318,6 +425,12 @@ export type McpGatewayApprovalCreateResult =
  * were requested, whatever the history retention, so the table and its argument previews never grow without bound.
  */
 export const MCP_GATEWAY_APPROVAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The WHERE clause of a user listing by kind: anything but 'human' lists as a service account, as storedUserFromRow reads it. */
+export function userKindWhere(kind: StoredUserKind | undefined): string {
+  if (!kind) return "";
+  return kind === "human" ? "WHERE kind = 'human'" : "WHERE kind <> 'human'";
+}
 
 /** The cutoff for `MCP_GATEWAY_APPROVAL_RETENTION_MS` at `now`. */
 export function mcpGatewayApprovalRetentionCutoff(now: string): string {
@@ -730,6 +843,20 @@ export interface Store extends AiGatewayStore {
   /** 13.2 — replaces the client's address list and certificate pin; null when the client does not exist. */
   updateMcpClientNetwork(id: string, input: { allowedIps: string[]; certFingerprints: string[]; certSubject: string | null }): Promise<McpClient | null>;
   touchMcpClient(id: string, at: string): Promise<void>;
+  /**
+   * 13.2 (v64) — rotates a gateway client's token in one UPDATE: the current prefix and hash move to previous_* (valid
+   * until `previousExpiresAt`; null ends the old token at once) and the new ones take their place. It applies only
+   * while the client's current prefix is still `expectedTokenPrefix`, so of two rotations racing on any instances
+   * exactly one succeeds and the other reads `conflict`. A revoked or expired client is `inactive`.
+   */
+  rotateMcpClient(input: {
+    id: string;
+    expectedTokenPrefix: string;
+    tokenPrefix: string;
+    tokenHash: string;
+    previousExpiresAt: string | null;
+    now: string;
+  }): Promise<McpClientRotationOutcome>;
   /** 12.6 — an admin's change of a client's name or rate limit (null removes it); null when the client does not exist. */
   updateMcpClient(id: string, patch: { name?: string; rateLimit?: McpGatewayRateLimit | null }): Promise<McpClient | null>;
   /** MCP tool-call telemetry rows of one execution, oldest first. */
@@ -1374,23 +1501,14 @@ export interface Store extends AiGatewayStore {
 
   // ---- Users, sessions, API keys, MFA and SSO identities
 
+  /** Every user row, service accounts included (first-run bootstrap only asks whether any exists). */
   countUsers(): Promise<number>;
-  getUserByEmail(email: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null>;
-  getUserById(id: string): Promise<{
-    id: string;
-    email: string;
-    passwordHash: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  } | null>;
+  getUserByEmail(email: string): Promise<StoredUser | null>;
+  getUserById(id: string): Promise<StoredUser | null>;
+  /**
+   * Inserts or updates a user. An insert is a person (`kind` human); an update never changes the kind, description or
+   * creator.
+   */
   saveUser(input: {
     id: string;
     email: string;
@@ -1403,13 +1521,15 @@ export interface Store extends AiGatewayStore {
     createdAt: string;
     updatedAt: string;
   }>;
-  listUsers(): Promise<Array<{
-    id: string;
-    email: string;
-    role: string;
-    createdAt: string;
-    updatedAt: string;
-  }>>;
+  /** Users, newest first; `kind` keeps only people or only service accounts (default: both). */
+  listUsers(options?: { kind?: StoredUserKind }): Promise<StoredUserSummary[]>;
+  /**
+   * 13.2 — creates a service account (kind `service`, the unusable password hash `!`). Null when a user with the
+   * email exists.
+   */
+  createServiceAccount(input: ServiceAccountCreate): Promise<StoredUserSummary | null>;
+  /** 13.2 — changes a service account's role and/or description; null when no service account has the id. */
+  updateServiceAccount(id: string, patch: { role?: string; description?: string | null }): Promise<StoredUserSummary | null>;
   /**
    * Roadmap 7.3 — a deployment-level invite: a pending user (an unusable password, so it cannot sign in with one) and
    * its one-time invite, written together. An email whose user still has an unaccepted invite (pending) is invited
@@ -1428,34 +1548,65 @@ export interface Store extends AiGatewayStore {
   /** Marks the user's unaccepted invites accepted (the user signed in another way, for example SSO). */
   closeUserInvites(userId: string, now: string): Promise<number>;
   /** Roadmap 7.3 — one page of listUsers' rows (newest first, id tiebreak) and the number of users. */
-  listUsersPage(options: { limit: number; offset: number }): Promise<{
-    items: Array<{ id: string; email: string; role: string; createdAt: string; updatedAt: string }>;
+  listUsersPage(options: { limit: number; offset: number; kind?: StoredUserKind }): Promise<{
+    items: StoredUserSummary[];
     total: number;
   }>;
   updateUserRole(id: string, role: string): Promise<boolean>;
+  /**
+   * 13.2 — changes a user's global role, but never demotes the last admin: when the user is an accepted admin and
+   * `role` is not admin, the change happens only if another accepted admin remains (an invited user who never accepted
+   * does not count). Counted and written in one transaction (Postgres locks the admin rows), so two admins demoting
+   * each other at once cannot both succeed.
+   */
+  updateUserRoleKeepingAdmin(id: string, role: string): Promise<"updated" | "not_found" | "last_admin">;
   deleteUser(id: string): Promise<boolean>;
-  getSession(sessionId: string): Promise<{
-    id: string;
-    userId: string;
-    expiresAt: string;
-    createdAt: string;
-    lastSeenAt: string;
-    revokedAt: string | null;
-  } | null>;
-  saveSession(input: {
-    id: string;
-    userId: string;
-    expiresAt: string;
-  }): Promise<{
-    id: string;
-    userId: string;
-    expiresAt: string;
-    createdAt: string;
-    lastSeenAt: string;
-  }>;
+  /**
+   * 13.2 — deletes a user (as deleteUser), but never the last accepted admin who is a person: a service account never
+   * counts, since it cannot sign in or get a break-glass link. Counted and deleted in one transaction (Postgres locks
+   * the admin rows), so two deletes at once cannot remove both of the last two admins.
+   */
+  deleteUserKeepingAdmin(id: string): Promise<"deleted" | "not_found" | "last_admin">;
+  getSession(sessionId: string): Promise<LoginSession | null>;
+  /**
+   * Inserts a session. Only services/session-service.ts calls this (issueSession), so every sign-in path records the
+   * same fields. A source scan in session-service.test.ts looks for `saveSession(` calls elsewhere; it is a tripwire,
+   * not a guarantee (an indexed or destructured call would pass it).
+   */
+  saveSession(input: LoginSessionInput): Promise<LoginSession>;
   touchSession(sessionId: string): Promise<void>;
-  revokeSession(sessionId: string): Promise<void>;
+  /** Ends a live session with an optional reason; false when it was already ended or does not exist. */
+  revokeSession(sessionId: string, reason?: SessionEndReason): Promise<boolean>;
+  /** Ends every session past its expiry (reason `expired`). */
   revokeExpiredSessions(): Promise<void>;
+  /**
+   * 13.2 — a user's sessions, newest first (created_at, then id). `liveOnly`: not revoked and not past expiry at
+   * `now` (default: the current time).
+   */
+  listUserSessions(userId: string, options?: { liveOnly?: boolean; now?: string }): Promise<LoginSession[]>;
+  /** 13.2 — ends all of a user's live sessions except `exceptId`; returns how many were ended. */
+  revokeUserSessions(userId: string, options: { exceptId?: string; reason: SessionEndReason }): Promise<number>;
+  /**
+   * 13.2 — records that a live session of `userId` just passed an MFA check. False (nothing written) when the session
+   * is missing, revoked, past its expiry, or belongs to another user.
+   */
+  markSessionMfaVerified(sessionId: string, input: { userId: string; at: string }): Promise<boolean>;
+  /** 13.2 — forgets a session's MFA check (after MFA was turned off); false when the session does not exist. */
+  clearSessionMfaVerified(sessionId: string): Promise<boolean>;
+  /**
+   * 13.2 — deletes sessions that ended (revoked, or past their expiry) before `before`; returns how many. Personal
+   * fields are already cleared when a session ends; this removes the rows themselves after the retention window.
+   */
+  purgeEndedSessions(before: string): Promise<number>;
+  /**
+   * 13.2 — keeps the user's `keep` newest live sessions (created_at, then id) and ends the rest with `reason`;
+   * returns the ended ids, oldest first. `protectId` (the session being issued) is never ended: it is kept first and
+   * counts toward `keep`. Atomic across instances: Postgres locks the user row (`FOR UPDATE`) for the transaction,
+   * SQLite runs one immediate write transaction, so two sign-ins racing past a limit leave exactly `keep` live
+   * sessions (each racer's own session survives its own call). Break-glass sessions are neither counted nor ended:
+   * a normal sign-in never ends a break-glass session.
+   */
+  revokeOldestUserSessions(userId: string, keep: number, reason: SessionEndReason, options?: { protectId?: string }): Promise<string[]>;
   saveApiKey(input: {
     id: string;
     userId: string;
@@ -1465,31 +1616,30 @@ export interface Store extends AiGatewayStore {
     scopes?: string[];
     expiresAt?: string | null;
   }): Promise<void>;
-  listApiKeys(userId?: string): Promise<Array<{
-    id: string;
-    userId: string;
-    name: string;
-    keyPrefix: string;
-    scopes: string[];
-    lastUsedAt: string | null;
-    expiresAt: string | null;
-    revokedAt: string | null;
-    createdAt: string;
-  }>>;
-  findApiKeyByPrefix(prefix: string): Promise<{
-    id: string;
-    userId: string;
-    name: string;
-    keyPrefix: string;
-    keyHash: string;
-    scopes: string[];
-    lastUsedAt: string | null;
-    expiresAt: string | null;
-    revokedAt: string | null;
-    createdAt: string;
-  } | null>;
+  listApiKeys(userId?: string): Promise<StoredApiKey[]>;
+  findApiKeyByPrefix(prefix: string): Promise<(StoredApiKey & { keyHash: string }) | null>;
   touchApiKey(id: string): Promise<void>;
   revokeApiKey(id: string, userId?: string): Promise<boolean>;
+  /**
+   * 13.2 (v64) — rotates the user's key `id`: inserts `next` with the old key's name and scopes (copied inside the
+   * transaction, so the new key can never be wider), moves the old key's expires_at to min(its expiry, graceUntil) and
+   * records superseded_by and rotated_at. Atomic across instances: Postgres locks the old row (`FOR UPDATE`), SQLite
+   * runs one immediate write transaction, so of two rotations of one key exactly one succeeds and the other reads
+   * `already_rotated`. A revoked or expired key is `inactive`; a key of another user is `not_found`.
+   */
+  rotateApiKey(input: {
+    id: string;
+    userId: string;
+    next: { id: string; keyPrefix: string; keyHash: string; expiresAt: string | null };
+    graceUntil: string;
+    now: string;
+  }): Promise<ApiKeyRotationOutcome>;
+  /**
+   * 13.2 (v64) — records that an expiry alert for the credential goes out now, unless one went out after `notBefore`.
+   * True when this caller claimed it (exactly one of several instances racing wins), false otherwise or when the
+   * credential does not exist.
+   */
+  claimCredentialExpiryNotice(kind: "api_key" | "mcp_client", id: string, now: string, notBefore: string): Promise<boolean>;
   getMfaSecret(userId: string): Promise<{
     userId: string;
     secretIv: string;
@@ -1517,6 +1667,11 @@ export interface Store extends AiGatewayStore {
    */
   replaceMfaBackupCodes(input: { userId: string; expected: readonly string[]; next: readonly string[] }): Promise<boolean>;
   deleteMfaSecret(userId: string): Promise<boolean>;
+  /**
+   * 13.2 (v63) — records that the TOTP time step `step` was accepted for this user. Compare-and-set: true only when no
+   * step at or after it was accepted before, so one code is accepted once (RFC 6238 §5.2) even across instances.
+   */
+  markTotpStepUsed(userId: string, step: number): Promise<boolean>;
   findSsoIdentity(provider: string, subject: string): Promise<{
     id: string;
     userId: string;
@@ -1903,7 +2058,37 @@ export interface Store extends AiGatewayStore {
     deletePausedState?: boolean;
     cancelClaimed?: boolean;
   }): Promise<CancelExecutionResult>;
+  /**
+   * The whole history retention in one call, without a row cap: history, tool calls, cassettes, rule events, decided
+   * approvals, gateway approvals and finished queue rows before the cut-off. The retention service prunes the same rows
+   * table by table (pruneRetentionTable); this stays as the reference its equivalence test compares against.
+   */
   pruneExecutionHistory(input: { before: string }): Promise<number>;
+  /**
+   * 13.3 — deletes `table`'s rows aged before `scope.before` (see RETENTION_TABLES), at most `scope.limit` of them, in
+   * batches of RETENTION_BATCH_ROWS; returns how many it deleted. SQLite yields to the event loop between batches, so a
+   * large purge never blocks it for long; Postgres skips rows another transaction holds (postgres/prune.ts).
+   */
+  pruneRetentionTable(table: RetentionTable, scope: RetentionScope): Promise<number>;
+  /** 13.3 — `table`'s rows aged before `before` (of one project, or but those of some: RetentionScope), counted up to `cap`. */
+  countRetentionDue(table: RetentionTable, input: Omit<RetentionScope, "limit"> & { cap: number }): Promise<number>;
+  /** 13.3 — records one retention purge (counts only). */
+  saveRetentionRun(run: RetentionRunView): Promise<void>;
+  /** 13.3 — the latest retention purges, newest first. */
+  listRetentionRuns(limit: number): Promise<RetentionRunView[]>;
+  /** 13.3 R1 — stored per-project retention values, all of them or one project's. */
+  listRetentionPolicies(filter?: { scopeId?: string }): Promise<RetentionPolicyRecord[]>;
+  /**
+   * 13.3 R1 — sets a project's values in one transaction: a number of days replaces the class's value, null removes it
+   * (the class inherits the deployment's again). Returns the project's values before the change.
+   */
+  setRetentionPolicies(input: {
+    scopeId: string;
+    values: Partial<Record<RetentionDataClass, number | null>>;
+    updatedBy: string | null;
+  }): Promise<RetentionPolicyRecord[]>;
+  /** 13.3 R1 — which of these run ids still have run history (a rule event or tool call may outlive its run). */
+  listExistingExecutionIds(executionIds: readonly string[]): Promise<string[]>;
   saveWorkflowExecutionState(input: {
     id: string;
     workflowId: string;
@@ -1984,6 +2169,8 @@ export interface Store extends AiGatewayStore {
     id: string;
     status: "approved" | "rejected" | "timed_out" | "canceled";
     decidedByUserId?: string | null;
+    /** 13.2 — the API key that decided, when one did. */
+    decidedByApiKeyId?: string | null;
     decidedBy?: string | null;
     reason?: string | null;
     edits?: Record<string, unknown> | null;
@@ -2224,6 +2411,11 @@ export interface Store extends AiGatewayStore {
   deletePendingChallenges(input: { kind: string; scope: string; userId: string | null }): Promise<number>;
   /** Removes expired challenges. Returns how many. */
   prunePendingChallenges(): Promise<number>;
+  /**
+   * 13.2 — up to `limit` live and expired challenges of `kind`, oldest first, without taking them out (the break-glass
+   * end sweep reads its claims; it still consumes each one before acting on it).
+   */
+  listPendingChallenges(input: { kind: string; limit: number }): Promise<PendingChallengeRow[]>;
   /**
    * Counts one hit in the fixed window of `key`, in one atomic statement: a key whose window (`windowMs`) has passed
    * starts a new one at 1. Returns the count in the current window and the milliseconds left in it.

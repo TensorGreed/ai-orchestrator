@@ -27,8 +27,8 @@ import {
   parseMcpRuntimeRejection,
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
-import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { providerDestinationRef } from "@ai-orchestrator/provider-sdk";
+import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
+import { ToolCallAssembler, chargedUsage, estimateAnswerTokens, estimateRequestTokens, isStreamUsageRefusal, providerDestinationRef } from "@ai-orchestrator/provider-sdk";
 import {
   GUARD_EFFECTIVE_PROFILE_REF,
   NODE_ACTIVITY_LIMIT,
@@ -156,6 +156,7 @@ import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch"
 import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
 import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPythonCode, type CodeSandboxPlan } from "./code-sandbox";
 import { runWithSandboxOwner } from "./quickjs-sandbox";
+import { ownUsage, ownUsageOf, runAsUsageOwner, withoutUsage } from "./usage-ownership";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
@@ -202,6 +203,28 @@ import {
   type GuardRuntimeDependencies
 } from "./guard-runtime";
 import { profileUsesLabels, type GuardDictionary } from "@ai-orchestrator/guard-sdk";
+import {
+  boundaryProfiles,
+  callerInputCheck,
+  checkModelBoundary,
+  checkRetrievedDocuments,
+  exportCallerInput,
+  exportRenderings,
+  hasUntrustedPiece,
+  importCallerInput,
+  importRenderings,
+  isCallerInputRun,
+  joinPromptParts,
+  numberedContextPieces,
+  promptPartPieces,
+  recordRendering,
+  rewriteTemplatePieces,
+  stackChecksPerDocument,
+  templateBoundaryPieces,
+  type BoundaryPiece,
+  type PieceSources,
+  type PromptPart
+} from "./model-boundary";
 import {
   createLabelScanner,
   currentLabelScope,
@@ -314,6 +337,85 @@ function runTelemetryBlobs(result: WorkflowExecutionResult): Record<string, unkn
   }
   return out;
 }
+
+/** A finished child's model usage, for `WorkflowExecutionDependencies.onSubWorkflowUsage`. */
+export interface SubWorkflowUsage {
+  workflowId: string;
+  status: WorkflowExecutionResult["status"];
+  mode: "sync" | "async" | "tool";
+  durationMs: number;
+  telemetry: Record<string, unknown>[];
+}
+
+/**
+ * What `admitSubWorkflow` is told about a child it is asked to start: how it runs (`async` children run beside their
+ * caller; sync and tool children one at a time) and the admission of the child it runs inside, if any.
+ */
+export interface SubWorkflowAdmissionRequest {
+  mode: SubWorkflowUsage["mode"];
+  parent?: SubWorkflowAdmission;
+}
+
+/** A started child, as the host admitted it: told when the child stops running. */
+export interface SubWorkflowAdmission {
+  /** The child stopped running (finished, failed or paused); its usage, if any, was reported first. */
+  settle(): void;
+  /** A Workflow Tool's child keeps running after its call timed out, beside its caller. */
+  detach?(): void;
+}
+
+/**
+ * Hands a finished child's model usage to the run (nothing when it made no model call); never fails the caller.
+ * `keepsPaused`: a paused child that will not resume (a Workflow Tool's) is reported as it is.
+ */
+async function reportSubWorkflowUsage(
+  dependencies: WorkflowExecutionDependencies,
+  result: WorkflowExecutionResult,
+  mode: SubWorkflowUsage["mode"],
+  keepsPaused = false
+): Promise<void> {
+  // A paused child's usage so far comes back with its result after the resume.
+  if (!dependencies.onSubWorkflowUsage || (result.status === "waiting_approval" && !keepsPaused)) return;
+  const telemetry = runTelemetryBlobs(result);
+  if (telemetry.length === 0) return;
+  const durationMs = result.completedAt ? Math.max(0, Date.parse(result.completedAt) - Date.parse(result.startedAt)) : 0;
+  try {
+    await dependencies.onSubWorkflowUsage({ workflowId: result.workflowId, status: result.status, mode, durationMs: Number.isFinite(durationMs) ? durationMs : 0, telemetry });
+  } catch {
+    // Recording usage never changes how the run goes.
+  }
+}
+
+/** A failed or stopped model call's usage, for `onUnrecordedModelUsage`; never fails the caller or hides its error. */
+async function reportUnrecordedUsage(
+  dependencies: WorkflowExecutionDependencies,
+  call: { providerId: string; model: string; usage: ReturnType<typeof chargedUsage>["usage"]; estimated: boolean; latencyMs: number }
+): Promise<void> {
+  if (!dependencies.onUnrecordedModelUsage) return;
+  try {
+    await dependencies.onUnrecordedModelUsage({
+      providerId: call.providerId,
+      model: call.model,
+      usage: call.usage,
+      ...(call.estimated ? { usageEstimated: true } : {}),
+      latencyMs: call.latencyMs,
+      llmCallCount: 1,
+      callFailed: true
+    });
+  } catch {
+    // Recording usage never changes how the run goes.
+  }
+}
+
+/** Tells the host a child stopped running; never fails the caller. */
+function settleSubWorkflow(admission: SubWorkflowAdmission | void): void {
+  try {
+    admission?.settle();
+  } catch {
+    // Bookkeeping only.
+  }
+}
+
 /** Phase 16 — label segments of an agent node: its user prompt's reads, and reads made while its loop runs. */
 const AGENT_USER_PROMPT_SEGMENT = "user_prompt";
 const AGENT_RUN_SEGMENT = "agent_run";
@@ -355,6 +457,31 @@ export interface WorkflowExecutionDependencies {
    * on top of the parent's dependencies when an Execute Workflow node runs.
    */
   scopeSubWorkflow?: (workflow: Workflow) => Partial<WorkflowExecutionDependencies>;
+  /**
+   * Asked before an Execute Workflow node or a Workflow Tool starts a child (sync or async; not when a paused child
+   * resumes). Throws to refuse it, for example when a used-up budget applies to the run; the node (or the tool call)
+   * fails with the error's message. May return an admission, which is settled when the child stops running (after its
+   * usage was reported). Absent: every child starts.
+   */
+  admitSubWorkflow?: (workflow: Workflow, request: SubWorkflowAdmissionRequest) => Promise<SubWorkflowAdmission | void>;
+  /** The admission of the child these dependencies run (set by the engine for a child's run). */
+  subWorkflowAdmission?: SubWorkflowAdmission;
+  /**
+   * The model usage of a child an Execute Workflow node or a Workflow Tool ran, once the child has stopped (also when
+   * it failed, for an async child whenever it ends, and for a Workflow Tool's child that ended after its call timed
+   * out): its own nodes' `_telemetry` blobs and those of the workflows its agents called as tools. A grandchild
+   * reports itself through the same hook (children inherit it), so each run is reported once. A paused Execute
+   * Workflow child is reported when it finishes after the resume. With this hook a Workflow Tool's child is reported
+   * here and not added to its agent node's `_childTelemetry`.
+   */
+  onSubWorkflowUsage?: (usage: SubWorkflowUsage) => void | Promise<void>;
+  /**
+   * Model usage that no node output carries: a streamed model call that failed after the provider started answering,
+   * or was cancelled or timed out while in flight. It is charged an estimate (the prompt and what had streamed; a usage
+   * frame the provider sent is used instead). Children inherit the hook, so the run that started the tree pays.
+   * Absent: such calls record no usage.
+   */
+  onUnrecordedModelUsage?: (telemetry: Record<string, unknown>) => void | Promise<void>;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   /**
    * 12.2 — secrets flagged "sensitive output": a node whose config references one of them produces sensitive output
@@ -528,6 +655,11 @@ export interface ExecuteWorkflowRequest {
   executionId?: string;
   customData?: Record<string, unknown>;
   triggerType?: string;
+  /**
+   * Phase 12 coverage — the trigger that produced the run's input when it is not `triggerType` (a replay of a
+   * recorded run gives the recording's trigger). Decides whether the input is a caller's own words at the model boundary.
+   */
+  inputTriggerType?: string;
   triggeredBy?: string;
   /**
    * Phase 10.2 — whose role the MCP tool policy is evaluated with. Absent →
@@ -3451,6 +3583,160 @@ function samplingGuardFor(
   };
 }
 
+/** Phase 12 coverage — the parts a model node's prompts were built from, and which one a server prompt replaced. */
+interface ModelBoundaryParts {
+  user: PromptPart[];
+  system: PromptPart[];
+  serverPrompt?: "system" | "user";
+}
+
+/** Phase 12 coverage — the first of these fields the template data has, as a prompt part (`fallback` when none). */
+function promptRead(templateData: Record<string, unknown>, keys: readonly string[], fallback = ""): PromptPart {
+  for (const key of keys) {
+    const value = readData(templateData, key);
+    if (value !== undefined && value !== null) return { text: String(value), path: key };
+  }
+  return fallback;
+}
+
+/** Phase 12 coverage — what splits a node's prompt reads into pieces; absent without label provenance. */
+function boundarySources(context: NodeRuntimeContext): PieceSources | undefined {
+  if (!context.labelScope) return undefined;
+  return {
+    scope: context.labelScope,
+    ...(context.nodeOutputs ? { run: context.nodeOutputs } : {}),
+    parentOutputs: context.parentOutputs,
+    ...(isCallerInputRun(context.globals.input_trigger_type ?? context.globals.trigger_type) ? { callerInput: callerInputCheck(context.labelScope.run) } : {})
+  };
+}
+
+/** Phase 12 coverage — remember how a template node's output is made up, for the model boundary of its readers. */
+function recordTemplateRendering(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies,
+  rendered: string,
+  pieces: readonly TemplatePiece[]
+): void {
+  if (!dependencies.guard) return;
+  const sources = boundarySources(context);
+  if (!sources?.run) return;
+  const split = templateBoundaryPieces(pieces, rendered, sources);
+  if (split) recordRendering(sources.run, node.id, rendered, split);
+}
+
+/**
+ * Phase 12 coverage — the model boundary of a model call made outside the
+ * agent loop (LLM Call, chat model nodes, the chains): every untrusted piece
+ * of its prompts is judged on the run's stack before the call. Under the
+ * built-in rule set applied automatically, the check only observes (shadow)
+ * for now; a rule set someone bound acts as written. Unchanged when nothing
+ * in the prompts is outside content or no rule set has a tool result channel.
+ */
+async function guardModelBoundary(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies,
+  prompts: { systemPrompt: string; userPrompt: string },
+  parts: ModelBoundaryParts
+): Promise<{ systemPrompt: string; userPrompt: string }> {
+  if (!dependencies.guard) return prompts;
+  const sources = boundarySources(context);
+  if (!sources) return prompts;
+  const fields: Array<{ field: "system_prompt" | "user_prompt"; pieces: BoundaryPiece[] }> = [
+    { field: "system_prompt", pieces: promptPartPieces(parts.system, prompts.systemPrompt, sources, parts.serverPrompt === "system") },
+    { field: "user_prompt", pieces: promptPartPieces(parts.user, prompts.userPrompt, sources, parts.serverPrompt === "user") }
+  ];
+  if (!hasUntrustedPiece(fields)) return prompts;
+  const resolution = await resolveGuardRun(dependencies.guard);
+  const profiles = boundaryProfiles(resolution.stack);
+  if (profiles.length === 0) return prompts;
+  const outcome = await checkModelBoundary({
+    scope: { ...guardScopeFor(node, context, dependencies, "retrieval", { memo: true }), ...(resolution.source === "instance" ? { shadowUnderBuiltin: true } : {}) },
+    profiles,
+    fields,
+    ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+    replay: Boolean(dependencies.replayNodeHook),
+    what: `${node.name || node.type} (model call)`
+  });
+  return { systemPrompt: outcome.fields[0]!.text, userPrompt: outcome.fields[1]!.text };
+}
+
+/**
+ * Phase 12 coverage — an agent's model boundary: the untrusted pieces of its
+ * system and user prompt, judged with the agent's own rule sets (its rules
+ * port's, or the run's) and added to its trace. Returns the checked prompts
+ * when a piece was rewritten or withheld; undefined when nothing changed.
+ */
+async function guardAgentModelBoundary(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies,
+  session: AgentGuardSession,
+  prompts: Record<"system" | "user", { text: string; pieces: TemplatePiece[]; fromServer: boolean }>
+): Promise<{ systemPrompt: string; userPrompt: string; userPromptPieces: TemplatePiece[] } | undefined> {
+  const sources = boundarySources(context);
+  const profiles = boundaryProfiles(session.profiles);
+  if (!sources || profiles.length === 0) return undefined;
+  // A prompt an MCP server wrote is outside content as a whole; so is one whose pieces no longer add up to it.
+  const piecesOf = (prompt: (typeof prompts)["user"]): BoundaryPiece[] =>
+    (prompt.fromServer ? undefined : templateBoundaryPieces(prompt.pieces, prompt.text, sources)) ?? (prompt.text ? [{ text: prompt.text, untrusted: true }] : []);
+  const fields: Array<{ field: "system_prompt" | "user_prompt"; pieces: BoundaryPiece[] }> = [
+    { field: "system_prompt", pieces: piecesOf(prompts.system) },
+    { field: "user_prompt", pieces: piecesOf(prompts.user) }
+  ];
+  if (!hasUntrustedPiece(fields)) return undefined;
+  const outcome = await checkModelBoundary({
+    scope: guardScopeFor(node, context, dependencies, "retrieval", { memo: true }),
+    profiles,
+    fields,
+    ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+    replay: Boolean(dependencies.replayNodeHook),
+    what: `${node.name || node.type} (agent)`,
+    // Under the built-in rule set applied automatically, the run's own input only observes here: the agent's prompt check acts on it.
+    ...(session.trace().source === "instance" ? { shadowInputUnderBuiltin: true } : {})
+  });
+  for (const check of outcome.checks) {
+    session.note({ iteration: 0, channel: "tool_result", placement: "retrieval", action: check.action, verdicts: check.verdicts, ...(check.approved ? { approved: true } : {}) });
+  }
+  const [system, user] = outcome.fields;
+  if (!system!.changed && !user!.changed) return undefined;
+  return {
+    systemPrompt: system!.text,
+    userPrompt: user!.text,
+    userPromptPieces: rewriteTemplatePieces(prompts.user.pieces, user!.pieces)
+  };
+}
+
+/**
+ * Phase 12 coverage — a retrieval node's output: under `retrieval.perDocument`
+ * each document is judged first (blocked ones dropped, rewrites applied), and
+ * the numbered context is rebuilt from what is left and remembered piece by
+ * piece for the model boundary.
+ */
+async function retrievalOutput<T extends { text: string }>(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies,
+  documents: T[]
+): Promise<{ documents: T[]; context: string; contentRules?: { dropped: number; redacted: number } }> {
+  let kept = documents;
+  let contentRules: { dropped: number; redacted: number } | undefined;
+  if (dependencies.guard && documents.length > 0) {
+    // A rule set that cannot be loaded skips the per-document checks: the model boundary downstream fails closed on it.
+    const resolution = await resolveGuardRun(dependencies.guard).catch(() => undefined);
+    const profiles = resolution ? boundaryProfiles(resolution.stack) : [];
+    if (profiles.length > 0 && stackChecksPerDocument(profiles)) {
+      const checked = await checkRetrievedDocuments({ scope: guardScopeFor(node, context, dependencies, "retrieval", { memo: true }), profiles, documents });
+      kept = checked.documents;
+      contentRules = { dropped: checked.dropped, redacted: checked.redacted };
+    }
+  }
+  const numbered = numberedContextPieces(kept, node.id);
+  if (dependencies.guard && context.nodeOutputs) recordRendering(context.nodeOutputs, node.id, numbered.text, numbered.pieces);
+  return { documents: kept, context: numbered.text, ...(contentRules ? { contentRules } : {}) };
+}
+
 async function runLlmNode(input: {
   nodeId: string;
   provider: LLMProviderConfig;
@@ -3459,9 +3745,13 @@ async function runLlmNode(input: {
   dependencies: WorkflowExecutionDependencies;
   /** Phase 16 — the calling node, for destination rules on the model call. */
   outbound?: { node: WorkflowNode; context: NodeRuntimeContext };
+  /** Phase 12 coverage — how the prompts were built, for the model boundary check (with `outbound`). */
+  boundary?: ModelBoundaryParts;
 }): Promise<Record<string, unknown>> {
   let { systemPrompt, userPrompt } = input;
   if (input.outbound) {
+    // Phase 12 coverage — outside content in the prompts, judged before anything is sent.
+    if (input.boundary) ({ systemPrompt, userPrompt } = await guardModelBoundary(input.outbound.node, input.outbound.context, input.dependencies, { systemPrompt, userPrompt }, input.boundary));
     // Phase 16 — destination rules: what this model call sends, judged against the provider it goes to.
     ({ systemPrompt, userPrompt } = await guardModelPrompt(input.outbound.node, input.outbound.context, input.dependencies, input.provider, { systemPrompt, userPrompt }));
   }
@@ -3505,6 +3795,85 @@ async function runLlmNode(input: {
   }
 }
 
+/**
+ * Providers whose streamed calls ask for the final usage frame (`stream_options.include_usage`) unless the model sets
+ * `extra.streamUsage: false`. OpenAI-compatible servers and Ollama differ in whether they accept the field, so they
+ * leave it out unless the model sets `extra.streamUsage: true`; their streamed usage is otherwise estimated.
+ */
+const STREAM_USAGE_BY_DEFAULT = new Set(["openai", "azure_openai"]);
+
+/** Endpoints and models that refused `stream_options` in this process: their streamed calls leave it out. */
+const streamUsageRefused = new Set<string>();
+const STREAM_USAGE_REFUSED_MAX = 1000;
+
+function streamUsageKey(provider: LLMProviderConfig): string {
+  const extra = provider.extra ?? {};
+  return JSON.stringify([
+    String(provider.providerId),
+    provider.baseUrl ?? "",
+    typeof extra.endpoint === "string" ? extra.endpoint : "",
+    typeof extra.apiVersion === "string" ? extra.apiVersion : "",
+    typeof extra.deployment === "string" ? extra.deployment : "",
+    provider.model ?? ""
+  ]);
+}
+
+function wantsStreamUsage(provider: LLMProviderConfig): boolean {
+  const setting = provider.extra?.streamUsage;
+  if (setting === false) return false;
+  if (setting !== true && !STREAM_USAGE_BY_DEFAULT.has(String(provider.providerId))) return false;
+  return !streamUsageRefused.has(streamUsageKey(provider));
+}
+
+/**
+ * The model's stream. When it was asked for the usage frame and the provider refuses the request because of that
+ * option (400 or 422 naming `stream_options`, see `isStreamUsageRefusal`) before sending anything, it is asked once
+ * more without it, and the endpoint is remembered so later calls leave the field out: a workflow that streamed before
+ * never fails because usage was requested. The usage of such a call is estimated. A model tape records only the retry.
+ */
+async function* streamWithUsageFallback(
+  adapter: ReturnType<ProviderRegistry["get"]>,
+  request: ProviderCallRequest,
+  context: ProviderExecutionContext,
+  warn: (message: string, metadata: Record<string, unknown>) => void
+): AsyncGenerator<LLMStreamChunk> {
+  const generateStream = adapter.generateStream!.bind(adapter);
+  let started = false;
+  try {
+    for await (const chunk of generateStream(request, context)) {
+      started = true;
+      yield chunk;
+    }
+    return;
+  } catch (error) {
+    // Only a refusal that names the option is retried; any other 400 or 422 is the request's own error.
+    if (started || request.options?.streamUsage !== true || !isStreamUsageRefusal(error)) throw error;
+    warn("The model refused the streamed request with the usage option (stream_options); retrying without it, and its usage is estimated", {
+      providerId: String(request.provider.providerId),
+      model: request.provider.model,
+      status: (error as { statusCode?: number }).statusCode,
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 300)
+    });
+  }
+  throwIfAborted(context.signal);
+  const { options: _usageOption, ...withoutUsage } = request;
+  // Remembered once the request without the field is accepted (its first chunk, or an empty end): the field was the
+  // cause. A retry that fails the same way leaves nothing remembered.
+  const remember = () => {
+    if (streamUsageRefused.size >= STREAM_USAGE_REFUSED_MAX) streamUsageRefused.clear();
+    streamUsageRefused.add(streamUsageKey(request.provider));
+  };
+  let accepted = false;
+  for await (const chunk of generateStream(withoutUsage, context)) {
+    if (!accepted) {
+      accepted = true;
+      remember();
+    }
+    yield chunk;
+  }
+  if (!accepted) remember();
+}
+
 async function runLlmCall(
   input: {
     nodeId: string;
@@ -3516,44 +3885,67 @@ async function runLlmCall(
 ): Promise<Record<string, unknown>> {
   if (input.dependencies.onLLMDelta && providerAdapter.generateStream) {
     let streamedText = "";
-    const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
+    const toolCallAssembler = new ToolCallAssembler();
     let llmDeltaIndex = 0;
+    let reportedUsage: Extract<LLMStreamChunk, { type: "usage" }>["usage"] | undefined;
+    const streamRequest: ProviderCallRequest = {
+      provider: input.provider,
+      messages,
+      // Ask for the final usage frame where the provider takes it (see STREAM_USAGE_BY_DEFAULT); without one the usage
+      // is estimated below.
+      ...(wantsStreamUsage(input.provider) ? { options: { streamUsage: true } } : {})
+    };
+    const warn = (message: string, metadata: Record<string, unknown>) => {
+      if (input.dependencies.logger) input.dependencies.logger(message, { nodeId: input.nodeId, ...metadata });
+      else console.warn(`[llm_call ${input.nodeId}] ${message}`, metadata);
+    };
+    const streamStartedMs = Date.now();
+
+    const estimateStream = () =>
+      chargedUsage(reportedUsage, () => ({
+        input: estimateRequestTokens(streamRequest),
+        output: estimateAnswerTokens(
+          streamedText,
+          toolCallAssembler.calls().map((entry) => ({ name: entry.name, arguments: entry.argumentsText }))
+        )
+      }));
+    let answering = false;
 
     throwIfAborted(input.dependencies.abortSignal);
-    for await (const chunk of providerAdapter.generateStream(
-      {
-        provider: input.provider,
-        messages
-      },
-      providerCallContext(input.dependencies, input.nodeId)
-    )) {
-      throwIfAborted(input.dependencies.abortSignal);
-      if (chunk.type === "text_delta" && chunk.textDelta) {
-        streamedText += chunk.textDelta;
-        await input.dependencies.onLLMDelta({
-          nodeId: input.nodeId,
-          delta: chunk.textDelta,
-          index: llmDeltaIndex
-        });
-        llmDeltaIndex += 1;
-      } else if (chunk.type === "tool_call_delta") {
-        const toolCallId = chunk.toolCallId ?? `toolcall_${toolCallById.size}`;
-        const existing = toolCallById.get(toolCallId) ?? {
-          id: toolCallId,
-          name: chunk.name ?? `tool_${toolCallById.size}`,
-          argumentsText: ""
-        };
-        if (typeof chunk.name === "string" && chunk.name) {
-          existing.name = chunk.name;
+    try {
+      for await (const chunk of streamWithUsageFallback(providerAdapter, streamRequest, providerCallContext(input.dependencies, input.nodeId), warn)) {
+        answering = true;
+        throwIfAborted(input.dependencies.abortSignal);
+        if (chunk.type === "usage") {
+          reportedUsage = chunk.usage;
+        } else if (chunk.type === "text_delta" && chunk.textDelta) {
+          streamedText += chunk.textDelta;
+          await input.dependencies.onLLMDelta({
+            nodeId: input.nodeId,
+            delta: chunk.textDelta,
+            index: llmDeltaIndex
+          });
+          llmDeltaIndex += 1;
+        } else if (chunk.type === "tool_call_delta") {
+          toolCallAssembler.add(chunk);
         }
-        if (typeof chunk.argumentsDelta === "string") {
-          existing.argumentsText += chunk.argumentsDelta;
-        }
-        toolCallById.set(toolCallId, existing);
       }
+    } catch (error) {
+      // The one place every failed, cancelled or timed-out stream passes: once the provider started answering, the
+      // call is charged, though the node gets no output. A request refused or stopped before any answer (an HTTP
+      // error, a retry wait, a cancel while connecting) is not charged.
+      if (answering) {
+        await reportUnrecordedUsage(input.dependencies, {
+          providerId: input.provider.providerId,
+          model: input.provider.model,
+          ...estimateStream(),
+          latencyMs: Math.max(0, Date.now() - streamStartedMs)
+        });
+      }
+      throw error;
     }
 
-    const toolCalls = [...toolCallById.values()].map((entry) => {
+    const toolCalls = toolCallAssembler.calls().map((entry) => {
       let parsedArguments: Record<string, unknown> = {};
       try {
         parsedArguments = JSON.parse(entry.argumentsText || "{}") as Record<string, unknown>;
@@ -3567,6 +3959,10 @@ async function runLlmCall(
       };
     });
 
+    // Budgets and spend read `_telemetry`: a stream whose provider sent no usage frame is charged an estimate of the
+    // request and the answer received (the same estimate as the /v1 gateway), never zero.
+    const charged = estimateStream();
+
     return {
       text: streamedText,
       answer: streamedText,
@@ -3574,18 +3970,28 @@ async function runLlmCall(
       raw: {
         streamed: true
       },
-      _provider: input.provider
+      _provider: input.provider,
+      _telemetry: ownUsage({
+        providerId: input.provider.providerId,
+        model: input.provider.model,
+        usage: charged.usage,
+        ...(charged.estimated ? { usageEstimated: true } : {}),
+        latencyMs: Math.max(0, Date.now() - streamStartedMs)
+      })
     };
   }
 
-  const response = await providerAdapter.generate(
-    {
-      provider: input.provider,
-      messages
-    },
-    providerCallContext(input.dependencies, input.nodeId)
-  );
+  const request: ProviderCallRequest = { provider: input.provider, messages };
+  const response = await providerAdapter.generate(request, providerCallContext(input.dependencies, input.nodeId));
   throwIfAborted(input.dependencies.abortSignal);
+  // A provider that reports no usage (some compatible servers) is charged an estimate, as a stream is.
+  const charged = chargedUsage(response.usage, () => ({
+    input: estimateRequestTokens(request),
+    output: estimateAnswerTokens(
+      response.content ?? "",
+      (response.toolCalls ?? []).map((call) => ({ name: call.name, arguments: JSON.stringify(call.arguments ?? {}) }))
+    )
+  }));
 
   return {
     text: response.content,
@@ -3596,12 +4002,13 @@ async function runLlmCall(
     // Phase 7.1 — surface telemetry on the node output so execution_history
     // captures token counts + provider-call latency. The Studio canvas reads
     // these via getExecutionHistory's nodeResults.
-    _telemetry: {
+    _telemetry: ownUsage({
       providerId: input.provider.providerId,
       model: input.provider.model,
-      usage: response.usage,
+      usage: charged.usage,
+      ...(charged.estimated ? { usageEstimated: true } : {}),
       latencyMs: response.latencyMs
-    }
+    })
   };
 }
 
@@ -4009,7 +4416,8 @@ function replayStubFor(node: WorkflowNode, dependencies: WorkflowExecutionDepend
 
 function resolveReplayStub(stub: ReplayNodeStub, context: NodeRuntimeContext): unknown {
   if (stub.kind === "pass_through") {
-    return mergeParentOutputs(context.parentOutputs);
+    // Passes its input on, as the live node did: the parents' model usage stays theirs (usage-ownership.ts).
+    return withoutUsage(mergeParentOutputs(context.parentOutputs));
   }
   if (stub.kind === "error") {
     throw new Error(`Replayed from the recording: ${stub.message}`);
@@ -4023,7 +4431,8 @@ function executeNode(
   context: NodeRuntimeContext,
   dependencies: WorkflowExecutionDependencies
 ): Promise<unknown> {
-  return runInLabelScope(context.labelScope, () => executeNodeHandler(node, context, dependencies));
+  // A node's output keeps only the model usage it made itself (usage-ownership.ts), so a pass-through is not counted.
+  return runInLabelScope(context.labelScope, () => runAsUsageOwner(() => executeNodeHandler(node, context, dependencies)));
 }
 
 async function executeNodeHandler(
@@ -4051,7 +4460,8 @@ async function executeNodeHandler(
 
   const replayStub = replayStubFor(node, dependencies);
   if (replayStub) {
-    return resolveReplayStub(replayStub, context);
+    // The recorded answer stands in for the node's own call, usage included.
+    return ownUsageOf(resolveReplayStub(replayStub, context));
   }
 
   const templateData = buildTemplateData(context, config);
@@ -4544,10 +4954,12 @@ async function executeNodeHandler(
       // Phase 6.4 — inside a Workflow Tool's child, the calling agent's write controls reach this workflow too (tighten-only).
       const targetWorkflow = dependencies.callerWriteControls ? withCallerWriteControls(loadedTarget, dependencies.callerWriteControls) : loadedTarget;
 
-      const childDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
+      const scopedChildDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
         ? { ...dependencies, ...dependencies.scopeSubWorkflow(targetWorkflow) }
         : dependencies;
       const mode = config.mode === "async" ? "async" : "sync";
+      const resume = context.resumeDecision;
+      const resumingChild = resume && resume.nodeId === node.id && resume.handoff.kind === "sub_workflow" ? resume.handoff : undefined;
       const inputMapping = toRecord(config.inputMapping);
       const mappedInput: Record<string, unknown> = {};
       for (const [parentKey, childKeyValue] of Object.entries(inputMapping)) {
@@ -4568,6 +4980,9 @@ async function executeNodeHandler(
       // Phase 16 — the child's trigger takes this node's input labels.
       const childInputLabels = context.labelScope?.inputLabels();
       if (mode === "async") {
+        // A new child may be refused (a used-up budget of the run, counting the children still running).
+        const asyncAdmission = await dependencies.admitSubWorkflow?.(targetWorkflow, { mode: "async", ...(dependencies.subWorkflowAdmission ? { parent: dependencies.subWorkflowAdmission } : {}) });
+        const childDependencies: WorkflowExecutionDependencies = asyncAdmission ? { ...scopedChildDependencies, subWorkflowAdmission: asyncAdmission } : scopedChildDependencies;
         // Fire-and-forget
         executeWorkflow(
           {
@@ -4580,60 +4995,74 @@ async function executeNodeHandler(
             callStack: [...context.callStack]
           },
           childDependencies
-        ).catch(() => {
-          // Intentionally ignored — async sub-workflow errors do not propagate
-        });
+        )
+          .then(
+            async (asyncResult) => await reportSubWorkflowUsage(dependencies, asyncResult, "async"),
+            () => {
+              // Intentionally ignored — async sub-workflow errors do not propagate
+            }
+          )
+          .finally(() => settleSubWorkflow(asyncAdmission));
         return { async: true, workflowId, status: "enqueued" };
       }
 
       // Phase 11.2 — a paused child is not saved on its own: its paused state
       // travels in this run's hand-off, and the parent pauses at this node.
       let childPause: Parameters<NonNullable<WorkflowExecutionDependencies["persistPausedExecution"]>>[0] | undefined;
-      const pauseCapturingDependencies: WorkflowExecutionDependencies = {
-        ...childDependencies,
-        persistPausedExecution: async (paused) => {
-          childPause = paused;
-        }
-      };
-      const resume = context.resumeDecision;
-      const resumingChild = resume && resume.nodeId === node.id && resume.handoff.kind === "sub_workflow" ? resume.handoff : undefined;
       // The child resumes under the scope of the workflow this node calls
       // now (checked by loadWorkflow above), never a stored one of another id.
       if (resumingChild && resumingChild.childState.workflow?.id !== targetWorkflow.id) {
         throw new Error(`The paused sub-workflow does not match '${workflowId}', so this run cannot resume it.`);
       }
-      const childResult = resumingChild
-        ? await executeWorkflow(
-            {
-              workflow: resumingChild.childState.workflow,
-              triggerType: "sub_workflow",
-              triggeredBy: context.workflow.id,
-              toolPolicySubject: context.toolPolicySubject,
-              callStack: [...context.callStack],
-              resumeState: resumingChild.childState,
-              approvalDecision: {
-                decision: resume!.decision,
-                ...(resume!.actedBy ? { actedBy: resume!.actedBy } : {}),
-                ...(resume!.reason ? { reason: resume!.reason } : {}),
-                ...(resume!.edits ? { edits: resume!.edits } : {}),
-                ...(resume!.editedFields ? { editedFields: resume!.editedFields } : {}),
-                ...(resume!.requestId ? { requestId: resume!.requestId } : {})
-              }
-            },
-            pauseCapturingDependencies
-          )
-        : await executeWorkflow(
-            {
-              workflow: targetWorkflow,
-              input: mappedInput,
-              ...(childInputLabels ? { inputLabels: childInputLabels } : {}),
-              triggerType: "sub_workflow",
-              triggeredBy: context.workflow.id,
-              toolPolicySubject: context.toolPolicySubject,
-              callStack: [...context.callStack]
-            },
-            pauseCapturingDependencies
-          );
+      // A new child may be refused (a used-up budget of the run); a paused one that resumes has started already.
+      const syncAdmission = resumingChild
+        ? undefined
+        : await dependencies.admitSubWorkflow?.(targetWorkflow, { mode: "sync", ...(dependencies.subWorkflowAdmission ? { parent: dependencies.subWorkflowAdmission } : {}) });
+      const pauseCapturingDependencies: WorkflowExecutionDependencies = {
+        ...scopedChildDependencies,
+        ...(syncAdmission ? { subWorkflowAdmission: syncAdmission } : {}),
+        persistPausedExecution: async (paused) => {
+          childPause = paused;
+        }
+      };
+      let childResult: WorkflowExecutionResult;
+      try {
+        childResult = resumingChild
+          ? await executeWorkflow(
+              {
+                workflow: resumingChild.childState.workflow,
+                triggerType: "sub_workflow",
+                triggeredBy: context.workflow.id,
+                toolPolicySubject: context.toolPolicySubject,
+                callStack: [...context.callStack],
+                resumeState: resumingChild.childState,
+                approvalDecision: {
+                  decision: resume!.decision,
+                  ...(resume!.actedBy ? { actedBy: resume!.actedBy } : {}),
+                  ...(resume!.reason ? { reason: resume!.reason } : {}),
+                  ...(resume!.edits ? { edits: resume!.edits } : {}),
+                  ...(resume!.editedFields ? { editedFields: resume!.editedFields } : {}),
+                  ...(resume!.requestId ? { requestId: resume!.requestId } : {})
+                }
+              },
+              pauseCapturingDependencies
+            )
+          : await executeWorkflow(
+              {
+                workflow: targetWorkflow,
+                input: mappedInput,
+                ...(childInputLabels ? { inputLabels: childInputLabels } : {}),
+                triggerType: "sub_workflow",
+                triggeredBy: context.workflow.id,
+                toolPolicySubject: context.toolPolicySubject,
+                callStack: [...context.callStack]
+              },
+              pauseCapturingDependencies
+            );
+        await reportSubWorkflowUsage(dependencies, childResult, "sync");
+      } finally {
+        settleSubWorkflow(syncAdmission);
+      }
 
       if (childResult.status === "error") {
         throw new Error(childResult.error ?? `Sub-workflow '${workflowId}' execution failed.`);
@@ -4750,7 +5179,9 @@ async function executeNodeHandler(
     case "prompt_template": {
       const template = typeof config.template === "string" ? config.template : "{{user_prompt}}";
       const outputKey = typeof config.outputKey === "string" && config.outputKey ? config.outputKey : "prompt";
-      const rendered = renderTemplate(template, templateData);
+      const pieces: TemplatePiece[] = [];
+      const rendered = renderTemplate(template, templateData, { pieces });
+      recordTemplateRendering(node, context, dependencies, rendered, pieces);
       return {
         [outputKey]: rendered,
         prompt: rendered
@@ -4761,14 +5192,16 @@ async function executeNodeHandler(
       const provider = config.provider as LLMProviderConfig;
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
+      const userPart = promptRead(templateData, [promptKey, "user_prompt"]);
+      const systemPart = promptRead(templateData, [systemPromptKey]);
       const prompts = await applyServerPromptToLlmNode({
         node,
         config,
         templateData,
         context,
         dependencies,
-        userPrompt: String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? ""),
-        systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
+        userPrompt: joinPromptParts([userPart]),
+        systemPrompt: joinPromptParts([systemPart])
       });
       const output = await runLlmNode({
         outbound: { node, context },
@@ -4776,7 +5209,8 @@ async function executeNodeHandler(
         provider,
         userPrompt: prompts.userPrompt,
         systemPrompt: prompts.systemPrompt,
-        dependencies
+        dependencies,
+        boundary: { user: [userPart], system: [systemPart], ...(prompts.trace ? { serverPrompt: prompts.trace.target } : {}) }
       });
       return prompts.trace ? { ...output, _serverPrompt: prompts.trace } : output;
     }
@@ -4794,14 +5228,16 @@ async function executeNodeHandler(
 
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
+      const userPart = promptRead(templateData, [promptKey, "user_prompt"]);
+      const systemPart = promptRead(templateData, [systemPromptKey]);
       const prompts = await applyServerPromptToLlmNode({
         node,
         config,
         templateData,
         context,
         dependencies,
-        userPrompt: String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? ""),
-        systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
+        userPrompt: joinPromptParts([userPart]),
+        systemPrompt: joinPromptParts([systemPart])
       });
       const output = await runLlmNode({
         outbound: { node, context },
@@ -4809,7 +5245,8 @@ async function executeNodeHandler(
         provider,
         userPrompt: prompts.userPrompt,
         systemPrompt: prompts.systemPrompt,
-        dependencies
+        dependencies,
+        boundary: { user: [userPart], system: [systemPart], ...(prompts.trace ? { serverPrompt: prompts.trace.target } : {}) }
       });
       return prompts.trace ? { ...output, _serverPrompt: prompts.trace } : output;
     }
@@ -4823,14 +5260,16 @@ async function executeNodeHandler(
 
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
+      const userPart = promptRead(templateData, [promptKey, "user_prompt"]);
+      const systemPart = promptRead(templateData, [systemPromptKey]);
       const prompts = await applyServerPromptToLlmNode({
         node,
         config,
         templateData,
         context,
         dependencies,
-        userPrompt: String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? ""),
-        systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
+        userPrompt: joinPromptParts([userPart]),
+        systemPrompt: joinPromptParts([systemPart])
       });
       const provider: LLMProviderConfig = {
         providerId: "azure_openai",
@@ -4854,7 +5293,8 @@ async function executeNodeHandler(
         provider,
         userPrompt: prompts.userPrompt,
         systemPrompt: prompts.systemPrompt,
-        dependencies
+        dependencies,
+        boundary: { user: [userPart], system: [systemPart], ...(prompts.trace ? { serverPrompt: prompts.trace.target } : {}) }
       });
       return prompts.trace ? { ...output, _serverPrompt: prompts.trace } : output;
     }
@@ -4867,8 +5307,10 @@ async function executeNodeHandler(
 
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
-      const userPrompt = String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? "");
-      const systemPrompt = String(readData(templateData, systemPromptKey) ?? "");
+      const userPart = promptRead(templateData, [promptKey, "user_prompt"]);
+      const systemPart = promptRead(templateData, [systemPromptKey]);
+      const userPrompt = joinPromptParts([userPart]);
+      const systemPrompt = joinPromptParts([systemPart]);
       const provider: LLMProviderConfig = {
         providerId: "gemini",
         model,
@@ -4884,7 +5326,8 @@ async function executeNodeHandler(
         userPrompt,
         systemPrompt,
         dependencies,
-        outbound: { node, context }
+        outbound: { node, context },
+        boundary: { user: [userPart], system: [systemPart] }
       });
     }
 
@@ -5394,10 +5837,13 @@ async function executeNodeHandler(
         documents = await store.similaritySearch(query, topK, embedder);
       }
 
+      // Phase 12 coverage — per-document checks when a rule set asks for them; the context as the model boundary sees it.
+      const retrieved = await retrievalOutput(node, context, dependencies, documents);
       return {
         query,
-        documents,
-        context: documents.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n"),
+        documents: retrieved.documents,
+        context: retrieved.context,
+        ...(retrieved.contentRules ? { contentRules: retrieved.contentRules } : {}),
         // Phase 9.4 — drop into a prompt template (e.g. {{citationInstructions}})
         // to teach the model to emit [N] markers that extract_citations
         // can resolve back to chunks.
@@ -5449,11 +5895,12 @@ async function executeNodeHandler(
         throw new Error(`Unknown reranker providerId: ${providerId}`);
       }
 
-      const documents = await adapter.rerank({ query, documents: upstreamDocs, topN });
+      const reranked = await retrievalOutput(node, context, dependencies, await adapter.rerank({ query, documents: upstreamDocs, topN }));
       return {
         query,
-        documents,
-        context: documents.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n"),
+        documents: reranked.documents,
+        context: reranked.context,
+        ...(reranked.contentRules ? { contentRules: reranked.contentRules } : {}),
         citationInstructions: DEFAULT_CITATION_INSTRUCTIONS
       };
     }
@@ -6081,13 +6528,13 @@ async function executeNodeHandler(
         // Phase 10.5 — sampling requests the tool made count in the run's usage like any model call.
         ...(directMcp.samplingHandler.requestCount() > 0 && samplingModel && samplingProvider
           ? {
-              _telemetry: {
+              _telemetry: ownUsage({
                 providerId: samplingProvider,
                 model: samplingModel,
                 usage: samplingUsage,
                 llmCallCount: directMcp.samplingHandler.requestCount(),
                 samplingUsage
-              }
+              })
             }
           : {})
       };
@@ -6135,7 +6582,9 @@ async function executeNodeHandler(
         typeof config.systemPromptTemplate === "string" ? config.systemPromptTemplate : "{{system_prompt}}";
       const userTemplate = typeof config.userPromptTemplate === "string" ? config.userPromptTemplate : "{{user_prompt}}";
       const sessionTemplate = typeof config.sessionIdTemplate === "string" ? config.sessionIdTemplate : "{{session_id}}";
-      let systemPrompt = renderTemplate(systemTemplate, templateData);
+      // Phase 12 coverage — the system prompt's pieces too, for the model boundary.
+      const systemPromptPieces: TemplatePiece[] = [];
+      let systemPrompt = renderTemplate(systemTemplate, templateData, { pieces: systemPromptPieces });
       // Phase 16 — the user prompt's reads are kept apart: a guard rewrite of the prompt declassifies them alone.
       // 12.2 — its pieces are kept too, so spotlighting can mark the untrusted ones.
       const userPromptPieces: TemplatePiece[] = [];
@@ -6270,7 +6719,8 @@ async function executeNodeHandler(
       let activeToolCall: { toolName: string; toolCallId?: string; labels?: DataLabels } | undefined;
       const workflowToolResultLabels = new Map<string, DataLabels>();
       const workflowToolResultKey = (toolName: string, toolCallId: string | undefined) => `${toolName}\u0000${toolCallId ?? ""}`;
-      // Phase 6.4 — the children's model usage, counted in this node's usage (and so in the run's spend and budgets).
+      // Phase 6.4 — the children's model usage, counted in this node's usage (and so in the run's spend and budgets),
+      // when the host does not take it through onSubWorkflowUsage.
       const childTelemetry: Record<string, unknown>[] = [];
       if (workflowToolConfigs.length > 0) {
         const runWorkflowTool: WorkflowToolRunner = async (call) => {
@@ -6289,15 +6739,31 @@ async function executeNodeHandler(
             return failure(error instanceof Error ? error.message : String(error));
           }
           if (!child) return failure(`Workflow '${call.workflowId}' was not found.`);
+          // A new child may be refused (a used-up budget of the run, counting the children it ran before).
+          let admission: SubWorkflowAdmission | void;
+          try {
+            admission = await dependencies.admitSubWorkflow?.(child, { mode: "tool", ...(dependencies.subWorkflowAdmission ? { parent: dependencies.subWorkflowAdmission } : {}) });
+          } catch (error) {
+            return failure(error instanceof Error ? error.message : String(error));
+          }
           // A per-call limit from the node; without one the call is bounded by the run's own timeout.
           const timeoutMs = call.nodeId ? workflowToolTimeouts.get(call.nodeId) : undefined;
           const callAbort = new AbortController();
           const abortFromRun = () => callAbort.abort(dependencies.abortSignal?.reason);
           if (dependencies.abortSignal?.aborted) abortFromRun();
           else dependencies.abortSignal?.addEventListener("abort", abortFromRun, { once: true });
+          let scoped: WorkflowExecutionDependencies;
+          try {
+            scoped = dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies;
+          } catch (error) {
+            dependencies.abortSignal?.removeEventListener("abort", abortFromRun);
+            settleSubWorkflow(admission);
+            return failure(error instanceof Error ? error.message : String(error));
+          }
           const childDependencies: WorkflowExecutionDependencies = {
-            ...(dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies),
+            ...scoped,
             abortSignal: callAbort.signal,
+            ...(admission ? { subWorkflowAdmission: admission } : {}),
             ...(context.workflow.settings ? { callerWriteControls: context.workflow.settings } : {}),
             // v1: a child that stops for an approval is not kept; the call fails and says why.
             persistPausedExecution: async () => undefined
@@ -6333,18 +6799,32 @@ async function executeNodeHandler(
                 })
               : undefined;
           let childResult: WorkflowExecutionResult;
+          let detached = false;
           try {
             const settled = limit ? await Promise.race([childRun, limit]) : await childRun;
             if (settled === "timed_out") {
-              childRun.catch(() => undefined);
+              // It runs on beside the agent: its spend is recorded for the run when it stops.
+              detached = true;
+              try {
+                admission?.detach?.();
+              } catch {
+                // Bookkeeping only.
+              }
+              childRun
+                .then(async (late) => await reportSubWorkflowUsage(dependencies, late, "tool", true), () => undefined)
+                .finally(() => settleSubWorkflow(admission));
               return failure(`The workflow '${child.name}' did not finish within this tool's ${timeoutMs} ms limit.`);
             }
             childResult = settled;
+            // The run's host counts it at once (so the next call's check sees it, and it survives this node failing);
+            // without that hook it counts in this node's usage.
+            if (dependencies.onSubWorkflowUsage) await reportSubWorkflowUsage(dependencies, childResult, "tool", true);
+            else childTelemetry.push(...runTelemetryBlobs(childResult));
           } finally {
             if (timer) clearTimeout(timer);
             dependencies.abortSignal?.removeEventListener("abort", abortFromRun);
+            if (!detached) settleSubWorkflow(admission);
           }
-          childTelemetry.push(...runTelemetryBlobs(childResult));
           // The child's output labels, or on failure what its failed node read: its error text can quote that.
           const outputLabels = runOutputLabels.get(childResult);
           if (outputLabels && active) workflowToolResultLabels.set(workflowToolResultKey(active.toolName, active.toolCallId), outputLabels);
@@ -6525,6 +7005,21 @@ async function executeNodeHandler(
                 }
               })
             : undefined;
+        // Phase 12 coverage — outside content in the prompts, judged before the agent starts (enforced, as tool results are).
+        if (guardSession) {
+          const checked = await guardAgentModelBoundary(node, context, dependencies, guardSession, {
+            system: { text: systemPrompt, pieces: systemPromptPieces, fromServer: serverPromptUsed?.target === "system" },
+            user: { text: userPrompt, pieces: userPromptPieces, fromServer: userPromptFromServer }
+          });
+          if (checked) {
+            systemPrompt = checked.systemPrompt;
+            userPrompt = checked.userPrompt;
+            userPromptPieces.splice(0, userPromptPieces.length, ...checked.userPromptPieces);
+            modelMessages.length = 0;
+            if (systemPrompt.trim()) modelMessages.push({ role: "system", content: systemPrompt });
+            modelMessages.push({ role: "user", content: userPrompt });
+          }
+        }
         let workerPendingApproval: ApprovalHandoffRequest | undefined;
         let toolGatePendingApproval: ApprovalHandoffRequest | undefined;
         const writeToolSession = context.writeToolSession ?? context.writeToolCalls?.session();
@@ -6919,16 +7414,16 @@ async function executeNodeHandler(
           // Phase 12.1 — which profiles guarded this agent and every verdict (masked evidence only).
           ...(guardSession ? { _guard: guardSession.trace() } : {}),
           // Phase 7.1 — surface cumulative agent telemetry on the node output.
-          _telemetry: {
+          _telemetry: ownUsage({
             providerId: provider.providerId,
             model: provider.model,
             usage: usageWithSampling,
             latencyMs: agentState.llmLatencyMs,
             llmCallCount: (agentState.llmCallCount ?? 0) + samplingRequests || agentState.llmCallCount,
             ...(samplingRequests > 0 ? { samplingUsage, samplingRequests } : {})
-          },
+          }),
           // Phase 6.4 — what the workflows this agent called as tools spent on models, each priced by its own model.
-          ...(childTelemetry.length > 0 ? { _childTelemetry: childTelemetry } : {}),
+          ...(childTelemetry.length > 0 ? { _childTelemetry: ownUsage(childTelemetry) } : {}),
           // Phase: agent_clarify — when the agent paused to ask the user a
           // question, surface the clarification details on the node output
           // so workflow consumers (chat UI, /executions response, downstream
@@ -7207,9 +7702,10 @@ async function executeNodeHandler(
       if (!provider) throw new Error("Basic LLM Chain requires a provider. Attach a Chat Model node upstream or configure provider in settings.");
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
-      const userPrompt = String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? "");
-      const systemPrompt = String(readData(templateData, systemPromptKey) ?? "You are a helpful assistant.");
-      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
+      const userPart = promptRead(templateData, [promptKey, "user_prompt"]);
+      const systemPart = promptRead(templateData, [systemPromptKey], "You are a helpful assistant.");
+      const boundary = { user: [userPart], system: [systemPart] };
+      return runLlmNode({ nodeId: node.id, provider, userPrompt: joinPromptParts(boundary.user), systemPrompt: joinPromptParts(boundary.system), dependencies, outbound: { node, context }, boundary });
     }
 
     case "qa_chain": {
@@ -7217,20 +7713,20 @@ async function executeNodeHandler(
       if (!provider) throw new Error("Q&A Chain requires a provider.");
       const contextKey = typeof config.contextKey === "string" ? config.contextKey : "context";
       const questionKey = typeof config.questionKey === "string" ? config.questionKey : "question";
-      const contextText = String(readData(templateData, contextKey) ?? "");
-      const question = String(readData(templateData, questionKey) ?? readData(templateData, "user_prompt") ?? "");
+      const contextPart = promptRead(templateData, [contextKey]);
+      const questionPart = promptRead(templateData, [questionKey, "user_prompt"]);
       const maxLen = typeof config.maxContextLength === "number" ? config.maxContextLength : 4000;
-      const truncatedContext = contextText.slice(0, maxLen);
+      const truncatedContext: PromptPart = typeof contextPart === "string" ? contextPart.slice(0, maxLen) : { ...contextPart, text: contextPart.text.slice(0, maxLen) };
       const systemPrompt = "You are a question-answering assistant. Answer the question based ONLY on the provided context. If the answer is not found in the context, say so. Cite specific parts of the context that support your answer.";
-      const userPrompt = `Context:\n${truncatedContext}\n\nQuestion: ${question}`;
-      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
+      const user = ["Context:\n", truncatedContext, "\n\nQuestion: ", questionPart];
+      return runLlmNode({ nodeId: node.id, provider, userPrompt: joinPromptParts(user), systemPrompt, dependencies, outbound: { node, context }, boundary: { user, system: [systemPrompt] } });
     }
 
     case "summarization_chain": {
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("Summarization Chain requires a provider.");
       const textKey = typeof config.textKey === "string" ? config.textKey : "text";
-      const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
+      const textPart = promptRead(templateData, [textKey, "prompt"]);
       const maxLength = typeof config.maxLength === "number" ? config.maxLength : 500;
       const style = typeof config.style === "string" ? config.style : "brief";
       const styleInstructions: Record<string, string> = {
@@ -7240,19 +7736,19 @@ async function executeNodeHandler(
         executive: `Write an executive summary suitable for senior leadership. Be concise and focus on actionable insights. Target: ${maxLength} characters.`
       };
       const systemPrompt = `You are a summarization assistant. ${styleInstructions[style] ?? styleInstructions.brief}`;
-      const userPrompt = `Summarize the following text:\n\n${text}`;
-      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
+      const user = ["Summarize the following text:\n\n", textPart];
+      return runLlmNode({ nodeId: node.id, provider, userPrompt: joinPromptParts(user), systemPrompt, dependencies, outbound: { node, context }, boundary: { user, system: [systemPrompt] } });
     }
 
     case "information_extractor": {
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("Information Extractor requires a provider.");
       const textKey = typeof config.textKey === "string" ? config.textKey : "text";
-      const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
+      const textPart = promptRead(templateData, [textKey, "prompt"]);
       const schema = typeof config.extractionSchema === "string" ? config.extractionSchema : '{ "key": "value" }';
       const systemPrompt = `You are an information extraction assistant. Extract structured data from the provided text according to the given schema. Return ONLY valid JSON matching the schema. If a field cannot be found, use null.`;
-      const userPrompt = `Schema to extract:\n${schema}\n\nText:\n${text}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
+      const user = [`Schema to extract:\n${schema}\n\nText:\n`, textPart];
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt: joinPromptParts(user), systemPrompt, dependencies, outbound: { node, context }, boundary: { user, system: [systemPrompt] } });
       const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
       let extracted: unknown = answer;
       try { extracted = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -7263,14 +7759,14 @@ async function executeNodeHandler(
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("Text Classifier requires a provider.");
       const textKey = typeof config.textKey === "string" ? config.textKey : "text";
-      const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
+      const textPart = promptRead(templateData, [textKey, "prompt"]);
       const categories = typeof config.categories === "string" ? config.categories : "positive, negative, neutral";
       const multiLabel = config.multiLabel === true;
       const systemPrompt = multiLabel
         ? `You are a text classification assistant. Classify the text into one or more of these categories: ${categories}. Return a JSON object with: { "categories": ["category1", "category2"], "confidence": { "category1": 0.9, "category2": 0.7 }, "reasoning": "brief explanation" }`
         : `You are a text classification assistant. Classify the text into exactly ONE of these categories: ${categories}. Return a JSON object with: { "category": "chosen_category", "confidence": 0.95, "reasoning": "brief explanation" }`;
-      const userPrompt = `Classify this text:\n\n${text}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
+      const user = ["Classify this text:\n\n", textPart];
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt: joinPromptParts(user), systemPrompt, dependencies, outbound: { node, context }, boundary: { user, system: [systemPrompt] } });
       const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
       let classification: unknown = answer;
       try { classification = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -7281,10 +7777,10 @@ async function executeNodeHandler(
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("Sentiment Analysis requires a provider.");
       const textKey = typeof config.textKey === "string" ? config.textKey : "text";
-      const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
+      const textPart = promptRead(templateData, [textKey, "prompt"]);
       const systemPrompt = `You are a sentiment analysis assistant. Analyze the sentiment of the provided text. Return a JSON object with: { "sentiment": "positive" | "negative" | "neutral" | "mixed", "score": <number from -1.0 to 1.0>, "confidence": <number from 0.0 to 1.0>, "explanation": "brief explanation of the sentiment" }`;
-      const userPrompt = `Analyze the sentiment of this text:\n\n${text}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
+      const user = ["Analyze the sentiment of this text:\n\n", textPart];
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt: joinPromptParts(user), systemPrompt, dependencies, outbound: { node, context }, boundary: { user, system: [systemPrompt] } });
       const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
       let sentiment: unknown = answer;
       try { sentiment = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -7295,7 +7791,7 @@ async function executeNodeHandler(
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("AI Transform requires a provider.");
       const inputKey = typeof config.inputKey === "string" ? config.inputKey : "text";
-      const input = String(readData(templateData, inputKey) ?? readData(templateData, "prompt") ?? "");
+      const inputPart = promptRead(templateData, [inputKey, "prompt"]);
       const instruction = typeof config.instruction === "string" ? config.instruction : "Transform the input";
       const outputFormat = typeof config.outputFormat === "string" ? config.outputFormat : "text";
       const formatInstructions: Record<string, string> = {
@@ -7304,8 +7800,8 @@ async function executeNodeHandler(
         code: "Return code only. No explanations."
       };
       const systemPrompt = `You are a data transformation assistant. Apply the user's transformation instruction to the input data. ${formatInstructions[outputFormat] ?? formatInstructions.text}`;
-      const userPrompt = `Instruction: ${instruction}\n\nInput:\n${input}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
+      const user = [`Instruction: ${instruction}\n\nInput:\n`, inputPart];
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt: joinPromptParts(user), systemPrompt, dependencies, outbound: { node, context }, boundary: { user, system: [systemPrompt] } });
       let transformed: unknown = result.answer ?? result.text;
       if (outputFormat === "json" && typeof transformed === "string") {
         try { transformed = JSON.parse((transformed as string).replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -8286,6 +8782,7 @@ async function executeWorkflowRun(
           (typeof request.webhookPayload?.session_id === "string" ? request.webhookPayload.session_id : undefined),
         images: Array.isArray(request.webhookPayload?.images) ? request.webhookPayload.images : undefined,
         trigger_type: request.triggerType ?? "manual",
+        input_trigger_type: request.inputTriggerType,
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
   const approvedHandoffKeys = approvedHandoffKeysFromState(request.resumeState);
@@ -8305,6 +8802,8 @@ async function executeWorkflowRun(
   const nodeOutputs = request.resumeState
     ? deserializeNodeOutputs(toRecord(request.resumeState.nodeOutputs))
     : deserializeNodeOutputs(toRecord(request.nodeOutputs));
+  // Phase 12 coverage — how the paused part's prompts were made up, for the model boundary.
+  if (request.resumeState?.boundaryRenderings) importRenderings(nodeOutputs, request.resumeState.boundaryRenderings);
   const workflowPinnedData = toRecord(workflow.pinnedData);
   const requestPinnedData = request.pinnedData === undefined ? workflowPinnedData : toRecord(request.pinnedData);
   const pinnedData = request.usePinnedData === false ? {} : { ...requestPinnedData };
@@ -8323,6 +8822,7 @@ async function executeWorkflowRun(
   // Phase 16 — labels beside the outputs. Outputs seeded by the editor and pinned data were given by a user,
   // and keep the origin of the node type that usually produces them (a pinned HTTP result was fetched from outside).
   const labelState = await initRunLabels(request, workflow, dependencies, (nodeId) => descendantCache.getDescendants(nodeId));
+  if (request.resumeState?.boundaryCallerInput) importCallerInput(labelState, request.resumeState.boundaryCallerInput);
   const workflowNodeTypes = new Map(workflow.nodes.map((entry) => [entry.id, entry.type]));
   const givenLabels = (nodeId: string): DataLabels => {
     const source = nodeContentSource(workflowNodeTypes.get(nodeId) ?? "");
@@ -8600,7 +9100,8 @@ async function executeWorkflowRun(
       pendingResumeDecision = { ...request.approvalDecision, nodeId: waitingNode.id, decidedAt, handoff };
       handledByHandoff = true;
     } else if (handoff?.kind === "route") {
-      const routed = approved ? handoff.onApprove : handoff.onReject;
+      // A Content Rules node passes its input on: the usage of the model call before it stays on that node.
+      const routed = withoutUsage(approved ? handoff.onApprove : handoff.onReject);
       nodeOutputs.set(waitingNode.id, routed);
       // Phase 16 — the paused node's labels were saved with the run; the decision comes from a person; the routed
       // output is scanned like any output.
@@ -8828,6 +9329,8 @@ async function executeWorkflowRun(
     const executionId = request.executionId ?? randomUUID();
     // The paused state is saved now and resumed later, so it must carry the activity recorded so far.
     attachNodeActivity(nodeResults, dependencies.activityRecorder);
+    const boundaryRenderings = exportRenderings(nodeOutputs);
+    const boundaryCallerInput = dependencies.guard && isCallerInputRun(globals.input_trigger_type ?? globals.trigger_type) ? exportCallerInput(labelState) : undefined;
     const stateSnapshot: WorkflowExecutionState = {
       workflow,
       nodeOrder,
@@ -8848,7 +9351,10 @@ async function executeWorkflowRun(
       ...(writeToolCalls.toState() ? { approvedToolResults: writeToolCalls.toState() } : {}),
       // Phase 16 — stored only on runs that track labels, or (12.2) that carry declared labels or an endorsement:
       // otherwise nothing new is stored.
-      ...(labelState.persists ? { dataLabels: labelState.toState() } : {})
+      ...(labelState.persists ? { dataLabels: labelState.toState() } : {}),
+      // Phase 12 coverage — so the resumed run's model boundary splits earlier renderings as this part did.
+      ...(boundaryRenderings ? { boundaryRenderings } : {}),
+      ...(boundaryCallerInput ? { boundaryCallerInput } : {})
     };
 
     if (dependencies.persistPausedExecution) {
@@ -9113,6 +9619,7 @@ async function executeWorkflowRun(
       nodeId: node.id,
       nodeType: node.type,
       parents: Object.keys(parentOutputs).map((parentId) => labelState.getFor(node.id, parentId)),
+      parentIds: Object.keys(parentOutputs),
       merged,
       globals
     });
@@ -9132,7 +9639,8 @@ async function executeWorkflowRun(
 
     try {
       if (hasOwnRecordKey(pinnedData, node.id)) {
-        const output = pinnedData[node.id];
+        // Pinned data made no model call: usage it was copied with is not counted again.
+        const output = withoutUsage(pinnedData[node.id]);
         nodeOutputs.set(node.id, output);
         // Phase 16 — pinned data was given by a user (plus the node type's own origin).
         labelState.set(node.id, labelState.finalize(unionLabels([givenLabels(node.id), nodeSensitive ? SENSITIVE_LABELS : undefined]), output));
@@ -9246,6 +9754,7 @@ async function executeWorkflowRun(
               nodeId: childNode.id,
               nodeType: childNode.type,
               parents: Object.keys(childParentOutputs).map((parentId) => (parentId === node.id ? itemLabels : labelState.getFor(childNode.id, parentId))),
+              parentIds: Object.keys(childParentOutputs),
               merged: childMerged,
               globals: iterationGlobals
             });

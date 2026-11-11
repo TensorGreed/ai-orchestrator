@@ -177,6 +177,7 @@ export default defineConfig({
         text: "Security",
         items: [
           { text: "Auth + RBAC", link: "/security/auth-rbac" },
+          { text: "Service Accounts + API Keys", link: "/security/service-accounts" },
           { text: "Secrets", link: "/security/secrets" },
           { text: "Secure Webhooks", link: "/security/secure-webhooks" },
           { text: "Audit Bundles", link: "/security/audit-bundles" },
@@ -210,6 +211,7 @@ export default defineConfig({
           { text: "Cluster operations", link: "/operations/cluster" },
           { text: "Verify a release", link: "/operations/verify-a-release" },
           { text: "Backup and recovery", link: "/operations/backup-and-recovery" },
+          { text: "Data retention", link: "/operations/data-retention" },
           { text: "Scaling", link: "/operations/scaling" },
           { text: "Troubleshooting", link: "/troubleshooting/common-issues" }
         ]

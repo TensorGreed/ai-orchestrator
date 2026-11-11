@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
-import type { Store } from "../db/store.js";
+import type { LoginSession, Store, StoredUserKind } from "../db/store.js";
+import { SessionService, type SessionRejectReason, type SessionRequestInfo } from "./session-service.js";
 
 export type UserRole = "admin" | "builder" | "operator" | "viewer";
 
@@ -8,7 +9,32 @@ export interface SafeUser {
   id: string;
   email: string;
   role: UserRole;
+  /**
+   * 13.2 — set only when the request is authenticated by an API key limited to projects (key-scopes.ts): the projects
+   * it may reach. RBAC checks (rbacService.can) refuse every other project.
+   */
+  projectScope?: string[];
+  /**
+   * 13.2 — the API key the request was authenticated with. Work that runs later on this user's behalf (an approval
+   * it decided, a queued run, an eval or replay job) records it, and runs again with that key's limits.
+   */
+  apiKeyId?: string;
+  /** 13.2 — set when the user is a service account (acting through one of its keys): it is never an approver. */
+  serviceAccount?: true;
 }
+
+/** 13.2 — a person, or a service account (a machine identity that only uses API keys). */
+export type UserKind = StoredUserKind;
+
+/** Service accounts get an email in this reserved domain (RFC 2606), so no person or SSO login can claim it. */
+export const SERVICE_ACCOUNT_EMAIL_DOMAIN = "service.invalid";
+
+export function isServiceAccountEmail(email: string): boolean {
+  return email.trim().toLowerCase().endsWith(`@${SERVICE_ACCOUNT_EMAIL_DOMAIN}`);
+}
+
+/** The password hash a service account is stored with: not `salt:hash`, so no password ever matches it. */
+export const UNUSABLE_PASSWORD_HASH = "!";
 
 const validRoles: UserRole[] = ["admin", "builder", "operator", "viewer"];
 
@@ -45,11 +71,16 @@ function verifyPassword(password: string, storedHash: string): boolean {
 export class AuthService {
   private cleanupTimer: NodeJS.Timeout | null = null;
   private readonly cleanupTasks: Array<() => Promise<unknown>> = [];
+  /** 13.2 — issues every sign-in session and holds the per-request sign-in context. */
+  readonly sessions: SessionService;
 
   constructor(
     private readonly store: Store,
-    private readonly sessionTtlHours: number
-  ) {}
+    sessionTtlHours: number,
+    sessions?: SessionService
+  ) {
+    this.sessions = sessions ?? new SessionService(store, { ttlHours: sessionTtlHours });
+  }
 
   async countUsers(): Promise<number> {
     return await this.store.countUsers();
@@ -102,6 +133,9 @@ export class AuthService {
 
   async register(input: { email: string; password: string; role: UserRole }): Promise<SafeUser> {
     const email = normalizeEmail(input.email);
+    if (isServiceAccountEmail(email)) {
+      throw new Error(`Emails in @${SERVICE_ACCOUNT_EMAIL_DOMAIN} are reserved for service accounts`);
+    }
     const existing = await this.store.getUserByEmail(email);
     if (existing) {
       throw new Error("An account with this email already exists");
@@ -117,68 +151,93 @@ export class AuthService {
     return this.toSafeUser(saved);
   }
 
-  async login(emailInput: string, password: string): Promise<{ user: SafeUser; sessionId: string; expiresAt: string }> {
+  /** Checks an email and password without issuing a session; throws "Invalid email or password" on a mismatch. */
+  async verifyCredentials(emailInput: string, password: string): Promise<SafeUser> {
     const email = normalizeEmail(emailInput);
     const user = await this.store.getUserByEmail(email);
-    if (!user || !verifyPassword(password, user.passwordHash)) {
+    // A service account never signs in (its hash matches no password; the kind check makes that explicit).
+    if (!user || user.kind === "service" || !verifyPassword(password, user.passwordHash)) {
       throw new Error("Invalid email or password");
     }
+    return this.toSafeUser(user);
+  }
 
-    await this.store.revokeExpiredSessions();
-
-    const expiresAtDate = new Date();
-    expiresAtDate.setHours(expiresAtDate.getHours() + this.sessionTtlHours);
-    const expiresAt = expiresAtDate.toISOString();
-
-    const session = await this.store.saveSession({
-      id: `sess_${nanoid(24)}`,
-      userId: user.id,
-      expiresAt
-    });
-
+  /** Checks the password and issues a password session (no MFA step; the login route decides on MFA first). */
+  async login(
+    emailInput: string,
+    password: string,
+    request?: SessionRequestInfo
+  ): Promise<{ user: SafeUser; sessionId: string; expiresAt: string }> {
+    const user = await this.verifyCredentials(emailInput, password);
+    const issued = await this.sessions.issueSession({ user, method: "password", request });
     return {
-      user: this.toSafeUser(user),
-      sessionId: session.id,
-      expiresAt: session.expiresAt
+      user,
+      sessionId: issued.sessionId,
+      expiresAt: issued.expiresAt
     };
   }
 
   /**
+   * The user and live session a session ID names, or why there is none. A session past its expiry or its role's
+   * absolute timeout is ended here with reason `expired`, one past its idle timeout with `idle` (SESSION_* policy; the
+   * user's current role applies). A live one records activity unless the request is background traffic.
+   *
    * `knownSession` is the row a caller already looked up for this ID (`null`: it does not exist). Leave it out to
    * look the session up here.
    */
-  async getSessionUser(
+  async resolveSession(
     sessionId: string,
-    knownSession?: Awaited<ReturnType<Store["getSession"]>>
-  ): Promise<SafeUser | null> {
+    knownSession?: LoginSession | null,
+    options: { background?: boolean } = {}
+  ): Promise<{ ok: true; user: SafeUser; session: LoginSession } | { ok: false; reason: SessionRejectReason }> {
     if (!sessionId) {
-      return null;
+      return { ok: false, reason: "invalid" };
     }
 
     const session = knownSession === undefined ? await this.store.getSession(sessionId) : knownSession;
-    if (!session || session.revokedAt) {
-      return null;
+    if (!session) {
+      return { ok: false, reason: "invalid" };
+    }
+    if (session.revokedAt) {
+      return { ok: false, reason: session.endedReason ?? "invalid" };
     }
 
-    if (new Date(session.expiresAt).getTime() <= Date.now()) {
-      await this.store.revokeSession(session.id);
-      return null;
+    const stored = await this.store.getUserById(session.userId);
+    // 13.2 — service accounts have no sign-in sessions; a row naming one is not honoured.
+    const user = stored && stored.kind !== "service" ? this.toSafeUser(stored) : null;
+    const verdict = this.sessions.verdict(session, user?.role);
+    if (verdict) {
+      await this.sessions.endSession(session.id, verdict);
+      return { ok: false, reason: verdict };
     }
-
-    const user = await this.store.getUserById(session.userId);
     if (!user) {
-      return null;
+      return { ok: false, reason: "invalid" };
     }
 
-    await this.store.touchSession(session.id);
-    return this.toSafeUser(user);
+    await this.sessions.recordActivity(session.id, { background: options.background });
+    return { ok: true, user, session };
+  }
+
+  /** The user and live session a session ID names, or null (see resolveSession). */
+  async getSessionAuth(
+    sessionId: string,
+    knownSession?: LoginSession | null,
+    options: { background?: boolean } = {}
+  ): Promise<{ user: SafeUser; session: LoginSession } | null> {
+    const resolved = await this.resolveSession(sessionId, knownSession, options);
+    return resolved.ok ? { user: resolved.user, session: resolved.session } : null;
+  }
+
+  /** The signed-in user a session ID names (see resolveSession). */
+  async getSessionUser(sessionId: string, knownSession?: LoginSession | null): Promise<SafeUser | null> {
+    return (await this.getSessionAuth(sessionId, knownSession))?.user ?? null;
   }
 
   async logout(sessionId: string): Promise<void> {
     if (!sessionId) {
       return;
     }
-    await this.store.revokeSession(sessionId);
+    await this.sessions.endSession(sessionId, "logout");
   }
 
   async bootstrapAdmin(email?: string, password?: string): Promise<SafeUser | null> {

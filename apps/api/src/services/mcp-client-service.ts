@@ -65,6 +65,42 @@ export class McpClientService {
 
   constructor(private readonly store: Store) {}
 
+  /**
+   * 13.2 — rotates the client's token: a new token (returned once), and the old one keeps working for `graceHours`
+   * (0 ends it now; never past the client's own expiry, which applies to both). While an old token is still in its
+   * grace window, another rotation is refused (`pending`) unless it asks for no grace window, which ends every old
+   * token at once (the way out when the new token leaked): a second click never cuts off callers of the first token
+   * without warning. The rotation applies only while the client's prefix is still the one the caller saw, so of two
+   * rotations racing exactly one applies (`conflict` for the other).
+   */
+  async rotate(input: {
+    client: McpClient;
+    graceHours: number;
+    now?: Date;
+  }): Promise<{ ok: true; client: McpClient; token: string } | { ok: false; reason: "not_found" | "inactive" | "conflict" | "pending" }> {
+    const now = input.now ?? new Date(Date.now());
+    const previousLive = Boolean(input.client.previousTokenPrefix && input.client.previousExpiresAt && Date.parse(input.client.previousExpiresAt) > now.getTime());
+    if (previousLive && input.graceHours > 0) return { ok: false, reason: "pending" };
+    const tokenPrefix = `${MCP_CLIENT_TOKEN_PREFIX}${nanoid(PREFIX_ID_LENGTH)}`;
+    const secret = crypto.randomBytes(SECRET_BYTES).toString("base64url");
+    let previousExpiresAt: string | null = null;
+    if (input.graceHours > 0) {
+      let end = now.getTime() + input.graceHours * 3_600_000;
+      if (input.client.expiresAt) end = Math.min(end, Date.parse(input.client.expiresAt));
+      previousExpiresAt = new Date(end).toISOString();
+    }
+    const outcome = await this.store.rotateMcpClient({
+      id: input.client.id,
+      expectedTokenPrefix: input.client.tokenPrefix,
+      tokenPrefix,
+      tokenHash: hashSecret(secret),
+      previousExpiresAt,
+      now: now.toISOString()
+    });
+    if (outcome.status !== "rotated") return { ok: false, reason: outcome.status };
+    return { ok: true, client: outcome.client, token: `${tokenPrefix}.${secret}` };
+  }
+
   async create(input: {
     name: string;
     toolsetIds: string[];
@@ -89,7 +125,7 @@ export class McpClientService {
     return { client, token: `${tokenPrefix}.${secret}` };
   }
 
-  async verify(rawToken: string, now: Date = new Date()): Promise<McpClientVerification> {
+  async verify(rawToken: string, now: Date = new Date(Date.now())): Promise<McpClientVerification> {
     const token = rawToken.trim();
     const separator = token.indexOf(".");
     if (!token.startsWith(MCP_CLIENT_TOKEN_PREFIX) || separator <= MCP_CLIENT_TOKEN_PREFIX.length) {
@@ -101,7 +137,11 @@ export class McpClientService {
 
     const record = await this.store.findMcpClientByTokenPrefix(prefix);
     if (!record) return { ok: false, reason: "unknown" };
-    const expected = Buffer.from(record.tokenHash, "hex");
+    // 13.2 — the token a rotation replaced works until the end of its grace window, then reads as expired.
+    const previous = record.tokenPrefix !== prefix;
+    const storedHash = previous ? record.previousTokenHash : record.tokenHash;
+    if (!storedHash || (previous && record.previousTokenPrefix !== prefix)) return { ok: false, reason: "unknown" };
+    const expected = Buffer.from(storedHash, "hex");
     const candidate = Buffer.from(hashSecret(secret), "hex");
     if (expected.length !== candidate.length || !crypto.timingSafeEqual(expected, candidate)) {
       return { ok: false, reason: "unknown" };
@@ -110,8 +150,11 @@ export class McpClientService {
     if (record.expiresAt && new Date(record.expiresAt).getTime() <= now.getTime()) {
       return { ok: false, reason: "expired" };
     }
+    if (previous && (!record.previousExpiresAt || new Date(record.previousExpiresAt).getTime() <= now.getTime())) {
+      return { ok: false, reason: "expired" };
+    }
 
-    const { tokenHash: _hash, ...client } = record;
+    const { tokenHash: _hash, previousTokenHash: _previousHash, ...client } = record;
     const last = this.lastTouched.get(client.id) ?? 0;
     if (now.getTime() - last >= TOUCH_INTERVAL_MS) {
       this.lastTouched.set(client.id, now.getTime());

@@ -266,7 +266,7 @@ Auth endpoints:
 Bootstrap credentials strategy:
 - If `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` are set and there are no users yet, API bootstraps the first admin account on startup.
 - If bootstrap values are not set, you can create the first user with `POST /api/auth/register`; first user defaults to `admin`.
-- Keep `AUTH_ALLOW_PUBLIC_REGISTER=false` in non-dev environments.
+- Keep `AUTH_ALLOW_PUBLIC_REGISTER=false` in non-dev environments. When it is on, a signed-out caller always registers as `viewer`, a signed-in user cannot give a role above their own, and API keys are refused.
 
 Role permissions:
 

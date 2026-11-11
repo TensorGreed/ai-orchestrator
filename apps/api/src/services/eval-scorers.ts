@@ -64,6 +64,8 @@ export interface EvalJudgeContext {
   /** The user who started the run (id and email must still match); a `secretRef` must still be usable by them in the workflow's project. */
   actorUserId: string | null;
   actorEmail: string | null;
+  /** 13.2 — the API key that started the run: the judge's secret check then uses that key's limits. */
+  actorApiKeyId?: string | null;
   /** The case's execution, when it ran one. */
   executionId?: string;
 }
@@ -828,19 +830,27 @@ function scoreBudget(spec: Extract<EvalScorerSpec, { type: "budget" }>, ctx: Sco
   const totals = ctx.candidate.totals;
   const base = ctx.baseline?.totals ?? null;
   const checks: Array<{ ok: boolean; text: string }> = [];
+  const skipped: string[] = [];
   const absolute = (limit: number | undefined, value: number | null, name: string, format: (n: number) => string) => {
     if (limit === undefined) return;
     if (value === null) checks.push({ ok: false, text: `${name} unknown (limit ${format(limit)})` });
     else checks.push({ ok: value <= limit, text: `${name} ${format(value)} ${value <= limit ? "≤" : ">"} ${format(limit)}` });
   };
-  const relative = (limitPct: number | undefined, value: number | null, baseline: number | null | undefined, name: string) => {
+  // A golden run that made model calls but recorded 0 tokens or $0 has no usable baseline: streamed model calls recorded
+  // no usage before their usage was counted. A golden run with no model calls is a real 0.
+  const usageMissing = (base?.modelCalls ?? 0) > 0;
+  const relative = (limitPct: number | undefined, value: number | null, baseline: number | null | undefined, name: string, usage = false) => {
     if (limitPct === undefined) return;
     if (value === null || baseline === null || baseline === undefined) {
       checks.push({ ok: false, text: `${name} increase unknown (${base ? "a value is missing" : "no golden run"})` });
       return;
     }
     if (baseline === 0) {
-      checks.push({ ok: value === 0, text: `${name} ${value === 0 ? "unchanged at 0" : `rose from 0 to ${value}`}` });
+      if (usage && usageMissing) {
+        skipped.push(`${name} increase not checked (the golden run made model calls but recorded 0)`);
+      } else {
+        checks.push({ ok: value === 0, text: `${name} ${value === 0 ? "unchanged at 0" : `rose from 0 to ${value}`}` });
+      }
       return;
     }
     const pct = ((value - baseline) / baseline) * 100;
@@ -849,16 +859,20 @@ function scoreBudget(spec: Extract<EvalScorerSpec, { type: "budget" }>, ctx: Sco
   absolute(spec.maxCostUsd, totals.costUsd, "cost", formatUsd);
   absolute(spec.maxTokens, totals.totalTokens, "tokens", (n) => String(n));
   absolute(spec.maxLatencyMs, totals.durationMs, "latency", (n) => `${n} ms`);
-  relative(spec.maxCostIncreasePct, totals.costUsd, base?.costUsd, "cost");
-  relative(spec.maxTokensIncreasePct, totals.totalTokens, base?.totalTokens, "tokens");
+  relative(spec.maxCostIncreasePct, totals.costUsd, base?.costUsd, "cost", true);
+  relative(spec.maxTokensIncreasePct, totals.totalTokens, base?.totalTokens, "tokens", true);
   relative(spec.maxLatencyIncreasePct, totals.durationMs, base?.durationMs, "latency");
-  if (checks.length === 0) return { pass: false, score: 0, reason: "no budget limit set" };
+  if (checks.length === 0) {
+    return skipped.length > 0 ? { pass: true, score: 1, reason: skipped.join("; ") } : { pass: false, score: 0, reason: "no budget limit set" };
+  }
   const passed = checks.filter((check) => check.ok).length;
   const failed = checks.filter((check) => !check.ok);
   return {
     pass: failed.length === 0,
     score: round3(passed / checks.length),
-    reason: failed.length === 0 ? `within budget: ${checks.map((check) => check.text).join("; ")}` : `over budget: ${failed.map((check) => check.text).join("; ")}`
+    reason:
+      (failed.length === 0 ? `within budget: ${checks.map((check) => check.text).join("; ")}` : `over budget: ${failed.map((check) => check.text).join("; ")}`) +
+      (skipped.length > 0 ? `; ${skipped.join("; ")}` : "")
   };
 }
 

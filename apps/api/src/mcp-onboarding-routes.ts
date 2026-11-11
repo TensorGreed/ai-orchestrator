@@ -56,6 +56,8 @@ export interface McpOnboardingDeps {
   sandboxSaveProblem: (adapterId: string, sandbox: McpSandboxSettings | null | undefined) => string | null;
   withScopedMcpContext: <T>(run: (context: MCPExecutionContext) => Promise<T>) => Promise<T>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** 13.2 — step-up before an import that creates secrets (STEP_UP_MAX_AGE_MINUTES); false means the answer was sent. */
+  requireStepUp?: (request: FastifyRequest, reply: FastifyReply, action: "secret.create") => Promise<boolean>;
   /** Whether the user may run workflows in the project; the playground runs tools under the same permission. */
   canExecuteInProject: (user: SafeUser, projectId: string) => Promise<boolean>;
   auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
@@ -129,6 +131,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
   app.post<{ Body: unknown }>("/api/mcp/servers/import", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return;
+    if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "secret.create"))) return;
     const parsed = mcpConfigImportRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);

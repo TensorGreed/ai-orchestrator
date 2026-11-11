@@ -118,6 +118,10 @@ and channels set from the environment get it automatically. Set `NETWORK_BREAK_G
 Break-glass never opens the webhook, public, gateway or metrics scopes. Since the lists live in the environment,
 fixing a wrong one is a change to the environment and a restart, never a database edit.
 
+Network break-glass admits an address; it does not sign anyone in. When no admin can sign in at all, use
+[break-glass sign-in](./auth-rbac.md#break-glass-sign-in): a one-time link minted on the host. Its confirm request
+and session are still checked against the allowlists, so open it from an allowed or break-glass address.
+
 ::: warning Behind a proxy on the same host
 If the proxy reaches the API over loopback and `TRUST_PROXY` is off, every request is counted from `127.0.0.1` and
 break-glass admits all of them. Set `TRUST_PROXY` so the client's own address is checked.

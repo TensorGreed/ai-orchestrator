@@ -89,6 +89,8 @@ export class MetricsService {
   private nodeExecutionDuration = new Histogram([10, 50, 100, 250, 500, 1000, 5000, 10000]);
   /** Phase 15.6 — production capture outcomes (captured, skipped_daily_limit, discarded_status, failed, ...). */
   private replayCaptures = new Map<string, number>();
+  /** 13.3 — rows the retention service deleted, by class. */
+  private retentionDeleted = new Map<string, number>();
   /** Phase 13.2 — network allowlist outcomes by scope (denied, would_deny in report mode, break_glass). */
   private networkDecisions = new Map<string, number>();
   /** Phase 13.1 — the registry's view at the last heartbeat (Postgres only; null until the first one). */
@@ -152,6 +154,13 @@ export class MetricsService {
     if (!this.enabled) return;
     const key = `${scope.replace(/[^a-z0-9_]/gi, "_").slice(0, 32)}|${outcome}`;
     this.networkDecisions.set(key, (this.networkDecisions.get(key) ?? 0) + 1);
+  }
+
+  /** 13.3 — rows a retention purge deleted for one class. */
+  recordRetentionDeleted(retentionClass: string, count: number): void {
+    if (!this.enabled || !Number.isFinite(count) || count <= 0) return;
+    const key = retentionClass.replace(/[^a-z0-9_]/gi, "_").slice(0, 64);
+    this.retentionDeleted.set(key, (this.retentionDeleted.get(key) ?? 0) + count);
   }
 
   replayCaptureCounts(): Record<string, number> {
@@ -310,6 +319,12 @@ export class MetricsService {
       lines.push(`# HELP ${p}_replay_captures_total Production runs considered for capture, by outcome`);
       lines.push(`# TYPE ${p}_replay_captures_total counter`);
       for (const [outcome, count] of this.replayCaptures) lines.push(`${p}_replay_captures_total{outcome="${outcome}"} ${count}`);
+    }
+
+    if (this.retentionDeleted.size > 0) {
+      lines.push(`# HELP ${p}_retention_deleted_total Rows the retention service deleted, by class`);
+      lines.push(`# TYPE ${p}_retention_deleted_total counter`);
+      for (const [retentionClass, count] of this.retentionDeleted) lines.push(`${p}_retention_deleted_total{class="${retentionClass}"} ${count}`);
     }
 
     if (this.networkDecisions.size > 0) {

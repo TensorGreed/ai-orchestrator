@@ -10,6 +10,8 @@ export * from "./guard";
 export * from "./response-boundary";
 export * from "./data-destinations";
 export * from "./network-controls";
+export * from "./break-glass";
+export * from "./credential-rotation";
 export * from "./destination-rules";
 
 export * from "./node-credentials";
@@ -34,3 +36,6 @@ export * from "./model-allowlist";
 export * from "./agent-tools";
 export * from "./guard-benchmark";
 export * from "./ai-gateway";
+export * from "./notification-events";
+export * from "./retention";
+export * from "./retention-policy";

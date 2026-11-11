@@ -121,7 +121,7 @@ import {
   type WorkflowRelease
 } from "@ai-orchestrator/shared";
 import type { EvalFixtureRecord, ReleaseApprovalRequestRecord, ReleaseGateRecord, WorkflowReleaseRecord } from "../db/database.js";
-import type { AuditEventInput } from "./audit-service.js";
+import type { AuditActor, AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { RunAccessResult } from "../run-access.js";
@@ -371,6 +371,17 @@ export interface RoutingConflict {
   workflowId: string;
 }
 
+/** 13.2 — who an audit entry names: the user, and the API key the request was made with (when there was one). */
+function userActor(user: SafeUser): AuditActor {
+  return {
+    userId: user.id,
+    email: user.email,
+    type: user.apiKeyId ? "api_key" : "user",
+    ...(user.apiKeyId ? { apiKeyId: user.apiKeyId } : {}),
+    ...(user.apiKeyId && user.serviceAccount ? { serviceAccount: true } : {})
+  };
+}
+
 function sameIdentity(a: { id?: string | null; email?: string | null }, b: { id?: string | null; email?: string | null }): boolean {
   if (a.id && b.id && a.id === b.id) return true;
   return Boolean(a.email && b.email && a.email.toLowerCase() === b.email.toLowerCase());
@@ -499,7 +510,8 @@ export class ReleaseService {
       productionRefused: Boolean(gate?.enabled) && ((publishedVersion === null && unpublishedAt === null) || await this.resolveRunnableWorkflow(workflowId, "production") === null),
       unpublishedAt: publishedVersion === null ? unpublishedAt : null,
       canPublish: (await this.options.access(user, workflowId, "workflow:publish")).ok,
-      canEditGate: (await this.options.access(user, workflowId, "workflow:write")).ok
+      // A key limited to projects cannot call the gate settings route (KEY_PROJECT_ROUTES), so it is never offered.
+      canEditGate: !user.projectScope && (await this.options.access(user, workflowId, "workflow:write")).ok
     };
   }
 
@@ -566,7 +578,7 @@ export class ReleaseService {
           eventType: "release.gate.update_refused",
           action: "update",
           outcome: "denied",
-          actor: { userId: user.id, email: user.email, type: "user" },
+          actor: userActor(user),
           resourceType: "workflow",
           resourceId: workflowId,
           projectId: await this.projectOf(workflowId),
@@ -641,7 +653,7 @@ export class ReleaseService {
       eventType: "release.gate.updated",
       action: "update",
       outcome: "success",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: workflowId,
       projectId: await this.projectOf(workflowId),
@@ -833,7 +845,7 @@ export class ReleaseService {
       eventType,
       action,
       outcome: "denied",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: workflowId,
       projectId: await this.projectOf(workflowId),
@@ -959,7 +971,7 @@ export class ReleaseService {
         eventType: "release.gate.cases_removed",
         action: "delete",
         outcome: "success",
-        actor: { userId: user.id, email: user.email, type: "user" },
+        actor: userActor(user),
         resourceType: "workflow",
         resourceId: workflowId,
         projectId: await this.projectOf(workflowId),
@@ -1021,7 +1033,7 @@ export class ReleaseService {
         eventType: "release.jobs.evidence_removed",
         action: "update",
         outcome: "success",
-        actor: { userId: user.id, email: user.email, type: "user" },
+        actor: userActor(user),
         resourceType: workflowId ? "workflow" : "eval_run",
         resourceId: workflowId ?? stale[0]!,
         projectId: workflowId ? await this.projectOf(workflowId) : null,
@@ -1397,7 +1409,7 @@ export class ReleaseService {
       eventType: input.verdict === "rollback" ? "release.rolled_back" : input.verdict === "overridden" ? "release.overridden" : "release.published",
       action: input.verdict === "rollback" ? "rollback" : "publish",
       outcome: "success",
-      actor: { userId: input.actor.id, email: input.actor.email, type: "user" },
+      actor: userActor(input.actor),
       resourceType: "workflow",
       resourceId: input.workflowId,
       projectId: await this.projectOf(input.workflowId),
@@ -1422,6 +1434,25 @@ export class ReleaseService {
     return release;
   }
 
+  /**
+   * 12.2 — the triggers whose input trust would change if `candidate` served production instead of what serves it now
+   * (the published version, or the draft when nothing is published). A trigger's input trust is an admin's setting, so
+   * a non-admin may not bring another one into production, by rollback, publish or an approved release request.
+   */
+  private async trustChangesFromProduction(workflowId: string, candidate: Workflow, live?: number | null): Promise<string[]> {
+    const published = live === undefined ? await this.store.getPublishedVersion(workflowId) : live;
+    const current = published !== null && published !== undefined ? (await this.versionCandidate(workflowId, published)).workflow : await this.store.getWorkflow(workflowId);
+    return triggerTrustChanges(current, candidate);
+  }
+
+  private trustRefusal(version: number, changed: string[], what: string): ReleaseError {
+    return new ReleaseError(
+      `Version ${version} has another input trust on trigger ${changed.map((id) => `'${id}'`).join(", ")}: only an admin can ${what} it`,
+      403,
+      { code: "trigger_trust" }
+    );
+  }
+
   async publish(user: SafeUser, workflowId: string, input: ReleasePublishInput): Promise<PublishOutcome> {
     await this.check(user, workflowId, "workflow:publish");
     const { workflowHash } = await this.versionCandidate(workflowId, input.version);
@@ -1436,7 +1467,15 @@ export class ReleaseService {
       };
     }
     if (input.override && user.role !== "admin") throw new ReleaseError("Only admins can override the release gate", 403);
-    const conflicts = await this.conflictReasons(user, workflowId, (await this.versionCandidate(workflowId, input.version)).workflow);
+    const candidate = (await this.versionCandidate(workflowId, input.version)).workflow;
+    if (user.role !== "admin") {
+      const changed = await this.trustChangesFromProduction(workflowId, candidate, previous);
+      if (changed.length > 0) {
+        await this.refuse(user, workflowId, "release.publish.refused", "publish", { version: input.version, reason: "trigger_trust" });
+        throw this.trustRefusal(input.version, changed, "publish");
+      }
+    }
+    const conflicts = await this.conflictReasons(user, workflowId, candidate);
     if (conflicts.length > 0) {
       // Not even an override: production routing would be ambiguous, whatever the gate says.
       return { status: 409, verdict: "blocked", reasons: conflicts, canRequestApproval: false };
@@ -1493,7 +1532,7 @@ export class ReleaseService {
       eventType: "release.blocked",
       action: "publish",
       outcome: "denied",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: workflowId,
       projectId: await this.projectOf(workflowId),
@@ -1537,14 +1576,10 @@ export class ReleaseService {
     // 12.2 — a trigger's input trust is an admin's setting: a rollback that would bring back another one (to what
     // production runs now, or the draft when nothing is published) is an admin's call too.
     if (user.role !== "admin") {
-      const current = previous !== null && previous !== undefined ? (await this.versionCandidate(workflowId, previous)).workflow : await this.store.getWorkflow(workflowId);
-      const changed = triggerTrustChanges(current, workflow);
+      const changed = await this.trustChangesFromProduction(workflowId, workflow, previous);
       if (changed.length > 0) {
         await this.refuse(user, workflowId, "release.rollback.refused", "rollback", { version: input.version, reason: "trigger_trust" });
-        throw new ReleaseError(
-          `Version ${input.version} has another input trust on trigger ${changed.map((id) => `'${id}'`).join(", ")}: only an admin can roll back to it`,
-          403
-        );
+        throw this.trustRefusal(input.version, changed, "roll back to");
       }
     }
     const conflicts = await this.conflictReasons(user, workflowId, workflow);
@@ -1631,7 +1666,7 @@ export class ReleaseService {
       eventType: "release.unpublished",
       action: "unpublish",
       outcome: "success",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: workflowId,
       projectId: await this.projectOf(workflowId),
@@ -1716,7 +1751,7 @@ export class ReleaseService {
       eventType: "release.approval.requested",
       action: "request",
       outcome: "success",
-      actor: { userId: input.user.id, email: input.user.email, type: "user" },
+      actor: userActor(input.user),
       resourceType: "workflow",
       resourceId: input.workflowId,
       projectId: record.projectId,
@@ -1907,7 +1942,7 @@ export class ReleaseService {
       eventType: status === "timed_out" ? "release.approval.timed_out" : "release.approval.canceled",
       action: status === "timed_out" ? "timeout" : "cancel",
       outcome: "success",
-      actor: actor ? { userId: actor.id, email: actor.email, type: "user" } : { type: "system", email: "system" },
+      actor: actor ? userActor(actor) : { type: "system", email: "system" },
       resourceType: "workflow",
       resourceId: record.workflowId,
       projectId: await this.projectOf(record.workflowId),
@@ -1935,7 +1970,7 @@ export class ReleaseService {
         eventType: "release.approval.decided",
         action: decision,
         outcome: "denied",
-        actor: { userId: user.id, email: user.email, type: "user" },
+        actor: userActor(user),
         resourceType: "workflow",
         resourceId: record.workflowId,
         projectId: await this.projectOf(record.workflowId),
@@ -1957,7 +1992,28 @@ export class ReleaseService {
       await this.closeRequest(record, "canceled", `Stale: ${stale}`, user);
       throw new ReleaseError(`This release request is stale and was canceled: ${stale} Ask again.`, 409);
     }
-    const conflicts = await this.conflictReasons(user, record.workflowId, (await this.versionCandidate(record.workflowId, record.version)).workflow);
+    const candidate = (await this.versionCandidate(record.workflowId, record.version)).workflow;
+    // As for a publish: a request a non-admin made may not bring another trigger input trust into production (the
+    // check is made again here, since what production runs may have changed since the request).
+    const requester = record.requestedByUserId ? await this.store.getUserById(record.requestedByUserId) : null;
+    if (requester?.role !== "admin") {
+      const changed = await this.trustChangesFromProduction(record.workflowId, candidate);
+      if (changed.length > 0) {
+        await this.options.audit({
+          category: "release",
+          eventType: "release.approval.decided",
+          action: decision,
+          outcome: "denied",
+          actor: userActor(user),
+          resourceType: "workflow",
+          resourceId: record.workflowId,
+          projectId: await this.projectOf(record.workflowId),
+          metadata: { requestId: record.id, version: record.version, refused: "trigger_trust" }
+        });
+        throw this.trustRefusal(record.version, changed, "publish");
+      }
+    }
+    const conflicts = await this.conflictReasons(user, record.workflowId, candidate);
     if (conflicts.length > 0) throw new ReleaseError(conflicts.join(" "), 409);
     // Judged again now: admitted cases, required cases and the policy may have changed since the request was made.
     const worse = await this.newGateReasons(record);
@@ -1998,7 +2054,7 @@ export class ReleaseService {
       eventType: "release.published",
       action: "publish",
       outcome: "success",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: record.workflowId,
       projectId: await this.projectOf(record.workflowId),
@@ -2028,7 +2084,7 @@ export class ReleaseService {
       eventType: "release.approval.decided",
       action: decision,
       outcome: "success",
-      actor: { userId: user.id, email: user.email, type: "user" },
+      actor: userActor(user),
       resourceType: "workflow",
       resourceId: record.workflowId,
       projectId: await this.projectOf(record.workflowId),

@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { GuardEventView, GuardProfileSummary, Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import { ApiError, fetchGuardEvents, fetchGuardProfiles, fetchGuardStats, type GuardStats } from "../lib/api";
-import { actionLabel, channelLabel, dailySeries, verdictReasonLine } from "../lib/guard-trace";
+import { actionLabel, channelLabel, dailySeries, placementLabel, verdictReasonLine } from "../lib/guard-trace";
 import { DataDestinationsView } from "./DataDestinationsView";
 import { GuardBenchmarkView } from "./GuardBenchmarkView";
 import { GuardProfilesView } from "./GuardProfilesView";
@@ -77,6 +77,9 @@ export function GuardSecurityPage({ projects, workflows, activeProjectId, role, 
   );
 }
 
+/** Checks outside a node or agent step, named next to the node: model boundary, response and request checks. */
+const SEPARATE_PLACEMENTS: ReadonlySet<string> = new Set(["retrieval", "response", "request"]);
+
 /** An incoming request content rules refused at the route: its execution id never ran, so there is no run to open. */
 function requestRefused(event: GuardEventView): boolean {
   return event.placement === "request" && (event.verdictAction === "block" || event.verdictAction === "review" || event.verdictAction === "require_approval");
@@ -93,7 +96,7 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
   const [includeEval, setIncludeEval] = useState(false);
   const [profiles, setProfiles] = useState<GuardProfileSummary[]>([]);
   const [stats, setStats] = useState<GuardStats | null>(null);
-  const [events, setEvents] = useState<Array<GuardEventView & { workflowName?: string }>>([]);
+  const [events, setEvents] = useState<Array<GuardEventView & { workflowName?: string; runDeleted?: boolean }>>([]);
   const [total, setTotal] = useState(0);
   const [findingsOnly, setFindingsOnly] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -289,6 +292,7 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                         {event.nodeId}
                         {typeof event.iteration === "number" ? ` · step ${event.iteration}` : ""}
                         {event.toolName ? ` · ${event.toolName}` : ""}
+                        {SEPARATE_PLACEMENTS.has(event.placement) ? ` · ${placementLabel(event.placement)}` : ""}
                       </span>
                     </td>
                     <td>{channelLabel(event.channel)}</td>
@@ -316,6 +320,10 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                       {requestRefused(event) ? (
                         <span className="kb-subtle" title={`Request ${event.executionId.slice(0, 8)} was refused before it ran`}>
                           request refused, no run
+                        </span>
+                      ) : event.runDeleted ? (
+                        <span className="kb-subtle" title={`Run ${event.executionId}`}>
+                          Run no longer stored
                         </span>
                       ) : onOpenRun && event.placement !== "gateway" ? (
                         <button type="button" className="mcp-ov-link mono-cell" onClick={() => onOpenRun(event.executionId)}>

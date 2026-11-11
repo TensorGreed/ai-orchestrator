@@ -292,6 +292,7 @@ describe("Security page", () => {
     expect(onOpenRun).toHaveBeenCalledWith("exec-12345678");
     // A request refused at the route never ran: no run to open.
     expect(screen.getByText("request refused, no run")).toBeInTheDocument();
+    expect(screen.getByText(/hook · request check/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "req-8765" })).toBeNull();
 
     await userEvent.selectOptions(screen.getByLabelText("Workflow"), "wf-1");

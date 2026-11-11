@@ -26,6 +26,7 @@ import * as model_allowlist from "./postgres/model-allowlist.js";
 import * as queue from "./postgres/queue.js";
 import * as release from "./postgres/release.js";
 import * as replay from "./postgres/replay.js";
+import * as retention from "./postgres/retention.js";
 import * as schedules from "./postgres/schedules.js";
 import * as secrets from "./postgres/secrets.js";
 import * as sessions from "./postgres/sessions.js";
@@ -377,6 +378,12 @@ export class PostgresStore implements Store {
   async listUsers(...args: Parameters<Store["listUsers"]>): ReturnType<Store["listUsers"]> {
     return auth.listUsers(this.ctx, ...args);
   }
+  async createServiceAccount(...args: Parameters<Store["createServiceAccount"]>): ReturnType<Store["createServiceAccount"]> {
+    return auth.createServiceAccount(this.ctx, ...args);
+  }
+  async updateServiceAccount(...args: Parameters<Store["updateServiceAccount"]>): ReturnType<Store["updateServiceAccount"]> {
+    return auth.updateServiceAccount(this.ctx, ...args);
+  }
   async createUserInvite(...args: Parameters<Store["createUserInvite"]>): ReturnType<Store["createUserInvite"]> {
     return auth.createUserInvite(this.ctx, ...args);
   }
@@ -398,8 +405,14 @@ export class PostgresStore implements Store {
   async updateUserRole(...args: Parameters<Store["updateUserRole"]>): ReturnType<Store["updateUserRole"]> {
     return auth.updateUserRole(this.ctx, ...args);
   }
+  async updateUserRoleKeepingAdmin(...args: Parameters<Store["updateUserRoleKeepingAdmin"]>): ReturnType<Store["updateUserRoleKeepingAdmin"]> {
+    return auth.updateUserRoleKeepingAdmin(this.ctx, ...args);
+  }
   async deleteUser(...args: Parameters<Store["deleteUser"]>): ReturnType<Store["deleteUser"]> {
     return auth.deleteUser(this.ctx, ...args);
+  }
+  async deleteUserKeepingAdmin(...args: Parameters<Store["deleteUserKeepingAdmin"]>): ReturnType<Store["deleteUserKeepingAdmin"]> {
+    return auth.deleteUserKeepingAdmin(this.ctx, ...args);
   }
   async getSession(...args: Parameters<Store["getSession"]>): ReturnType<Store["getSession"]> {
     return sessions.getSession(this.ctx, ...args);
@@ -415,6 +428,24 @@ export class PostgresStore implements Store {
   }
   async revokeExpiredSessions(...args: Parameters<Store["revokeExpiredSessions"]>): ReturnType<Store["revokeExpiredSessions"]> {
     return sessions.revokeExpiredSessions(this.ctx, ...args);
+  }
+  async listUserSessions(...args: Parameters<Store["listUserSessions"]>): ReturnType<Store["listUserSessions"]> {
+    return sessions.listUserSessions(this.ctx, ...args);
+  }
+  async revokeUserSessions(...args: Parameters<Store["revokeUserSessions"]>): ReturnType<Store["revokeUserSessions"]> {
+    return sessions.revokeUserSessions(this.ctx, ...args);
+  }
+  async markSessionMfaVerified(...args: Parameters<Store["markSessionMfaVerified"]>): ReturnType<Store["markSessionMfaVerified"]> {
+    return sessions.markSessionMfaVerified(this.ctx, ...args);
+  }
+  async clearSessionMfaVerified(...args: Parameters<Store["clearSessionMfaVerified"]>): ReturnType<Store["clearSessionMfaVerified"]> {
+    return sessions.clearSessionMfaVerified(this.ctx, ...args);
+  }
+  async purgeEndedSessions(...args: Parameters<Store["purgeEndedSessions"]>): ReturnType<Store["purgeEndedSessions"]> {
+    return sessions.purgeEndedSessions(this.ctx, ...args);
+  }
+  async revokeOldestUserSessions(...args: Parameters<Store["revokeOldestUserSessions"]>): ReturnType<Store["revokeOldestUserSessions"]> {
+    return sessions.revokeOldestUserSessions(this.ctx, ...args);
   }
   async loadSessionMemory(...args: Parameters<Store["loadSessionMemory"]>): ReturnType<Store["loadSessionMemory"]> {
     return sessions.loadSessionMemory(this.ctx, ...args);
@@ -476,6 +507,27 @@ export class PostgresStore implements Store {
   }
   async pruneExecutionHistory(...args: Parameters<Store["pruneExecutionHistory"]>): ReturnType<Store["pruneExecutionHistory"]> {
     return executions.pruneExecutionHistory(this.ctx, ...args);
+  }
+  async pruneRetentionTable(...args: Parameters<Store["pruneRetentionTable"]>): ReturnType<Store["pruneRetentionTable"]> {
+    return retention.pruneRetentionTable(this.ctx, ...args);
+  }
+  async countRetentionDue(...args: Parameters<Store["countRetentionDue"]>): ReturnType<Store["countRetentionDue"]> {
+    return retention.countRetentionDue(this.ctx, ...args);
+  }
+  async saveRetentionRun(...args: Parameters<Store["saveRetentionRun"]>): ReturnType<Store["saveRetentionRun"]> {
+    return retention.saveRetentionRun(this.ctx, ...args);
+  }
+  async listRetentionRuns(...args: Parameters<Store["listRetentionRuns"]>): ReturnType<Store["listRetentionRuns"]> {
+    return retention.listRetentionRuns(this.ctx, ...args);
+  }
+  async listRetentionPolicies(...args: Parameters<Store["listRetentionPolicies"]>): ReturnType<Store["listRetentionPolicies"]> {
+    return retention.listRetentionPolicies(this.ctx, ...args);
+  }
+  async setRetentionPolicies(...args: Parameters<Store["setRetentionPolicies"]>): ReturnType<Store["setRetentionPolicies"]> {
+    return retention.setRetentionPolicies(this.ctx, ...args);
+  }
+  async listExistingExecutionIds(...args: Parameters<Store["listExistingExecutionIds"]>): ReturnType<Store["listExistingExecutionIds"]> {
+    return retention.listExistingExecutionIds(this.ctx, ...args);
   }
   async saveWorkflowExecutionState(...args: Parameters<Store["saveWorkflowExecutionState"]>): ReturnType<Store["saveWorkflowExecutionState"]> {
     return executions.saveWorkflowExecutionState(this.ctx, ...args);
@@ -935,6 +987,10 @@ export class PostgresStore implements Store {
   async revokeMcpClient(...args: Parameters<Store["revokeMcpClient"]>): ReturnType<Store["revokeMcpClient"]> {
     return mcp.revokeMcpClient(this.ctx, ...args);
   }
+
+  async rotateMcpClient(...args: Parameters<Store["rotateMcpClient"]>): ReturnType<Store["rotateMcpClient"]> {
+    return mcp.rotateMcpClient(this.ctx, ...args);
+  }
   async updateMcpClientNetwork(...args: Parameters<Store["updateMcpClientNetwork"]>): ReturnType<Store["updateMcpClientNetwork"]> {
     return mcp.updateMcpClientNetwork(this.ctx, ...args);
   }
@@ -1383,6 +1439,14 @@ export class PostgresStore implements Store {
   async revokeApiKey(...args: Parameters<Store["revokeApiKey"]>): ReturnType<Store["revokeApiKey"]> {
     return auth.revokeApiKey(this.ctx, ...args);
   }
+
+  async rotateApiKey(...args: Parameters<Store["rotateApiKey"]>): ReturnType<Store["rotateApiKey"]> {
+    return auth.rotateApiKey(this.ctx, ...args);
+  }
+
+  async claimCredentialExpiryNotice(...args: Parameters<Store["claimCredentialExpiryNotice"]>): ReturnType<Store["claimCredentialExpiryNotice"]> {
+    return auth.claimCredentialExpiryNotice(this.ctx, ...args);
+  }
   async getMfaSecret(...args: Parameters<Store["getMfaSecret"]>): ReturnType<Store["getMfaSecret"]> {
     return auth.getMfaSecret(this.ctx, ...args);
   }
@@ -1391,6 +1455,9 @@ export class PostgresStore implements Store {
   }
   async replaceMfaBackupCodes(...args: Parameters<Store["replaceMfaBackupCodes"]>): ReturnType<Store["replaceMfaBackupCodes"]> {
     return auth.replaceMfaBackupCodes(this.ctx, ...args);
+  }
+  async markTotpStepUsed(...args: Parameters<Store["markTotpStepUsed"]>): ReturnType<Store["markTotpStepUsed"]> {
+    return auth.markTotpStepUsed(this.ctx, ...args);
   }
   async deleteMfaSecret(...args: Parameters<Store["deleteMfaSecret"]>): ReturnType<Store["deleteMfaSecret"]> {
     return auth.deleteMfaSecret(this.ctx, ...args);
@@ -1532,6 +1599,9 @@ export class PostgresStore implements Store {
   }
   async deletePendingChallenges(...args: Parameters<Store["deletePendingChallenges"]>): ReturnType<Store["deletePendingChallenges"]> {
     return flow_state.deletePendingChallenges(this.ctx, ...args);
+  }
+  async listPendingChallenges(...args: Parameters<Store["listPendingChallenges"]>): ReturnType<Store["listPendingChallenges"]> {
+    return flow_state.listPendingChallenges(this.ctx, ...args);
   }
   async prunePendingChallenges(...args: Parameters<Store["prunePendingChallenges"]>): ReturnType<Store["prunePendingChallenges"]> {
     return flow_state.prunePendingChallenges(this.ctx, ...args);

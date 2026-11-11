@@ -16,6 +16,7 @@ import {
   DEFAULT_DATAMARK,
   evaluateGuardStack,
   generateCanaryToken,
+  GUARD_ACTIONS,
   guardCheckIsMemoisable,
   guardVerdictMemoKey,
   hashGuardProfile,
@@ -201,6 +202,14 @@ export interface GuardEvalScope {
    * runs and records, as before.
    */
   memo?: GuardVerdictMemo<GuardCheckResult["verdicts"]>;
+  /**
+   * Phase 12 coverage — the built-in rule set judges this check in shadow:
+   * its findings and actions are recorded, nothing is blocked or rewritten,
+   * and a latency overrun lets the content through. Other rule sets in the
+   * stack act as written. Set where a new checkpoint observes zero-config
+   * runs before it enforces (LLM Call nodes at the model boundary).
+   */
+  shadowUnderBuiltin?: boolean;
 }
 
 export interface GuardCheckResult {
@@ -236,6 +245,34 @@ const resolutionCache = new WeakMap<GuardRuntimeDependencies, Promise<GuardRunRe
 const issuedCache = new WeakMap<GuardRuntimeDependencies, Set<string>>();
 const rowsCache = new WeakMap<GuardRuntimeDependencies, Promise<DataDestinationRow[]>>();
 const memoCache = new WeakMap<object, GuardVerdictMemo<GuardCheckResult["verdicts"]>>();
+const shadowCopies = new WeakMap<GuardProfile, GuardProfile>();
+
+/**
+ * Phase 12 coverage — the profile with every action observed only: each
+ * action rule and default action in shadow, every action shadowed at the
+ * profile level, and a latency overrun failing open. Detection is unchanged.
+ */
+export function shadowedGuardProfile(profile: GuardProfile): GuardProfile {
+  let copy = shadowCopies.get(profile);
+  if (!copy) {
+    const channels: GuardProfile["channels"] = {};
+    for (const [channel, entry] of Object.entries(profile.channels) as Array<[GuardChannel, NonNullable<GuardProfile["channels"][GuardChannel]>]>) {
+      channels[channel] = {
+        ...entry,
+        actions: Object.fromEntries(Object.entries(entry.actions).map(([key, rule]) => [key, { ...rule, shadow: true }])),
+        defaultAction: { ...entry.defaultAction, shadow: true }
+      };
+    }
+    copy = {
+      ...profile,
+      channels,
+      shadow: Object.fromEntries(GUARD_ACTIONS.map((action) => [action, true])) as GuardProfile["shadow"],
+      latencyBudget: { ...profile.latencyBudget, onExceeded: "fail_open" }
+    };
+    shadowCopies.set(profile, copy);
+  }
+  return copy;
+}
 
 /**
  * Phase 12 coverage — the run's memo of clean checks, never shared across
@@ -443,10 +480,14 @@ export async function runGuardCheck(
   const issued = issuedSurrogatesOf(scope.guard);
   const subject = scope.subject ? { role: scope.subject.role, ...(scope.subject.userId ? { userId: scope.subject.userId } : {}) } : undefined;
   const evaluated: GuardInput = { ...input, ...(subject && !input.subject ? { subject } : {}), ...(input.issuedSurrogates ? {} : { issuedSurrogates: issued }) };
+  // Phase 12 coverage — the built-in rule set only observes here; the recorded profile is still the built-in one.
+  const judged = scope.shadowUnderBuiltin
+    ? profiles.map((entry) => (entry.profileId === GUARD_BUILTIN_PROFILE_ID ? shadowedGuardProfile(entry.profile) : entry.profile))
+    : profiles.map((entry) => entry.profile);
   // Phase 12 coverage — the same clean check earlier in this run: reuse it, record nothing new.
   // Only content checks: never tool arguments, outbound requests, destinations or detectors that read DNS or the filesystem.
   const memoKey =
-    scope.memo && profiles.length > 0 && guardCheckIsMemoisable(evaluated, profiles.map((entry) => entry.profile), registry)
+    scope.memo && profiles.length > 0 && guardCheckIsMemoisable(evaluated, judged, registry)
       ? guardVerdictMemoKey(profiles.map((entry) => entry.hash), evaluated)
       : undefined;
   if (memoKey && scope.memo) {
@@ -454,7 +495,7 @@ export async function runGuardCheck(
     if (hit) return { action: "allow", content: input.content, transformed: false, verdicts: hit, memoHit: true };
   }
   const stack = await evaluateGuardStack(
-    profiles.map((entry) => entry.profile),
+    judged,
     evaluated,
     { registry, protection }
   );
@@ -584,6 +625,8 @@ export function needsApproval(action: GuardAction): boolean {
 export interface AgentGuardTraceEntry {
   iteration: number;
   channel: GuardChannel;
+  /** Phase 12 coverage — `retrieval` for checks on outside content in the prompts before the first model call. */
+  placement?: "retrieval";
   toolName?: string;
   action: GuardAction;
   approved?: boolean;
@@ -592,6 +635,10 @@ export interface AgentGuardTraceEntry {
 
 export interface AgentGuardSession {
   hooks: AgentGuardHooks;
+  /** The profiles this agent's checks evaluate (the port's, or the run's automatic stack). */
+  profiles: ResolvedGuardProfile[];
+  /** Phase 12 coverage — adds a check made outside the loop (the model boundary) to the trace. */
+  note(entry: AgentGuardTraceEntry): void;
   /** The approval request behind the last `pause` decision (this agent's or a delegated worker's). */
   takePendingApproval(): ApprovalHandoffRequest | undefined;
   /** A delegated worker paused: its request pauses this agent too. */
@@ -762,6 +809,10 @@ export async function createAgentGuardSession(input: {
 
   return {
     hooks,
+    profiles,
+    note: (entry) => {
+      verdictLog.push(entry);
+    },
     takePendingApproval: () => {
       const pending = pendingApproval;
       pendingApproval = undefined;
