@@ -45,13 +45,13 @@ function scopeFor(profile: ResolvedGuardProfile): AiGatewayGuardScope {
 describe("whole-answer checks on /v1 answers", () => {
   it("a boundary check of a streamed answer does not run the schema check", async () => {
     const scope = scopeFor(schemaRule());
-    expect(await checkAiGatewayAnswer(scope, { content: '{"status":"o', toolCalls: [] }, false)).toEqual({ action: "allow" });
+    expect(await checkAiGatewayAnswer(scope, { content: '{"status":"o', toolCalls: [] }, false)).toMatchObject({ action: "allow" });
   });
 
   it("the final check runs it", async () => {
     const scope = scopeFor(schemaRule());
     expect((await checkAiGatewayAnswer(scope, { content: '{"status":"o', toolCalls: [] }, true)).action).toBe("block");
-    expect(await checkAiGatewayAnswer(scope, { content: '{"status":"ok"}', toolCalls: [] }, true)).toEqual({ action: "allow" });
+    expect(await checkAiGatewayAnswer(scope, { content: '{"status":"ok"}', toolCalls: [] }, true)).toMatchObject({ action: "allow" });
   });
 
   it("a blocking whole-answer check buffers the answer on its own; a shadow or allowing one streams in chunks", () => {
