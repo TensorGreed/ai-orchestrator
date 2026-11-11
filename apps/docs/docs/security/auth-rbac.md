@@ -93,9 +93,15 @@ longer than it are signed out on their next request; users sign in again. Loweri
 - Workflow create/update/delete: `builder`, `admin`
 - Execute workflow/webhook API trigger: `builder`, `admin`
 - Secrets list/create: `builder`, `admin`
-- User registration:
-  - first-user bootstrap or public registration (as configured)
-  - `admin` can create admin users
+- User registration (`POST /api/auth/register`):
+  - the first user is the bootstrap admin
+  - with `AUTH_ALLOW_PUBLIC_REGISTER=false` (the default) only an `admin`, signed in or with an API key, creates
+    users, with any role
+  - with `AUTH_ALLOW_PUBLIC_REGISTER=true`, a signed-out caller always gets `viewer`, whatever role it asks for; a
+    signed-in user can give a role up to their own (a `viewer` creates viewers, a `builder` up to `builder`, an
+    `admin` any role) and gets `403` above it; a request with an L2M API key (`Authorization: Bearer ao_...`,
+    valid or not) gets `403`, while any other Bearer value (an auth proxy's own token, for example) is ignored.
+    Refusals are audited as `user.register` with outcome `denied`.
   - `admin` can invite a user by email (see [User invites](#user-invites))
 
 ## User invites
@@ -784,6 +790,7 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Import MCP servers (creates secrets) | `POST /api/mcp/servers/import` |
 | Add or remove a project member | `POST /api/projects/:id/members`, `DELETE /api/projects/:id/members/:userId` |
 | Create, change or delete a custom role | `POST /api/custom-roles`, `PUT /api/custom-roles/:id`, `DELETE /api/custom-roles/:id` |
+| Change a project's data retention | `PUT /api/projects/:id/retention` |
 
 **API keys.** With step-up on, personal API keys are refused on these actions with `403 step_up_required`
 (`stepUp.credential: "api_key"`): a key cannot answer a code, and a stolen personal key should not mint more keys or

@@ -152,7 +152,8 @@ export const openApiSpec = {
         responses: {
           "200": { description: "User created", content: { "application/json": { schema: { type: "object", properties: { user: { $ref: "#/components/schemas/SafeUser" } } } } } },
           "400": { description: "Validation error" },
-          "403": { description: "Insufficient permissions" }
+          "401": { description: "Public registration is off and no admin is signed in" },
+          "403": { description: "A role above the caller's own, a non-admin caller while public registration is off, or an API key on public registration" }
         }
       }
     },
@@ -1171,6 +1172,53 @@ export const openApiSpec = {
           { name: "userId", in: "path", required: true, schema: { type: "string" } }
         ],
         responses: { "200": { description: "Member removed" } }
+      }
+    },
+    "/api/projects/{id}/retention": {
+      get: {
+        tags: ["Projects"],
+        summary:
+          "A project's data retention (project members): days per class (runs, tool_calls, rule_events, agent_memory), null where the deployment's value is inherited, what applies now, and the bounds a value must fall in",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Project retention view" }, "404": { description: "Project not found or not readable" } }
+      },
+      put: {
+        tags: ["Projects"],
+        summary:
+          "Set or clear a project's retention (admins and the project's admins; step-up when it is on). A number of days within RETENTION_MIN_DAYS..RETENTION_MAX_DAYS (0 = keep forever, only without a maximum), or null to inherit the deployment's value; audited as project.retention.update",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["classes"],
+                properties: {
+                  classes: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      runs: { type: "integer", minimum: 0, nullable: true },
+                      tool_calls: { type: "integer", minimum: 0, nullable: true },
+                      rule_events: { type: "integer", minimum: 0, nullable: true },
+                      agent_memory: { type: "integer", minimum: 0, nullable: true }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "The updated project retention view" },
+          "400": { description: "Invalid body, or a value outside the deployment's bounds (retention_out_of_bounds)" },
+          "403": {
+            description:
+              "Not an admin of the project, step_up_required, or retention_admin_required (only an admin may set tool_calls or rule_events shorter than the deployment's value)"
+          },
+          "404": { description: "Project not found or not readable" }
+        }
       }
     },
     "/api/folders": {

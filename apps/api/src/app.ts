@@ -226,6 +226,7 @@ import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-ser
 import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerRetentionRoutes } from "./retention-routes.js";
+import { registerProjectRetentionRoutes } from "./project-retention-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
@@ -328,7 +329,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
-import { NetworkControls, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
+import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
 import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
@@ -4027,30 +4028,38 @@ export async function createApp(
   // default `<workflowId>:<nodeId>` and its literal custom namespaces. Only
   // read when a run falls back to an unprefixed row; rebuilt when any
   // workflow changes.
-  let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]> } | null = null;
-  const legacyNamespaceOwners = async (): Promise<Map<string, string[]>> => {
+  // 13.3 — `defaults` holds the default namespaces alone: the retention purge gives an older key to a project only
+  // when it is exactly one of that project's workflows' own `<workflowId>:<nodeId>` and no other project claims it.
+  let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]>; defaults: Map<string, string[]> } | null = null;
+  const legacyNamespaceIndexNow = async () => {
     const items = await store.listWorkflows();
     const fingerprint = items.map((item) => `${item.id}|${item.updatedAt}|${item.workflowVersion}|${item.projectId ?? DEFAULT_PROJECT_ID}`).join("\n");
-    if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex.owners;
+    if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex;
     const owners = new Map<string, string[]>();
-    const claim = (namespace: string, projectId: string) => {
-      const list = owners.get(namespace) ?? [];
+    const defaults = new Map<string, string[]>();
+    const claim = (index: Map<string, string[]>, namespace: string, projectId: string) => {
+      const list = index.get(namespace) ?? [];
       if (!list.includes(projectId)) list.push(projectId);
-      owners.set(namespace, list);
+      index.set(namespace, list);
     };
+    const defaultKeys: string[] = [];
     for (const item of items) {
       const workflow = await store.getWorkflow(item.id);
       if (!workflow) continue;
       const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
       for (const node of workflow.nodes) {
-        claim(`${workflow.id}:${node.id}`, projectId);
+        defaultKeys.push(`${workflow.id}:${node.id}`);
+        claim(owners, `${workflow.id}:${node.id}`, projectId);
         const custom = (node.config as Record<string, unknown> | undefined)?.namespace;
-        if (typeof custom === "string" && custom.trim() && !custom.includes("{{")) claim(custom.trim(), projectId);
+        if (typeof custom === "string" && custom.trim() && !custom.includes("{{")) claim(owners, custom.trim(), projectId);
       }
     }
-    legacyNamespaceIndex = { fingerprint, owners };
-    return owners;
+    // Every project that claims a default namespace, also as another workflow's literal custom namespace.
+    for (const namespace of defaultKeys) defaults.set(namespace, owners.get(namespace) ?? []);
+    legacyNamespaceIndex = { fingerprint, owners, defaults };
+    return legacyNamespaceIndex;
   };
+  const legacyNamespaceOwners = async (): Promise<Map<string, string[]>> => (await legacyNamespaceIndexNow()).owners;
   // What a run can reach once it is going: sub-workflows, secrets, knowledge
   // bases and session state of its own project (see run-scope.ts).
   const runScope = createRunScope({
@@ -4932,6 +4941,7 @@ export async function createApp(
     settings: resolveRetentionSettings(config),
     executionHistoryDays: config.EXECUTION_HISTORY_RETENTION_DAYS,
     evalRunDays: config.EVAL_RUN_RETENTION_DAYS,
+    legacyMemoryOwners: async () => (await legacyNamespaceIndexNow()).defaults,
     intervalMs: config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS,
     instanceId: leaderElection.getInstanceId(),
     isLeader: () => leaderElection.isLeader(),
@@ -7734,22 +7744,53 @@ export async function createApp(
       }
       if (!await requireStepUp(request, reply, "user.create")) return;
     } else if (existingUsers > 0 && config.AUTH_ALLOW_PUBLIC_REGISTER) {
+      // Public registration is for people: a request carrying an L2M API key (well-formed, valid or not) is refused
+      // rather than treated as signed out or as the key's owner. Any other Bearer value (an auth proxy's own token) is
+      // not an L2M credential and is ignored, as on other routes. Admins create users with a session or a key while
+      // public registration is off.
+      if (hasApiKeyBearer(request.headers.authorization)) {
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.register",
+          action: "register",
+          outcome: "denied",
+          metadata: {
+            email: parsed.data.email,
+            role: parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer"),
+            reason: "api_key"
+          }
+        });
+        reply.code(403);
+        return { error: "API keys cannot be used for public registration" };
+      }
       // 13.2 — a session restricted by MFA_REQUIRED_ROLES registers as anyone else would (as a viewer).
       actor = await unrestrictedSessionUser(request);
     }
 
     const requestedRole: UserRole = parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer");
-    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action.
-    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
     let role: UserRole = requestedRole;
     if (existingUsers === 0) {
       role = parsed.data.role ?? "admin";
     } else if (!actor) {
+      // A signed-out caller always gets the lowest role, whatever it asked for.
       role = "viewer";
-    } else if (role === "admin" && actor.role !== "admin") {
+    } else if (rolePriority[role] > rolePriority[actor.role]) {
+      // A signed-in caller cannot create a user with a role above its own.
+      await audit(request, actor, {
+        category: "auth",
+        eventType: "user.register",
+        action: "register",
+        outcome: "denied",
+        metadata: { email: parsed.data.email, role, reason: "role_above_actor", actorEmail: actor.email, actorRole: actor.role }
+      });
       reply.code(403);
-      return { error: "Only admins can create admin users" };
+      return {
+        error: role === "admin" ? "Only admins can create admin users" : `Your role (${actor.role}) cannot create a user with the ${role} role`
+      };
     }
+    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action. It
+    // runs after the role check, so a role above the caller's own is refused and audited first.
+    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
 
     try {
       const user = await authService.register({
@@ -14197,6 +14238,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
   registerRetentionRoutes({ app, retention, requireRole: (request, reply, roles) => requireRole(request, reply, roles) });
+  registerProjectRetentionRoutes({
+    app,
+    store,
+    retention,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    projectAccess: (user, projectId) => runAccess.project(user, projectId, "workflow:read"),
+    canManageProject: (user, projectId) => rbacService.can(user, projectId, "project:manage"),
+    requireStepUp: (request, reply, action) => requireStepUp(request, reply, action),
+    audit: (request, user, event) => audit(request, user, event)
+  });
   registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, audit: async (request, user, event) => await audit(request, user, event) });
 
   // Phase 15.1 — golden runs and replay.

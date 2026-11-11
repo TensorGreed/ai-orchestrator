@@ -110,6 +110,8 @@ import type {
   McpClientBudgetUsage,
   McpGatewayRateLimit,
   NetworkSettingsView,
+  ProjectRetentionUpdate,
+  ProjectRetentionView,
   RetentionAdminView,
   McpGatewaySessionView,
   McpGatewayHiddenToolView,
@@ -3893,6 +3895,19 @@ export async function fetchRetention() {
   return apiRequest<RetentionAdminView>("/api/admin/retention");
 }
 
+/** 13.3 — a project's retention per class, what it inherits, and the bounds. */
+export async function fetchProjectRetention(projectId: string) {
+  return apiRequest<ProjectRetentionView>(`/api/projects/${encodeURIComponent(projectId)}/retention`);
+}
+
+/** 13.3 — sets a project's values: days per class, null to inherit the deployment's again. */
+export async function updateProjectRetention(projectId: string, classes: ProjectRetentionUpdate["classes"]) {
+  return apiRequest<ProjectRetentionView>(`/api/projects/${encodeURIComponent(projectId)}/retention`, {
+    method: "PUT",
+    body: JSON.stringify({ classes })
+  });
+}
+
 /** 12.2 — a client's open sessions on the instance that answers, with the labels each has collected. */
 export async function fetchMcpClientSessions(id: string) {
   return apiRequest<{ clientId: string; sessions: McpGatewaySessionView[] }>(`/api/mcp/clients/${encodeURIComponent(id)}/sessions`);
@@ -4455,7 +4470,8 @@ export async function fetchExecutionGuardEvents(executionId: string) {
 }
 
 export async function fetchGuardEvents(filter: GuardEventFilter = {}) {
-  return apiRequest<{ events: Array<GuardEventView & { workflowName?: string }>; total: number }>(`/api/guard/events${guardQuery(filter)}`);
+  // `runDeleted`: the run is no longer stored (retention, a delete) while its rule event is kept.
+  return apiRequest<{ events: Array<GuardEventView & { workflowName?: string; runDeleted?: boolean }>; total: number }>(`/api/guard/events${guardQuery(filter)}`);
 }
 
 export async function fetchGuardStats(filter: GuardEventFilter = {}) {
