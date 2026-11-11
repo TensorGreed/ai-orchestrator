@@ -266,6 +266,39 @@ describe("guard node on DAG edges", () => {
     expect(statusOf(rejected, "on_pass")?.status).toBe("skipped");
   });
 
+  it("does not repeat the usage of the model call before it once an approval resumes the run", async () => {
+    const { guard } = guardDeps();
+    const paused: WorkflowExecutionState[] = [];
+    const metered: LLMProviderAdapter = {
+      definition: { id: "metered", label: "Metered", supportsTools: false, configSchema: {} },
+      generate: async () => ({ content: "Drafted.", toolCalls: [], usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 } })
+    } as LLMProviderAdapter;
+    const wf = workflow(
+      [
+        node("in", "webhook_input"),
+        node("model", "llm_call", { provider: { providerId: "metered", model: "m" }, userPromptTemplate: "Draft a reply", retry: { enabled: false, maxAttempts: 1, delayMs: 1 } }),
+        node("guard", "guard", { profileId: "email-approval" }, "Prompt guard"),
+        node("on_pass", "output"),
+        node("on_blocked", "output")
+      ],
+      [
+        { source: "in", target: "model" },
+        { source: "model", target: "guard" },
+        { source: "guard", sourceHandle: "pass", target: "on_pass" },
+        { source: "guard", sourceHandle: "blocked", target: "on_blocked" }
+      ]
+    );
+    const withUsage = (result: Awaited<ReturnType<typeof executeWorkflow>>) =>
+      result.nodeResults.filter((entry) => (entry.output as Record<string, unknown> | undefined)?._telemetry !== undefined).map((entry) => entry.nodeId);
+    const first = await executeWorkflow({ workflow: wf, executionId: "exec-usage", webhookPayload: { user_prompt: `Mail ${EMAIL}` } }, deps({ provider: metered, guard, paused }));
+    expect(first.status).toBe("waiting_approval");
+    const approved = await resumeWorkflowExecution({ executionId: "exec-usage", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps({ provider: metered, guard }));
+    expect(approved.status).toBe("success");
+    expect(statusOf(approved, "on_pass")?.status).toBe("success");
+    expect(withUsage(approved)).toEqual(["model"]);
+    expect((statusOf(approved, "guard")?.output as Record<string, unknown>).answer).toBe("Drafted.");
+  });
+
   it("validates guard and protection configuration and placement", () => {
     const bad = workflow(
       [node("a", "agent_orchestrator", { maxIterations: 2 }), node("m", "llm_call", { provider: { providerId: "x", model: "m" } }), node("g", "guard", { channel: "nowhere" }), node("p", "guard_protection", { providerId: "aes_gcm", dataClasses: ["email"] }), node("o", "noop_node")],
@@ -319,13 +352,20 @@ describe("agent guard port and automatic profiles", () => {
     const toolMessage = provider.calls[1]!.find((message) => message.role === "tool")!;
     expect(toolMessage.content).toContain("withheld by content rules");
     expect(toolMessage.content).not.toContain("ignore your previous instructions");
-    const blocked = events.find((event) => event.channel === "tool_result");
+    const blocked = events.find((event) => event.channel === "tool_result" && event.placement === "agent");
     expect(blocked).toMatchObject({ nodeId: "agent", placement: "agent", iteration: 1, toolName: "fetch_page", verdict: { action: "block" } });
     expect(blocked!.verdict.findings[0]!.category).toBe("indirect_injection");
-    expect(events.map((event) => event.channel)).toEqual(["prompt", "tool_arguments", "tool_result", "final_output"]);
+    // The webhook's prompt is outside content (no trigger trust), so the model boundary judged it first.
+    expect(events.map((event) => `${event.placement}:${event.channel}`)).toEqual([
+      "retrieval:tool_result",
+      "agent:prompt",
+      "agent:tool_arguments",
+      "agent:tool_result",
+      "agent:final_output"
+    ]);
     const agentOutput = statusOf(result, "agent")?.output as Record<string, any>;
     expect(agentOutput._guard.source).toBe("port");
-    expect(agentOutput._guard.verdicts.map((entry: { action: string }) => entry.action)).toEqual(["allow", "allow", "block", "allow"]);
+    expect(agentOutput._guard.verdicts.map((entry: { action: string }) => entry.action)).toEqual(["allow", "allow", "allow", "block", "allow"]);
     // The guard node on the port is consumed by the agent, never run as a DAG step.
     expect(statusOf(result, "agent_guard")?.output).toMatchObject({ reason: "attachment_consumed_by_agent", handle: "guard" });
   });
@@ -359,7 +399,7 @@ describe("agent guard port and automatic profiles", () => {
     const provider = new ToolThenAnswerProvider("docs-mcp__fetch_page", { url: "https://news.example/q3" });
     const { guard, events } = guardDeps({ stack: ["default"] });
     await executeWorkflow({ workflow: agentWorkflow(), executionId: "exec-auto", webhookPayload: { user_prompt: "Summarise" } }, deps({ provider, guard, page: () => ({ text: INJECTION }) }));
-    expect(events.find((event) => event.channel === "tool_result")?.verdict.action).toBe("block");
+    expect(events.find((event) => event.channel === "tool_result" && event.placement === "agent")?.verdict.action).toBe("block");
 
     const unguarded = new ToolThenAnswerProvider("docs-mcp__fetch_page", { url: "https://news.example/q3" });
     await executeWorkflow({ workflow: agentWorkflow(), executionId: "exec-none", webhookPayload: { user_prompt: "Summarise" } }, deps({ provider: unguarded, page: () => ({ text: INJECTION }) }));
@@ -373,7 +413,7 @@ describe("agent guard port and automatic profiles", () => {
       { workflow: agentWorkflow({ guardPort: { profileId: "loose" } }), executionId: "exec-enf", webhookPayload: { user_prompt: "Summarise" } },
       deps({ provider, guard, page: () => ({ text: INJECTION }) })
     );
-    const toolEvents = events.filter((event) => event.channel === "tool_result");
+    const toolEvents = events.filter((event) => event.channel === "tool_result" && event.placement === "agent");
     expect(toolEvents[0]).toMatchObject({ profile: { profileId: "default" }, verdict: { action: "block" } });
     expect(provider.calls[1]!.find((message) => message.role === "tool")!.content).toContain("withheld by content rules");
   });
@@ -454,7 +494,7 @@ describe("agent guard port and automatic profiles", () => {
     expect(approved.status).toBe("success");
     const agentOutput = statusOf(approved, "agent")?.output as Record<string, any>;
     expect(agentOutput.answer).toBe("All done.");
-    expect(agentOutput._guard.verdicts.find((entry: { channel: string }) => entry.channel === "tool_result").approved).toBe(true);
+    expect(agentOutput._guard.verdicts.find((entry: { channel: string; toolName?: string }) => entry.channel === "tool_result" && entry.toolName).approved).toBe(true);
 
     const rejected = await resumeWorkflowExecution({ executionId: "exec-ap", state: paused[0]!, decision: "reject", reason: "Not this address" }, deps({ provider, guard, page }));
     expect(rejected.status).toBe("error");
@@ -592,14 +632,14 @@ describe("worker delegation", () => {
       deps({ provider: new DelegatingProvider(), guard, paused, page: () => ({ text: INJECTION }) })
     );
     // The worker's guard blocked the injected page inside the worker's loop.
-    expect(events.find((event) => event.nodeId === "worker" && event.channel === "tool_result")?.verdict.action).toBe("block");
+    expect(events.find((event) => event.nodeId === "worker" && event.channel === "tool_result" && event.placement === "agent")?.verdict.action).toBe("block");
     // The worker's own guard also checked the delegated task as its prompt.
     expect(events.find((event) => event.nodeId === "worker" && event.channel === "prompt")).toBeTruthy();
     // The supervisor's guard saw the delegated task as tool arguments …
     const delegated = events.find((event) => event.nodeId === "sup" && event.channel === "tool_arguments");
     expect(delegated?.toolName).toBe("delegate_to_Researcher");
     // … and the worker's answer as a tool result: its profile reviews emails, so the run pauses for a person.
-    const answer = events.find((event) => event.nodeId === "sup" && event.channel === "tool_result");
+    const answer = events.find((event) => event.nodeId === "sup" && event.channel === "tool_result" && event.placement === "agent");
     expect(answer?.verdict.action).toBe("review");
     expect(result.status).toBe("waiting_approval");
     expect(paused[0]?.approvalHandoff).toMatchObject({ kind: "rerun", approvalKey: expect.stringContaining("guard:sup:tool_result") });
@@ -638,7 +678,7 @@ describe("worker delegation", () => {
     expect(result.status).toBe("success");
     const workerFinal = events.find((event) => event.nodeId === "writer" && event.channel === "final_output")!;
     expect(workerFinal.verdict.action).toBe("redact");
-    const parentResult = events.find((event) => event.nodeId === "sup" && event.channel === "tool_result");
+    const parentResult = events.find((event) => event.nodeId === "sup" && event.channel === "tool_result" && event.placement === "agent");
     expect(parentResult?.toolName).toBe("delegate_to_Writer");
     expect(JSON.stringify(result.nodeResults)).not.toContain(SECRET);
   });

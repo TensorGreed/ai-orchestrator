@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
-import type { LoginSession, Store } from "../db/store.js";
-import { SessionService, type SessionRequestInfo } from "./session-service.js";
+import type { LoginSession, Store, StoredUserKind } from "../db/store.js";
+import { SessionService, type SessionRejectReason, type SessionRequestInfo } from "./session-service.js";
 
 export type UserRole = "admin" | "builder" | "operator" | "viewer";
 
@@ -9,7 +9,32 @@ export interface SafeUser {
   id: string;
   email: string;
   role: UserRole;
+  /**
+   * 13.2 — set only when the request is authenticated by an API key limited to projects (key-scopes.ts): the projects
+   * it may reach. RBAC checks (rbacService.can) refuse every other project.
+   */
+  projectScope?: string[];
+  /**
+   * 13.2 — the API key the request was authenticated with. Work that runs later on this user's behalf (an approval
+   * it decided, a queued run, an eval or replay job) records it, and runs again with that key's limits.
+   */
+  apiKeyId?: string;
+  /** 13.2 — set when the user is a service account (acting through one of its keys): it is never an approver. */
+  serviceAccount?: true;
 }
+
+/** 13.2 — a person, or a service account (a machine identity that only uses API keys). */
+export type UserKind = StoredUserKind;
+
+/** Service accounts get an email in this reserved domain (RFC 2606), so no person or SSO login can claim it. */
+export const SERVICE_ACCOUNT_EMAIL_DOMAIN = "service.invalid";
+
+export function isServiceAccountEmail(email: string): boolean {
+  return email.trim().toLowerCase().endsWith(`@${SERVICE_ACCOUNT_EMAIL_DOMAIN}`);
+}
+
+/** The password hash a service account is stored with: not `salt:hash`, so no password ever matches it. */
+export const UNUSABLE_PASSWORD_HASH = "!";
 
 const validRoles: UserRole[] = ["admin", "builder", "operator", "viewer"];
 
@@ -108,6 +133,9 @@ export class AuthService {
 
   async register(input: { email: string; password: string; role: UserRole }): Promise<SafeUser> {
     const email = normalizeEmail(input.email);
+    if (isServiceAccountEmail(email)) {
+      throw new Error(`Emails in @${SERVICE_ACCOUNT_EMAIL_DOMAIN} are reserved for service accounts`);
+    }
     const existing = await this.store.getUserByEmail(email);
     if (existing) {
       throw new Error("An account with this email already exists");
@@ -127,7 +155,8 @@ export class AuthService {
   async verifyCredentials(emailInput: string, password: string): Promise<SafeUser> {
     const email = normalizeEmail(emailInput);
     const user = await this.store.getUserByEmail(email);
-    if (!user || !verifyPassword(password, user.passwordHash)) {
+    // A service account never signs in (its hash matches no password; the kind check makes that explicit).
+    if (!user || user.kind === "service" || !verifyPassword(password, user.passwordHash)) {
       throw new Error("Invalid email or password");
     }
     return this.toSafeUser(user);
@@ -149,40 +178,57 @@ export class AuthService {
   }
 
   /**
-   * The user and live session a session ID names, or null (unknown, revoked, expired, or the user is gone). An
-   * expired session is ended here with reason `expired`; a live one is touched.
+   * The user and live session a session ID names, or why there is none. A session past its expiry or its role's
+   * absolute timeout is ended here with reason `expired`, one past its idle timeout with `idle` (SESSION_* policy; the
+   * user's current role applies). A live one records activity unless the request is background traffic.
    *
    * `knownSession` is the row a caller already looked up for this ID (`null`: it does not exist). Leave it out to
    * look the session up here.
    */
-  async getSessionAuth(
+  async resolveSession(
     sessionId: string,
-    knownSession?: LoginSession | null
-  ): Promise<{ user: SafeUser; session: LoginSession } | null> {
+    knownSession?: LoginSession | null,
+    options: { background?: boolean } = {}
+  ): Promise<{ ok: true; user: SafeUser; session: LoginSession } | { ok: false; reason: SessionRejectReason }> {
     if (!sessionId) {
-      return null;
+      return { ok: false, reason: "invalid" };
     }
 
     const session = knownSession === undefined ? await this.store.getSession(sessionId) : knownSession;
-    if (!session || session.revokedAt) {
-      return null;
+    if (!session) {
+      return { ok: false, reason: "invalid" };
+    }
+    if (session.revokedAt) {
+      return { ok: false, reason: session.endedReason ?? "invalid" };
     }
 
-    if (new Date(session.expiresAt).getTime() <= Date.now()) {
-      await this.store.revokeSession(session.id, "expired");
-      return null;
+    const stored = await this.store.getUserById(session.userId);
+    // 13.2 — service accounts have no sign-in sessions; a row naming one is not honoured.
+    const user = stored && stored.kind !== "service" ? this.toSafeUser(stored) : null;
+    const verdict = this.sessions.verdict(session, user?.role);
+    if (verdict) {
+      await this.sessions.endSession(session.id, verdict);
+      return { ok: false, reason: verdict };
     }
-
-    const user = await this.store.getUserById(session.userId);
     if (!user) {
-      return null;
+      return { ok: false, reason: "invalid" };
     }
 
-    await this.store.touchSession(session.id);
-    return { user: this.toSafeUser(user), session };
+    await this.sessions.recordActivity(session.id, { background: options.background });
+    return { ok: true, user, session };
   }
 
-  /** The signed-in user a session ID names (see getSessionAuth). */
+  /** The user and live session a session ID names, or null (see resolveSession). */
+  async getSessionAuth(
+    sessionId: string,
+    knownSession?: LoginSession | null,
+    options: { background?: boolean } = {}
+  ): Promise<{ user: SafeUser; session: LoginSession } | null> {
+    const resolved = await this.resolveSession(sessionId, knownSession, options);
+    return resolved.ok ? { user: resolved.user, session: resolved.session } : null;
+  }
+
+  /** The signed-in user a session ID names (see resolveSession). */
   async getSessionUser(sessionId: string, knownSession?: LoginSession | null): Promise<SafeUser | null> {
     return (await this.getSessionAuth(sessionId, knownSession))?.user ?? null;
   }
@@ -191,7 +237,7 @@ export class AuthService {
     if (!sessionId) {
       return;
     }
-    await this.store.revokeSession(sessionId, "logout");
+    await this.sessions.endSession(sessionId, "logout");
   }
 
   async bootstrapAdmin(email?: string, password?: string): Promise<SafeUser | null> {

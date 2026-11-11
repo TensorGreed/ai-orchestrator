@@ -190,6 +190,9 @@ export async function seedAllDomains(target: Store): Promise<void> {
   await store.revokeSession("sess-2");
   await store.saveApiKey({ id: "key-1", userId: "u-admin", name: "ci", keyPrefix: "l2m_ci01", keyHash: "khash-1", scopes: ["workflow:run"], expiresAt: FAR_FUTURE });
   await store.saveApiKey({ id: "key-2", userId: "u-builder", name: "local", keyPrefix: "l2m_lo02", keyHash: "khash-2" });
+  // 13.2 (v64) — a rotated key (superseded_by, rotated_at) and its replacement, and an expiry notice.
+  await store.rotateApiKey({ id: "key-1", userId: "u-admin", next: { id: "key-3", keyPrefix: "l2m_ci03", keyHash: "khash-3", expiresAt: FAR_FUTURE }, graceUntil: T(950), now: T(902) });
+  await store.claimCredentialExpiryNotice("api_key", "key-1", T(903), T(0));
   await store.upsertMfaSecret({ userId: "u-admin", secretIv: "mfa-iv", secretAuthTag: "mfa-tag", secretCiphertext: "mfa-ct", backupCodes: ["code-a", "code-b"], enabled: true, activatedAt: T(1) });
   await store.upsertSsoIdentity({ id: "sso-1", userId: "u-builder", provider: "oidc", subject: "sub-builder", email: "builder@example.com", attributes: { groups: ["eng"] } });
   await store.upsertCustomRole({ id: "cr-runner", projectId: "proj-ops", name: "Runner", description: "runs only", permissions: ["workflow:read", "workflow:run"], createdBy: "u-admin" });
@@ -406,6 +409,9 @@ export async function seedAllDomains(target: Store): Promise<void> {
   await store.createMcpClient({ id: "mcp-client-1", name: "Desktop agent", tokenPrefix: "l2mc_abc", tokenHash: "thash-1", toolsetIds: ["ts-support"], role: "builder", createdBy: "u-admin", createdByEmail: "admin@example.com", expiresAt: FAR_FUTURE });
   await store.createMcpClient({ id: "mcp-client-2", name: "Old CLI", tokenPrefix: "l2mc_old", tokenHash: "thash-2", toolsetIds: [], role: "viewer", createdBy: null, createdByEmail: null, expiresAt: null });
   await store.touchMcpClient("mcp-client-1", T(901));
+  // 13.2 (v64) — a rotated client token (previous_* columns) and an expiry notice.
+  await store.rotateMcpClient({ id: "mcp-client-1", expectedTokenPrefix: "l2mc_abc", tokenPrefix: "l2mc_new", tokenHash: "thash-3", previousExpiresAt: T(960), now: T(902) });
+  await store.claimCredentialExpiryNotice("mcp_client", "mcp-client-1", T(903), T(0));
   await store.revokeMcpClient("mcp-client-2");
   await store.saveMcpCassette({ id: "cas-1", executionId: "exec-1", workflowId: "wf-support", workflowName: "Support triage", projectId: "proj-ops", source: "manual", cassette: cassette(2), createdBy: "u-builder" });
   await store.saveMcpCassette({ id: "cas-2", executionId: "exec-replay", workflowId: "wf-support", workflowName: "Support triage", projectId: "proj-ops", source: "eval", evalRunId: "eval-run-1", fixtureId: "fx-1", cassette: cassette(3), createdBy: null });
@@ -709,6 +715,8 @@ export function roundTripReads(): NamedRead[] {
     { name: "getMcpToolsetBySlug", read: (s) => s.getMcpToolsetBySlug("support") },
     { name: "listMcpClients", read: (s) => s.listMcpClients() },
     { name: "findMcpClientByTokenPrefix", read: (s) => s.findMcpClientByTokenPrefix("l2mc_abc") },
+    { name: "findMcpClientByTokenPrefix (current)", read: (s) => s.findMcpClientByTokenPrefix("l2mc_new") },
+    { name: "findApiKeyByPrefix (rotated)", read: (s) => s.findApiKeyByPrefix("l2m_ci01") },
     { name: "listMcpCassettes", read: (s) => s.listMcpCassettes() },
     { name: "getMcpCassette", read: (s) => s.getMcpCassette("cas-2") },
     { name: "getMcpCassetteForExecution", read: (s) => s.getMcpCassetteForExecution("exec-1") },

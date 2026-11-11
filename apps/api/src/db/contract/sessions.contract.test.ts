@@ -69,6 +69,10 @@ describeStoreContract("store contract: sessions, webhooks and triggers", (ctx) =
     expect(await mark("s1", "u2", "2026-11-09T11:00:00.000Z")).toBe(false);
     expect(await mark("s1", "u1", "2026-11-09T11:30:00.000Z")).toBe(true);
     expect((await store.getSession("s1"))?.mfaVerifiedAt).toBe("2026-11-09T11:30:00.000Z");
+    expect(await store.clearSessionMfaVerified("s1")).toBe(true);
+    expect((await store.getSession("s1"))?.mfaVerifiedAt).toBeNull();
+    expect(await store.clearSessionMfaVerified("missing")).toBe(false);
+    expect(await mark("s1", "u1", "2026-11-09T11:30:00.000Z")).toBe(true);
     await store.saveSession({ id: "s-expired", userId: "u1", expiresAt: "2000-01-01T00:00:00.000Z" });
     expect(await mark("s-expired", "u1", "2026-11-09T11:30:00.000Z")).toBe(false);
     expect((await store.getSession("s-expired"))?.mfaVerifiedAt).toBeNull();
@@ -176,6 +180,18 @@ describeStoreContract("store contract: sessions, webhooks and triggers", (ctx) =
     expect(await store.listUserSessions("u1", { liveOnly: true })).toEqual([]);
     expect((await store.getSession("theirs"))?.revokedAt).toBeNull();
     expect(await store.revokeOldestUserSessions("nobody", 1, "evicted")).toEqual([]);
+  });
+
+  it("revokeOldestUserSessions never counts or ends a break-glass session", async () => {
+    const store = ctx.store();
+    await store.saveUser({ id: "u1", email: "u1@example.com", passwordHash: "x", role: "admin" });
+    const future = "2099-01-01T00:00:00.000Z";
+    await store.saveSession({ id: "old", userId: "u1", expiresAt: future });
+    await store.saveSession({ id: "glass", userId: "u1", expiresAt: future, authMethod: "break_glass", breakGlass: true });
+    await store.saveSession({ id: "new", userId: "u1", expiresAt: future });
+    expect(await store.revokeOldestUserSessions("u1", 1, "evicted", { protectId: "new" })).toEqual(["old"]);
+    expect(await store.revokeOldestUserSessions("u1", 0, "evicted")).toEqual(["new"]);
+    expect((await store.getSession("glass"))?.revokedAt).toBeNull();
   });
 
   it("revokeOldestUserSessions never ends the protected session, also when it ties on created_at and loses the id tiebreak", async () => {

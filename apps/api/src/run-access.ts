@@ -60,6 +60,12 @@ export interface RunAccess {
   readableProjectIds(user: SafeUser): Promise<string[] | null>;
 }
 
+/**
+ * Admins pass every project check, unless the request's API key is limited to projects (13.2). Such a key is capped
+ * at builder already; this keeps the shortcut closed should that cap ever change.
+ */
+const globalAdmin = (user: SafeUser): boolean => user.role === "admin" && !user.projectScope;
+
 const notFound = (what: string): RunAccessDenial => ({ ok: false, status: 404, error: `${what} not found` });
 const forbidden = (permission: RunPermission): RunAccessDenial => ({ ok: false, status: 403, error: `Permission '${permission}' required for this workflow` });
 
@@ -80,7 +86,7 @@ export async function elicitationVisibleTo(
 
 export function createRunAccess(deps: RunAccessDeps): RunAccess {
   const workflowVerdict = async (user: SafeUser, workflow: Workflow | null | undefined, permission: RunPermission, what: string): Promise<RunAccessDenial | null> => {
-    if (user.role === "admin") return null;
+    if (globalAdmin(user)) return null;
     if (!workflow) return notFound(what);
     const ref = { id: workflow.id, projectId: workflow.projectId ?? undefined };
     if (!await deps.canAccessWorkflow(user, ref, "workflow:read")) return notFound(what);
@@ -92,7 +98,7 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
   // a workflow is readable when its project is, or when it is shared to a
   // project the user can read. Same rule as `canAccessWorkflow`, batched.
   const readableWorkflowIds = async (user: SafeUser): Promise<string[] | null> => {
-    if (user.role === "admin") return null;
+    if (globalAdmin(user)) return null;
     const verdicts = new Map<string, boolean>();
     const canRead = async (projectId: string) => {
       let verdict = verdicts.get(projectId);
@@ -141,7 +147,7 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
     },
 
     async project(user, projectId, permission, what = "Project") {
-      if (user.role === "admin") return { ok: true };
+      if (globalAdmin(user)) return { ok: true };
       const id = projectId ?? DEFAULT_PROJECT_ID;
       // A project that does not exist (or was deleted) reads as missing.
       if (!await projectKnown(id) || !await deps.canInProject(user, id, "workflow:read")) return notFound(what);
@@ -152,7 +158,7 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
     },
 
     async readableProjectIds(user) {
-      if (user.role === "admin") return null;
+      if (globalAdmin(user)) return null;
       return await filterAsync(await deps.listProjectIds(), (id) => deps.canInProject(user, id, "workflow:read"));
     }
   };

@@ -47,7 +47,7 @@ The toolset detail shows the endpoint URL with a copy button and a live preview 
 
 ## Clients
 
-Clients live under **MCP → Clients**. Admins create and revoke them; builders can list them and see their usage.
+Clients live under **MCP → Clients**. Admins create, rotate and revoke them; builders can list them and see their usage.
 
 | Field | Meaning |
 |---|---|
@@ -64,7 +64,22 @@ When a client is created, its token is shown **once**, together with copy-paste 
 
 L2M stores only a SHA-256 hash of the token and its first characters (`l2m_mcp_<id>`), which the studio shows so you can tell tokens apart. A lost token cannot be recovered: revoke the client and create a new one.
 
-**Revoke** takes effect at once: the token gets 401 and the client's open sessions are closed. The **Usage** panel shows the client's calls, errors and latency per tool for the last 24 hours, 7 days or 30 days, from the same telemetry table as agent calls.
+**Revoke** takes effect at once: the token gets 401 and the client's open sessions are closed.
+
+### Rotating a client's token
+
+**Rotate** (or `POST /api/mcp/clients/:id/rotate` with `{ "graceHours": 24 }`) issues a new token, shown once, and
+keeps the old token working for the grace window: 24 hours by default, 0 to 168, 0 stops it at once, and never past the
+client's own expiry. The client keeps its name, role, toolsets, limits, network settings and open sessions: a session
+keeps working with either token until the window ends, then the old token gets 401 ("expired"). The client's row shows
+the previous token's prefix and when it stops working.
+
+While an old token is still in its window, another rotation is refused (`409 { code: "rotation_pending" }`), so a second
+click never cuts off the first token's callers without warning. Rotate with `graceHours: 0` to end every old token now,
+for example when the new token leaked. Two rotations at the same moment, on one instance or two, apply once (the other
+gets `rotation_conflict` or `rotation_pending`). Rotating needs step-up when it is on (`mcp_client.rotate`). A client
+that expires within 7 days raises the `credential.expiring` notification (see
+[Expiry warnings](../security/service-accounts.md#expiry-warnings)). The **Usage** panel shows the client's calls, errors and latency per tool for the last 24 hours, 7 days or 30 days, from the same telemetry table as agent calls.
 
 ## Policy subject
 
@@ -191,7 +206,7 @@ Audit events:
 | `mcp_toolset.session_tracking_changed` | **Track outside content per session** was turned on or off. |
 | `mcp_gateway.guard_blocked` | Content rules blocked a server tool call's arguments or result (with the client, the tool, the channel, the finding kinds and the rule sets; never the content). |
 | `mcp_gateway.session_labels_raised` | A session on a tracking toolset carried outside content or sensitive data for the first time (once per session, with the client and the tool). |
-| `mcp_client.created` / `updated` / `revoked` | Client changes (updated: its name or rate limit, with the previous values). Metadata carries the token prefix, never the token. |
+| `mcp_client.created` / `updated` / `revoked` / `rotated` | Client changes (updated: its name or rate limit, with the previous values; rotated: the old and new token prefixes and the grace window). Metadata carries the token prefix, never the token. |
 | `mcp_gateway.rate_limited` / `budget_blocked` | A rate limit or a used-up block budget refused a call (once per session per minute). |
 | `mcp_client.network_updated` | A client's address list or certificate pin changed, with the values before and after. |
 | `mcp_gateway.client_certificate_refused` | A client that pins certificates called without a matching one (at most once a minute per client, address and reason). |

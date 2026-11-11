@@ -41,7 +41,7 @@ import {
   normalizeSessionId,
   retryAfterSeconds
 } from "./run-helpers.js";
-import { startSseHeartbeat } from "./sse-heartbeat.js";
+import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
 import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispatch.js";
 import { onceEachElicitationEvent, type RunEventName, type RunRelay } from "./services/run-event-relay.js";
 import { followExecution } from "./services/execution-follow.js";
@@ -61,6 +61,8 @@ export interface ExecutionRoutesDeps {
   store: Store;
   config: AppConfig;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** 13.2 — closes a stream when the sign-in session that opened it ends (undefined for API-key requests). */
+  streamSessionWatch?: (request: FastifyRequest, onEnded: (reason: string) => void) => SseSessionWatch | undefined;
   runAccess: RunAccess;
   denyRunAccess: (reply: FastifyReply, denial: { status: number; error: string }) => { error: string };
   /** The channel `/execute` runs on (an API key: production, unless it asks for the draft). */
@@ -327,7 +329,16 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     if (typeof reply.raw.flushHeaders === "function") {
       reply.raw.flushHeaders();
     }
-    const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => streamClosed);
+    const stopHeartbeat = startSseHeartbeat(
+      reply.raw,
+      config.SSE_HEARTBEAT_INTERVAL_MS,
+      () => streamClosed,
+      deps.streamSessionWatch?.(request, () => {
+        // The run goes on without this client, as when the client goes away.
+        streamClosed = true;
+        markClientGone();
+      })
+    );
 
     sendSseEvent("execution_started", {
       executionId,
@@ -491,7 +502,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     reply.hijack();
     reply.raw.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive" });
     if (typeof reply.raw.flushHeaders === "function") reply.raw.flushHeaders();
-    const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => closed);
+    let finish: () => void = () => undefined;
+    const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => closed, deps.streamSessionWatch?.(request, () => finish()));
     const follower = followExecution({
       open: async (onEvent) => await openExecutionRelay(executionId, onEvent),
       readExecution: async () => await store.getExecutionHistory(executionId),
@@ -503,7 +515,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       send,
       waitMs: executionRelayWaitMs
     });
-    const finish = () => {
+    finish = () => {
       if (closed) return;
       closed = true;
       stopHeartbeat();
@@ -670,6 +682,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
       channel: "draft",
       ...replayRunInputFor(source.triggerType, storedInput),
+      ...(source.triggerType ? { inputTriggerType: source.triggerType } : {}),
       // Phase 16 — the source run's input origin, not the user replaying it (12.2: recorded on this run's trigger
       // result too, so a replay of this replay keeps it).
       inputLabels: historyInputLabels(source, workflow),

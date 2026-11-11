@@ -19,7 +19,7 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 import type { Store, UserInviteRecord } from "./db/store.js";
 import type { AuditActor, AuditEventInput } from "./services/audit-service.js";
-import { hashPassword, type SafeUser, type UserRole } from "./services/auth-service.js";
+import { hashPassword, isServiceAccountEmail, SERVICE_ACCOUNT_EMAIL_DOMAIN, type SafeUser, type UserRole } from "./services/auth-service.js";
 import { escapeHtml } from "./services/notification-service.js";
 
 export const USER_INVITE_DEFAULT_HOURS = 168;
@@ -41,6 +41,8 @@ export interface UserInviteRoutesDeps {
   app: FastifyInstance;
   store: Store;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** 13.2 — step-up before inviting (STEP_UP_MAX_AGE_MINUTES); false means the answer was sent. Absent = no step-up. */
+  requireStepUp?: (request: FastifyRequest, reply: FastifyReply, action: "user.invite") => Promise<boolean>;
   audit: (
     request: FastifyRequest,
     user: SafeUser | null,
@@ -82,12 +84,18 @@ export function registerUserInviteRoutes(deps: UserInviteRoutesDeps): void {
   app.post<{ Body: unknown }>("/api/users/invite", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    if (deps.requireStepUp && !(await deps.requireStepUp(request, reply, "user.invite"))) return;
     const parsed = inviteCreateSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid invite payload", details: parsed.error.issues };
     }
     const email = parsed.data.email.toLowerCase();
+    // 13.2 — the service-account domain is reserved: nobody is invited into it.
+    if (isServiceAccountEmail(email)) {
+      reply.code(400);
+      return { error: `Emails in @${SERVICE_ACCOUNT_EMAIL_DOMAIN} are reserved for service accounts` };
+    }
     const token = crypto.randomBytes(32).toString("base64url");
     const now = new Date();
     const expiresAt = new Date(now.getTime() + (parsed.data.expiresInHours ?? USER_INVITE_DEFAULT_HOURS) * 3_600_000).toISOString();
