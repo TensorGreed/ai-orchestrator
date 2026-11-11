@@ -39,6 +39,22 @@ SAML logins, from the IdP or the local TOTP step; `SSO_MFA_OIDC_AMR`,
 `SSO_MFA_OIDC_ACR` and `SSO_MFA_SAML_AUTHN_CONTEXTS` tune what counts as IdP
 MFA. See [MFA on SSO](../security/auth-rbac.md#mfa-on-sso).
 
+`MFA_REQUIRED_ROLES` (unset by default; a comma list of `admin`, `builder`,
+`operator`, `viewer`) makes MFA required for those roles: an unenrolled user
+gets a session that can only set it up. `MFA_ENFORCE=true` adds `admin` to the
+list. `STEP_UP_MAX_AGE_MINUTES` (0 or unset = off) asks for a fresh code before
+security actions such as role changes, new API keys and secret changes, and
+refuses personal API keys on them (a service account's key with an admin role
+ceiling is let through). See
+[MFA required per role](../security/auth-rbac.md#mfa-required-per-role).
+
+`SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS` (0 or unset = no limit) makes every new or
+rotated service-account key expire within that many days.
+`NOTIFICATIONS_CREDENTIAL_EVENTS=true` sends the `credential.expiring` warning
+(an API key or gateway client expiring within 7 days, or a rotated key still in
+use as its grace window ends) to the channels set in the environment; off by
+default. See [Rotating keys](../security/service-accounts.md#rotating-keys).
+
 ## Rate limits (on by default)
 
 `RATE_LIMIT_ENABLED=true` (the default) limits requests per client address in
@@ -101,6 +117,16 @@ Address allowlists per scope (`NETWORK_ALLOW_UI`, `NETWORK_ALLOW_API`, `NETWORK_
 gateway (`MCP_GATEWAY_CLIENT_CERT_HEADER`, `MCP_GATEWAY_CLIENT_CERT_PROXIES`). All unset by default, so every scope is
 open. They are checked against the client address above, and refused with `TRUST_PROXY=true`. See
 [Network controls](../security/network-controls.md).
+
+## Data retention (optional)
+
+How long each kind of data is kept: `EXECUTION_HISTORY_RETENTION_DAYS` (30), `EVAL_RUN_RETENTION_DAYS` (90),
+`AUDIT_LOG_RETENTION_DAYS` (365), and, kept forever unless set, `USAGE_EVENTS_RETENTION_DAYS`,
+`AGENT_MEMORY_RETENTION_DAYS` and `AI_GATEWAY_REQUEST_RETENTION_DAYS`. `RETENTION_MAX_ROWS_PER_TICK` (50 000) caps the
+rows one purge deletes per table. See [Data retention](../operations/data-retention.md) for every setting and what it
+deletes. Upgrading: an `.env` copied from an older `.env.example` sets `USAGE_EVENTS_RETENTION_DAYS=365`, which now
+deletes usage events older than a year; remove it or set `0` to keep them
+([details](../operations/data-retention.md#upgrading-usage-retention)).
 
 ## MCP server registry probes (optional)
 

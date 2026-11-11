@@ -253,8 +253,10 @@ export class RbacService {
    *  - Otherwise, in `role` isolation: fall back to the user's global role mapped to a coarse
    *    permission set (backwards-compatible behaviour for users without per-project roles).
    *  - Otherwise, in `strict` isolation: no permissions.
+   *  - 13.2: a request made with an API key limited to projects (`user.projectScope`) has no permission outside them.
    */
   async effectivePermissions(user: SafeUser, projectId: string): Promise<Permission[]> {
+    if (user.projectScope && !user.projectScope.includes(projectId)) return [];
     if (user.role === "admin") return [...ALL_PERMISSIONS];
     const membership = await this.getMembership(user.id, projectId);
     if (membership) return membership.permissions;

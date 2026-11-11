@@ -24,6 +24,14 @@
  * `admitIf()` makes a check and the child's reservation one step: an execution's checks run one after another, so
  * children admitted at the same time each see the others. This holds within one process, which is where all of a
  * segment's children run; separate runs (and segments on separate instances) are matched only through recorded usage.
+ * A check that takes longer than SUB_WORKFLOW_BUDGET_CHECK_TIMEOUT_MS (a budget read that hangs) refuses that child
+ * and lets the next check go on, so a stuck read cannot stall the run's other children. While that read is still
+ * unanswered, the execution's later checks are refused at once instead of starting more reads; a check waiting its
+ * turn stops when the run is stopped.
+ *
+ * The same record holds a streamed model call of the run (or of one of its children) that failed, was cancelled or
+ * timed out (`reportModelUsage`): no node output carries it, so it joins the run's row, or a row of its own, the same
+ * way.
  */
 import type { GatewayRunUsage } from "@ai-orchestrator/shared";
 import type { SubWorkflowAdmission, SubWorkflowAdmissionRequest, SubWorkflowUsage } from "@ai-orchestrator/workflow-engine";
@@ -60,6 +68,34 @@ export type Spend = { costUsd: number; totalTokens: number };
 const ZERO: Spend = { costUsd: 0, totalTokens: 0 };
 const add = (a: Spend, b: Spend): Spend => ({ costUsd: a.costUsd + b.costUsd, totalTokens: a.totalTokens + b.totalTokens });
 
+/** How long one budget check before a child may take; a longer one refuses the child (the budgets could not be read). */
+export const SUB_WORKFLOW_BUDGET_CHECK_TIMEOUT_MS = 15_000;
+
+/** Spend held for a run's row: a finished child's, or a failed model call's. */
+type HeldUsage = Pick<SubWorkflowUsage, "workflowId" | "status" | "durationMs" | "telemetry">;
+
+/** Thrown when a budget check before a child did not finish in time. */
+export class BudgetCheckTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`The budgets could not be read within ${Math.round(timeoutMs / 1000)} s.`);
+    this.name = "BudgetCheckTimeoutError";
+  }
+}
+
+/** `check`, or a BudgetCheckTimeoutError once `timeoutMs` has passed (a late answer is ignored). */
+export async function withinBudgetCheckTime<T>(check: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new BudgetCheckTimeoutError(timeoutMs)), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([check, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** What a running child is reserved at before any child of the run has finished: one cent, or 1,000 tokens. */
 export const RESERVATION_FLOOR: Spend = { costUsd: 0.01, totalTokens: 1_000 };
 
@@ -89,18 +125,38 @@ class ChildAdmission implements SubWorkflowAdmission {
 class ExecutionSpend {
   readonly runs = new Set<RunSubWorkflowSpend>();
   largest: Spend = ZERO;
+  /** A budget check that timed out and has not answered yet: later checks are refused until it does. */
+  hungCheck: Promise<unknown> | undefined;
   private tail: Promise<unknown> = Promise.resolve();
 
-  /** Runs `step` once the steps queued before it have finished (in this process). */
-  exclusive<T>(step: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(step);
-    this.tail = result.catch(() => undefined);
+  /**
+   * Runs `step` once the steps queued before it have finished (in this process). A step whose `signal` aborts while it
+   * waits its turn does not run (it rejects with the signal's reason); the steps after it still wait for those before.
+   */
+  exclusive<T>(step: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const previous = this.tail;
+    const result = (signal ? untilAborted(previous, signal) : previous).then(() => {
+      signal?.throwIfAborted();
+      return step();
+    });
+    this.tail = Promise.all([previous, result.catch(() => undefined)]);
     return result;
   }
 }
 
+/** `waiting`, or a rejection with the signal's reason as soon as it aborts first. */
+function untilAborted(waiting: Promise<unknown>, signal: AbortSignal): Promise<unknown> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return Promise.race([waiting, aborted]).finally(() => signal.removeEventListener("abort", onAbort!));
+}
+
 export class RunSubWorkflowSpend {
-  private usages: Array<{ usage: SubWorkflowUsage; spend: Spend }> = [];
+  private usages: Array<{ usage: HeldUsage; spend: Spend }> = [];
   private held: Spend = ZERO;
   /** Joined to the run's row, which is being written. */
   private recording: Spend = ZERO;
@@ -110,13 +166,27 @@ export class RunSubWorkflowSpend {
   constructor(
     readonly attribution: RunUsageAttribution,
     private readonly owner: SubWorkflowSpendTracker,
-    private readonly execution: ExecutionSpend = new ExecutionSpend()
+    private execution: ExecutionSpend = new ExecutionSpend(),
+    /** The attempt that started this segment (a queue job), so stopping one attempt never closes another's. */
+    readonly attempt?: object
   ) {
     execution.runs.add(this);
   }
 
+  /**
+   * A segment that left its execution's record (it was closed early, for example dropped from the open runs, while
+   * its run goes on) joins it again before it admits a child, so its own children are counted, and a later segment
+   * of the execution sees them.
+   */
+  private rejoin(): void {
+    if (this.execution.runs.has(this)) return;
+    this.execution = this.owner.executionFor(this.attribution.executionId, this.execution);
+    this.execution.runs.add(this);
+  }
+
   /** A child starts (no check: see `admitIf`). */
   admit(request: SubWorkflowAdmissionRequest): SubWorkflowAdmission {
+    this.rejoin();
     const parent = request.parent instanceof ChildAdmission ? request.parent : undefined;
     const admission = new ChildAdmission(this, parent, request.mode);
     this.running.add(admission);
@@ -128,8 +198,40 @@ export class RunSubWorkflowSpend {
    * reservations) and says whether the child may start; it is admitted, and reserved for the next check, before any
    * other check of the execution runs. Undefined when it does not fit.
    */
-  async admitIf(request: SubWorkflowAdmissionRequest, fits: (pending: () => Spend) => Promise<boolean>): Promise<SubWorkflowAdmission | undefined> {
-    return await this.execution.exclusive(async () => ((await fits(() => this.pending(request))) ? this.admit(request) : undefined));
+  async admitIf(
+    request: SubWorkflowAdmissionRequest,
+    fits: (pending: () => Spend) => Promise<boolean>,
+    signal?: AbortSignal
+  ): Promise<SubWorkflowAdmission | undefined> {
+    this.rejoin();
+    const timeoutMs = this.owner.checkTimeoutMs;
+    const execution = this.execution;
+    try {
+      const admission = await execution.exclusive(async () => {
+        // One unanswered read at a time: a store that hangs is not sent another read per child.
+        if (execution.hungCheck) throw new BudgetCheckTimeoutError(timeoutMs);
+        const check = fits(() => this.pending(request));
+        try {
+          return (await withinBudgetCheckTime(check, timeoutMs)) ? this.admit(request) : undefined;
+        } catch (error) {
+          if (error instanceof BudgetCheckTimeoutError) {
+            execution.hungCheck = check;
+            const answered = () => {
+              // promise-ok: identity check: only the read that timed out clears its own mark
+              if (execution.hungCheck === check) execution.hungCheck = undefined;
+            };
+            check.then(answered, answered);
+          }
+          throw error;
+        }
+      }, signal);
+      // A refused child: a closed segment that joined only for this check leaves again.
+      if (!admission) this.leaveWhenDone();
+      return admission;
+    } catch (error) {
+      this.leaveWhenDone();
+      throw error;
+    }
   }
 
   release(admission: ChildAdmission): void {
@@ -142,7 +244,7 @@ export class RunSubWorkflowSpend {
     const ancestors = new Set<ChildAdmission>();
     for (let at = request?.parent instanceof ChildAdmission ? request.parent : undefined; at; at = at.parent) ancestors.add(at);
     let count = 0;
-    for (const run of this.execution.runs) for (const admission of run.running) if (admission.concurrent && !ancestors.has(admission)) count += 1;
+    for (const run of this.segments()) for (const admission of run.running) if (admission.concurrent && !ancestors.has(admission)) count += 1;
     return count;
   }
 
@@ -151,12 +253,31 @@ export class RunSubWorkflowSpend {
     const spend = this.owner.price(usage.telemetry);
     const largest = this.execution.largest;
     this.execution.largest = { costUsd: Math.max(largest.costUsd, spend.costUsd), totalTokens: Math.max(largest.totalTokens, spend.totalTokens) };
+    await this.hold(usage, spend);
+  }
+
+  /**
+   * A model call of the run (or of a child) that failed, was cancelled or timed out: its estimated usage, which no
+   * node output carries. Held and recorded like a child's spend; it does not change a child's reservation.
+   */
+  async reportModelUsage(telemetry: Record<string, unknown>): Promise<void> {
+    const latency = typeof telemetry.latencyMs === "number" && Number.isFinite(telemetry.latencyMs) ? telemetry.latencyMs : 0;
+    const usage: HeldUsage = { workflowId: this.attribution.workflowId, status: "error", durationMs: latency, telemetry: [telemetry] };
+    await this.hold(usage, this.owner.price(usage.telemetry));
+  }
+
+  private async hold(usage: HeldUsage, spend: Spend): Promise<void> {
     if (!this.closed) {
       this.usages.push({ usage, spend });
       this.held = add(this.held, spend);
       return;
     }
     await this.owner.recordDetached(this.attribution, [usage]);
+  }
+
+  /** This execution's segments that count, this one always among them (it is asking, so its run goes on). */
+  private segments(): Set<RunSubWorkflowSpend> {
+    return this.execution.runs.has(this) ? this.execution.runs : new Set([...this.execution.runs, this]);
   }
 
   /**
@@ -171,7 +292,7 @@ export class RunSubWorkflowSpend {
     };
     const running = this.concurrentRunning(request);
     let unrecorded = ZERO;
-    for (const run of this.execution.runs) unrecorded = add(unrecorded, add(run.held, run.recording));
+    for (const run of this.segments()) unrecorded = add(unrecorded, add(run.held, run.recording));
     return add(unrecorded, { costUsd: reserve.costUsd * running, totalTokens: reserve.totalTokens * running });
   }
 
@@ -220,6 +341,8 @@ export class RunSubWorkflowSpend {
 
 export class SubWorkflowSpendTracker {
   private readonly open = new Map<string, RunSubWorkflowSpend>();
+  /** Each attempt's segment, so a stopped attempt closes its own (not a retry's that started since). */
+  private readonly byAttempt = new WeakMap<object, RunSubWorkflowSpend>();
   /** Per execution id, the segments that still count (bounded by the runs open and the children still running). */
   private readonly executions = new Map<string, ExecutionSpend>();
 
@@ -229,14 +352,35 @@ export class SubWorkflowSpendTracker {
       budgetService: Pick<BudgetService, "recordExecution">;
       logger: Logger;
       maxOpenRuns?: number;
+      budgetCheckTimeoutMs?: number;
     }
   ) {}
+
+  get checkTimeoutMs(): number {
+    return this.deps.budgetCheckTimeoutMs ?? SUB_WORKFLOW_BUDGET_CHECK_TIMEOUT_MS;
+  }
+
+  /** The execution's shared record: the one tracked for the id, else `mine`, which is tracked from now on. */
+  executionFor(executionId: string, mine: ExecutionSpend): ExecutionSpend {
+    const tracked = this.executions.get(executionId);
+    if (tracked) {
+      if (tracked !== mine) {
+        tracked.largest = {
+          costUsd: Math.max(tracked.largest.costUsd, mine.largest.costUsd),
+          totalTokens: Math.max(tracked.largest.totalTokens, mine.largest.totalTokens)
+        };
+      }
+      return tracked;
+    }
+    this.executions.set(executionId, mine);
+    return mine;
+  }
 
   /**
    * Starts tracking a run (a resumed or re-run one starts afresh under the same execution id). Spend an earlier
    * tracker of the id, or one dropped to keep the map bounded, still held is recorded on its own, with a warning.
    */
-  start(attribution: RunUsageAttribution): RunSubWorkflowSpend {
+  start(attribution: RunUsageAttribution, attempt?: object): RunSubWorkflowSpend {
     // A resumed or retried segment shares its execution's earlier segments' running children and reservations.
     let execution = this.executions.get(attribution.executionId);
     if (!execution) {
@@ -244,7 +388,8 @@ export class SubWorkflowSpendTracker {
       this.executions.set(attribution.executionId, execution);
     }
     this.flushDropped(this.open.get(attribution.executionId), "replaced by a new run of the same execution");
-    const spend = new RunSubWorkflowSpend(attribution, this, execution);
+    const spend = new RunSubWorkflowSpend(attribution, this, execution, attempt);
+    if (attempt) this.byAttempt.set(attempt, spend);
     this.open.delete(attribution.executionId);
     if (this.open.size >= (this.deps.maxOpenRuns ?? SUB_WORKFLOW_SPEND_MAX_OPEN_RUNS)) {
       const oldest = this.open.keys().next().value!;
@@ -272,9 +417,20 @@ export class SubWorkflowSpendTracker {
     return spend;
   }
 
-  /** A run that stops without a usage row of its own (a queue that stopped it, a failed resume): records what it held. */
-  async abandon(executionId: string, reason: string): Promise<void> {
-    const spend = this.take(executionId);
+  /**
+   * A run that stops without a usage row of its own (a queue that stopped it, a failed resume): records what it held.
+   * With `attempt`, only that attempt's segment: a retry of the execution that started since keeps its own, and its
+   * children still join its row.
+   */
+  async abandon(executionId: string, reason: string, attempt?: object): Promise<void> {
+    let spend: RunSubWorkflowSpend | undefined;
+    if (attempt) {
+      spend = this.byAttempt.get(attempt);
+      this.byAttempt.delete(attempt);
+      if (spend && this.open.get(executionId) === spend) this.open.delete(executionId);
+    } else {
+      spend = this.take(executionId);
+    }
     if (!spend) return;
     if (spend.holdsSpend()) {
       this.deps.logger.warn({ executionId, reason }, "A run stopped without its usage row; its sub-workflows' spend is recorded on its own");
@@ -305,7 +461,7 @@ export class SubWorkflowSpendTracker {
   }
 
   /** One usage row per child, for the run's execution and attribution, then the budget alerts it crossed. */
-  async recordDetached(attribution: RunUsageAttribution, usages: SubWorkflowUsage[]): Promise<void> {
+  async recordDetached(attribution: RunUsageAttribution, usages: HeldUsage[]): Promise<void> {
     const user = usageUserOf(attribution.triggeredBy, attribution.gatewayUsage);
     const gateway = attribution.gatewayUsage;
     for (const usage of usages) {

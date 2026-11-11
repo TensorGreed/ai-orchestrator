@@ -41,6 +41,8 @@ the envelope `GET /api/executions` uses:
 - `POST /api/auth/saml/callback` (IdP HTTP-POST binding form post → redirect to the web app; JSON → JSON; see [SAML single sign-on](../security/auth-rbac.md#saml-single-sign-on))
 - `POST /api/auth/invite/lookup` (public; `{ token }` → `{ email, role, expiresAt }`; `404` for a used, expired or unknown link; see [User invites](../security/auth-rbac.md#user-invites))
 - `POST /api/auth/invite/accept` (public; `{ token, password }` with a password of 8 characters or more → `{ ok, email }`; the invite is used up and the page signs in with the password next; `404` as above; audited as `user.invite.accept`)
+- `POST /api/auth/api-keys/:id/rotate` (builder, your own key; `{ graceHours?: 0-168 }`, default 24 → `{ key, record, previous }`, the new key once; the old key works until `previous.expiresAt`; `409 already_rotated` / `inactive`; step-up; audited as `api_key.rotate`; see [Rotating keys](../security/service-accounts.md#rotating-keys))
+- `POST /api/service-accounts/:id/keys/:keyId/rotate` (admin; the same body and answer, for a service account's key; a service account's own key is refused on its own account, and a key made with a key ends no later than it)
 
 ## Users and tags
 
@@ -156,6 +158,7 @@ Clients:
 - `POST /api/mcp/clients` (admin; `{ name, toolsetIds, role, expiresAt? }`; `toolsetIds` may be empty for a client that only calls `/v1`; the response carries the token once)
 - `PATCH /api/mcp/clients/:id` (admin; `{ name?, rateLimit? }`, nothing else; `rateLimit: null` removes the client's limit)
 - `POST /api/mcp/clients/:id/revoke` (admin)
+- `POST /api/mcp/clients/:id/rotate` (admin; `{ graceHours?: 0-168 }`, default 24 → `{ client, token }`, the new token once; the old token works until `client.previousExpiresAt`; `409 inactive`, `rotation_pending` (an old token is still in its window: rotate with `graceHours: 0`), `rotation_conflict`; step-up; audited as `mcp_client.rotated`)
 - `GET /api/mcp/clients/:id/budgets` (builder; every budget that applies to the client, its own, its toolsets' projects' and the global ones, each labelled by scope, with what it counted this period and whether it refuses the client's calls now)
 - `GET /api/mcp/clients/:id/usage?window=24h|7d|30d` (builder)
 - `GET /api/mcp/clients/:id/sessions` (builder): the client's open sessions on the answering instance, with the labels each collected on a toolset that tracks outside content per session
@@ -267,6 +270,14 @@ See [Audit bundles and signed run manifests](../security/audit-bundles.md).
 - `GET /api/executions/:id/bundle` (read access to the run's workflow; streamed zip with `x-l2m-manifest-digest` and `x-l2m-signing-key-id` headers; 409 while in progress, 413 over `AUDIT_BUNDLE_MAX_BYTES`; audited as `execution.audit_bundle.export`)
 - `GET /api/audit/signing-keys` (admin; `{ activeKeyId, canRotate, keys: [{ keyId, algorithm, publicKey, publicKeyPem, source, status, createdAt, retiredAt }] }`)
 - `POST /api/audit/signing-keys/rotate` (admin; `201 { key, keys }`; 409 when the key comes from `AUDIT_SIGNING_KEY_BASE64`; audited as `audit.signing_key.rotated`)
+
+## Data retention
+
+See [Data retention](../operations/data-retention.md).
+
+- `GET /api/admin/retention` (admin; read-only; `{ intervalMs, maxRowsPerTick, bounds: { minDays, maxDays }, backlogCap, classes: [{ class, label, what, setting, days, cutoff, backlog, backlogCapped }], lastRun, nextRunAt, runs: [{ id, startedAt, finishedAt, instanceId, reason, outcome, counts, capped, error }], projectOverrides: [{ projectId, projectName, classes }] }`; `days: 0` means kept forever, and `backlog` counts the rows due now up to `backlogCap`, projects' own cutoffs included)
+- `GET /api/projects/:id/retention` (project members; `{ projectId, bounds: { minDays, maxDays }, classes: [{ class, label, what, deploymentDays, deploymentSetting, days, effectiveDays, clamped, updatedBy, updatedAt }], exemptions, canEdit }`; `days: null` inherits the deployment's value)
+- `PUT /api/projects/:id/retention` (admins and the project's admins; step-up when it is on; body `{ classes: { runs?, tool_calls?, rule_events?, agent_memory? } }` with a number of days, or `null` to inherit again; `400 retention_out_of_bounds` outside `RETENTION_MIN_DAYS` to `RETENTION_MAX_DAYS`; `403 retention_admin_required` when someone other than an admin sets `tool_calls` or `rule_events` shorter than the deployment's value, audited as `project.retention.update_denied`; answers the updated view)
 
 ## Golden runs and replay
 

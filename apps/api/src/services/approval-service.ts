@@ -173,10 +173,10 @@ function describeApprovers(spec: ApprovalRequestSpec): string {
   return parts.length > 0 ? parts.join(", ") : "operators, builders and admins";
 }
 
-function requesterFromState(state: WorkflowExecutionState): { userId: string | null; email: string | null } {
+function requesterFromState(state: WorkflowExecutionState): { userId: string | null; email: string | null; apiKeyId: string | null } {
   const subject = state.toolPolicySubject;
-  if (subject?.source === "user") return { userId: subject.userId ?? null, email: subject.email ?? null };
-  return { userId: null, email: null };
+  if (subject?.source === "user") return { userId: subject.userId ?? null, email: subject.email ?? null, apiKeyId: subject.apiKeyId ?? null };
+  return { userId: null, email: null, apiKeyId: null };
 }
 
 export type ApprovalCheck = { allowed: true } | { allowed: false; message: string; code: string };
@@ -206,6 +206,11 @@ export async function approvalPersonCheck(
     }
   }
   if (options.accessOnly) return { allowed: true };
+  // 13.2 — a machine never decides: holding a service account's key must not get round the approver and
+  // self-approval rules. A run a service account started can still be decided by people.
+  if (user.serviceAccount) {
+    return { allowed: false, code: "service_account", message: "A service account cannot decide approvals; a person has to." };
+  }
   const spec = { ...defaultApprovalRequest(record.kind), ...record.spec, ...(options.skipSelfApproval ? { allowSelfApproval: true } : {}) };
   const check = checkApprover(spec, user, { userId: record.requestedByUserId, email: record.requestedBy });
   return check.allowed ? { allowed: true } : { allowed: false, code: check.code, message: check.message };
@@ -288,7 +293,7 @@ export class ApprovalService {
     const info = resolvePendingApproval(input.state);
     const earlier = await this.store.listApprovalRequestsForExecution(input.executionId);
     const first = earlier[0];
-    const requester = first ? { userId: first.requestedByUserId, email: first.requestedBy } : requesterFromState(input.state);
+    const requester = first ? { userId: first.requestedByUserId, email: first.requestedBy, apiKeyId: first.requestedByApiKeyId } : requesterFromState(input.state);
     const createdAt = this.now();
     const timeoutMinutes = input.timeoutMinutes > 0 ? Math.floor(input.timeoutMinutes) : null;
     const insert = () => this.store.insertApprovalRequest({
@@ -306,6 +311,7 @@ export class ApprovalService {
       details: info.details,
       requestedByUserId: requester.userId,
       requestedBy: requester.email,
+      requestedByApiKeyId: requester.apiKeyId,
       timeoutMinutes,
       expiresAt: timeoutMinutes ? new Date(createdAt.getTime() + timeoutMinutes * 60_000).toISOString() : null,
       askingWorkflowId: info.workflowId || null,
@@ -373,6 +379,7 @@ export class ApprovalService {
         details: info.details,
         requestedByUserId: requester.userId,
         requestedBy: requester.email,
+        requestedByApiKeyId: requester.apiKeyId,
         timeoutMinutes,
         expiresAt: timeoutMinutes && Number.isFinite(countFrom) ? new Date(countFrom + timeoutMinutes * 60_000).toISOString() : null,
         askingWorkflowId: info.workflowId || null,
@@ -577,6 +584,7 @@ export class ApprovalService {
       id: record.id,
       status: input.decision === "approve" ? "approved" : "rejected",
       decidedByUserId: input.user.id,
+      decidedByApiKeyId: input.user.apiKeyId ?? null,
       decidedBy: input.user.email,
       reason: reason ?? null,
       edits: edits && editedFields.length > 0 ? edits : null,

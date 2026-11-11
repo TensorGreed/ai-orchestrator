@@ -100,10 +100,19 @@ export function readDispatchedRunSpec(value: unknown): DispatchedRunSpec | null 
   return spec as DispatchedRunSpec;
 }
 
-/** Only what identifies the user crosses the queue (the session, a token or a password never does). */
+/**
+ * Only what identifies the user crosses the queue (the session, a token or a password never does). An API key's
+ * limits cross with it (13.2): the role is already the key's effective role, and the project list and key id go too.
+ */
 export function dispatchedPolicyActor(user: SafeUser | null | undefined): SafeUser | null | undefined {
   if (!user) return user;
-  return { id: user.id, email: user.email, role: user.role };
+  return {
+    id: user.id,
+    email: user.email,
+    role: user.role,
+    ...(user.projectScope ? { projectScope: [...user.projectScope] } : {}),
+    ...(user.apiKeyId ? { apiKeyId: user.apiKeyId } : {})
+  };
 }
 
 /** The idempotent queue item of a schedule's fire: two leaders (or a retried tick) firing one second enqueue once. */
