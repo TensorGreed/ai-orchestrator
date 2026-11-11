@@ -328,7 +328,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
-import { NetworkControls, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
+import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
 import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
@@ -7734,22 +7734,53 @@ export async function createApp(
       }
       if (!await requireStepUp(request, reply, "user.create")) return;
     } else if (existingUsers > 0 && config.AUTH_ALLOW_PUBLIC_REGISTER) {
+      // Public registration is for people: a request carrying an L2M API key (well-formed, valid or not) is refused
+      // rather than treated as signed out or as the key's owner. Any other Bearer value (an auth proxy's own token) is
+      // not an L2M credential and is ignored, as on other routes. Admins create users with a session or a key while
+      // public registration is off.
+      if (hasApiKeyBearer(request.headers.authorization)) {
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.register",
+          action: "register",
+          outcome: "denied",
+          metadata: {
+            email: parsed.data.email,
+            role: parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer"),
+            reason: "api_key"
+          }
+        });
+        reply.code(403);
+        return { error: "API keys cannot be used for public registration" };
+      }
       // 13.2 — a session restricted by MFA_REQUIRED_ROLES registers as anyone else would (as a viewer).
       actor = await unrestrictedSessionUser(request);
     }
 
     const requestedRole: UserRole = parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer");
-    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action.
-    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
     let role: UserRole = requestedRole;
     if (existingUsers === 0) {
       role = parsed.data.role ?? "admin";
     } else if (!actor) {
+      // A signed-out caller always gets the lowest role, whatever it asked for.
       role = "viewer";
-    } else if (role === "admin" && actor.role !== "admin") {
+    } else if (rolePriority[role] > rolePriority[actor.role]) {
+      // A signed-in caller cannot create a user with a role above its own.
+      await audit(request, actor, {
+        category: "auth",
+        eventType: "user.register",
+        action: "register",
+        outcome: "denied",
+        metadata: { email: parsed.data.email, role, reason: "role_above_actor", actorEmail: actor.email, actorRole: actor.role }
+      });
       reply.code(403);
-      return { error: "Only admins can create admin users" };
+      return {
+        error: role === "admin" ? "Only admins can create admin users" : `Your role (${actor.role}) cannot create a user with the ${role} role`
+      };
     }
+    // 13.2 — a signed-in user granting more than viewer through public registration is the same security action. It
+    // runs after the role check, so a role above the caller's own is refused and audited first.
+    if (actor && config.AUTH_ALLOW_PUBLIC_REGISTER && requestedRole !== "viewer" && !await requireStepUp(request, reply, "user.create")) return;
 
     try {
       const user = await authService.register({

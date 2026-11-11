@@ -683,7 +683,7 @@ describe("fix-round odds and ends", () => {
     expect(await booted.store.findSsoIdentity("ldap", dn)).toMatchObject({ userId: admin.id });
   });
 
-  it("public registration ignores an API key: only a browser session can act as the registering admin", async () => {
+  it("public registration refuses an API key: only a browser session can act as the registering admin", async () => {
     const booted = await boot({ AUTH_ALLOW_PUBLIC_REGISTER: "true" });
     await register(booted, "root@example.com", "admin");
     const session = await signIn(booted, "root@example.com");
@@ -694,7 +694,9 @@ describe("fix-round odds and ends", () => {
       payload: { email: "k@example.com", password: "Pass-word-123!", role: "builder" },
       headers: { authorization: `Bearer ${key.key}` }
     });
-    expect(viaKey.json()).toMatchObject({ user: { role: "viewer" } });
+    expect(viaKey.statusCode).toBe(403);
+    expect(viaKey.json()).toEqual({ error: "API keys cannot be used for public registration" });
+    expect(await booted.store.getUserByEmail("k@example.com")).toBeNull();
   });
 });
 
