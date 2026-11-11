@@ -329,7 +329,9 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "POST", url: `/api/users/${other.id}/mfa/reset` },
       { method: "POST", url: "/api/auth/mfa/disable", payload: {} },
       { method: "POST", url: "/api/auth/api-keys", payload: { name: "ci" } },
+      { method: "POST", url: "/api/auth/api-keys/apk_x/rotate", payload: {} },
       { method: "POST", url: "/api/mcp/clients", payload: {} },
+      { method: "POST", url: "/api/mcp/clients/mcc_x/rotate", payload: {} },
       { method: "POST", url: "/api/secrets", payload: {} },
       { method: "PUT", url: "/api/secrets/sec_x/sensitive-output", payload: { sensitiveOutput: true } },
       { method: "POST", url: "/api/secrets/sec_x/shares", payload: {} },
@@ -354,6 +356,7 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "POST", url: "/api/mcp/servers/import", payload: {} },
       { method: "POST", url: `/api/users/${other.id}/sessions/revoke`, payload: {} },
       { method: "POST", url: `/api/service-accounts/${account.id}/keys`, payload: { name: "ci" } },
+      { method: "POST", url: `/api/service-accounts/${account.id}/keys/apk_x/rotate`, payload: {} },
       { method: "PATCH", url: `/api/service-accounts/${account.id}`, payload: { role: "operator" } },
       { method: "DELETE", url: `/api/service-accounts/${account.id}` }
     ];
@@ -681,7 +684,7 @@ describe("fix-round odds and ends", () => {
     expect(await booted.store.findSsoIdentity("ldap", dn)).toMatchObject({ userId: admin.id });
   });
 
-  it("public registration ignores an API key: only a browser session can act as the registering admin", async () => {
+  it("public registration refuses an API key: only a browser session can act as the registering admin", async () => {
     const booted = await boot({ AUTH_ALLOW_PUBLIC_REGISTER: "true" });
     await register(booted, "root@example.com", "admin");
     const session = await signIn(booted, "root@example.com");
@@ -692,7 +695,9 @@ describe("fix-round odds and ends", () => {
       payload: { email: "k@example.com", password: "Pass-word-123!", role: "builder" },
       headers: { authorization: `Bearer ${key.key}` }
     });
-    expect(viaKey.json()).toMatchObject({ user: { role: "viewer" } });
+    expect(viaKey.statusCode).toBe(403);
+    expect(viaKey.json()).toEqual({ error: "API keys cannot be used for public registration" });
+    expect(await booted.store.getUserByEmail("k@example.com")).toBeNull();
   });
 });
 

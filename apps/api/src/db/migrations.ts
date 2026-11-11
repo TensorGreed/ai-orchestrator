@@ -2653,7 +2653,41 @@ export const MIGRATIONS: Migration[] = [
     `
   },
   {
-    // Provisional number: v64 belongs to the key-rotation change; renumber at merge if that lands later.
+    version: 64,
+    description: "13.2 — key and gateway client rotation with a grace window, and expiry warnings sent once a day",
+    // Every column is nullable, so keys and clients from before the upgrade behave as before (no backfill).
+    // api_keys: a rotated key names the key that replaced it (superseded_by) and when (rotated_at); its expires_at was
+    // already moved to the end of the grace window, so it needs no new check. mcp_clients: the old token's prefix and
+    // hash stay in previous_* until previous_expires_at. expiry_notified_at records the last credential.expiring alert
+    // so the leader sends at most one per credential per day, across instances and restarts.
+    up: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS superseded_by TEXT;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expiry_notified_at TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_token_prefix TEXT;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_token_hash TEXT;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS previous_expires_at TIMESTAMPTZ;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS expiry_notified_at TIMESTAMPTZ;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_clients_previous_token_prefix ON mcp_clients(previous_token_prefix);
+    `,
+    // Rolling back ends every old gateway token still in its grace window (the previous_* columns go); rotated API
+    // keys keep the shortened expires_at, so nothing is widened.
+    down: `
+      DROP INDEX IF EXISTS idx_mcp_clients_previous_token_prefix;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS expiry_notified_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS rotated_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_expires_at;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_token_hash;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS previous_token_prefix;
+      DROP INDEX IF EXISTS idx_api_keys_expires_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS expiry_notified_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS rotated_at;
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS superseded_by;
+    `
+  },
+  {
     version: 65,
     description: "13.3 — retention: per-scope policies, the purge log, and indexes for purging by age",
     // retention_policies is read from per-project retention on; scope_type is 'project' (other scopes are refused by

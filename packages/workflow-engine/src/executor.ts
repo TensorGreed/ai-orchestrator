@@ -27,8 +27,8 @@ import {
   parseMcpRuntimeRejection,
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
-import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { providerDestinationRef } from "@ai-orchestrator/provider-sdk";
+import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
+import { ToolCallAssembler, chargedUsage, estimateAnswerTokens, estimateRequestTokens, isStreamUsageRefusal, providerDestinationRef } from "@ai-orchestrator/provider-sdk";
 import {
   GUARD_EFFECTIVE_PROFILE_REF,
   NODE_ACTIVITY_LIMIT,
@@ -155,6 +155,7 @@ import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch"
 import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
 import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPythonCode, type CodeSandboxPlan } from "./code-sandbox";
 import { runWithSandboxOwner } from "./quickjs-sandbox";
+import { ownUsage, ownUsageOf, runAsUsageOwner, withoutUsage } from "./usage-ownership";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
@@ -188,6 +189,7 @@ import {
 } from "./destination-guard";
 import {
   builtInGuardProfile,
+  runVerdictMemoOf,
   createAgentGuardSession,
   GuardBlockedError,
   guardMayUseLabels,
@@ -311,6 +313,85 @@ function runTelemetryBlobs(result: WorkflowExecutionResult): Record<string, unkn
   }
   return out;
 }
+
+/** A finished child's model usage, for `WorkflowExecutionDependencies.onSubWorkflowUsage`. */
+export interface SubWorkflowUsage {
+  workflowId: string;
+  status: WorkflowExecutionResult["status"];
+  mode: "sync" | "async" | "tool";
+  durationMs: number;
+  telemetry: Record<string, unknown>[];
+}
+
+/**
+ * What `admitSubWorkflow` is told about a child it is asked to start: how it runs (`async` children run beside their
+ * caller; sync and tool children one at a time) and the admission of the child it runs inside, if any.
+ */
+export interface SubWorkflowAdmissionRequest {
+  mode: SubWorkflowUsage["mode"];
+  parent?: SubWorkflowAdmission;
+}
+
+/** A started child, as the host admitted it: told when the child stops running. */
+export interface SubWorkflowAdmission {
+  /** The child stopped running (finished, failed or paused); its usage, if any, was reported first. */
+  settle(): void;
+  /** A Workflow Tool's child keeps running after its call timed out, beside its caller. */
+  detach?(): void;
+}
+
+/**
+ * Hands a finished child's model usage to the run (nothing when it made no model call); never fails the caller.
+ * `keepsPaused`: a paused child that will not resume (a Workflow Tool's) is reported as it is.
+ */
+async function reportSubWorkflowUsage(
+  dependencies: WorkflowExecutionDependencies,
+  result: WorkflowExecutionResult,
+  mode: SubWorkflowUsage["mode"],
+  keepsPaused = false
+): Promise<void> {
+  // A paused child's usage so far comes back with its result after the resume.
+  if (!dependencies.onSubWorkflowUsage || (result.status === "waiting_approval" && !keepsPaused)) return;
+  const telemetry = runTelemetryBlobs(result);
+  if (telemetry.length === 0) return;
+  const durationMs = result.completedAt ? Math.max(0, Date.parse(result.completedAt) - Date.parse(result.startedAt)) : 0;
+  try {
+    await dependencies.onSubWorkflowUsage({ workflowId: result.workflowId, status: result.status, mode, durationMs: Number.isFinite(durationMs) ? durationMs : 0, telemetry });
+  } catch {
+    // Recording usage never changes how the run goes.
+  }
+}
+
+/** A failed or stopped model call's usage, for `onUnrecordedModelUsage`; never fails the caller or hides its error. */
+async function reportUnrecordedUsage(
+  dependencies: WorkflowExecutionDependencies,
+  call: { providerId: string; model: string; usage: ReturnType<typeof chargedUsage>["usage"]; estimated: boolean; latencyMs: number }
+): Promise<void> {
+  if (!dependencies.onUnrecordedModelUsage) return;
+  try {
+    await dependencies.onUnrecordedModelUsage({
+      providerId: call.providerId,
+      model: call.model,
+      usage: call.usage,
+      ...(call.estimated ? { usageEstimated: true } : {}),
+      latencyMs: call.latencyMs,
+      llmCallCount: 1,
+      callFailed: true
+    });
+  } catch {
+    // Recording usage never changes how the run goes.
+  }
+}
+
+/** Tells the host a child stopped running; never fails the caller. */
+function settleSubWorkflow(admission: SubWorkflowAdmission | void): void {
+  try {
+    admission?.settle();
+  } catch {
+    // Bookkeeping only.
+  }
+}
+
 /** Phase 16 — label segments of an agent node: its user prompt's reads, and reads made while its loop runs. */
 const AGENT_USER_PROMPT_SEGMENT = "user_prompt";
 const AGENT_RUN_SEGMENT = "agent_run";
@@ -352,6 +433,31 @@ export interface WorkflowExecutionDependencies {
    * on top of the parent's dependencies when an Execute Workflow node runs.
    */
   scopeSubWorkflow?: (workflow: Workflow) => Partial<WorkflowExecutionDependencies>;
+  /**
+   * Asked before an Execute Workflow node or a Workflow Tool starts a child (sync or async; not when a paused child
+   * resumes). Throws to refuse it, for example when a used-up budget applies to the run; the node (or the tool call)
+   * fails with the error's message. May return an admission, which is settled when the child stops running (after its
+   * usage was reported). Absent: every child starts.
+   */
+  admitSubWorkflow?: (workflow: Workflow, request: SubWorkflowAdmissionRequest) => Promise<SubWorkflowAdmission | void>;
+  /** The admission of the child these dependencies run (set by the engine for a child's run). */
+  subWorkflowAdmission?: SubWorkflowAdmission;
+  /**
+   * The model usage of a child an Execute Workflow node or a Workflow Tool ran, once the child has stopped (also when
+   * it failed, for an async child whenever it ends, and for a Workflow Tool's child that ended after its call timed
+   * out): its own nodes' `_telemetry` blobs and those of the workflows its agents called as tools. A grandchild
+   * reports itself through the same hook (children inherit it), so each run is reported once. A paused Execute
+   * Workflow child is reported when it finishes after the resume. With this hook a Workflow Tool's child is reported
+   * here and not added to its agent node's `_childTelemetry`.
+   */
+  onSubWorkflowUsage?: (usage: SubWorkflowUsage) => void | Promise<void>;
+  /**
+   * Model usage that no node output carries: a streamed model call that failed after the provider started answering,
+   * or was cancelled or timed out while in flight. It is charged an estimate (the prompt and what had streamed; a usage
+   * frame the provider sent is used instead). Children inherit the hook, so the run that started the tree pays.
+   * Absent: such calls record no usage.
+   */
+  onUnrecordedModelUsage?: (telemetry: Record<string, unknown>) => void | Promise<void>;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   /**
    * 12.2 — secrets flagged "sensitive output": a node whose config references one of them produces sensitive output
@@ -3495,6 +3601,85 @@ async function runLlmNode(input: {
   }
 }
 
+/**
+ * Providers whose streamed calls ask for the final usage frame (`stream_options.include_usage`) unless the model sets
+ * `extra.streamUsage: false`. OpenAI-compatible servers and Ollama differ in whether they accept the field, so they
+ * leave it out unless the model sets `extra.streamUsage: true`; their streamed usage is otherwise estimated.
+ */
+const STREAM_USAGE_BY_DEFAULT = new Set(["openai", "azure_openai"]);
+
+/** Endpoints and models that refused `stream_options` in this process: their streamed calls leave it out. */
+const streamUsageRefused = new Set<string>();
+const STREAM_USAGE_REFUSED_MAX = 1000;
+
+function streamUsageKey(provider: LLMProviderConfig): string {
+  const extra = provider.extra ?? {};
+  return JSON.stringify([
+    String(provider.providerId),
+    provider.baseUrl ?? "",
+    typeof extra.endpoint === "string" ? extra.endpoint : "",
+    typeof extra.apiVersion === "string" ? extra.apiVersion : "",
+    typeof extra.deployment === "string" ? extra.deployment : "",
+    provider.model ?? ""
+  ]);
+}
+
+function wantsStreamUsage(provider: LLMProviderConfig): boolean {
+  const setting = provider.extra?.streamUsage;
+  if (setting === false) return false;
+  if (setting !== true && !STREAM_USAGE_BY_DEFAULT.has(String(provider.providerId))) return false;
+  return !streamUsageRefused.has(streamUsageKey(provider));
+}
+
+/**
+ * The model's stream. When it was asked for the usage frame and the provider refuses the request because of that
+ * option (400 or 422 naming `stream_options`, see `isStreamUsageRefusal`) before sending anything, it is asked once
+ * more without it, and the endpoint is remembered so later calls leave the field out: a workflow that streamed before
+ * never fails because usage was requested. The usage of such a call is estimated. A model tape records only the retry.
+ */
+async function* streamWithUsageFallback(
+  adapter: ReturnType<ProviderRegistry["get"]>,
+  request: ProviderCallRequest,
+  context: ProviderExecutionContext,
+  warn: (message: string, metadata: Record<string, unknown>) => void
+): AsyncGenerator<LLMStreamChunk> {
+  const generateStream = adapter.generateStream!.bind(adapter);
+  let started = false;
+  try {
+    for await (const chunk of generateStream(request, context)) {
+      started = true;
+      yield chunk;
+    }
+    return;
+  } catch (error) {
+    // Only a refusal that names the option is retried; any other 400 or 422 is the request's own error.
+    if (started || request.options?.streamUsage !== true || !isStreamUsageRefusal(error)) throw error;
+    warn("The model refused the streamed request with the usage option (stream_options); retrying without it, and its usage is estimated", {
+      providerId: String(request.provider.providerId),
+      model: request.provider.model,
+      status: (error as { statusCode?: number }).statusCode,
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 300)
+    });
+  }
+  throwIfAborted(context.signal);
+  const { options: _usageOption, ...withoutUsage } = request;
+  // Remembered once the request without the field is accepted (its first chunk, or an empty end): the field was the
+  // cause. A retry that fails the same way leaves nothing remembered.
+  const remember = () => {
+    if (streamUsageRefused.size >= STREAM_USAGE_REFUSED_MAX) streamUsageRefused.clear();
+    streamUsageRefused.add(streamUsageKey(request.provider));
+  };
+  let accepted = false;
+  for await (const chunk of generateStream(withoutUsage, context)) {
+    if (!accepted) {
+      accepted = true;
+      remember();
+    }
+    yield chunk;
+  }
+  if (!accepted) remember();
+}
+
 async function runLlmCall(
   input: {
     nodeId: string;
@@ -3506,44 +3691,67 @@ async function runLlmCall(
 ): Promise<Record<string, unknown>> {
   if (input.dependencies.onLLMDelta && providerAdapter.generateStream) {
     let streamedText = "";
-    const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
+    const toolCallAssembler = new ToolCallAssembler();
     let llmDeltaIndex = 0;
+    let reportedUsage: Extract<LLMStreamChunk, { type: "usage" }>["usage"] | undefined;
+    const streamRequest: ProviderCallRequest = {
+      provider: input.provider,
+      messages,
+      // Ask for the final usage frame where the provider takes it (see STREAM_USAGE_BY_DEFAULT); without one the usage
+      // is estimated below.
+      ...(wantsStreamUsage(input.provider) ? { options: { streamUsage: true } } : {})
+    };
+    const warn = (message: string, metadata: Record<string, unknown>) => {
+      if (input.dependencies.logger) input.dependencies.logger(message, { nodeId: input.nodeId, ...metadata });
+      else console.warn(`[llm_call ${input.nodeId}] ${message}`, metadata);
+    };
+    const streamStartedMs = Date.now();
+
+    const estimateStream = () =>
+      chargedUsage(reportedUsage, () => ({
+        input: estimateRequestTokens(streamRequest),
+        output: estimateAnswerTokens(
+          streamedText,
+          toolCallAssembler.calls().map((entry) => ({ name: entry.name, arguments: entry.argumentsText }))
+        )
+      }));
+    let answering = false;
 
     throwIfAborted(input.dependencies.abortSignal);
-    for await (const chunk of providerAdapter.generateStream(
-      {
-        provider: input.provider,
-        messages
-      },
-      providerCallContext(input.dependencies, input.nodeId)
-    )) {
-      throwIfAborted(input.dependencies.abortSignal);
-      if (chunk.type === "text_delta" && chunk.textDelta) {
-        streamedText += chunk.textDelta;
-        await input.dependencies.onLLMDelta({
-          nodeId: input.nodeId,
-          delta: chunk.textDelta,
-          index: llmDeltaIndex
-        });
-        llmDeltaIndex += 1;
-      } else if (chunk.type === "tool_call_delta") {
-        const toolCallId = chunk.toolCallId ?? `toolcall_${toolCallById.size}`;
-        const existing = toolCallById.get(toolCallId) ?? {
-          id: toolCallId,
-          name: chunk.name ?? `tool_${toolCallById.size}`,
-          argumentsText: ""
-        };
-        if (typeof chunk.name === "string" && chunk.name) {
-          existing.name = chunk.name;
+    try {
+      for await (const chunk of streamWithUsageFallback(providerAdapter, streamRequest, providerCallContext(input.dependencies, input.nodeId), warn)) {
+        answering = true;
+        throwIfAborted(input.dependencies.abortSignal);
+        if (chunk.type === "usage") {
+          reportedUsage = chunk.usage;
+        } else if (chunk.type === "text_delta" && chunk.textDelta) {
+          streamedText += chunk.textDelta;
+          await input.dependencies.onLLMDelta({
+            nodeId: input.nodeId,
+            delta: chunk.textDelta,
+            index: llmDeltaIndex
+          });
+          llmDeltaIndex += 1;
+        } else if (chunk.type === "tool_call_delta") {
+          toolCallAssembler.add(chunk);
         }
-        if (typeof chunk.argumentsDelta === "string") {
-          existing.argumentsText += chunk.argumentsDelta;
-        }
-        toolCallById.set(toolCallId, existing);
       }
+    } catch (error) {
+      // The one place every failed, cancelled or timed-out stream passes: once the provider started answering, the
+      // call is charged, though the node gets no output. A request refused or stopped before any answer (an HTTP
+      // error, a retry wait, a cancel while connecting) is not charged.
+      if (answering) {
+        await reportUnrecordedUsage(input.dependencies, {
+          providerId: input.provider.providerId,
+          model: input.provider.model,
+          ...estimateStream(),
+          latencyMs: Math.max(0, Date.now() - streamStartedMs)
+        });
+      }
+      throw error;
     }
 
-    const toolCalls = [...toolCallById.values()].map((entry) => {
+    const toolCalls = toolCallAssembler.calls().map((entry) => {
       let parsedArguments: Record<string, unknown> = {};
       try {
         parsedArguments = JSON.parse(entry.argumentsText || "{}") as Record<string, unknown>;
@@ -3557,6 +3765,10 @@ async function runLlmCall(
       };
     });
 
+    // Budgets and spend read `_telemetry`: a stream whose provider sent no usage frame is charged an estimate of the
+    // request and the answer received (the same estimate as the /v1 gateway), never zero.
+    const charged = estimateStream();
+
     return {
       text: streamedText,
       answer: streamedText,
@@ -3564,18 +3776,28 @@ async function runLlmCall(
       raw: {
         streamed: true
       },
-      _provider: input.provider
+      _provider: input.provider,
+      _telemetry: ownUsage({
+        providerId: input.provider.providerId,
+        model: input.provider.model,
+        usage: charged.usage,
+        ...(charged.estimated ? { usageEstimated: true } : {}),
+        latencyMs: Math.max(0, Date.now() - streamStartedMs)
+      })
     };
   }
 
-  const response = await providerAdapter.generate(
-    {
-      provider: input.provider,
-      messages
-    },
-    providerCallContext(input.dependencies, input.nodeId)
-  );
+  const request: ProviderCallRequest = { provider: input.provider, messages };
+  const response = await providerAdapter.generate(request, providerCallContext(input.dependencies, input.nodeId));
   throwIfAborted(input.dependencies.abortSignal);
+  // A provider that reports no usage (some compatible servers) is charged an estimate, as a stream is.
+  const charged = chargedUsage(response.usage, () => ({
+    input: estimateRequestTokens(request),
+    output: estimateAnswerTokens(
+      response.content ?? "",
+      (response.toolCalls ?? []).map((call) => ({ name: call.name, arguments: JSON.stringify(call.arguments ?? {}) }))
+    )
+  }));
 
   return {
     text: response.content,
@@ -3586,12 +3808,13 @@ async function runLlmCall(
     // Phase 7.1 — surface telemetry on the node output so execution_history
     // captures token counts + provider-call latency. The Studio canvas reads
     // these via getExecutionHistory's nodeResults.
-    _telemetry: {
+    _telemetry: ownUsage({
       providerId: input.provider.providerId,
       model: input.provider.model,
-      usage: response.usage,
+      usage: charged.usage,
+      ...(charged.estimated ? { usageEstimated: true } : {}),
       latencyMs: response.latencyMs
-    }
+    })
   };
 }
 
@@ -3710,20 +3933,33 @@ function buildGraphIndexes(workflow: Workflow): GraphIndexes {
   };
 }
 
+/** Phase 12 coverage — the run's memo of clean checks (see `guardScopeFor`). */
+function guardRunMemo(context: Pick<NodeRuntimeContext, "nodeOutputs" | "globals">, dependencies: Pick<WorkflowExecutionDependencies, "guard">) {
+  return dependencies.guard ? runVerdictMemoOf(dependencies.guard) : runVerdictMemoOf(STANDALONE_GUARD, context.nodeOutputs ?? context.globals);
+}
+
 /** Phase 12.1 — without guard dependencies, guard nodes use the built-in default profile and agents run unguarded. */
 const STANDALONE_GUARD: GuardRuntimeDependencies = {
   resolveRun: () => ({ source: "none", stack: [], chain: [] }),
   loadProfile: (profileId) => (profileId === "default" ? builtInGuardProfile() : undefined)
 };
 
+/**
+ * Phase 12 coverage — `options.memo`: the scope reuses earlier clean checks of
+ * this run. With the standalone fallback (shared by every run in the process)
+ * the memo is kept on the run's own output map, so it never crosses runs.
+ */
 function guardScopeFor(
   node: WorkflowNode,
   context: NodeRuntimeContext,
   dependencies: WorkflowExecutionDependencies,
-  placement: GuardEvalScope["placement"]
+  placement: GuardEvalScope["placement"],
+  options: { memo?: boolean } = {}
 ): GuardEvalScope {
+  const guard = dependencies.guard ?? STANDALONE_GUARD;
   return {
-    guard: dependencies.guard ?? STANDALONE_GUARD,
+    guard,
+    ...(options.memo ? { memo: guardRunMemo(context, dependencies) } : {}),
     resolveSecret: dependencies.resolveSecret,
     executionId: typeof context.globals.execution_id === "string" ? context.globals.execution_id : "",
     workflowId: context.workflow.id,
@@ -3986,7 +4222,8 @@ function replayStubFor(node: WorkflowNode, dependencies: WorkflowExecutionDepend
 
 function resolveReplayStub(stub: ReplayNodeStub, context: NodeRuntimeContext): unknown {
   if (stub.kind === "pass_through") {
-    return mergeParentOutputs(context.parentOutputs);
+    // Passes its input on, as the live node did: the parents' model usage stays theirs (usage-ownership.ts).
+    return withoutUsage(mergeParentOutputs(context.parentOutputs));
   }
   if (stub.kind === "error") {
     throw new Error(`Replayed from the recording: ${stub.message}`);
@@ -4000,7 +4237,8 @@ function executeNode(
   context: NodeRuntimeContext,
   dependencies: WorkflowExecutionDependencies
 ): Promise<unknown> {
-  return runInLabelScope(context.labelScope, () => executeNodeHandler(node, context, dependencies));
+  // A node's output keeps only the model usage it made itself (usage-ownership.ts), so a pass-through is not counted.
+  return runInLabelScope(context.labelScope, () => runAsUsageOwner(() => executeNodeHandler(node, context, dependencies)));
 }
 
 async function executeNodeHandler(
@@ -4028,7 +4266,8 @@ async function executeNodeHandler(
 
   const replayStub = replayStubFor(node, dependencies);
   if (replayStub) {
-    return resolveReplayStub(replayStub, context);
+    // The recorded answer stands in for the node's own call, usage included.
+    return ownUsageOf(resolveReplayStub(replayStub, context));
   }
 
   const templateData = buildTemplateData(context, config);
@@ -4521,10 +4760,12 @@ async function executeNodeHandler(
       // Phase 6.4 — inside a Workflow Tool's child, the calling agent's write controls reach this workflow too (tighten-only).
       const targetWorkflow = dependencies.callerWriteControls ? withCallerWriteControls(loadedTarget, dependencies.callerWriteControls) : loadedTarget;
 
-      const childDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
+      const scopedChildDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
         ? { ...dependencies, ...dependencies.scopeSubWorkflow(targetWorkflow) }
         : dependencies;
       const mode = config.mode === "async" ? "async" : "sync";
+      const resume = context.resumeDecision;
+      const resumingChild = resume && resume.nodeId === node.id && resume.handoff.kind === "sub_workflow" ? resume.handoff : undefined;
       const inputMapping = toRecord(config.inputMapping);
       const mappedInput: Record<string, unknown> = {};
       for (const [parentKey, childKeyValue] of Object.entries(inputMapping)) {
@@ -4545,6 +4786,9 @@ async function executeNodeHandler(
       // Phase 16 — the child's trigger takes this node's input labels.
       const childInputLabels = context.labelScope?.inputLabels();
       if (mode === "async") {
+        // A new child may be refused (a used-up budget of the run, counting the children still running).
+        const asyncAdmission = await dependencies.admitSubWorkflow?.(targetWorkflow, { mode: "async", ...(dependencies.subWorkflowAdmission ? { parent: dependencies.subWorkflowAdmission } : {}) });
+        const childDependencies: WorkflowExecutionDependencies = asyncAdmission ? { ...scopedChildDependencies, subWorkflowAdmission: asyncAdmission } : scopedChildDependencies;
         // Fire-and-forget
         executeWorkflow(
           {
@@ -4557,60 +4801,74 @@ async function executeNodeHandler(
             callStack: [...context.callStack]
           },
           childDependencies
-        ).catch(() => {
-          // Intentionally ignored — async sub-workflow errors do not propagate
-        });
+        )
+          .then(
+            async (asyncResult) => await reportSubWorkflowUsage(dependencies, asyncResult, "async"),
+            () => {
+              // Intentionally ignored — async sub-workflow errors do not propagate
+            }
+          )
+          .finally(() => settleSubWorkflow(asyncAdmission));
         return { async: true, workflowId, status: "enqueued" };
       }
 
       // Phase 11.2 — a paused child is not saved on its own: its paused state
       // travels in this run's hand-off, and the parent pauses at this node.
       let childPause: Parameters<NonNullable<WorkflowExecutionDependencies["persistPausedExecution"]>>[0] | undefined;
-      const pauseCapturingDependencies: WorkflowExecutionDependencies = {
-        ...childDependencies,
-        persistPausedExecution: async (paused) => {
-          childPause = paused;
-        }
-      };
-      const resume = context.resumeDecision;
-      const resumingChild = resume && resume.nodeId === node.id && resume.handoff.kind === "sub_workflow" ? resume.handoff : undefined;
       // The child resumes under the scope of the workflow this node calls
       // now (checked by loadWorkflow above), never a stored one of another id.
       if (resumingChild && resumingChild.childState.workflow?.id !== targetWorkflow.id) {
         throw new Error(`The paused sub-workflow does not match '${workflowId}', so this run cannot resume it.`);
       }
-      const childResult = resumingChild
-        ? await executeWorkflow(
-            {
-              workflow: resumingChild.childState.workflow,
-              triggerType: "sub_workflow",
-              triggeredBy: context.workflow.id,
-              toolPolicySubject: context.toolPolicySubject,
-              callStack: [...context.callStack],
-              resumeState: resumingChild.childState,
-              approvalDecision: {
-                decision: resume!.decision,
-                ...(resume!.actedBy ? { actedBy: resume!.actedBy } : {}),
-                ...(resume!.reason ? { reason: resume!.reason } : {}),
-                ...(resume!.edits ? { edits: resume!.edits } : {}),
-                ...(resume!.editedFields ? { editedFields: resume!.editedFields } : {}),
-                ...(resume!.requestId ? { requestId: resume!.requestId } : {})
-              }
-            },
-            pauseCapturingDependencies
-          )
-        : await executeWorkflow(
-            {
-              workflow: targetWorkflow,
-              input: mappedInput,
-              ...(childInputLabels ? { inputLabels: childInputLabels } : {}),
-              triggerType: "sub_workflow",
-              triggeredBy: context.workflow.id,
-              toolPolicySubject: context.toolPolicySubject,
-              callStack: [...context.callStack]
-            },
-            pauseCapturingDependencies
-          );
+      // A new child may be refused (a used-up budget of the run); a paused one that resumes has started already.
+      const syncAdmission = resumingChild
+        ? undefined
+        : await dependencies.admitSubWorkflow?.(targetWorkflow, { mode: "sync", ...(dependencies.subWorkflowAdmission ? { parent: dependencies.subWorkflowAdmission } : {}) });
+      const pauseCapturingDependencies: WorkflowExecutionDependencies = {
+        ...scopedChildDependencies,
+        ...(syncAdmission ? { subWorkflowAdmission: syncAdmission } : {}),
+        persistPausedExecution: async (paused) => {
+          childPause = paused;
+        }
+      };
+      let childResult: WorkflowExecutionResult;
+      try {
+        childResult = resumingChild
+          ? await executeWorkflow(
+              {
+                workflow: resumingChild.childState.workflow,
+                triggerType: "sub_workflow",
+                triggeredBy: context.workflow.id,
+                toolPolicySubject: context.toolPolicySubject,
+                callStack: [...context.callStack],
+                resumeState: resumingChild.childState,
+                approvalDecision: {
+                  decision: resume!.decision,
+                  ...(resume!.actedBy ? { actedBy: resume!.actedBy } : {}),
+                  ...(resume!.reason ? { reason: resume!.reason } : {}),
+                  ...(resume!.edits ? { edits: resume!.edits } : {}),
+                  ...(resume!.editedFields ? { editedFields: resume!.editedFields } : {}),
+                  ...(resume!.requestId ? { requestId: resume!.requestId } : {})
+                }
+              },
+              pauseCapturingDependencies
+            )
+          : await executeWorkflow(
+              {
+                workflow: targetWorkflow,
+                input: mappedInput,
+                ...(childInputLabels ? { inputLabels: childInputLabels } : {}),
+                triggerType: "sub_workflow",
+                triggeredBy: context.workflow.id,
+                toolPolicySubject: context.toolPolicySubject,
+                callStack: [...context.callStack]
+              },
+              pauseCapturingDependencies
+            );
+        await reportSubWorkflowUsage(dependencies, childResult, "sync");
+      } finally {
+        settleSubWorkflow(syncAdmission);
+      }
 
       if (childResult.status === "error") {
         throw new Error(childResult.error ?? `Sub-workflow '${workflowId}' execution failed.`);
@@ -6058,13 +6316,13 @@ async function executeNodeHandler(
         // Phase 10.5 — sampling requests the tool made count in the run's usage like any model call.
         ...(directMcp.samplingHandler.requestCount() > 0 && samplingModel && samplingProvider
           ? {
-              _telemetry: {
+              _telemetry: ownUsage({
                 providerId: samplingProvider,
                 model: samplingModel,
                 usage: samplingUsage,
                 llmCallCount: directMcp.samplingHandler.requestCount(),
                 samplingUsage
-              }
+              })
             }
           : {})
       };
@@ -6247,7 +6505,8 @@ async function executeNodeHandler(
       let activeToolCall: { toolName: string; toolCallId?: string; labels?: DataLabels } | undefined;
       const workflowToolResultLabels = new Map<string, DataLabels>();
       const workflowToolResultKey = (toolName: string, toolCallId: string | undefined) => `${toolName}\u0000${toolCallId ?? ""}`;
-      // Phase 6.4 — the children's model usage, counted in this node's usage (and so in the run's spend and budgets).
+      // Phase 6.4 — the children's model usage, counted in this node's usage (and so in the run's spend and budgets),
+      // when the host does not take it through onSubWorkflowUsage.
       const childTelemetry: Record<string, unknown>[] = [];
       if (workflowToolConfigs.length > 0) {
         const runWorkflowTool: WorkflowToolRunner = async (call) => {
@@ -6266,15 +6525,31 @@ async function executeNodeHandler(
             return failure(error instanceof Error ? error.message : String(error));
           }
           if (!child) return failure(`Workflow '${call.workflowId}' was not found.`);
+          // A new child may be refused (a used-up budget of the run, counting the children it ran before).
+          let admission: SubWorkflowAdmission | void;
+          try {
+            admission = await dependencies.admitSubWorkflow?.(child, { mode: "tool", ...(dependencies.subWorkflowAdmission ? { parent: dependencies.subWorkflowAdmission } : {}) });
+          } catch (error) {
+            return failure(error instanceof Error ? error.message : String(error));
+          }
           // A per-call limit from the node; without one the call is bounded by the run's own timeout.
           const timeoutMs = call.nodeId ? workflowToolTimeouts.get(call.nodeId) : undefined;
           const callAbort = new AbortController();
           const abortFromRun = () => callAbort.abort(dependencies.abortSignal?.reason);
           if (dependencies.abortSignal?.aborted) abortFromRun();
           else dependencies.abortSignal?.addEventListener("abort", abortFromRun, { once: true });
+          let scoped: WorkflowExecutionDependencies;
+          try {
+            scoped = dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies;
+          } catch (error) {
+            dependencies.abortSignal?.removeEventListener("abort", abortFromRun);
+            settleSubWorkflow(admission);
+            return failure(error instanceof Error ? error.message : String(error));
+          }
           const childDependencies: WorkflowExecutionDependencies = {
-            ...(dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies),
+            ...scoped,
             abortSignal: callAbort.signal,
+            ...(admission ? { subWorkflowAdmission: admission } : {}),
             ...(context.workflow.settings ? { callerWriteControls: context.workflow.settings } : {}),
             // v1: a child that stops for an approval is not kept; the call fails and says why.
             persistPausedExecution: async () => undefined
@@ -6310,18 +6585,32 @@ async function executeNodeHandler(
                 })
               : undefined;
           let childResult: WorkflowExecutionResult;
+          let detached = false;
           try {
             const settled = limit ? await Promise.race([childRun, limit]) : await childRun;
             if (settled === "timed_out") {
-              childRun.catch(() => undefined);
+              // It runs on beside the agent: its spend is recorded for the run when it stops.
+              detached = true;
+              try {
+                admission?.detach?.();
+              } catch {
+                // Bookkeeping only.
+              }
+              childRun
+                .then(async (late) => await reportSubWorkflowUsage(dependencies, late, "tool", true), () => undefined)
+                .finally(() => settleSubWorkflow(admission));
               return failure(`The workflow '${child.name}' did not finish within this tool's ${timeoutMs} ms limit.`);
             }
             childResult = settled;
+            // The run's host counts it at once (so the next call's check sees it, and it survives this node failing);
+            // without that hook it counts in this node's usage.
+            if (dependencies.onSubWorkflowUsage) await reportSubWorkflowUsage(dependencies, childResult, "tool", true);
+            else childTelemetry.push(...runTelemetryBlobs(childResult));
           } finally {
             if (timer) clearTimeout(timer);
             dependencies.abortSignal?.removeEventListener("abort", abortFromRun);
+            if (!detached) settleSubWorkflow(admission);
           }
-          childTelemetry.push(...runTelemetryBlobs(childResult));
           // The child's output labels, or on failure what its failed node read: its error text can quote that.
           const outputLabels = runOutputLabels.get(childResult);
           if (outputLabels && active) workflowToolResultLabels.set(workflowToolResultKey(active.toolName, active.toolCallId), outputLabels);
@@ -6896,16 +7185,16 @@ async function executeNodeHandler(
           // Phase 12.1 — which profiles guarded this agent and every verdict (masked evidence only).
           ...(guardSession ? { _guard: guardSession.trace() } : {}),
           // Phase 7.1 — surface cumulative agent telemetry on the node output.
-          _telemetry: {
+          _telemetry: ownUsage({
             providerId: provider.providerId,
             model: provider.model,
             usage: usageWithSampling,
             latencyMs: agentState.llmLatencyMs,
             llmCallCount: (agentState.llmCallCount ?? 0) + samplingRequests || agentState.llmCallCount,
             ...(samplingRequests > 0 ? { samplingUsage, samplingRequests } : {})
-          },
+          }),
           // Phase 6.4 — what the workflows this agent called as tools spent on models, each priced by its own model.
-          ...(childTelemetry.length > 0 ? { _childTelemetry: childTelemetry } : {}),
+          ...(childTelemetry.length > 0 ? { _childTelemetry: ownUsage(childTelemetry) } : {}),
           // Phase: agent_clarify — when the agent paused to ask the user a
           // question, surface the clarification details on the node output
           // so workflow consumers (chat UI, /executions response, downstream
@@ -8566,7 +8855,8 @@ async function executeWorkflowRun(
       pendingResumeDecision = { ...request.approvalDecision, nodeId: waitingNode.id, decidedAt, handoff };
       handledByHandoff = true;
     } else if (handoff?.kind === "route") {
-      const routed = approved ? handoff.onApprove : handoff.onReject;
+      // A Content Rules node passes its input on: the usage of the model call before it stays on that node.
+      const routed = withoutUsage(approved ? handoff.onApprove : handoff.onReject);
       nodeOutputs.set(waitingNode.id, routed);
       // Phase 16 — the paused node's labels were saved with the run; the decision comes from a person; the routed
       // output is scanned like any output.
@@ -9098,7 +9388,8 @@ async function executeWorkflowRun(
 
     try {
       if (hasOwnRecordKey(pinnedData, node.id)) {
-        const output = pinnedData[node.id];
+        // Pinned data made no model call: usage it was copied with is not counted again.
+        const output = withoutUsage(pinnedData[node.id]);
         nodeOutputs.set(node.id, output);
         // Phase 16 — pinned data was given by a user (plus the node type's own origin).
         labelState.set(node.id, labelState.finalize(unionLabels([givenLabels(node.id), nodeSensitive ? SENSITIVE_LABELS : undefined]), output));

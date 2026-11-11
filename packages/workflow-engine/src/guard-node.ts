@@ -1,6 +1,7 @@
 import type { GuardOutputHandle, WorkflowNode } from "@ai-orchestrator/shared";
 import { ApprovalHandoffSignal } from "./approval-handoff";
 import type { NodeLabelScope } from "./data-labels";
+import { withoutUsage } from "./usage-ownership";
 import {
   needsApproval,
   parseGuardNodeConfig,
@@ -127,8 +128,10 @@ export async function executeGuardNodeStep(input: {
 
   const parentIds = new Set(input.parentIds);
   const itemWithoutParentCopies = Object.fromEntries(Object.entries(input.merged).filter(([key]) => !parentIds.has(key)));
+  // The item passes on without the parents' model usage, which stays on the node that made the call (also when the
+  // output is stored for an approval and set on resume, outside the node's run).
   const passOutput = (summary: GuardNodeSummary) => ({
-    ...writePath(itemWithoutParentCopies, config.inputField, result.transformed ? result.content : value ?? ""),
+    ...withoutUsage(writePath(itemWithoutParentCopies, config.inputField, result.transformed ? result.content : value ?? "")),
     guard: summary,
     _branchHandle: "pass"
   });

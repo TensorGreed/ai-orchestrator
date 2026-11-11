@@ -1,7 +1,8 @@
 /**
  * 13.3 — a large first purge on SQLite keeps the event loop responsive: the store deletes in batches and yields between
- * them, so a timer due during a purge of 200 000 runs fires within 100 ms. (better-sqlite3 is synchronous: one
- * unbatched DELETE held the loop for the whole purge.)
+ * them, so a timer due during a purge of 200 000 runs fires within 500 ms. (better-sqlite3 is synchronous: one
+ * unbatched DELETE held the loop for the whole purge, several seconds. A batch takes well under 100 ms locally; the
+ * bound leaves room for a busy shared CI runner, where one batch has taken over 200 ms.)
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { Database as BetterSqlite3Database } from "better-sqlite3";
@@ -19,7 +20,7 @@ describe("retention purge on SQLite under load", () => {
     current = undefined;
   });
 
-  it("deletes 200 000 runs while a 10 ms timer keeps firing within 100 ms", async () => {
+  it("deletes 200 000 runs while a 10 ms timer keeps firing within 500 ms", async () => {
     current = await createTestStore({ kind: "sqlite" });
     const store = current.store;
     const db = (store as unknown as { db: BetterSqlite3Database }).db;
@@ -62,7 +63,7 @@ describe("retention purge on SQLite under load", () => {
     }
     const left = db.prepare(`SELECT COUNT(*) AS n FROM execution_history`).get() as { n: number };
     expect(left.n).toBe(0);
-    expect(worstGap).toBeLessThan(100);
+    expect(worstGap).toBeLessThan(500);
     expect(fired).toBeGreaterThanOrEqual(5);
   }, 120_000);
 });
