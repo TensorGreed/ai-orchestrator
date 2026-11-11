@@ -188,6 +188,13 @@ describe("channelStreamMode", () => {
     const unknown = parseGuardProfile({ id: "u", name: "U", version: "1", channels: { final_output: { detectors: [{ id: "custom.x" }], actions: { email: { action: "redact", stream: "window" } } } } });
     expect(channelStreamMode(unknown, "final_output", registry)).toBe("buffer");
   });
+
+  it("buffers when a windowed rewrite rule could catch a whole-answer check's finding (schema, grounding)", () => {
+    const schema = (actions: Record<string, unknown>) =>
+      parseGuardProfile({ id: "s", name: "S", version: "1", channels: { final_output: { detectors: [{ id: "output.schema", options: { schema: { type: "object" } } }, { id: "dlp.patterns" }], actions, defaultAction: { action: "allow" } } } });
+    expect(channelStreamMode(schema({ schema_violation: { action: "redact", stream: "window" }, email: { action: "redact", stream: "window" } }), "final_output", registry)).toBe("buffer");
+    expect(channelStreamMode(schema({ schema_violation: { action: "allow" }, email: { action: "redact", stream: "window" } }), "final_output", registry)).toBe("window");
+  });
 });
 
 describe("the injection classifier", () => {

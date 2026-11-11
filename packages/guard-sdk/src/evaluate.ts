@@ -17,6 +17,7 @@ import {
   type GuardDetector,
   type GuardFinding,
   type GuardInput,
+  type GuardModelServices,
   type GuardSpan,
   type GuardTraceEntry,
   type GuardVerdict
@@ -52,6 +53,8 @@ export interface EvaluateGuardOptions {
   /** Wall-clock timer for detector timeouts; defaults to `setTimeout`. */
   setTimer?: (callback: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /** Phase 12 coverage — model calls offered to detectors (see `DetectorContext.models`). */
+  models?: GuardModelServices;
 }
 
 const SEVERITY: Record<GuardAction, number> = {
@@ -145,14 +148,16 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     return finish("allow");
   }
 
-  const entries = orderByTier(
-    (runDetectors ? channel!.detectors : []).map((entry) => ({
-      id: entry.id,
-      threshold: entry.threshold,
-      options: entry.options,
-      detector: options.registry.get(entry.id)
-    }))
-  );
+  const configured = (runDetectors ? channel!.detectors : []).map((entry) => ({
+    id: entry.id,
+    threshold: entry.threshold,
+    options: entry.options,
+    detector: options.registry.get(entry.id)
+  }));
+  // Phase 12 coverage — a partial stream check leaves whole-answer detectors to the final check.
+  const deferred = input.partial ? configured.filter((entry) => entry.detector?.wholeAnswer === true) : [];
+  if (deferred.length > 0) log("detector", `Partial content: ${deferred.map((entry) => entry.id).join(", ")} run on the complete answer`);
+  const entries = orderByTier(deferred.length > 0 ? configured.filter((entry) => entry.detector?.wholeAnswer !== true) : configured);
 
   const shadowFor = (rule: ActionRule, action: GuardAction): boolean => rule.shadow ?? profile.shadow[action] ?? false;
 
@@ -164,6 +169,7 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
 
   let shortCircuited = false;
   let failed = false;
+  let modelMs = 0;
   let currentTier: DetectorTier | undefined;
 
   for (const entry of entries) {
@@ -176,8 +182,10 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       timings.push({ detectorId: entry.id, tier: tier ?? "rule", durationMs: 0, status: failed ? "skipped_budget" : "skipped_short_circuit", findings: 0 });
       continue;
     }
-    const elapsed = now() - started;
-    if (elapsed >= budget.limitMs) {
+    const modelCheck = entry.detector?.callsModel?.(entry.options) === true;
+    // Time spent waiting on model checks has its own limit and does not use up the budget of the other checks.
+    const elapsed = now() - started - modelMs;
+    if (!modelCheck && elapsed >= budget.limitMs) {
       budget.exceeded = true;
       log("budget", `Latency budget of ${budget.limitMs} ms exceeded before ${entry.id}; policy ${budget.policy}`, { elapsedMs: elapsed });
       timings.push({ detectorId: entry.id, tier: tier ?? "rule", durationMs: 0, status: "skipped_budget", findings: 0 });
@@ -191,13 +199,16 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       continue;
     }
     const detector = entry.detector;
+    const abort = new AbortController();
     const context: DetectorContext = {
       text,
       options: { ...(dictionaries.length ? { dictionaries } : {}), ...entry.options },
-      now
+      now,
+      ...(options.models ? { models: options.models } : {}),
+      signal: abort.signal
     };
     const detectorStart = now();
-    const remaining = Math.max(1, budget.limitMs - elapsed);
+    const remaining = modelCheck ? modelCheckTimeoutMs(entry.options) : Math.max(1, budget.limitMs - elapsed);
     let result: GuardFinding[] | "timeout" | Error;
     try {
       result = await raceWithTimeout(Promise.resolve(detector.detect(input, context)), remaining, setTimer, clearTimer);
@@ -205,10 +216,13 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       result = error instanceof Error ? error : new Error(String(error));
     }
     const durationMs = Math.round((now() - detectorStart) * 1000) / 1000;
+    if (modelCheck) modelMs += now() - detectorStart;
     if (result === "timeout") {
+      // Stop a model call the check started: it would otherwise run on, and be paid for, after the verdict.
+      abort.abort(new Error(`${detector.id} timed out`));
       budget.exceeded = true;
       timings.push({ detectorId: detector.id, tier: detector.tier, durationMs, status: "timed_out", findings: 0 });
-      log("budget", `Detector ${detector.id} exceeded the remaining budget (${remaining} ms); policy ${budget.policy}`);
+      log("budget", `Detector ${detector.id} exceeded ${modelCheck ? "its time limit" : "the remaining budget"} (${remaining} ms); policy ${budget.policy}`);
       failed = true;
       continue;
     }
@@ -542,6 +556,13 @@ function windowedFinding(finding: GuardFinding, window: GuardSpan): GuardFinding
     spans.push({ start: Math.max(span.start, window.start), end: span.end });
   }
   return spans.length > 0 ? { ...finding, spans } : null;
+}
+
+/** Phase 12 coverage — the time limit of a check that calls a model: `options.timeoutMs`, default 30 s, at most 5 minutes. */
+export const DEFAULT_MODEL_CHECK_TIMEOUT_MS = 30_000;
+export function modelCheckTimeoutMs(options: Record<string, unknown>): number {
+  const value = options.timeoutMs;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), 300_000) : DEFAULT_MODEL_CHECK_TIMEOUT_MS;
 }
 
 async function raceWithTimeout<T>(

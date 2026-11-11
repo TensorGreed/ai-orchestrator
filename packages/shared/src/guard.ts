@@ -47,6 +47,18 @@ export type GuardProfileChannelValue = (typeof GUARD_PROFILE_CHANNEL_VALUES)[num
  * receives), `retrieval` (untrusted pieces and documents at the model
  * boundary) and `reveal` (tokens turned back into values).
  */
+/**
+ * Phase 12 coverage — checks the Output Guardrail node offers. `matches_schema`
+ * validates against the node's `schema` (only parses JSON without one);
+ * `topic`, `safety` and `grounding` run the output checks of the content rules.
+ */
+export const OUTPUT_GUARDRAIL_CHECK_VALUES = ["no_pii", "no_profanity", "must_contain_json", "matches_schema", "topic", "safety", "grounding"] as const;
+export type OutputGuardrailCheckValue = (typeof OUTPUT_GUARDRAIL_CHECK_VALUES)[number];
+
+/** Phase 12 coverage — content safety categories (the `output.safety` check). */
+export const CONTENT_SAFETY_CATEGORY_VALUES = ["self_harm", "violence", "sexual", "sexual_minors", "hate"] as const;
+export type ContentSafetyCategoryValue = (typeof CONTENT_SAFETY_CATEGORY_VALUES)[number];
+
 export const GUARD_PLACEMENT_VALUES = ["node", "agent", "gateway", "response", "retrieval", "reveal"] as const;
 export type GuardPlacementValue = (typeof GUARD_PLACEMENT_VALUES)[number];
 

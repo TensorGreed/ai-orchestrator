@@ -113,6 +113,9 @@ import type {
   ProjectRetentionUpdate,
   ProjectRetentionView,
   RetentionAdminView,
+  LegalHoldPlaceInput,
+  LegalHoldStatus,
+  LegalHoldView,
   McpGatewaySessionView,
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -3893,6 +3896,38 @@ export async function fetchNetworkSettings() {
 /** 13.3 — the deployment's retention per class, the backlog and the latest purges (admin, read-only). */
 export async function fetchRetention() {
   return apiRequest<RetentionAdminView>("/api/admin/retention");
+}
+
+/** 13.3 — legal holds, newest first (hold managers). */
+export async function fetchLegalHolds(status?: LegalHoldStatus) {
+  return apiRequest<{ holds: LegalHoldView[] }>(`/api/legal-holds${status ? `?status=${status}` : ""}`);
+}
+
+/** 13.3 — place a legal hold (step-up when it is on). */
+export async function placeLegalHold(payload: LegalHoldPlaceInput) {
+  return apiRequest<{ hold: LegalHoldView }>("/api/legal-holds", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+/** 13.3 — release a legal hold, with a reason (step-up when it is on). */
+export async function releaseLegalHold(id: string, reason: string) {
+  return apiRequest<{ hold: LegalHoldView }>(`/api/legal-holds/${encodeURIComponent(id)}/release`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason })
+  });
+}
+
+/** 13.3 — whether a workflow, project or run is under legal hold (hold names only for hold managers). */
+export async function fetchLegalHoldStatus(target: { workflowId: string } | { projectId: string } | { executionId: string }) {
+  const [key, value] = Object.entries(target)[0]!;
+  return apiRequest<{ held: boolean; holds: Array<{ id: string; name: string }> }>(
+    `/api/legal-holds/status?${key}=${encodeURIComponent(value)}`,
+    { headers: { [BACKGROUND_HEADER]: "1" } }
+  );
 }
 
 /** 13.3 — a project's retention per class, what it inherits, and the bounds. */

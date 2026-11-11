@@ -283,6 +283,113 @@ describe("guard profiles", () => {
     expect(keyed.statusCode).toBe(201);
   });
 
+  it("checks output check options when a rule set is saved: schemas, topics, models and their secrets", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const withChecks = (id: string, detectors: unknown[]) => ({ id, name: id, version: "1", channels: { final_output: { detectors, defaultAction: { action: "block" } } } });
+    const bad = await call(context, "POST", "/api/guard/profiles", builder.cookie, {
+      document: withChecks("bad-checks", [
+        { id: "output.schema", options: { schema: { type: "nope" } } },
+        { id: "output.topic", options: { deny: [{ name: "rivals", dictionary: "missing" }] } },
+        { id: "output.safety", options: { mode: "model", model: { providerId: "openai", model: "m", extra: { apiKey: SECRET } } } },
+        { id: "output.grounding", options: { judge: { model: { providerId: "openai", model: "m", secretRef: { secretId: "sec_missing" } } } } },
+        { id: "output.schema", options: { schema: { type: "object", properties: { name: { type: "string", pattern: "^(a+)+$" } } } } },
+        { id: "output.safety", options: { mode: "model", model: { providerId: "openai", model: "m", headers: { Authorization: `Bearer ${SECRET}` } } } }
+      ])
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json<{ issues: Array<{ path: string }> }>().issues.map((issue) => issue.path)).toEqual([
+      "channels.final_output.detectors.0.options.schema",
+      "channels.final_output.detectors.1.options.deny.0.dictionary",
+      "channels.final_output.detectors.2.options.model",
+      "channels.final_output.detectors.4.options.schema",
+      "channels.final_output.detectors.5.options.model",
+      "channels.final_output.detectors.3.options.judge.model.secretRef.secretId"
+    ]);
+    expect(bad.body).not.toContain(SECRET);
+    // Nothing was stored, so no key sits in a rule set for viewers to read.
+    expect((await call(context, "GET", "/api/guard/profiles", builder.cookie)).body).not.toContain(SECRET);
+
+    const secret = await context.secretService.createSecret({ name: "judge key", provider: "openai", value: SECRET });
+    const good = await call(context, "POST", "/api/guard/profiles", builder.cookie, {
+      document: withChecks("good-checks", [
+        { id: "output.schema", options: { schema: { type: "object" } } },
+        { id: "output.topic", options: { deny: ["crypto"] } },
+        { id: "output.safety", options: { mode: "model", model: { providerId: "openai", model: "m", secretRef: { secretId: secret.secretId } } } },
+        { id: "output.grounding", options: { requireCitations: true } }
+      ])
+    });
+    expect(good.statusCode).toBe(201);
+    const detectors = (await call(context, "GET", "/api/guard/detectors", builder.cookie)).json<{ detectors: Array<{ id: string }> }>().detectors.map((entry) => entry.id);
+    expect(detectors).toEqual(expect.arrayContaining(["output.schema", "output.topic", "output.safety", "output.grounding"]));
+  });
+
+  it("a builder cannot point a rule set's check model at a secret they may not use, or at an address of their choosing", async () => {
+    const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    expect((await call(context, "POST", "/api/projects", admin.cookie, { id: "proj-x", name: "X" })).statusCode).toBe(200);
+    const theirs = await context.secretService.createSecret({ name: "x key", provider: "openai", value: SECRET, projectId: "proj-x" });
+    const exfiltrate = (secretId: string, baseUrl?: string) => ({
+      id: "judge",
+      name: "Judge",
+      version: "1",
+      channels: {
+        final_output: {
+          detectors: [{ id: "output.safety", options: { mode: "model", model: { providerId: "openai", model: "gpt-4o", ...(baseUrl ? { baseUrl } : {}), secretRef: { secretId } } } }],
+          defaultAction: { action: "block" }
+        }
+      }
+    });
+    // Another project's key sent to an attacker's endpoint: both refused.
+    const refused = await call(context, "POST", "/api/guard/profiles", builder.cookie, { document: exfiltrate(theirs.secretId, "https://attacker.example/v1") });
+    expect(refused.statusCode).toBe(400);
+    const issues = refused.json<{ issues: Array<{ path: string; message: string }> }>().issues;
+    expect(issues).toEqual([
+      { path: "channels.final_output.detectors.0.options.model.secretRef.secretId", message: "secretId must name a stored secret you may use" },
+      { path: "channels.final_output.detectors.0.options.model.baseUrl", message: expect.stringMatching(/Only an admin/) }
+    ]);
+    // A missing id reads the same as one that is not theirs.
+    const missing = await call(context, "POST", "/api/guard/profiles", builder.cookie, { document: exfiltrate("sec_nope") });
+    expect(missing.json<{ issues: Array<{ message: string }> }>().issues[0]!.message).toBe("secretId must name a stored secret you may use");
+    // Their own project's key: fine without a custom address, refused with one.
+    const own = await context.secretService.createSecret({ name: "default key", provider: "openai", value: SECRET, projectId: "default" });
+    expect((await call(context, "POST", "/api/projects/default/members", admin.cookie, { userId: builder.id, role: "editor" })).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/guard/profiles", builder.cookie, { document: exfiltrate(own.secretId, "https://attacker.example/v1") })).statusCode).toBe(400);
+    expect((await call(context, "POST", "/api/guard/profiles", builder.cookie, { document: exfiltrate(own.secretId) })).statusCode).toBe(201);
+    // The same rule set cannot be edited into the attack either.
+    const edited = await call(context, "PUT", "/api/guard/profiles/judge", builder.cookie, { document: exfiltrate(theirs.secretId) });
+    expect(edited.statusCode).toBe(400);
+    // An admin may use any key and a custom address.
+    const adminSave = await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: { ...exfiltrate(theirs.secretId, "https://models.internal.example/v1"), id: "judge-admin" } });
+    expect(adminSave.statusCode, adminSave.body).toBe(201);
+  });
+
+  it("model-backed checks cannot be bound to an AI gateway route set, nor added to a rule set bound to one", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const set = await call(context, "POST", "/api/ai-gateway/route-sets", admin.cookie, { name: "Apps", projectId: "default" });
+    expect(set.statusCode, set.body).toBe(201);
+    const setId = set.json<{ id: string }>().id;
+    const withSafety = (mode?: "model") => ({
+      id: "answers",
+      name: "Answers",
+      version: "1",
+      channels: { final_output: { detectors: [{ id: "output.safety", options: mode ? { mode } : {} }], defaultAction: { action: "block" } } }
+    });
+    expect((await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: withSafety() })).statusCode).toBe(201);
+    expect((await call(context, "PUT", `/api/ai-gateway/route-sets/${setId}/guard`, admin.cookie, { mode: "override", profileId: "answers" })).statusCode).toBe(200);
+    const edit = await call(context, "PUT", "/api/guard/profiles/answers", admin.cookie, { document: withSafety("model") });
+    expect(edit.statusCode).toBe(400);
+    expect(edit.json<{ issues: Array<{ path: string; message: string }> }>().issues).toEqual([
+      { path: "channels.final_output.detectors.0.options.mode", message: expect.stringMatching(/do not run on AI gateway answers yet; the rule set is bound to ai_route_set/) }
+    ]);
+    expect((await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: { ...withSafety("model"), id: "judged" } })).statusCode).toBe(201);
+    const bind = await call(context, "PUT", `/api/ai-gateway/route-sets/${setId}/guard`, admin.cookie, { mode: "override", profileId: "judged" });
+    expect(bind.statusCode).toBe(400);
+    expect(bind.body).toContain("do not run on AI gateway answers yet");
+  });
+
   it("versions every change, diffs versions and round-trips export and import", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");

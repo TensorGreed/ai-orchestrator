@@ -105,8 +105,9 @@ import type {
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
-import type { RetentionDataClass, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
+import type { LegalHoldItemView, LegalHoldRef, LegalHoldStatus, LegalHoldView, RetentionDataClass, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
 import type { RetentionScope, RetentionTable } from "./retention-tables.js";
+import type { LegalHoldInsert, LegalHoldTarget } from "./legal-hold-sql.js";
 
 /** The decision `decideApprovalRequest` records. */
 export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0];
@@ -547,7 +548,10 @@ export interface Store extends AiGatewayStore {
   listGuardSimulations(options: { profileId: string; limit?: number; offset?: number }): Promise<GuardSimulationRecord[]>;
   /** Simulations still running (a stopped server left them so). */
   listRunningGuardSimulations(): Promise<GuardSimulationRecord[]>;
-  /** Deletes simulations created before `before`, with their replay jobs and case results. Returns how many simulations were deleted. */
+  /**
+   * Deletes simulations created before `before`, with their replay jobs and case results. A simulation with a replay
+   * job under a legal hold is kept. Returns how many simulations were deleted.
+   */
   pruneGuardSimulations(input: { before: string }): Promise<number>;
 
   // ---- 12.7 Content rules benchmarks
@@ -584,6 +588,7 @@ export interface Store extends AiGatewayStore {
   }>;
   /** Runs-page badges: the newest cassette per execution id. */
   mcpCassetteBadgesForExecutions(executionIds: string[]): Promise<Map<string, McpCassetteBadge>>;
+  /** Throws `LegalHoldError` while a legal hold covers the cassette. */
   deleteMcpCassette(id: string): Promise<boolean>;
 
   // ---- MCP registry, probes, telemetry, OAuth, elicitations, policies, toolsets and clients
@@ -1061,6 +1066,7 @@ export interface Store extends AiGatewayStore {
   }): Promise<void>;
   listEvalDatasets(options?: { projectId?: string; workflowId?: string; id?: string }): Promise<EvalDatasetRecord[]>;
   getEvalDataset(id: string): Promise<EvalDatasetRecord | null>;
+  /** Throws `LegalHoldError` while a legal hold covers the set, its cases or its runs. */
   deleteEvalDataset(id: string): Promise<boolean>;
   createEvalFixture(input: {
     id: string; datasetId: string; name: string;
@@ -1073,6 +1079,7 @@ export interface Store extends AiGatewayStore {
   /** Phase 15.2 — whether a golden set already holds this golden run. */
   findEvalFixtureByRecording(datasetId: string, recordingId: string): Promise<EvalFixtureRecord | null>;
   getEvalFixtureDatasetId(id: string): Promise<string | null>;
+  /** Throws `LegalHoldError` while a legal hold covers the case. */
   deleteEvalFixture(id: string): Promise<boolean>;
   /** Migration 36 — marks a case required (or not); false when it does not exist. */
   setEvalFixtureRequired(id: string, required: boolean): Promise<boolean>;
@@ -1099,7 +1106,7 @@ export interface Store extends AiGatewayStore {
    * Phase 15.2 — deletes finished eval runs and replay jobs (with their case
    * results) that started before `before`. The newest run of every dataset
    * or golden set, and its newest finished one, are always kept, so a set
-   * never loses its last verdict. Returns how many runs were deleted.
+   * never loses its last verdict. Runs under a legal hold are kept. Returns how many runs were deleted.
    */
   pruneEvalRuns(input: { before: string }): Promise<number>;
   finalizeEvalRun(input: {
@@ -1171,9 +1178,9 @@ export interface Store extends AiGatewayStore {
   }): Promise<{ items: ReplayRecordingSummary[]; total: number }>;
   /** Runs captured for a workflow since `since` (ISO), promoted or not: the daily limit counts these. */
   countReplayCapturesSince(workflowId: string, since: string): Promise<number>;
-  /** The oldest `count` candidates of a workflow (eviction order). */
+  /** The oldest `count` candidates of a workflow (eviction order), leaving out those under a legal hold. */
   oldestReplayCaptureIds(workflowId: string, count: number): Promise<string[]>;
-  /** Deletes candidates captured before `before` (retention). Golden runs are never touched. */
+  /** Deletes candidates captured before `before` (retention). Golden runs and held candidates are never touched. */
   pruneReplayCaptures(before: string): Promise<number>;
   /** Promote: the candidate becomes golden with its re-scrubbed content. Returns false when it is no longer a candidate. */
   promoteReplayCapture(id: string, input: Pick<ReplayRecordingInsert, "name" | "capturedWorkflowJson" | "inputJson" | "nodeOutputsJson" | "factsJson" | "mcpCassetteJson" | "modelTapeJson" | "memorySeedJson" | "bytes" | "workflowHash"> & {
@@ -1193,13 +1200,17 @@ export interface Store extends AiGatewayStore {
    * Deletes one row the data-subject lookup found. A golden run takes the
    * golden-set cases made from it, and the results of those cases, with it.
    */
-  deleteSubjectRow(kind: SubjectStoreKind, id: string): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }> }>;
+  deleteSubjectRow(
+    kind: SubjectStoreKind,
+    id: string
+  ): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }>; heldBy?: LegalHoldRef[] }>;
   /** Bytes one workflow's captured candidates use (REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW). */
   sumReplayCaptureBytesForWorkflow(workflowId: string): Promise<number>;
-  /** The oldest candidates of a workflow with their sizes, oldest first (byte-budget eviction). */
+  /** The oldest candidates of a workflow with their sizes, oldest first (byte-budget eviction), held ones left out. */
   oldestReplayCaptures(workflowId: string, limit: number): Promise<Array<{ id: string; bytes: number }>>;
   /** Runs-page badges: how many golden runs were saved from each execution. */
   replayGoldenBadgesForExecutions(executionIds: string[]): Promise<Map<string, ReplayGoldenBadge>>;
+  /** Throws `LegalHoldError` while a legal hold covers the golden or captured run. */
   deleteReplayRecording(id: string): Promise<boolean>;
 
   // ---- Workflow versions
@@ -1446,7 +1457,8 @@ export interface Store extends AiGatewayStore {
   /**
    * With `refuseIfGateEnforced` (a caller who is not an admin) the release gate row is read before anything is
    * deleted, in the same transaction, and when the gate is on and enforced the call throws `ReleaseGateEnforcedError`
-   * and deletes nothing.
+   * and deletes nothing. Throws `LegalHoldError` (deleting nothing) while a legal hold covers the workflow, its
+   * project or any of its rows.
    */
   deleteWorkflow(id: string, options?: { refuseIfGateEnforced?: boolean }): Promise<boolean>;
   countWorkflows(): Promise<number>;
@@ -1477,6 +1489,7 @@ export interface Store extends AiGatewayStore {
     description?: string;
     createdBy?: string;
   }): Promise<Project>;
+  /** Throws `LegalHoldError` (deleting nothing) while a legal hold covers the project or anything in it. */
   deleteProject(id: string): Promise<boolean>;
   listFolders(projectId?: string): Promise<Folder[]>;
   getFolder(id: string): Promise<Folder | null>;
@@ -2071,6 +2084,20 @@ export interface Store extends AiGatewayStore {
   saveRetentionRun(run: RetentionRunView): Promise<void>;
   /** 13.3 — the latest retention purges, newest first. */
   listRetentionRuns(limit: number): Promise<RetentionRunView[]>;
+  /**
+   * 13.3 — places a legal hold with its items, in one transaction. On Postgres it takes the legal-hold advisory lock
+   * exclusively first, so it waits for purge batches and hold-checked deletes under way and every later one sees it.
+   */
+  placeLegalHold(input: LegalHoldInsert): Promise<LegalHoldView>;
+  /** 13.3 — releases an active hold; null when there is no such hold, the hold as it is when already released. */
+  releaseLegalHold(input: { id: string; releasedBy: string | null; reason: string; releasedAt: string }): Promise<LegalHoldView | null>;
+  getLegalHold(id: string): Promise<LegalHoldView | null>;
+  /** 13.3 — holds, newest first; only those of `status` when given. */
+  listLegalHolds(options?: { status?: LegalHoldStatus }): Promise<LegalHoldView[]>;
+  /** 13.3 — a page of a hold's items, in the order they were added. */
+  listLegalHoldItems(holdId: string, page: { offset: number; limit: number }): Promise<{ items: LegalHoldItemView[]; total: number }>;
+  /** 13.3 — the active holds that keep anything deleting `target` would remove (empty: nothing held). */
+  legalHoldsOn(target: LegalHoldTarget): Promise<LegalHoldRef[]>;
   /** 13.3 R1 — stored per-project retention values, all of them or one project's. */
   listRetentionPolicies(filter?: { scopeId?: string }): Promise<RetentionPolicyRecord[]>;
   /**

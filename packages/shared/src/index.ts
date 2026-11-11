@@ -37,4 +37,5 @@ export * from "./guard-benchmark";
 export * from "./ai-gateway";
 export * from "./notification-events";
 export * from "./retention";
+export * from "./legal-hold";
 export * from "./retention-policy";

@@ -67,7 +67,15 @@ export interface ReplayCaptureSettings {
 }
 
 /** Capture outcomes that lost a run the settings asked for (masking could not finish, too large, an error): shown as the last drop. */
-export const REPLAY_CAPTURE_DROP_OUTCOMES = ["dropped_identifier_value", "dropped_unscannable", "dropped_incomplete_mask", "skipped_too_large", "failed"] as const;
+export const REPLAY_CAPTURE_DROP_OUTCOMES = [
+  "dropped_identifier_value",
+  "dropped_unscannable",
+  "dropped_incomplete_mask",
+  "skipped_too_large",
+  /** 13.3 — the workflow's capture budget is full of captured runs a legal hold keeps, which are never evicted. */
+  "held_budget",
+  "failed"
+] as const;
 export type ReplayCaptureDropOutcome = (typeof REPLAY_CAPTURE_DROP_OUTCOMES)[number];
 
 /** The last run the workflow's capture dropped, and when. */
@@ -344,6 +352,6 @@ export interface ReplayFindSubjectDeleteResult {
   deleted: Record<ReplayFindSubjectKind, number>;
   /** Every row deleted, by kind and id (the targets, and the cases and results removed with a golden run). */
   removed: Array<{ kind: ReplayFindSubjectKind; id: string }>;
-  /** Targets not deleted: gone already, or no longer holding the value. */
-  skipped: Array<{ kind: ReplayFindSubjectKind; id: string; reason: "not_found" | "no_match" | "possible_match_unconfirmed" }>;
+  /** Targets not deleted: gone already, no longer holding the value, or under a legal hold (`held`). */
+  skipped: Array<{ kind: ReplayFindSubjectKind; id: string; reason: "not_found" | "no_match" | "possible_match_unconfirmed" | "held" }>;
 }

@@ -1604,6 +1604,7 @@ const AUDIT_CATEGORIES = [
   "sharing",
   "approval",
   "release",
+  "data_protection",
   "system"
 ];
 
@@ -2124,6 +2125,7 @@ const LOG_STREAM_CATEGORIES = [
   "project",
   "rbac",
   "sharing",
+  "data_protection",
   "system"
 ];
 

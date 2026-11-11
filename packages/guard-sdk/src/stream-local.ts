@@ -11,7 +11,8 @@ import type { GuardChannel } from "./types";
  *   `protect` (a token per released part would not be the token the whole
  *   answer's check issues), none is the default action (it could catch any
  *   finding), and none can apply to a finding that is not local to a stretch
- *   of text (`GuardDetector.nonStreamLocal`), from any detector on the channel.
+ *   of text (`GuardDetector.nonStreamLocal`, or any finding of a `wholeAnswer` detector), from any detector on the
+ *   channel.
  *   A detector the registry does not know counts as not local.
  * - `buffer`: anything else, including any rule with `stream: "buffer"`.
  *   Rule sets written before windowed streaming keep buffering.
@@ -37,7 +38,8 @@ export function channelStreamMode(profile: GuardProfile, channel: GuardChannel, 
   for (const entry of config.detectors) {
     const detector = registry.get(entry.id);
     if (!detector) return "buffer";
-    const nonLocal = detector.nonStreamLocal;
+    // A whole-answer check (schema, grounding) only runs on the complete answer: nothing it finds is local.
+    const nonLocal = detector.wholeAnswer ? true : detector.nonStreamLocal;
     if (!nonLocal) continue;
     if (nonLocal === true) {
       if (detector.categories.some((category) => rewrites(ruleFor(undefined, category)))) return "buffer";

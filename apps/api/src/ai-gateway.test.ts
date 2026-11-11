@@ -1256,6 +1256,9 @@ async function windowedCopy(fixture: Fixture, setId: string, id = "aigw-windowed
 const PEM_BODY = Array.from({ length: 20 }, (_, index) => `MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC${String(index).padStart(2, "0")}kLmNoPqRsT`);
 const PEM_LINES = ["-----BEGIN PRIVATE KEY-----", ...PEM_BODY, "-----END PRIVATE KEY-----"];
 
+/** A raw stream without its random ids and timestamps, which can hold any run of digits. */
+const withoutIds = (raw: string) => raw.replace(/"id":"[^"]*"/g, '"id":""').replace(/"created":\d+/g, '"created":0');
+
 const CARD = "4111 1111 1111 1111";
 const MASKED_CARD = "•••• •••• •••• 1111";
 const GH_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD";
@@ -1290,7 +1293,7 @@ describe("rewrites on a real stream (D14)", () => {
     fixture.upstream.chat.push({ json: completion(`${PLAIN.repeat(4)}Card ${CARD}.`) });
     const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
     const raw = await response.text();
-    expect(raw).not.toContain("4111");
+    expect(withoutIds(raw)).not.toContain("4111");
     expect(streamedText(frames(raw))).toBe(`${PLAIN.repeat(4)}Card ${MASKED_CARD}.`);
     // Buffered: the upstream was asked for the whole answer.
     expect(fixture.upstream.requests[0]!.body.stream).not.toBe(true);
@@ -1409,7 +1412,7 @@ describe("rewrites on a real stream (D14)", () => {
       fixture.upstream.chat.push({ sse: [chunk({ role: "assistant", content: "" }), chunk({ content: first }), chunk({ content: second }), chunk({}, "stop")], gapMs: 2 });
       const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
       const raw = await response.text();
-      expect(raw, first.slice(-24)).not.toContain("4111");
+      expect(withoutIds(raw), first.slice(-24)).not.toContain("4111");
       expect(raw, first.slice(-24)).not.toContain("ghp_");
       expect(streamedText(frames(raw)), first.slice(-24)).toBe(expected);
     }
@@ -1478,8 +1481,8 @@ describe("rewrites on a real stream (D14)", () => {
     fixture.upstream.chat.push({ sse: [chunk({ content: "Paying now." }), chunk({ tool_calls: [call] }), chunk({}, "tool_calls")] });
     const response = await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }], stream: true });
     const raw = await response.text();
-    expect(raw).not.toContain("4111");
-    expect(raw).toContain("1111");
+    expect(withoutIds(raw)).not.toContain("4111");
+    expect(withoutIds(raw)).toContain("1111");
     expect(streamedText(frames(raw))).toBe("Paying now.");
   });
 });

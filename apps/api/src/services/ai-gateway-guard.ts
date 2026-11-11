@@ -34,10 +34,14 @@
  * out. If the audit check rewrites a value that went out unchanged, the stream ends with `content_filter` and is
  * recorded as blocked, never as rewritten. Each boundary check reads a bounded window, so the work grows with the
  * answer's length, not its square.
+ * Whole-answer checks (a JSON schema, grounding) skip the boundary checks (`partial`) and run in the audit check; one
+ * that can block makes the answer `buffered`, as does a whole-answer check that a rewrite rule could apply to.
+ * Checks that call a model do not run here yet: rule sets bound to AI route sets or clients cannot use them.
  */
 import {
   channelStreamMode,
   contentText,
+  profileBlocksOnWholeAnswer,
   createDefaultGuardRegistry,
   createGuardVerdictMemo,
   type GuardRegistry,
@@ -73,6 +77,9 @@ export function outputGuardMode(stack: ReadonlyArray<ResolvedGuardProfile>, regi
     if (!profile.channels.final_output) continue;
     if (channelStreamMode(profile, "final_output", registry) === "buffer") return "buffered";
     checked = true;
+    // Phase 12 coverage — a whole-answer check (schema, grounding) that blocks runs only on the complete answer: hold
+    // the stream back so a block stops the answer instead of cutting it off after most of it was sent.
+    if (profileBlocksOnWholeAnswer(profile, "final_output")) return "buffered";
   }
   return checked ? "chunked" : "none";
 }
@@ -156,7 +163,7 @@ async function check(
   scope: AiGatewayGuardScope,
   channel: GuardChannel,
   content: unknown,
-  options: { labels: ProvenanceLabel[]; provider?: LLMProviderConfig; record: boolean; streamWindow?: GuardSpan; deps?: GuardRuntimeDependencies }
+  options: { labels: ProvenanceLabel[]; provider?: LLMProviderConfig; record: boolean; streamWindow?: GuardSpan; partial?: boolean; deps?: GuardRuntimeDependencies }
 ): Promise<CheckOutcome> {
   const profiles = scope.resolution.stack;
   if (profiles.length === 0) return { action: "allow", clean: true, ...(options.streamWindow ? { window: options.streamWindow } : {}) };
@@ -177,7 +184,14 @@ async function check(
       ...(scope.logger ? { logger: scope.logger } : {})
     },
     profiles,
-    { content, channel, labels: options.labels, ...(destination ? { destination, dataLabels } : {}), ...(options.streamWindow ? { streamWindow: options.streamWindow } : {}) }
+    {
+      content,
+      channel,
+      labels: options.labels,
+      ...(destination ? { destination, dataLabels } : {}),
+      ...(options.streamWindow ? { streamWindow: options.streamWindow } : {}),
+      ...(options.partial ? { partial: true } : {})
+    }
   );
   if (result.action === "block" || needsApproval(result.action)) {
     return {
@@ -376,7 +390,8 @@ function answerContent(answer: AiGatewayAnswer): unknown {
  * the full answer's check records.
  */
 export async function checkAiGatewayAnswer(scope: AiGatewayGuardScope, answer: AiGatewayAnswer, record = true): Promise<AiGatewayGuardOutcome<AiGatewayAnswer>> {
-  const outcome = await check(scope, "final_output", answerContent(answer), { labels: [], record });
+  // Phase 12 coverage — a boundary check sees the answer so far: whole-answer checks (schema, grounding) wait for the end.
+  const outcome = await check(scope, "final_output", answerContent(answer), { labels: [], record, ...(record ? {} : { partial: true }) });
   if (outcome.action !== "rewrite") return outcome;
   const content = outcome.content;
   const values = outcome.values;
@@ -416,7 +431,8 @@ export async function checkAiGatewayStreamWindow(
   const content = input.context + input.pending;
   const start = input.context.length;
   const release = Math.max(0, Math.min(input.release, input.pending.length));
-  const outcome = await check(scope, "final_output", content, { labels: [], record: false, streamWindow: { start, end: start + release } });
+  // A boundary check sees only part of the answer: whole-answer checks (schema, grounding) wait for the audit check.
+  const outcome = await check(scope, "final_output", content, { labels: [], record: false, partial: true, streamWindow: { start, end: start + release } });
   if (outcome.action === "block") return outcome;
   const window = outcome.window ?? { start, end: start + release };
   if (outcome.action === "allow") {
