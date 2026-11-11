@@ -485,6 +485,12 @@ export interface WorkflowExecutionResult {
   };
 }
 
+/** Phase 12 coverage — per node: the SHA-256 of a rendered text and the layout of its pieces (see `boundaryRenderings`). */
+export type ModelBoundaryRenderings = Record<
+  string,
+  Array<{ sha256: string; pieces: Array<{ length: number; untrusted?: true; fromInput?: true; expression?: string; sourceNodeId?: string }> }>
+>;
+
 export interface WorkflowExecutionState {
   workflow: Workflow;
   nodeOrder: string[];
@@ -529,6 +535,17 @@ export interface WorkflowExecutionState {
    * again on resume. Written and read only by the API.
    */
   approvedToolResultsSealed?: string;
+  /**
+   * Phase 12 coverage — how prompts that earlier nodes rendered are made up (piece lengths and trust, never text),
+   * so a resumed run's model boundary judges the same pieces as before the pause. Written and read only by the engine.
+   */
+  boundaryRenderings?: ModelBoundaryRenderings;
+  /**
+   * Phase 12 coverage — nodes finished before the pause whose output is only the caller's own input (webhook,
+   * API, chat, form and MCP server runs), so the resumed run's model boundary treats their reads as before.
+   * Written and read only by the engine.
+   */
+  boundaryCallerInput?: string[];
   /**
    * Phase 15.4 — the release channel the run started on. A resumed
    * production run keeps calling the published versions of its
