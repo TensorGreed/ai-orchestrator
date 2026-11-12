@@ -6,6 +6,7 @@
 // The landing's WebSite, Organization and SoftwareApplication nodes are referenced by @id.
 import type { HeadConfig, PageData } from "vitepress";
 import { docsUrl, hubSectionOf, pageKindOf, pageUrl, SITE, type Crumb } from "./sections.js";
+import { INDEX_ENTRIES } from "./glossary-entries.js";
 import { LEVEL_LABELS, trackById, type Level } from "./tracks.js";
 
 // The share card lives with the landing at the site root (source: scripts/social-card/).
@@ -88,7 +89,10 @@ export function jsonLdOf(page: HubPage, title: string, description: string): Rec
     ...extra
   });
   const about = fmString(frontmatter.about);
-  const aboutTerm = about ? { about: { "@type": "DefinedTerm", "@id": `${docsUrl(`/glossary/${about}`)}#term`, url: docsUrl(`/glossary/${about}`) } } : {};
+  // A term with a page is "<page>#term"; an index-only term is "<glossary index>#<slug>" (see the DefinedTermSet below).
+  const aboutUrl = frontmatter.aboutIndexEntry === true ? `${docsUrl("/glossary/")}#${about}` : docsUrl(`/glossary/${about}`);
+  const aboutId = frontmatter.aboutIndexEntry === true ? aboutUrl : `${aboutUrl}#term`;
+  const aboutTerm = about ? { about: { "@type": "DefinedTerm", "@id": aboutId, url: aboutUrl } } : {};
   const level = LEVEL_LABELS[fmString(frontmatter.level) as Level];
 
   switch (kind) {
@@ -147,7 +151,19 @@ export function jsonLdOf(page: HubPage, title: string, description: string): Rec
           url,
           inLanguage: "en",
           publisher: ORGANIZATION_ID,
-          hasDefinedTerm: (page.hasPart ?? []).map((part) => ({ "@id": `${part.url}#term` }))
+          hasDefinedTerm: [
+            ...(page.hasPart ?? []).map((part) => ({ "@id": `${part.url}#term` })),
+            // Index-only terms are defined on this page itself, under their own anchor.
+            ...INDEX_ENTRIES.filter((entry) => !(page.hasPart ?? []).some((part) => part.url.endsWith(`/glossary/${entry.slug}`))).map((entry) => ({
+              "@type": "DefinedTerm",
+              "@id": `${url}#${entry.slug}`,
+              name: entry.term,
+              description: entry.definition,
+              url: `${url}#${entry.slug}`,
+              termCode: entry.slug,
+              inDefinedTermSet: { "@id": `${url}#termset` }
+            }))
+          ]
         });
       } else if (page.relativePath === "blog/index.md") {
         graph.push({

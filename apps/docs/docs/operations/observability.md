@@ -20,7 +20,8 @@ Traces and OTLP metrics go to any OTLP-compatible backend, or to an [OpenTelemet
 ### What is traced today
 
 - **One SERVER span per HTTP request**, named `{method} {route}` (for example `POST /api/workflows/:id/execute`), with the stable HTTP attribute names listed [below](#http-server-spans). `/health`, `/ready` and `/metrics` get no span.
-- Spans inside a request (workflow runs, nodes, agents, model calls, tool calls, MCP calls and queue workers) are **not recorded yet**.
+- **Workflow runs, nodes, agents and tool calls**: one `invoke_workflow` span per run, one span per node that ran, `invoke_agent` per Agent or Supervisor loop and `execute_tool` per tool call the model made. See [run spans](#run-spans).
+- Model calls, MCP calls and queue workers are **not recorded yet**.
 - L2M does **not** send `traceparent` on its outbound calls yet, so a trace stops at L2M.
 
 ## Quickstart: send traces to a collector
@@ -62,9 +63,26 @@ To send traces and metrics to different places, set `OTEL_EXPORTER_OTLP_TRACES_E
 
 `TRACING_ENABLED=true` with no endpoint records spans in the in-memory buffer only, which is useful for looking at `/api/observability/traces` without a collector.
 
+## Metrics over OTLP
+
+With `OTEL_METRICS_ENABLED=true` and an endpoint (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT`, which also turns tracing on), L2M exports metrics through the OpenTelemetry SDK every `OTEL_METRICS_PUSH_INTERVAL_MS` (60 seconds by default), with the same protocol, headers and timeout as traces, and once more on a clean stop. A metrics endpoint **does not turn tracing on**: with only `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` and `OTEL_METRICS_ENABLED=true`, only the metrics pipeline runs (no spans, no HTTP hooks, no context propagation).
+
+The metric names are the ones L2M has always pushed, as cumulative sums (counters) and gauges, so existing dashboards keep working:
+
+| Name | Kind |
+|---|---|
+| `ao.http.requests.total`, `ao.workflow.executions.total`, `ao.workflow.executions.success.total`, `ao.workflow.executions.failure.total` | Sum (monotonic, cumulative) |
+| `ao.workflow.executions.active`, `ao.slo.success.rate`, `ao.slo.healthy`, `ao.uptime.seconds` | Gauge |
+| `ao.workflow.execution.duration.p50.ms`, `.p95.ms`, `.p99.ms`, `ao.http.request.duration.p50.ms`, `.p95.ms` | Gauge, **deprecated**: use the histograms |
+| `ao.workflow.execution.duration` (unit `s`, attribute `l2m.execution.status`) | Histogram, new |
+| `ao.http.request.duration` (unit `s`, attributes `http.request.method`, `http.response.status_class`) | Histogram, new |
+| `l2m_otel_spans_dropped_total` (attribute `reason=export_failed`) | Sum, new; counted while spans are exported, and visible only with a metrics endpoint |
+
+Differences from the previous push: the default encoding is `http/protobuf` (set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` for the old one), the instrumentation scope stays `ai-orchestrator`, and values are exported from the same counters the Prometheus `/metrics` page reads, which are unchanged. The percentile gauges are kept for one release and then removed; the histograms replace them. With `METRICS_ENABLED=false` the counters stay at zero and the histograms get no observations. Spans lost when the queue is full, or still being exported when a shutdown times out, are not counted: only those lost to a failed export.
+
 ## Export
 
-- **Protocol.** `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/protobuf` (the default, as in the OpenTelemetry specification) or `http/json`, for traces. Collectors listening on port 4318 accept both. The metrics push (`OTEL_METRICS_ENABLED`) always sends OTLP/HTTP JSON. gRPC is not shipped: `grpc` with a traces endpoint set stops the API at start-up.
+- **Protocol.** `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/protobuf` (the default, as in the OpenTelemetry specification) or `http/json`, for traces and for metrics. Collectors listening on port 4318 accept both. gRPC is not shipped: `grpc` with a traces or a metrics endpoint in use stops the API at start-up.
 - **Batching.** Spans are exported in batches by the SDK's batch span processor, never one request per span. The `OTEL_BSP_*` variables tune it (see the [settings table](#settings)). When the queue is full, new spans are dropped rather than slowing requests down.
 - **Unreachable collector.** An export that fails or takes longer than `OTEL_EXPORTER_OTLP_TIMEOUT` (10 seconds by default) is dropped. Exporting never blocks a request.
 - **Shutdown.** On a clean stop, L2M flushes the spans still queued, waiting at most 5 seconds.
@@ -135,6 +153,38 @@ With tracing off, log lines are unchanged.
 
 A 5xx response sets the span status to ERROR; a 4xx leaves it unset. A request that matched no route is named after its method alone.
 
+## Run spans
+
+While tracing is on, every workflow run is traced below the request (or the trigger) that started it. Span names and the GenAI attributes follow the OpenTelemetry GenAI semantic conventions pinned at v1.41.0, which are still marked experimental upstream.
+
+```
+POST /api/workflows/:id/execute         SERVER
+└─ invoke_workflow {workflow name}      the run
+   ├─ l2m.node {node type}              one per node that ran
+   │  └─ invoke_workflow {child name}   an Execute Workflow node's child run
+   └─ l2m.node agent_orchestrator
+      └─ invoke_agent {agent name}      the agent loop
+         ├─ l2m.agent.iteration         one per turn (L2M_OTEL_SPAN_DETAIL=verbose only)
+         └─ execute_tool {tool name}    one per tool call the model made
+            └─ invoke_agent {worker}    a Supervisor's worker, under the call that delegated to it
+```
+
+- **Nodes.** Only nodes the run reached get a span; a node answered from pinned data gets one too, with no children. Skipped nodes (a branch not taken, a disconnected node) and nodes on an agent's attachment ports (chat model, memory, tools, workers) get none: they are not steps of the workflow, and their work shows up inside the agent's spans. A Loop node's body nodes are children of the Loop node's span, one per pass, with `l2m.node.loop_index`.
+- **Outcomes, not errors.** `l2m.run.status` and `l2m.node.status` hold the result (`success`, `error`, `canceled`, `waiting_approval`, ...). Only a failed run or node sets the span status to ERROR, with the L2M error category as `error.type` (the error text stays in the run's history); a canceled run and an approval pause are not errors. A node that failed but let the run continue is ERROR while its run is not. When a run is stopped or times out, the node, Loop pass or tool call that was in flight can show as ERROR while the run is `canceled`.
+- **Resumed runs.** A run resumed after an approval is traced as a new run; the decided Human Approval node itself gets no span in it.
+- **Tool calls.** `l2m.tool.outcome` is `ok`, `error`, `blocked` or `paused`. A call that content rules or a tool policy blocked is an outcome, not an error (a node that fails because content rules blocked it is an error of that node); `l2m.content_rules.outcome` (`blocked`, `rewritten`, `paused`) says what content rules did. A failed call records its error type only, never the tool's error text. `gen_ai.tool.type` is `extension` for an MCP server's tool and `function` for one that runs in L2M (a worker, a workflow tool, a built-in or internal tool, with `l2m.tool.internal` for the internal ones).
+- **Names.** Workflow, node and agent names appear in span names and attributes. `L2M_OTEL_NAMES=ids` uses ids instead.
+
+| Span | Attributes |
+|---|---|
+| `invoke_workflow` | `gen_ai.operation.name`, `l2m.execution.id`, `l2m.workflow.id`, `l2m.workflow.name`, `l2m.project.id`, `l2m.trigger.type`, `l2m.run.mode`, `l2m.replay`, `l2m.run.status` |
+| `l2m.node` | `l2m.node.id`, `l2m.node.type`, `l2m.node.name`, `l2m.node.status`, `l2m.node.attempts`, `l2m.node.loop_index` |
+| `invoke_agent` | `gen_ai.operation.name`, `gen_ai.agent.id` (the node id), `gen_ai.agent.name`, `gen_ai.conversation.id` (the memory session id; hashed when it looks like an email address or phone number), `l2m.agent.supervisor`, `l2m.agent.iterations`, `l2m.agent.stop_reason`, summed `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and `gen_ai.usage.cache_read.input_tokens` |
+| `l2m.agent.iteration` | `l2m.agent.iteration`, `l2m.agent.final` |
+| `execute_tool` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type`, `l2m.tool.internal`, `l2m.tool.outcome`, `l2m.content_rules.outcome` |
+
+Spans carry ids and timings, not content: prompts, tool arguments and results stay in L2M's execution history. Use `l2m.execution.id` to go from a trace to the run in L2M.
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -163,8 +213,8 @@ A 5xx response sets the span status to ERROR; a 4xx leaves it unset. A request t
 | `OTEL_METRICS_PUSH_INTERVAL_MS` | `60000` | Metrics push interval. |
 | `L2M_OTEL_TRUST_INBOUND` | `authenticated` | See [Inbound trace context](#inbound-trace-context-and-who-is-trusted). |
 | `L2M_OTEL_TRUSTED_PROXIES` | empty | Connections whose trace context is always continued. |
-| `L2M_OTEL_SPAN_DETAIL` | `standard` | `verbose` will add more detailed spans as they are added. |
-| `L2M_OTEL_NAMES` | `names` | `ids` keeps workflow, node and agent names out of spans as they are added. |
+| `L2M_OTEL_SPAN_DETAIL` | `standard` | `verbose` adds one span per agent turn (`l2m.agent.iteration`). |
+| `L2M_OTEL_NAMES` | `names` | `ids` keeps workflow, node and agent names out of spans. |
 | `L2M_OTEL_PROPAGATE_TO_PROVIDERS` | `false` | Reserved for outbound propagation to model providers. |
 | `L2M_OTEL_PROPAGATE_TO_MCP` | `true` | Reserved for outbound propagation to MCP servers. |
 

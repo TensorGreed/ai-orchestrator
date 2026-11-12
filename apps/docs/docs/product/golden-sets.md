@@ -7,6 +7,8 @@ description: "Golden sets are regression suites for an L2M workflow: replay jobs
 
 A **golden set** is a regression suite for one workflow: a list of [golden runs](./golden-runs.md) (and, if you like, hand-written cases). A **replay job** replays every golden run in one or more sets against a candidate (the draft, a saved version or a workflow file, with optional overrides) in the background, scores each case and reports pass, fail or inconclusive per case. Use it before you ship a prompt, model, tool or workflow change: one job tells you which real runs the change breaks.
 
+Concepts: [AI agent evals](/learn/testing/agent-evals) covers the vocabulary of an <Term id="eval">eval</Term>: tasks, graders and pass rates.
+
 Everything stays on your deployment. Replays use the deployment's own providers and secrets.
 
 ## Golden sets
@@ -219,6 +221,6 @@ l2m replay run --set ds_… --version 12 --max-cost 2 --timeout 900
 - Golden runs recorded before this release have no model tape; record new ones to replay model calls.
 - Interrupted jobs are not resumed; start them again.
 - Judge prompt framing reduces, but cannot rule out, a judge being steered by the output it grades.
-- No release gate yet: a job's result does not block publishing.
+- A job's result blocks publishing only when the workflow has a [release gate](./release-gate); without one, publishing ignores it.
 - Golden sets cannot be exported to or imported from files.
 - Deleting a set deletes the jobs that started from it (for a job over several sets, the first one).

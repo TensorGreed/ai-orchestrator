@@ -1,10 +1,9 @@
 import { context as contextApi, propagation, trace, type Context, type Meter, type TextMapPropagator } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
-import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator } from "@opentelemetry/core";
+import { CompositePropagator, ExportResultCode, W3CBaggagePropagator, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { OTLPTraceExporter as OTLPJsonTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { OTLPTraceExporter as OTLPProtoTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { defaultResource, resourceFromAttributes, type Resource } from "@opentelemetry/resources";
-import { MeterProvider } from "@opentelemetry/sdk-metrics";
 import {
   AlwaysOffSampler,
   AlwaysOnSampler,
@@ -13,9 +12,11 @@ import {
   TraceIdRatioBasedSampler,
   TracerProvider,
   type Sampler,
+  type SpanExporter,
   type SpanProcessor
 } from "@opentelemetry/sdk-trace";
 import type { TraceIds } from "@ai-orchestrator/shared";
+import { MetricsPipeline } from "./metrics.js";
 import { startHttpServerSpan, type HttpServerSpan, type HttpServerSpanInput } from "./http-server.js";
 import { OtelRunInstrumentation } from "./instrumentation.js";
 import type { OtelRuntimeOptions, OtlpTraceExportOptions, PropagatorName, SamplerName } from "./options.js";
@@ -51,9 +52,20 @@ export function buildPropagator(names: readonly PropagatorName[]): TextMapPropag
   return new CompositePropagator({ propagators });
 }
 
-function buildExporter(options: OtlpTraceExportOptions) {
+function buildExporter(options: OtlpTraceExportOptions, onDropped: (count: number) => void): SpanExporter {
   const config = { url: options.url, headers: { ...options.headers }, timeoutMillis: options.timeoutMs };
-  return options.protocol === "http/json" ? new OTLPJsonTraceExporter(config) : new OTLPProtoTraceExporter(config);
+  const exporter = options.protocol === "http/json" ? new OTLPJsonTraceExporter(config) : new OTLPProtoTraceExporter(config);
+  // The batch processor discards a batch whose export fails; count those spans for l2m_otel_spans_dropped_total.
+  return {
+    export(spans, resultCallback) {
+      exporter.export(spans, (result) => {
+        if (result.code !== ExportResultCode.SUCCESS) onDropped(spans.length);
+        resultCallback(result);
+      });
+    },
+    shutdown: () => exporter.shutdown(),
+    forceFlush: () => exporter.forceFlush()
+  };
 }
 
 /** The ids written into log lines (`trace_id`, `span_id`, `trace_flags`). */
@@ -73,7 +85,7 @@ export class OtelRuntime {
   readonly meter: Meter;
   readonly semconvLatestGenAi: boolean;
   private readonly tracerProvider: TracerProvider;
-  private readonly meterProvider: MeterProvider;
+  readonly metrics: MetricsPipeline;
   private readonly contextManager: AsyncLocalStorageContextManager;
   private readonly recentSpans: RecentSpansProcessor;
   private readonly ownsGlobals: boolean;
@@ -83,11 +95,17 @@ export class OtelRuntime {
     const scrub = options.scrub ?? ((text: string) => text);
     this.resource = defaultResource().merge(resourceFromAttributes(options.resourceAttributes));
     this.recentSpans = new RecentSpansProcessor(options.recentSpanLimit);
+    this.metrics = new MetricsPipeline(this.resource, { export: options.metricsExport ?? null, readers: options.metricReaders ?? [] });
+    this.meter = this.metrics.meter;
+    const droppedSpans = this.meter.createCounter("l2m_otel_spans_dropped_total", {
+      description: "Spans discarded because their export to the collector failed",
+      unit: "{span}"
+    });
     const processors: SpanProcessor[] = [this.recentSpans, ...(options.spanProcessors ?? [])];
     if (options.export) {
       processors.push(
         new BatchSpanProcessor({
-          exporter: buildExporter(options.export),
+          exporter: buildExporter(options.export, (count) => droppedSpans.add(count, { reason: "export_failed" })),
           scheduledDelayMillis: options.batch.scheduledDelayMs,
           exportTimeoutMillis: options.batch.exportTimeoutMs,
           maxQueueSize: options.batch.maxQueueSize,
@@ -101,8 +119,6 @@ export class OtelRuntime {
       spanLimits: { attributeValueLengthLimit: options.attributeValueLengthLimit },
       spanProcessors: processors
     });
-    this.meterProvider = new MeterProvider({ resource: this.resource, readers: [...(options.metricReaders ?? [])] });
-    this.meter = this.meterProvider.getMeter(INSTRUMENTATION_SCOPE, undefined, { schemaUrl: SEMCONV_SCHEMA_URL });
     this.contextManager = new AsyncLocalStorageContextManager();
     this.contextManager.enable();
     const propagator = buildPropagator(options.propagators);
@@ -167,7 +183,21 @@ export class OtelRuntime {
   }
 
   forceFlush(timeoutMs = SHUTDOWN_TIMEOUT_MS): Promise<void> {
-    return withTimeout(Promise.all([this.tracerProvider.forceFlush({ timeoutMillis: timeoutMs }), this.meterProvider.forceFlush()]).then(() => undefined), timeoutMs);
+    return this.spansThenMetrics(timeoutMs, (budget) => this.tracerProvider.forceFlush({ timeoutMillis: budget }), (budget) => this.metrics.forceFlush(budget));
+  }
+
+  /**
+   * Spans first: a batch that fails to export adds to the dropped-span counter, which the metrics step then carries.
+   * The spans get three fifths of the budget, so an unreachable traces collector cannot starve the final metrics export.
+   */
+  private async spansThenMetrics(
+    timeoutMs: number,
+    spans: (budgetMs: number) => Promise<void>,
+    metrics: (budgetMs: number) => Promise<void>
+  ): Promise<void> {
+    const spanBudget = Math.floor(timeoutMs * 0.6);
+    await withTimeout(spans(spanBudget), spanBudget);
+    await metrics(timeoutMs - spanBudget);
   }
 
   /** Flushes and stops exporting (capped at five seconds); idempotent. */
@@ -175,10 +205,7 @@ export class OtelRuntime {
     if (!this.stopped) {
       this.stopped = (async () => {
         try {
-          await withTimeout(
-            Promise.all([this.tracerProvider.shutdown(), this.meterProvider.shutdown()]).then(() => undefined),
-            timeoutMs
-          );
+          await this.spansThenMetrics(timeoutMs, () => this.tracerProvider.shutdown(), (budget) => this.metrics.shutdown(budget));
         } finally {
           this.contextManager.disable();
           if (this.ownsGlobals) {

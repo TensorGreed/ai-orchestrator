@@ -8,7 +8,7 @@ nodeCount: 6
 sample: "mcp-agent-quickstart-flow.json"
 demo: "wf-mcp-agent-quickstart"
 demoRecorded: true
-related: ["agent-loop","tool-calling","ai-agent","mcp-tool"]
+related: ["ai-agent","agent-loop","tool-calling","mcp-tool"]
 ---
 
 <!--
@@ -22,7 +22,7 @@ related: ["agent-loop","tool-calling","ai-agent","mcp-tool"]
 
 **Needs:** No API key · **Time:** 5 minutes · **Nodes:** 6
 
-A manual trigger starts one Agent Orchestrator node, which can call two tools from the bundled mock MCP server: `get_current_time` and `calculator`. The chat model is the built-in echo provider, so the workflow imports and runs with no key. Echo is not a real model: it never asks for a tool, so a local run ends after one model call. To watch the full loop, with its tool calls, play the recorded run in the demo, or attach a real chat model.
+A manual trigger starts one Agent Orchestrator node. Its chat model is the built-in echo provider, and its tools come from the mock MCP server that runs inside L2M: `get_current_time` and `calculator`. Nothing needs a key, a network connection or a separate server. Echo is not a real model: it repeats the prompt back and never asks for a tool, so a local run makes one model call and ends. That proves the wiring works. To see the agent call tools, attach a real chat model.
 
 <div class="recipe-actions">
   <a class="hub-button" href="/docs/recipes/files/mcp-agent-quickstart-flow.json" download>Download the workflow JSON</a>
@@ -33,8 +33,16 @@ A manual trigger starts one Agent Orchestrator node, which can call two tools fr
 
 1. Download <a href="/docs/recipes/files/mcp-agent-quickstart-flow.json" download>mcp-agent-quickstart-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/mcp-agent-quickstart-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. Run it as it is and open the run to see each step.
-4. Then change one thing at a time (see below).
+3. Click **Run** in the editor, or call the run API with your own question. The API takes an API key from **Settings → Account → API Keys**:
+
+   ```bash
+   curl -X POST http://localhost:4000/api/workflows/wf-mcp-agent-quickstart/execute \
+     -H "Authorization: Bearer $L2M_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"user_prompt": "What is 2340 * 0.17?"}'
+   ```
+4. Open the run in the execution history and click the **Agent** node to read its trace.
+5. Then change one thing at a time (see below).
 
 ## How it works
 
@@ -54,17 +62,31 @@ A manual trigger starts one Agent Orchestrator node, which can call two tools fr
 
 5 node types. Each type links to its config fields in the [node reference](/nodes/reference/).
 
+## What a run does
+
+We imported the file into a fresh install and ran it with the question above. The run succeeded in well under a second:
+
+- The **Agent** made one model call. The model was offered the two tools as `mock-mcp__get_current_time` and `mock-mcp__calculator`; L2M also adds a short note to the system prompt about its built-in `session_cache_list`, `session_cache_get` and `agent_clarify` tools.
+- Echo answered `Echo: What is 2340 * 0.17?`. The agent stopped after 1 iteration with `stopReason: "final_answer"`, and the **Output** node returned that text as `result`.
+- The two MCP Tool nodes are marked as used by the agent: they supplied the tool definitions. No tool ran, because echo asked for none.
+
+An empty question fails the run: the agent's user prompt template is <span v-pre>`{{user_prompt}}`</span>, and with nothing in it the Agent stops with "Agent Orchestrator user prompt is empty after template rendering".
+
+## See the loop with tool calls
+
+The demo's copy of this workflow plays an echo run too, so it shows no tool calls either. The demo's **Support agent** workflow plays a run recorded with a scripted stand-in model, so the demo needs no key. In that run the agent calls a knowledge-base tool once and a calculator tool twice before it answers: <a href="/demo/?mode=editor&amp;workflowId=wf-demo-support-agent&amp;demoRun=recorded" target="_self">open it in the demo</a>.
+
 ## Make it yours
 
-- Replace the echo chat model node with a real one (OpenAI, Anthropic, Ollama or any OpenAI-compatible endpoint) on the agent's `chat_model` port.
+- Replace the echo chat model node with a real one (OpenAI, Anthropic, Ollama or any OpenAI-compatible endpoint) on the agent's `chat_model` port. A model that supports tool calling can then call the clock and the calculator.
 - Replace the mock MCP tools with a server from your [MCP server registry](/product/mcp-server-registry), such as a filesystem or database server.
-- Write your own system prompt on the agent node, and raise `maxIterations` only if the task needs more steps.
+- Write your own system prompt on the agent node, and raise `maxIterations` (4 in the sample) only if the task needs more steps.
 
 ## Make it safer
 
 These controls are optional; the recipe runs without them.
 
-- Deny or allow tools per role with [MCP tool policy](/product/mcp-tool-policy).
+- `calculator` has no read-only annotation, so L2M counts it as a write tool. Turn on the workflow's **No write tools** setting and it is blocked for the agent, while the clock stays. See [MCP tool policy](/product/mcp-tool-policy#no-write-tools).
 - Require a person's approval before write tools run: see [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).
 - Cap model spend with a [budget](/product/budgets).
 

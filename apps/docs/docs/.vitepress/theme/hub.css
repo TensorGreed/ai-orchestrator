@@ -579,6 +579,32 @@
   color: var(--vp-c-text-2);
 }
 
+/* Index-only terms: no page, so the term is plain text and the card is the link target. */
+.hub-term-card {
+  scroll-margin-top: calc(var(--vp-nav-height) + 72px);
+}
+
+.hub-term-card.is-entry dt {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+}
+
+.hub-term-card:target {
+  border-color: var(--vp-c-brand-1);
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 2px;
+  background: var(--vp-c-brand-soft);
+}
+
+.hub-term-docs {
+  margin-left: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--vp-c-brand-1);
+  white-space: nowrap;
+}
+
 /* Recipes: filters */
 
 .hub-filters {
@@ -756,6 +782,36 @@
 .hub-related-def {
   display: block;
   font-size: 14px;
+  color: var(--vp-c-text-2);
+}
+
+/* Glossary: the guide that explains the term. */
+.hub-term-guide {
+  padding: 20px;
+  border: 1px solid var(--vp-c-divider);
+  border-left: 3px solid var(--vp-c-brand-1);
+  border-radius: var(--hub-radius-sm);
+}
+
+.hub-term-guide-label {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-2);
+}
+
+.hub-term-guide-link {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--vp-c-brand-1);
+}
+
+.hub-term-guide-desc {
+  margin: 6px 0 0;
+  font-size: 14px;
+  line-height: 1.5;
   color: var(--vp-c-text-2);
 }
 

@@ -261,3 +261,5 @@ The reference key and a running request's sealed value are in backups and are re
 --source-master-key`, so references keep matching after a restore with a new master key. Exports are never in
 backups: a request that was ready when the backup was taken shows as **Expired** after a restore. Erasure records are
 in backups and are re-applied on every restore (see above).
+
+Background: [Retention, legal holds and data-subject requests](../blog/retention-legal-holds-and-subject-requests) (blog).

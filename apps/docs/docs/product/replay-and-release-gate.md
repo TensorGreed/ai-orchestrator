@@ -108,7 +108,7 @@ Live write calls are never allowed in a replay job; the server refuses an overri
 ```bash
 l2m replay run --set "$GOLDEN_SET_ID" --file workflows/support-bot.json --repeats 3 --estimate
 # Estimate: 12 cases, 3 runs each, about 48 model calls, about $0.8400
-#   36 executions (a job may run at most 2000)
+#   36 executions (a job may run at most 500)
 ```
 
 Use it to fail fast when a job would exceed what the pipeline may spend. `--max-cost` still stops the job itself at its budget.

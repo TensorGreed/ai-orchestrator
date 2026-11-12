@@ -6,7 +6,16 @@ import type {
   ChatMessage,
   ToolDefinition
 } from "@ai-orchestrator/shared";
-import { MODEL_NOT_ALLOWED_CODE, NODE_ACTIVITY_PREVIEW_CHARS, unionDataLabels, withoutDataClasses, type DataLabels } from "@ai-orchestrator/shared";
+import {
+  MODEL_NOT_ALLOWED_CODE,
+  NODE_ACTIVITY_PREVIEW_CHARS,
+  NOOP_SCOPED_INSTRUMENTATION_SPAN,
+  SPAN_OUTCOME_ATTRIBUTES,
+  unionDataLabels,
+  withoutDataClasses,
+  type DataLabels,
+  type ScopedInstrumentationSpan
+} from "@ai-orchestrator/shared";
 import type { AgentGuardCheck, AgentRuntimeAdapter, AgentRuntimeContext, AgentRuntimeEvent, AgentToolRuntime, InternalToolResult } from "./types";
 import { AgentGuardInterrupt, createToolErrorResult, isAgentGuardInterrupt } from "./types";
 
@@ -1243,16 +1252,24 @@ ${effectiveSystemPrompt}`;
     const endStep = (iteration: number, extra: { toolCalls?: string[]; final?: boolean } = {}) =>
       emit({ kind: "agent_step", phase: "end", iteration, maxIterations: request.maxIterations, ...extra });
 
+    // Trace spans (only while instrumentation is on): one per turn at the verbose span detail, one per tool call.
+    const instrument = context.instrument?.enabled ? context.instrument : undefined;
+    let turnSpan: ScopedInstrumentationSpan = NOOP_SCOPED_INSTRUMENTATION_SPAN;
+
     try {
       for (let iteration = 1; iteration <= request.maxIterations; iteration += 1) {
         if (context.signal?.aborted) {
           throw abortErrorFor(context.signal);
         }
         emit({ kind: "agent_step", phase: "start", iteration, maxIterations: request.maxIterations });
+        if (instrument) {
+          turnSpan.end();
+          turnSpan = instrument.startIteration({ iteration });
+        }
         // Phase 12.1 — guard hook: before each model call.
-        await guardPrompts(iteration);
+        await turnSpan.enter(() => guardPrompts(iteration));
         // Phase 16 — destination rules on what this model call adds (tool results since the last call).
-        await guardModelCall(iteration);
+        await turnSpan.enter(() => guardModelCall(iteration));
         // --- LLM call with per-iteration retry ---
         let modelResponse: Awaited<ReturnType<typeof providerAdapter.generate>> | undefined;
         let llmError: Error | undefined;
@@ -1266,7 +1283,7 @@ ${effectiveSystemPrompt}`;
 
             emit({ kind: "llm_call", phase: "start", ...llmIdentity, iteration });
             const llmStartedMs = Date.now();
-            modelResponse = await providerAdapter.generate(
+            modelResponse = await turnSpan.enter(() => providerAdapter.generate(
               {
                 provider: request.provider,
                 messages,
@@ -1278,7 +1295,7 @@ ${effectiveSystemPrompt}`;
                 ...(context.onProviderRetry ? { onRetry: context.onProviderRetry } : {}),
                 callSite: { ...(context.callSite?.nodeId ? { nodeId: context.callSite.nodeId } : {}), iteration }
               }
-            );
+            ));
             emit({
               kind: "llm_call",
               phase: "end",
@@ -1405,8 +1422,23 @@ ${effectiveSystemPrompt}`;
 
           for (const call of requestedTools) {
             const callStartedMs = Date.now();
+            // The call's `execute_tool` span (a child of the turn's span when there is one); its outcome is set below.
+            const toolSpan = instrument
+              ? instrument.startToolCall(
+                  {
+                    toolName: call.name,
+                    toolCallId: call.id,
+                    ...(internalToolsByName.has(call.name)
+                      ? { toolType: "function" as const, internal: true }
+                      : { toolType: tools.toolType?.(call.name) ?? "function" })
+                  },
+                  turnSpan
+                )
+              : NOOP_SCOPED_INSTRUMENTATION_SPAN;
+            const toolTrace: ToolTrace = {};
             let toolReported = false;
             const reportToolEnd = (outcome: "ok" | "error" | "blocked", error?: string) => {
+              toolTrace.outcome ??= outcome;
               if (toolReported) return;
               toolReported = true;
               emit({
@@ -1442,6 +1474,7 @@ ${effectiveSystemPrompt}`;
                 const errorMsg =
                   tools.describeUnavailableTool?.(call.name) ??
                   `Tool '${call.name}' does not exist. Available tools: ${availableToolNames || "none"}`;
+                toolTrace.errorType = "tool_not_found";
                 reportToolEnd("error", errorMsg);
                 toolResults.push({
                   toolCallId: call.id,
@@ -1462,6 +1495,8 @@ ${effectiveSystemPrompt}`;
               // --- Check if tool is disabled ---
               if (disabledTools.has(call.name)) {
                 const errorMsg = `Tool '${call.name}' has been disabled due to repeated failures.`;
+                toolTrace.outcome = "error";
+                toolTrace.errorType = "tool_disabled";
                 toolResults.push({
                   toolCallId: call.id,
                   toolName: call.name,
@@ -1486,6 +1521,8 @@ ${effectiveSystemPrompt}`;
                   `Tool call '${call.name}' is missing required arguments: ${missingRequiredArgs.join(", ")}.` +
                   (providedKeys.length ? ` Provided keys: ${providedKeys.join(", ")}.` : " No arguments were provided.") +
                   " Please call this tool again with all required fields.";
+                toolTrace.outcome = "error";
+                toolTrace.errorType = "tool_arguments";
 
                 toolResults.push({
                   toolCallId: call.id,
@@ -1570,11 +1607,11 @@ ${effectiveSystemPrompt}`;
               // Phase 12.4 — the caller's tool-call check (the MCP tool
               // policy) decides before the guard sees the arguments.
               if (!internalTool && tools.checkToolCall) {
-                const check = await tools.checkToolCall(call.name, callArguments, {
+                const check = await toolSpan.enter(async () => await tools.checkToolCall!(call.name, callArguments, {
                   toolCallId: call.id,
                   iteration,
                   ...(labelTracking ? { labels: accumulatedLabels() } : {})
-                });
+                }));
                 if (check.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_arguments", iteration, check.message);
                 if (check.outcome === "block") {
                   reportToolEnd("blocked", check.message);
@@ -1591,19 +1628,21 @@ ${effectiveSystemPrompt}`;
               const guardTool = { name: call.name, inputSchema: toolDefinition?.inputSchema, toolCallId: call.id };
               if (guard && !internalTool) {
                 guardedTool = guardTool;
-                const decision = await guard.check({
+                const decision = await toolSpan.enter(() => guard.check({
                   channel: "tool_arguments",
                   content: callArguments,
                   labels: [],
                   ...(labelTracking ? { dataLabels: accumulatedLabels() } : {}),
                   iteration,
                   tool: guardTool
-                });
+                }));
+                noteContentRules(toolTrace, decision.outcome);
                 if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_arguments", iteration, decision.message);
                 // A rewrite that is no longer an argument object cannot be sent safely: it is refused like a block.
                 const unusableRewrite =
                   decision.outcome === "rewrite" && (!decision.content || typeof decision.content !== "object" || Array.isArray(decision.content));
                 if (decision.outcome === "block" || unusableRewrite) {
+                  toolTrace.contentRules = "blocked";
                   const reason = decision.outcome === "block" ? decision.message : "the rewritten arguments are not an object";
                   const errorMsg = `Tool call '${call.name}' was blocked by content rules: ${reason}. Do not retry it with the same arguments.`;
                   reportToolEnd("blocked", errorMsg);
@@ -1627,12 +1666,12 @@ ${effectiveSystemPrompt}`;
               });
               let output: unknown;
               if (internalTool) {
-                output = await internalTool.invoke(callArguments);
+                output = await toolSpan.enter(() => internalTool.invoke(callArguments));
               } else {
                 if (labelTracking) resultLabels = EXTERNAL_RESULT_LABELS;
                 output = labelTracking
-                  ? await tools.invokeTool(call.name, callArguments, { labels: accumulatedLabels(), toolCallId: call.id })
-                  : await tools.invokeTool(call.name, callArguments);
+                  ? await toolSpan.enter(() => tools.invokeTool(call.name, callArguments, { labels: accumulatedLabels(), toolCallId: call.id }))
+                  : await toolSpan.enter(() => tools.invokeTool(call.name, callArguments));
                 if (labelTracking) resultLabels = tools.resultLabels?.(call.name, call.id) ?? EXTERNAL_RESULT_LABELS;
               }
 
@@ -1640,14 +1679,15 @@ ${effectiveSystemPrompt}`;
               // before the model sees it. The content is external and untrusted.
               let guardNotice: string | undefined;
               if (guard && !internalTool) {
-                const decision = await guard.check({
+                const decision = await toolSpan.enter(() => guard.check({
                   channel: "tool_result",
                   content: output,
                   labels: ["untrusted_external"],
                   ...(resultLabels ? { dataLabels: resultLabels } : {}),
                   iteration,
                   tool: guardTool
-                });
+                }));
+                noteContentRules(toolTrace, decision.outcome);
                 if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_result", iteration, decision.message);
                 if (decision.outcome === "block") {
                   guardNotice = `The result of '${call.name}' was withheld by content rules: ${decision.message}. Continue without it.`;
@@ -1703,8 +1743,11 @@ ${effectiveSystemPrompt}`;
               messages.push(spotlightResult ? markedCopy(resultMessage, serializedResult, (raw) => spotlightResult(raw, { toolName: call.name, iteration })) : resultMessage);
             } catch (error) {
               if (isAgentGuardInterrupt(error)) {
+                toolTrace.outcome = "paused";
                 throw error;
               }
+              toolTrace.outcome = "error";
+              toolTrace.thrown = error;
               const rawError =
                 error instanceof Error ? error.message : typeof error === "string" ? error : "Tool call failed";
               const unresolvedTokens = extractUnresolvedPlaceholderTokens(rawError).filter(
@@ -1720,14 +1763,15 @@ ${effectiveSystemPrompt}`;
               // tool and is as untrusted as a result: guard it before the model sees it.
               let guardedError = normalizedError;
               if (guard && guardedTool) {
-                const decision = await guard.check({
+                const decision = await toolSpan.enter(() => guard.check({
                   channel: "tool_result",
                   content: normalizedError,
                   labels: ["untrusted_external"],
                   ...(resultLabels ? { dataLabels: resultLabels } : {}),
                   iteration,
                   tool: guardedTool
-                });
+                }));
+                noteContentRules(toolTrace, decision.outcome);
                 if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_result", iteration, decision.message);
                 if (decision.outcome === "block") guardedError = `The error from '${call.name}' was withheld by content rules: ${decision.message}.`;
                 else if (decision.outcome === "rewrite") guardedError = typeof decision.content === "string" ? decision.content : JSON.stringify(decision.content);
@@ -1777,6 +1821,7 @@ ${effectiveSystemPrompt}`;
               for (let index = resultsBeforeCall; index < toolResults.length; index += 1) {
                 toolResults[index] = { ...toolResults[index], startedAt: callStartedAt, durationMs: callDurationMs };
               }
+              finishToolSpan(toolSpan, toolTrace);
             }
           }
 
@@ -1815,6 +1860,7 @@ ${effectiveSystemPrompt}`;
           ...turnTelemetry(modelResponse)
         });
         endStep(iteration, { final: true });
+        turnSpan.setAttributes({ [SPAN_OUTCOME_ATTRIBUTES.AGENT_FINAL]: true });
 
         const result: AgentRunState = {
           finalAnswer,
@@ -1871,6 +1917,51 @@ ${effectiveSystemPrompt}`;
       };
       await persistConversation();
       return withLabels(result);
+    } finally {
+      turnSpan.end();
     }
+  }
+}
+
+/** What a tool call's span records once the call is over. */
+interface ToolTrace {
+  outcome?: "ok" | "error" | "blocked" | "paused";
+  /** What content rules did to the call (D10: a block is policy at work, not an error). */
+  contentRules?: "blocked" | "rewritten" | "paused";
+  /** A low-cardinality type for a failure the loop detected itself (no thrown error). */
+  errorType?: string;
+  thrown?: unknown;
+}
+
+/** A thrown tool error's low-cardinality type: its L2M category, else its class name. */
+function toolErrorType(error: unknown): string {
+  const category = (error as { errorCategory?: unknown } | null)?.errorCategory;
+  if (typeof category === "string" && category) return category;
+  if (error instanceof Error && error.name && error.name !== "Error") return error.name;
+  return "tool_error";
+}
+
+function noteContentRules(trace: ToolTrace, outcome: "allow" | "rewrite" | "block" | "pause"): void {
+  if (outcome === "rewrite") trace.contentRules ??= "rewritten";
+  else if (outcome === "block") trace.contentRules = "blocked";
+  else if (outcome === "pause") trace.contentRules = "paused";
+}
+
+/**
+ * Ends a tool call's span. Only a failed call (an unknown or disabled tool, missing arguments, a thrown error) marks it
+ * ERROR; a block (by content rules or the tool policy) and an approval pause are outcomes on an unset status.
+ */
+function finishToolSpan(span: ScopedInstrumentationSpan, trace: ToolTrace): void {
+  if (span === NOOP_SCOPED_INSTRUMENTATION_SPAN) return;
+  try {
+    const outcome = trace.outcome ?? "ok";
+    span.setAttributes({
+      [SPAN_OUTCOME_ATTRIBUTES.TOOL_OUTCOME]: outcome,
+      [SPAN_OUTCOME_ATTRIBUTES.CONTENT_RULES_OUTCOME]: trace.contentRules
+    });
+    // The type only: a tool's error text is external content (it can echo arguments or data), so it stays out.
+    if (outcome === "error") span.recordError("", { type: trace.errorType ?? toolErrorType(trace.thrown) });
+  } finally {
+    span.end();
   }
 }

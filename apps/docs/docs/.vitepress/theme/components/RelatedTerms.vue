@@ -15,7 +15,7 @@ const items = computed(() => {
 });
 if (import.meta.env.SSR) {
   const wanted = props.terms ?? [];
-  for (const slug of wanted) if (!glossary.some((term) => term.slug === slug)) console.warn(`[glossary] related term "${slug}" has no glossary page`);
+  for (const slug of wanted) if (!glossary.some((term) => term.slug === slug)) console.warn(`[glossary] related term "${slug}" is not a glossary term (no page and no index entry)`);
 }
 </script>
 
@@ -24,7 +24,7 @@ if (import.meta.env.SSR) {
     <h2 class="hub-related-title">{{ heading }}</h2>
     <ul>
       <li v-for="term in items" :key="term.slug">
-        <a :href="withBase(`/glossary/${term.slug}`)">{{ term.term }}</a>
+        <a :href="withBase(term.href)">{{ term.term }}</a>
         <span class="hub-related-def">{{ term.definition }}</span>
       </li>
     </ul>

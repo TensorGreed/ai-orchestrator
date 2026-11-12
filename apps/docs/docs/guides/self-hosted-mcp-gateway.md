@@ -124,6 +124,7 @@ Every `tools/call` through the gateway is written to the same telemetry table as
 
 ## Next steps
 
+- Concepts: [LLM gateway vs MCP gateway](../learn/operations/llm-gateway-vs-mcp-gateway)
 - Reference: [MCP gateway](../product/mcp-gateway.md), [MCP server registry](../product/mcp-server-registry.md), [MCP tool policy](../product/mcp-tool-policy.md)
 - Guides: [Govern MCP tools](./govern-mcp-tools.md), [Test MCP servers in CI](./test-mcp-servers-in-ci.md)
 - See the MCP pages of the studio in the [live demo](https://lsquarem.com/demo/){target="_self"}, or [build your first MCP agent](../getting-started/build-your-first-mcp-agent.md)

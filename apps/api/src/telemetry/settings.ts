@@ -27,6 +27,8 @@ export interface TelemetrySettings {
   tracesEndpoint: string | null;
   /** Where the OTLP metrics push goes when OTEL_METRICS_ENABLED; null when it does not run. */
   metricsEndpoint: string | null;
+  /** How often metrics are exported (OTEL_METRICS_PUSH_INTERVAL_MS). */
+  metricsIntervalMs: number;
   protocol: "http/protobuf" | "http/json";
   /** Percent-decoded OTEL_EXPORTER_OTLP_HEADERS. Never echoed: only the names are shown. */
   headers: Record<string, string>;
@@ -170,18 +172,21 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
   // values L2M does not support, and those must not stop it. Unknown values fall back to the default with a warning,
   // as the specification asks; only an endpoint or protocol L2M is about to use fails start-up.
   const metricsOn = !disabled && config.OTEL_METRICS_ENABLED;
+  // Settings shared by both signals (protocol, timeout) are checked when either one is exported.
+  const exporting = enabled || (metricsOn && Boolean(metricsEndpoint));
   const used: string[] = enabled ? warnings : [];
+  const usedByExport: string[] = exporting ? warnings : [];
   if (enabled && tracesEndpoint) requireHttpUrl(tracesSource, tracesEndpoint);
   if (metricsOn && metricsEndpoint) requireHttpUrl(metricsSource, metricsEndpoint);
 
   const protocolText = text(config.OTEL_EXPORTER_OTLP_PROTOCOL)?.toLowerCase();
   let protocol: TelemetrySettings["protocol"] = "http/protobuf";
   if (protocolText === "http/json" || protocolText === "http/protobuf") protocol = protocolText;
-  else if (protocolText && enabled && tracesEndpoint) {
+  else if (protocolText && ((enabled && tracesEndpoint) || (metricsOn && metricsEndpoint))) {
     if (protocolText === "grpc") {
       throw new Error("Invalid environment configuration: OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not shipped; use http/protobuf (the default) or http/json");
     }
-    used.push(`OTEL_EXPORTER_OTLP_PROTOCOL=${protocolText} is not supported; using http/protobuf`);
+    usedByExport.push(`OTEL_EXPORTER_OTLP_PROTOCOL=${protocolText} is not supported; using http/protobuf`);
   }
 
   const samplerText = text(config.OTEL_TRACES_SAMPLER)?.toLowerCase();
@@ -222,9 +227,10 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
     enabled,
     tracesEndpoint: enabled ? tracesEndpoint : null,
     metricsEndpoint: metricsOn ? metricsEndpoint : null,
+    metricsIntervalMs: config.OTEL_METRICS_PUSH_INTERVAL_MS,
     protocol,
     headers: parseOtelKeyValueList(config.OTEL_EXPORTER_OTLP_HEADERS),
-    timeoutMs: positiveInt("OTEL_EXPORTER_OTLP_TIMEOUT", config.OTEL_EXPORTER_OTLP_TIMEOUT, 10_000, used),
+    timeoutMs: positiveInt("OTEL_EXPORTER_OTLP_TIMEOUT", config.OTEL_EXPORTER_OTLP_TIMEOUT, 10_000, usedByExport),
     serviceName: resourceAttributes["service.name"]!,
     resourceAttributes,
     sampler: ratio === undefined ? { name: sampler } : { name: sampler, ratio },

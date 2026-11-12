@@ -8,7 +8,7 @@ description: "Notes from the team building L2M, a self-hosted runtime for MCP ag
 
 <div class="hub-page">
 
-<HubHero eyebrow="Blog" title="Notes on building and running MCP agents" lead="Release notes, design decisions and lessons from running agents in production.">
+<HubHero eyebrow="Blog" title="Notes on building and running MCP agents" lead="Release notes and the design decisions behind them.">
   <a href="/docs/blog/feed.xml">Subscribe with the Atom feed</a>
 </HubHero>
 

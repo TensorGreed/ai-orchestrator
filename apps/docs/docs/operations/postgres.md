@@ -234,3 +234,5 @@ An approval resume that was interrupted (the instance stopped after the decision
 **Webhook-only replicas** (`WORKER_MODE=webhook`) do not take part in the election and never run background work.
 
 **Signalling between instances.** With `HA_ENABLED=true` the instances share a `LISTEN/NOTIFY` bus (one more connection each): a cancel stops the run on whichever instance executes it, the leader fails the runs of an instance that stopped beating, only the leader exports audit batches, and every instance appears in `GET /api/cluster`. Several instances leading at once because HA is off are reported in `/health`. See [Cluster operations](./cluster.md).
+
+Concepts: [Self-hosting AI agents: what you run and why](../learn/operations/self-hosting-ai-agents).

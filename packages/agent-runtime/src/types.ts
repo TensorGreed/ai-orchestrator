@@ -1,4 +1,4 @@
-import type { AgentRunRequest, AgentRunState, ChatMessage, DataLabels, NodeActivity, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
+import type { AgentRunRequest, AgentRunState, ChatMessage, DataLabels, NodeActivity, RunInstrumentation, ToolCall, ToolCallSpanInfo, ToolDefinition } from "@ai-orchestrator/shared";
 import type { ProviderExecutionContext, ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 
 export interface AgentToolRuntime {
@@ -32,6 +32,11 @@ export interface AgentToolRuntime {
     args: Record<string, unknown>,
     call: { toolCallId: string; iteration: number; labels?: DataLabels }
   ) => AgentToolCallCheck | Promise<AgentToolCallCheck>;
+  /**
+   * The kind of tool a name is, for its trace span (`gen_ai.tool.type`): `extension` for an MCP server's tool,
+   * `function` for one that runs in process (a worker, a workflow tool, a built-in tool). Absent: `function`.
+   */
+  toolType?: (toolName: string) => ToolCallSpanInfo["toolType"] | undefined;
 }
 
 /** Phase 12.4 — what `checkToolCall` decided. */
@@ -72,6 +77,11 @@ export interface AgentRuntimeContext {
   onProviderRetry?: ProviderExecutionContext["onRetry"];
   /** Fire-and-forget progress events; a throwing listener never affects the run. */
   onEvent?: (event: AgentRuntimeEvent) => void;
+  /**
+   * Trace spans for the loop's turns (verbose span detail only) and tool calls; the caller wraps the whole loop in
+   * its agent span. Model calls and MCP requests made inside become children of the turn or the tool call.
+   */
+  instrument?: RunInstrumentation;
 }
 
 /**

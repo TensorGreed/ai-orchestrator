@@ -7,6 +7,8 @@ description: "Measure a rule set on a labelled red-team corpus mapped to the OWA
 
 L2M ships a labelled red-team corpus: attacks and realistic look-alikes in eleven categories, mapped to the OWASP Top 10 for LLM applications. The benchmark runs it through any rule set and reports how many attacks the rule set caught and how many harmless items it stopped, per category. Run it from the Security page, on a draft in the rule set editor, over the API, or with `l2m guard benchmark` in CI.
 
+Concepts: [the OWASP Top 10 for LLM apps, explained for agents](/learn/security/owasp-llm-top-10).
+
 A benchmark calls no model and reads no workflow data. It touches neither the network nor the disk, and gives the same result every time for the same rule set and corpus. Its verdicts are not content rules events, so they never show up in the Security page's numbers.
 
 ## What it measures
@@ -42,7 +44,7 @@ LLM03 (supply chain), LLM04 (data and model poisoning), LLM08 (vector and embedd
 
 ## Splits
 
-- **Main** (220 attacks, 213 benign): the built-in detectors were tuned on it.
+- **Main** (240 attacks, 213 benign): the built-in detectors were tuned on it.
 - **Held-out** (110 attacks, 110 benign, ten of each per category): written apart from the detectors, by an author who did not read the detector rules or the main split. It shows how well the rules generalise to paraphrases and new styles.
 
 When a change catches more or flags less, `l2m guard benchmark --builtin` names the categories now above their floor. Raise those floors (`BUILT_IN_PROFILE_BENCHMARK_FLOORS` in guard-sdk) to the new counts in the same pull request, so a later change cannot slip back.

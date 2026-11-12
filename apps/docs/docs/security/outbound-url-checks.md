@@ -16,7 +16,13 @@ the host. This
 blocks server-side request forgery (SSRF) and local-file reads through those
 nodes.
 
-MCP HTTP servers are out of scope here; they have their own connection policy.
+MCP HTTP servers do not go through these checks. For the OAuth discovery,
+registration, token and refresh requests of remote MCP servers, set
+`MCP_OAUTH_BLOCK_PRIVATE_HOSTS=true` (off by default) to refuse private,
+loopback, link-local and cloud metadata addresses; see
+[OAuth for remote servers](/product/mcp-server-registry#oauth-for-remote-servers).
+Limit where the API host can connect to MCP servers with egress rules at the
+network layer (a firewall or an outbound proxy).
 
 ## Policy
 
@@ -86,5 +92,5 @@ the `Host` header are unchanged.
 - **Deployment-level endpoints** are infrastructure settings and are not
   checked: LLM provider base URLs, connector SDK endpoints, and RAG endpoints
   that come from environment variables (`QDRANT_ENDPOINT`, `CHROMA_ENDPOINT`
-  and the like) rather than from a node. MCP HTTP servers have their own
-  policy.
+  and the like) rather than from a node. MCP HTTP servers and MCP OAuth
+  discovery are not checked either (see above).

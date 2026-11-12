@@ -105,3 +105,4 @@ Scans read newest first, in pages of 1,000, up to 50,000 calls. When a window ho
 
 - Reference: [MCP tool policy](../product/mcp-tool-policy.md), [MCP tool-call telemetry](../product/mcp-tool-call-telemetry.md)
 - Guides: [Govern MCP tools](./govern-mcp-tools.md), [Run a self-hosted MCP gateway](./self-hosted-mcp-gateway.md)
+- Background: [Least privilege for MCP tools, learned from real calls](../blog/least-privilege-mcp-tool-rules) (blog)

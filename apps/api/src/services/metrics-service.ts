@@ -55,6 +55,12 @@ class Histogram {
   }
 }
 
+/** The OpenTelemetry histograms fed from this service (see packages/otel MetricsRecorder). */
+export interface OtelMetricsRecorder {
+  recordExecution(status: "success" | "error" | "canceled", durationMs: number): void;
+  recordHttpRequest(method: string, statusCode: number, durationMs: number): void;
+}
+
 export interface SloStatus {
   successTarget: number;
   p95LatencyTargetMs: number;
@@ -107,6 +113,9 @@ export class MetricsService {
   /** Phase 12 coverage — runs sent inline because a worker of their pool lacked a capability they need, per label. */
   private readonly dispatchInlineRuns = new Map<string, number>();
 
+  /** Optional OpenTelemetry histograms (set only while OTLP metrics are exported). */
+  private otelRecorder: OtelMetricsRecorder | null = null;
+
   private readonly startTime = Date.now();
 
   constructor(options: MetricsOptions = {}) {
@@ -117,6 +126,11 @@ export class MetricsService {
     this.sloP95LatencyMs = options.sloP95LatencyMs ?? 30000;
   }
 
+  /** Mirrors executions and HTTP requests into OpenTelemetry duration histograms. */
+  attachOtelRecorder(recorder: OtelMetricsRecorder): void {
+    this.otelRecorder = recorder;
+  }
+
   isEnabled(): boolean {
     return this.enabled;
   }
@@ -125,6 +139,7 @@ export class MetricsService {
     if (!this.enabled) return;
     this.httpRequestsTotal += 1;
     this.httpRequestDuration.observe(durationMs);
+    this.otelRecorder?.recordHttpRequest(method, statusCode, durationMs);
     const methodKey = method.toUpperCase();
     this.httpRequestsByMethod.set(methodKey, (this.httpRequestsByMethod.get(methodKey) ?? 0) + 1);
     const statusBucket = `${Math.floor(statusCode / 100)}xx`;
@@ -137,6 +152,7 @@ export class MetricsService {
     if (status === "success") this.executionsSuccess += 1;
     else this.executionsFailure += 1;
     this.executionDuration.observe(durationMs);
+    this.otelRecorder?.recordExecution(status, durationMs);
   }
 
   recordNodeExecution(durationMs: number): void {

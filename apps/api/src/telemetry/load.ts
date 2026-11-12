@@ -5,7 +5,7 @@
  * Only type imports from the otel package appear in this file: they are erased at compile time, so the module
  * graph of an API with tracing off never reaches `@opentelemetry/*` (telemetry-off.test.ts checks this).
  */
-import type { OtelRuntime, SpanProcessor } from "@ai-orchestrator/otel";
+import type { MetricsPipeline, OtelRuntime, SpanProcessor } from "@ai-orchestrator/otel";
 import { NOOP_RUN_INSTRUMENTATION, type RunInstrumentation } from "@ai-orchestrator/shared";
 import type { TelemetrySettings } from "./settings.js";
 
@@ -16,6 +16,8 @@ export interface Telemetry {
   readonly enabled: boolean;
   /** Null while tracing is off. */
   readonly runtime: OtelRuntime | null;
+  /** The metrics pipeline: the runtime's while tracing is on, its own with only a metrics endpoint, else null. */
+  readonly metrics: MetricsPipeline | null;
   /** What the engine, runtime and SDK packages are given: the no-op while tracing is off. */
   readonly instrumentation: RunInstrumentation;
   readonly settings: TelemetrySettings;
@@ -31,8 +33,23 @@ export interface LoadTelemetryOptions {
 }
 
 export async function loadTelemetry(settings: TelemetrySettings, options: LoadTelemetryOptions = {}): Promise<Telemetry> {
+  const metricsExport = settings.metricsEndpoint
+    ? {
+        url: settings.metricsEndpoint,
+        protocol: settings.protocol,
+        headers: settings.headers,
+        timeoutMs: settings.timeoutMs,
+        intervalMs: settings.metricsIntervalMs
+      }
+    : null;
   if (!settings.enabled) {
-    return Object.freeze({ enabled: false, runtime: null, instrumentation: NOOP_RUN_INSTRUMENTATION, settings });
+    if (!metricsExport) {
+      return Object.freeze({ enabled: false, runtime: null, metrics: null, instrumentation: NOOP_RUN_INSTRUMENTATION, settings });
+    }
+    // A metrics endpoint without tracing: only the meter provider and its reader are built (no tracer, no globals).
+    const otel = await import("@ai-orchestrator/otel");
+    const metrics = otel.createMetricsPipeline({ resourceAttributes: settings.resourceAttributes, export: metricsExport });
+    return Object.freeze({ enabled: false, runtime: null, metrics, instrumentation: NOOP_RUN_INSTRUMENTATION, settings });
   }
   const otel = await import("@ai-orchestrator/otel");
   const runtime = otel.createOtelRuntime({
@@ -49,10 +66,11 @@ export async function loadTelemetry(settings: TelemetrySettings, options: LoadTe
     propagateToProviders: settings.propagateToProviders,
     propagateToMcp: settings.propagateToMcp,
     semconvOptIn: settings.semconvOptIn,
+    metricsExport,
     recentSpanLimit: RECENT_SPAN_LIMIT,
     ...(options.scrub ? { scrub: options.scrub } : {}),
     ...(options.spanProcessors ? { spanProcessors: options.spanProcessors } : {}),
     ...(options.registerGlobals === false ? { registerGlobals: false } : {})
   });
-  return Object.freeze({ enabled: true, runtime, instrumentation: runtime.instrumentation, settings });
+  return Object.freeze({ enabled: true, runtime, metrics: runtime.metrics, instrumentation: runtime.instrumentation, settings });
 }

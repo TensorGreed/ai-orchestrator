@@ -1,15 +1,17 @@
 ---
 title: "Build your first MCP agent in 5 minutes, no API keys"
-description: "Tutorial: from a fresh clone to a self-hosted L2M agent calling MCP tools in five minutes, with no API keys: the built-in echo model and a mock MCP server."
+description: "Tutorial: from a fresh clone to a self-hosted L2M agent wired to MCP tools in five minutes, with no API keys; add a real model to see it call them."
 ---
 
 # Build your first MCP agent in 5 minutes
 
-This is the shortest path from a fresh clone to an agent that calls real tools via the [Model Context Protocol](https://modelcontextprotocol.io/). No API keys, no Ollama, no setup.
+This is the shortest path from a fresh clone to an agent wired to tools via the [Model Context Protocol](https://modelcontextprotocol.io/), ready to call them once you add a real model. No API keys, no Ollama, no setup.
+
+New to the ideas? [What is MCP?](/learn/mcp/what-is-mcp) and [What is an AI agent?](/learn/agents/what-is-an-ai-agent) explain them in a few minutes each.
 
 By the end you'll have:
 - L2M running locally with a Studio UI at `http://localhost:5173`.
-- A working multi-tool agent that calls MCP tools (`get_current_time`, `calculator`) on your prompts.
+- A working agent wired to two MCP tools (`get_current_time`, `calculator`), ready for a real model to call them.
 - A clear next step for swapping the bundled echo provider for a real LLM and the in-process mock MCP server for a real one (filesystem, git, postgres, etc.).
 
 ## 0. Prerequisites
@@ -90,12 +92,13 @@ Click **Run**.
 Open the **Execution history** panel (left sidebar). The most recent run shows:
 
 - Manual Trigger → success
-- Agent → success
-- MCP: get_current_time → success (called by the agent, with the model's chosen `tz` argument)
-- MCP: calculator → success (with `expression: "12*7"`)
-- Output → success
+- Chat Model (echo), MCP: get_current_time and MCP: calculator → skipped as steps (they are attachments, not DAG steps), then marked as used by the agent, which loaded the model and the tool definitions
+- Agent → success, after one model call
+- Output → success, with the answer `Echo: What time is it in UTC, and what is 12 times 7?`
 
-Click the agent node to inspect the iteration trace: you'll see the model's tool-call requests and the tool responses interleaved. The bundled `echo` provider is not a real LLM, so it doesn't actually reason — but the runtime still drives the tool-calling loop, which is what we want to verify.
+No tool was called, and that is expected. The bundled `echo` provider is not a real model: it repeats your prompt and never asks for a tool, so the agent's first model call is already its final answer. What this run proves is the wiring: the trigger reaches the agent, the agent loads its model and its MCP tools, and the answer reaches the output.
+
+To see tool calls without a key, open the [support agent in the live demo](https://lsquarem.com/demo/?mode=editor&workflowId=wf-demo-support-agent&demoRun=recorded){target="_self"}. Its recorded run shows the agent calling a knowledge-base tool and a calculator, one call failing and being retried. To make tool calls on your own machine, swap echo for a real model (next step). [What is an AI agent?](/learn/agents/what-is-an-ai-agent) explains the loop you will then see.
 
 ## 6. Make it real
 
@@ -114,7 +117,7 @@ You'll see the model actually reason about which tools to call, in what order, w
 
 ### Swap the mock MCP for a real MCP server
 
-The `mock-mcp` adapter is in-process and ships with three demo tools. To plug in a community MCP server (e.g. `@modelcontextprotocol/server-filesystem` for filesystem access):
+The `mock-mcp` adapter is in-process and ships with a few demo tools (`get_current_time`, `calculator`, `lookup_kb` and others). To plug in a community MCP server (e.g. `@modelcontextprotocol/server-filesystem` for filesystem access):
 
 1. Replace one of the `MCP: …` nodes with a new **MCP Tool** node.
 2. Set the connection:
@@ -125,6 +128,8 @@ The `mock-mcp` adapter is in-process and ships with three demo tools. To plug in
 4. Save and re-run with a prompt like `List files in the project root and tell me which ones look like documentation.`
 
 That's the whole loop: visual workflow + agent runtime + MCP tool calls. See [the MCP integration page](/extensions/mcp) for transport options and best practices, and [agent loop](/runtime/agent-loop) for the iteration semantics.
+
+Next steps: the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) walks through this workflow node by node and lists ways to extend it, and the glossary defines an [MCP tool](/glossary/mcp-tool).
 
 ## What if it didn't work
 

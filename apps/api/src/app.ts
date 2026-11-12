@@ -99,6 +99,7 @@ import {
   ExternalWorkflowImportError,
   outputLabelsOf,
   checkTriggerInput,
+  describeRunResult,
   workflowDeclaresSensitiveSource,
   type ChunkOptions,
   type EmbeddingAdapter,
@@ -211,7 +212,6 @@ import type { SpanProcessor } from "@ai-orchestrator/otel";
 import { resolveTelemetrySettings } from "./telemetry/settings.js";
 import { loadTelemetry, type Telemetry } from "./telemetry/load.js";
 import { installHandlerContext, installHttpServerSpans, traceLogMixin } from "./telemetry/http-tracing.js";
-import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
 import { SubWorkflowSpendTracker, usageUserOf, withinBudgetCheckTime, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
@@ -1591,6 +1591,13 @@ export async function createApp(
     options.lifecycle?.setExitFlush(() => telemetryRuntime.forceFlush());
     // Before any route is added: every handler then runs in its request's server span (when one was started).
     if (telemetrySettings.httpServerSpans) installHandlerContext(app, telemetryRuntime);
+  } else if (telemetry.metrics) {
+    // Metrics without tracing: only the meter provider runs. It exports once more on close and before a signal exits.
+    const metricsPipeline = telemetry.metrics;
+    app.addHook("onClose", async () => {
+      await metricsPipeline.shutdown();
+    });
+    options.lifecycle?.setExitFlush(() => metricsPipeline.forceFlush());
   }
   // 12.6 — model allowlists. Every model call goes through this seam: each run, gateway sampling call, provider test,
   // eval judge call and knowledge-base request gets a registry (and an embedding check) for its project.
@@ -2255,7 +2262,37 @@ export async function createApp(
   // Bounded: a run whose history is never persisted must not grow it forever.
   const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
 
+  // The run's trace span (only while tracing is on): it covers the host's work around the engine as well, and the
+  // engine's node, agent and tool spans are its children.
+  const runInstrumentation = telemetry.instrumentation;
   const runWorkflowExecutionUnsettled = async (input: RunWorkflowExecutionInput) => {
+    if (!runInstrumentation.enabled) return await runWorkflowExecutionInScope(input);
+    return await runInstrumentation.run(
+      {
+        ...(input.executionId ? { executionId: input.executionId } : {}),
+        workflowId: input.workflow.id,
+        ...(input.workflow.name ? { workflowName: input.workflow.name } : {}),
+        projectId: input.workflow.projectId ?? DEFAULT_PROJECT_ID,
+        ...(input.triggerType ? { triggerType: input.triggerType } : {}),
+        runMode: input.runMode ?? "workflow",
+        replay: Boolean(input.replay)
+      },
+      async (span) => {
+        const result = await runWorkflowExecutionInScope(input);
+        describeRunResult(span, result);
+        return result;
+      }
+    );
+  };
+  // Phase 13 metrics — every node that ran (skipped steps and attachment nodes an agent consumed are not node runs);
+  // replays stay out of the metrics, as their runs do.
+  const recordNodeMetric = (input: RunWorkflowExecutionInput, event: { status: string; durationMs: number; output?: unknown }) => {
+    if (input.replay || input.triggerType === REPLAY_TRIGGER_TYPE || event.status === "skipped") return;
+    const reason = event.output && typeof event.output === "object" ? (event.output as { reason?: unknown }).reason : undefined;
+    if (reason === "attachment_consumed_by_agent") return;
+    metricsService.recordNodeExecution(event.durationMs);
+  };
+  const runWorkflowExecutionInScope = async (input: RunWorkflowExecutionInput) => {
     const channel: ReleaseChannel = input.channel ?? "draft";
     const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
     // Phase 15.4 — the run's history records which published version it ran, so a retry runs that version again.
@@ -2549,7 +2586,8 @@ export async function createApp(
             const errorScoped = runScope.dependenciesFor(errorWf, { actor: sameProject ? input.policyActor : null, channel });
             const errorModelRun: ModelRun = { runKey: `error:${payload.executionId}:${errorWf.id}`, sourceExecutionId: payload.executionId };
             try {
-              await executeWorkflow(
+              const errorToolPolicySubject = await resolveToolPolicySubject(errorWf.id);
+              const runErrorWorkflow = () => executeWorkflow(
                 {
                   workflow: errorWf,
                   input: {
@@ -2561,7 +2599,7 @@ export async function createApp(
                     timestamp: payload.timestamp
                   },
                   triggerType: "error",
-                  toolPolicySubject: await resolveToolPolicySubject(errorWf.id),
+                  toolPolicySubject: errorToolPolicySubject,
                   executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
                 },
                 {
@@ -2578,18 +2616,39 @@ export async function createApp(
                   loadMcpToolPolicy,
                   codeSandbox: codeSandboxPlan,
                   outboundGuard,
-                  outboundDnsResolver: nodeDnsResolver
+                  outboundDnsResolver: nodeDnsResolver,
+                  ...(runInstrumentation.enabled ? { instrument: runInstrumentation } : {}),
+                  ...(metricsService.isEnabled() ? { onNodeComplete: (event: { status: string; durationMs: number; output?: unknown }) => recordNodeMetric(input, event) } : {})
                 }
               );
+              // The error workflow's run is its own span, a child of the failed run's.
+              if (runInstrumentation.enabled) {
+                await runInstrumentation.run(
+                  { workflowId: errorWf.id, ...(errorWf.name ? { workflowName: errorWf.name } : {}), projectId: errorWf.projectId ?? DEFAULT_PROJECT_ID, triggerType: "error" },
+                  async (span) => {
+                    const errorResult = await runErrorWorkflow();
+                    describeRunResult(span, errorResult);
+                    return errorResult;
+                  }
+                );
+              } else {
+                await runErrorWorkflow();
+              }
             } catch (err) {
               app.log.warn({ err: err instanceof Error ? err.message : String(err), errorWorkflowId: payload.errorWorkflowId }, "Error workflow execution failed");
             }
           },
           onNodeStart: input.hooks?.onNodeStart,
-          onNodeComplete: input.hooks?.onNodeComplete,
+          onNodeComplete: metricsService.isEnabled()
+            ? async (event) => {
+                recordNodeMetric(input, event);
+                await input.hooks?.onNodeComplete?.(event);
+              }
+            : input.hooks?.onNodeComplete,
           onLLMDelta: input.hooks?.onLLMDelta,
           onMcpProgress: input.hooks?.onMcpProgress,
           onNodeActivity: input.hooks?.onNodeActivity,
+          ...(runInstrumentation.enabled ? { instrument: runInstrumentation } : {}),
           abortSignal: runController.signal
         }
       );
@@ -4869,22 +4928,11 @@ export async function createApp(
     resourceAttributes: telemetrySettings.resourceAttributes
   });
 
-  let otlpMetricsExporter: OtlpMetricsExporter | null = null;
-  if (telemetrySettings.metricsEndpoint) {
-    otlpMetricsExporter = new OtlpMetricsExporter(metricsService, {
-      endpoint: telemetrySettings.metricsEndpoint,
-      resourceAttributes: telemetrySettings.resourceAttributes,
-      headers: telemetrySettings.headers,
-      intervalMs: config.OTEL_METRICS_PUSH_INTERVAL_MS,
-      serviceName: telemetrySettings.serviceName
-    });
-    otlpMetricsExporter.setLogger({
-      warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
-    });
-    otlpMetricsExporter.start();
-    app.addHook("onClose", async () => {
-      await otlpMetricsExporter?.stop();
-    });
+  // OTLP metrics (OTEL_METRICS_ENABLED with a metrics endpoint): the `ao.*` instruments are registered on the SDK
+  // meter, and the duration histograms get their observations from MetricsService.
+  if (telemetry.metrics && telemetrySettings.metricsEndpoint) {
+    const { registerL2mMetrics } = await import("@ai-orchestrator/otel");
+    metricsService.attachOtelRecorder(registerL2mMetrics(telemetry.metrics.meter, metricsService));
   }
   secretService.attachExternalSecrets(externalSecretsService);
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
@@ -6708,9 +6756,9 @@ export async function createApp(
         spanDetail: telemetrySettings.spanDetail
       },
       otlpMetrics: {
-        enabled: otlpMetricsExporter !== null,
+        enabled: telemetry.metrics !== null && telemetrySettings.metricsEndpoint !== null,
         endpoint: telemetrySettings.metricsEndpoint,
-        intervalMs: otlpMetricsExporter ? config.OTEL_METRICS_PUSH_INTERVAL_MS : null
+        intervalMs: telemetry.metrics && telemetrySettings.metricsEndpoint ? telemetrySettings.metricsIntervalMs : null
       }
     };
   });

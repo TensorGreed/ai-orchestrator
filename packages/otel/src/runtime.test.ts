@@ -473,3 +473,55 @@ describe("runtime", () => {
     expect(received.every((entry) => entry.bytes > 0)).toBe(true);
   });
 });
+
+describe("scoped spans (startNode, startIteration, startToolCall)", () => {
+  it("opens a span that is not active until entered, nests what starts inside, and ends only when told", async () => {
+    const { inst, spans, byName } = setup({ spanDetail: "verbose" });
+    await inst.run({ executionId: "e", workflowId: "w", workflowName: "Flow" }, async () => {
+      const node = inst.startNode({ nodeId: "n1", nodeType: "agent_orchestrator", nodeName: "Agent" });
+      expect(node.recording).toBe(true);
+      // Not active: a span started outside enter() is the run's child, not the node's.
+      await inst.span({ name: "outside" }, async () => undefined);
+      const answer = await node.enter(async () => {
+        await inst.span({ name: "inside" }, async () => undefined);
+        return 7;
+      });
+      expect(answer).toBe(7);
+      const turn = inst.startIteration({ iteration: 1 }, node);
+      const tool = inst.startToolCall({ toolName: "search", toolCallId: "c1", toolType: "extension" }, turn);
+      await tool.enter(async () => inst.span({ name: "mcp" }, async () => undefined));
+      tool.setAttributes({ "l2m.tool.outcome": "ok" });
+      tool.end();
+      tool.end();
+      turn.end();
+      expect(spans().some((span) => span.name === "l2m.node agent_orchestrator")).toBe(false);
+      node.end();
+    });
+    const run = byName("invoke_workflow Flow");
+    const node = byName("l2m.node agent_orchestrator");
+    const turn = byName("l2m.agent.iteration");
+    const tool = byName("execute_tool search");
+    const parent = (span: ReadableSpan) => span.parentSpanContext?.spanId;
+    expect(parent(node)).toBe(run.spanContext().spanId);
+    expect(parent(byName("outside"))).toBe(run.spanContext().spanId);
+    expect(parent(byName("inside"))).toBe(node.spanContext().spanId);
+    expect(parent(turn)).toBe(node.spanContext().spanId);
+    expect(parent(tool)).toBe(turn.spanContext().spanId);
+    expect(parent(byName("mcp"))).toBe(tool.spanContext().spanId);
+    expect(tool.attributes).toMatchObject({ "gen_ai.tool.name": "search", "gen_ai.tool.call.id": "c1", "gen_ai.tool.type": "extension", "l2m.tool.outcome": "ok" });
+    expect(spans().filter((span) => span.name === "execute_tool search")).toHaveLength(1);
+  });
+
+  it("gives the no-op turn span at the standard detail, and a no-op parent falls back to the active span", async () => {
+    const { inst, byName, spans } = setup();
+    await inst.run({ executionId: "e", workflowId: "w", workflowName: "Flow" }, async () => {
+      const turn = inst.startIteration({ iteration: 1 });
+      expect(turn.recording).toBe(false);
+      const tool = inst.startToolCall({ toolName: "t" }, turn);
+      tool.end();
+      turn.end();
+    });
+    expect(spans().map((span) => span.name).sort()).toEqual(["execute_tool t", "invoke_workflow Flow"]);
+    expect(byName("execute_tool t").parentSpanContext?.spanId).toBe(byName("invoke_workflow Flow").spanContext().spanId);
+  });
+});

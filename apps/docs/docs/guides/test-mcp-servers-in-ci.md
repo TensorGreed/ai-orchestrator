@@ -36,7 +36,7 @@ Every probed server has an **accepted snapshot**: the tool schemas you last acce
 
 ```bash
 export L2M_API_URL=https://l2m.example.com
-export L2M_API_KEY=l2m_…                 # a builder API key
+export L2M_API_KEY=ao_…                  # a builder API key
 
 pnpm l2m mcp snapshot export --server mcp_123 --out docs-server.snapshot.json
 pnpm l2m mcp mock --snapshot docs-server.snapshot.json --cassette run.cassette.json
