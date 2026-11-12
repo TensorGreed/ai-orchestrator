@@ -13475,7 +13475,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     await store.updateMcpServer(existing.id, {
       ...rest,
       // The stored OAuth issuer binding survives a save; it changes only through a connection or an admin reset.
-      ...(rest.connection !== undefined ? { connection: carryIssuerBinding(rest.connection, existing.connection) } : {}),
+      // Read again just before the write, so a binding made while this request was checked is not dropped.
+      ...(rest.connection !== undefined
+        ? { connection: carryIssuerBinding(rest.connection, (await store.getMcpServer(existing.id))?.connection ?? existing.connection) }
+        : {}),
       ...(sandbox !== undefined ? { sandbox: nextAdapterId === "stdio_mcp" ? sandbox : null } : {}),
       ...(nextAdapterId !== "stdio_mcp" && existing.sandbox ? { sandbox: null } : {}),
       ...(secretRef !== undefined ? { secretId: secretRef?.secretId ?? null } : {}),

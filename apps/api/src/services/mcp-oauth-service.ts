@@ -370,6 +370,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
   private async bindIssuer(serverId: string, clientId: string, issuer: string): Promise<void> {
     const current = await this.store.getMcpServer(serverId);
     if (!current) return;
+    // Only the client id the server is configured with now is bound (a flow for a replaced id binds nothing).
+    if (String(toRecord(current.connection.oauth).clientId ?? "").trim() !== clientId) return;
     const existing = readIssuerBinding(current.connection);
     if (existing && existing.clientId === clientId) return;
     await this.store.updateMcpServer(serverId, {
@@ -723,6 +725,21 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     if (!input.code) {
       return failed("The authorization server sent no code.");
     }
+    // A pre-registered client id: the server's settings may have changed while the browser was away. The client id
+    // must still be the configured one, and a binding made meanwhile (by another flow) must name this issuer; the
+    // code (and the client secret) never go to another authorization server's token endpoint.
+    if (pending.client.registration === "pre_registered") {
+      const configured = String(toRecord(server.connection.oauth).clientId ?? "").trim();
+      if (configured !== pending.client.clientId) {
+        return failed("The server's client id changed while this authorization was in progress. Start again from the MCP servers page.");
+      }
+      const binding = readIssuerBinding(server.connection);
+      if (binding && binding.clientId === pending.client.clientId && binding.issuer !== pending.issuer) {
+        return failed(
+          `The authorization server changed: the client id is bound to ${binding.issuer}, but this authorization went to ${pending.issuer}. An admin can check the client id or reset the binding in the server's OAuth settings.`
+        );
+      }
+    }
 
     let tokens: OAuthTokenSet;
     try {
@@ -743,10 +760,6 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       const message = error instanceof McpOAuthError ? error.message : "Token exchange failed.";
       await recordError(message);
       return failed(message);
-    }
-
-    if (pending.client.registration === "pre_registered") {
-      await this.bindIssuer(server.id, pending.client.clientId, pending.issuer);
     }
 
     const secret: StoredOAuthSecret = {
@@ -781,6 +794,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
         connectedAt: now,
         lastError: null
       });
+      if (pending.client.registration === "pre_registered") await this.bindIssuer(server.id, pending.client.clientId, pending.issuer);
       return { serverId: server.id, ok: true, userId };
     }
     const existing = await this.store.getMcpOAuthConnection(server.id);
@@ -801,6 +815,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       connectedBy: pending.userEmail,
       lastError: null
     });
+    if (pending.client.registration === "pre_registered") await this.bindIssuer(server.id, pending.client.clientId, pending.issuer);
     return { serverId: server.id, ok: true };
   }
 

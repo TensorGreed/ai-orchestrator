@@ -188,8 +188,7 @@ describe("McpOAuthPanel", () => {
     vi.mocked(api.connectMcpServerOAuth).mockResolvedValue({
       authorizationUrl: "https://auth.example.test/authorize?state=abc",
       expiresAt: "2026-10-20T10:10:00.000Z",
-      redirectUri: "http://localhost:5173/api/mcp/oauth/callback",
-      issuerBinding: null
+      redirectUri: "http://localhost:5173/api/mcp/oauth/callback"
     });
     const openSpy = vi.spyOn(window, "open").mockReturnValue({ closed: false } as Window);
 
@@ -235,8 +234,7 @@ describe("McpOAuthPanel", () => {
     vi.mocked(api.connectMcpServerOAuth).mockResolvedValue({
       authorizationUrl: "https://auth.example.test/authorize",
       expiresAt: "2026-10-20T10:10:00.000Z",
-      redirectUri: "http://localhost:5173/api/mcp/oauth/callback",
-      issuerBinding: null
+      redirectUri: "http://localhost:5173/api/mcp/oauth/callback"
     });
     vi.spyOn(window, "open").mockReturnValue({ closed: false } as Window);
     render(<McpOAuthPanel serverId="mcp_1" isAdmin />);

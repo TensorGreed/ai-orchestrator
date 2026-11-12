@@ -238,6 +238,8 @@ export function McpOAuthPanel({ serverId, isAdmin }: { serverId: string; isAdmin
             <>
               <dt>Client id bound to</dt>
               <dd className="mcp-oauth-redirect">
+                <code>{status.issuerBinding.clientId}</code>
+                {" → "}
                 <code>{status.issuerBinding.issuer}</code>
                 {status.issuerBinding.boundAt ? ` since ${formatDate(status.issuerBinding.boundAt)}` : ""}
                 {isAdmin && (

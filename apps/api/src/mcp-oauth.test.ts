@@ -1353,3 +1353,50 @@ describe("issuer binding stored on the server's OAuth settings", () => {
     expect(entry?.metadata).toMatchObject({ hadBinding: true, clientId: "pre-registered-7", issuer: `${fake.base}/auth` });
   });
 });
+
+describe("issuer binding: authorizations in flight", () => {
+  async function start(context: TestContext, cookie: string, serverId: string): Promise<string> {
+    const started = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, cookie, {});
+    expect(started.statusCode).toBe(200);
+    return started.json<{ authorizationUrl: string }>().authorizationUrl;
+  }
+  async function finish(context: TestContext, cookie: string, authorizationUrl: string) {
+    const consent = await fetch(authorizationUrl, { redirect: "manual" });
+    const location = new URL(consent.headers.get("location") ?? "");
+    return await call(context, "GET", `${location.pathname}${location.search}`, cookie);
+  }
+
+  it("refuses a callback for an issuer other than the one a flow bound meanwhile, before the code exchange", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin, { oauth: { clientId: "pre-registered-8" } });
+    const viaFirst = await start(context, admin, serverId);
+    fake.authorizationServers = [`${fake.base}/auth2`];
+    const viaSecond = await start(context, admin, serverId);
+
+    expect((await finish(context, admin, viaSecond)).statusCode).toBe(200);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toMatchObject({ issuer: `${fake.base}/auth2` });
+    const exchanges = fake.tokenRequests.length;
+
+    const late = await finish(context, admin, viaFirst);
+    expect(late.statusCode).toBe(400);
+    expect(late.body).toContain("authorization server changed");
+    expect(fake.tokenRequests.length).toBe(exchanges);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toMatchObject({ issuer: `${fake.base}/auth2` });
+  });
+
+  it("refuses a callback whose client id was replaced meanwhile, and binds nothing for it", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin, { oauth: { clientId: "client-a" } });
+    const flow = await start(context, admin, serverId);
+    const connection = { endpoint: `${fake.base}/mcp`, transport: "http_streamable", authType: "oauth", oauth: { clientId: "client-b" } };
+    expect((await call(context, "PUT", `/api/mcp/servers/${serverId}`, admin, { connection })).statusCode).toBe(200);
+
+    const late = await finish(context, admin, flow);
+    expect(late.statusCode).toBe(400);
+    expect(late.body).toContain("client id changed");
+    expect(fake.tokenRequests).toEqual([]);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toBeNull();
+  });
+});
