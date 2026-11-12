@@ -22,10 +22,24 @@
  *      downloaded once, until SUBJECT_EXPORT_TTL_HOURS pass.
  * The lookup runs on the leader under the `subject-requests` lease, a page at a time, and records where it is after
  * every page, so a restart resumes it. A request past its due date sends `data.subject_request_due` once.
+ *
+ * A deletion request runs the same lookup, then waits (`ready`) until a manager confirms what it found. Then, on the
+ * leader and resumable like the lookup (`running`):
+ *   - an end user: each found row is deleted with what belongs to it (a run takes its tool calls, rule events,
+ *     approvals, cassettes and queue jobs; its usage rows are kept with the person cleared), a row found by the search
+ *     is checked again against the value first, and the token vault entries of the person's values found in those rows
+ *     are deleted. Golden runs, cases and results go through the release gate's hook, as the data-subject lookup's
+ *     delete does;
+ *   - a staff member: their email is replaced with `erased-user-<8 hex>` in every authorship column, then the user and
+ *     their credentials are deleted. Their audit-log rows stay (security logging; the hash chain stays verifiable).
+ * Every erased row writes a tombstone (db/erasure.ts) that a restore re-applies. A row a legal hold keeps is skipped
+ * and recorded in `deferred`; the request waits as `deferred_by_hold`, and a hold release re-queues it.
  */
 import crypto from "node:crypto";
 import { deflateRawSync } from "node:zlib";
 import {
+  STAFF_AUDIT_LOG_KEPT,
+  SUBJECT_DELETION_NOT_COVERED,
   SUBJECT_REQUEST_MAX_ROWS,
   SUBJECT_ROW_KINDS,
   subjectRefPath,
@@ -36,8 +50,10 @@ import {
   type SubjectRequestCreateInput,
   type SubjectRequestProgress,
   type SubjectRequestStatus,
+  type SubjectDeletionView,
   type SubjectRequestView,
   type SubjectRefPreviewView,
+  type SubjectStaffPreview,
   type SubjectRowKind,
   type Workflow
 } from "@ai-orchestrator/shared";
@@ -46,12 +62,24 @@ import type { Store } from "../db/store.js";
 import {
   SUBJECT_SCAN_KINDS,
   memorySessionRowId,
+  parseMemoryArtifactRowId,
   parseMemorySessionRowId,
   type SubjectRefWrite,
   type SubjectRequestRecord,
   type SubjectScanKind
 } from "../db/subject-store.js";
 import { yieldToEventLoop } from "../db/retention-tables.js";
+import {
+  ERASED_RUN_SCRUB_HOURS,
+  SCRUB_RUNS_PER_SWEEP,
+  memoryArtifactTombstoneId,
+  memorySessionTombstoneId,
+  staffEmails,
+  staffPseudonym,
+  staffTombstoneId,
+  subjectRowHoldTargets,
+  type SubjectDeleteKind
+} from "../db/erasure.js";
 import type { AuditEventInput } from "./audit-service.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { SecretService } from "./secret-service.js";
@@ -73,6 +101,11 @@ const DEFAULT_POLL_MS = 15_000;
 const DEFAULT_SWEEP_MS = 10 * 60_000;
 const DEFAULT_LEASE_TTL_MS = 5 * 60_000;
 const ORPHAN_REFS_PER_SWEEP = 5_000;
+const TOMBSTONES_PER_SWEEP = 5_000;
+/** Default ERASURE_TOMBSTONE_RETENTION_DAYS: longer than a year of backups. */
+export const ERASURE_TOMBSTONE_DEFAULT_RETENTION_DAYS = 400;
+/** Found entries a deletion handles between saves of where it is (and lease renewals). */
+const DELETE_SAVE_EVERY = 10;
 /** Errors in a row before a request fails (a passing page resets the count). */
 export const SUBJECT_REQUEST_MAX_ERRORS = 3;
 /** Times an export is started before the request fails (a crash while building it cannot loop). */
@@ -138,10 +171,45 @@ interface LookupState {
   errors: number;
   /** Times the export was started. */
   exportAttempts: number;
+  /** A deletion request once confirmed: where it is and what it did. */
+  deletion?: DeletionState;
+  /** A staff deletion's preview counts. */
+  staffPreview?: SubjectStaffPreview;
+}
+
+/** A confirmed deletion's state, stored in `progress_json.deletion` as it goes (it resumes after a restart). */
+interface DeletionState {
+  /** The next found entry to handle. */
+  index: number;
+  confirmedAt: string;
+  confirmedBy: string;
+  confirmedByUserId: string | null;
+  deleted: Partial<Record<SubjectRowKind, number>>;
+  usageRowsCleared: number;
+  vaultTokensDeleted: number;
+  skipped: number;
+  /** Tokens seen in rows that were deleted, and in rows a hold keeps (never deleted while held). */
+  tokens: string[];
+  heldTokens: string[];
+  staff: { pseudonym: string; rowsPseudonymised: number; userDeleted: boolean; held: number } | null;
 }
 
 /** Sealing with the master key (SecretService). */
 export type SubjectSecrets = Pick<SecretService, "sealValue" | "openValue">;
+
+/** The release gate's part in a deletion: called before a golden run, case or result is deleted (as the lookup's delete). */
+export type SubjectRowRemovalHook = (actor: { id: string; email: string }, row: { kind: string; id: string }) => Promise<(() => Promise<void>) | null>;
+
+/** The staff user behind a staff erasure (the app's user delete). */
+export interface StaffUserHooks {
+  /**
+   * Why `actor` cannot erase this person (not an admin while the person has an account, their own account, the last
+   * admin), or null. Checked at confirmation and again before the account is deleted.
+   */
+  check(email: string, actor: { id: string; email: string }): Promise<string | null>;
+  /** Deletes the user with this email through the existing user delete (audited as `user.delete`). */
+  remove(email: string, actor: { id: string; email: string }, requestId: string): Promise<"deleted" | "not_found" | "last_admin">;
+}
 
 export interface SubjectRequestServiceOptions {
   store: Store;
@@ -156,6 +224,10 @@ export interface SubjectRequestServiceOptions {
   exportTtlHours: number;
   /** Most bytes of rows in one export (uncompressed); more are left out and the manifest says so. */
   exportMaxBytes?: number;
+  /** Days erasure tombstones are kept (ERASURE_TOMBSTONE_RETENTION_DAYS; 0 keeps them). */
+  tombstoneRetentionDays?: number;
+  subjectRowRemoval?: SubjectRowRemovalHook;
+  staffUser?: StaffUserHooks;
   audit?: (event: AuditEventInput) => Promise<unknown>;
   notify?: (event: NotificationEvent) => Promise<void>;
   logger?: { info(fields: Record<string, unknown>, message: string): void; warn(fields: Record<string, unknown>, message: string): void };
@@ -301,8 +373,61 @@ function readState(progress: Record<string, unknown>): LookupState {
     found: Array.isArray(progress.found)
       ? (progress.found as FoundRow[]).filter((row) => row && typeof row.id === "string" && (SUBJECT_ROW_KINDS as readonly string[]).includes(row.k))
       : [],
-    ...(Array.isArray(progress.classesTried) ? { classesTried: progress.classesTried.map(String) } : {})
+    ...(Array.isArray(progress.classesTried) ? { classesTried: progress.classesTried.map(String) } : {}),
+    ...(progress.deletion && typeof progress.deletion === "object" ? { deletion: readDeletion(progress.deletion as Record<string, unknown>) } : {}),
+    ...(progress.staffPreview && typeof progress.staffPreview === "object" ? { staffPreview: progress.staffPreview as SubjectStaffPreview } : {})
   };
+}
+
+function numberOf(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function readDeletion(raw: Record<string, unknown>): DeletionState {
+  const staff = raw.staff && typeof raw.staff === "object" ? (raw.staff as Record<string, unknown>) : null;
+  return {
+    index: numberOf(raw.index),
+    confirmedAt: String(raw.confirmedAt ?? ""),
+    confirmedBy: String(raw.confirmedBy ?? ""),
+    confirmedByUserId: typeof raw.confirmedByUserId === "string" ? raw.confirmedByUserId : null,
+    deleted: raw.deleted && typeof raw.deleted === "object" ? (raw.deleted as Partial<Record<SubjectRowKind, number>>) : {},
+    usageRowsCleared: numberOf(raw.usageRowsCleared),
+    vaultTokensDeleted: numberOf(raw.vaultTokensDeleted),
+    skipped: numberOf(raw.skipped),
+    tokens: Array.isArray(raw.tokens) ? raw.tokens.map(String) : [],
+    heldTokens: Array.isArray(raw.heldTokens) ? raw.heldTokens.map(String) : [],
+    staff: staff
+      ? { pseudonym: String(staff.pseudonym ?? ""), rowsPseudonymised: numberOf(staff.rowsPseudonymised), userDeleted: staff.userDeleted === true, held: numberOf(staff.held) }
+      : null
+  };
+}
+
+/** The store kind a found entry is deleted as. */
+function deleteKindOf(found: FoundRow): SubjectDeleteKind {
+  return found.s === "memory_ref" ? "memory_session" : found.s;
+}
+
+/** The deferred entries of a request (rows a hold kept), as stored in `deferred_json`. */
+/**
+ * What a deletion left for a legal hold: deferred rows, plus a staff member's held authorship rows and vault entries
+ * kept while a hold is active (recorded as markers beside the rows).
+ */
+function deferredCount(record: Pick<SubjectRequestRecord, "deferred">): number {
+  let count = deferredOf(record as SubjectRequestRecord).filter((row) => !(row as FoundRow & { busy?: boolean }).busy).length;
+  for (const entry of record.deferred as Array<Record<string, unknown>>) {
+    if (entry && entry.staff === true) count += numberOf(entry.held);
+    if (entry && entry.vault === true) count += numberOf(entry.tokens);
+  }
+  return count;
+}
+
+/** Runs a deletion waits for (still in flight when it reached them). */
+function waitingCount(record: Pick<SubjectRequestRecord, "deferred">): number {
+  return deferredOf(record as SubjectRequestRecord).filter((row) => (row as FoundRow & { busy?: boolean }).busy).length;
+}
+
+function deferredOf(record: SubjectRequestRecord): FoundRow[] {
+  return (record.deferred as FoundRow[]).filter((row) => row && typeof row.id === "string" && (SUBJECT_ROW_KINDS as readonly string[]).includes(row.k));
 }
 
 function countsOf(found: FoundRow[]): Partial<Record<SubjectRowKind, number>> {
@@ -375,6 +500,8 @@ export class SubjectRequestService {
     const expressions = input.workflow.settings?.dataProtection?.subjectRefs ?? [];
     if (expressions.length === 0) return 0;
     try {
+      // A run a deletion erased while its executor was finishing gets no reference back.
+      if (await this.options.store.runErased(input.executionId)) return 0;
       const context = subjectContextOf(input.run);
       const createdAt = this.now().toISOString();
       const projectId = input.workflow.projectId ?? null;
@@ -425,8 +552,12 @@ export class SubjectRequestService {
     if (input.subjectKind === "staff" && !value.includes("@")) {
       throw new SubjectRequestError("A staff member is looked up by their email address.", "invalid");
     }
+    // A staff erasure pseudonymises what the person authored and deletes the user: it reads no run data, so there is
+    // no lookup (an end-user deletion with the same email covers their data in runs).
+    const staffDelete = input.type === "delete" && input.subjectKind === "staff";
+    if (input.type === "delete" && input.revealTokens) throw new SubjectRequestError("Revealing tokens applies to exports only.", "invalid");
     // Checks the value can be searched (a short free-text value cannot) before anything is stored.
-    if (input.scan) {
+    if (input.scan && !staffDelete) {
       try {
         await this.options.matcher({ value });
       } catch (error) {
@@ -440,13 +571,13 @@ export class SubjectRequestService {
       subjectKind: input.subjectKind,
       queryHash: await this.hashValue(value),
       valueSealed: this.options.secrets.sealValue(REQUEST_VALUE_PURPOSE, value),
-      scan: input.scan,
+      scan: staffDelete ? false : input.scan,
       revealTokens: input.revealTokens,
       status: "searching",
       dueAt: new Date(now.getTime() + this.options.dueDays * DAY_MS).toISOString(),
       dueNotifiedAt: null,
       counts: {},
-      progress: { ...emptyState() },
+      progress: { ...emptyState(), ...(staffDelete ? { phase: "export" } : {}) },
       deferred: [],
       createdBy: actor.email,
       createdByUserId: actor.id,
@@ -476,6 +607,7 @@ export class SubjectRequestService {
   async download(id: string, actor: { email: string }): Promise<{ bytes: Buffer; filename: string; request: SubjectRequestView }> {
     const record = await this.options.store.getSubjectRequest(id);
     if (!record) throw new SubjectRequestError("Request not found", "not_found");
+    if (record.type !== "export") throw new SubjectRequestError("A deletion request has no export.", "conflict");
     const at = this.now().toISOString();
     const sealed = await this.options.store.claimSubjectExport({ requestId: id, by: actor.email, at });
     if (sealed === null) {
@@ -492,9 +624,10 @@ export class SubjectRequestService {
 
   async viewOf(record: SubjectRequestRecord): Promise<SubjectRequestView> {
     const state = readState(record.progress);
-    const exported = record.status === "searching" || record.status === "failed" ? null : await this.options.store.getSubjectExport(record.id);
+    const exported =
+      record.type !== "export" || record.status === "searching" || record.status === "failed" ? null : await this.options.store.getSubjectExport(record.id);
     const now = this.now();
-    const open = record.status === "searching" || record.status === "ready";
+    const open = subjectRequestOpen(record.status);
     const scanTotal = record.scan ? SCAN_ORDER.length : 0;
     return {
       id: record.id,
@@ -527,8 +660,156 @@ export class SubjectRequestService {
             downloadedBy: exported.downloadedBy,
             available: exported.stored && !exported.downloadedAt && Date.parse(exported.expiresAt) > now.getTime()
           }
-        : null
+        : null,
+      deletion: record.type === "delete" && state.deletion ? deletionView(record, state.deletion) : null,
+      staffPreview: record.type === "delete" && record.subjectKind === "staff" ? (state.staffPreview ?? null) : null
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Deletion: confirm, re-queue after a hold release
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Confirms a deletion request whose preview is ready: it starts on the leader in the background (`running`). Refused
+   * for an export, a request not `ready`, or a staff member `actor` may not erase (their own account, the last admin).
+   */
+  async confirm(id: string, actor: { id: string; email: string }, onConfirmed?: (view: SubjectRequestView) => Promise<void>): Promise<SubjectRequestView> {
+    const { store, secrets } = this.options;
+    const record = await store.getSubjectRequest(id);
+    if (!record) throw new SubjectRequestError("Request not found", "not_found");
+    if (record.type !== "delete") throw new SubjectRequestError("Only a deletion request is confirmed.", "conflict");
+    if (record.status !== "ready") throw new SubjectRequestError(`The request is ${record.status.replace(/_/g, " ")}; only a request ready for confirmation can be confirmed.`, "conflict");
+    if (record.subjectKind === "staff") {
+      if (!record.valueSealed) throw new SubjectRequestError("The request's value is no longer stored. Make a new request.", "conflict");
+      let email: string;
+      try {
+        email = secrets.openValue(REQUEST_VALUE_PURPOSE, record.valueSealed);
+      } catch {
+        throw new SubjectRequestError("The request's value cannot be opened with the current master key. Make a new request.", "unavailable");
+      }
+      const refusal = (await this.options.staffUser?.check(email, actor)) ?? null;
+      if (refusal) throw new SubjectRequestError(refusal, "conflict");
+    }
+    const state = readState(record.progress);
+    const at = this.now().toISOString();
+    const deletion: DeletionState = {
+      index: 0,
+      confirmedAt: at,
+      confirmedBy: actor.email,
+      confirmedByUserId: actor.id,
+      deleted: {},
+      usageRowsCleared: 0,
+      vaultTokensDeleted: 0,
+      skipped: 0,
+      tokens: [],
+      heldTokens: [],
+      staff: null
+    };
+    const ok = await store.updateSubjectRequest(id, { status: "running", progress: { ...state, deletion }, updatedAt: at }, "ready");
+    if (!ok) throw new SubjectRequestError("The request changed meanwhile; reload it.", "conflict");
+    const view = await this.viewOf((await store.getSubjectRequest(id)) ?? record);
+    // The caller's intent audit row is written before the deletion starts.
+    try {
+      await onConfirmed?.(view);
+    } finally {
+      this.kick();
+    }
+    return view;
+  }
+
+  /**
+   * A staff deletion request's email, for the caller's authorization checks (who may erase that account); null for
+   * any other request or once the value is dropped. Never returned to a client.
+   */
+  async staffTarget(id: string): Promise<string | null> {
+    const record = await this.options.store.getSubjectRequest(id);
+    if (!record || record.type !== "delete" || record.subjectKind !== "staff" || !record.valueSealed) return null;
+    try {
+      return this.options.secrets.openValue(REQUEST_VALUE_PURPOSE, record.valueSealed);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Re-queues deletions a legal hold deferred (called when a hold is released): their kept rows are tried again, and a
+   * row still held by another hold is deferred again. Returns how many requests were re-queued.
+   */
+  async requeueDeferred(filter: (record: SubjectRequestRecord) => Promise<boolean> = async () => true): Promise<number> {
+    const { store } = this.options;
+    let requeued = 0;
+    for (const record of await store.listSubjectRequests({ limit: 500, statuses: ["deferred_by_hold"] })) {
+      if (!(await filter(record))) continue;
+      const state = readState(record.progress);
+      if (!state.deletion) continue;
+      const at = this.now().toISOString();
+      // Each row is tried afresh: a run that was waiting and is now held is reported as held, not waiting.
+      const found = deferredOf(record).map((row) => {
+        const { busy: _busy, ...rest } = row as FoundRow & { busy?: boolean };
+        return rest as FoundRow;
+      });
+      const progress = { ...state, found, deletion: { ...state.deletion, index: 0 } };
+      if (await store.updateSubjectRequest(record.id, { status: "running", progress, deferred: [], updatedAt: at }, "deferred_by_hold")) {
+        requeued += 1;
+        await this.options.audit?.({
+          category: "data_protection",
+          eventType: "data_subject.deletion_requeued",
+          action: "delete",
+          actor: { type: "system" },
+          resourceType: "subject_request",
+          resourceId: record.id,
+          metadata: { requestId: record.id, deferred: progress.found.length, staffRowsHeld: state.deletion.staff?.held ?? 0 }
+        });
+      }
+    }
+    if (requeued > 0) this.kick();
+    return requeued;
+  }
+
+  /**
+   * Whether any row a deferred request kept is no longer held (its hold was released). A staff member's held authorship
+   * rows are tried again when a hold is released (the release calls requeueDeferred), not from here.
+   */
+  private async deferredFreed(record: SubjectRequestRecord): Promise<boolean> {
+    for (const found of deferredOf(record)) {
+      if ((found as FoundRow & { busy?: boolean }).busy && (await this.options.store.subjectRunActive(found.id))) continue;
+      let held = false;
+      for (const target of subjectRowHoldTargets(deleteKindOf(found), found.id)) {
+        if ((await this.options.store.legalHoldsOn(target)).length > 0) {
+          held = true;
+          break;
+        }
+      }
+      if (!held) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Audits restores that skipped re-applying erasures (db:import or db:copy with --skip-erasures --i-understand): each
+   * marker is read once, by whichever instance starts first. Returns how many were found.
+   */
+  async auditSkippedRestores(): Promise<number> {
+    const { store } = this.options;
+    const markers = await store.takeRestoreSkippedMarkers();
+    if (markers.length === 0) return 0;
+    const tombstones = await store.countErasureTombstones();
+    for (const marker of markers) {
+      this.options.logger?.warn({ restoredAt: marker.at, tombstones }, "A restore skipped re-applying data-subject erasures (--skip-erasures)");
+      await this.options.audit?.({
+        category: "data_protection",
+        eventType: "data_subject.erasures_skipped_on_restore",
+        action: "restore",
+        outcome: "failure",
+        actor: { type: "system" },
+        resourceType: "erasure_tombstones",
+        resourceId: marker.id,
+        metadata: { restoredAt: marker.at, tombstones },
+        message: "A restore skipped re-applying data-subject erasures: data erased earlier may be back."
+      });
+    }
+    return markers.length;
   }
 
   // ---------------------------------------------------------------------------
@@ -539,6 +820,10 @@ export class SubjectRequestService {
     if (this.stopped || this.timer) return;
     this.timer = setInterval(() => this.kick(), this.options.pollMs ?? DEFAULT_POLL_MS);
     this.timer.unref?.();
+    // A restore that skipped re-applying erasures is audited once, at the first start after it.
+    this.auditSkippedRestores().catch((error: unknown) => {
+      this.options.logger?.warn({ error: this.message(error) }, "Could not check for restores that skipped erasures");
+    });
     this.kick();
   }
 
@@ -576,7 +861,7 @@ export class SubjectRequestService {
         this.lastSweepAt = this.now().getTime();
         await this.sweep();
       }
-      const pending = await store.listSubjectRequests({ limit: 50, statuses: ["searching"] });
+      const pending = await store.listSubjectRequests({ limit: 50, statuses: ["searching", "running"] });
       // Oldest first.
       let first = true;
       for (const record of pending.reverse()) {
@@ -584,7 +869,8 @@ export class SubjectRequestService {
         // Keeps the lease (and leadership) between requests, not only between scan pages.
         if (!first && !(await this.renew(lease))) break;
         first = false;
-        await this.process(record, async () => await this.renew(lease));
+        if (record.status === "running") await this.processDeletion(record, async () => await this.renew(lease));
+        else await this.process(record, async () => await this.renew(lease));
       }
     } finally {
       try {
@@ -618,6 +904,41 @@ export class SubjectRequestService {
       if (pruned > 0) this.options.logger?.info({ pruned }, "Removed subject references whose rows are gone");
     } catch (error) {
       this.options.logger?.warn({ error: this.message(error) }, "Could not remove orphaned subject references");
+    }
+    try {
+      // A deletion preview nobody confirmed within SUBJECT_EXPORT_TTL_HOURS: its value is dropped.
+      const cutoff = now.getTime() - this.options.exportTtlHours * HOUR_MS;
+      for (const record of await store.listSubjectRequests({ limit: 500, statuses: ["ready"] })) {
+        if (record.type !== "delete" || Date.parse(record.updatedAt) > cutoff) continue;
+        const progress = { ...readState(record.progress), found: [] };
+        await store.updateSubjectRequest(record.id, { status: "expired", valueSealed: null, progress, updatedAt: now.toISOString() }, "ready");
+      }
+    } catch (error) {
+      this.options.logger?.warn({ error: this.message(error) }, "Could not expire unconfirmed deletion requests");
+    }
+    try {
+      // A deferred deletion whose hold went (released by any instance, or by hand) is tried again.
+      const requeued = await this.requeueDeferred(async (record) => await this.deferredFreed(record));
+      if (requeued > 0) this.options.logger?.info({ requests: requeued }, "Re-queued deletions a legal hold had deferred");
+    } catch (error) {
+      this.options.logger?.warn({ error: this.message(error) }, "Could not re-queue deferred deletions");
+    }
+    try {
+      // What an executor wrote for a run after its erasure (a canceled run still stopping, or a write racing the delete).
+      const since = new Date(now.getTime() - ERASED_RUN_SCRUB_HOURS * HOUR_MS).toISOString();
+      const scrubbed = await store.scrubErasedRuns(since, SCRUB_RUNS_PER_SWEEP);
+      if (scrubbed > 0) this.options.logger?.info({ rows: scrubbed }, "Deleted rows written for erased runs after their erasure");
+    } catch (error) {
+      this.options.logger?.warn({ error: this.message(error) }, "Could not delete rows written for erased runs after their erasure");
+    }
+    try {
+      const days = this.options.tombstoneRetentionDays ?? ERASURE_TOMBSTONE_DEFAULT_RETENTION_DAYS;
+      if (days > 0) {
+        const pruned = await store.pruneErasureTombstones(new Date(now.getTime() - days * DAY_MS).toISOString(), TOMBSTONES_PER_SWEEP);
+        if (pruned > 0) this.options.logger?.info({ pruned }, "Removed erasure tombstones past ERASURE_TOMBSTONE_RETENTION_DAYS");
+      }
+    } catch (error) {
+      this.options.logger?.warn({ error: this.message(error) }, "Could not prune erasure tombstones");
     }
     try {
       for (const record of await store.listOverdueSubjectRequests(now.toISOString(), 500)) {
@@ -726,6 +1047,11 @@ export class SubjectRequestService {
         }
         state.phase = "export";
         if (!(await save())) return;
+      }
+
+      if (state.phase === "export" && initial.type === "delete") {
+        await this.prepareDeletion(initial, value, state);
+        return;
       }
 
       if (state.phase === "export") {
@@ -974,6 +1300,244 @@ export class SubjectRequestService {
     });
   }
 
+  /**
+   * A deletion's lookup is done: the request waits for its confirmation (`ready`), keeping what it found (ids only)
+   * and its sealed value (rows found by the search are checked against it again before they are deleted).
+   */
+  private async prepareDeletion(record: SubjectRequestRecord, value: string, state: LookupState): Promise<void> {
+    const { store } = this.options;
+    if (record.subjectKind === "staff") {
+      const rows = await store.staffSubjectRows(value);
+      state.staffPreview = {
+        userFound: rows.user !== null,
+        runsTriggered: rows.runsTriggered.length,
+        workflowsCreated: rows.workflowsCreated.length,
+        approvals: rows.approvals.length,
+        evalRuns: rows.evalRuns.length,
+        releasesPublished: rows.releasesPublished.length,
+        auditEntries: rows.auditEntries.length
+      };
+    }
+    const at = this.now().toISOString();
+    const counts = countsOf(state.found);
+    const progress = { ...state, phase: "finished" as const, foundByReference: state.found.filter((row) => row.by === "r").length };
+    const ready = await store.updateSubjectRequest(record.id, { status: "ready", counts: counts as Record<string, number>, progress, updatedAt: at }, "searching");
+    if (!ready) return;
+    await this.options.audit?.({
+      category: "data_protection",
+      eventType: "data_subject.deletion_ready",
+      action: "delete",
+      actor: { type: "system" },
+      resourceType: "subject_request",
+      resourceId: record.id,
+      metadata: { requestId: record.id, subjectKind: record.subjectKind, counts, possibleMatchesLeftOut: state.possible, truncated: state.truncated }
+    });
+  }
+
+  /**
+   * Runs a confirmed deletion from where it stopped: each found row (held ones deferred), then the vault entries of the
+   * person's values, then (staff) the pseudonymisation and the user. Returns early when the lease is lost.
+   */
+  private async processDeletion(initial: SubjectRequestRecord, renew: () => Promise<boolean>): Promise<void> {
+    const { store, secrets } = this.options;
+    const state = readState(initial.progress);
+    const deletion = state.deletion;
+    const deferred: unknown[] = [...initial.deferred];
+    // A save after progress resets the error count, in this pass too: a deletion fails after SUBJECT_REQUEST_MAX_ERRORS
+    // errors in a row.
+    let errorsBefore = typeof initial.progress.errors === "number" ? initial.progress.errors : 0;
+    const save = async (): Promise<boolean> => {
+      const saved = await store.updateSubjectRequest(initial.id, { progress: { ...state, errors: 0 }, deferred, updatedAt: this.now().toISOString() }, "running");
+      if (saved) errorsBefore = 0;
+      return saved;
+    };
+    try {
+      if (!deletion) throw new Error("The deletion was never confirmed");
+      if (!initial.valueSealed) throw new Error("The request's value is no longer stored");
+      let value: string;
+      try {
+        value = secrets.openValue(REQUEST_VALUE_PURPOSE, initial.valueSealed);
+      } catch {
+        throw new Error("The request's value cannot be opened with the current master key");
+      }
+      const key = await this.subjectKey();
+      const erasedAt = this.now().toISOString();
+      const actor = { id: deletion.confirmedByUserId ?? "", email: deletion.confirmedBy };
+      const matcher = state.found.some((found) => found.by === "s") ? await this.options.matcher({ value }) : null;
+      const tokens = new Set(deletion.tokens);
+      const heldTokens = new Set(deletion.heldTokens);
+      const tokensOf = (rows: SubjectTextRow[], into: Set<string>) => {
+        for (const row of rows) for (const text of Object.values(row.texts)) if (text) for (const match of text.matchAll(TOKEN_PATTERN)) into.add(match[0]);
+      };
+
+      while (deletion.index < state.found.length) {
+        if (this.stopped) return;
+        const found = state.found[deletion.index]!;
+        const kind = deleteKindOf(found);
+        const rows = await this.rowsOf(found);
+        // A row found by the search is deleted only while it still holds the value (as the lookup's delete checks).
+        const stillMatches = found.by === "r" || (matcher !== null && rows.some((row) => matcher.match(row)?.certainty === "exact"));
+        if (rows.length === 0 || !stillMatches) {
+          deletion.skipped += 1;
+        } else {
+          let tombstoneId: string | undefined;
+          if (kind === "memory_session") {
+            const parsed = parseMemorySessionRowId(found.id);
+            if (parsed) tombstoneId = memorySessionTombstoneId(key, parsed.namespace, parsed.sessionId);
+          } else if (kind === "memory_artifact") {
+            const parsed = parseMemoryArtifactRowId(found.id);
+            if (parsed) tombstoneId = memoryArtifactTombstoneId(key, parsed.namespace, parsed.sessionId, parsed.artifactKey);
+          }
+          const gate = (GATE_KINDS as readonly string[]).includes(kind) ? ((await this.options.subjectRowRemoval?.(actor, { kind, id: found.id })) ?? null) : null;
+          const outcome = await store.deleteSubjectRow(kind, found.id, { requestId: initial.id, erasedAt, ...(tombstoneId ? { tombstoneId } : {}) });
+          if (outcome.busy) {
+            // A run still in flight: deleted once it has finished (the sweep re-queues it), its tokens kept until then.
+            deferred.push({ ...found, busy: true });
+            tokensOf(rows, heldTokens);
+          } else if (outcome.heldBy && outcome.heldBy.length > 0) {
+            deferred.push(found);
+            tokensOf(rows, heldTokens);
+          } else if (outcome.deleted) {
+            await gate?.();
+            tokensOf(rows, tokens);
+            deletion.deleted[found.k] = (deletion.deleted[found.k] ?? 0) + 1;
+            for (const cascaded of outcome.cascaded) {
+              const cascadedKind: SubjectRowKind = cascaded.kind === "fixture" ? "golden_set_case" : "eval_result";
+              deletion.deleted[cascadedKind] = (deletion.deleted[cascadedKind] ?? 0) + 1;
+            }
+            deletion.usageRowsCleared += outcome.usageCleared ?? 0;
+          } else {
+            deletion.skipped += 1;
+          }
+        }
+        deletion.index += 1;
+        deletion.tokens = [...tokens];
+        deletion.heldTokens = [...heldTokens];
+        if (deletion.index % DELETE_SAVE_EVERY === 0) {
+          if (!(await save())) return;
+          if (!(await renew())) return;
+          await yieldToEventLoop();
+        }
+      }
+
+      // The vault entries of the person's own values (never a token a held row still holds, nor another person's).
+      if (tokens.size > 0 && this.options.revealToken) {
+        const subject = normalizeSubjectValue(value);
+        const theirs: string[] = [];
+        for (const token of tokens) {
+          if (heldTokens.has(token)) continue;
+          const original = await this.options.revealToken(token);
+          if (original !== null && normalizeSubjectValue(original) === subject) theirs.push(token);
+        }
+        // A token can also stand in rows this request did not find (another workflow's run, a tool call), which a
+        // legal hold may keep: while any hold is active the entries wait, and the hold's release runs them again.
+        if (theirs.length > 0 && (await store.listLegalHolds({ status: "active" })).length > 0) {
+          deferred.push({ vault: true, tokens: theirs.length });
+          deletion.tokens = theirs;
+        } else {
+          deletion.vaultTokensDeleted += await store.deleteGuardVaultTokens(theirs, { requestId: initial.id, erasedAt });
+          deletion.tokens = [];
+        }
+      }
+
+      if (initial.subjectKind === "staff") {
+        const user = (await store.staffSubjectRows(value)).user;
+        const tombstoneId = staffTombstoneId(key, value);
+        const pseudonym = staffPseudonym(tombstoneId);
+        const previous = deletion.staff;
+        // The account first (checked again: it may have become the last admin since the confirmation), so the person
+        // can write nothing more under the email; then the tombstone, written only once the account is gone, so a
+        // restore never re-applies an erasure whose account delete was refused; then the authorship rows.
+        let userDeleted = previous?.userDeleted ?? false;
+        if (!userDeleted && this.options.staffUser) {
+          const refusal = await this.options.staffUser.check(value, actor);
+          if (refusal) throw new PermanentDeletionError(refusal);
+          const removed = await this.options.staffUser.remove(value, actor, initial.id);
+          if (removed === "last_admin") throw new PermanentDeletionError("The user is the only admin who can sign in; make another person an admin, then make a new request.");
+          userDeleted = true;
+          deletion.staff = { pseudonym, rowsPseudonymised: previous?.rowsPseudonymised ?? 0, userDeleted, held: previous?.held ?? 0 };
+          if (!(await save())) return;
+        }
+        await store.writeErasureTombstones([{ kind: "staff", rowId: tombstoneId, requestId: initial.id, erasedAt }]);
+        const result = await store.pseudonymiseStaff({ emails: staffEmails(value, typeof user?.email === "string" ? user.email : null), pseudonym });
+        deletion.staff = {
+          pseudonym,
+          rowsPseudonymised: (deletion.staff?.rowsPseudonymised ?? previous?.rowsPseudonymised ?? 0) + result.changed,
+          userDeleted,
+          held: result.held
+        };
+        if (result.remaining > 0) {
+          // Rows another transaction had locked: tried again on the next pass.
+          await save();
+          return;
+        }
+        if (deletion.staff.held > 0) deferred.push({ staff: true, held: deletion.staff.held });
+      }
+
+      const held = deferred.length > 0;
+      const at = this.now().toISOString();
+      const progress = { ...state, found: held ? deferredOf({ ...initial, deferred }) : [] };
+      const finished = await store.updateSubjectRequest(
+        initial.id,
+        held
+          ? { status: "deferred_by_hold", progress, deferred, updatedAt: at }
+          : { status: "done", valueSealed: null, progress, deferred: [], updatedAt: at },
+        "running"
+      );
+      if (!finished) return;
+      this.options.logger?.info({ requestId: initial.id, deleted: deletion.deleted, deferred: deferred.length }, "Data-subject deletion finished");
+      await this.options.audit?.({
+        category: "data_protection",
+        eventType: held ? "data_subject.deletion_deferred" : "data_subject.deleted",
+        action: "delete",
+        actor: { type: "system" },
+        resourceType: "subject_request",
+        resourceId: initial.id,
+        metadata: {
+          requestId: initial.id,
+          subjectKind: initial.subjectKind,
+          confirmedBy: deletion.confirmedBy,
+          deleted: deletion.deleted,
+          usageRowsCleared: deletion.usageRowsCleared,
+          vaultTokensDeleted: deletion.vaultTokensDeleted,
+          skipped: deletion.skipped,
+          deferred: deferredCount({ deferred }),
+          waitingForRuns: waitingCount({ deferred }),
+          ...(deletion.staff
+            ? { pseudonym: deletion.staff.pseudonym, rowsPseudonymised: deletion.staff.rowsPseudonymised, userDeleted: deletion.staff.userDeleted, staffRowsHeld: deletion.staff.held }
+            : {})
+        }
+      });
+    } catch (error) {
+      const message = this.message(error).slice(0, MAX_ERROR_LENGTH);
+      const errors = errorsBefore + 1;
+      if (!(error instanceof PermanentDeletionError) && errors < SUBJECT_REQUEST_MAX_ERRORS) {
+        this.options.logger?.warn({ requestId: initial.id, error: message, errors }, "A data-subject deletion hit an error; it will be retried");
+        await store
+          .updateSubjectRequest(initial.id, { progress: { ...state, errors }, deferred, updatedAt: this.now().toISOString() }, "running")
+          .catch(() => false);
+        return;
+      }
+      this.options.logger?.warn({ requestId: initial.id, error: message }, "A data-subject deletion failed");
+      const failed = await store.updateSubjectRequest(
+        initial.id,
+        { status: "failed", valueSealed: null, progress: { ...state, found: [], errors }, deferred, error: message, updatedAt: this.now().toISOString() },
+        "running"
+      );
+      if (!failed) return;
+      await this.options.audit?.({
+        category: "data_protection",
+        eventType: "data_subject.request_failed",
+        action: "delete",
+        outcome: "failure",
+        actor: { type: "system" },
+        resourceType: "subject_request",
+        resourceId: initial.id,
+        metadata: { requestId: initial.id, error: message, deleted: deletion?.deleted ?? {} }
+      });
+    }
+  }
+
   private async renew(lease: { leaseName: string; holderId: string; ttlMs: number }): Promise<boolean> {
     if (this.stopped || !this.options.isLeader()) return false;
     try {
@@ -989,7 +1553,30 @@ export class SubjectRequestService {
   }
 }
 
-/** Whether a status can still change (the lookup runs, or the export waits for its download). */
+/** Whether a request still owes the person something: the lookup or deletion runs, or the export or confirmation waits. */
 export function subjectRequestOpen(status: SubjectRequestStatus): boolean {
-  return status === "searching" || status === "ready";
+  return status === "searching" || status === "ready" || status === "running";
+}
+
+/** The kinds whose deletion the release gate hears about (golden runs, cases and results). */
+const GATE_KINDS = ["recording", "fixture", "eval_result"] as const;
+
+/** A deletion error that retrying cannot fix. */
+class PermanentDeletionError extends Error {}
+
+function deletionView(record: SubjectRequestRecord, deletion: DeletionState): SubjectDeletionView {
+  return {
+    confirmedAt: deletion.confirmedAt || null,
+    confirmedBy: deletion.confirmedBy || null,
+    deleted: deletion.deleted,
+    usageRowsCleared: deletion.usageRowsCleared,
+    vaultTokensDeleted: deletion.vaultTokensDeleted,
+    deferred: deferredCount(record),
+    waitingForRuns: waitingCount(record),
+    skipped: deletion.skipped,
+    staff: deletion.staff
+      ? { pseudonym: deletion.staff.pseudonym, rowsPseudonymised: deletion.staff.rowsPseudonymised, userDeleted: deletion.staff.userDeleted, auditLog: STAFF_AUDIT_LOG_KEPT }
+      : null,
+    notCovered: [...SUBJECT_DELETION_NOT_COVERED]
+  };
 }

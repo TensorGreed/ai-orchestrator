@@ -12,6 +12,7 @@ vi.mock("../lib/api", async () => {
     fetchSubjectRequests: vi.fn(),
     createSubjectRequest: vi.fn(),
     downloadSubjectExport: vi.fn(),
+    confirmSubjectDeletion: vi.fn(),
     previewSubjectRefs: vi.fn()
   };
 });
@@ -38,8 +39,85 @@ const base: SubjectRequestView = {
   createdAt: "2026-11-10T12:00:00.000Z",
   updatedAt: "2026-11-10T12:00:00.000Z",
   error: null,
-  export: { bytes: 2048, expiresAt: "2026-11-13T12:00:00.000Z", downloadedAt: null, downloadedBy: null, available: true }
+  export: { bytes: 2048, expiresAt: "2026-11-13T12:00:00.000Z", downloadedAt: null, downloadedBy: null, available: true },
+  deletion: null,
+  staffPreview: null
 };
+
+const deletionView = {
+  confirmedAt: "2026-11-10T12:05:00.000Z",
+  confirmedBy: "admin@example.com",
+  deleted: { run: 3 },
+  usageRowsCleared: 2,
+  vaultTokensDeleted: 1,
+  deferred: 1,
+  waitingForRuns: 0,
+  skipped: 0,
+  staff: null,
+  notCovered: []
+};
+
+describe("data-subject deletion requests", () => {
+  it("sends a deletion without revealTokens, and confirms its preview", async () => {
+    const preview: SubjectRequestView = { ...base, id: "dsr_del", type: "delete", export: null, deletion: { ...deletionView, confirmedAt: null, confirmedBy: null, deleted: {}, usageRowsCleared: 0, vaultTokensDeleted: 0, deferred: 0 } };
+    vi.mocked(api.fetchSubjectRequests)
+      .mockResolvedValueOnce({ requests: [] })
+      .mockResolvedValueOnce({ requests: [preview] })
+      .mockResolvedValue({ requests: [{ ...preview, status: "deferred_by_hold", deletion: deletionView }] });
+    vi.mocked(api.createSubjectRequest).mockResolvedValue({ ...preview, status: "searching" });
+    vi.mocked(api.confirmSubjectDeletion).mockResolvedValue({ ...preview, status: "running" });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<SubjectRequestsSection />);
+    await screen.findByText("No requests yet.");
+    fireEvent.click(screen.getByLabelText(/Delete \(erasure\)/));
+    expect(screen.queryByLabelText(/Replace reversible tokens/)).toBeNull();
+    fireEvent.change(screen.getByLabelText(/email, customer id or phone/), { target: { value: "ana@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Find what to delete" }));
+    await waitFor(() =>
+      expect(api.createSubjectRequest).toHaveBeenCalledWith({ type: "delete", subjectKind: "end_user", value: "ana@example.com", scan: true })
+    );
+    const row = await screen.findByTestId("subject-request-dsr_del");
+    expect(row.textContent).toContain("Preview ready: confirm to delete");
+    fireEvent.click(screen.getByRole("button", { name: "Confirm deletion" }));
+    await waitFor(() => expect(api.confirmSubjectDeletion).toHaveBeenCalledWith("dsr_del"));
+    await waitFor(() => expect(screen.getByTestId("subject-request-dsr_del").textContent).toContain("waiting for a legal hold"));
+    const done = screen.getByTestId("subject-request-dsr_del").textContent ?? "";
+    expect(done).toContain("2 usage row(s) kept with the person cleared");
+    expect(done).toContain("1 reversible token(s) deleted");
+    expect(done).toContain("1 row(s) kept by a legal hold");
+    confirmSpy.mockRestore();
+  });
+
+  it("does not confirm when the dialog is cancelled, and shows a staff preview and pseudonym", async () => {
+    const staff: SubjectRequestView = {
+      ...base,
+      id: "dsr_staff",
+      type: "delete",
+      subjectKind: "staff",
+      export: null,
+      counts: {},
+      deletion: null,
+      staffPreview: { userFound: true, runsTriggered: 4, workflowsCreated: 1, approvals: 2, evalRuns: 0, releasesPublished: 0, auditEntries: 9 }
+    };
+    vi.mocked(api.fetchSubjectRequests).mockResolvedValue({
+      requests: [
+        staff,
+        { ...staff, id: "dsr_staff2", status: "done", deletion: { ...deletionView, deleted: {}, usageRowsCleared: 0, vaultTokensDeleted: 0, deferred: 0, staff: { pseudonym: "erased-user-1a2b3c4d", rowsPseudonymised: 7, userDeleted: true, auditLog: "kept" } } }
+      ]
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<SubjectRequestsSection />);
+    const row = await screen.findByTestId("subject-request-dsr_staff");
+    expect(row.textContent).toContain("runs started: 4");
+    expect(row.textContent).toContain("audit-log rows kept: 9");
+    fireEvent.click(screen.getByRole("button", { name: "Confirm deletion" }));
+    expect(api.confirmSubjectDeletion).not.toHaveBeenCalled();
+    const done = screen.getByTestId("subject-request-dsr_staff2").textContent ?? "";
+    expect(done).toContain("Deleted");
+    expect(done).toContain("Email replaced with erased-user-1a2b3c4d in 7 row(s), account deleted");
+    confirmSpy.mockRestore();
+  });
+});
 
 describe("data-subject requests section", () => {
   it("lists requests with what was found, and downloads an export once", async () => {

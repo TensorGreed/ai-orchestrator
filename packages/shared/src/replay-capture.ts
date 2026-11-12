@@ -353,5 +353,5 @@ export interface ReplayFindSubjectDeleteResult {
   /** Every row deleted, by kind and id (the targets, and the cases and results removed with a golden run). */
   removed: Array<{ kind: ReplayFindSubjectKind; id: string }>;
   /** Targets not deleted: gone already, no longer holding the value, or under a legal hold (`held`). */
-  skipped: Array<{ kind: ReplayFindSubjectKind; id: string; reason: "not_found" | "no_match" | "possible_match_unconfirmed" | "held" }>;
+  skipped: Array<{ kind: ReplayFindSubjectKind; id: string; reason: "not_found" | "no_match" | "possible_match_unconfirmed" | "held" | "running" }>;
 }

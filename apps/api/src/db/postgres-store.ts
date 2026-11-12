@@ -31,6 +31,7 @@ import * as legalHolds from "./postgres/legal-holds.js";
 import * as schedules from "./postgres/schedules.js";
 import * as secrets from "./postgres/secrets.js";
 import * as subject from "./postgres/subject.js";
+import * as erasure from "./postgres/erasure.js";
 import * as sessions from "./postgres/sessions.js";
 import * as webhooks from "./postgres/webhooks.js";
 import * as workflows from "./postgres/workflows.js";
@@ -1403,6 +1404,37 @@ export class PostgresStore implements Store {
   }
   async deleteSubjectRow(...args: Parameters<Store["deleteSubjectRow"]>): ReturnType<Store["deleteSubjectRow"]> {
     return data_labels.deleteSubjectRow(this.ctx, ...args);
+  }
+  // 13.3 — erasure tombstones and staff pseudonymisation (postgres/erasure.ts).
+  async writeErasureTombstones(...args: Parameters<Store["writeErasureTombstones"]>): ReturnType<Store["writeErasureTombstones"]> {
+    return erasure.writeErasureTombstones(this.ctx, ...args);
+  }
+  async deleteGuardVaultTokens(...args: Parameters<Store["deleteGuardVaultTokens"]>): ReturnType<Store["deleteGuardVaultTokens"]> {
+    return erasure.deleteGuardVaultTokens(this.ctx, ...args);
+  }
+  async pruneErasureTombstones(...args: Parameters<Store["pruneErasureTombstones"]>): ReturnType<Store["pruneErasureTombstones"]> {
+    return erasure.pruneErasureTombstones(this.ctx, ...args);
+  }
+  async takeRestoreSkippedMarkers(): ReturnType<Store["takeRestoreSkippedMarkers"]> {
+    return erasure.takeRestoreSkippedMarkers(this.ctx);
+  }
+  async scrubErasedRuns(since: string, limit: number): Promise<number> {
+    return data_labels.scrubErasedRuns(this.ctx, since, limit);
+  }
+
+  async subjectRunActive(id: string): Promise<boolean> {
+    return erasure.subjectRunActive(this.ctx, id);
+  }
+
+  async runErased(id: string): Promise<boolean> {
+    return erasure.runErased(this.ctx, id);
+  }
+
+  async countErasureTombstones(): ReturnType<Store["countErasureTombstones"]> {
+    return erasure.countErasureTombstones(this.ctx);
+  }
+  async pseudonymiseStaff(...args: Parameters<Store["pseudonymiseStaff"]>): ReturnType<Store["pseudonymiseStaff"]> {
+    return erasure.pseudonymiseStaff(this.ctx, ...args);
   }
   async sumReplayCaptureBytesForWorkflow(...args: Parameters<Store["sumReplayCaptureBytesForWorkflow"]>): ReturnType<Store["sumReplayCaptureBytesForWorkflow"]> {
     return capture.sumReplayCaptureBytesForWorkflow(this.ctx, ...args);

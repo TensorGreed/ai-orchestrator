@@ -40,6 +40,11 @@
  *     Postgres: it must give exactly the predicted verdict and meet the rule above. Then sequences are moved past the
  *     copied values and the transaction commits; anything that does not verify rolls back.
  *
+ *  7. Erasures (13.3), after the verification, in the same transaction: every erasure tombstone copied is re-applied,
+ *     so a source restored from an older backup without them cannot carry erased rows over ("re-applied N erasures").
+ *     Tombstones that name agent memory or a staff member need SECRET_MASTER_KEY_BASE64 (the subject key is sealed with
+ *     it). `skipErasures` (--skip-erasures --i-understand) leaves a marker the next API start audits instead.
+ *
  * Why one transaction (not one per table): a failed copy leaves the target exactly as it was (migrated and empty),
  * so it can simply be re-run, and a copy that does not verify is never committed. Postgres has no transaction size
  * limit beyond disk for WAL; the target is not in use during the copy (the advisory lock holds back API starts).
@@ -72,6 +77,8 @@ import { loadApiEnvFiles, resolveSettingOrigins, type SettingOrigin } from "../e
 import { auditCarryOver, brokenPosition, unverifiableOnPostgresBySource, verdictText, verifyPostgresAuditChainByCursor } from "./audit-carry-over.js";
 import { applyMigrationChain, currentChainVersion, postgresPoolConfig, withMigrationLock, type PostgresStoreConfig } from "../db/postgres-store.js";
 import { createPostgresPool } from "../db/postgres/pool.js";
+import { toPgPlaceholders } from "../db/legal-hold-sql.js";
+import { ErasureKeyMissing, reapplyAfterRestore, type RestoreErasuresReport } from "./erasure-restore.js";
 
 /** The chain version this build migrates to (whatever MIGRATIONS' highest is; never a fixed number). */
 export const CODE_SCHEMA_VERSION = Math.max(...MIGRATIONS.map((migration) => migration.version));
@@ -105,6 +112,10 @@ export interface DbCopyOptions {
   settingOrigins?: SettingOrigins;
   /** Rows per INSERT (default 500, fewer for wide tables). */
   batchRows?: number;
+  /** 13.3 — re-apply no erasure tombstone; a marker the next API start audits is left instead. */
+  skipErasures?: boolean;
+  /** SECRET_MASTER_KEY_BASE64, decoded: opens the subject key for tombstones of agent memory and staff members. */
+  masterKey?: Buffer | null;
   log?: (line: string) => void;
 }
 
@@ -124,6 +135,8 @@ export interface DbCopyReport {
   migratedTarget: boolean;
   tables: DbCopyTableReport[];
   totalRows: number;
+  /** 13.3 — erasures re-applied after the copy (not on a dry run). */
+  erasures?: RestoreErasuresReport;
   audit: {
     source: AuditChainResult;
     /** The verdict the copied chain must have (the source rows as Postgres stores them). */
@@ -694,7 +707,8 @@ export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
         if (options.postgres.schema) await client.query(`CREATE SCHEMA IF NOT EXISTS ${pgIdent(options.postgres.schema)}`);
         try {
           const report = await copyInto(client, {
-            db, source, dryRun, batchRows, log, sourceAudit, expectedTarget, becameUnverifiable, sourceBrokenAt, explainedBySource
+            db, source, dryRun, batchRows, log, sourceAudit, expectedTarget, becameUnverifiable, sourceBrokenAt, explainedBySource,
+            skipErasures: options.skipErasures === true, masterKey: options.masterKey ?? null
           });
           if (dryRun) await client.query("ROLLBACK");
           return report;
@@ -727,6 +741,8 @@ interface CopyContext {
   becameUnverifiable: string[];
   sourceBrokenAt?: { id: string; position: number };
   explainedBySource: ReadonlySet<string>;
+  skipErasures: boolean;
+  masterKey: Buffer | null;
 }
 
 async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyReport> {
@@ -878,10 +894,25 @@ async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyRep
     if (mismatches.length > 0) {
       throw new Error(`Verification failed, nothing was committed: ${mismatches.join("; ")}.`);
     }
+    // 13.3 — the copied tombstones are re-applied (or the skip recorded) before the copy commits.
+    let erasures: RestoreErasuresReport;
+    try {
+      erasures = await reapplyAfterRestore(
+        {
+          all: async (sql, params) => (await client.query(toPgPlaceholders(sql), pgParams(params))).rows as Array<Record<string, unknown>>,
+          run: async (sql, params) => (await client.query(toPgPlaceholders(sql), pgParams(params))).rowCount ?? 0
+        },
+        { skip: ctx.skipErasures, masterKey: ctx.masterKey, log, warn: log }
+      );
+    } catch (error) {
+      if (error instanceof ErasureKeyMissing) throw new DbCopyRefusal(error.message.replace("--source-master-key-file", "SECRET_MASTER_KEY_BASE64 set to that key"));
+      throw error;
+    }
     await client.query("COMMIT");
     const report = summary(tables, {
       dryRun,
       migratedTarget,
+      erasures,
       audit: {
         source: ctx.sourceAudit,
         expectedTarget: ctx.expectedTarget,
@@ -950,6 +981,8 @@ export interface DbCopyArgs {
   dryRun: boolean;
   /** Copy even though the SQLite audit chain is broken (refused by default). */
   allowBrokenAudit: boolean;
+  /** 13.3 — do not re-apply erasure tombstones (only with --i-understand). */
+  skipErasures: boolean;
   help: boolean;
 }
 
@@ -973,6 +1006,9 @@ export const USAGE = [
   "  --yes, -y             Copy (required unless --dry-run).",
   "  --allow-broken-audit  Copy even though the SQLite audit chain is broken (refused by default). The summary then",
   "                        says the Postgres audit verdict cannot be trusted to show the break.",
+  "  --skip-erasures       Do not re-apply the erasure tombstones copied (refused without --i-understand; audited",
+  "                        at the next API start). By default they are re-applied: \"re-applied N erasures\".",
+  "  --i-understand        Confirms --skip-erasures.",
   "  --help, -h            Show this message.",
   "",
   "Stop the API first. An empty, unmigrated Postgres database is migrated first; a non-empty one, or one at",
@@ -991,6 +1027,8 @@ export function parseDbCopyArgs(argv: string[], env: Record<string, string | und
   let dryRun = false;
   let help = false;
   let allowBrokenAudit = false;
+  let skipErasures = false;
+  let iUnderstand = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--") continue;
@@ -1005,10 +1043,18 @@ export function parseDbCopyArgs(argv: string[], env: Record<string, string | und
     else if (flag === "--yes" || flag === "-y") yes = true;
     else if (flag === "--dry-run") dryRun = true;
     else if (flag === "--allow-broken-audit") allowBrokenAudit = true;
+    else if (flag === "--skip-erasures") skipErasures = true;
+    else if (flag === "--i-understand") iUnderstand = true;
     else if (flag === "--help" || flag === "-h") help = true;
     else throw new DbCopyRefusal(`Unknown argument: ${arg}\n\n${USAGE}`);
   }
-  if (help) return { from: "", yes, dryRun, allowBrokenAudit, help };
+  if (help) return { from: "", yes, dryRun, allowBrokenAudit, skipErasures, help };
+  if (skipErasures && !iUnderstand) {
+    throw new DbCopyRefusal(
+      `--skip-erasures copies data that data-subject deletions removed (when the source was restored without them). Pass ` +
+        `--i-understand with it to go ahead; the next API start records it in the audit log.\n\n${USAGE}`
+    );
+  }
   if (from === undefined) throw new DbCopyRefusal(`--from sqlite:<path> is required.\n\n${USAGE}`);
   let file: string;
   if (from === "sqlite") {
@@ -1021,7 +1067,15 @@ export function parseDbCopyArgs(argv: string[], env: Record<string, string | und
   if (to === undefined) throw new DbCopyRefusal(`--to postgres is required.\n\n${USAGE}`);
   if (to !== "postgres" && to !== "postgresql") throw new DbCopyRefusal(`--to must be postgres, got '${to}'.\n\n${USAGE}`);
   if (yes && dryRun) throw new DbCopyRefusal(`--dry-run and --yes together: choose one.\n\n${USAGE}`);
-  return { from: file, yes, dryRun, allowBrokenAudit, help };
+  return { from: file, yes, dryRun, allowBrokenAudit, skipErasures, help };
+}
+
+/** SECRET_MASTER_KEY_BASE64 decoded when it is a 32-byte key; null otherwise (it is only needed for keyed tombstones). */
+function masterKeyOf(env: Record<string, string | undefined>): Buffer | null {
+  const raw = env.SECRET_MASTER_KEY_BASE64?.trim();
+  if (!raw) return null;
+  const key = Buffer.from(raw, "base64");
+  return key.length === 32 ? key : null;
 }
 
 /** Refuses a run with neither --yes nor --dry-run (after the CLI printed the source and target it resolved). */
@@ -1070,6 +1124,8 @@ export async function runDbCopyCli(argv: string[], options: DbCopyCliOptions): P
       postgres: postgresStoreConfig(settings, { maxConnections: 1 }),
       dryRun: args.dryRun,
       allowBrokenAudit: args.allowBrokenAudit,
+      skipErasures: args.skipErasures,
+      masterKey: masterKeyOf(env),
       settingOrigins,
       log: out
     });
