@@ -6,6 +6,7 @@ import {
   NETWORK_SCOPES,
   NETWORK_SCOPE_ENV,
   QUEUE_POOL_NAME_PATTERN,
+  mcpClientProtocolModeSchema,
   parseIpAllowlist,
   splitIpAllowlist,
   type NetworkAllowlistMode,
@@ -341,6 +342,23 @@ const envSchema = z.object({
   MCP_CASSETTE_MAX_BYTES: z.coerce.number().int().min(1_024).max(268_435_456).default(5_242_880),
   /** Phase 10.8 — most MCP calls one cassette keeps. */
   MCP_CASSETTE_MAX_CALLS: z.coerce.number().int().min(1).max(100_000).default(5_000),
+  /**
+   * MCP 2026-07-28 — how L2M talks to MCP servers whose connection sets no `protocolMode`: `legacy` (the
+   * `initialize` handshake; a server that only speaks 2026-07-28 is still reached), `auto` (try 2026-07-28 first,
+   * fall back) or `modern` (2026-07-28 only).
+   */
+  MCP_CLIENT_PROTOCOL_DEFAULT: z.preprocess(
+    (value) => (typeof value === "string" ? value.trim().toLowerCase() || undefined : value),
+    mcpClientProtocolModeSchema.default("legacy")
+  ),
+  /** MCP 2026-07-28 — most times one call may ask for more input (elicitation, sampling) before it fails. */
+  MCP_CLIENT_MRTR_MAX_ROUNDS: z.coerce.number().int().min(1).max(20).default(5),
+  /**
+   * MCP 2026-07-28 — after a broken connection or a timeout, send a request to an `initialize`-based server again
+   * only when that is safe (anything but a tool call, or a tool marked read-only or idempotent). False sends every
+   * request again, as earlier releases did. 2026-07-28 servers always follow the safe rule.
+   */
+  MCP_CLIENT_LEGACY_SAFE_REISSUE: booleanFromEnv.default(true),
   /**
    * Phase 12.1 — apply the built-in default guard profile to agent traffic
    * in projects and workflows with no guard binding. Bindings and guard

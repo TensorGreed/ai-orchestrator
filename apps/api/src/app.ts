@@ -44,6 +44,7 @@ import {
   type McpSandboxSettings,
   mcpToolClassificationSchema,
   mcpSamplingSettingsPatchSchema,
+  mcpServerConnectionSchema,
   mcpToolPolicyEvaluateSchema,
   mcpToolPolicyRuleInputSchema,
   mcpToolPolicyRuleIssues,
@@ -506,7 +507,7 @@ const mcpDiscoverSchema = z.object({
   /** Phase 10.2 — project whose tool policy marks the discovered tools; defaults to "default". */
   projectId: z.string().min(1).optional(),
   label: z.string().optional(),
-  connection: z.record(z.string(), z.unknown()).optional(),
+  connection: mcpServerConnectionSchema.optional(),
   secretRef: z
     .object({
       secretId: z.string().min(1)
@@ -518,7 +519,7 @@ const mcpDiscoverSchema = z.object({
 const mcpTestToolSchema = z.object({
   serverId: z.string().min(1),
   label: z.string().optional(),
-  connection: z.record(z.string(), z.unknown()).optional(),
+  connection: mcpServerConnectionSchema.optional(),
   secretRef: z
     .object({
       secretId: z.string().min(1)
@@ -536,7 +537,7 @@ const mcpServerCreateSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().max(2000).nullable().optional(),
   adapterId: z.string().min(1),
-  connection: z.record(z.string(), z.unknown()).optional(),
+  connection: mcpServerConnectionSchema.optional(),
   secretRef: mcpSecretRefSchema.nullable().optional(),
   owner: z.string().max(200).nullable().optional(),
   projectId: z.string().nullable().optional(),
@@ -1791,6 +1792,12 @@ export async function createApp(
     runtimeGuard: mcpRuntimeGuard,
     // Phase 6.4 — built-in tools reach the outside only through the outbound URL checks.
     builtInTools: { fetch: (url, init) => guardedFetch(url, init, { config: outboundGuard, resolver: nodeDnsResolver }) },
+    // MCP 2026-07-28 — protocol era default, input round limit and the safe re-issue rule of the HTTP client.
+    httpProtocol: {
+      defaultMode: config.MCP_CLIENT_PROTOCOL_DEFAULT,
+      mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
+      legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE
+    },
     // Phase 10.8 — snapshot mock servers read accepted snapshots and cassettes from the store.
     snapshots: {
       loadSnapshot: async (sourceServerId) => {
