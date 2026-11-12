@@ -42,6 +42,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.3.0",

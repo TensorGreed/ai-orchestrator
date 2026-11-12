@@ -1,0 +1,18 @@
+# Known failures of the client-2026-07-28 conformance run (see apps/api/conformance/run.mjs).
+# The run fails when a listed scenario starts passing: delete its entry then. A scenario counts as failing when
+# any of its checks fails or warns. Conformance package 0.2.0-alpha.12.
+client:
+  # Warning only (sep-2575-client-retry-supported-version): the harness pins protocolMode "modern", so a rejected
+  # version header is not retried against another version.
+  - request-metadata
+  # Warning only: the harness registers dynamically (DCR) and never uses a client-ID metadata document, although
+  # the server advertises support. Client-ID metadata documents are opt-in.
+  - auth/basic-cimd
+  # Two gaps: (1) oauth.ts discovery probes with a legacy `initialize`; a modern-only server answers it 400 instead of
+  # 401, so the WWW-Authenticate challenge (scope, resource_metadata) is lost and scopes_supported is used instead
+  # (a real client gap against modern-only servers); (2) no step-up: a 403 insufficient_scope answer does not start a
+  # second authorization with the union of scopes.
+  - auth/scope-step-up
+  # The client does not re-register when the protected resource metadata names a different authorization server
+  # mid-run (a gap of this harness, which registers once per run; not a statement about the API's connect flow).
+  - auth/authorization-server-migration

@@ -1,0 +1,46 @@
+# Known failures of the server-modern-on-2026-07-28 conformance run (see apps/api/conformance/run.mjs).
+# One entry per scenario, with the reason above it. The run fails when a listed scenario starts passing:
+# delete its entry then. A scenario counts as failing when any of its checks fails or warns.
+# Conformance package 0.2.0-alpha.12, scenarios of the spec revision the run name carries.
+server:
+  # REAL GATEWAY GAPS (found by this suite, to be fixed in the gateway): (1) a request with MCP-Protocol-Version 2026-07-28 but no or incomplete per-request _meta takes the legacy path and is answered -32000 'Unsupported MCP-Protocol-Version' with id null (expected -32602 and the request id); (2) 'initialize' with modern headers is answered 400/-32000 (expected 404/-32601); (3) a header/_meta version mismatch is answered -32022 (expected -32020 HeaderMismatch). The rest of the scenario's failures are diagnostic fixture tools (test_missing_capability, test_streaming_elicitation, test_logging_tool) the gateway does not serve and subscriptions/listen, which is not served.
+  - server-stateless
+  # The gateway serves tools only: this method is answered with -32601 (resources, prompts and completion are not part of the gateway).
+  - completion-complete
+  - resources-list
+  - resources-read-text
+  - resources-read-binary
+  - resources-templates-read
+  - prompts-list
+  - prompts-get-simple
+  - prompts-get-with-args
+  - prompts-get-embedded-resource
+  - prompts-get-with-image
+  # The scenario calls a fixture tool of the reference server by its bare name (for example test_simple_text); the gateway only serves the tools of its toolsets, named <server>__<tool>, and the test toolset holds the mock server's tools. A property of the test setup, not a gateway defect.
+  - tools-call-simple-text
+  - tools-call-image
+  - tools-call-audio
+  - tools-call-embedded-resource
+  - tools-call-mixed-content
+  - tools-call-error
+  - tools-call-with-progress
+  # resources/read is not served: the gateway answers -32601 where the scenario expects -32602 with data.uri (reported as warnings).
+  - sep-2164-resource-not-found
+  # The gateway rejects every Origin that is not in its allow list (MCP_GATEWAY_ALLOWED_ORIGINS), including http://127.0.0.1:<port>; the scenario expects a valid localhost Origin to be accepted. It targets unauthenticated localhost servers; the gateway always needs a bearer token. Rejection of foreign hosts passes.
+  - dns-rebinding-protection
+  # list caching hints are checked on prompts/list, resources/list and resources/templates/list, which the gateway does not serve (tools/list hints pass).
+  - caching
+  # SEP-2322 input requests: the scenario needs a fixture tool that asks for input; the gateway has none, and relaying an upstream input request to the caller is not built (it declines them).
+  - input-required-result-basic-elicitation
+  - input-required-result-basic-sampling
+  - input-required-result-basic-list-roots
+  - input-required-result-request-state
+  - input-required-result-multiple-input-requests
+  - input-required-result-multi-round
+  - input-required-result-non-tool-request
+  - input-required-result-result-type
+  - input-required-result-tampered-state
+  - input-required-result-capability-check
+  # Reported as a warning only: the fixture tool does not exist behind the gateway, so the server answered 'Unknown tool' instead of the behaviour the scenario checks.
+  - input-required-result-missing-input-response
+  - input-required-result-ignore-extra-params

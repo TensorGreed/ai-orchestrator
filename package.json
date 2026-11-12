@@ -23,6 +23,7 @@
     "dr:drill": "node scripts/dr-drill.mjs"
   },
   "devDependencies": {
+    "@modelcontextprotocol/conformance": "0.2.0-alpha.12",
     "@playwright/test": "^1.64.1",
     "@types/node": "^24.3.0",
     "concurrently": "^9.2.1",

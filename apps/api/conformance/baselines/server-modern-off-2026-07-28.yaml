@@ -1,0 +1,42 @@
+# Known failures of the server-modern-off-2026-07-28 conformance run (see apps/api/conformance/run.mjs).
+# One entry per scenario, with the reason above it. The run fails when a listed scenario starts passing:
+# delete its entry then. A scenario counts as failing when any of its checks fails or warns.
+# Conformance package 0.2.0-alpha.12, scenarios of the spec revision the run name carries.
+server:
+  # MCP_GATEWAY_MODERN_PROTOCOL=off: the gateway refuses 2026-07-28 requests with the legacy 'Unsupported MCP-Protocol-Version' error, so this scenario fails by design. The same scenario passes or is baselined with its own reason in the modern-on run.
+  - server-stateless
+  - completion-complete
+  - tools-list
+  - tools-call-simple-text
+  - tools-call-image
+  - tools-call-audio
+  - tools-call-embedded-resource
+  - tools-call-mixed-content
+  - tools-call-error
+  - tools-call-with-progress
+  - server-sse-multiple-streams
+  - resources-list
+  - resources-read-text
+  - resources-read-binary
+  - resources-templates-read
+  - sep-2164-resource-not-found
+  - prompts-list
+  - prompts-get-simple
+  - prompts-get-with-args
+  - prompts-get-embedded-resource
+  - prompts-get-with-image
+  - dns-rebinding-protection
+  - caching
+  - input-required-result-basic-elicitation
+  - input-required-result-basic-sampling
+  - input-required-result-basic-list-roots
+  - input-required-result-request-state
+  - input-required-result-multiple-input-requests
+  - input-required-result-multi-round
+  - input-required-result-missing-input-response
+  - input-required-result-non-tool-request
+  - input-required-result-result-type
+  - input-required-result-unsupported-methods
+  - input-required-result-tampered-state
+  - input-required-result-capability-check
+  - input-required-result-ignore-extra-params
