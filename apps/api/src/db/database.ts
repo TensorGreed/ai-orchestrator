@@ -12,7 +12,9 @@ import {
   RESTORE_SKIPPED_KIND,
   STAFF_AUTHORSHIP_COLUMNS,
   STAFF_BATCH,
+  RUN_ACTIVE_CHECKS,
   deletionTombstones,
+  isRunKind,
   memoryArtifactErasureStatements,
   memorySessionErasureStatements,
   runErasureStatements,
@@ -5993,7 +5995,10 @@ export class SqliteStore implements Store {
           node_results_json,
           custom_data_json,
           error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        )
+        -- 13.3: a run a data-subject deletion erased (its tombstone) is never written back by its executor.
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM erasure_tombstones WHERE kind = 'run' AND row_id = ?)
         ON CONFLICT(id) DO UPDATE SET
           workflow_id = excluded.workflow_id,
           workflow_name = excluded.workflow_name,
@@ -6023,6 +6028,7 @@ export class SqliteStore implements Store {
         input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
         input.customData === undefined ? null : JSON.stringify(input.customData),
         input.error ?? null,
+        input.id,
         ...(interrupted ? [options.unlessInterruptedWith] : [])
     );
     this.persist();
@@ -14959,10 +14965,24 @@ export class SqliteStore implements Store {
       const heldBy: LegalHoldRef[] = [];
       for (const target of subjectRowHoldTargets(kind, id)) for (const hold of this.legalHoldsOnSync(target)) if (!heldBy.some((one) => one.id === hold.id)) heldBy.push(hold);
       if (heldBy.length > 0) return { deleted: false, cascaded: [], heldBy };
+      // 13.3 — a run in flight would be written back by its executor: it waits (same transaction, one connection).
+      if (isRunKind(kind) && RUN_ACTIVE_CHECKS.some((sql) => Boolean(this.queryOne(sql, [id])))) {
+        return { deleted: false, cascaded: [], busy: true };
+      }
       const outcome = this.deleteSubjectRowSync(kind, id);
       if (erasure) this.writeErasureTombstonesSync(deletionTombstones(kind, id, outcome, erasure));
       return outcome;
     });
+  }
+
+  /** 13.3 — whether a run is still in flight (RUN_ACTIVE_CHECKS). */
+  async subjectRunActive(id: string): Promise<boolean> {
+    return RUN_ACTIVE_CHECKS.some((sql) => Boolean(this.queryOne(sql, [id])));
+  }
+
+  /** 13.3 — whether a data-subject deletion erased this run (its tombstone). */
+  async runErased(id: string): Promise<boolean> {
+    return Boolean(this.queryOne(`SELECT 1 AS erased FROM erasure_tombstones WHERE kind = 'run' AND row_id = ?`, [id]));
   }
 
   private writeErasureTombstonesSync(rows: ErasureTombstoneWrite[]): void {

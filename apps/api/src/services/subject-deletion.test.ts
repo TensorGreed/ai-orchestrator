@@ -331,6 +331,135 @@ for (const kind of kinds) {
       expect(audits.map((event) => event.eventType)).toEqual(expect.arrayContaining(["data_subject.deletion_requeued", "data_subject.deleted"]));
     });
 
+    it("waits for a run still in flight: its executor finishes it, then the sweep deletes it and no late write brings it back", async () => {
+      const { store, service } = await setup();
+      await store.upsertWorkflow(WORKFLOW);
+      await seedRun(store, service, "run-1", "CUST-777");
+      const finalWrite = {
+        id: "run-1",
+        workflowId: WORKFLOW.id,
+        workflowName: WORKFLOW.name,
+        startedAt: AT,
+        triggerType: "webhook",
+        inputJson: { customerId: "CUST-777", session_id: "sess-run-1" },
+        outputJson: { ok: true }
+      };
+      await store.saveExecutionHistory({ ...finalWrite, status: "running" });
+      const created = await service.create({ type: "delete", subjectKind: "end_user", value: "cust-777", scan: false, revealTokens: false }, ADMIN);
+      await settle(service);
+      await service.confirm(created.id, ADMIN);
+      await settle(service);
+      const waiting = (await service.get(created.id))!;
+      expect(waiting.status).toBe("deferred_by_hold");
+      expect(waiting.deletion).toMatchObject({ deferred: 0, waitingForRuns: 1 });
+      expect(await count(store, "execution_history", "id = 'run-1'")).toBe(1);
+      expect(await count(store, "erasure_tombstones", "kind = 'run'")).toBe(0);
+      // Still running: the sweep leaves it.
+      await service.sweep();
+      await settle(service);
+      expect((await service.get(created.id))!.status).toBe("deferred_by_hold");
+
+      // The executor's final write lands on the kept row; the next sweep deletes the finished run.
+      expect(await store.saveExecutionHistory({ ...finalWrite, status: "success", completedAt: AT }, { unlessCanceled: true })).toBe(true);
+      await service.sweep();
+      await settle(service);
+      const done = (await service.get(created.id))!;
+      expect(done.status).toBe("done");
+      expect(done.deletion).toMatchObject({ deferred: 0, waitingForRuns: 0 });
+      expect(await count(store, "execution_history", "id = 'run-1'")).toBe(0);
+
+      // A late write for an erased run (a progress or final write racing the delete) writes nothing; no reference either.
+      expect(await store.saveExecutionHistory({ ...finalWrite, status: "running" }, { unlessFinished: true })).toBe(false);
+      expect(await store.saveExecutionHistory({ ...finalWrite, status: "success", completedAt: AT }, { unlessCanceled: true })).toBe(false);
+      expect(await store.saveExecutionHistory({ ...finalWrite, status: "success", completedAt: AT })).toBe(false);
+      expect(await count(store, "execution_history", "id = 'run-1'")).toBe(0);
+      expect(await service.recordRunRefs({ executionId: "run-1", workflow: WORKFLOW, run: { input: { customerId: "CUST-777" }, sessionId: "sess-run-1" } })).toBe(0);
+      expect(await count(store, "subject_refs", "row_id = 'run-1'")).toBe(0);
+    });
+
+    it("a pass that made progress resets the error count, so one more error after two failed passes does not fail it", async () => {
+      const { store, service } = await setup();
+      await store.upsertWorkflow(WORKFLOW);
+      for (let n = 0; n < 12; n += 1) await seedRun(store, service, `run-${n}`, "CUST-777");
+      const created = await service.create({ type: "delete", subjectKind: "end_user", value: "cust-777", scan: false, revealTokens: false }, ADMIN);
+      await settle(service);
+      // Calls 1 and 2 fail (two passes with no progress); the third pass saves after ten deletes, then fails once more.
+      const real = store.deleteSubjectRow.bind(store);
+      let calls = 0;
+      store.deleteSubjectRow = async (...args: Parameters<Store["deleteSubjectRow"]>) => {
+        calls += 1;
+        if (calls === 1 || calls === 2 || calls === 14) throw new Error("transient");
+        return await real(...args);
+      };
+      await service.confirm(created.id, ADMIN);
+      await settle(service);
+      const done = (await service.get(created.id))!;
+      expect(calls).toBeGreaterThan(14);
+      expect(done.error).toBeNull();
+      expect(done.status).toBe("done");
+      expect(await count(store, "execution_history")).toBe(0);
+    });
+
+    it("treats a resuming run and a run with an open queue job as in flight", async () => {
+      const { store, sql } = await setup();
+      await store.upsertWorkflow(WORKFLOW);
+      await saveRun(store, "run-r", { a: 1 });
+      await saveRun(store, "run-q", { a: 1 });
+      await sql.run(
+        `INSERT INTO workflow_executions (id, workflow_id, status, waiting_node_id, started_at, state_json, created_at, updated_at) VALUES ('run-r', ?, 'resuming', 'gate', ?, '{}', ?, ?)`,
+        WORKFLOW.id, AT, AT, AT
+      );
+      expect(await store.deleteSubjectRow("production_execution", "run-r")).toMatchObject({ deleted: false, busy: true });
+      expect(await store.subjectRunActive("run-r")).toBe(true);
+      await sql.run(
+        `INSERT INTO execution_queue (id, workflow_id, execution_id, status, payload_json, created_at, updated_at, scheduled_at) VALUES ('q-1', ?, 'run-q', 'pending', '{}', ?, ?, ?)`,
+        WORKFLOW.id, AT, AT, AT
+      );
+      expect(await store.deleteSubjectRow("production_execution", "run-q")).toMatchObject({ deleted: false, busy: true });
+      await sql.run("UPDATE execution_queue SET status = 'completed' WHERE id = 'q-1'");
+      expect(await store.deleteSubjectRow("production_execution", "run-q")).toMatchObject({ deleted: true });
+      expect(await store.subjectRunActive("run-q")).toBe(false);
+    });
+
+    it("keeps a run whose usage row a project hold covers (the run itself not held), the usage row unchanged", async () => {
+      const { store, sql } = await setup();
+      await store.upsertWorkflow(WORKFLOW);
+      await saveRun(store, "run-u", { a: 1 });
+      await sql.run(
+        `INSERT INTO usage_events (id, execution_id, workflow_id, user_id, user_email, project_id, status, total_tokens, cost_usd, created_at)
+         VALUES ('ue-u', 'run-u', ?, 'u-op', 'op@example.com', 'proj-held', 'success', 5, 0.1, ?)`,
+        WORKFLOW.id, AT
+      );
+      await store.placeLegalHold({
+        id: "h-u", name: "M", reason: "r", matterRef: null, scopeType: "project", scopeId: "proj-held", endsAt: null, createdBy: null, createdAt: AT, items: []
+      });
+      const outcome = await store.deleteSubjectRow("production_execution", "run-u", { requestId: "dsr-u", erasedAt: AT });
+      expect(outcome.deleted).toBe(false);
+      expect(outcome.heldBy?.map((hold) => hold.id)).toEqual(["h-u"]);
+      expect(await count(store, "execution_history", "id = 'run-u'")).toBe(1);
+      expect(await sql.all("SELECT user_id, user_email FROM usage_events WHERE id = 'ue-u'")).toEqual([{ user_id: "u-op", user_email: "op@example.com" }]);
+      expect(await count(store, "erasure_tombstones")).toBe(0);
+    });
+
+    it("fails a staff erasure the account delete refuses (the only admin), with no tombstone and authorship unchanged", async () => {
+      const { store, sql, service } = await setup({
+        staffUser: { check: async () => null, remove: async () => "last_admin" }
+      });
+      await store.saveUser({ id: "u-erin", email: STAFF_EMAIL, passwordHash: "x", role: "admin" });
+      await store.upsertWorkflow(WORKFLOW);
+      await sql.run("UPDATE workflows SET created_by = ? WHERE id = ?", STAFF_EMAIL.toLowerCase(), WORKFLOW.id);
+      const created = await service.create({ type: "delete", subjectKind: "staff", value: STAFF_EMAIL, scan: false, revealTokens: false }, ADMIN);
+      await settle(service);
+      await service.confirm(created.id, ADMIN);
+      await settle(service);
+      const failed = (await service.get(created.id))!;
+      expect(failed.status).toBe("failed");
+      expect(failed.error).toMatch(/only admin/);
+      expect(await count(store, "erasure_tombstones")).toBe(0);
+      expect((await sql.all<{ created_by: string }>("SELECT created_by FROM workflows WHERE id = ?", WORKFLOW.id))[0]!.created_by).toBe(STAFF_EMAIL.toLowerCase());
+      expect(await store.getUserByEmail(STAFF_EMAIL)).not.toBeNull();
+    });
+
     it("erases a staff member: every authorship column pseudonymised, the user deleted, the audit log kept and verifiable", async () => {
       const removed: string[] = [];
       const { store, sql, service } = await setup({
@@ -468,6 +597,12 @@ for (const kind of kinds) {
       await store.saveUser({ id: "u-rehired", email: "rehired@example.com", passwordHash: "x", role: "builder" });
       await sql.run("UPDATE users SET created_at = '2026-07-01T00:00:00.000Z' WHERE id = 'u-rehired'");
       await store.saveUser({ id: "u-only", email: "only.admin@example.com", passwordHash: "x", role: "admin" });
+      // Another admin whose invite is still open cannot sign in yet, so u-only still counts as the only admin.
+      await store.saveUser({ id: "u-invited", email: "invited.admin@example.com", passwordHash: "x", role: "admin" });
+      await sql.run(
+        "INSERT INTO user_invites (id, user_id, email, role, token_hash, created_by, created_at, expires_at) VALUES ('inv-1', 'u-invited', 'invited.admin@example.com', 'admin', 'h', 'admin@example.com', ?, '2027-01-01T00:00:00.000Z')",
+        AT
+      );
       await store.saveUser({ id: "u-gone", email: "gone@example.com", passwordHash: "x", role: "builder" });
       await sql.run("UPDATE users SET created_at = '2026-01-01T00:00:00.000Z' WHERE id IN ('u-only', 'u-gone')");
       await store.upsertWorkflow({ ...WORKFLOW, id: "wf-held" } as Workflow);
@@ -482,7 +617,7 @@ for (const kind of kinds) {
       const report = await reapplyErasures(sqlExecutor(store), key);
       expect(report.needKey).toBe(0);
       expect((await sql.all<{ namespace: string }>("SELECT namespace FROM session_memory")).map((row) => row.namespace)).toEqual(["ns-new"]);
-      expect((await sql.all<{ id: string }>("SELECT id FROM users ORDER BY id")).map((row) => row.id)).toEqual(["u-only", "u-rehired"]);
+      expect((await sql.all<{ id: string }>("SELECT id FROM users ORDER BY id")).map((row) => row.id)).toEqual(["u-invited", "u-only", "u-rehired"]);
       expect(await sql.all("SELECT id, triggered_by FROM execution_history ORDER BY id")).toEqual([
         { id: "r-free", triggered_by: staffPseudonym(staffTombstoneId(key, "gone@example.com")) },
         { id: "r-held", triggered_by: "gone@example.com" },

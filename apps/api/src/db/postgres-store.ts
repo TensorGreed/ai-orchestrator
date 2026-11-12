@@ -1418,6 +1418,14 @@ export class PostgresStore implements Store {
   async takeRestoreSkippedMarkers(): ReturnType<Store["takeRestoreSkippedMarkers"]> {
     return erasure.takeRestoreSkippedMarkers(this.ctx);
   }
+  async subjectRunActive(id: string): Promise<boolean> {
+    return erasure.subjectRunActive(this.ctx, id);
+  }
+
+  async runErased(id: string): Promise<boolean> {
+    return erasure.runErased(this.ctx, id);
+  }
+
   async countErasureTombstones(): ReturnType<Store["countErasureTombstones"]> {
     return erasure.countErasureTombstones(this.ctx);
   }

@@ -411,12 +411,17 @@ function deleteKindOf(found: FoundRow): SubjectDeleteKind {
  * kept while a hold is active (recorded as markers beside the rows).
  */
 function deferredCount(record: Pick<SubjectRequestRecord, "deferred">): number {
-  let count = deferredOf(record as SubjectRequestRecord).length;
+  let count = deferredOf(record as SubjectRequestRecord).filter((row) => !(row as FoundRow & { busy?: boolean }).busy).length;
   for (const entry of record.deferred as Array<Record<string, unknown>>) {
     if (entry && entry.staff === true) count += numberOf(entry.held);
     if (entry && entry.vault === true) count += numberOf(entry.tokens);
   }
   return count;
+}
+
+/** Runs a deletion waits for (still in flight when it reached them). */
+function waitingCount(record: Pick<SubjectRequestRecord, "deferred">): number {
+  return deferredOf(record as SubjectRequestRecord).filter((row) => (row as FoundRow & { busy?: boolean }).busy).length;
 }
 
 function deferredOf(record: SubjectRequestRecord): FoundRow[] {
@@ -493,6 +498,8 @@ export class SubjectRequestService {
     const expressions = input.workflow.settings?.dataProtection?.subjectRefs ?? [];
     if (expressions.length === 0) return 0;
     try {
+      // A run a deletion erased while its executor was finishing gets no reference back.
+      if (await this.options.store.runErased(input.executionId)) return 0;
       const context = subjectContextOf(input.run);
       const createdAt = this.now().toISOString();
       const projectId = input.workflow.projectId ?? null;
@@ -759,6 +766,7 @@ export class SubjectRequestService {
    */
   private async deferredFreed(record: SubjectRequestRecord): Promise<boolean> {
     for (const found of deferredOf(record)) {
+      if ((found as FoundRow & { busy?: boolean }).busy && (await this.options.store.subjectRunActive(found.id))) continue;
       let held = false;
       for (const target of subjectRowHoldTargets(deleteKindOf(found), found.id)) {
         if ((await this.options.store.legalHoldsOn(target)).length > 0) {
@@ -1320,9 +1328,14 @@ export class SubjectRequestService {
     const state = readState(initial.progress);
     const deletion = state.deletion;
     const deferred: unknown[] = [...initial.deferred];
-    // A save after progress resets the error count: a deletion fails after SUBJECT_REQUEST_MAX_ERRORS errors in a row.
-    const save = async (): Promise<boolean> =>
-      await store.updateSubjectRequest(initial.id, { progress: { ...state, errors: 0 }, deferred, updatedAt: this.now().toISOString() }, "running");
+    // A save after progress resets the error count, in this pass too: a deletion fails after SUBJECT_REQUEST_MAX_ERRORS
+    // errors in a row.
+    let errorsBefore = typeof initial.progress.errors === "number" ? initial.progress.errors : 0;
+    const save = async (): Promise<boolean> => {
+      const saved = await store.updateSubjectRequest(initial.id, { progress: { ...state, errors: 0 }, deferred, updatedAt: this.now().toISOString() }, "running");
+      if (saved) errorsBefore = 0;
+      return saved;
+    };
     try {
       if (!deletion) throw new Error("The deletion was never confirmed");
       if (!initial.valueSealed) throw new Error("The request's value is no longer stored");
@@ -1362,7 +1375,11 @@ export class SubjectRequestService {
           }
           const gate = (GATE_KINDS as readonly string[]).includes(kind) ? ((await this.options.subjectRowRemoval?.(actor, { kind, id: found.id })) ?? null) : null;
           const outcome = await store.deleteSubjectRow(kind, found.id, { requestId: initial.id, erasedAt, ...(tombstoneId ? { tombstoneId } : {}) });
-          if (outcome.heldBy && outcome.heldBy.length > 0) {
+          if (outcome.busy) {
+            // A run still in flight: deleted once it has finished (the sweep re-queues it), its tokens kept until then.
+            deferred.push({ ...found, busy: true });
+            tokensOf(rows, heldTokens);
+          } else if (outcome.heldBy && outcome.heldBy.length > 0) {
             deferred.push(found);
             tokensOf(rows, heldTokens);
           } else if (outcome.deleted) {
@@ -1470,6 +1487,7 @@ export class SubjectRequestService {
           vaultTokensDeleted: deletion.vaultTokensDeleted,
           skipped: deletion.skipped,
           deferred: deferredCount({ deferred }),
+          waitingForRuns: waitingCount({ deferred }),
           ...(deletion.staff
             ? { pseudonym: deletion.staff.pseudonym, rowsPseudonymised: deletion.staff.rowsPseudonymised, userDeleted: deletion.staff.userDeleted, staffRowsHeld: deletion.staff.held }
             : {})
@@ -1477,7 +1495,7 @@ export class SubjectRequestService {
       });
     } catch (error) {
       const message = this.message(error).slice(0, MAX_ERROR_LENGTH);
-      const errors = (typeof initial.progress.errors === "number" ? initial.progress.errors : 0) + 1;
+      const errors = errorsBefore + 1;
       if (!(error instanceof PermanentDeletionError) && errors < SUBJECT_REQUEST_MAX_ERRORS) {
         this.options.logger?.warn({ requestId: initial.id, error: message, errors }, "A data-subject deletion hit an error; it will be retried");
         await store
@@ -1539,6 +1557,7 @@ function deletionView(record: SubjectRequestRecord, deletion: DeletionState): Su
     usageRowsCleared: deletion.usageRowsCleared,
     vaultTokensDeleted: deletion.vaultTokensDeleted,
     deferred: deferredCount(record),
+    waitingForRuns: waitingCount(record),
     skipped: deletion.skipped,
     staff: deletion.staff
       ? { pseudonym: deletion.staff.pseudonym, rowsPseudonymised: deletion.staff.rowsPseudonymised, userDeleted: deletion.staff.userDeleted, auditLog: STAFF_AUDIT_LOG_KEPT }

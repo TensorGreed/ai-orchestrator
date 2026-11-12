@@ -44,6 +44,9 @@ const STATUS_LABELS: Record<SubjectRequestView["status"], string> = {
 };
 
 function statusLabel(request: SubjectRequestView): string {
+  if (request.status === "deferred_by_hold" && request.deletion && request.deletion.deferred === 0 && request.deletion.waitingForRuns > 0) {
+    return "Partly deleted: waiting for runs to finish";
+  }
   if (request.type === "delete" && request.status === "ready") return "Preview ready: confirm to delete";
   if (request.type === "delete" && request.status === "done") return "Deleted";
   if (request.type === "delete" && request.status === "expired") return "Not confirmed in time";
@@ -86,6 +89,7 @@ function describeDeletion(request: SubjectRequestView): string | null {
   if (deletion.usageRowsCleared > 0) parts.push(`${deletion.usageRowsCleared} usage row(s) kept with the person cleared`);
   if (deletion.vaultTokensDeleted > 0) parts.push(`${deletion.vaultTokensDeleted} reversible token(s) deleted`);
   if (deletion.deferred > 0) parts.push(`${deletion.deferred} row(s) kept by a legal hold until it is released`);
+  if (deletion.waitingForRuns > 0) parts.push(`${deletion.waitingForRuns} run(s) still in progress, deleted once they finish`);
   if (deletion.staff) {
     parts.push(
       `Email replaced with ${deletion.staff.pseudonym} in ${deletion.staff.rowsPseudonymised} row(s)${deletion.staff.userDeleted ? ", account deleted" : ""}`

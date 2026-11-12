@@ -1222,6 +1222,10 @@ export interface Store extends AiGatewayStore, SubjectStore {
   pruneErasureTombstones(before: string, limit: number): Promise<number>;
   /** 13.3 — the markers of restores that skipped re-applying erasures, removed as they are read (one reader gets each). */
   takeRestoreSkippedMarkers(): Promise<Array<{ id: string; at: string }>>;
+  /** 13.3 — whether a run is still in flight (running, queued, resuming, or an open queue job). */
+  subjectRunActive(id: string): Promise<boolean>;
+  /** 13.3 — whether a data-subject deletion erased this run (a `run` tombstone). */
+  runErased(id: string): Promise<boolean>;
   /** 13.3 — tombstones kept (restore markers left out). */
   countErasureTombstones(): Promise<number>;
   /**

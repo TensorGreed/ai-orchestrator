@@ -157,6 +157,8 @@ export interface SubjectDeletionView {
   vaultTokensDeleted: number;
   /** Rows a legal hold keeps; deleted when the hold is released. */
   deferred: number;
+  /** Runs still in flight when the deletion reached them; deleted once they have finished (the sweep retries). */
+  waitingForRuns: number;
   /** Rows gone already, or no longer holding the value, when the deletion reached them. */
   skipped: number;
   /** A staff member: the pseudonym their email was replaced with, how many rows changed, and whether the user is gone. */

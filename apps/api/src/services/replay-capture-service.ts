@@ -1051,6 +1051,9 @@ export class ReplayCaptureService {
       if (outcome.heldBy && outcome.heldBy.length > 0) {
         // 13.3 — a legal hold outranks erasure (GDPR Art. 17(3)(e)): the row stays and is reported as held.
         skipped.push({ kind: target.kind, id: target.id, reason: "held" });
+      } else if (outcome.busy) {
+        // 13.3 — a run still in flight would be written back by its executor: it is left; delete it once it finishes.
+        skipped.push({ kind: target.kind, id: target.id, reason: "running" });
       } else if (outcome.deleted) {
         gone.add(`${target.kind}:${target.id}`);
         deleted[target.kind] += 1;

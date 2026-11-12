@@ -7,6 +7,7 @@
 import {
   INSERT_TOMBSTONE_SQL,
   RESTORE_SKIPPED_KIND,
+  RUN_ACTIVE_CHECKS,
   STAFF_AUTHORSHIP_COLUMNS,
   STAFF_BATCH,
   staffWhere,
@@ -56,6 +57,17 @@ export async function pruneErasureTombstones(ctx: PgContext, before: string, lim
 export async function takeRestoreSkippedMarkers(ctx: PgContext): Promise<Array<{ id: string; at: string }>> {
   const rows = await ctx.query<{ row_id: string; erased_at: unknown }>(`DELETE FROM erasure_tombstones WHERE kind = $1 RETURNING row_id, erased_at`, [RESTORE_SKIPPED_KIND]);
   return rows.map((row) => ({ id: String(row.row_id), at: row.erased_at instanceof Date ? row.erased_at.toISOString() : String(row.erased_at) }));
+}
+
+/** 13.3 — whether a run is still in flight (RUN_ACTIVE_CHECKS). */
+export async function subjectRunActive(ctx: PgContext, id: string): Promise<boolean> {
+  for (const sql of RUN_ACTIVE_CHECKS) if (await ctx.queryOne(toPgPlaceholders(sql), [id])) return true;
+  return false;
+}
+
+/** 13.3 — whether a data-subject deletion erased this run (its tombstone). */
+export async function runErased(ctx: PgContext, id: string): Promise<boolean> {
+  return Boolean(await ctx.queryOne(`SELECT 1 AS erased FROM erasure_tombstones WHERE kind = 'run' AND row_id = $1`, [id]));
 }
 
 export async function countErasureTombstones(ctx: PgContext): Promise<number> {

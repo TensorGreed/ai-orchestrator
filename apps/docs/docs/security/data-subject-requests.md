@@ -136,7 +136,10 @@ a recent MFA check when step-up is on. A preview not confirmed within `SUBJECT_E
 is dropped. Reversible tokens cannot be revealed on a deletion request.
 
 The deletion then runs in the background on the leader, resumes after a restart, and checks each row found by the
-search again before deleting it (a row that no longer holds the value is skipped).
+search again before deleting it (a row that no longer holds the value is skipped). A run still in progress (running,
+queued, resuming, or with an open queue job) is not deleted under its executor: the request shows **Partly deleted:
+waiting for runs to finish** and deletes it on a later pass once it has finished. Once a run is erased, its executor
+can no longer write it back.
 
 ### End users
 
@@ -162,8 +165,8 @@ releases record them, and how many audit-log rows they have. On confirmation:
 - **their audit-log rows are kept unchanged** for security logging until `AUDIT_LOG_RETENTION_DAYS` removes them.
   Rewriting them would break the audit chain, which still verifies afterwards.
 
-Erasing a person who has an account deletes that account, so **only an admin** can confirm it (with the `user.delete`
-step-up as well, when step-up is on); the account delete is audited as `user.delete` without the email. A
+Erasing a person who has an account deletes that account, so **only an admin** can confirm it (with the same recent MFA check as any
+deletion, when step-up is on); the account delete is audited as `user.delete` without the email. A
 `data_subject:manage` role can still make the request and see its preview. You cannot erase your own account, nor the
 only admin who can sign in. The account is deleted first, so the person cannot write anything more under the email,
 and then their authorship rows are renamed. A staff request does not search runs for the

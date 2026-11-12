@@ -14,7 +14,7 @@
 import crypto from "node:crypto";
 import type { LegalHoldRef } from "@ai-orchestrator/shared";
 import type { SubjectStoreKind } from "./database.js";
-import { heldRowSql, type HoldableTable, type LegalHoldTarget } from "./legal-hold-sql.js";
+import { heldRowSql, notHeldSql, type HoldableTable, type LegalHoldTarget } from "./legal-hold-sql.js";
 import { parseMemoryArtifactRowId, parseMemorySessionRowId, type SubjectScanKind } from "./subject-store.js";
 
 /** The kinds a tombstone names. `staff`: a staff member's pseudonymised authorship and deleted user row. */
@@ -93,10 +93,29 @@ export function runErasureStatements(executionId: string): ErasureStatement[] {
 }
 
 /** The holdable tables a run's delete takes rows of by `execution_id` (runErasureStatements). */
-export const RUN_SIDE_HOLDABLE = ["mcp_tool_calls", "guard_events", "mcp_cassettes", "approval_requests", "execution_queue"] as const;
+export const RUN_SIDE_HOLDABLE = ["mcp_tool_calls", "guard_events", "mcp_cassettes", "approval_requests", "execution_queue", "usage_events"] as const;
 
-/** Clears the person from a run's usage rows; tokens and cost stay. */
-export const CLEAR_RUN_USAGE_SQL = "UPDATE usage_events SET user_id = NULL, user_email = NULL WHERE execution_id = ? AND (user_id IS NOT NULL OR user_email IS NOT NULL)";
+/**
+ * Clears the person from a run's usage rows; tokens and cost stay. A usage row a legal hold keeps is never changed
+ * (the run's delete is deferred when one is held; the predicate keeps it so on its own as well).
+ */
+export const CLEAR_RUN_USAGE_SQL = `UPDATE usage_events SET user_id = NULL, user_email = NULL
+  WHERE execution_id = ? AND (user_id IS NOT NULL OR user_email IS NOT NULL) AND ${notHeldSql("usage_events")}`;
+
+/**
+ * A run still in flight (its history row running or queued, its paused state resuming, or an open queue job): its
+ * executor would write it back, so a deletion waits for it. Each takes the run id once; any row means busy.
+ */
+export const RUN_ACTIVE_CHECKS = [
+  "SELECT 1 AS busy FROM execution_history WHERE id = ? AND status IN ('running', 'queued')",
+  "SELECT 1 AS busy FROM workflow_executions WHERE id = ? AND status = 'resuming'",
+  "SELECT 1 AS busy FROM execution_queue WHERE execution_id = ? AND status IN ('pending', 'running')"
+] as const;
+
+/** The subject row kinds that are runs. */
+export function isRunKind(kind: SubjectDeleteKind): boolean {
+  return kind === "execution" || kind === "production_execution" || kind === "paused_run";
+}
 
 /** An agent memory session: its messages, artifacts, cached tool results and subject references. */
 export function memorySessionErasureStatements(namespace: string, sessionId: string): ErasureStatement[] {
@@ -446,7 +465,10 @@ export async function reapplyErasures(exec: ErasureExecutor, subjectKey: Buffer 
         }
       }
     }
-    const isSignInAdmin = (user: Record<string, unknown>) => user.role === "admin" && (user.kind ?? "human") === "human";
+    // As the live check counts them: human admins without an open invite (one who has not accepted cannot sign in).
+    const invited = new Set((await exec.all("SELECT user_id FROM user_invites WHERE accepted_at IS NULL", [])).map((row) => String(row.user_id)));
+    const isSignInAdmin = (user: Record<string, unknown>) =>
+      user.role === "admin" && (user.kind ?? "human") === "human" && !invited.has(String(user.id));
     let admins = users.filter(isSignInAdmin).length;
     for (const user of users) {
       if (!staff.has(staffTombstoneId(subjectKey, String(user.email)))) continue;
@@ -493,6 +515,8 @@ export interface SubjectRowDeletion {
   heldBy?: LegalHoldRef[];
   /** Usage rows of a deleted run kept with the person cleared. */
   usageCleared?: number;
+  /** A run still in flight (RUN_ACTIVE_CHECKS): nothing was deleted; try again once it has finished. */
+  busy?: boolean;
 }
 
 /** A tombstone as written. */

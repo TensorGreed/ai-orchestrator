@@ -51,6 +51,7 @@ const deletionView = {
   usageRowsCleared: 2,
   vaultTokensDeleted: 1,
   deferred: 1,
+  waitingForRuns: 0,
   skipped: 0,
   staff: null,
   notCovered: []

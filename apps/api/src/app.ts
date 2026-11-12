@@ -14654,7 +14654,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requests: subjectRequestService,
     available: captureAvailable,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    requireStepUp: async (request, reply, action, targetUserId) => await requireStepUp(request, reply, action, targetUserId ? { targetUserId } : undefined),
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
     staffAccount: async (email) => {
       const account = await store.getUserByEmail(email);
       return account ? { id: account.id } : null;

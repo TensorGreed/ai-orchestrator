@@ -18,8 +18,10 @@ import type { PgContext } from "./context.js";
 import { LEGAL_HOLD_LOCK_SHARED_SQL, toPgPlaceholders } from "../legal-hold-sql.js";
 import {
   CLEAR_RUN_USAGE_SQL,
+  RUN_ACTIVE_CHECKS,
   deletionTombstones,
   holdsOnAny,
+  isRunKind,
   memoryArtifactErasureStatements,
   memorySessionErasureStatements,
   runErasureStatements,
@@ -126,6 +128,14 @@ export async function deleteSubjectRow(ctx: PgContext, kind: SubjectDeleteKind, 
     await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
     const heldBy = await holdsOnAny(subjectRowHoldTargets(kind, id), async (target) => await legalHoldsOnWith(client, target));
     if (heldBy.length > 0) return { deleted: false, cascaded: [], heldBy };
+    // 13.3 — a run in flight would be written back by its executor: it waits. FOR UPDATE makes a concurrent executor
+    // write wait for this transaction, which then finds the run tombstone and writes nothing.
+    if (isRunKind(kind)) {
+      for (const sql of RUN_ACTIVE_CHECKS) {
+        if (((await client.query(toPgPlaceholders(`${sql} FOR UPDATE`), [id])).rowCount ?? 0) > 0) return { deleted: false, cascaded: [], busy: true };
+      }
+      await client.query(`SELECT 1 FROM execution_history WHERE id = $1 FOR UPDATE`, [id]);
+    }
     const outcome = await deleteSubjectRowWith(client, kind, id);
     if (erasure) await writeErasureTombstonesWith(client, deletionTombstones(kind, id, outcome, erasure));
     return outcome;
