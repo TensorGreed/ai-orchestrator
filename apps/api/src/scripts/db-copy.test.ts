@@ -107,7 +107,17 @@ function insertVaultRows(raw: Database.Database, valueHashes: string[]): void {
 
 describe("parseDbCopyArgs", () => {
   it("reads sqlite:<path>, --to postgres and one of --yes / --dry-run", () => {
-    expect(parseDbCopyArgs(["--from", "sqlite:/tmp/a.db", "--to", "postgres", "--yes"])).toEqual({ from: "/tmp/a.db", yes: true, dryRun: false, allowBrokenAudit: false, help: false });
+    expect(parseDbCopyArgs(["--from", "sqlite:/tmp/a.db", "--to", "postgres", "--yes"])).toEqual({
+      from: "/tmp/a.db",
+      yes: true,
+      dryRun: false,
+      allowBrokenAudit: false,
+      skipErasures: false,
+      help: false
+    });
+    // 13.3 — skipping erasures needs --i-understand too.
+    expect(parseDbCopyArgs(["--from", "sqlite:/tmp/a.db", "--to", "postgres", "--yes", "--skip-erasures", "--i-understand"]).skipErasures).toBe(true);
+    expect(() => parseDbCopyArgs(["--from", "sqlite:/tmp/a.db", "--to", "postgres", "--yes", "--skip-erasures"])).toThrow(/Pass --i-understand/);
     expect(parseDbCopyArgs(["--from", "sqlite:/tmp/a.db", "--to", "postgres", "--yes", "--allow-broken-audit"]).allowBrokenAudit).toBe(true);
     expect(parseDbCopyArgs(["--", "--from=sqlite:/tmp/a.db", "--to=postgresql", "--dry-run"])).toMatchObject({ from: "/tmp/a.db", dryRun: true });
     expect(parseDbCopyArgs(["--from", "sqlite:rel/a.db", "--to", "postgres", "-y"]).from).toBe(path.resolve("rel/a.db"));
@@ -512,6 +522,38 @@ describe.skipIf(!postgresUrl)("db:copy into Postgres", () => {
     expect((await store.getWorkflow("wf-1"))?.name).toBe("Hello");
     expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 1 });
   }, 120_000);
+
+  it("13.3: re-applies the erasure tombstones it copies (a source restored without them), or records --skip-erasures", async () => {
+    await sqliteSource(async (store) => {
+      await store.upsertWorkflow({ id: "wf-e", name: "E", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
+      for (const id of ["run-erased", "run-kept"]) {
+        await store.saveExecutionHistory({ id, workflowId: "wf-e", workflowName: "E", status: "success", startedAt: "2026-11-01T00:00:00.000Z", inputJson: {}, outputJson: {} });
+      }
+    });
+    // As after a restore that skipped erasures: the row is back beside its tombstone.
+    const raw = new Database(sourcePath);
+    raw.prepare("INSERT INTO erasure_tombstones (kind, row_id, request_id, erased_at) VALUES ('run', 'run-erased', 'dsr-1', ?)").run(new Date().toISOString());
+    raw.close();
+    const { report, lines } = await copy();
+    expect(report.erasures).toMatchObject({ erasures: 1, skipped: false });
+    expect(lines.join("\n")).toMatch(/re-applied 1 erasure/);
+    expect((await q<{ id: string }>("SELECT id FROM $S.execution_history ORDER BY id")).map((row) => row.id)).toEqual(["run-kept"]);
+    expect(await q("SELECT kind, row_id FROM $S.erasure_tombstones")).toEqual([{ kind: "run", row_id: "run-erased" }]);
+  });
+
+  it("13.3: --skip-erasures leaves the rows and a marker the next start audits", async () => {
+    await sqliteSource(async (store) => {
+      await store.upsertWorkflow({ id: "wf-e", name: "E", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
+      await store.saveExecutionHistory({ id: "run-erased", workflowId: "wf-e", workflowName: "E", status: "success", startedAt: "2026-11-01T00:00:00.000Z", inputJson: {}, outputJson: {} });
+    });
+    const raw = new Database(sourcePath);
+    raw.prepare("INSERT INTO erasure_tombstones (kind, row_id, request_id, erased_at) VALUES ('run', 'run-erased', 'dsr-1', ?)").run(new Date().toISOString());
+    raw.close();
+    const report = await runDbCopy({ sqlitePath: sourcePath, postgres: config, skipErasures: true, log: () => undefined });
+    expect(report.erasures).toMatchObject({ skipped: true });
+    expect((await q<{ id: string }>("SELECT id FROM $S.execution_history")).map((row) => row.id)).toEqual(["run-erased"]);
+    expect(await q("SELECT COUNT(*)::int AS n FROM $S.erasure_tombstones WHERE kind = 'restore_skipped'")).toEqual([{ n: 1 }]);
+  });
 
   it("--dry-run reports counts and writes nothing: the unmigrated target stays empty, the source unchanged", async () => {
     await sqliteSource(async (store) => {

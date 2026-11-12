@@ -2857,6 +2857,31 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE guard_token_vault DROP COLUMN IF EXISTS execution_id;
       ALTER TABLE guard_token_vault DROP COLUMN IF EXISTS project_id;
     `
+  },
+  {
+    version: 69,
+    description: "13.3 — erasure tombstones: what data-subject deletions removed, re-applied when a backup is restored",
+    // One row per erased row: its kind and id, the request that erased it, and when. Ids only, never values: an agent
+    // memory session or a staff member is named by a keyed hash (the subject key), not by its session id or email.
+    // Exported in backups (db:import and db:copy re-apply them) and pruned after ERASURE_TOMBSTONE_RETENTION_DAYS.
+    up: `
+      CREATE TABLE IF NOT EXISTS erasure_tombstones (
+        kind TEXT NOT NULL,
+        row_id TEXT NOT NULL,
+        request_id TEXT,
+        erased_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (kind, row_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_erasure_tombstones_erased ON erasure_tombstones(erased_at);
+      -- A run's erasure (and the sweep's scrub of late rows) finds its usage rows and queue jobs by execution id.
+      CREATE INDEX IF NOT EXISTS idx_usage_events_execution ON usage_events(execution_id);
+      CREATE INDEX IF NOT EXISTS idx_execution_queue_execution ON execution_queue(execution_id);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_execution_queue_execution;
+      DROP INDEX IF EXISTS idx_usage_events_execution;
+      DROP TABLE IF EXISTS erasure_tombstones;
+    `
   }
 ];
 

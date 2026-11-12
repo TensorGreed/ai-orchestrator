@@ -294,9 +294,10 @@ See [Legal holds](../operations/legal-hold.md).
 
 See [Data-subject requests](../security/data-subject-requests.md). The value is never echoed, logged or audited.
 
-- `POST /api/data-protection/requests` (admin or `data_subject:manage`; `{ type: "export", subjectKind?: "end_user" | "staff", value, scan?, revealTokens? }`; 201 with the request; `revealTokens` needs step-up when it is on)
-- `GET /api/data-protection/requests` (admin or `data_subject:manage`; `{ requests }`, newest first), `GET /api/data-protection/requests/:id` (admin or `data_subject:manage`; `{ id, type, subjectKind, status, scan, revealTokens, counts, foundByReference, truncated, progress, dueAt, overdue, createdBy, createdAt, updatedAt, error, export }`; `status` is `searching`, `ready`, `done`, `expired` or `failed`)
-- `GET /api/data-protection/requests/:id/export` (admin or `data_subject:manage`; step-up when on; the zip, once; 409 once downloaded or expired)
+- `POST /api/data-protection/requests` (admin or `data_subject:manage`; `{ type: "export" | "delete", subjectKind?: "end_user" | "staff", value, scan?, revealTokens? }`; 201 with the request; `revealTokens` is for exports only and needs step-up when it is on)
+- `GET /api/data-protection/requests` (admin or `data_subject:manage`; `{ requests }`, newest first), `GET /api/data-protection/requests/:id` (admin or `data_subject:manage`; `{ id, type, subjectKind, status, scan, revealTokens, counts, foundByReference, truncated, progress, dueAt, overdue, createdBy, createdAt, updatedAt, error, export, deletion, staffPreview }`; `status` is `searching`, `ready`, `running`, `deferred_by_hold`, `done`, `expired` or `failed`)
+- `GET /api/data-protection/requests/:id/export` (admin or `data_subject:manage`; step-up when on; the zip, once; 409 once downloaded or expired, and for a deletion)
+- `POST /api/data-protection/requests/:id/confirm` (admin or `data_subject:manage`; step-up when on; `{}`; confirms a deletion whose preview is `ready`, which then runs in the background; a staff erasure of an existing account is admin-only (403 otherwise) and also needs the `user.delete` step-up, which refuses a service-account key; 409 for an export, a request not ready, your own account or the last admin)
 - `POST /api/data-protection/subject-refs/preview` (builder with write access to the workflow; `{ workflowId, subjectRefs }` → `{ runs, refs: [{ expression, resolved, sample }] }`, samples masked)
 
 ## Golden runs and replay

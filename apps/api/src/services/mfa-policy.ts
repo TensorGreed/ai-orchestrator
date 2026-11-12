@@ -94,7 +94,8 @@ export const STEP_UP_ACTIONS = {
   "audit_export.change": "Create, change or delete an audit export destination or log stream",
   "legal_hold.change": "Place or release a legal hold",
   "subject_request.reveal": "Make a data-subject export that reveals tokenised values",
-  "subject_export.download": "Download a data-subject export"
+  "subject_export.download": "Download a data-subject export",
+  "subject_request.delete": "Confirm a data-subject deletion"
 } as const;
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS;

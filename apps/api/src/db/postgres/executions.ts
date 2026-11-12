@@ -79,7 +79,9 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
   const fence = options?.fence;
   const sql =
     `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       SELECT $1::text, $2::text, $3::text, $4::text, $5::timestamptz, $6::timestamptz, $7::integer, $8::text, $9::text, $10::text, $11::text, $12::text, $13::text, $14::text
+       -- 13.3: a run a data-subject deletion erased (its tombstone) is never written back by its executor.
+       WHERE NOT EXISTS (SELECT 1 FROM erasure_tombstones WHERE kind = 'run' AND row_id = $1)
        ON CONFLICT (id) DO UPDATE SET
          workflow_id = EXCLUDED.workflow_id,
          workflow_name = EXCLUDED.workflow_name,

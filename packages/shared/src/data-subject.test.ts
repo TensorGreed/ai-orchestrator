@@ -57,7 +57,10 @@ describe("data-subject requests", () => {
   });
 
   it("refuses unknown types, empty values and unknown fields", () => {
-    expect(subjectRequestCreateSchema.safeParse({ type: "delete", value: "x" }).success).toBe(false);
+    expect(subjectRequestCreateSchema.safeParse({ type: "erase", value: "x" }).success).toBe(false);
+    // 13.3 — a deletion is a request type; revealing tokens is for exports only.
+    expect(subjectRequestCreateSchema.safeParse({ type: "delete", value: "x" }).success).toBe(true);
+    expect(subjectRequestCreateSchema.safeParse({ type: "delete", value: "x", revealTokens: true }).success).toBe(false);
     expect(subjectRequestCreateSchema.safeParse({ type: "export", value: "  " }).success).toBe(false);
     expect(subjectRequestCreateSchema.safeParse({ type: "export", value: "x".repeat(321) }).success).toBe(false);
     expect(subjectRequestCreateSchema.safeParse({ type: "export", value: "x", extra: 1 }).success).toBe(false);
