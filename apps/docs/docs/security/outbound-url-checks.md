@@ -16,7 +16,10 @@ the host. This
 blocks server-side request forgery (SSRF) and local-file reads through those
 nodes.
 
-MCP HTTP servers are out of scope here; they have their own connection policy.
+MCP HTTP servers and the OAuth discovery URLs of remote MCP servers do not go
+through these checks, and L2M has no other address policy for them. Limit where
+the API host can connect with egress rules at the network layer (a firewall or
+an outbound proxy).
 
 ## Policy
 
@@ -86,5 +89,5 @@ the `Host` header are unchanged.
 - **Deployment-level endpoints** are infrastructure settings and are not
   checked: LLM provider base URLs, connector SDK endpoints, and RAG endpoints
   that come from environment variables (`QDRANT_ENDPOINT`, `CHROMA_ENDPOINT`
-  and the like) rather than from a node. MCP HTTP servers have their own
-  policy.
+  and the like) rather than from a node. MCP HTTP servers and MCP OAuth
+  discovery are not checked either (see above).

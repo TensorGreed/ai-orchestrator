@@ -135,7 +135,7 @@ Probes and tool calls then send `Authorization: Bearer <token>`. Tokens are refr
 How the flow is protected:
 
 - The `state` is single-use, expires after `MCP_OAUTH_STATE_TTL_MS` (10 minutes by default) and is bound to the admin's sign-in session and the server. A callback from another session, a replayed callback and an expired one are all refused. Pending authorizations are kept in memory, so restarting the API cancels them.
-- Discovery and token endpoints must use `https`, except on loopback addresses for local testing. The protected resource metadata must name the server's own origin.
+- Discovery and token endpoints must use `https`, except on loopback addresses for local testing. When the protected resource metadata names a `resource`, it must be on the server's own origin; without one, L2M uses the server's URL as the resource.
 - Access tokens, refresh tokens and the client registration are stored only as an encrypted secret through the secret service. They are not shown in the Secrets list, cannot be used as a node's `secretRef`, and are never returned by the API or written to logs or the audit log. The page sees only the status fields above.
 
 ### The redirect URL

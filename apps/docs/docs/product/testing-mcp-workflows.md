@@ -143,7 +143,7 @@ Create an API key for a builder (Settings → API keys), then:
 
 ```bash
 export L2M_API_URL=https://l2m.internal.example
-export L2M_API_KEY=l2m_…
+export L2M_API_KEY=ao_…
 pnpm l2m mcp check                       # every registered server
 pnpm l2m mcp check --server mcp_1,mcp_2  # some servers
 pnpm l2m mcp check --toolset support     # a toolset's servers and the servers its workflows use

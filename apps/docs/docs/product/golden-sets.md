@@ -219,6 +219,6 @@ l2m replay run --set ds_… --version 12 --max-cost 2 --timeout 900
 - Golden runs recorded before this release have no model tape; record new ones to replay model calls.
 - Interrupted jobs are not resumed; start them again.
 - Judge prompt framing reduces, but cannot rule out, a judge being steered by the output it grades.
-- No release gate yet: a job's result does not block publishing.
+- A job's result blocks publishing only when the workflow has a [release gate](./release-gate); without one, publishing ignores it.
 - Golden sets cannot be exported to or imported from files.
 - Deleting a set deletes the jobs that started from it (for a job over several sets, the first one).

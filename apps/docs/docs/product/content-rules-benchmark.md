@@ -42,7 +42,7 @@ LLM03 (supply chain), LLM04 (data and model poisoning), LLM08 (vector and embedd
 
 ## Splits
 
-- **Main** (220 attacks, 213 benign): the built-in detectors were tuned on it.
+- **Main** (240 attacks, 213 benign): the built-in detectors were tuned on it.
 - **Held-out** (110 attacks, 110 benign, ten of each per category): written apart from the detectors, by an author who did not read the detector rules or the main split. It shows how well the rules generalise to paraphrases and new styles.
 
 When a change catches more or flags less, `l2m guard benchmark --builtin` names the categories now above their floor. Raise those floors (`BUILT_IN_PROFILE_BENCHMARK_FLOORS` in guard-sdk) to the new counts in the same pull request, so a later change cannot slip back.

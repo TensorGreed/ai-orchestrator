@@ -32,7 +32,7 @@ On **Evaluations → Golden sets**, create a set for the workflow and add its go
 
 ## 3. Replay every change in the pipeline
 
-The CLI reads the deployment from two variables. Use a builder API key with run access to the workflow, kept in your CI secret store:
+The CLI reads the deployment from two variables. Use a builder API key with edit access (`workflow:write`) to the workflow, kept in your CI secret store: a `--file` candidate is unsaved workflow code, so run access alone is not enough.
 
 ```bash
 export L2M_API_URL=https://l2m.example.com
