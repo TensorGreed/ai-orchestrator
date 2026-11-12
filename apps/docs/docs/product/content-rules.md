@@ -14,8 +14,16 @@ The [content rules engine](./content-rules-engine.md) checks content against a r
 | **Rules port** on an Agent or Supervisor | The agent loop: the prompt, every tool call's arguments, every tool result, the final answer | Blocks, rewrites or pauses at that point of the loop |
 | **Automatic rule set** bound to a project or workflow | The same agent loop, for every agent without a rules port | Same as the rules port |
 | **Model boundary** on LLM Call nodes, chat model nodes, the chains, agents and Supervisors | Each part of a prompt that comes from outside content (retrieved documents, connector, HTTP and web page data, webhook payloads from callers the run does not trust), before the model call | Fails the node, or withholds that part; see [Outside content at the model boundary](#outside-content-at-the-model-boundary) |
+| **Response** to an external caller | What a webhook, chat or MCP invoke caller receives, once at the end of the run | Rewrites or withholds the response; see [Responses to external callers](#responses-to-external-callers) |
+| **Request** at the webhook route | The incoming webhook payload, before the run starts (optional `trigger_input` channel) | Refuses the request, or rewrites what the run receives |
+| **Reveal node** | Protection tokens in one field, against the reveal rules of the run's rule sets | Restores the values a rule allows; see [Reveal node](#reveal-node) |
+| **Gateways** | Calls through the [MCP gateway](./mcp-gateway.md#content-rules-on-the-gateway) and the [/v1 AI gateway](./ai-gateway.md#content-rules) | Blocks or rewrites the call or the answer |
 
 An enforced project rule set (see [Bindings](#bindings)) runs in every placement, before anything else.
+
+Each rule event records its placement: `node`, `agent`, `retrieval` (the model boundary), `response`, `request`, `reveal` or `gateway`. The Security page and `GET /api/guard/events?placement=` can filter on `gateway`, `response` and `request`, or on everything but gateway calls (`run`).
+
+To check what an answer says rather than the data in it (an answer schema, topics, content safety, grounding in retrieved documents), add [output checks](./content-rules-output-checks.md) to a rule set.
 
 ### Content Rules node
 
@@ -121,7 +129,7 @@ Precedence, for each agent:
 
 The applied rule sets are deduplicated by hash. All of them run, and the most severe action wins, so an override can add checks to an enforced rule set but never loosen it. A Content Rules node with **Effective rule set** resolves the same way; one with a named rule set runs the enforced rule set first and then its own.
 
-An enforced project rule set covers the project's runs. It reaches calls through the [MCP gateway](./mcp-gateway.md#content-rules-on-the-gateway) only once the toolset or the client calling it has a rule set of its own; until then, gateway calls to the project's toolsets are not checked by content rules.
+An enforced project rule set covers the project's runs. It also checks calls through the [MCP gateway](./mcp-gateway.md#content-rules-on-the-gateway) to the project's toolsets and through the [/v1 AI gateway](./ai-gateway.md#content-rules) to the project's route sets, with no rule set bound to the toolset, route set or client. Before this release it reached gateway calls only once the toolset or the client had a rule set; `GATEWAY_RULES_WITHOUT_BINDING=false` keeps that behaviour.
 
 Changing a project binding needs write access to that project, and reading it (or `GET /api/guard/effective?projectId=`) needs read access, so a project membership with fewer rights than the global role applies here too.
 
@@ -185,9 +193,9 @@ A rule set with a `response` channel checks what external callers receive, with 
 - **Rewritten.** The caller gets the rewritten output, and the run history and the idempotency store keep that version. Node results keep what ran, for builders.
 - **Blocked, review or approval.** The caller cannot wait for a person, so the output is withheld. Webhooks and chat answer `422` with `{ "error": "The response was withheld by content rules.", "code": "content_filter", "executionId": "…" }` (chat adds `session_id`). MCP invoke answers a tool error result. The run itself ends `success`. A check that cannot run withholds the output too.
 - **Paused runs.** A run that pauses for approval answers only `{ "waitingForApproval": true, "executionId": "…" }`, without the approval message, because that message can quote any step's data. Approvers still read the message.
-- **Failed runs.** The caller reads `The workflow run failed.` and the execution id. The error text, which can quote run data, stays in the run history.
+- **Failed runs.** Webhook and MCP invoke callers read `The workflow run failed.` and the execution id; chat callers get `status: "error"` with no error text. The error text, which can quote run data, stays in the run history.
 - **Webhook Response replies** are checked on the headers and body they send.
-- **Run views.** While any rule set has a `response` channel, viewers and operators reading such a run (`GET /api/executions/<id>` and its event stream) see each step's status and timing but not its data. The run's own output is the checked one. Builders and admins see everything. Audit bundle exports and golden run recordings are not masked: they hold the run as it ran.
+- **Run views.** Once any rule set, in any of its versions, has a `response` channel, viewers and operators reading such a run (`GET /api/executions/<id>` and its event stream) see each step's status and timing but not its data. The run's own output is the checked one. Builders and admins see everything. Audit bundle exports and golden run recordings are not masked: they hold the run as it ran.
 - **Queued runs** go only to workers that can check responses. While a worker of the pool cannot, these runs execute inline and count in `dispatch_inline_runs_total{reason="capability:content-rules-response-v1"}`. A result returned without the check is withheld.
 
 An optional `trigger_input` channel checks webhook payloads at the route, before anything is reserved or run. A block answers `400` with `{ "error": "The request was refused by content rules.", "code": "content_filter" }`. A rewrite is what the run receives. These checks are recorded with the placement `request`. A refused request never runs, so the Security page shows "request refused, no run" instead of a run link. The check also runs on idempotent retries that are answered from the store. It does not run on `/api/chat` or MCP invoke.
@@ -227,4 +235,7 @@ Rows never hold the content that was checked, the raw matched value, protection 
 - **Sub-workflows** run under the calling workflow's rule set resolution, not their own bindings. **Error-handler workflows** run under their own workflow and project bindings.
 - **Read scoping.** Rule events, the Security page counts and the bindings listed on a rule set are limited to the workflows and projects the user can read. Rule sets and their versions are instance-wide: every signed-in user can read every rule set. Run history itself is filtered by role only.
 - **Custom patterns.** The nested-quantifier check catches the common catastrophic shapes but not every slow pattern (overlapping alternations such as `(a|aa)+` pass). Patterns run over the whole checked text and the latency budget cannot interrupt a regular expression that is already running, so keep dictionary patterns simple and anchored.
+- **Model-backed output checks on responses.** The `response` check offers no model, so an output check set to call one (safety by model, topics by meaning, the grounding judge) cannot run there and follows the rule set's failure policy: with `fail_closed`, the default, every response is withheld. See [Output checks](./content-rules-output-checks.md#limits).
+- **Audit bundles and golden runs keep step data.** Anyone who can read the workflow, viewers included, can export a run's audit bundle and read its golden run recordings. Both hold each step's data as it ran, unmasked, even while a `response` rule set masks run views.
+- **Run view masking is not per run.** Once any version of any rule set has a `response` channel, viewers and operators see webhook, chat and MCP invoke runs masked, older runs included. Removing the channel in a new version does not unmask them, because earlier versions still have it; deleting those rule sets does.
 - **Token vault.** `guard_token_vault` rows are not covered by run retention, and rows stay until they are deleted. Each row records the project and run that issued it (rows from before this was recorded have none); a Reveal node reveals only its own project's tokens, while a Content Rules node reuses a deterministic token for an equal value whichever project issued it. Sealing binds each value to the vault's purpose but not to its token or row. Keys for deterministic tokens and keyed hashes must be at least 16 bytes.
