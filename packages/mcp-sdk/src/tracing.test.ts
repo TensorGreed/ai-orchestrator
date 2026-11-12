@@ -277,7 +277,8 @@ describe("HTTP client: trace context on the wire", () => {
     const out = await registry.get("http_mcp").invokeTool("missing", {}, { serverId: "http_mcp", connection: { endpoint } }, contextOf());
     expect(out).toMatchObject({ ok: false, errorKind: "invalid_arguments" });
     expect(trace.named("tools/call missing")[0]!.attributes["rpc.response.status_code"]).toBe("-32602");
-    expect(trace.named("tools/call missing")[0]!.errorType).toBe("invalid_arguments");
+    // The adapter answers with a failed result (invalid_arguments); the span's error type is still the server's code.
+    expect(trace.named("tools/call missing")[0]!.errorType).toBe("-32602");
   });
 
   it("modern: merges the protocol keys, the progress token and trace context into one _meta and adds the headers", async () => {

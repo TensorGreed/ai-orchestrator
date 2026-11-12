@@ -252,4 +252,41 @@ describe("MCP span errors", () => {
     expect(JSON.stringify(span.events)).not.toContain("customer data");
     expect(span.status.message ?? "").toBe("");
   });
+
+  it("uses a JSON-RPC code seen during the request as error.type however the failure is then recorded", async () => {
+    const { inst, byName, metrics } = setup();
+    await inst.mcpRequest({ method: "tools/call", target: "lookup", side: "client" }, async (span) => {
+      inst.annotate({ "rpc.response.status_code": "-32602" });
+      span.recordError(null, { type: "invalid_arguments" });
+    });
+    expect(byName("tools/call lookup").attributes["error.type"]).toBe("-32602");
+    const point = (await metrics()).get("mcp.client.operation.duration")!.dataPoints[0]!;
+    expect(point.attributes).toMatchObject({ "error.type": "-32602", "rpc.response.status_code": "-32602" });
+  });
+
+  it("records a server code outside the JSON-RPC reserved range as _OTHER on the metric, and as sent on the span", async () => {
+    const { inst, byName, metrics } = setup();
+    await inst.mcpRequest({ method: "tools/list", side: "client" }, async (span) => {
+      span.setAttributes({ "rpc.response.status_code": "918273645" });
+      span.recordError(null, { type: "918273645" });
+    });
+    expect(byName("tools/list").attributes["rpc.response.status_code"]).toBe("918273645");
+    const point = (await metrics()).get("mcp.client.operation.duration")!.dataPoints[0]!;
+    expect(point.attributes).toMatchObject({ "error.type": "_OTHER", "rpc.response.status_code": "_OTHER" });
+  });
+});
+
+describe("MCP annotations outside an MCP span", () => {
+  it("does not put an MCP client's request attributes on the span around it", async () => {
+    const { inst, byName } = setup();
+    await inst.span({ name: "probe" }, async () => {
+      inst.annotate({ "mcp.protocol.version": "2025-06-18", "jsonrpc.request.id": "1", "rpc.response.status_code": "-32601" });
+      inst.annotate({ "l2m.custom": "kept" });
+    });
+    const span = byName("probe");
+    expect(span.attributes["mcp.protocol.version"]).toBeUndefined();
+    expect(span.attributes["jsonrpc.request.id"]).toBeUndefined();
+    expect(span.attributes["rpc.response.status_code"]).toBeUndefined();
+    expect(span.attributes["l2m.custom"]).toBe("kept");
+  });
 });

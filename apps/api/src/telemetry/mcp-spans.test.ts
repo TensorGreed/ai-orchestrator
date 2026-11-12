@@ -12,6 +12,8 @@ import { InMemorySpanExporter, type ReadableSpan, type SpanProcessor } from "@ai
 import type { McpClient, McpToolset } from "@ai-orchestrator/shared";
 import { gatewayToolName, slugifyServerName } from "@ai-orchestrator/mcp-sdk";
 import { createApp } from "../app.js";
+import { gatewayMethodName, traceCarrierFromMeta, traceGatewayRequest } from "./mcp-gateway-tracing.js";
+import type { InstrumentationSpan, RunInstrumentation } from "@ai-orchestrator/shared";
 import { parseConfig } from "../config.js";
 import type { Store } from "../db/store.js";
 import { AuthService } from "../services/auth-service.js";
@@ -259,14 +261,24 @@ describe("MCP gateway SERVER spans and upstream CLIENT spans", () => {
     expect([list.attributes["jsonrpc.request.id"], ping.attributes["jsonrpc.request.id"]]).toEqual(["1", "2"]);
   });
 
-  it("records a JSON-RPC error answer by its code", async () => {
+  it("records a JSON-RPC error answer by its code, and an unknown method as _OTHER (the caller picks the method)", async () => {
     const fixture = await setup({ TRACING_ENABLED: "true" });
     const sessionId = await openSession(fixture);
-    const response = await rpc(fixture, { jsonrpc: "2.0", id: 3, method: "no/such" }, { "mcp-session-id": sessionId });
+    const response = await rpc(fixture, { jsonrpc: "2.0", id: 3, method: "no/such-0123456789" }, { "mcp-session-id": sessionId });
     expect(response.json()).toMatchObject({ error: { code: -32601 } });
-    const [span] = spansNamed(fixture, "no/such", SPAN_KIND_SERVER);
-    expect(span!.attributes).toMatchObject({ "error.type": "-32601", "rpc.response.status_code": "-32601" });
+    expect(spansNamed(fixture, "no/such-0123456789", SPAN_KIND_SERVER)).toEqual([]);
+    const [span] = spansNamed(fixture, "_OTHER", SPAN_KIND_SERVER);
+    expect(span!.attributes).toMatchObject({ "mcp.method.name": "_OTHER", "error.type": "-32601", "rpc.response.status_code": "-32601" });
     expect(span!.status.code).toBe(2);
+  });
+
+  it("modern: server/discover gets a SERVER span with the request's version and trusted parent", async () => {
+    const fixture = await setup({ TRACING_ENABLED: "true" });
+    const response = await rpc(fixture, { jsonrpc: "2.0", id: 9, method: "server/discover", params: { _meta: modernMeta({ traceparent: CALLER_TRACEPARENT }) } }, modernHeaders("server/discover"));
+    expect(response.statusCode).toBe(200);
+    const [server] = spansNamed(fixture, "server/discover", SPAN_KIND_SERVER);
+    expect(server!.parentSpanContext?.spanId).toBe(CALLER_SPAN);
+    expect(server!.attributes).toMatchObject({ "mcp.method.name": "server/discover", "mcp.protocol.version": MODERN, "jsonrpc.request.id": "9" });
   });
 
   it("does not send trace context to a server that opted out", async () => {
@@ -293,5 +305,32 @@ describe("tracing off", () => {
     expect(response.statusCode).toBe(200);
     expect(upstreamMeta(response.json())).toBeNull();
     expect(fixture.exporter.getFinishedSpans()).toEqual([]);
+  });
+});
+
+describe("gateway span helpers", () => {
+  it("names only the methods MCP defines; anything else is _OTHER", () => {
+    expect(gatewayMethodName("tools/call")).toBe("tools/call");
+    expect(gatewayMethodName("server/discover")).toBe("server/discover");
+    expect(gatewayMethodName("x".repeat(500))).toBe("_OTHER");
+  });
+
+  it("reads traceparent and tracestate up to 512 characters and baggage up to 8192", () => {
+    const long = "a".repeat(513);
+    expect(traceCarrierFromMeta({ _meta: { traceparent: long } })).toBeUndefined();
+    expect(traceCarrierFromMeta({ _meta: { traceparent: CALLER_TRACEPARENT, tracestate: long, baggage: "k=" + "v".repeat(8000) } })).toEqual({
+      traceparent: CALLER_TRACEPARENT,
+      baggage: "k=" + "v".repeat(8000)
+    });
+  });
+
+  it("records a thrown error by its type only and rethrows it", async () => {
+    const recorded: Array<{ error: unknown; type?: string }> = [];
+    const span = { recordError: (error: unknown, options?: { type?: string }) => recorded.push({ error, type: options?.type }) } as unknown as InstrumentationSpan;
+    const instrumentation = { enabled: true, mcpRequest: async (_info: unknown, fn: (s: InstrumentationSpan) => Promise<unknown>) => await fn(span) } as unknown as RunInstrumentation;
+    const facts = { method: "initialize", params: {}, era: "legacy" as const, toolsetId: "t", clientId: "c" };
+    await expect(traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => { throw new Error("secret request text"); })).rejects.toThrow("secret request text");
+    await expect(traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => { throw new TypeError("more text"); })).rejects.toThrow();
+    expect(recorded).toEqual([{ error: null, type: "_OTHER" }, { error: null, type: "TypeError" }]);
   });
 });

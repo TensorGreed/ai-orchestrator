@@ -62,7 +62,10 @@ export class RecordingInstrumentation implements RunInstrumentation {
         for (const [key, value] of Object.entries(values)) if (value !== undefined && value !== null) attributes[key] = value;
       },
       recordError(_error: unknown, options?: { type?: string }) {
-        span.errorType = options?.type ?? "_OTHER";
+        // As the OTel implementation does: a JSON-RPC code seen during the request is the error type.
+        if (span.errorType !== undefined) return;
+        const code = attributes["rpc.response.status_code"];
+        span.errorType = typeof code === "string" ? code : (options?.type ?? "_OTHER");
       },
       keepOpen: () => undefined,
       end() {

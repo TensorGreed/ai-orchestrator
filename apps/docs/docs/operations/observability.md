@@ -209,7 +209,7 @@ tools/call {tool}             SERVER   one per JSON-RPC request, batches include
 | CLIENT | `mcp.method.name`, `gen_ai.operation.name` (`execute_tool` for `tools/call`), `gen_ai.tool.name`, `gen_ai.prompt.name`, `mcp.resource.uri` (without credentials, query or fragment), `mcp.session.id` (session-based servers), `mcp.protocol.version`, `jsonrpc.request.id`, `network.transport` (`tcp` or `pipe` for stdio), `network.protocol.name`, `server.address` and `server.port` (host only), `l2m.mcp.server.id` (the registry id), `rpc.response.status_code`, `error.type` |
 | SERVER (gateway) | the same names without `server.*`, plus `l2m.toolset.id` and `l2m.gateway.client.id` |
 
-Metrics, exported with the other OTLP metrics: `mcp.client.operation.duration` and `mcp.server.operation.duration` (seconds), by method, protocol version, transport and outcome. The client histogram also carries the tool and prompt name; the gateway's does not, because callers choose those names.
+Metrics, exported with the other OTLP metrics: `mcp.client.operation.duration` and `mcp.server.operation.duration` (seconds), by method, protocol version, transport and outcome. The client histogram also carries the tool and prompt name; the gateway's does not, because callers choose those names. For the same reason a gateway request whose method MCP does not define is named `_OTHER`, and a JSON-RPC error code outside the range JSON-RPC reserves (-32768 to -32000) is recorded as `_OTHER` on the metrics (the span keeps the code).
 
 ### Trace context sent to MCP servers
 
@@ -217,7 +217,7 @@ Each request to an MCP server carries the active span's trace context in `params
 
 ### Trace context the gateway receives
 
-A gateway client can send trace context in `params._meta`, in the HTTP headers, or both. The `_meta` context wins: it becomes the parent of the request's SERVER span, and the HTTP request's span is linked (`l2m.link.reason=transport`). Every request that reaches the gateway carries a valid client token, so its context is continued under `L2M_OTEL_TRUST_INBOUND=authenticated` (the default) and `all`; with `none` the span stays in the HTTP request's trace and only links the caller's (`l2m.link.reason=untrusted_inbound`). The gateway never forwards a caller's `_meta` to the servers behind it: they receive the context of the gateway's own CLIENT span.
+A gateway client can send trace context in `params._meta`, in the HTTP headers, or both. The `_meta` context wins: it becomes the parent of the request's SERVER span, and the HTTP request's span is linked (`l2m.link.reason=transport`). Every request that reaches the gateway carries a valid client token, so its context is continued under `L2M_OTEL_TRUST_INBOUND=authenticated` (the default) and `all`; with `none` the span stays in the HTTP request's trace and only links the caller's (`l2m.link.reason=untrusted_inbound`). The servers behind the gateway never receive a caller's `_meta` as it was sent: they get the context of the gateway's own CLIENT span, which keeps the caller's trace (and its `tracestate`) only when the caller's context was continued. Baggage in a caller's `_meta` is not carried on. In `_meta`, `traceparent` and `tracestate` longer than 512 characters and `baggage` longer than 8192 are ignored.
 
 ## Settings
 

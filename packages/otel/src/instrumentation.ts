@@ -37,8 +37,8 @@ import type {
 } from "@ai-orchestrator/shared";
 import { NOOP_INSTRUMENTATION_SPAN, NOOP_SCOPED_INSTRUMENTATION_SPAN } from "@ai-orchestrator/shared";
 import type { OtelRuntimeOptions } from "./options.js";
-import { MCP_CLIENT_METRIC_KEYS, MCP_SERVER_METRIC_KEYS, McpMetrics, mcpSpanSpec } from "./mcp.js";
-import { ATTR_ERROR_TYPE, ATTR_EXCEPTION_MESSAGE, ATTR_EXCEPTION_TYPE, ATTR_SERVER_ADDRESS, ATTR_SERVER_PORT, GEN_AI, GEN_AI_OPERATION, L2M, genAiProviderName } from "./semconv.js";
+import { MCP_CLIENT_METRIC_KEYS, MCP_REQUEST_KEYS, MCP_SERVER_METRIC_KEYS, McpMetrics, mcpSpanSpec, metricValue } from "./mcp.js";
+import { ATTR_ERROR_TYPE, ATTR_EXCEPTION_MESSAGE, ATTR_EXCEPTION_TYPE, ATTR_SERVER_ADDRESS, ATTR_SERVER_PORT, GEN_AI, GEN_AI_OPERATION, L2M, MCP, genAiProviderName } from "./semconv.js";
 
 const KINDS: Record<InstrumentationSpanKind, SpanKind> = {
   internal: SpanKind.INTERNAL,
@@ -167,6 +167,8 @@ export class McpSpanHandle extends OtelSpanHandle {
   private readonly metricAttributes: Attributes = {};
   private measured = false;
   private errored = false;
+  /** The JSON-RPC error code the server answered with, once seen: it is the request's `error.type`. */
+  private rpcCode: string | undefined;
 
   constructor(
     span: Span,
@@ -180,10 +182,12 @@ export class McpSpanHandle extends OtelSpanHandle {
   }
 
   private capture(attributes: InstrumentationAttributes): void {
+    const code = attributes[MCP.RPC_RESPONSE_STATUS_CODE];
+    if (code !== undefined && code !== null) this.rpcCode = String(code);
     if (!this.metrics) return;
     const clean = cleanAttributes(attributes);
     for (const key of this.side === "server" ? MCP_SERVER_METRIC_KEYS : MCP_CLIENT_METRIC_KEYS) {
-      if (clean[key] !== undefined) this.metricAttributes[key] = clean[key];
+      if (clean[key] !== undefined) this.metricAttributes[key] = metricValue(key, clean[key]);
     }
   }
 
@@ -199,8 +203,10 @@ export class McpSpanHandle extends OtelSpanHandle {
   override recordError(error: unknown, options: { type?: string } = {}): void {
     if (this.errored) return;
     this.errored = true;
-    this.capture({ [ATTR_ERROR_TYPE]: errorTypeOf(error, options.type) });
-    super.recordError(error, options);
+    // A JSON-RPC error code seen during the request is its error type (MCP conventions), however the failure surfaced.
+    const type = this.rpcCode ?? errorTypeOf(error, options.type);
+    this.capture({ [ATTR_ERROR_TYPE]: type });
+    super.recordError(error, { type });
   }
 
   override end(): void {
@@ -472,7 +478,9 @@ export class OtelRunInstrumentation implements RunInstrumentation {
     // An MCP span's handle also keeps what its duration metric needs, sampled or not.
     const mcp = this.mcpHandles.get(span);
     if (mcp) mcp.setAttributes(attributes);
-    else if (span.isRecording()) span.setAttributes(cleanAttributes(attributes));
+    // What an MCP client reports about its request belongs on an MCP span only (a call made outside one, such as a
+    // capability lookup, must not put MCP attributes on the HTTP or tool span around it).
+    else if (span.isRecording() && !Object.keys(attributes).every((key) => MCP_REQUEST_KEYS.has(key))) span.setAttributes(cleanAttributes(attributes));
   }
 
   inject(carrier: TraceCarrier, target: TraceInjectTarget): boolean {

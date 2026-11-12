@@ -1,4 +1,4 @@
-import { ValueType, type Histogram, type Meter } from "@opentelemetry/api";
+import { ValueType, type AttributeValue, type Histogram, type Meter } from "@opentelemetry/api";
 import type { InstrumentationAttributes, McpRequestSpanInfo } from "@ai-orchestrator/shared";
 import {
   ATTR_CLIENT_ADDRESS,
@@ -92,6 +92,26 @@ export const MCP_SERVER_METRIC_KEYS: readonly string[] = [
   MCP.RPC_RESPONSE_STATUS_CODE,
   ATTR_ERROR_TYPE
 ];
+
+/** Attributes MCP clients report about their request through `annotate`; they are set on MCP spans only. */
+export const MCP_REQUEST_KEYS: ReadonlySet<string> = new Set([
+  MCP.SESSION_ID,
+  MCP.PROTOCOL_VERSION,
+  MCP.JSONRPC_REQUEST_ID,
+  MCP.RPC_RESPONSE_STATUS_CODE,
+  L2M.MCP_ROUNDS
+]);
+
+/**
+ * A metric attribute value. A JSON-RPC code comes from the server, so outside the range JSON-RPC reserves
+ * (-32768 to -32000, which holds every MCP code) it is recorded as `_OTHER` to keep series bounded.
+ */
+export function metricValue(key: string, value: AttributeValue): AttributeValue {
+  if (key !== MCP.RPC_RESPONSE_STATUS_CODE && key !== ATTR_ERROR_TYPE) return value;
+  if (typeof value !== "string" || !/^-?\d+$/.test(value)) return value;
+  const code = Number(value);
+  return code >= -32768 && code <= -32000 ? value : "_OTHER";
+}
 
 /** The MCP operation duration histograms. */
 export class McpMetrics {

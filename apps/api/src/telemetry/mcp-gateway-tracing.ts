@@ -17,9 +17,32 @@ export interface McpGatewayTracing {
   trustInbound: InboundTrust;
 }
 
-/** Longest trace context value read from `_meta` (W3C allows 512 for tracestate; baggage up to 8192). */
-const MAX_CARRIER_VALUE = 8192;
+/** Longest trace context values read from `_meta`: as for the HTTP headers, and the W3C limit for baggage. */
+const MAX_CARRIER_VALUE: Record<"traceparent" | "tracestate" | "baggage", number> = { traceparent: 512, tracestate: 512, baggage: 8192 };
 const TRACE_KEYS = ["traceparent", "tracestate", "baggage"] as const;
+
+/**
+ * Methods named as they are in spans and metrics. A caller can send any method on a session, so anything else is
+ * recorded as `_OTHER` (it is answered with "method not found"), which keeps span names and metric series bounded.
+ */
+const KNOWN_METHODS: ReadonlySet<string> = new Set([
+  "initialize",
+  "ping",
+  "server/discover",
+  "tools/list",
+  "tools/call",
+  "resources/list",
+  "resources/templates/list",
+  "resources/read",
+  "prompts/list",
+  "prompts/get",
+  "completion/complete",
+  "logging/setLevel"
+]);
+
+export function gatewayMethodName(method: string): string {
+  return KNOWN_METHODS.has(method) ? method : "_OTHER";
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -28,11 +51,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** The trace context in a request's `params._meta`, or undefined when it carries no `traceparent`. */
 export function traceCarrierFromMeta(params: unknown): TraceCarrier | undefined {
   const meta = isRecord(params) && isRecord(params._meta) ? params._meta : undefined;
-  if (!meta || typeof meta.traceparent !== "string" || meta.traceparent.length > MAX_CARRIER_VALUE) return undefined;
+  if (!meta || typeof meta.traceparent !== "string" || meta.traceparent.length > MAX_CARRIER_VALUE.traceparent) return undefined;
   const carrier: TraceCarrier = {};
   for (const key of TRACE_KEYS) {
     const value = meta[key];
-    if (typeof value === "string" && value.length <= MAX_CARRIER_VALUE) carrier[key] = value;
+    if (typeof value === "string" && value.length <= MAX_CARRIER_VALUE[key]) carrier[key] = value;
   }
   return carrier;
 }
@@ -55,7 +78,7 @@ export function gatewaySpanInfo(facts: GatewayRequestFacts, trustInbound: Inboun
   const name = typeof params.name === "string" && (facts.method === "tools/call" || facts.method === "prompts/get") ? params.name : undefined;
   const carrier = traceCarrierFromMeta(facts.params);
   return {
-    method: facts.method,
+    method: gatewayMethodName(facts.method),
     side: "server",
     ...(name ? { target: name } : {}),
     ...(facts.era === "legacy" && facts.sessionId ? { sessionId: facts.sessionId } : {}),
@@ -84,11 +107,20 @@ export function recordGatewayOutcome(span: InstrumentationSpan, response: unknow
   if (isRecord(response.result) && response.result.isError === true) span.recordError(null, { type: "tool_error" });
 }
 
-/** Runs `fn` (the request's dispatch) in its SERVER span; without tracing it runs `fn` as it is. */
+/**
+ * Runs `fn` (the request's dispatch) in its SERVER span; without tracing it runs `fn` as it is. A thrown error is
+ * recorded by its type only (its text can hold request content) and rethrown.
+ */
 export async function traceGatewayRequest<T>(tracing: McpGatewayTracing | undefined, facts: GatewayRequestFacts, fn: () => Promise<T>): Promise<T> {
   if (!tracing?.instrumentation.enabled) return await fn();
   return await tracing.instrumentation.mcpRequest(gatewaySpanInfo(facts, tracing.trustInbound), async (span) => {
-    const response = await fn();
+    let response: T;
+    try {
+      response = await fn();
+    } catch (error) {
+      span.recordError(null, { type: error instanceof Error && error.name && error.name !== "Error" ? error.name : "_OTHER" });
+      throw error;
+    }
     recordGatewayOutcome(span, response);
     return response;
   });

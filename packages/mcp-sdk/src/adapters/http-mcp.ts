@@ -1035,11 +1035,10 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
         const { response } = await postRpc(
           session.endpoint,
           { jsonrpc: "2.0", id: nextRequestId("server-discover"), method: "server/discover", params },
-          {
-            ...session.headers,
+          mergeHeaders(session.headers, {
             ...buildMcpStandardHeaders(session.protocolVersion as string, "server/discover", params),
             ...traceContextHeaders(carrier)
-          },
+          }),
           Math.min(session.timeoutMs, ERA_PROBE_TIMEOUT_MS),
           { ...(context.signal ? { signal: context.signal } : {}), maxRetries: 0 }
         );
@@ -1159,13 +1158,13 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
     const traceHeaders = traceContextHeaders(mcpTraceCarrier(this.trace, config));
     let initialize: Awaited<ReturnType<typeof postRpc>>;
     try {
-      initialize = await postRpc(endpoint, initializePayload, { ...headers, ...traceHeaders }, timeoutMs, { signal: context.signal });
+      initialize = await postRpc(endpoint, initializePayload, mergeHeaders(headers, traceHeaders), timeoutMs, { signal: context.signal });
     } catch (error) {
       // An OAuth access token the server rejects is refreshed once before giving up.
       if (error instanceof McpHttpError && error.status === 401 && authTypeOf(config) === "oauth") {
         headers = await buildHeaders(true);
         try {
-          initialize = await postRpc(endpoint, initializePayload, { ...headers, ...traceHeaders }, timeoutMs, { signal: context.signal });
+          initialize = await postRpc(endpoint, initializePayload, mergeHeaders(headers, traceHeaders), timeoutMs, { signal: context.signal });
         } catch (retryError) {
           const modern = fallForward(retryError);
           if (modern) return modern;
