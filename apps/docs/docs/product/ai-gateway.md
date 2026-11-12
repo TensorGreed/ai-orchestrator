@@ -177,3 +177,8 @@ Errors use the OpenAI shape: `{"error": {"message", "type", "code", "param"}}`.
 | 503 | `service_unavailable` | Budgets, content rules or the allowlist could not be checked; the request was not sent. |
 
 See the [API endpoints](../api/endpoints#v1-ai-gateway) for the admin API.
+
+## Concepts
+
+- [LLM gateway vs MCP gateway: what each one governs](../learn/operations/llm-gateway-vs-mcp-gateway)
+- [Controlling LLM and agent costs](../learn/operations/llm-cost-control)

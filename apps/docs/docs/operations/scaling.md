@@ -178,3 +178,5 @@ the harness with `SCALE_EXECUTION_DISPATCH=queue` (the compose file passes it to
 - The measurements are runs per second against the number of workers (2, 4 and 8, aiming at 80% scaling
   efficiency), queue wait p95 under 250 ms with the bus waking workers, stream relay lag from worker to browser, cancel
   propagation, recovery after a worker is killed, and the end-to-end overhead compared with one all-in-one instance.
+
+Concepts: [Self-hosting AI agents: what you run and why](../learn/operations/self-hosting-ai-agents).
