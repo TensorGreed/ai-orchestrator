@@ -1,28 +1,40 @@
 {
-  "$comment": "Which samples in samples/workflows/ become recipe pages under docs/recipes/. Run `pnpm --filter @ai-orchestrator/docs gen:recipes` (the docs build runs it). Each entry: sample (file name), slug (page name), title (<= 54 chars; the page title adds ' | L2M'), description (<= 155 chars), tags (lower case; they become the filters on /recipes/), summary (Markdown, a short paragraph on what it does and when to use it), related (glossary slugs, optional), docs (further reading inside the docs, optional).",
+  "$comment": "Which samples in samples/workflows/ become recipe pages under docs/recipes/. `pnpm --filter @ai-orchestrator/docs gen:recipes` (run by the docs build and dev server) writes them. Fields: sample (file name); slug (page name; never rename a published slug, GitHub Pages cannot redirect); title (<= 54 characters, the page title adds ' | L2M'); description (<= 155 characters); keys (none | model | services: what it needs to run); keysNote (one short line, e.g. 'No API key'); time (optional, e.g. '5 minutes'); tags (lower case, the filters on /recipes/); whatYouGet (one sentence); summary (Markdown paragraph: what it does and when to use it); makeItYours and makeItSafer (Markdown lists, optional; safety controls are optional features, say so); related (glossary slugs); docs (further reading inside the docs).",
   "recipes": [
     {
       "sample": "mcp-agent-quickstart-flow.json",
-      "slug": "mcp-agent-quickstart",
-      "title": "MCP agent quickstart: an agent with two MCP tools",
-      "description": "A ready-to-import L2M workflow: one agent with a chat model and two MCP tools, a clock and a calculator. Runs without API keys on a fresh install.",
+      "slug": "zero-key-mcp-agent",
+      "title": "Build an MCP agent with no API key in 5 minutes",
+      "description": "Import a ready MCP agent that runs on a fresh L2M install with a built-in echo model and a mock MCP server, then swap in a real model and server.",
+      "keys": "none",
+      "keysNote": "No API key",
+      "time": "5 minutes",
       "tags": ["agent", "mcp", "starter"],
-      "summary": "The smallest useful agent: a manual trigger starts one Agent Orchestrator node, which answers with the help of two MCP tools from the bundled mock MCP server, `get_current_time` and `calculator`. The chat model is the built-in echo provider, so it runs with no API key. Use it to see the agent loop and its tool calls, then swap the echo provider for a real model and the mock server for your own MCP server.",
-      "related": ["agent-loop", "tool-call"],
+      "whatYouGet": "One agent with a chat model and two MCP tools, a clock and a calculator, that runs on a fresh install.",
+      "summary": "A manual trigger starts one Agent Orchestrator node, which can call two tools from the bundled mock MCP server: `get_current_time` and `calculator`. The chat model is the built-in echo provider, so the workflow imports and runs with no key. Echo is not a real model: it never asks for a tool, so a local run ends after one model call. To watch the full loop, with its tool calls, play the recorded run in the demo, or attach a real chat model.",
+      "makeItYours": "- Replace the echo chat model node with a real one (OpenAI, Anthropic, Ollama or any OpenAI-compatible endpoint) on the agent's `chat_model` port.\n- Replace the mock MCP tools with a server from your [MCP server registry](/product/mcp-server-registry), such as a filesystem or database server.\n- Write your own system prompt on the agent node, and raise `maxIterations` only if the task needs more steps.",
+      "makeItSafer": "- Deny or allow tools per role with [MCP tool policy](/product/mcp-tool-policy).\n- Require a person's approval before write tools run: see [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Cap model spend with a [budget](/product/budgets).",
+      "related": ["agent-loop", "tool-calling", "ai-agent", "mcp-tool"],
       "docs": [
-        { "text": "Build your first MCP agent in 5 min", "link": "/getting-started/build-your-first-mcp-agent" },
+        { "text": "Build your first MCP agent in 5 minutes", "link": "/getting-started/build-your-first-mcp-agent" },
+        { "text": "What is an AI agent?", "link": "/learn/agents/what-is-an-ai-agent" },
         { "text": "Agent loop", "link": "/runtime/agent-loop" },
         { "text": "Pattern library", "link": "/patterns/" }
       ]
     },
     {
       "sample": "supervisor-worker-swarm-flow.json",
-      "slug": "supervisor-worker-swarm",
-      "title": "Supervisor and worker agents: a two-worker swarm",
-      "description": "A ready-to-import L2M workflow: a Supervisor agent delegates to a researcher and a calculator worker, each with its own model and MCP tools. No API keys.",
+      "slug": "supervisor-worker-agents",
+      "title": "Supervisor and worker agents: a runnable example",
+      "description": "A supervisor agent hands work to a researcher and a calculator worker, each with its own tools. Imports and runs with no API key.",
+      "keys": "none",
+      "keysNote": "No API key",
       "tags": ["agent", "mcp", "multi-agent"],
-      "summary": "A Supervisor node coordinates two worker agents. The researcher has an MCP knowledge-base lookup tool; the computer has a calculator and a clock. The Supervisor sees each worker as one tool and decides which to call for each step. Every agent uses the built-in echo provider and the bundled mock MCP server, so it runs with no API key. Use it as the starting point when one agent's tool list gets too long or its job splits into roles.",
-      "related": ["agent-loop", "tool-call"],
+      "whatYouGet": "A Supervisor agent with two worker agents, each with its own chat model and MCP tools, that runs on a fresh install.",
+      "summary": "A Supervisor node coordinates two worker agents. The researcher has an MCP knowledge-base lookup tool; the computer has a calculator and a clock. The Supervisor sees each worker as one tool and decides which to call for each step, and each worker runs its own agent loop. Every agent uses the built-in echo provider and the bundled mock MCP server, so it runs with no API key. Echo never asks for a tool, so the Supervisor answers on its first turn and hands nothing off; attach a real chat model to see it delegate.",
+      "makeItYours": "- Give each worker its own real chat model on its `chat_model` port: a small, cheap model often does for a narrow worker.\n- Swap a worker's mock tools for your own MCP servers.\n- Add a third worker on the Supervisor's `worker` port when a new kind of task appears, rather than giving one agent every tool.",
+      "makeItSafer": "- Keep write tools on one worker only, and require approval for them: see [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Record a good run as a [golden run](/product/golden-runs) and replay it after each change.",
+      "related": ["agent-loop", "tool-calling", "supervisor-agent", "worker-agent"],
       "docs": [
         { "text": "Agent loop: attachment ports", "link": "/runtime/agent-loop#attachment-ports" },
         { "text": "Pattern library", "link": "/patterns/" }

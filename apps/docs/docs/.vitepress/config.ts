@@ -2,11 +2,14 @@ import { copyFileSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
-import { hasIndex, readingMinutes, SRC_DIR } from "./site/content.js";
+import { firstPublished, hasIndex, pageExists, pageSocialCard, pagesIn, readingMinutes, SRC_DIR, text } from "./site/content.js";
 import { FEED_PATH, writeFeed } from "./site/feed.js";
-import { breadcrumbsOf, pageKindOf } from "./site/sections.js";
+import { breadcrumbsOf, defaultFolderLabel, docsUrl, hubSectionOf, pageKindOf, type Crumb } from "./site/sections.js";
 import { pageHeadTags, type HubPageData } from "./site/seo.js";
-import { blogSidebar, glossarySidebar, learnSidebar, recipesSidebar } from "./site/sidebars.js";
+import { blogPosts, blogSidebar, glossarySidebar, learnSidebar, recipesSidebar } from "./site/sidebars.js";
+import { LEVEL_LABELS, trackById, TRACKS } from "./site/tracks.js";
+
+const BLOG_IS_EMPTY = blogPosts().length === 0;
 
 // One consent script serves the landing and the docs. It lives with the landing (repo-root
 // docs/site-consent.js); copy it into public/ so VitePress serves it in dev and ships it in the
@@ -19,11 +22,36 @@ copyFileSync(
 /** Frontmatter every page of a knowledge-hub section must carry; the build stops without it. */
 const REQUIRED_FRONTMATTER: Record<string, string[]> = {
   learn: ["title", "description", "level"],
-  glossary: ["title", "description", "term"],
-  recipe: ["title", "description"],
+  glossary: ["title", "description", "term", "topic"],
+  recipe: ["title", "description", "keys"],
   post: ["title", "description", "date", "author"],
-  "hub-index": ["title", "description"]
+  "hub-index": ["title", "description"],
+  "track-index": ["title", "description"]
 };
+
+/** Breadcrumb label of a folder: a Learn track's short title, else the section's label. */
+function folderLabel(folder: string): string {
+  const track = folder.startsWith("learn/") ? trackById(folder.slice("learn/".length)) : undefined;
+  return track?.shortTitle ?? defaultFolderLabel(folder);
+}
+
+const crumbOf = (relativePath: string, name: string): Crumb => ({ name, url: docsUrl(`/${relativePath.replace(/\.md$/, "")}`) });
+
+/** The pages an index lists, for its CollectionPage, DefinedTermSet or Blog JSON-LD. */
+function partsOf(relativePath: string): Crumb[] {
+  const titleOf = (page: { frontmatter: Record<string, string | string[]>; heading: string }) => text(page.frontmatter.title) || page.heading;
+  if (relativePath === "learn/index.md" || /^learn\/[^/]+\/index\.md$/.test(relativePath)) {
+    const only = relativePath === "learn/index.md" ? null : relativePath.split("/")[1];
+    const pages = new Map(pagesIn("learn", true).map((page) => [page.relativePath, page]));
+    return TRACKS.filter((track) => only === null || track.id === only).flatMap((track) =>
+      track.pages.map((slug) => pages.get(`learn/${track.id}/${slug}.md`)).filter((page) => page !== undefined).map((page) => crumbOf(page.relativePath, titleOf(page)))
+    );
+  }
+  if (relativePath === "glossary/index.md") return pagesIn("glossary").map((page) => crumbOf(page.relativePath, text(page.frontmatter.term) || titleOf(page)));
+  if (relativePath === "recipes/index.md") return pagesIn("recipes").map((page) => crumbOf(page.relativePath, titleOf(page)));
+  if (relativePath === "blog/index.md") return blogPosts().map((post) => crumbOf(`blog/${post.slug}.md`, post.title));
+  return [];
+}
 
 export default defineConfig({
   title: "L2M",
@@ -35,9 +63,12 @@ export default defineConfig({
   // artifact before publishing.
   base: "/docs/",
   cleanUrls: true,
-  sitemap: { hostname: "https://lsquarem.com/docs/" },
+  // An empty blog index is thin content: it stays out of the sitemap and search until the first post.
+  sitemap: { hostname: "https://lsquarem.com/docs/", transformItems: (items) => (BLOG_IS_EMPTY ? items.filter((item) => item.url !== "blog/") : items) },
   // Generated table pulled into product/importing-from-another-builder.md with @include; not a page of its own.
   srcExclude: ["product/external-import-coverage.md"],
+  // The local search index (about 1 MB) is one chunk, loaded only when the search box opens.
+  vite: { build: { chunkSizeWarningLimit: 1200 } },
   // "Last updated" on every page, and dateModified in its JSON-LD (from git).
   lastUpdated: true,
   head: [
@@ -55,17 +86,55 @@ export default defineConfig({
     if (missing.length > 0 && !pageData.isNotFound) {
       throw new Error(`${pageData.relativePath}: add ${missing.map((key) => `"${key}"`).join(", ")} to the frontmatter (templates: docs/.vitepress/templates/)`);
     }
-    const name = String(pageData.frontmatter.term ?? pageData.frontmatter.sidebarTitle ?? pageData.title ?? "");
-    const extra: HubPageData = { breadcrumbs: breadcrumbsOf(pageData.relativePath, name, hasIndex) };
+    const fmIn = pageData.frontmatter as Record<string, unknown>;
+    if (fmIn.level !== undefined && !(String(fmIn.level) in LEVEL_LABELS)) {
+      throw new Error(`${pageData.relativePath}: "level" must be one of ${Object.keys(LEVEL_LABELS).join(", ")} (got "${String(fmIn.level)}")`);
+    }
+    // Glossary slugs: `about` feeds the JSON-LD, so a missing term is dropped (with a warning) rather
+    // than left as a dangling reference; `related` terms not written yet are skipped where shown.
+    if (typeof fmIn.about === "string" && !pageExists(`/glossary/${fmIn.about}`)) {
+      console.warn(`[glossary] ${pageData.relativePath}: "about: ${fmIn.about}" names no glossary page yet; left out of the JSON-LD`);
+      delete pageData.frontmatter.about;
+    }
+    if (Array.isArray(fmIn.related) && !pageData.relativePath.startsWith("glossary/")) {
+      const absent = fmIn.related.map(String).filter((slug) => !pageExists(`/glossary/${slug}`));
+      if (absent.length > 0) console.warn(`[glossary] ${pageData.relativePath}: related terms not written yet (skipped): ${absent.join(", ")}`);
+    }
+    // Breadcrumbs use the short label (sidebar title, term, section or track name), not the SEO title.
+    const section = hubSectionOf(pageData.relativePath);
+    const fm = pageData.frontmatter as Record<string, unknown>;
+    const name =
+      kind === "hub-index" && section
+        ? section.label
+        : kind === "track-index"
+          ? folderLabel(pageData.relativePath.replace(/\/index\.md$/, ""))
+          : kind === "docs-index"
+            ? defaultFolderLabel(pageData.relativePath.replace(/\/index\.md$/, ""))
+            : String(fm.sidebarTitle ?? fm.term ?? pageData.title ?? "");
+    const extra: HubPageData = { breadcrumbs: breadcrumbsOf(pageData.relativePath, name, hasIndex, folderLabel) };
     if (kind === "learn" || kind === "post" || kind === "recipe") {
       extra.readingMinutes = readingMinutes(readFileSync(path.join(SRC_DIR, pageData.filePath), "utf8"));
+    }
+    if (kind === "learn" || kind === "glossary" || kind === "recipe" || kind === "docs") {
+      const published = firstPublished(pageData.filePath);
+      if (published) extra.datePublished = published;
+    }
+    if (kind === "hub-index" || kind === "track-index") extra.hasPart = partsOf(pageData.relativePath);
+    const card = pageSocialCard(pageData.relativePath);
+    if (card) extra.socialCard = card;
+    // Learn guides get their own "next in this track" link (TrackNav); the theme's sidebar-order links would cross tracks.
+    if (kind === "learn") {
+      pageData.frontmatter.prev = false;
+      pageData.frontmatter.next = false;
     }
     return extra;
   },
   // Per page: canonical URL, share tags with its own title, description and image, and JSON-LD.
   // The 404 page is kept out of search results instead.
   transformHead({ pageData, title, description }) {
-    return pageHeadTags(pageData, title, description);
+    const tags = pageHeadTags(pageData, title, description);
+    if (BLOG_IS_EMPTY && pageData.relativePath === "blog/index.md") tags.push(["meta", { name: "robots", content: "noindex" }]);
+    return tags;
   },
   buildEnd(siteConfig) {
     writeFeed(siteConfig.outDir);
@@ -73,6 +142,10 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: "← lsquarem.com", link: "https://lsquarem.com/", target: "_self" },
+      { text: "Learn", link: "/learn/", activeMatch: "^/learn/" },
+      { text: "Glossary", link: "/glossary/", activeMatch: "^/glossary/" },
+      { text: "Recipes", link: "/recipes/", activeMatch: "^/recipes/" },
+      { text: "Blog", link: "/blog/", activeMatch: "^/blog/" },
       {
         text: "Docs",
         activeMatch: "^/(?!learn/|glossary/|recipes/|blog/)",
@@ -87,10 +160,6 @@ export default defineConfig({
           { text: "API", link: "/api/endpoints" }
         ]
       },
-      { text: "Learn", link: "/learn/", activeMatch: "^/learn/" },
-      { text: "Recipes", link: "/recipes/", activeMatch: "^/recipes/" },
-      { text: "Glossary", link: "/glossary/", activeMatch: "^/glossary/" },
-      { text: "Blog", link: "/blog/", activeMatch: "^/blog/" },
       { text: "Live demo", link: "https://lsquarem.com/demo/", target: "_self" }
     ],
     search: { provider: "local" },
@@ -101,6 +170,14 @@ export default defineConfig({
       "/recipes/": recipesSidebar(),
       "/blog/": blogSidebar(),
       "/": [
+      {
+        text: "Concepts",
+        items: [
+          { text: "Learn: guided tracks", link: "/learn/" },
+          { text: "Glossary", link: "/glossary/" },
+          { text: "Recipes", link: "/recipes/" }
+        ]
+      },
       {
         text: "Introduction",
         items: [

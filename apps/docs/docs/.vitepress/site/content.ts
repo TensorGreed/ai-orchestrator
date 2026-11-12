@@ -2,6 +2,7 @@
 // blog feed and breadcrumbs. VitePress itself parses frontmatter for the pages; these helpers only
 // read the simple keys the hub needs, so the hub templates keep those keys flat:
 //   key: value | key: "quoted value" | key: [a, b] | key:\n  - a\n  - b
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,10 +66,15 @@ export interface SourcePage {
   body: string;
 }
 
-/** The pages of one hub folder (not its index), sorted by file name. */
-export function pagesIn(folder: string): SourcePage[] {
+/** The pages of one hub folder (not its index), sorted by file name; `deep` also reads sub-folders. */
+export function pagesIn(folder: string, deep = false): SourcePage[] {
   const dir = path.join(SRC_DIR, folder);
   if (!existsSync(dir)) return [];
+  const sub = deep
+    ? readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .flatMap((entry) => pagesIn(`${folder}/${entry.name}`, true))
+    : [];
   return readdirSync(dir)
     .filter((name) => name.endsWith(".md") && name !== "index.md")
     .sort()
@@ -82,7 +88,8 @@ export function pagesIn(folder: string): SourcePage[] {
         heading: body.match(/^#\s+(.+)$/m)?.[1].trim() ?? "",
         body
       };
-    });
+    })
+    .concat(sub);
 }
 
 export const text = (value: string | string[] | undefined): string => (Array.isArray(value) ? value.join(", ") : (value ?? ""));
@@ -100,4 +107,34 @@ export function readingMinutes(markdown: string): number {
   const prose = body.replace(/```[\s\S]*?```/g, " ").replace(/<[^>]+>/g, " ");
   const words = (value: string) => value.split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length;
   return Math.max(1, Math.round((words(prose) + words(code) / 2) / 220));
+}
+
+/** Whether a docs path is a published page: `/learn/agents/x` → learn/agents/x.md, `/learn/` → learn/index.md. */
+export function pageExists(docsPath: string): boolean {
+  const clean = docsPath.replace(/[?#].*$/, "").replace(/^\//, "");
+  const file = clean === "" || clean.endsWith("/") ? `${clean}index.md` : `${clean}.md`;
+  return existsSync(path.join(SRC_DIR, file));
+}
+
+const firstCommitCache = new Map<string, string | undefined>();
+
+/** The date a page was first committed (ISO 8601), from git; undefined for a file git does not know yet. */
+export function firstPublished(relativePath: string): string | undefined {
+  if (!firstCommitCache.has(relativePath)) {
+    let date: string | undefined;
+    try {
+      const out = execFileSync("git", ["log", "--diff-filter=A", "--follow", "--format=%cI", "--", relativePath], { cwd: SRC_DIR, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      date = out.split("\n").filter(Boolean).at(-1);
+    } catch {
+      date = undefined;
+    }
+    firstCommitCache.set(relativePath, date);
+  }
+  return firstCommitCache.get(relativePath);
+}
+
+/** A per-page share card rendered by scripts/social-card/render-sections.mjs, if one exists. */
+export function pageSocialCard(relativePath: string): string | null {
+  const name = `${relativePath.replace(/\.md$/, "").replace(/\//g, "--")}.png`;
+  return existsSync(path.join(SRC_DIR, "public", "social", "pages", name)) ? `/social/pages/${name}` : null;
 }

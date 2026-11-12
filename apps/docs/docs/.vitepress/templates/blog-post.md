@@ -3,7 +3,7 @@
 title: "Post title, at most 54 characters"
 description: "What the post says, at most 155 characters. Unique across the site; it is also the feed summary."
 date: 2026-11-12 # YYYY-MM-DD, the publication date
-author: "Full Name"
+author: "Full Name" # a real person, or "The L2M team"; never an invented name
 # Optional:
 # authorUrl: "https://github.com/handle"
 # related: [agent-loop] # glossary slugs

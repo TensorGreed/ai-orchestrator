@@ -1,5 +1,13 @@
 // Small helpers shared by the knowledge-hub components.
 import { SITE } from "../site/sections.js";
+import { data as pages } from "./data/pages.data.js";
+
+const published = new Set(pages);
+
+/** Whether a docs path (`/learn/agents/x`, `/learn/`) is a published page. */
+export function pageExists(docsPath: string): boolean {
+  return published.has(docsPath.replace(/[?#].*$/, ""));
+}
 
 /** A site URL as a path on the current origin (https://lsquarem.com/docs/x → /docs/x), so links work in previews too. */
 export function sitePath(url: string): string {

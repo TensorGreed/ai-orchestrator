@@ -1,8 +1,8 @@
 ---
 layout: page
 sidebar: false
-title: "Glossary of MCP and AI agent terms"
-description: "Plain-language definitions of the terms behind MCP agents and the L2M studio, from agent loop to tool call, each linked to the docs that use it."
+title: "AI agent and MCP glossary: plain definitions"
+description: "Plain-language definitions of AI agent and MCP terms, starting with the agent loop and tool calling, each with an example and further reading."
 ---
 
 <div class="hub-page">

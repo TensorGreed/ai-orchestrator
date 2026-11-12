@@ -14,6 +14,7 @@ import RecipeCard from "./components/RecipeCard.vue";
 import RecipeGrid from "./components/RecipeGrid.vue";
 import RelatedTerms from "./components/RelatedTerms.vue";
 import Term from "./components/Term.vue";
+import TrackGuides from "./components/TrackGuides.vue";
 import TryInDemo from "./components/TryInDemo.vue";
 import "./custom.css";
 import "./hub.css";
@@ -23,7 +24,7 @@ export default {
   Layout() {
     return h(DefaultTheme.Layout, null, {
       "doc-before": () => h(HubDocBefore),
-      "doc-footer-before": () => h(HubDocFooter),
+      "doc-after": () => h(HubDocFooter),
       "layout-bottom": () =>
         h("p", { class: "site-privacy-note" }, [
           "This website (not the L2M product) uses Google Analytics, only after you accept cookies. ",
@@ -32,7 +33,7 @@ export default {
     });
   },
   enhanceApp({ app }) {
-    for (const [name, component] of Object.entries({ BlogIndex, GlossaryIndex, HubHero, LearnTracks, RecipeCard, RecipeGrid, RelatedTerms, Term, TryInDemo })) {
+    for (const [name, component] of Object.entries({ BlogIndex, GlossaryIndex, HubHero, LearnTracks, RecipeCard, RecipeGrid, RelatedTerms, Term, TrackGuides, TryInDemo })) {
       app.component(name, component);
     }
   }

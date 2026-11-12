@@ -7,6 +7,7 @@ import { data as glossary } from "../data/glossary.data.js";
 
 const props = defineProps<{ terms?: string[] }>();
 const { frontmatter, page } = useData();
+const heading = computed(() => (page.value.relativePath.startsWith("learn/") ? "Key terms" : "Related terms"));
 const self = computed(() => page.value.relativePath.replace(/^glossary\//, "").replace(/\.md$/, ""));
 const items = computed(() => {
   const wanted = props.terms ?? (Array.isArray(frontmatter.value.related) ? (frontmatter.value.related as string[]) : []);
@@ -19,8 +20,8 @@ if (import.meta.env.SSR) {
 </script>
 
 <template>
-  <aside v-if="items.length > 0" class="hub-related" aria-label="Related terms">
-    <h2 class="hub-related-title">Related terms</h2>
+  <aside v-if="items.length > 0" class="hub-related" :aria-label="heading">
+    <h2 class="hub-related-title">{{ heading }}</h2>
     <ul>
       <li v-for="term in items" :key="term.slug">
         <a :href="withBase(`/glossary/${term.slug}`)">{{ term.term }}</a>

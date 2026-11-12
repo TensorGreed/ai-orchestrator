@@ -44,3 +44,21 @@
   --vp-button-brand-hover-bg: #5ccdf3;
   --vp-button-brand-active-bg: #5ccdf3;
 }
+
+/* The nav holds the four hub sections, the Docs menu, the demo and the way back to the landing:
+   too many for a tablet, so it folds into the menu screen until the desktop layout. */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .VPNavBar .VPNavBarMenu,
+  .VPNavBar .VPNavBarExtra {
+    display: none;
+  }
+
+  .VPNavBar .VPNavBarHamburger {
+    display: flex;
+  }
+
+  /* The theme's scoped rule hides the screen from 768 px up; this one needs to win over it. */
+  .VPNav .VPNavScreen {
+    display: block !important;
+  }
+}

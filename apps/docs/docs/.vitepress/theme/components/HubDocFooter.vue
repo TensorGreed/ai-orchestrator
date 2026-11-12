@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// Under every doc page of the knowledge hub: the demo call-out (frontmatter `demo`), related
+// Under every doc page of the knowledge hub (the doc-after slot, so it shows even on a page with no
+// "last updated" date or pager): the demo call-out (frontmatter `demo`), related
 // glossary terms (frontmatter `related`) and, on Learn guides, next / previous in the track.
 import { computed } from "vue";
 import { useData } from "vitepress";

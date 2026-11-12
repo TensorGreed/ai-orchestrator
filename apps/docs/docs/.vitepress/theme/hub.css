@@ -361,6 +361,75 @@
   flex: 1;
 }
 
+/* Learn: start here and track indexes */
+
+.hub-start {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hub-start-step {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 16px;
+  border: 1px solid var(--hub-card-border);
+  border-radius: var(--hub-radius-sm);
+  background: var(--hub-card-bg);
+}
+
+.hub-start-number {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.hub-start-kind {
+  display: block;
+  font-family: var(--vp-font-family-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-2);
+}
+
+.hub-start-link,
+.hub-plain-link {
+  color: var(--vp-c-text-1);
+  font-size: 17px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--vp-c-divider);
+  text-underline-offset: 3px;
+}
+
+.hub-start-link:hover,
+.hub-plain-link:hover {
+  color: var(--vp-c-brand-1);
+  text-decoration-color: currentColor;
+}
+
+.hub-start-step .hub-card-text,
+.hub-start-step .hub-card-meta {
+  margin-top: 4px;
+}
+
+.hub-track-summary {
+  margin: -6px 0 16px;
+}
+
 /* Learn: tracks */
 
 .hub-track {
@@ -613,7 +682,7 @@
 .hub-doc-footer {
   display: grid;
   gap: 20px;
-  margin-top: 40px;
+  margin-top: 32px;
 }
 
 .hub-demo {
@@ -779,9 +848,23 @@
   line-height: 1.5;
   text-align: left;
   white-space: normal;
-  visibility: hidden;
-  opacity: 0;
-  transition: opacity 0.15s, visibility 0.15s;
+  display: none;
+}
+
+/* On a phone the tooltip is a sheet along the bottom of the screen, so it never runs off the side. */
+@media (max-width: 639px) {
+  .hub-term-tip {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+    width: auto;
+    max-width: none;
+  }
+
+  .hub-term-tip::after {
+    display: none;
+  }
 }
 
 /* A bridge over the gap, so the pointer can move onto the tooltip without it closing. */
@@ -796,13 +879,11 @@
 
 .hub-term:hover .hub-term-tip,
 .hub-term-link:focus-visible + .hub-term-tip {
-  visibility: visible;
-  opacity: 1;
+  display: block;
 }
 
 .hub-term.is-dismissed .hub-term-tip {
-  visibility: hidden;
-  opacity: 0;
+  display: none;
 }
 
 /* ---------- recipe pages ---------- */

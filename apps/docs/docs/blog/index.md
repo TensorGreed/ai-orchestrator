@@ -1,8 +1,9 @@
 ---
 layout: page
 sidebar: false
-title: "Blog: notes on running MCP agents"
-description: "Release notes, design notes and field reports from the team building L2M, the open-source, self-hosted studio and runtime for MCP agents."
+titleTemplate: false
+title: "L2M blog: how we build a self-hosted agent runtime"
+description: "Notes from the team building L2M, a self-hosted runtime for MCP agents: how features are tested, released and governed, with links to the docs."
 ---
 
 <div class="hub-page">

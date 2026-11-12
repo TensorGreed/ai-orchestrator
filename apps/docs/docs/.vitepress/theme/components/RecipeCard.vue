@@ -14,6 +14,7 @@ defineProps<{ recipe: RecipeSummary; headingLevel?: 2 | 3 }>();
     <p class="hub-card-text">{{ recipe.description }}</p>
     <p class="hub-card-meta">
       <span>{{ recipe.nodeCount }} nodes</span>
+      <span v-if="recipe.keysNote">{{ recipe.keysNote }}</span>
       <span v-if="recipe.demo" class="hub-badge">Opens in the demo</span>
     </p>
     <ul class="hub-tags" aria-label="Tags">

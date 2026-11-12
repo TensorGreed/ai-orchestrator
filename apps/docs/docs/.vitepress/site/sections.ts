@@ -70,16 +70,17 @@ export type PageKind =
   | "docs"
   | "docs-index"
   | "hub-index"
+  | "track-index"
   | "learn"
   | "glossary"
   | "recipe"
   | "post"
   | "not-found";
 
-/** The hub section a page belongs to, if any. */
+/** The hub section a page belongs to, if any (`learn/...`, `glossary/...`, `recipes/...`, `blog/...`). */
 export function hubSectionOf(relativePath: string): HubSection | null {
   const first = relativePath.split("/")[0];
-  return (HUB_SECTIONS as Record<string, HubSection>)[first] && relativePath.includes("/") ? HUB_SECTIONS[first as HubSectionId] : null;
+  return relativePath.includes("/") && Object.hasOwn(HUB_SECTIONS, first) ? HUB_SECTIONS[first as HubSectionId] : null;
 }
 
 export function pageKindOf(relativePath: string): PageKind {
@@ -88,7 +89,7 @@ export function pageKindOf(relativePath: string): PageKind {
   const section = hubSectionOf(relativePath);
   const isIndex = /(^|\/)index\.md$/.test(relativePath);
   if (section) {
-    if (isIndex) return "hub-index";
+    if (isIndex) return relativePath === `${section.id}/index.md` ? "hub-index" : "track-index";
     return ({ learn: "learn", glossary: "glossary", recipes: "recipe", blog: "post" } as const)[section.id];
   }
   return isIndex ? "docs-index" : "docs";
@@ -116,31 +117,37 @@ export interface Crumb {
 }
 
 /**
- * The breadcrumb trail of a page, from the site's home to the page itself.
- * `hasIndex` says whether a folder has an index page (the middle crumb links there; a section
- * without one is left out, so every crumb is a real page).
+ * The breadcrumb trail of a page: Docs › section › sub-folder › page. A folder is a crumb only when
+ * it has an index page (`hasIndex`), so every crumb is a real page; `folderLabel` names it
+ * (a Learn track's short title, a docs section's sidebar label).
  */
-export function breadcrumbsOf(relativePath: string, title: string, hasIndex: (folder: string) => boolean): Crumb[] {
-  const trail: Crumb[] = [{ name: "L2M", url: `${SITE}/` }];
-  const section = hubSectionOf(relativePath);
+export function breadcrumbsOf(
+  relativePath: string,
+  title: string,
+  hasIndex: (folder: string) => boolean,
+  folderLabel: (folder: string) => string
+): Crumb[] {
+  const trail: Crumb[] = [{ name: "Docs", url: docsUrl("/") }];
   const kind = pageKindOf(relativePath);
-  if (kind === "docs-home") return [...trail, { name: "Docs", url: docsUrl("/") }];
-  if (section) {
-    trail.push({ name: section.label, url: docsUrl(section.path) });
-    if (kind !== "hub-index") trail.push({ name: title, url: pageUrl(relativePath) });
-    return trail;
-  }
-  trail.push({ name: "Docs", url: docsUrl("/") });
+  if (kind === "docs-home") return trail;
   const folders = relativePath.split("/").slice(0, -1);
   for (let depth = 1; depth <= folders.length; depth += 1) {
     const folder = folders.slice(0, depth).join("/");
-    const isSelf = kind === "docs-index" && depth === folders.length;
-    if (isSelf) break;
-    if (hasIndex(folder)) {
-      const label = depth === 1 ? (DOCS_SECTION_LABELS[folder] ?? folder) : folders[depth - 1].replace(/-/g, " ").replace(/^./, (c) => c.toUpperCase());
-      trail.push({ name: label, url: docsUrl(`/${folder}/`) });
+    const isSelf = (kind === "docs-index" || kind === "hub-index" || kind === "track-index") && depth === folders.length;
+    if (isSelf) {
+      trail.push({ name: title, url: docsUrl(`/${folder}/`) });
+      return trail;
     }
+    if (hasIndex(folder)) trail.push({ name: folderLabel(folder), url: docsUrl(`/${folder}/`) });
   }
   trail.push({ name: title, url: pageUrl(relativePath) });
   return trail;
+}
+
+/** The default label of a docs folder: a hub section's label, a docs section's label, or its name. */
+export function defaultFolderLabel(folder: string): string {
+  const last = folder.split("/").at(-1) ?? folder;
+  if (!folder.includes("/") && Object.hasOwn(HUB_SECTIONS, folder)) return HUB_SECTIONS[folder as HubSectionId].label;
+  if (!folder.includes("/") && DOCS_SECTION_LABELS[folder]) return DOCS_SECTION_LABELS[folder];
+  return last.replace(/-/g, " ").replace(/^./, (c) => c.toUpperCase());
 }

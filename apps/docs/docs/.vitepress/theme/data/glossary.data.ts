@@ -8,6 +8,8 @@ export interface GlossaryTerm {
   /** The page's description: one plain sentence that defines the term. */
   definition: string;
   related: string[];
+  /** One of GLOSSARY_TOPICS. */
+  topic: string;
 }
 
 declare const data: GlossaryTerm[];
@@ -21,8 +23,9 @@ export default createContentLoader("glossary/*.md", {
         slug: page.url.replace(/^.*\/glossary\//, "").replace(/\.html$/, ""),
         url: page.url,
         term: String(page.frontmatter.term ?? page.frontmatter.title ?? ""),
-        definition: String(page.frontmatter.description ?? ""),
-        related: Array.isArray(page.frontmatter.related) ? page.frontmatter.related.map(String) : []
+        definition: String(page.frontmatter.definition ?? page.frontmatter.description ?? ""),
+        related: Array.isArray(page.frontmatter.related) ? page.frontmatter.related.map(String) : [],
+        topic: String(page.frontmatter.topic ?? "")
       }))
       .sort((a, b) => a.term.localeCompare(b.term, "en", { sensitivity: "base" }));
   }

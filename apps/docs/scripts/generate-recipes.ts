@@ -28,6 +28,7 @@ const SAMPLES = path.join(REPO, "samples", "workflows");
 const OUT_DIR = path.join(DOCS_APP, "docs", "recipes");
 const FILES_DIR = path.join(DOCS_APP, "docs", "public", "recipes", "files");
 const DEMO_FIXTURES = path.join(REPO, "apps", "web", "src", "demo", "fixtures");
+const GITHUB_SAMPLES = "https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/";
 
 const PORTS = new Set(["chat_model", "memory", "tool", "worker"]);
 const PORT_LABELS: Record<string, string> = { chat_model: "chat model", memory: "memory", tool: "tool", worker: "worker" };
@@ -37,8 +38,14 @@ export interface RecipeConfig {
   slug: string;
   title: string;
   description: string;
+  keys: "none" | "model" | "services";
+  keysNote: string;
+  time?: string;
   tags: string[];
+  whatYouGet: string;
   summary: string;
+  makeItYours?: string;
+  makeItSafer?: string;
   related?: string[];
   docs?: Array<{ text: string; link: string }>;
 }
@@ -223,6 +230,8 @@ export function renderRecipe(recipe: RecipeConfig, workflow: Workflow, demo: Dem
     "---",
     `title: ${JSON.stringify(recipe.title)}`,
     `description: ${JSON.stringify(recipe.description)}`,
+    `keys: ${JSON.stringify(recipe.keys)}`,
+    `keysNote: ${JSON.stringify(recipe.keysNote)}`,
     `tags: ${JSON.stringify(recipe.tags)}`,
     `nodeCount: ${workflow.nodes.length}`,
     `sample: ${JSON.stringify(recipe.sample)}`,
@@ -250,21 +259,30 @@ export function renderRecipe(recipe: RecipeConfig, workflow: Workflow, demo: Dem
     "",
     `# ${recipe.title}`,
     "",
+    `**What you get:** ${recipe.whatYouGet}`,
+    "",
+    `**Needs:** ${recipe.keysNote}${recipe.time ? ` · **Time:** ${recipe.time}` : ""} · **Nodes:** ${workflow.nodes.length}`,
+    "",
     recipe.summary,
     "",
     '<div class="recipe-actions">',
     `  <a class="hub-button" href="${download}" download>Download the workflow JSON</a>`,
-    ...(inDemo ? [`  <a class="hub-button hub-button-quiet" href="${demoUrl}" target="_self">${recorded ? "Open it in the demo and play a run" : "Open it in the demo"}</a>`] : []),
+    ...(inDemo ? [`  <a class="hub-button hub-button-quiet" href="${demoUrl.replace(/&/g, "&amp;")}" target="_self">${recorded ? "Open it in the demo and play a run" : "Open it in the demo"}</a>`] : []),
     "</div>",
     "",
-    "## Workflow",
+    "## Steps",
+    "",
+    `1. Download <a href="${download}" download>${recipe.sample}</a>, or take it from the [samples folder on GitHub](${GITHUB_SAMPLES}${recipe.sample}).`,
+    "2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).",
+    "3. Run it as it is and open the run to see each step.",
+    "4. Then change one thing at a time (see below).",
+    "",
+    "## How it works",
     "",
     '<figure class="recipe-diagram">',
     diagramSvg(workflow, `rd-${recipe.slug}`),
     "<figcaption>Solid arrows are the order the steps run in. Dashed lines attach a chat model, memory, tools or workers to an agent; the agent uses them while it runs.</figcaption>",
     "</figure>",
-    "",
-    "## Nodes",
     "",
     "| Node | Type | Role |",
     "| --- | --- | --- |",
@@ -275,14 +293,10 @@ export function renderRecipe(recipe: RecipeConfig, workflow: Workflow, demo: Dem
     }),
     "",
     `${types.length} node types. Each type links to its config fields in the [node reference](/nodes/reference/).`,
-    "",
-    "## Use it",
-    "",
-    `1. Download <a href="${download}" download>${recipe.sample}</a>.`,
-    "2. Import it in the studio's workflow editor (see [import and export](/product/workflow-editor)).",
-    "3. Run it as it is, then change one node at a time: a real chat model, your own MCP server, your own prompts.",
     ""
   ];
+  if (recipe.makeItYours) lines.push("## Make it yours", "", recipe.makeItYours, "");
+  if (recipe.makeItSafer) lines.push("## Make it safer", "", "These controls are optional; the recipe runs without them.", "", recipe.makeItSafer, "");
   if (recipe.docs && recipe.docs.length > 0) {
     lines.push("## Further reading", "", ...recipe.docs.map((doc) => `- [${doc.text}](${doc.link})`), "");
   }
@@ -297,6 +311,7 @@ function main() {
   const slugs = new Set<string>();
   for (const recipe of config.recipes) {
     if (!/^[a-z0-9-]+$/.test(recipe.slug) || recipe.slug === "index") throw new Error(`[recipes] bad slug "${recipe.slug}"`);
+    if (!["none", "model", "services"].includes(recipe.keys)) throw new Error(`[recipes] ${recipe.slug}: keys must be none, model or services`);
     if (slugs.has(recipe.slug)) throw new Error(`[recipes] slug "${recipe.slug}" is used twice`);
     slugs.add(recipe.slug);
     const source = path.join(SAMPLES, recipe.sample);
