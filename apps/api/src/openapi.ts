@@ -3306,13 +3306,14 @@ export const openApiSpec = {
       post: {
         tags: ["MCP"],
         summary:
-          "MCP Streamable HTTP endpoint for a toolset (JSON-RPC 2.0: initialize, ping, tools/list, tools/call, notifications/initialized, notifications/cancelled; with MCP_GATEWAY_MODERN_PROTOCOL=on also server/discover, tools/list and tools/call from MCP 2026-07-28 clients). Bearer client token scoped to the toolset.",
+          "MCP Streamable HTTP endpoint for a toolset (JSON-RPC 2.0: initialize, ping, tools/list, tools/call, notifications/initialized, notifications/cancelled; with MCP_GATEWAY_MODERN_PROTOCOL=on also server/discover, tools/list, tools/call and subscriptions/listen from MCP 2026-07-28 clients). Bearer client token scoped to the toolset.",
         description:
           "Protocol versions 2025-11-25, 2025-06-18 and 2025-03-26 (batches only in 2025-03-26). Responds with application/json, or text/event-stream when a request carries _meta.progressToken and Accept allows SSE. initialize returns the Mcp-Session-Id header that later requests must send. Origin must be absent, WEB_ORIGIN, MCP_GATEWAY_PUBLIC_URL or listed in MCP_GATEWAY_ALLOWED_ORIGINS. " +
           "With MCP_GATEWAY_MODERN_PROTOCOL=on the endpoint also serves protocol version 2026-07-28 without sessions: a single request whose params._meta carries io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities, with the MCP-Protocol-Version, Mcp-Method and (tools/call) Mcp-Name headers matching the body. " +
           "Failed checks answer HTTP 400 with -32022 (unsupported version; data.supported lists every version), -32020 (header mismatch) or -32602 (missing _meta keys); other methods answer 404 with -32601. " +
           "Results carry resultType and _meta[\"io.modelcontextprotocol/serverInfo\"]; tools/list and server/discover also carry ttlMs and cacheScope \"private\". Mcp-Session-Id is ignored for these requests and never returned; closing the connection cancels the call. " +
           "The gateway's own errors use -31029 (retry later), -31030 (approval pending), -31031 (approval rejected) and -31032 (budget exceeded) for 2026-07-28 callers, and -32029 to -32032 for sessions. " +
+          "subscriptions/listen (Accept: text/event-stream) answers with an SSE stream: first notifications/subscriptions/acknowledged (the gateway honours no notification type, so notifications is empty), then keep-alive comments until the client closes the stream, MCP_GATEWAY_LISTEN_MAX_MS passes or the server shuts down; the last two end with a complete result. Streams count against the client's concurrency limit and MCP_GATEWAY_LISTEN_MAX_PER_CLIENT (HTTP 429, -31029). " +
           "In cluster mode a toolset that tracks outside content per session answers 2026-07-28 requests like a request without a session.",
         parameters: [
           { name: "toolset", in: "path", required: true, schema: { type: "string" } },

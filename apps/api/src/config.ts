@@ -319,6 +319,16 @@ const envSchema = z.object({
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
     z.coerce.number().int().min(0).max(86_400_000).optional()
   ),
+  /** MCP 2026-07-28 — a `subscriptions/listen` stream ends gracefully after this many ms (clients reconnect). Unset or empty = 600000. */
+  MCP_GATEWAY_LISTEN_MAX_MS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(1000).max(86_400_000).optional()
+  ),
+  /** MCP 2026-07-28 — open `subscriptions/listen` streams per client on one instance. Unset or empty = 4. */
+  MCP_GATEWAY_LISTEN_MAX_PER_CLIENT: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(1).max(1000).optional()
+  ),
   /** Base URL clients reach this instance at, used for the endpoint URLs shown in the UI. Empty = the browser's origin. */
   MCP_GATEWAY_PUBLIC_URL: z
     .string()
