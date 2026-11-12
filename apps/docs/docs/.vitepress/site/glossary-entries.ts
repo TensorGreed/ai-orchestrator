@@ -376,7 +376,8 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     slug: "right-to-erasure",
     term: "Right to erasure",
     topic: "operations",
-    definition: "The GDPR right (Article 17) to have one's personal data deleted on certain grounds, with exceptions, for example data needed for legal claims."
+    definition: "The GDPR right (Article 17) to have one's personal data deleted on certain grounds, with exceptions, for example data needed for legal claims.",
+    docs: "/security/data-subject-requests#deleting-a-persons-data"
   },
   {
     slug: "subject-reference",

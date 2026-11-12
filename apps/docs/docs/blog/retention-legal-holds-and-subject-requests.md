@@ -1,6 +1,6 @@
 ---
 title: "Retention, legal holds and data-subject requests"
-description: "What L2M now keeps and for how long, how purges and per-project retention work, how holds block deletes, and how to answer a data-subject request."
+description: "What L2M keeps and for how long, how purges and per-project retention work, how holds block deletes, and how to export or delete one person's data."
 date: 2026-11-12
 author: "The L2M team"
 related: [data-retention, legal-hold, data-subject-request, right-to-erasure, subject-reference]
@@ -9,7 +9,7 @@ socialCard: true
 
 # Retention, legal holds and data-subject requests
 
-An agent platform stores more personal data than it seems to. Every run keeps the user's message, the arguments of each tool call, the tool results and the answer; agent memory keeps whole conversations. Between 10 and 11 November 2026 we merged four pieces of work that make that data manageable on a self-hosted L2M: a retention service, retention per project, legal holds, and data-subject requests with a one-time export. Per-project retention, holds and requests are optional. The retention service deletes what was deleted before, with one exception: read the note on usage retention below before you upgrade.
+An agent platform stores more personal data than it seems to. Every run keeps the user's message, the arguments of each tool call, the tool results and the answer; agent memory keeps whole conversations. Between 10 and 12 November 2026 we merged five pieces of work that make that data manageable on a self-hosted L2M: a retention service, retention per project, legal holds, data-subject requests with a one-time export, and deletion of one person's data on request. Per-project retention, holds, requests and deletion are optional. The retention service deletes what was deleted before, with one exception: read the note on usage retention below before you upgrade.
 
 ## Start with a data map
 
@@ -56,7 +56,7 @@ Retention deletes; sometimes you must not. A <Term id="legal-hold">legal hold</T
 
 A hold never changes who may read the data. Placing and releasing a hold are audited, need a fresh MFA check when step-up is on, and a release needs a signed-in person and a reason. A released hold stays listed, so the record is complete.
 
-GDPR Article 17 gives people a right to erasure, and Article 17(3)(e) says it does not apply where processing is necessary "for the establishment, exercise or defence of legal claims". A hold is how you record that decision in L2M: the per-person delete for golden and captured runs (below) skips held rows with the reason `held` and deletes the rest. Whether the exemption applies is for your legal team to decide.
+GDPR Article 17 gives people a right to erasure, and Article 17(3)(e) says it does not apply where processing is necessary "for the establishment, exercise or defence of legal claims". A hold is how you record that decision in L2M: a deletion request (below) leaves held rows in place and finishes as **Partly deleted: waiting for a legal hold**, and runs again for those rows when the hold is released. Whether the exemption applies is for your legal team to decide.
 
 ## Subject references and data-subject requests
 
@@ -69,21 +69,27 @@ When someone asks what you hold about them, GDPR Article 15 gives them a right t
 How it behaves:
 
 - **Strict matching.** Whole values only. A phone number with no country code in the search or in the data is only a *possible match*, left out of the export and counted in the manifest.
-- **The value never lands in a log.** Not in the audit log, logs, API answers or error messages. While the lookup runs, it is kept sealed with the master key and erased when the export is ready.
+- **The value never lands in a log.** Not in the audit log, logs, API answers or error messages. While the lookup runs, it is kept sealed with the master key and erased when the export is ready, or when a deletion finishes or its preview expires (a deletion waiting for a legal hold keeps it until then).
 - **Coverage.** The search reads runs, paused runs, approval requests, agent memory sessions and artifacts, cassettes, and evaluation data. The manifest names much of what it does not read: logs and metrics, the audit log, tool-call telemetry and rule events (they hold summaries and masked evidence only), usage rows, knowledge bases, backups, and anything sent to model providers or MCP servers. Queue jobs, gateway approval requests, the session tool cache and `/v1` request metadata are not searched either, and the manifest does not list them yet.
 - **Staff requests.** For an L2M user, the export also includes their account, SSO identities, project roles, API key metadata (never the key), and their own audit entries.
 
-## Deleting a person's data today
+## Deleting a person's data
 
-A data-subject request exports; it does not delete. What L2M can delete for one person today is narrower: the [data-subject lookup](/product/production-capture#data-subject-lookup) finds a value in golden runs, captured runs, golden-set cases and the evaluation results and replay runs made from them, and an admin deletes the matches they choose, each checked again before it goes. Production run history is not deleted per person; it leaves with retention (30 days by default). Agent memory is kept until you set `AGENT_MEMORY_RETENTION_DAYS`, so set it if you promise deletion.
+A data-subject request can also delete. Choose **Delete (erasure)** instead of **Export** when you make it ([PR #187](https://github.com/TensorGreed/ai-orchestrator/pull/187), 12 November). The lookup runs as for an export, then stops at a preview of what it found. Nothing is deleted until an admin, or someone with `data_subject:manage`, presses **Confirm deletion**, which needs a fresh MFA check when step-up is on. The deletion runs in the background on the leader, and checks each row the search found again before deleting it. A run still in progress is deleted once it has finished.
+
+- **End users.** A found run goes with its tool-call telemetry, rule events, cassettes, approval requests, queue jobs and subject references. Agent memory sessions and artifacts, and golden or captured runs with the evaluation data made from them, are deleted too. Usage rows of a deleted run stay, with the user cleared, so cost totals and budgets do not change.
+- **Staff members.** The account is deleted the way **Settings → Users → Delete** does, and the person's email becomes a pseudonym (`erased-user-` and 8 hex characters) wherever it records who started, wrote or decided something. Because it deletes the account, only an admin can confirm it. A staff request does not search runs for the email, so make an end-user request too if the person's own data flows through runs. Their audit-log rows are kept unchanged until audit retention removes them, because rewriting them would break the audit chain.
+- **Erasure records.** Every erased row leaves a record: the kind, the row id and when (agent memory and staff members by a keyed hash, never the value). `db:import` and `db:copy` re-apply the records after a restore, so an older backup does not bring the data back. They are kept for `ERASURE_TOMBSTONE_RETENTION_DAYS` (400 by default); keep that longer than your oldest backup.
+
+The older [data-subject lookup](/product/production-capture#data-subject-lookup) for golden and captured runs still works and leaves the same erasure records. Without a request, production run history leaves with retention (30 days by default), and agent memory is kept until you set `AGENT_MEMORY_RETENTION_DAYS`.
 
 ## Backups
 
-Retention, holds and deletes do not reach backups already taken. Rotate backups within the retention you promise, and take a backup when you place a hold: a hold cannot protect data from someone with database access. See [Backup and recovery](/operations/backup-and-recovery).
+Retention, holds and deletes do not reach backups already taken. A restore with `db:import` or `db:copy` re-applies erasure records, but a file-level restore (a copied SQLite file, `pg_restore`) brings the database back exactly as it was. Rotate backups within the retention you promise, and take a backup when you place a hold: a hold cannot protect data from someone with database access. See [Backup and recovery](/operations/backup-and-recovery).
 
 ## What it does not do
 
-- There is no erasure request: a data-subject request exports, and per-person deletion covers only golden and captured runs and the evaluation data made from them.
+- A deletion does not reach logs, metrics, traces and log-streaming destinations, knowledge bases, backups already written (until they are restored with `db:import` or `db:copy`), the model providers and MCP servers that runs sent data to, or reversible tokens that are not in the person's rows and format-preserving tokens. A staff deletion keeps the person's audit-log rows.
 - It does not search logs, metrics, the audit log (a staff export lists only the person's own entries), tool-call telemetry, rule events, usage rows, queue jobs, gateway approvals, the session tool cache, `/v1` request metadata, knowledge bases or backups.
 - Holds stop deletion inside L2M only. They do not stop a database administrator, and they do not stop retention in the systems your logs and backups go to.
 - It does not decide your policy. How long to keep data, and when a request may be refused, are questions for your legal team. This post is not legal advice.
@@ -91,6 +97,6 @@ Retention, holds and deletes do not reach backups already taken. Rotate backups 
 ## Further reading
 
 - Concepts: [Self-hosted AI agent platform: what you run and why](/learn/operations/self-hosting-ai-agents)
-- [Data retention](/operations/data-retention), [Legal holds](/operations/legal-hold), [Data-subject requests](/security/data-subject-requests), [Production capture: data-subject lookup](/product/production-capture#data-subject-lookup)
+- [Data retention](/operations/data-retention), [Legal holds](/operations/legal-hold), [Data-subject requests](/security/data-subject-requests), [Deleting a person's data](/security/data-subject-requests#deleting-a-persons-data), [Production capture: data-subject lookup](/product/production-capture#data-subject-lookup)
 - [GDPR Article 17: right to erasure](https://gdpr-info.eu/art-17-gdpr/), [Article 15: right of access](https://gdpr-info.eu/art-15-gdpr/) and [Article 12: time limits](https://gdpr-info.eu/art-12-gdpr/) (gdpr-info.eu, reproducing Regulation (EU) 2016/679)
-- Pull requests: [#174 retention service](https://github.com/TensorGreed/ai-orchestrator/pull/174), [#176 per-project retention](https://github.com/TensorGreed/ai-orchestrator/pull/176), [#177 legal holds](https://github.com/TensorGreed/ai-orchestrator/pull/177), [#178 data-subject requests](https://github.com/TensorGreed/ai-orchestrator/pull/178) (GitHub)
+- Pull requests: [#174 retention service](https://github.com/TensorGreed/ai-orchestrator/pull/174), [#176 per-project retention](https://github.com/TensorGreed/ai-orchestrator/pull/176), [#177 legal holds](https://github.com/TensorGreed/ai-orchestrator/pull/177), [#178 data-subject requests](https://github.com/TensorGreed/ai-orchestrator/pull/178), [#187 deletion and erasure](https://github.com/TensorGreed/ai-orchestrator/pull/187) (GitHub)
