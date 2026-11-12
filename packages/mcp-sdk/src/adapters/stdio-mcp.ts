@@ -244,6 +244,8 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 const STDERR_LOG_BUFFER_LINES = 100;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const CLOSE_GRACE_MS = 2_000;
+/** After the server process exits, how long its stdout gets to deliver what it already wrote. */
+const EXIT_DRAIN_MS = 200;
 /** After cancelling in-flight requests, how long a server gets to exit on stdin EOF before SIGTERM. */
 const STDIN_CLOSE_GRACE_MS = 500;
 
@@ -641,8 +643,22 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     proc.stderr?.setEncoding("utf-8");
     proc.stderr?.on("data", (chunk: string) => this.handleStderr(session, chunk));
     proc.on("exit", () => {
-      this.handleClose(session);
-      this.runCleanup(session);
+      const finish = () => {
+        this.handleClose(session);
+        this.runCleanup(session);
+      };
+      // A server may write its last answer and exit at once: read stdout to its end (briefly) before failing what is
+      // still in flight, so an answered request is not reported as lost.
+      const stdout = proc.stdout;
+      if (!stdout || stdout.readableEnded || stdout.destroyed) {
+        finish();
+        return;
+      }
+      const timer = setTimeout(finish, EXIT_DRAIN_MS);
+      stdout.once("end", () => {
+        clearTimeout(timer);
+        finish();
+      });
     });
     proc.on("error", (error) => {
       this.handleProcError(session, error);
@@ -727,8 +743,17 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       } else {
         // The process never started or ended on the probe.
         this.useLegacy(session);
-        if (session.spawnFailed || !allowLegacy) throw error;
-        throw new StdioProbeEndedProcessError(error instanceof Error ? error.message : String(error));
+        if (session.spawnFailed) throw error;
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!allowLegacy) {
+          throw new Error(
+            `MCP server '${serverNameOf(config)}' does not speak MCP ${MCP_MODERN_PROTOCOL_VERSIONS.join(", ")}: its process ended on server/discover. Set its protocol to Legacy or Auto. ${detail}`
+          );
+        }
+        // Remember it, so the next process opens with initialize straight away instead of dying on the probe again.
+        this.eraCache.set(session.eraKey, "legacy");
+        this.modernOnlyCache.invalidate(session.eraKey);
+        throw new StdioProbeEndedProcessError(detail);
       }
     }
     const verdict = classifyStdioEraProbe(outcome);
@@ -783,6 +808,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
         const choice = chooseMcpProtocolVersion(supported);
         if (choice.era !== "modern") throw this.noMutualVersionError(config, supported);
         this.modernOnlyCache.set(session.eraKey, "modern", choice.version);
+        if (session.mode === "auto") this.eraCache.set(session.eraKey, "modern", choice.version);
         this.useModern(session, choice.version);
         return;
       }
@@ -1058,7 +1084,8 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     } else {
       session.closeError = error;
     }
-    session.spawnFailed = true;
+    // Only a process that never got a pid failed to start; other process errors are a lost connection.
+    if (session.proc.pid === undefined) session.spawnFailed = true;
     this.handleClose(session);
   }
 
@@ -1365,6 +1392,13 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
             this.eraCache.invalidate(session.eraKey);
             this.modernOnlyCache.invalidate(session.eraKey);
             throw new StdioEraMismatchError("legacy", safeText(recognised.message, 500) || "The server asked for an initialize-based protocol version.");
+          }
+          if (choice.era === "none" && chooseMcpProtocolVersion(recognised.supported, { allowLegacy: true }).era === "legacy") {
+            throw new McpJsonRpcError(
+              `MCP server '${serverNameOf(config)}' only speaks initialize-based protocol versions (${recognised.supported.slice(0, 10).map((version) => safeText(version, 40)).join(", ")}). Set its protocol to Legacy or Auto.`,
+              MCP_ERROR_UNSUPPORTED_PROTOCOL_VERSION,
+              { supported: recognised.supported.slice(0, 50) }
+            );
           }
           throw this.noMutualVersionError(config, recognised.supported);
         }

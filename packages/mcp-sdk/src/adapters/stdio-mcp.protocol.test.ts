@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,7 +17,8 @@ import { StdioMCPServerAdapter, type StdioMcpProtocolOptions } from "./stdio-mcp
  */
 const SERVER_SCRIPT = `
 const fs = require('fs');
-const scenario = process.env.SCENARIO;
+const scenarioFile = process.env.SCENARIO_FILE;
+const scenario = scenarioFile && fs.existsSync(scenarioFile) ? fs.readFileSync(scenarioFile, 'utf-8').trim() : process.env.SCENARIO;
 const MODERN = '2026-07-28';
 const LEGACY_ONLY = ['legacy', 'legacy-silent', 'legacy-exit'];
 let initialized = false;
@@ -73,6 +74,7 @@ function handle(msg, modern) {
       if (name === 'meta') return ok(msg, complete({ content: [{ type: 'text', text: JSON.stringify(msg.params._meta === undefined ? null : msg.params._meta) }] }));
       if (name === 'crash' || name === 'crash_ro') { crashOnce(); return ok(msg, complete({ content: [{ type: 'text', text: 'survived' }] })); }
       if (name === 'hang') return;
+      if (name === 'answer_exit') { ok(msg, complete({ content: [{ type: 'text', text: 'answered' }] })); process.exit(0); }
       if (name === 'weird') return ok(msg, { resultType: 'task', task: {} });
       if (name === 'ping_me') { send({ jsonrpc: '2.0', id: 'srv-1', method: 'ping' }); return ok(msg, complete({ content: [{ type: 'text', text: 'pinged' }] })); }
       if (name === 'needs_sampling') {
@@ -106,6 +108,7 @@ process.stdin.on('data', (chunk) => {
     if (msg.id === undefined) continue;
     if (msg.method === undefined) continue;
     if (msg.method === 'initialize') {
+      if (scenario === 'modern-plain') { err(msg, -32601, 'Method not found: initialize'); continue; }
       if (scenario === 'modern' || scenario === 'nomutual') {
         err(msg, -32022, 'Unsupported protocol version', { supported: [MODERN], requested: msg.params.protocolVersion });
         continue;
@@ -131,7 +134,7 @@ process.stdin.on('data', (chunk) => {
 });
 `;
 
-type Scenario = "legacy" | "legacy-silent" | "legacy-exit" | "modern" | "dual" | "downgrade" | "nomutual" | "crash-list";
+type Scenario = "modern-plain" | "legacy" | "legacy-silent" | "legacy-exit" | "modern" | "dual" | "downgrade" | "nomutual" | "crash-list";
 
 interface LoggedMessage {
   id?: string | number;
@@ -160,7 +163,7 @@ function fixture(scenario: Scenario, protocolMode?: McpClientProtocolMode) {
       command: process.execPath,
       args: ["-e", SERVER_SCRIPT],
       timeoutMs: 5000,
-      env: { SCENARIO: scenario, LOG_FILE: logFile, CRASH_MARKER: path.join(dir, "crashed") },
+      env: { SCENARIO: scenario, SCENARIO_FILE: path.join(dir, "scenario"), LOG_FILE: logFile, CRASH_MARKER: path.join(dir, "crashed") },
       ...(protocolMode ? { protocolMode } : {})
     }
   };
@@ -174,7 +177,8 @@ function fixture(scenario: Scenario, protocolMode?: McpClientProtocolMode) {
       return [];
     }
   };
-  return { config, log, methods: () => log().map((message) => message.method ?? "(response)") };
+  const become = (next: Scenario) => writeFileSync(path.join(dir, "scenario"), next);
+  return { config, log, become, methods: () => log().map((message) => message.method ?? "(response)") };
 }
 
 function adapterWith(protocol?: StdioMcpProtocolOptions): StdioMCPServerAdapter {
@@ -220,6 +224,17 @@ describe("legacy mode (the default)", () => {
     const adapter = adapterWith();
     expect((await adapter.invokeTool("echo", {}, config, run(adapter))).ok).toBe(true);
     expect(methods()).toEqual(["initialize", "notifications/initialized", "tools/call", "tools/list"]);
+  });
+
+  it("opens with initialize again when a server that had rejected it no longer does", async () => {
+    const { config, log, methods, become } = fixture("modern");
+    const adapter = adapterWith();
+    expect((await adapter.invokeTool("write", {}, config, run(adapter))).ok).toBe(true);
+    become("legacy");
+    const before = log().length;
+    expect((await adapter.invokeTool("write", {}, config, run(adapter))).ok).toBe(true);
+    expect(methods().slice(before)).toEqual(["server/discover", "initialize", "notifications/initialized", "tools/call", "tools/list"]);
+    expect(adapter.observedProtocol(config)).toEqual({ era: "legacy" });
   });
 
   it("falls forward to 2026-07-28 on the same process when a modern-only server rejects initialize", async () => {
@@ -290,11 +305,37 @@ describe("auto mode", () => {
     expect(methods()).toEqual(["server/discover", "initialize", "notifications/initialized", "tools/call", "tools/list"]);
   });
 
-  it("starts a new process with initialize when the server exits on the probe", async () => {
-    const { config, methods } = fixture("legacy-exit", "auto");
+  it("starts a new process with initialize when the server exits on the probe, and does not probe it again", async () => {
+    const { config, log, methods } = fixture("legacy-exit", "auto");
     const adapter = adapterWith();
     expect((await adapter.invokeTool("write", {}, config, run(adapter))).ok).toBe(true);
     expect(methods()).toEqual(["server/discover", "initialize", "notifications/initialized", "tools/call", "tools/list"]);
+    const before = log().length;
+    expect((await adapter.invokeTool("write", {}, config, run(adapter))).ok).toBe(true);
+    expect(methods().slice(before)).toEqual(["initialize", "notifications/initialized", "tools/call", "tools/list"]);
+  });
+
+  it("probes again when a server cached as initialize-based now rejects initialize", async () => {
+    const { config, log, methods, become } = fixture("legacy", "auto");
+    const adapter = adapterWith();
+    expect((await adapter.invokeTool("write", {}, config, run(adapter))).ok).toBe(true);
+    become("modern-plain");
+    const before = log().length;
+    expect(await adapter.invokeTool("write", {}, config, run(adapter))).toMatchObject({ ok: true, output: "written" });
+    expect(methods().slice(before)).toEqual(["initialize", "server/discover", "tools/call", "tools/list"]);
+    expect(adapter.observedProtocol(config)).toEqual({ era: "modern", version: "2026-07-28" });
+  });
+
+  it("sends no notifications/cancelled when the run is cancelled during the probe", async () => {
+    const { config, methods } = fixture("legacy-silent", "auto");
+    const adapter = adapterWith({ probeTimeoutMs: 4000 });
+    const controller = new AbortController();
+    const pending = adapter.invokeTool("write", {}, config, run(adapter, { signal: controller.signal }));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    controller.abort("stop");
+    expect(await pending).toMatchObject({ ok: false, errorKind: "canceled" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(methods()).toEqual(["server/discover"]);
   });
 
   it("reports a server that shares no version with the client", async () => {
@@ -323,6 +364,14 @@ describe("modern mode", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/does not speak MCP 2026-07-28.*Set its protocol to Legacy or Auto/);
     expect(methods()).toEqual(["server/discover"]);
+  });
+
+  it("fails clearly when an initialize-based server exits on the probe", async () => {
+    const { config } = fixture("legacy-exit", "modern");
+    const adapter = adapterWith();
+    const result = await adapter.invokeTool("write", {}, config, run(adapter));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/does not speak MCP 2026-07-28: its process ended on server\/discover\. Set its protocol to Legacy or Auto/);
   });
 
   it("keeps the progress token beside the modern keys and sends no notifications/initialized", async () => {
@@ -439,6 +488,13 @@ describe("re-issue after the server process died (D13)", () => {
     expect(result).toMatchObject({ ok: false, errorKind: "outcome_unknown" });
     expect(result.error).toMatch(/not sent again because the tool is not marked read-only or idempotent/);
     expect(callsOf(log, "crash")).toBe(1);
+  });
+
+  it("reads an answer the server wrote just before it exited instead of reporting it lost", async () => {
+    const { config, log } = fixture("legacy");
+    const adapter = adapterWith();
+    expect(await adapter.invokeTool("answer_exit", {}, config, run(adapter))).toMatchObject({ ok: true, output: "answered" });
+    expect(callsOf(log, "answer_exit")).toBe(1);
   });
 
   it("sends a tool call the listing marks read-only again on a new process", async () => {
