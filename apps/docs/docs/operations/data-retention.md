@@ -176,3 +176,5 @@ at: a background sweep deletes references whose run or memory session is gone (u
 
 Retention does not reach backups already taken. Rotate backups within the retention you promise; see
 [Backup and recovery](./backup-and-recovery.md). The purge log is not exported in backups.
+
+Background: [Retention, legal holds and data-subject requests](../blog/retention-legal-holds-and-subject-requests) (blog).

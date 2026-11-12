@@ -5,6 +5,7 @@ topic: agents
 definition: "The cycle an AI agent repeats: call the model, run the tools it asks for, add the results to the conversation, then call the model again until it answers."
 description: "The agent loop: send messages and tools to the model, run the tool calls it asks for, add the results, repeat until a final answer or a limit."
 related: [tool-calling, ai-agent, max-iterations, context-window]
+guide: [/learn/agents/what-is-an-ai-agent]
 ---
 
 # Agent loop

@@ -7,6 +7,8 @@ description: "Built-in L2M knowledge bases: a SQLite-backed vector store with no
 
 Phase 9.1 ships a SQLite-backed vector store with no external dependencies. Create a knowledge base, ingest documents (programmatically or via the upcoming Studio UI), and target it from a `rag_retrieve` node — chunks survive across workflow runs.
 
+Concepts: <Term id="rag">retrieval-augmented generation</Term>. The [RAG knowledge base recipe](/recipes/rag-knowledge-base) builds one that runs with no API key.
+
 For larger corpora (~10k+ chunks per KB) move to pgvector or Qdrant; the same `rag_retrieve` node accepts those vector store IDs unchanged. The built-in KB is designed for the "install and have working RAG in five minutes" path, not as a global production-scale store.
 
 ## Lifecycle

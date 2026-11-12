@@ -7,6 +7,8 @@ description: "The content rules engine inspects content flowing between users, m
 
 The content rules engine checks AI traffic. It inspects what flows between users, models and tools, decides what to do with it, and records why. The engine lives in `@ai-orchestrator/guard-sdk` as a standalone library: it knows nothing about workflows, nodes or HTTP, and it never makes a network call of its own.
 
+Concepts: [Prompt injection](/learn/security/prompt-injection) and [the OWASP Top 10 for LLM apps](/learn/security/owasp-llm-top-10) explain the attacks these checks address.
+
 This page describes the engine. [Content rules in workflows](./content-rules.md) covers the Content Rules node, the agent rules port, stored rule sets and bindings, the protection port and rule events. What is still to come is listed under [Not yet available](#not-yet-available).
 
 ## Concepts
@@ -95,6 +97,7 @@ A protection provider turns a sensitive value into a token (`protect`) and, when
 | `mask` | no | yes | the masked form of the value |
 | `keyed_hash` | no | yes | HMAC-SHA-256 pseudonym under an injected key |
 | `aes_gcm` | yes | no | AES-256-GCM, random nonce, key id in the token, data class bound as authenticated data |
+| `surrogate` | no | yes | keyed, format-preserving stand-in: an email, card, IBAN, US SSN, UK National Insurance or phone number keeps its shape (cards stay Luhn-valid); credentials, private keys and JWTs are fully redacted. Pseudonymisation: whoever holds the key can test a guessed value |
 | `token_vault` | yes | optional | tokens kept in an injected store; random, deterministic, or format-preserving (card tokens stay Luhn-valid) |
 
 Key material arrives through an injected key resolver. The library never reads environment variables or files; in L2M the resolver reads stored secrets through `SecretService`. The vault's storage is an interface too, with an in-memory implementation for tests and single-process use; L2M stores it encrypted in the database.

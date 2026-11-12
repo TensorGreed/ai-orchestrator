@@ -24,8 +24,8 @@ Set `SECRET_MASTER_KEY_BASE64` in `.env` with a base64-encoded 32-byte value.
 
 - Reduce tool set size.
 - Improve prompt constraints for tool usage and stop conditions.
-- Increase context window/model limits where possible.
-- Raise max iterations only when needed.
+- Increase <Term id="context-window">context window</Term>/model limits where possible.
+- Raise <Term id="max-iterations">max iterations</Term> only when needed.
 
 ## Context-length/token overflow
 

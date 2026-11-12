@@ -12,10 +12,13 @@ rule set, runs, checks and stores exactly as before.
 ## Data labels
 
 Data labels answer two questions about each step of a run: **where did this
-data come from**, and **what does it contain**. Turn them on when you want
-checks to know that text fetched from the web is still outside content after
-it was copied into a prompt, or when you want to see on a run which steps
-handled email addresses or card numbers.
+data come from**, and **what does it contain**. Every run already works out
+where each step's data came from, including text copied into a later prompt,
+so checks within the run know it is outside content. Turn tracking on when you
+also want each step scanned for what it contains (to see on a run which steps
+handled email addresses or card numbers), and the labels stored with node
+results, session memory and artifacts, so a later run that reads them still
+knows where the text came from.
 
 ### Turning it on
 
@@ -27,8 +30,9 @@ rule set that never used it keeps its hash.
 Labels are tracked for a run when any of the run's applied rule sets (the
 enforced rule set, the project or workflow binding, a Content Rules node's own
 rule set, or a Content Rules node's rule set override) has the switch on. Runs that
-don't track labels store none, scan nothing and read no stored labels; the
-only cost is one cached check per run of whether any rule set uses the switch.
+don't track labels still work out provenance within the run, but store no
+labels, scan nothing and read no stored labels; the only cost is one cached
+check per run of whether any rule set uses the switch.
 
 ### What a label holds
 

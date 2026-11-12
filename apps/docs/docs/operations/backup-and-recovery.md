@@ -439,3 +439,5 @@ The master keys, passwords and the secret value are generated per run and never 
 CI runs it in the **DR drill** workflow (`.github/workflows/dr-drill.yml`) on pull requests that touch the backup
 scripts, the database layer, the API's services or `app.ts`, the lockfile, the drill or this page, every week, and on
 demand, with Postgres and PITR.
+
+Concepts: [Self-hosting AI agents: what you run and why](../learn/operations/self-hosting-ai-agents).

@@ -7,6 +7,8 @@ description: "How MCP tools reach L2M agents: MCP Tool nodes, the built-in HTTP 
 
 MCP tools are represented by `mcp_tool` nodes and exposed to agents as callable tool definitions.
 
+Concepts: [What is MCP?](/learn/mcp/what-is-mcp) explains the <Term id="model-context-protocol">Model Context Protocol</Term> from the start.
+
 ## Built-in MCP adapters
 
 - `http_mcp`: real endpoint integration

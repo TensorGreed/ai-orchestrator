@@ -2,13 +2,13 @@
 layout: page
 sidebar: false
 title: "Learn MCP and AI agents: guides from the basics up"
-description: "Free guides to AI agents and the Model Context Protocol in reading order, from the tool-calling loop up, with runnable examples in the L2M demo."
+description: "Free guides to MCP, AI agents, agent security, testing and running AI in production, in reading order, with runnable examples and demos in L2M."
 ---
 
 <div class="hub-page">
 
-<HubHero eyebrow="Learn" title="Learn MCP and AI agents, one track at a time" lead="Short guides in reading order. Each one explains one idea in plain words, shows it in L2M, and links to something you can run.">
-  <a class="hub-button" href="/docs/learn/agents/what-is-an-ai-agent">Start with what an agent is</a>
+<HubHero eyebrow="Learn" title="Learn MCP and AI agents, one track at a time" lead="Short guides in reading order. Each one explains one idea in plain words, shows it in L2M, and most link to something you can run.">
+  <a class="hub-button" href="/docs/learn/mcp/what-is-mcp">Start with what MCP is</a>
   <a href="/docs/glossary/">Look up a term</a>
 </HubHero>
 

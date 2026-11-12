@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // The A–Z glossary on /glossary/: topic filters, a jump bar of letters, then every term with its
-// definition. Every term is in the HTML, so without JavaScript all of them show; the filters are
+// definition. Terms with a page link to it; index-only terms (site/glossary-entries.ts) carry their
+// definition here, an anchor (/glossary/#<slug>) and, when L2M has the feature, an "In L2M" link. Every term is in the HTML, so without JavaScript all of them show; the filters are
 // toggle buttons and a status line reads out the count.
 import { computed, ref } from "vue";
 import { withBase } from "vitepress";
@@ -46,9 +47,15 @@ const toggle = (topic: string | null) => {
   <section v-for="group in groups" :key="group.letter" class="hub-az-group" :aria-labelledby="anchor(group.letter)">
     <h2 :id="anchor(group.letter)" class="hub-az-letter">{{ group.letter }}</h2>
     <dl class="hub-terms">
-      <div v-for="term in group.terms" :key="term.slug" class="hub-card hub-term-card">
-        <dt><a :href="withBase(`/glossary/${term.slug}`)">{{ term.term }}</a></dt>
-        <dd>{{ term.definition }}</dd>
+      <div v-for="term in group.terms" :id="term.slug" :key="term.slug" class="hub-card hub-term-card" :class="{ 'is-entry': !term.hasPage }">
+        <dt>
+          <a v-if="term.hasPage" :href="withBase(term.href)">{{ term.term }}</a>
+          <template v-else>{{ term.term }}</template>
+        </dt>
+        <dd>
+          {{ term.definition }}
+          <a v-if="term.docs" class="hub-term-docs" :href="withBase(term.docs)">In L2M<span class="visually-hidden">: {{ term.term }}</span><span aria-hidden="true"> →</span></a>
+        </dd>
       </div>
     </dl>
   </section>

@@ -7,6 +7,8 @@ description: "Why L2M: MCP-first agents, Supervisor and worker swarms, a VS Code
 
 Most AI workflow tools were designed before the Model Context Protocol existed and before "multi-agent" meant anything more than chained prompts. L2M was built around both, and ships with the production basics that closed-source agent platforms charge for.
 
+Concepts: the [Learn](/learn/) guides explain MCP, agents and their security in plain words, and [Self-hosted AI agent platform: what you run and why](/learn/operations/self-hosting-ai-agents) covers what running L2M yourself involves.
+
 This page is the long answer to "what makes this different from other visual workflow tools?"
 
 ## 1. MCP-first, not bolted on
