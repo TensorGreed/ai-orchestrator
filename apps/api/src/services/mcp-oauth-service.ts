@@ -60,7 +60,12 @@ import {
   type OAuthTokenSet
 } from "@ai-orchestrator/mcp-sdk";
 import { classifyIp, parseIp } from "@ai-orchestrator/guard-sdk";
-import type { McpOAuthClientRegistration, McpOAuthConnectionStatus, McpUserConnectionView } from "@ai-orchestrator/shared";
+import type {
+  McpOAuthClientRegistration,
+  McpOAuthConnectionStatus,
+  McpOAuthIssuerBinding,
+  McpUserConnectionView
+} from "@ai-orchestrator/shared";
 import type { McpOAuthConnectionRecord, McpServerRecord, McpUserOAuthConnectionRecord } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
 import type { Store } from "../db/store.js";
@@ -126,6 +131,44 @@ export function clientMetadataDocumentUrlProblem(url: string): string | null {
   if (literal) return classifyIp(literal) === "public" ? null : "its host is not a public address";
   if (!host.includes(".") || NON_PUBLIC_SUFFIXES.some((suffix) => host.endsWith(suffix))) return "its host is not a public name";
   return null;
+}
+
+/**
+ * Where a server's issuer binding lives: `connection.oauth.issuerBinding`, beside the client id it is for. Only this
+ * service writes it (on the first successful connection with a pre-registered client id) and only an admin resets
+ * it; every route that saves a server's connection keeps the stored value with `carryIssuerBinding`.
+ */
+const ISSUER_BINDING_KEY = "issuerBinding";
+
+/** The issuer binding stored on a server's connection, or null. */
+export function readIssuerBinding(connection: Record<string, unknown> | null | undefined): McpOAuthIssuerBinding | null {
+  const value = toRecord(toRecord(connection?.oauth)[ISSUER_BINDING_KEY]);
+  return typeof value.clientId === "string" && value.clientId && typeof value.issuer === "string" && value.issuer
+    ? { clientId: value.clientId, issuer: value.issuer, boundAt: typeof value.boundAt === "string" ? value.boundAt : "" }
+    : null;
+}
+
+/**
+ * The connection to save: `next` as the caller sent it, except that its issuer binding is the one `previous`
+ * (the stored connection, or null for a new server) holds. A binding in `next` is ignored, so no save can set,
+ * change or clear it.
+ */
+export function carryIssuerBinding(next: Record<string, unknown>, previous: Record<string, unknown> | null): Record<string, unknown> {
+  const binding = readIssuerBinding(previous);
+  const hadOAuth = next.oauth !== undefined;
+  const oauth = { ...toRecord(next.oauth) };
+  delete oauth[ISSUER_BINDING_KEY];
+  if (binding) oauth[ISSUER_BINDING_KEY] = binding;
+  const result = { ...next };
+  if (hadOAuth || binding) result.oauth = oauth;
+  return result;
+}
+
+function withIssuerBinding(connection: Record<string, unknown>, binding: McpOAuthIssuerBinding | null): Record<string, unknown> {
+  const oauth = { ...toRecord(connection.oauth) };
+  if (binding) oauth[ISSUER_BINDING_KEY] = binding;
+  else delete oauth[ISSUER_BINDING_KEY];
+  return { ...connection, oauth };
 }
 
 /** L2M's Client ID Metadata Document: public, holds no secret; `client_id` is exactly the document's own URL. */
@@ -320,17 +363,28 @@ export class McpOAuthService implements McpOAuthTokenProvider {
   }
 
   /**
-   * The issuer a pre-registered client id of this server was used with, from any of its connections (the caller's
-   * secret, the shared connection's row and every user's row), or null when it has not been used yet.
+   * Records the first successful use of a pre-registered client id: the server's binding names its issuer from then
+   * on. A binding for the same client id is never replaced here (a stale one was refused at the start); one for a
+   * client id the admin has since replaced is.
    */
-  private async boundIssuerFor(serverId: string, clientId: string, previous: StoredOAuthSecret | null): Promise<string | null> {
-    if (previous?.client.registration === "pre_registered" && previous.client.clientId === clientId && previous.issuer) return previous.issuer;
-    const rows: Array<Pick<McpOAuthConnectionRecord, "clientRegistration" | "clientId" | "authorizationServer">> = [];
-    const shared = await this.store.getMcpOAuthConnection(serverId);
-    if (shared) rows.push(shared);
-    rows.push(...(await this.store.listMcpUserOAuthConnections({ serverId })));
-    const used = rows.find((row) => row.clientRegistration === "pre_registered" && row.clientId === clientId && row.authorizationServer);
-    return used?.authorizationServer ?? null;
+  private async bindIssuer(serverId: string, clientId: string, issuer: string): Promise<void> {
+    const current = await this.store.getMcpServer(serverId);
+    if (!current) return;
+    const existing = readIssuerBinding(current.connection);
+    if (existing && existing.clientId === clientId) return;
+    await this.store.updateMcpServer(serverId, {
+      connection: withIssuerBinding(current.connection, { clientId, issuer, boundAt: new Date().toISOString() })
+    });
+  }
+
+  /** Admin action: forget the server's issuer binding, so the next successful connection binds again. Returns the old one. */
+  async resetIssuerBinding(serverId: string): Promise<McpOAuthIssuerBinding | null> {
+    const server = await this.store.getMcpServer(serverId);
+    const binding = readIssuerBinding(server?.connection);
+    if (server && binding) {
+      await this.store.updateMcpServer(serverId, { connection: withIssuerBinding(server.connection, null) });
+    }
+    return binding;
   }
 
   /** Fetch options for the OAuth requests of the MCP server at `endpoint`. */
@@ -361,6 +415,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
 
   async status(serverId: string): Promise<McpOAuthConnectionStatus> {
     const row = await this.store.getMcpOAuthConnection(serverId);
+    const server = await this.store.getMcpServer(serverId);
     const base: McpOAuthConnectionStatus = {
       serverId,
       state: "not_connected",
@@ -376,7 +431,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       connectedBy: null,
       lastError: null,
       updatedAt: null,
-      redirectUri: this.options.redirectUri
+      redirectUri: this.options.redirectUri,
+      issuerBinding: readIssuerBinding(server?.connection)
     };
     if (!row) return base;
     let state = row.state;
@@ -483,13 +539,13 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     let client: StoredOAuthSecret["client"];
     const configuredClientId = typeof oauthSettings.clientId === "string" ? oauthSettings.clientId.trim() : "";
     if (configuredClientId) {
-      // A pre-registered client id belongs to the authorization server it was first used with; if the server's
-      // metadata now names another one, refuse instead of sending the id (and its secret) there. Every connection of
-      // the server counts (the shared one and each user's), so a user connecting for the first time is held to it too.
-      const boundIssuer = await this.boundIssuerFor(server.id, configuredClientId, previous);
-      if (boundIssuer !== null && boundIssuer !== metadata.issuer) {
+      // A pre-registered client id belongs to the authorization server it was first used with (stored on the server,
+      // so it holds for every user and survives removed connections); if the server's metadata now names another one,
+      // refuse instead of sending the id (and its secret) there.
+      const binding = readIssuerBinding(server.connection);
+      if (binding && binding.clientId === configuredClientId && binding.issuer !== metadata.issuer) {
         throw new McpOAuthUserError(
-          `The authorization server changed: the client id was used with ${boundIssuer}, but the MCP server now names ${metadata.issuer}. Check the client id: an admin registers L2M with the new authorization server and enters its client id on the server.`,
+          `The authorization server changed: the client id was used with ${binding.issuer}, but the MCP server now names ${metadata.issuer}. Check the client id: an admin registers L2M with the new authorization server and enters its client id on the server, or resets the binding in the server's OAuth settings.`,
           409
         );
       }
@@ -687,6 +743,10 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       const message = error instanceof McpOAuthError ? error.message : "Token exchange failed.";
       await recordError(message);
       return failed(message);
+    }
+
+    if (pending.client.registration === "pre_registered") {
+      await this.bindIssuer(server.id, pending.client.clientId, pending.issuer);
     }
 
     const secret: StoredOAuthSecret = {

@@ -1958,6 +1958,15 @@ export const openApiSpec = {
         }
       }
     },
+    "/api/mcp/servers/{id}/oauth/issuer-binding": {
+      delete: {
+        tags: ["MCP"],
+        summary:
+          "Admin: forget the authorization server the server's pre-registered client id is bound to (audited as mcp_server.oauth_issuer_binding_reset). The next successful connection binds again. Removing connections never clears the binding.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ status: McpOAuthConnectionStatus }" }, "403": { description: "Not an admin" }, "404": { description: "Not found" } }
+      }
+    },
     "/api/mcp/oauth/client-metadata.json": {
       get: {
         tags: ["MCP"],

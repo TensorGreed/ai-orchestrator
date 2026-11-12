@@ -12,7 +12,8 @@ import {
   connectMcpServerOAuth,
   disconnectMcpServerOAuth,
   fetchMcpServerOAuth,
-  refreshMcpServerOAuth
+  refreshMcpServerOAuth,
+  resetMcpServerOAuthIssuerBinding
 } from "../lib/api";
 
 const POPUP_FEATURES = "popup=yes,width=560,height=720";
@@ -148,6 +149,25 @@ export function McpOAuthPanel({ serverId, isAdmin }: { serverId: string; isAdmin
     }
   };
 
+  const resetBinding = async () => {
+    if (
+      !window.confirm(
+        "Forget which authorization server this client id belongs to? The next successful connection binds it again, to whichever authorization server the MCP server names then."
+      )
+    )
+      return;
+    setBusy("reset-binding");
+    setError(null);
+    try {
+      const result = await resetMcpServerOAuthIssuerBinding(serverId);
+      setStatus(result.status);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const copyRedirect = async () => {
     if (!status?.redirectUri) return;
     try {
@@ -214,6 +234,20 @@ export function McpOAuthPanel({ serverId, isAdmin }: { serverId: string; isAdmin
               </>
             ) : null}
           </dd>
+          {status.issuerBinding && (
+            <>
+              <dt>Client id bound to</dt>
+              <dd className="mcp-oauth-redirect">
+                <code>{status.issuerBinding.issuer}</code>
+                {status.issuerBinding.boundAt ? ` since ${formatDate(status.issuerBinding.boundAt)}` : ""}
+                {isAdmin && (
+                  <button type="button" className="pg-btn ghost" onClick={() => void resetBinding()} disabled={busy !== null}>
+                    {busy === "reset-binding" ? "Resetting…" : "Reset"}
+                  </button>
+                )}
+              </dd>
+            </>
+          )}
           <dt>Scope</dt>
           <dd>{status.scope ?? "—"}</dd>
           {status.connectedAt && (

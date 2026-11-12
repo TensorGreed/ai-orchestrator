@@ -1880,6 +1880,17 @@ export type McpOAuthConnectionState = "not_connected" | "connected" | "expired" 
  */
 export type McpOAuthClientRegistration = "dynamic" | "pre_registered" | "metadata_document";
 
+/**
+ * The authorization server a pre-registered client id of a server is bound to (MCP 2026-07-28 "Authorization
+ * Server Binding"). Set on the first successful connection with that client id, kept when connections are
+ * removed, and reset only by an admin.
+ */
+export interface McpOAuthIssuerBinding {
+  clientId: string;
+  issuer: string;
+  boundAt: string;
+}
+
 export interface McpOAuthConnectionStatus {
   serverId: string;
   state: McpOAuthConnectionState;
@@ -1900,6 +1911,8 @@ export interface McpOAuthConnectionStatus {
   updatedAt: string | null;
   /** The redirect URL to allow on the authorization server for this L2M instance. */
   redirectUri: string;
+  /** The authorization server the server's pre-registered client id is bound to, if it has been used. */
+  issuerBinding: McpOAuthIssuerBinding | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -355,6 +355,7 @@ import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 import {
   buildClientMetadataDocument,
+  carryIssuerBinding,
   clientMetadataDocumentUrlProblem,
   createClusterRefreshLock,
   MCP_OAUTH_CLIENT_METADATA_PATH,
@@ -13391,7 +13392,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       name: parsed.data.name,
       description: parsed.data.description ?? null,
       adapterId: parsed.data.adapterId,
-      connection: parsed.data.connection ?? {},
+      // An issuer binding is only ever set by a successful OAuth connection, never by a save.
+      connection: carryIssuerBinding(parsed.data.connection ?? {}, null),
       secretId: parsed.data.secretRef?.secretId ?? null,
       owner: parsed.data.owner ?? user.email,
       projectId: parsed.data.projectId ?? null,
@@ -13472,6 +13474,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     await store.updateMcpServer(existing.id, {
       ...rest,
+      // The stored OAuth issuer binding survives a save; it changes only through a connection or an admin reset.
+      ...(rest.connection !== undefined ? { connection: carryIssuerBinding(rest.connection, existing.connection) } : {}),
       ...(sandbox !== undefined ? { sandbox: nextAdapterId === "stdio_mcp" ? sandbox : null } : {}),
       ...(nextAdapterId !== "stdio_mcp" && existing.sandbox ? { sandbox: null } : {}),
       ...(secretRef !== undefined ? { secretId: secretRef?.secretId ?? null } : {}),
@@ -13884,6 +13888,27 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       metadata: { name: server.name }
     });
     return { status };
+  });
+
+  // The authorization server a pre-registered client id is bound to stays until an admin resets it here (removing
+  // connections never clears it). The next successful connection with that client id binds again.
+  app.delete<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth/issuer-binding", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const server = await findOAuthServer(request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
+    const previous = await mcpOAuthService.resetIssuerBinding(server.id);
+    await audit(request, user, {
+      category: "system",
+      eventType: "mcp_server.oauth_issuer_binding_reset",
+      action: "update",
+      outcome: "success",
+      resourceType: "mcp_server",
+      resourceId: server.id,
+      projectId: server.projectId,
+      metadata: { name: server.name, hadBinding: previous !== null, ...(previous ? { clientId: previous.clientId, issuer: previous.issuer } : {}) }
+    });
+    return { status: await mcpOAuthService.status(server.id) };
   });
 
   // Phase 10.7 — delegated credentials. Every user who can run workflows

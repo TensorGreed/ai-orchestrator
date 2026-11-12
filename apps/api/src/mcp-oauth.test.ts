@@ -1092,10 +1092,13 @@ describe("MCP 2026-07-28 authorization rules", () => {
     expect(again.json<{ error: string }>().error).toMatch(/authorization server changed.*Check the client id/);
     expect(fake.authorizeRequests.length).toBe(authorizeBefore);
 
-    // After a disconnect the admin can start over with the new server.
+    // Disconnecting does not clear the binding; only an admin reset does, and the next connection binds again.
     expect((await call(context, "DELETE", `/api/mcp/servers/${serverId}/oauth`, admin)).statusCode).toBe(200);
-    const fresh = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
-    expect(fresh.statusCode).toBe(200);
+    expect((await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {})).statusCode).toBe(409);
+    expect((await call(context, "DELETE", `/api/mcp/servers/${serverId}/oauth/issuer-binding`, admin)).statusCode).toBe(200);
+    const { callback } = await connect(context, admin, serverId);
+    expect(callback.statusCode).toBe(200);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toMatchObject({ clientId: "pre-registered-1", issuer: `${fake.base}/auth2` });
   });
 
   it("re-registers dynamically when the authorization server changes", async () => {
@@ -1257,5 +1260,96 @@ describe("MCP 2026-07-28 authorization rules: review follow-ups", () => {
     const key = crypto.randomBytes(32).toString("base64");
     expect(() => parseConfig({ SECRET_MASTER_KEY_BASE64: key, MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: "fd00::5" })).toThrow(/bare IPv6/);
     expect(parseConfig({ SECRET_MASTER_KEY_BASE64: key, MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: "fd00::5/128" }).MCP_OAUTH_PRIVATE_HOST_ALLOWLIST).toEqual(["fd00::5/128"]);
+  });
+});
+
+describe("issuer binding stored on the server's OAuth settings", () => {
+  const preRegistered = (clientId: string) => ({
+    connection: { endpoint: `${fake.base}/mcp`, transport: "http_streamable", authType: "oauth", oauth: { clientId } }
+  });
+
+  it("survives a user removing their own connection", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const alice = await login(context, "builder", "alice");
+    const serverId = await registerDelegatedServer(context, admin, preRegistered("pre-registered-4"));
+    await connectOwn(context, alice, serverId);
+    expect((await call(context, "DELETE", `/api/mcp/connections/${serverId}`, alice)).statusCode).toBe(200);
+
+    fake.authorizationServers = [`${fake.base}/auth2`];
+    const again = await call(context, "POST", `/api/mcp/connections/${serverId}/connect`, alice, {});
+    expect(again.statusCode).toBe(409);
+    expect(again.json<{ error: string }>().error).toMatch(/authorization server changed/);
+  });
+
+  it("is set on first successful use and shown in the status, not before", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin, { oauth: { clientId: "pre-registered-5" } });
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toBeNull();
+    // A refused callback binds nothing.
+    fake.shapeRedirect = (redirect) => redirect.searchParams.set("iss", "https://attacker.example.test");
+    await connect(context, admin, serverId);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toBeNull();
+    fake.shapeRedirect = null;
+    await connect(context, admin, serverId);
+    const status = await oauthStatus(context, admin, serverId);
+    expect(status.issuerBinding).toMatchObject({ clientId: "pre-registered-5", issuer: `${fake.base}/auth` });
+    expect(Date.parse(status.issuerBinding?.boundAt ?? "")).toBeGreaterThan(0);
+  });
+
+  it("cannot be set, changed or cleared by saving the server", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const forged = { clientId: "pre-registered-6", issuer: "https://attacker.example.test", boundAt: "2026-01-01T00:00:00.000Z" };
+    const serverId = await registerOAuthServer(context, admin, { oauth: { clientId: "pre-registered-6", issuerBinding: forged } });
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toBeNull();
+    await connect(context, admin, serverId);
+    const bound = (await oauthStatus(context, admin, serverId)).issuerBinding;
+    expect(bound).toMatchObject({ issuer: `${fake.base}/auth` });
+
+    // A save without the binding (as the editor sends it) and a save with a forged one both keep the stored binding.
+    const connection = { endpoint: `${fake.base}/mcp`, transport: "http_streamable", authType: "oauth", oauth: { clientId: "pre-registered-6", scope: "tools:read" } };
+    expect((await call(context, "PUT", `/api/mcp/servers/${serverId}`, admin, { connection })).statusCode).toBe(200);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toEqual(bound);
+    const forgedSave = { ...connection, oauth: { ...connection.oauth, issuerBinding: forged } };
+    expect((await call(context, "PUT", `/api/mcp/servers/${serverId}`, admin, { connection: forgedSave })).statusCode).toBe(200);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toEqual(bound);
+    const withoutOAuth = { endpoint: `${fake.base}/mcp`, transport: "http_streamable", authType: "oauth" };
+    expect((await call(context, "PUT", `/api/mcp/servers/${serverId}`, admin, { connection: withoutOAuth })).statusCode).toBe(200);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toEqual(bound);
+  });
+
+  it("binds again when an admin enters a different client id", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin, { oauth: { clientId: "old-client" } });
+    await connect(context, admin, serverId);
+    fake.authorizationServers = [`${fake.base}/auth2`];
+    const connection = { endpoint: `${fake.base}/mcp`, transport: "http_streamable", authType: "oauth", oauth: { clientId: "new-client" } };
+    expect((await call(context, "PUT", `/api/mcp/servers/${serverId}`, admin, { connection })).statusCode).toBe(200);
+    const { callback } = await connect(context, admin, serverId);
+    expect(callback.statusCode).toBe(200);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).toMatchObject({ clientId: "new-client", issuer: `${fake.base}/auth2` });
+  });
+
+  it("can be reset only by an admin, and the reset is audited", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const serverId = await registerOAuthServer(context, admin, { oauth: { clientId: "pre-registered-7" } });
+    await connect(context, admin, serverId);
+
+    const refused = await call(context, "DELETE", `/api/mcp/servers/${serverId}/oauth/issuer-binding`, builder);
+    expect(refused.statusCode).toBe(403);
+    expect((await oauthStatus(context, admin, serverId)).issuerBinding).not.toBeNull();
+
+    const reset = await call(context, "DELETE", `/api/mcp/servers/${serverId}/oauth/issuer-binding`, admin);
+    expect(reset.statusCode).toBe(200);
+    expect(reset.json<{ status: McpOAuthConnectionStatus }>().status.issuerBinding).toBeNull();
+    const audit = await context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 });
+    const entry = audit.items.find((item) => item.eventType === "mcp_server.oauth_issuer_binding_reset");
+    expect(entry).toMatchObject({ outcome: "success", resourceId: serverId });
+    expect(entry?.metadata).toMatchObject({ hadBinding: true, clientId: "pre-registered-7", issuer: `${fake.base}/auth` });
   });
 });

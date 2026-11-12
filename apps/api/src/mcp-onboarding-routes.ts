@@ -20,6 +20,7 @@ import {
   type SecretReference
 } from "@ai-orchestrator/shared";
 import type { McpServerRecord } from "./db/database.js";
+import { carryIssuerBinding } from "./services/mcp-oauth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { McpCatalogService } from "./services/mcp-catalog.js";
@@ -239,7 +240,8 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       if (view.decision === "update" && view.duplicate) {
         await store.updateMcpServer(view.duplicate.serverId, {
           adapterId: view.adapterId,
-          connection: materialized.connection,
+          // An imported config never carries an OAuth issuer binding; the stored one stays.
+          connection: carryIssuerBinding(materialized.connection, (await store.getMcpServer(view.duplicate.serverId))?.connection ?? null),
           secretId,
           ...(sandbox ? { sandbox } : {})
         });
@@ -254,7 +256,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
         name: view.name,
         description: `Imported from ${parsed.data.fileName ?? "a client config"} (${view.key})`.slice(0, 2000),
         adapterId: view.adapterId,
-        connection: materialized.connection,
+        connection: carryIssuerBinding(materialized.connection, null),
         secretId,
         owner: user.email,
         projectId,
