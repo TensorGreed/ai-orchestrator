@@ -309,7 +309,8 @@ export async function discoverProtectedResource(
         break;
       }
     } catch {
-      // Try the next probe, then the well-known URLs.
+      // No answer at all (unreachable, timed out): a second probe would wait as long again. Go to the well-known URLs.
+      break;
     }
   }
 

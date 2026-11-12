@@ -227,6 +227,16 @@ describe("discoverProtectedResource: the 401 challenge probe", () => {
     expect(found.resourceMetadataUrl).toBe("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
     expect(posts).toHaveLength(2);
   });
+
+  it("sends no second probe when the first got no answer at all", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(() => {
+      throw new TypeError("fetch failed");
+    }, posts);
+    const found = await discoverProtectedResource(endpoint, { fetchImpl });
+    expect(found.resourceMetadataUrl).toBe("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
+    expect(posts.map((post) => post.body.method)).toEqual(["initialize"]);
+  });
 });
 
 describe("step-up: insufficient_scope challenges and the scope union", () => {
