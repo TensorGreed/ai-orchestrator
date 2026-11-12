@@ -24,6 +24,7 @@ import type {
 } from "../types";
 import {
   McpDelegatedCredentialError,
+  McpInsufficientScopeError,
   McpJsonRpcError,
   McpMissingClientCapabilityError,
   McpOutcomeUnknownError,
@@ -47,6 +48,7 @@ import {
   parseListChangedNotification
 } from "../client-features";
 import { withToolAnnotations } from "../tool-annotations";
+import { readInsufficientScopeChallenge } from "../oauth";
 import { annotateMcpError, annotateMcpRequest, mcpTraceCarrier, traceContextHeaders, traceMcpRound, withTraceContext } from "../tracing";
 import { buildToolCallResult, withOutputSchema } from "../structured-output";
 import {
@@ -561,6 +563,15 @@ async function postRpc(
       if (!response.ok) {
         const bodyText = await response.text();
         const wwwAuthenticate = response.headers.get("www-authenticate");
+        // A valid token without the scope this operation needs: never sent again, never an era signal (step-up).
+        const scopeChallenge = readInsufficientScopeChallenge(response.status, wwwAuthenticate);
+        if (scopeChallenge) {
+          throw new McpInsufficientScopeError(
+            `MCP server refused ${method}: the OAuth token lacks the scope it needs${scopeChallenge.scope ? ` (${safeText(scopeChallenge.scope, 300)})` : ""}. Reconnect the server to grant it; the new authorization asks for this scope together with the scopes already granted.`,
+            scopeChallenge.scope,
+            scopeChallenge.resourceMetadata
+          );
+        }
         // D13 — a gateway error can come after the upstream acted on a request that is not safe to repeat.
         if (reissue === "fail" && !isNotification && OUTCOME_UNKNOWN_STATUSES.has(response.status)) {
           throw outcomeUnknown(method, `the answer was HTTP ${response.status} from a gateway in front of the server`);
@@ -885,6 +896,34 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
     operation: (session: PreparedSession) => Promise<T>,
     options?: { forceNew?: boolean }
   ): Promise<T> {
+    try {
+      return await this.withSessionOnce(config, context, operation, options);
+    } catch (error) {
+      await this.reportScopeChallenge(config, error);
+      throw error;
+    }
+  }
+
+  /**
+   * MCP step-up authorization: tell the OAuth token provider which scope a server asked for, so the next
+   * authorization of the connection requests it with the granted ones. Only for OAuth registry servers; the
+   * provider's failures never hide the server's error.
+   */
+  private async reportScopeChallenge(config: MCPServerConfig, error: unknown): Promise<void> {
+    if (!(error instanceof McpInsufficientScopeError) || authTypeOf(config) !== "oauth" || !config.registryServerId) return;
+    try {
+      await this.oauth?.noteInsufficientScope?.(config.registryServerId, error.requiredScope, tokenOptionsFor(config));
+    } catch {
+      // The error the caller sees is the server's.
+    }
+  }
+
+  private async withSessionOnce<T>(
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    operation: (session: PreparedSession) => Promise<T>,
+    options?: { forceNew?: boolean }
+  ): Promise<T> {
     const session = await this.getOrCreateSession(config, context, options);
     try {
       return await operation(session);
@@ -1049,7 +1088,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
         if (choice.era === "legacy") return legacy(true);
         supported = discover.supportedVersions;
       } catch (error) {
-        if (isCanceledError(error)) throw error;
+        if (isCanceledError(error) || error instanceof McpInsufficientScopeError) throw error;
         if (error instanceof McpHttpError) {
           if (error.status === 401 && authTypeOf(config) === "oauth" && attempt === 0) {
             await session.refreshAuth();
@@ -1904,7 +1943,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
    * call again (handled before this).
    */
   private mayRetryCall(error: unknown, session: PreparedSession, toolName: string, config: MCPServerConfig): boolean {
-    if (isCanceledError(error) || error instanceof McpOutcomeUnknownError) return false;
+    if (isCanceledError(error) || error instanceof McpOutcomeUnknownError || error instanceof McpInsufficientScopeError) return false;
     if (session.era === "modern") return false;
     if (this.safeReissueApplies(session) && error instanceof McpTimeoutError && !this.toolReissueSafe(session, toolName, config)) {
       return false;
@@ -1947,6 +1986,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
       const outputSchema = await this.outputSchemaFor(session, toolName, config, context);
       return buildToolCallResult(toolName, response.result, outputSchema);
     } catch (error) {
+      await this.reportScopeChallenge(config, error);
       return {
         ok: false,
         output: null,

@@ -6,7 +6,9 @@ import {
   discoverProtectedResource,
   isLoopbackHost,
   oauthApplicationType,
+  readInsufficientScopeChallenge,
   registerOAuthClient,
+  unionOAuthScopes,
   validateAuthorizationResponseIssuer,
   type FetchLike
 } from "./oauth";
@@ -224,5 +226,28 @@ describe("discoverProtectedResource: the 401 challenge probe", () => {
     expect(found.scopeHint).toBeUndefined();
     expect(found.resourceMetadataUrl).toBe("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
     expect(posts).toHaveLength(2);
+  });
+});
+
+describe("step-up: insufficient_scope challenges and the scope union", () => {
+  it("reads a 403 insufficient_scope Bearer challenge and nothing else", () => {
+    const header = 'Bearer error="insufficient_scope", scope="files:write files:read", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"';
+    expect(readInsufficientScopeChallenge(403, header)).toEqual({
+      scope: "files:write files:read",
+      resourceMetadata: "https://mcp.example.com/.well-known/oauth-protected-resource"
+    });
+    expect(readInsufficientScopeChallenge(403, 'Bearer error="insufficient_scope"')).toEqual({});
+    expect(readInsufficientScopeChallenge(401, header)).toBeNull();
+    expect(readInsufficientScopeChallenge(403, 'Bearer error="invalid_token", scope="x"')).toBeNull();
+    expect(readInsufficientScopeChallenge(403, null)).toBeNull();
+    expect(readInsufficientScopeChallenge(403, 'Basic realm="x"')).toBeNull();
+  });
+
+  it("unions scopes in first-seen order, drops malformed tokens and caps the count", () => {
+    expect(unionOAuthScopes("mcp:basic", "mcp:write mcp:basic", undefined, null)).toBe("mcp:basic mcp:write");
+    expect(unionOAuthScopes(undefined, "  ")).toBeUndefined();
+    expect(unionOAuthScopes('a "b" c\\d e')).toBe("a e");
+    const many = Array.from({ length: 100 }, (_, index) => `s${index}`).join(" ");
+    expect(unionOAuthScopes(many)!.split(" ")).toHaveLength(64);
   });
 });

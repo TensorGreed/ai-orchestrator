@@ -106,6 +106,12 @@ export interface McpOAuthTokenProvider {
    * actionable message when the server is not connected.
    */
   getAccessToken(registryServerId: string, options?: McpAccessTokenOptions): Promise<string>;
+  /**
+   * The server refused a request with 403 `insufficient_scope` and asked for `scope` (space separated; undefined when
+   * the challenge named none). The provider remembers it so the next authorization of the same connection asks for
+   * the union of the granted and the challenged scopes (MCP step-up authorization). Optional; failures are ignored.
+   */
+  noteInsufficientScope?(registryServerId: string, scope: string | undefined, options?: McpAccessTokenOptions): Promise<void>;
 }
 
 export interface McpAccessTokenOptions {

@@ -147,6 +147,56 @@ export function parseWwwAuthenticate(header: string | null | undefined): Record<
   return params;
 }
 
+/** What a 403 `insufficient_scope` challenge (RFC 6750 section 3.1) asks for. */
+export interface McpInsufficientScopeChallenge {
+  /** The scopes the server needs for the refused operation, space separated (only well-formed scope tokens). */
+  scope?: string;
+  /** The protected resource metadata URL the challenge names. */
+  resourceMetadata?: string;
+}
+
+/** RFC 6749 section 3.3 scope-token characters. */
+const SCOPE_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]{1,200}$/;
+/** At most this many scope tokens are kept from server-supplied or stored scope strings. */
+const MAX_SCOPE_TOKENS = 64;
+
+function scopeTokens(value: string | null | undefined): string[] {
+  if (typeof value !== "string") return [];
+  return value.split(/\s+/).filter((token) => SCOPE_TOKEN.test(token));
+}
+
+/**
+ * MCP authorization, scope challenge handling: a 403 whose `WWW-Authenticate` Bearer challenge says
+ * `error="insufficient_scope"` means the token is valid but lacks scope for this operation. Anything else (another
+ * status, another error, no challenge) is not one.
+ */
+export function readInsufficientScopeChallenge(status: number, header: string | null | undefined): McpInsufficientScopeChallenge | null {
+  if (status !== 403) return null;
+  const params = parseWwwAuthenticate(header);
+  if (!params || params.error !== "insufficient_scope") return null;
+  const scope = unionOAuthScopes(params.scope);
+  return {
+    ...(scope ? { scope } : {}),
+    ...(params.resource_metadata ? { resourceMetadata: params.resource_metadata.slice(0, 2000) } : {})
+  };
+}
+
+/**
+ * The step-up scope set: the union of the given scope strings in first-seen order (MCP 2026-07-28 step-up
+ * authorization: previously requested scopes plus the challenged ones). Malformed tokens are dropped; undefined when
+ * nothing is left.
+ */
+export function unionOAuthScopes(...scopes: Array<string | null | undefined>): string | undefined {
+  const seen = new Set<string>();
+  for (const value of scopes) {
+    for (const token of scopeTokens(value)) {
+      if (seen.size >= MAX_SCOPE_TOKENS) break;
+      seen.add(token);
+    }
+  }
+  return seen.size > 0 ? [...seen].join(" ") : undefined;
+}
+
 async function fetchWithTimeout(fetchImpl: FetchLike, input: string, init: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

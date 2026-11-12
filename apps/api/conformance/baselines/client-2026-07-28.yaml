@@ -8,9 +8,6 @@ client:
   # Warning only: the harness registers dynamically (DCR) and never uses a client-ID metadata document, although
   # the server advertises support. Client-ID metadata documents are opt-in.
   - auth/basic-cimd
-  # No step-up: a 403 insufficient_scope answer does not start a second authorization with the union of scopes. (The
-  # initial scope now comes from the 401 challenge: scope-step-up-initial passes.)
-  - auth/scope-step-up
   # The client does not re-register when the protected resource metadata names a different authorization server
   # mid-run (a gap of this harness, which registers once per run; not a statement about the API's connect flow).
   - auth/authorization-server-migration

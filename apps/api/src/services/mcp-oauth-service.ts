@@ -53,6 +53,7 @@ import {
   oauthApplicationType,
   refreshOAuthToken,
   registerOAuthClient,
+  unionOAuthScopes,
   validateAuthorizationResponseIssuer,
   type FetchLike,
   type McpAccessTokenOptions,
@@ -192,6 +193,12 @@ interface StoredOAuthSecret {
   refreshToken?: string;
   expiresAt?: string;
   scope?: string;
+  /**
+   * MCP step-up authorization: scopes the server asked for in 403 `insufficient_scope` challenges since this token
+   * was issued. The next authorization of the connection asks for them together with the granted scope; a new
+   * token (a new secret) starts without any.
+   */
+  stepUpScope?: string;
   tokenEndpoint: string;
   issuer: string;
   resource: string;
@@ -526,7 +533,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     }
     const metadata = discovery.authorizationServer;
     const redirectUri = this.options.redirectUri;
-    const configuredScope =
+    const selectedScope =
       input.scope?.trim() ||
       (typeof oauthSettings.scope === "string" && oauthSettings.scope.trim()) ||
       discovery.scopeHint ||
@@ -538,6 +545,9 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     const previous = input.userId
       ? await this.readSecret(await this.store.getMcpUserOAuthConnection(server.id, input.userId))
       : await this.readSecret(await this.store.getMcpOAuthConnection(server.id));
+    // Step-up: after the server refused an operation for lack of scope, the new authorization asks for the scope
+    // granted before, the scope chosen above and the challenged scopes together. Without a challenge nothing changes.
+    const configuredScope = previous?.stepUpScope ? unionOAuthScopes(previous.scope, selectedScope, previous.stepUpScope) : selectedScope;
     let client: StoredOAuthSecret["client"];
     const configuredClientId = typeof oauthSettings.clientId === "string" ? oauthSettings.clientId.trim() : "";
     if (configuredClientId) {
@@ -856,6 +866,47 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       connectedAt: row?.connectedAt ?? null,
       connectedBy: row?.connectedBy ?? null,
       lastError: message.slice(0, 500)
+    });
+  }
+
+  /**
+   * McpOAuthTokenProvider: the server refused an operation with 403 `insufficient_scope`. The challenged scope is
+   * kept with the connection's token (encrypted, like the token) so the next Connect asks for it together with the
+   * granted scope, and the connection shows what to do. Nothing is written when the scope is already noted.
+   */
+  async noteInsufficientScope(registryServerId: string, scope: string | undefined, options?: McpAccessTokenOptions): Promise<void> {
+    const server = await this.store.getMcpServer(registryServerId);
+    if (!server || !McpOAuthService.usesOAuth(server)) return;
+    const userId = server.credentialMode === "delegated" ? options?.userId : undefined;
+    if (server.credentialMode === "delegated" && !userId) return;
+    const key = userId ? `${server.id}::${userId}` : server.id;
+    const message = `The server refused an operation because the connection lacks OAuth scope${scope ? ` (${scope.slice(0, 300)})` : ""}. Reconnect it to grant the scope; the existing scope is kept.`;
+    const changed = await this.underRefreshLock(key, async () => {
+      if (userId) {
+        const row = await this.store.getMcpUserOAuthConnection(server.id, userId);
+        const secret = await this.readSecret(row);
+        if (!row || !secret) return false;
+        const stepUpScope = unionOAuthScopes(secret.stepUpScope, scope);
+        if (stepUpScope === secret.stepUpScope && row.lastError === message) return false;
+        const secretId = await this.writeSecret(server, row.secretId, { ...secret, ...(stepUpScope ? { stepUpScope } : {}) }, { userId });
+        await this.store.upsertMcpUserOAuthConnection({ ...row, secretId, lastError: message.slice(0, 500) });
+        return true;
+      }
+      const row = await this.store.getMcpOAuthConnection(server.id);
+      const secret = await this.readSecret(row);
+      if (!row || !secret) return false;
+      const stepUpScope = unionOAuthScopes(secret.stepUpScope, scope);
+      if (stepUpScope === secret.stepUpScope && row.lastError === message) return false;
+      const secretId = await this.writeSecret(server, row.secretId, { ...secret, ...(stepUpScope ? { stepUpScope } : {}) });
+      await this.store.upsertMcpOAuthConnection({ ...row, secretId, lastError: message.slice(0, 500) });
+      return true;
+    });
+    if (!changed) return;
+    await this.options.onAudit?.({
+      eventType: "mcp_server.oauth_scope_challenged",
+      serverId: server.id,
+      outcome: "failure",
+      metadata: { ...(scope ? { scope: scope.slice(0, 300) } : {}), ...(userId ? { userId } : {}) }
     });
   }
 
