@@ -29,6 +29,16 @@ export interface OtlpTraceExportOptions {
   timeoutMs: number;
 }
 
+export interface OtlpMetricExportOptions {
+  /** Full URL metrics are POSTed to (the `/v1/metrics` path included). */
+  url: string;
+  protocol: OtlpProtocol;
+  headers: Record<string, string>;
+  timeoutMs: number;
+  /** How often the cumulative values are exported. */
+  intervalMs: number;
+}
+
 export interface BatchOptions {
   scheduledDelayMs: number;
   exportTimeoutMs: number;
@@ -58,7 +68,9 @@ export interface OtelRuntimeOptions {
   scrub?: (text: string) => string;
   /** Extra span processors, run before the exporter (tests add an in-memory exporter here). */
   spanProcessors?: readonly SpanProcessor[];
-  /** Metric readers for the meter provider (none: metrics are recorded nowhere). */
+  /** Where metrics go (OTEL_METRICS_ENABLED with a metrics endpoint); null: `OtelRuntime.meter` records nowhere. */
+  metricsExport?: OtlpMetricExportOptions | null;
+  /** Extra metric readers (tests add an in-memory reader here). */
   metricReaders?: readonly MetricReader[];
   /**
    * Register the tracer provider, context manager and propagator as the process-wide OpenTelemetry globals, so

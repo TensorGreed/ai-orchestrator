@@ -4,6 +4,16 @@
  */
 export { createOtelRuntime, OtelRuntime, buildPropagator, buildSampler, type LogTraceFields } from "./runtime.js";
 export { OtelRunInstrumentation, OtelSpanHandle, cleanAttributes, conversationIdFor, errorTypeOf, type StartSpanSpec } from "./instrumentation.js";
+export {
+  createMetricsPipeline,
+  registerL2mMetrics,
+  HISTOGRAM_METRIC_NAMES,
+  LEGACY_METRIC_NAMES,
+  MetricsPipeline,
+  type MetricsPipelineOptions,
+  type MetricsRecorder,
+  type MetricsSnapshotSource
+} from "./metrics.js";
 export { startHttpServerSpan, type HttpServerSpan, type HttpServerSpanInput, type InboundTraceUse } from "./http-server.js";
 export { RecentSpansProcessor, toRecentSpan, type RecentSpan } from "./recent-spans.js";
 export {
@@ -13,6 +23,7 @@ export {
   SAMPLER_NAMES,
   type BatchOptions,
   type OtelRuntimeOptions,
+  type OtlpMetricExportOptions,
   type OtlpProtocol,
   type OtlpTraceExportOptions,
   type PropagatorName,
@@ -23,3 +34,4 @@ export {
 export * from "./semconv.js";
 // SDK types and the in-memory exporter, re-exported so the API's tests can collect spans without depending on the SDK.
 export { InMemorySpanExporter, type ReadableSpan, type SpanProcessor } from "@opentelemetry/sdk-trace";
+export { InMemoryMetricExporter, AggregationTemporality, PeriodicExportingMetricReader, type MetricReader, type ResourceMetrics } from "@opentelemetry/sdk-metrics";

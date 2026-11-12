@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service.js";
-import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter.js";
 import { MetricsService } from "./services/metrics-service.js";
 import { loadTestTelemetry } from "./test-support/telemetry.js";
 
@@ -113,49 +112,6 @@ describe("Phase 8.1 — OpenTelemetry bridge", () => {
       expect(t.recentSpans()).toHaveLength(0);
       expect(t.isEnabled()).toBe(false);
       expect(t.getResourceAttributes()).toEqual({ "service.name": "off" });
-    });
-  });
-
-  describe("OtlpMetricsExporter.buildPayload", () => {
-    it("emits OTel-shape resourceMetrics with sums + gauges", () => {
-      const m = new MetricsService();
-      m.recordHttpRequest("GET", 200, 42);
-      m.recordExecution("success", 1500);
-
-      const exporter = new OtlpMetricsExporter(m, {
-        endpoint: "http://localhost:4318/v1/metrics",
-        resourceAttributes: { "service.name": "ai-orchestrator", "deployment.environment": "test" },
-        intervalMs: 60000,
-        serviceName: "ai-orchestrator"
-      });
-
-      const payload = exporter.buildPayload() as {
-        resourceMetrics: Array<{
-          resource: { attributes: Array<{ key: string; value: { stringValue: string } }> };
-          scopeMetrics: Array<{
-            metrics: Array<{
-              name: string;
-              sum?: { dataPoints: Array<{ asInt: string }>; isMonotonic: boolean };
-              gauge?: { dataPoints: Array<unknown> };
-            }>;
-          }>;
-        }>;
-      };
-
-      expect(payload.resourceMetrics).toHaveLength(1);
-      const rm = payload.resourceMetrics[0]!;
-      const resourceKeys = rm.resource.attributes.map((a) => a.key);
-      expect(resourceKeys).toContain("service.name");
-      expect(resourceKeys).toContain("deployment.environment");
-
-      const metricNames = rm.scopeMetrics[0]!.metrics.map((x) => x.name);
-      expect(metricNames).toContain("ao.http.requests.total");
-      expect(metricNames).toContain("ao.workflow.executions.total");
-      expect(metricNames).toContain("ao.slo.healthy");
-
-      const httpTotal = rm.scopeMetrics[0]!.metrics.find((x) => x.name === "ao.http.requests.total");
-      expect(httpTotal?.sum?.isMonotonic).toBe(true);
-      expect(httpTotal?.sum?.dataPoints[0]!.asInt).toBe("1");
     });
   });
 });

@@ -8,6 +8,7 @@ export function testTelemetrySettings(overrides: Partial<TelemetrySettings> = {}
     enabled: true,
     tracesEndpoint: null,
     metricsEndpoint: null,
+    metricsIntervalMs: 60_000,
     protocol: "http/protobuf",
     headers: {},
     timeoutMs: 10_000,

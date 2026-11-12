@@ -61,9 +61,26 @@ To send traces and metrics to different places, set `OTEL_EXPORTER_OTLP_TRACES_E
 
 `TRACING_ENABLED=true` with no endpoint records spans in the in-memory buffer only, which is useful for looking at `/api/observability/traces` without a collector.
 
+## Metrics over OTLP
+
+With `OTEL_METRICS_ENABLED=true` and an endpoint (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT`, which also turns tracing on), L2M exports metrics through the OpenTelemetry SDK every `OTEL_METRICS_PUSH_INTERVAL_MS` (60 seconds by default), with the same protocol, headers and timeout as traces, and once more on a clean stop. A metrics endpoint **does not turn tracing on**: with only `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` and `OTEL_METRICS_ENABLED=true`, only the metrics pipeline runs (no spans, no HTTP hooks, no context propagation).
+
+The metric names are the ones L2M has always pushed, as cumulative sums (counters) and gauges, so existing dashboards keep working:
+
+| Name | Kind |
+|---|---|
+| `ao.http.requests.total`, `ao.workflow.executions.total`, `ao.workflow.executions.success.total`, `ao.workflow.executions.failure.total` | Sum (monotonic, cumulative) |
+| `ao.workflow.executions.active`, `ao.slo.success.rate`, `ao.slo.healthy`, `ao.uptime.seconds` | Gauge |
+| `ao.workflow.execution.duration.p50.ms`, `.p95.ms`, `.p99.ms`, `ao.http.request.duration.p50.ms`, `.p95.ms` | Gauge, **deprecated**: use the histograms |
+| `ao.workflow.execution.duration` (unit `s`, attribute `l2m.execution.status`) | Histogram, new |
+| `ao.http.request.duration` (unit `s`, attributes `http.request.method`, `http.response.status_class`) | Histogram, new |
+| `l2m_otel_spans_dropped_total` (attribute `reason=export_failed`) | Sum, new; only while spans are exported |
+
+Differences from the previous push: the default encoding is `http/protobuf` (set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` for the old one), the instrumentation scope is `l2m` (it was `ai-orchestrator`), and values are exported from the same counters the Prometheus `/metrics` page reads, which are unchanged. The percentile gauges are kept for one release and then removed; the histograms replace them. With `METRICS_ENABLED=false` the counters stay at zero and the histograms get no observations. Spans lost when the queue is full are not counted, only those lost to a failed export.
+
 ## Export
 
-- **Protocol.** `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/protobuf` (the default, as in the OpenTelemetry specification) or `http/json`, for traces. Collectors listening on port 4318 accept both. The metrics push (`OTEL_METRICS_ENABLED`) always sends OTLP/HTTP JSON. gRPC is not shipped: `grpc` with a traces endpoint set stops the API at start-up.
+- **Protocol.** `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/protobuf` (the default, as in the OpenTelemetry specification) or `http/json`, for traces and for metrics. Collectors listening on port 4318 accept both. gRPC is not shipped: `grpc` with a traces or a metrics endpoint in use stops the API at start-up.
 - **Batching.** Spans are exported in batches by the SDK's batch span processor, never one request per span. The `OTEL_BSP_*` variables tune it (see the [settings table](#settings)). When the queue is full, new spans are dropped rather than slowing requests down.
 - **Unreachable collector.** An export that fails or takes longer than `OTEL_EXPORTER_OTLP_TIMEOUT` (10 seconds by default) is dropped. Exporting never blocks a request.
 - **Shutdown.** On a clean stop, L2M flushes the spans still queued, waiting at most 5 seconds.
