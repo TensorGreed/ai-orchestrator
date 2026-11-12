@@ -185,9 +185,9 @@ export interface SubjectStore {
    * `searching`. False (nothing written) when another worker finished, failed or expired it first.
    */
   completeSubjectRequest(id: string, patch: SubjectRequestPatch, exported: SubjectExportWrite): Promise<boolean>;
-  /** Open requests (`searching`, `ready`) past `at` and not yet notified, oldest due first. */
+  /** Open requests (`searching`, `ready`, `running`) past `at` and not yet notified, oldest due first. */
   listOverdueSubjectRequests(at: string, limit: number): Promise<SubjectRequestRecord[]>;
-  /** Marks `ready` requests that have no export row (a restore leaves exports out) `expired`; returns their ids. */
+  /** Marks `ready` export requests that have no export row (a restore leaves exports out) `expired`; returns their ids. */
   expireReadySubjectRequestsWithoutExport(at: string): Promise<string[]>;
   getSubjectExport(requestId: string): Promise<SubjectExportRecord | null>;
   /**

@@ -187,7 +187,8 @@ describe("decideStepUp", () => {
       "audit_export.change",
       "legal_hold.change",
       "subject_request.reveal",
-      "subject_export.download"
+      "subject_export.download",
+      "subject_request.delete"
     ]);
   });
 });
