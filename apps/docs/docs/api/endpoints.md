@@ -249,7 +249,7 @@ Bindings:
 Events (masked evidence only):
 
 - `GET /api/executions/:id/guard-events` (viewer)
-- `GET /api/guard/events?projectId=&workflowId=&profileId=&channel=&action=&days=&since=&findings=true&placement=&limit=&offset=` (viewer; `{ events, total }`, newest first; `placement=gateway` for gateway calls only, `run` for runs only, `response` for responses to external callers, `request` for refused or rewritten webhook payloads)
+- `GET /api/guard/events?projectId=&workflowId=&profileId=&channel=&action=&days=&since=&findings=true&placement=&limit=&offset=` (viewer; `{ events, total }`, newest first; `placement=gateway` for gateway calls only, `run` for everything else (response and request events included), `response` for responses to external callers, `request` for refused or rewritten webhook payloads)
 - `GET /api/guard/stats?projectId=&workflowId=&profileId=&placement=&days=` (viewer; counts by verdict, action, category, channel and detector, shadow would-block, budget overruns and per-day counts; 14 days by default)
 
 Verdicts from eval runs and replay jobs are left out of `/api/guard/events` and `/api/guard/stats` unless `includeEval=true`; a run's own `/api/executions/:id/guard-events` lists them. Their events carry `runSource: "eval"`, also after an approval resume.
@@ -358,7 +358,7 @@ When a rule set has a `response` channel, what `/webhook/:path`, `/webhook-test/
 |---|---|---|---|
 | Response withheld (block, review, approval, or a check that could not run) | `422 { error: "The response was withheld by content rules.", code: "content_filter", executionId }` | the same `422`, plus `session_id` | `200 { ok: false, executionId, code: "content_filter", error, result: { isError: true, content: [{ type: "text", text }] } }` |
 | Run paused for approval | `output` is `{ waitingForApproval: true, executionId }` | the same `output` | `result` is the same object |
-| Run failed | `400` with `error: "The workflow run failed."` and `executionId` | `status: "error"`, no error text | `500 { error: "The workflow run failed.", executionId }` |
+| Run failed | `400` with `error: "The workflow run failed."` and `executionId` | `200` with `ok: true`, `status: "error"` and the run's `output`, no error text | `500 { error: "The workflow run failed.", executionId }` |
 
 An idempotent retry of a withheld webhook call answers the same `422`.
 

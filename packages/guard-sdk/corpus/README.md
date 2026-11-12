@@ -159,7 +159,7 @@ Items are answers; a grounding item reads the file's `sources` (or its own).
 }
 ```
 
-Measured today (main split only; `src/output-benchmark.test.ts` pins it):
+Measured today (`src/output-benchmark.test.ts` pins it):
 
 | File | Category | Detected | False positives |
 |---|---|---|---|

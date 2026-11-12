@@ -62,6 +62,7 @@ describe("output check corpus", () => {
     expect(Object.keys(profile.channels)).toEqual(["final_output"]);
     expect(profile.channels.final_output!.detectors.map((entry) => entry.id)).toEqual(["output.topic"]);
     expect(profile.channels.final_output!.actions.off_topic).toMatchObject({ action: "block" });
+    expect(profile.latencyBudget.ms).toBeGreaterThanOrEqual(60_000);
   });
 });
 

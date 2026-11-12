@@ -97,6 +97,8 @@ export function outputCheckBenchmarkProfile(file: Pick<OutputCheckCorpusFile, "c
     id: `output-benchmark-${file.category}`,
     name: `Output check benchmark: ${file.category}`,
     version: "1",
+    // A generous budget: the local checks take milliseconds, and a slow host must not turn a benign item into a catch.
+    latencyBudget: { ms: 60_000, onExceeded: "fail_closed" },
     channels: {
       final_output: {
         detectors: [{ id: file.check, options: file.options }],

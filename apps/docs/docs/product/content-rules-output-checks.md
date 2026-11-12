@@ -45,7 +45,7 @@ Saving a rule set checks the options: a schema that does not compile, a topic th
 | Where | Channel | Notes |
 |---|---|---|
 | Content Rules node | `model_output` or `final_output` | Grounding reads the RAG Retrieve and Rerank steps upstream of the node. |
-| Agent rules port and automatic rule sets | `final_output` | Grounding reads the retrieval steps upstream plus the answers of the agent's retrieval tools. |
+| Agent rules port and automatic rule sets | `final_output` (agents do not check `model_output` inside the loop) | Grounding reads the retrieval steps upstream plus the answers of the agent's retrieval tools. |
 | Responses to external callers | `response` | See [Responses to external callers](./content-rules.md#responses-to-external-callers). Model-backed modes do not run here (see [Limits](#limits)). |
 | [/v1 AI gateway](./ai-gateway.md#content-rules) | `final_output` | Model-backed modes do not run here. |
 | Output Guardrail node | its own checks | See [Output Guardrail](#output-guardrail-node). |
@@ -72,7 +72,7 @@ Answers can be steered by an attacker, so validation is bounded. A schema is at 
 | Option | Default | Meaning |
 |---|---|---|
 | `mode` | `phrases` | `phrases` makes no model calls; `semantic` compares by meaning with an embedding model |
-| `minChars` | 1 | The allow list applies only to answers at least this long, so "Thanks!" is never off topic |
+| `minChars` | 1 | The allow list applies only to answers at least this long; set it (for example to 40) so short replies such as "Thanks!" are never off topic |
 | `denyThreshold`, `allowThreshold` | 0.8, 0.5 | Similarity limits in `semantic` mode |
 
 ## Content safety
@@ -90,15 +90,15 @@ The check splits the answer into claims (sentences with at least `minClaimWords`
 
 Without documents the check finds nothing, unless `onNoSources: "flag"`.
 
-**Where the documents come from.** In a workflow, the RAG Retrieve and Rerank steps upstream of the check. In an agent, also the answers of its retrieval tools. A tool counts as a retrieval tool when its name says it retrieves (`search_docs`, `kb_lookup`, `retrieve` and the like), and it is not marked as reaching the open web and its name does not say so (`web`, `http`, `browse` and the like). `toolSources: "all"` counts every tool's answer; a web page can say anything, so it is off by default.
+**Where the documents come from.** In a workflow, the RAG Retrieve and Rerank steps upstream of the check. In an agent, also the answers of its retrieval tools. A tool counts as a retrieval tool when its name says it retrieves (`search_docs`, `kb_lookup`, `retrieve` and the like). A tool marked as reaching the open web, or named so (`web`, `http`, `browse` and the like), does not count. `toolSources: "all"` counts every tool's answer; a web page can say anything, so it is off by default.
 
-**Judge.** With `judge: true` (or `{ "model": … }`), a claim whose support falls in the uncertain band (`judgeBand`, default 0.35 to 0.65) is put to a chat model, which confirms or clears it. At most `maxJudgeCalls` claims per check (default 5).
+**Judge.** With `judge: true` (or `{ "model": … }`), a flagged claim whose score (1 minus its support) falls in the uncertain band (`judgeBand`, default 0.35 to 0.65) is put to a chat model, which confirms or clears it. At most `maxJudgeCalls` claims per check (default 5).
 
 ## Model-backed modes
 
 Three modes call a model: safety with `mode: "model"`, topics with `mode: "semantic"`, and grounding with `judge`. They are opt-in.
 
-- **Which model.** The check's `model` option, else the model of the node being checked.
+- **Which model.** For safety by model and the grounding judge, the check's `model` option, else the model of the node being checked. Topics by meaning need `model` to name an embedding model.
 - **Keys.** A model names its key as a stored secret (`secretRef.secretId`). Saving needs `secret:use` on that secret. Raw keys and credential-like fields are refused.
 - **Addresses.** Only an admin can send a check's model calls to a custom address (`baseUrl` or endpoint fields).
 - **Time.** Each model-backed check has its own time limit, `timeoutMs` (default 30 seconds, from 1 second to 5 minutes). It does not use up the rule set's latency budget.
@@ -108,7 +108,7 @@ Three modes call a model: safety with `mode: "model"`, topics with `mode: "seman
 
 ## Streaming
 
-Schema and grounding judge a complete answer. While a [/v1 answer streams](./ai-gateway.md#content-rules), the checks at each boundary skip them; they run in the check of the whole answer at the end. If a schema or grounding rule would block (not in shadow, not `allow`), the answer is buffered and checked before any of it is sent. Topic and safety checks run at each boundary on the text so far, so a topic allow list can flag an answer whose first part names no allowed topic yet. For those, set `"stream": "buffer"` on the rule ("Always check the whole answer before streaming any of it" in the editor) to judge the whole answer once.
+Schema and grounding judge a complete answer. While a [/v1 answer streams](./ai-gateway.md#content-rules), the checks at each boundary skip them; they run in the check of the whole answer at the end. If a schema or grounding rule would block (not in shadow, not `allow`), the answer is buffered and checked before any of it is sent. Topic and safety checks run at each boundary on the newest part of the answer only, so a topic allow list can flag any part that names no allowed topic. For those, set `"stream": "buffer"` on the rule ("Always check the whole answer before streaming any of it" in the editor) to judge the whole answer once.
 
 ## Output Guardrail node
 
