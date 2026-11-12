@@ -402,6 +402,10 @@ describe("modern mode on", () => {
       id: 9,
       error: { code: -32022, message: "Unsupported protocol version", data: { supported: ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"], requested: "2027-01-01" } }
     });
+    // The modern version in the header over an unknown version in _meta: the header does not match the body, -32020.
+    const mismatch = await send({ _meta: modernMeta({ "io.modelcontextprotocol/protocolVersion": "v999.0.0" }) }, modernHeaders("tools/list"));
+    expect(mismatch.statusCode).toBe(400);
+    expect(mismatch.json()).toMatchObject({ id: 9, error: { code: -32020 } });
     // A legacy version named in modern _meta is not served without initialize either.
     const legacyInMeta = await send({ _meta: modernMeta({ "io.modelcontextprotocol/protocolVersion": "2025-11-25" }) }, { ...modernHeaders("tools/list"), "mcp-protocol-version": "2025-11-25" });
     expect(legacyInMeta.json().error.code).toBe(-32022);

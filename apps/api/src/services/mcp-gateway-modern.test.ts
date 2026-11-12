@@ -78,6 +78,21 @@ describe("validateModernGatewayMessage", () => {
     expect(wrongType).toMatchObject({ ok: false, status: 400, response: { error: { code: -32602 } } });
   });
 
+  it("answers a header version that differs from the _meta version with -32020, before -32022", () => {
+    // Supported header, unknown body version: a mismatch, not an unsupported version.
+    const unknownBody = validate(
+      { jsonrpc: "2.0", id: 302, method: "server/discover", params: { _meta: { ...META, "io.modelcontextprotocol/protocolVersion": "v999.0.0" } } },
+      { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover" }
+    );
+    expect(unknownBody).toMatchObject({ ok: false, status: 400, response: { id: 302, error: { code: -32020 } } });
+    // Both naming the same unknown version: -32022 with the supported list.
+    const unknownBoth = validate(
+      { jsonrpc: "2.0", id: 301, method: "server/discover", params: { _meta: { ...META, "io.modelcontextprotocol/protocolVersion": "v999.0.0" } } },
+      { "MCP-Protocol-Version": "v999.0.0", "Mcp-Method": "server/discover" }
+    );
+    expect(unknownBoth).toMatchObject({ ok: false, status: 400, response: { id: 301, error: { code: -32022, data: { requested: "v999.0.0" } } } });
+  });
+
   it("answers a header-modern request without the _meta keys with -32602 and its id", () => {
     const bare = validate({ jsonrpc: "2.0", id: 101, method: "server/discover" });
     expect(bare).toMatchObject({

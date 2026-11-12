@@ -22,6 +22,8 @@ import {
   inspectRequestMeta,
   isMcpSpecReservedErrorCode,
   missingRequestMetaError,
+  headerMismatchError,
+  MCP_HEADER_PROTOCOL_VERSION,
   stripMcpHeaderAnnotations,
   unsupportedProtocolVersionError,
   verifyMcpRequestHeaders,
@@ -100,7 +102,8 @@ function clientInfoOf(info: McpImplementationInfo | undefined): { name?: string;
 
 /**
  * Validate a modern message in the order the specification implies: a well-formed JSON-RPC message; a protocol
- * version in `_meta` (else -32602); a version the gateway serves statelessly (else -32022 listing every version it
+ * version in `_meta` (else -32602); an `MCP-Protocol-Version` header, when sent, equal to it (else -32020); a version
+ * the gateway serves statelessly (else -32022 listing every version it
  * speaks, so a client can pick a legacy one and `initialize`); `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name`
  * headers present and equal to the body (else -32020); the other required `_meta` keys (else -32602). Each failure is
  * HTTP 400. Notifications need none of this: the specification defines no client notification over HTTP for modern
@@ -127,6 +130,12 @@ export function validateModernGatewayMessage(parsed: unknown, headers: McpHeader
   }
   if (meta.missing.includes(MCP_META_PROTOCOL_VERSION) || meta.protocolVersion === undefined) {
     return { ok: false, status: 400, response: rpcErrorFrom(message.id, missingRequestMetaError(meta.missing)) };
+  }
+  // The header must name the version `_meta` names: a mismatch is -32020, whatever either version is (checked before
+  // -32022, so a supported header over an unknown body version is a mismatch, not an unsupported version).
+  const versionHeader = headers(MCP_HEADER_PROTOCOL_VERSION);
+  if (versionHeader !== undefined && versionHeader.trim() !== meta.protocolVersion) {
+    return { ok: false, status: 400, response: rpcErrorFrom(message.id, headerMismatchError(`${MCP_HEADER_PROTOCOL_VERSION} header does not match the protocol version in _meta`)) };
   }
   if (!(MCP_MODERN_PROTOCOL_VERSIONS as readonly string[]).includes(meta.protocolVersion)) {
     return { ok: false, status: 400, response: rpcErrorFrom(message.id, unsupportedProtocolVersionError(meta.protocolVersion, gatewaySupportedVersions(mode))) };
