@@ -8,7 +8,8 @@ import { ensureErasureSchema, ensureSubjectSchema, sqliteSubjectStore } from "./
 import {
   LABEL_MARK_INSERT_EMPTY_SQL,
   LABEL_MARK_TOUCH_SQL,
-  LABEL_MARK_UPDATE_SQL,
+  LABEL_MARK_WRITE_SQL,
+  labelMarkTouchParams,
   ensureLabelMarkSchema,
   labelMarkLive,
   labelMarkUpdateParams,
@@ -14001,7 +14002,7 @@ export class SqliteStore implements Store {
 
   // MCP 2026-07-28 (v71) — label marks of stateless gateway callers (gateway-label-marks.ts).
   async readMcpGatewayLabelMark(key: McpGatewayLabelMarkKey, at: { now: string; expiresAt: string }): Promise<McpGatewayLabelMark | null> {
-    const row = this.queryOne<Record<string, unknown>>(LABEL_MARK_TOUCH_SQL, [at.now, at.expiresAt, key.clientId, key.toolsetId, key.scopeKey, at.now]);
+    const row = this.queryOne<Record<string, unknown>>(LABEL_MARK_TOUCH_SQL, labelMarkTouchParams(key, at));
     return row ? mapLabelMarkRow(row) : null;
   }
 
@@ -14014,7 +14015,7 @@ export class SqliteStore implements Store {
       );
       const stored = row ? mapLabelMarkRow(row) : null;
       const { next, firstRaise } = mergeLabelMark(stored && labelMarkLive(stored, input.now) ? stored : null, input);
-      this.exec(LABEL_MARK_UPDATE_SQL, labelMarkUpdateParams(next));
+      this.exec(LABEL_MARK_WRITE_SQL, labelMarkUpdateParams(next));
       return { mark: next, firstRaise };
     }).immediate();
   }

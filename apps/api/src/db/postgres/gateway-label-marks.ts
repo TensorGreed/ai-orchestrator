@@ -1,12 +1,14 @@
 /**
  * MCP 2026-07-28 (v71) — PostgresStore: label marks of stateless gateway callers (db/gateway-label-marks.ts). Each
  * function matches the SqliteStore method of the same name. A raise locks the caller's row (`FOR UPDATE`) for the
- * merge, so raises from several instances never lose a label.
+ * merge, so raises from several instances never lose a label, and writes the result as an upsert, so a sweep that
+ * deleted the (expired) row in between cannot make it update nothing.
  */
 import {
   LABEL_MARK_INSERT_EMPTY_SQL,
   LABEL_MARK_TOUCH_SQL,
-  LABEL_MARK_UPDATE_SQL,
+  LABEL_MARK_WRITE_SQL,
+  labelMarkTouchParams,
   labelMarkLive,
   labelMarkUpdateParams,
   mapLabelMarkRow,
@@ -18,13 +20,13 @@ import type { PgContext } from "./context.js";
 
 const TOUCH_SQL = toPgPlaceholders(LABEL_MARK_TOUCH_SQL);
 const INSERT_EMPTY_SQL = toPgPlaceholders(LABEL_MARK_INSERT_EMPTY_SQL);
-const UPDATE_SQL = toPgPlaceholders(LABEL_MARK_UPDATE_SQL);
+const WRITE_SQL = toPgPlaceholders(LABEL_MARK_WRITE_SQL);
 
 export async function readMcpGatewayLabelMark(
   ctx: PgContext,
   ...[key, at]: Parameters<Store["readMcpGatewayLabelMark"]>
 ): ReturnType<Store["readMcpGatewayLabelMark"]> {
-  const row = await ctx.queryOne<Record<string, unknown>>(TOUCH_SQL, [at.now, at.expiresAt, key.clientId, key.toolsetId, key.scopeKey, at.now]);
+  const row = await ctx.queryOne<Record<string, unknown>>(TOUCH_SQL, labelMarkTouchParams(key, at));
   return row ? mapLabelMarkRow(row) : null;
 }
 
@@ -41,7 +43,7 @@ export async function raiseMcpGatewayLabelMark(
     const row = result.rows[0];
     const stored = row ? mapLabelMarkRow(row) : null;
     const { next, firstRaise } = mergeLabelMark(stored && labelMarkLive(stored, input.now) ? stored : null, input);
-    await client.query(UPDATE_SQL, labelMarkUpdateParams(next));
+    await client.query(WRITE_SQL, labelMarkUpdateParams(next));
     return { mark: next, firstRaise };
   });
 }

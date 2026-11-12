@@ -91,6 +91,16 @@ describeStoreContract("store contract: gateway label marks", (ctx) => {
     expect(Date.parse(read!.lastSeenAt)).toBe(T0 + 3_000);
   });
 
+  it("never moves an expiry back when an instance with a lagging clock reads the mark", async () => {
+    const store = ctx.store();
+    await store.raiseMcpGatewayLabelMark(raise({ provenance: ["sensitive"], offsetMs: 10_000 }));
+    // A read stamped five seconds earlier keeps the later expiry.
+    const lagging = await store.readMcpGatewayLabelMark(KEY, at(5_000));
+    expect(Date.parse(lagging!.expiresAt)).toBe(T0 + 10_000 + IDLE);
+    const later = await store.readMcpGatewayLabelMark(KEY, at(20_000));
+    expect(Date.parse(later!.expiresAt)).toBe(T0 + 20_000 + IDLE);
+  });
+
   it("keeps marks of other clients, toolsets and users apart", async () => {
     const store = ctx.store();
     await store.raiseMcpGatewayLabelMark(raise({ provenance: ["untrusted_external"] }));

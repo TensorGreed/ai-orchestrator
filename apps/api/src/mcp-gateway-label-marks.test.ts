@@ -221,6 +221,8 @@ describe("stored label marks of stateless callers", () => {
     const sessionId = await legacySession(fixture, a);
     expect(sessionId).toMatch(/[0-9a-f-]{36}/);
     expect((await calc(fixture, a, "4+4")).error?.code).toBe(APPROVAL_PENDING);
+    // The principal state really was evicted: the call above started a new one (a second caller_seen).
+    expect(await auditEvents(a.store, "mcp_gateway.caller_seen")).toHaveLength(2);
 
     // A restart (or another instance) starts with no principal state at all.
     await stop(a);
@@ -245,13 +247,21 @@ describe("stored label marks of stateless callers", () => {
     expect((await calc(fixture, b, "3+3")).result?.structuredContent?.result).toBe(6);
   });
 
-  it("fails closed when the stored mark cannot be read: the call is checked as carrying outside content", async () => {
+  it("fails closed when the stored mark cannot be read: the call is refused before it reaches the tool", async () => {
     const fixture = await setup({ track: true });
     const a = fixture.instance;
     const read = vi.spyOn(a.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
-    // A clean caller's first write would go through; with the mark unreadable it is held.
-    expect((await calc(fixture, a, "1+1")).error?.code).toBe(APPROVAL_PENDING);
+    // A clean caller's first call would go through; with the mark unreadable it is refused (no label set could stand
+    // in for data classes the caller may hold), and nothing ran.
+    const refused = await calc(fixture, a, "1+1");
+    expect(refused.result?.isError).toBe(true);
+    expect((refused.result?.content ?? []).map((entry) => entry.text).join("")).toMatch(/labels could not be checked/);
+    expect(refused.result?.structuredContent).toBeUndefined();
+    const workflow = await modernCall(fixture, a, "echo_workflow", { text: "x" });
+    expect((workflow.result?.content ?? []).map((entry) => entry.text).join("")).toMatch(/labels could not be checked/);
     expect(read).toHaveBeenCalled();
+    read.mockRestore();
+    expect((await calc(fixture, a, "1+2")).result?.structuredContent?.result).toBe(3);
     // A legacy session keeps its own mark and is not affected.
     const sessionId = await legacySession(fixture, a);
     const legacy = await a.app.inject({
@@ -284,6 +294,10 @@ describe("stored label marks of stateless callers", () => {
     const a = fixture.instance;
     expect((await calc(fixture, a, "1+1")).result?.structuredContent?.result).toBe(2);
     expect((await calc(fixture, a, "2+2")).result?.structuredContent?.result).toBe(4);
+    // The note is written once per half idle window, so it lasts one and a half windows.
+    const [note] = await a.store.listMcpGatewayLabelMarks({ clientId: fixture.client.id }, new Date().toISOString());
+    expect(note).toMatchObject({ unobserved: true, provenance: [] });
+    expect(Date.parse(note!.expiresAt)).toBeGreaterThan(Date.now() + a.config.MCP_GATEWAY_SESSION_IDLE_MS * 1.4);
     expect((await api(a, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { trackSessionLabels: true })).status).toBe(200);
     // Another instance (here: after a restart) never saw those results itself.
     await stop(a);

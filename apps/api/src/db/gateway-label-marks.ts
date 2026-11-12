@@ -147,19 +147,19 @@ export function mapLabelMarkRow(row: Record<string, unknown>): McpGatewayLabelMa
   };
 }
 
-/** The values of an UPDATE of every mutable column, in LABEL_MARK_UPDATE_SQL's order. */
+/** The values of LABEL_MARK_WRITE_SQL: the key, then every mutable column. */
 export function labelMarkUpdateParams(mark: McpGatewayLabelMark): unknown[] {
   return [
+    mark.clientId,
+    mark.toolsetId,
+    mark.scopeKey,
     JSON.stringify(mark.provenance),
     JSON.stringify(mark.dataClasses),
     mark.unobserved ? 1 : 0,
     mark.raisedAt,
     mark.raiseAudited ? 1 : 0,
     mark.lastSeenAt,
-    mark.expiresAt,
-    mark.clientId,
-    mark.toolsetId,
-    mark.scopeKey
+    mark.expiresAt
   ];
 }
 
@@ -169,15 +169,35 @@ export const LABEL_MARK_INSERT_EMPTY_SQL = `INSERT INTO mcp_gateway_label_marks
   VALUES (?, ?, ?, '[]', '[]', 0, NULL, 0, ?, ?)
   ON CONFLICT (client_id, toolset_id, scope_key) DO NOTHING`;
 
-export const LABEL_MARK_UPDATE_SQL = `UPDATE mcp_gateway_label_marks
-  SET provenance_json = ?, data_classes_json = ?, unobserved = ?, raised_at = ?, raise_audited = ?, last_seen_at = ?, expires_at = ?
-  WHERE client_id = ? AND toolset_id = ? AND scope_key = ?`;
+/**
+ * The merged mark, written as an upsert: if the row vanished between the insert and the locked read (another
+ * instance's sweep deleted it as expired), the write re-creates it instead of updating no row and losing the raise.
+ */
+export const LABEL_MARK_WRITE_SQL = `INSERT INTO mcp_gateway_label_marks
+  (client_id, toolset_id, scope_key, provenance_json, data_classes_json, unobserved, raised_at, raise_audited, last_seen_at, expires_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT (client_id, toolset_id, scope_key) DO UPDATE SET
+    provenance_json = excluded.provenance_json,
+    data_classes_json = excluded.data_classes_json,
+    unobserved = excluded.unobserved,
+    raised_at = excluded.raised_at,
+    raise_audited = excluded.raise_audited,
+    last_seen_at = excluded.last_seen_at,
+    expires_at = excluded.expires_at`;
 
-/** Reads a live mark and moves its expiry on (a call keeps its caller's mark alive, as a request keeps a session). */
+/**
+ * Reads a live mark and moves its expiry on (a call keeps its caller's mark alive, as a request keeps a session). The
+ * expiry never moves back: an instance whose clock lags cannot shorten a mark another instance set.
+ */
 export const LABEL_MARK_TOUCH_SQL = `UPDATE mcp_gateway_label_marks
-  SET last_seen_at = ?, expires_at = ?
+  SET last_seen_at = ?, expires_at = CASE WHEN expires_at > ? THEN expires_at ELSE ? END
   WHERE client_id = ? AND toolset_id = ? AND scope_key = ? AND expires_at > ?
   RETURNING *`;
+
+/** The touch's parameters, in LABEL_MARK_TOUCH_SQL's order. */
+export function labelMarkTouchParams(key: McpGatewayLabelMarkKey, at: { now: string; expiresAt: string }): unknown[] {
+  return [at.now, at.expiresAt, at.expiresAt, key.clientId, key.toolsetId, key.scopeKey, at.now];
+}
 
 /** The v71 table, as the Postgres chain creates it (TEXT timestamps on SQLite). */
 export function ensureLabelMarkSchema(db: BetterSqlite3Database): void {
