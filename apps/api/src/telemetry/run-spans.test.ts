@@ -197,6 +197,26 @@ describe("run and node spans", () => {
     expect(runSpan.status.code).toBe(SPAN_STATUS_ERROR);
     expect(runSpan.attributes).toMatchObject({ "l2m.run.status": "error", "error.type": result.errorCategory });
     expect(t.named("l2m.node output")).toHaveLength(0);
+    // Error types only: the error text (here quoting a key) stays in the run's history.
+    const recorded = JSON.stringify(t.spans().map((span) => [span.attributes, span.events, span.status]));
+    expect(recorded).not.toContain("sk-test-123");
+    expect(recorded).not.toContain("invalid api key");
+  });
+
+  it("gives a node answered from pinned data a span with no children", async () => {
+    const t = tracing();
+    const wf = workflow(
+      "pinned",
+      [node("in", "webhook_input"), node("llm", "llm_call", { ...MODEL, promptKey: "user_prompt" }), node("out", "output")],
+      [edge("in", "llm"), edge("llm", "out")]
+    );
+    const result = await t.run(wf, () => {
+      throw new Error("the model must not be called");
+    }, { pinnedData: { llm: { answer: "pinned" } }, usePinnedData: true });
+    expect(result.status).toBe("success");
+    const llm = t.one("l2m.node llm_call");
+    expect(llm.attributes["l2m.node.status"]).toBe("success");
+    expect(t.spans().filter((span) => t.parentOf(span) === llm.spanContext().spanId)).toHaveLength(0);
   });
 
   it("records a node that continues on error as ERROR while the run is partial", async () => {
@@ -300,6 +320,22 @@ describe("agent and tool spans", () => {
     expect(nodeIds).not.toContain("tools");
     expect(result.nodeResults.find((entry) => entry.nodeId === "model")?.status).not.toBe("error");
     expect(t.named("l2m.agent.iteration")).toHaveLength(0);
+  });
+
+  it("keeps the model's last answer off the agent span when the loop stops on a model failure", async () => {
+    const t = tracing();
+    const answer: Answer = (request) => {
+      if (request.messages.some((message) => message.role === "tool")) {
+        throw Object.assign(new Error("tape miss"), { code: "MODEL_TAPE_MISS" });
+      }
+      return { content: "PLANTED-ANSWER-7731", toolCalls: [{ id: "call-1", name: "mock-mcp__get_current_time", arguments: {} }] };
+    };
+    const result = await t.run(agentWorkflow(), answer, { webhookPayload: { user_prompt: "time?" } });
+    expect(result.status).toBe("success");
+    const agent = t.one("invoke_agent Helper");
+    expect(agent.attributes).toMatchObject({ "l2m.agent.stop_reason": "error", "error.type": "agent_error" });
+    expect(agent.status.code).toBe(SPAN_STATUS_ERROR);
+    expect(JSON.stringify(t.spans().map((span) => [span.attributes, span.events, span.status]))).not.toContain("PLANTED-ANSWER-7731");
   });
 
   it("adds one span per agent turn at the verbose span detail, with the tool calls inside their turn", async () => {

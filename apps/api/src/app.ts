@@ -2584,7 +2584,8 @@ export async function createApp(
                   codeSandbox: codeSandboxPlan,
                   outboundGuard,
                   outboundDnsResolver: nodeDnsResolver,
-                  ...(runInstrumentation.enabled ? { instrument: runInstrumentation } : {})
+                  ...(runInstrumentation.enabled ? { instrument: runInstrumentation } : {}),
+                  ...(metricsService.isEnabled() ? { onNodeComplete: (event: { status: string; durationMs: number; output?: unknown }) => recordNodeMetric(input, event) } : {})
                 }
               );
               // The error workflow's run is its own span, a child of the failed run's.

@@ -37,7 +37,8 @@ export function openNodeSpan(
 /**
  * Ends a node's span with the outcome its result recorded (the last result for the node; every exit of the node's
  * step pushes one). Canceled, paused and skipped are outcomes, not errors; only a failed node marks the span ERROR,
- * with its error category as `error.type`.
+ * with its error category as `error.type`. The error text is left out: it can quote what the node read or what an
+ * upstream service answered (the run's history keeps it).
  */
 export function finishNodeSpan(span: ScopedInstrumentationSpan, nodeResults: readonly NodeExecutionResult[], nodeId: string): void {
   if (span === NOOP_SCOPED_INSTRUMENTATION_SPAN) return;
@@ -54,7 +55,7 @@ export function finishNodeSpan(span: ScopedInstrumentationSpan, nodeResults: rea
         [SPAN_OUTCOME_ATTRIBUTES.NODE_STATUS]: result.status,
         [SPAN_OUTCOME_ATTRIBUTES.NODE_ATTEMPTS]: result.attempts
       });
-      if (result.status === "error") span.recordError(result.error ?? "", { type: result.errorCategory ?? "unknown" });
+      if (result.status === "error") span.recordError("", { type: result.errorCategory ?? "unknown" });
     }
   } finally {
     span.end();
@@ -70,8 +71,8 @@ function describeAgentState(span: InstrumentationSpan, state: AgentRunState): vo
     [SPAN_OUTCOME_ATTRIBUTES.USAGE_OUTPUT_TOKENS]: state.usage?.outputTokens,
     [SPAN_OUTCOME_ATTRIBUTES.USAGE_CACHE_READ_INPUT_TOKENS]: state.usage?.cachedInputTokens
   });
-  // The loop turns a model failure into an `error` stop reason with the message as its answer.
-  if (state.stopReason === "error") span.recordError(state.finalAnswer, { type: "agent_error" });
+  // The type only: with an `error` stop reason the answer is an error message or the model's last answer (content).
+  if (state.stopReason === "error") span.recordError("", { type: "agent_error" });
 }
 
 /**
@@ -141,8 +142,11 @@ export async function runChildInSpan(
   );
 }
 
-/** A finished run's status on its span; only a failed run marks it ERROR (canceled and paused are outcomes). */
-export function describeRunResult(span: InstrumentationSpan, result: Pick<WorkflowExecutionResult, "status" | "error" | "errorCategory">): void {
+/**
+ * A finished run's status on its span; only a failed run marks it ERROR (canceled and paused are outcomes). Like a
+ * node's, the run's error text stays in its history and off the span.
+ */
+export function describeRunResult(span: InstrumentationSpan, result: Pick<WorkflowExecutionResult, "status" | "errorCategory">): void {
   span.setAttributes({ [SPAN_OUTCOME_ATTRIBUTES.RUN_STATUS]: result.status });
-  if (result.status === "error") span.recordError(result.error ?? "", { type: result.errorCategory ?? "unknown" });
+  if (result.status === "error") span.recordError("", { type: result.errorCategory ?? "unknown" });
 }
