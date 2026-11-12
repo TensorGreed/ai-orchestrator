@@ -354,14 +354,20 @@ import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 import {
+  buildClientMetadataDocument,
+  carryIssuerBinding,
+  clientMetadataDocumentUrlProblem,
   createClusterRefreshLock,
+  MCP_OAUTH_CLIENT_METADATA_PATH,
   MCP_OAUTH_MAX_PENDING,
   McpOAuthService,
   McpOAuthUserError,
   renderOAuthCallbackPage,
   resolveMcpConnectionsUrl,
+  resolveMcpOAuthClientMetadataUrl,
   resolveMcpOAuthRedirectUri
 } from "./services/mcp-oauth-service.js";
+import { createMcpOAuthEgressFetch } from "./services/mcp-oauth-egress.js";
 import { isInternalSecretProvider } from "./services/secret-service.js";
 import type { QueueClaimFence, SessionAuthMethod, Store } from "./db/store.js";
 
@@ -1758,9 +1764,22 @@ export async function createApp(
 
   // Phase 10.5 — OAuth connections for remote MCP servers. The http adapter
   // asks this service for access tokens; tokens stay in SecretService.
+  // Client ID Metadata Document (optional): used only when its URL is one an authorization server could fetch.
+  const mcpOAuthClientMetadataUrl = resolveMcpOAuthClientMetadataUrl(config);
+  const mcpOAuthClientMetadataProblem = config.MCP_OAUTH_CLIENT_METADATA_ENABLED ? clientMetadataDocumentUrlProblem(mcpOAuthClientMetadataUrl) : null;
+  if (mcpOAuthClientMetadataProblem) {
+    app.log.warn(
+      { url: mcpOAuthClientMetadataUrl },
+      `MCP_OAUTH_CLIENT_METADATA_ENABLED is on, but L2M will not offer its client metadata document because ${mcpOAuthClientMetadataProblem}; set MCP_OAUTH_REDIRECT_BASE_URL to a public https URL. Dynamic registration is used instead.`
+    );
+  }
   const mcpOAuthService = new McpOAuthService(store, secretService, {
     connectionsUrl: resolveMcpConnectionsUrl(config),
     redirectUri: resolveMcpOAuthRedirectUri(config),
+    ...(config.MCP_OAUTH_CLIENT_METADATA_ENABLED && !mcpOAuthClientMetadataProblem ? { clientMetadataUrl: mcpOAuthClientMetadataUrl } : {}),
+    ...(config.MCP_OAUTH_BLOCK_PRIVATE_HOSTS
+      ? { egressFetch: (endpoint: string) => createMcpOAuthEgressFetch(endpoint, { allowlist: config.MCP_OAUTH_PRIVATE_HOST_ALLOWLIST }) }
+      : {}),
     stateTtlMs: config.MCP_OAUTH_STATE_TTL_MS,
     refreshSkewMs: config.MCP_OAUTH_REFRESH_SKEW_MS,
     challenges: challengeStore,
@@ -13373,7 +13392,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       name: parsed.data.name,
       description: parsed.data.description ?? null,
       adapterId: parsed.data.adapterId,
-      connection: parsed.data.connection ?? {},
+      // An issuer binding is only ever set by a successful OAuth connection, never by a save.
+      connection: carryIssuerBinding(parsed.data.connection ?? {}, null),
       secretId: parsed.data.secretRef?.secretId ?? null,
       owner: parsed.data.owner ?? user.email,
       projectId: parsed.data.projectId ?? null,
@@ -13454,6 +13474,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     await store.updateMcpServer(existing.id, {
       ...rest,
+      // The stored OAuth issuer binding survives a save; it changes only through a connection or an admin reset.
+      // Read again just before the write, so a binding made while this request was checked is not dropped.
+      ...(rest.connection !== undefined
+        ? { connection: carryIssuerBinding(rest.connection, (await store.getMcpServer(existing.id))?.connection ?? existing.connection) }
+        : {}),
       ...(sandbox !== undefined ? { sandbox: nextAdapterId === "stdio_mcp" ? sandbox : null } : {}),
       ...(nextAdapterId !== "stdio_mcp" && existing.sandbox ? { sandbox: null } : {}),
       ...(secretRef !== undefined ? { secretId: secretRef?.secretId ?? null } : {}),
@@ -13762,6 +13787,21 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
   });
 
+  // L2M's Client ID Metadata Document: public (authorization servers fetch it), holds no secret, and is served
+  // only when MCP_OAUTH_CLIENT_METADATA_ENABLED is on. Its `client_id` is exactly the URL it is served at.
+  app.get(MCP_OAUTH_CLIENT_METADATA_PATH, async (_request, reply) => {
+    if (!config.MCP_OAUTH_CLIENT_METADATA_ENABLED || mcpOAuthClientMetadataProblem) {
+      reply.code(404);
+      return {
+        error: mcpOAuthClientMetadataProblem
+          ? "The client metadata document is not offered: its URL is not a public https URL (see MCP_OAUTH_REDIRECT_BASE_URL)."
+          : "Client ID Metadata Documents are not enabled (MCP_OAUTH_CLIENT_METADATA_ENABLED)."
+      };
+    }
+    reply.header("cache-control", "public, max-age=3600");
+    return buildClientMetadataDocument({ url: mcpOAuthClientMetadataUrl, redirectUri: mcpOAuthService.redirectUri });
+  });
+
   app.get<{ Querystring: Record<string, string | undefined> }>("/api/mcp/oauth/callback", async (request, reply) => {
     const query = request.query ?? {};
     const sessionId = getSessionIdFromRequest(request);
@@ -13773,6 +13813,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           code: query.code,
           ...(query.error ? { error: query.error } : {}),
           ...(query.error_description ? { errorDescription: query.error_description } : {}),
+          // RFC 9207: passed as the router decoded it, so a repeated `iss` is seen and refused.
+          ...(Object.prototype.hasOwnProperty.call(query, "iss") ? { iss: (query as Record<string, unknown>).iss } : {}),
           sessionId,
           actor: { userId: sessionUser.id, isAdmin: sessionUser.role === "admin" }
         })
@@ -13849,6 +13891,27 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       metadata: { name: server.name }
     });
     return { status };
+  });
+
+  // The authorization server a pre-registered client id is bound to stays until an admin resets it here (removing
+  // connections never clears it). The next successful connection with that client id binds again.
+  app.delete<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth/issuer-binding", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const server = await findOAuthServer(request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
+    const previous = await mcpOAuthService.resetIssuerBinding(server.id);
+    await audit(request, user, {
+      category: "system",
+      eventType: "mcp_server.oauth_issuer_binding_reset",
+      action: "update",
+      outcome: "success",
+      resourceType: "mcp_server",
+      resourceId: server.id,
+      projectId: server.projectId,
+      metadata: { name: server.name, hadBinding: previous !== null, ...(previous ? { clientId: previous.clientId, issuer: previous.issuer } : {}) }
+    });
+    return { status: await mcpOAuthService.status(server.id) };
   });
 
   // Phase 10.7 — delegated credentials. Every user who can run workflows

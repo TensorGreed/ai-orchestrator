@@ -44,6 +44,7 @@ function oauthStatus(overrides: Partial<McpOAuthConnectionStatus> = {}): McpOAut
     lastError: null,
     updatedAt: null,
     redirectUri: "http://localhost:5173/api/mcp/oauth/callback",
+    issuerBinding: null,
     ...overrides
   };
 }

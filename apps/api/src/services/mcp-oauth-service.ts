@@ -30,6 +30,14 @@
  * of their own (provider `mcp_oauth_user`) with a row in
  * `mcp_user_oauth_connections`. `getAccessToken` with a `userId` reads only
  * that user's connection, and never the service one.
+ *
+ * MCP 2026-07-28 authorization rules (every protocol era): the pending
+ * authorization records the authorization server's validated issuer and
+ * whether it sends `iss`; the callback applies RFC 9207 before showing an
+ * error or spending the code. A pre-registered client id stays bound to the
+ * issuer it was first used with. Optional: a Client ID Metadata Document as
+ * the client id (MCP_OAUTH_CLIENT_METADATA_ENABLED), and private-address
+ * blocking for OAuth requests (MCP_OAUTH_BLOCK_PRIVATE_HOSTS, `egressFetch`).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -41,20 +49,31 @@ import {
   createPkcePair,
   discoverMcpOAuth,
   exchangeAuthorizationCode,
+  isLoopbackHost,
+  oauthApplicationType,
   refreshOAuthToken,
   registerOAuthClient,
+  validateAuthorizationResponseIssuer,
   type FetchLike,
   type McpAccessTokenOptions,
   type McpOAuthTokenProvider,
   type OAuthTokenSet
 } from "@ai-orchestrator/mcp-sdk";
-import type { McpOAuthConnectionStatus, McpUserConnectionView } from "@ai-orchestrator/shared";
+import { classifyIp, parseIp } from "@ai-orchestrator/guard-sdk";
+import type {
+  McpOAuthClientRegistration,
+  McpOAuthConnectionStatus,
+  McpOAuthIssuerBinding,
+  McpUserConnectionView
+} from "@ai-orchestrator/shared";
 import type { McpOAuthConnectionRecord, McpServerRecord, McpUserOAuthConnectionRecord } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
 import type { Store } from "../db/store.js";
 import { MemoryChallengeStore, type ChallengeStore } from "./challenge-store.js";
 
 export const MCP_OAUTH_CALLBACK_PATH = "/api/mcp/oauth/callback";
+/** Where L2M serves its Client ID Metadata Document (under the redirect base); the document's URL is the client id. */
+export const MCP_OAUTH_CLIENT_METADATA_PATH = "/api/mcp/oauth/client-metadata.json";
 export const MCP_OAUTH_SECRET_PROVIDER = "mcp_oauth";
 /** Phase 10.7 — internal secrets holding one user's tokens for a delegated server. */
 export const MCP_OAUTH_USER_SECRET_PROVIDER = "mcp_oauth_user";
@@ -66,17 +85,103 @@ export function resolveMcpConnectionsUrl(config: { WEB_ORIGIN: string }): string
   return `${base.replace(/\/+$/, "")}/?mode=connections`;
 }
 
-export function resolveMcpOAuthRedirectUri(config: {
+type RedirectBaseConfig = {
   MCP_OAUTH_REDIRECT_BASE_URL: string;
   MCP_GATEWAY_PUBLIC_URL: string;
   WEB_ORIGIN: string;
-}): string {
+};
+
+function resolveMcpOAuthBaseUrl(config: RedirectBaseConfig): string {
   const base =
     config.MCP_OAUTH_REDIRECT_BASE_URL.trim() ||
     config.MCP_GATEWAY_PUBLIC_URL.trim() ||
     config.WEB_ORIGIN.split(",").map((entry) => entry.trim()).find(Boolean) ||
     "http://localhost:5173";
-  return `${base.replace(/\/+$/, "")}${MCP_OAUTH_CALLBACK_PATH}`;
+  return base.replace(/\/+$/, "");
+}
+
+export function resolveMcpOAuthRedirectUri(config: RedirectBaseConfig): string {
+  return `${resolveMcpOAuthBaseUrl(config)}${MCP_OAUTH_CALLBACK_PATH}`;
+}
+
+/** The URL of L2M's Client ID Metadata Document, which is also the client id it names: beside the callback. */
+export function resolveMcpOAuthClientMetadataUrl(config: RedirectBaseConfig): string {
+  return `${resolveMcpOAuthBaseUrl(config)}${MCP_OAUTH_CLIENT_METADATA_PATH}`;
+}
+
+const NON_PUBLIC_SUFFIXES = [".localhost", ".local", ".internal", ".home.arpa", ".lan"];
+
+/**
+ * Whether an authorization server could fetch L2M's Client ID Metadata Document at `url`: https (the spec requires
+ * it), no credentials, query or fragment, and a host that is not loopback, a non-public address or a name that only
+ * resolves on a local network. Reachability itself cannot be proven from here.
+ */
+export function clientMetadataDocumentUrlProblem(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "it is not a valid URL";
+  }
+  if (parsed.protocol !== "https:") return "it does not use https";
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) return "it carries credentials, a query or a fragment";
+  const host = parsed.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+  if (isLoopbackHost(parsed.hostname)) return "its host is a loopback address";
+  const literal = parseIp(host);
+  if (literal) return classifyIp(literal) === "public" ? null : "its host is not a public address";
+  if (!host.includes(".") || NON_PUBLIC_SUFFIXES.some((suffix) => host.endsWith(suffix))) return "its host is not a public name";
+  return null;
+}
+
+/**
+ * Where a server's issuer binding lives: `connection.oauth.issuerBinding`, beside the client id it is for. Only this
+ * service writes it (on the first successful connection with a pre-registered client id) and only an admin resets
+ * it; every route that saves a server's connection keeps the stored value with `carryIssuerBinding`.
+ */
+const ISSUER_BINDING_KEY = "issuerBinding";
+
+/** The issuer binding stored on a server's connection, or null. */
+export function readIssuerBinding(connection: Record<string, unknown> | null | undefined): McpOAuthIssuerBinding | null {
+  const value = toRecord(toRecord(connection?.oauth)[ISSUER_BINDING_KEY]);
+  return typeof value.clientId === "string" && value.clientId && typeof value.issuer === "string" && value.issuer
+    ? { clientId: value.clientId, issuer: value.issuer, boundAt: typeof value.boundAt === "string" ? value.boundAt : "" }
+    : null;
+}
+
+/**
+ * The connection to save: `next` as the caller sent it, except that its issuer binding is the one `previous`
+ * (the stored connection, or null for a new server) holds. A binding in `next` is ignored, so no save can set,
+ * change or clear it.
+ */
+export function carryIssuerBinding(next: Record<string, unknown>, previous: Record<string, unknown> | null): Record<string, unknown> {
+  const binding = readIssuerBinding(previous);
+  const hadOAuth = next.oauth !== undefined;
+  const oauth = { ...toRecord(next.oauth) };
+  delete oauth[ISSUER_BINDING_KEY];
+  if (binding) oauth[ISSUER_BINDING_KEY] = binding;
+  const result = { ...next };
+  if (hadOAuth || binding) result.oauth = oauth;
+  return result;
+}
+
+function withIssuerBinding(connection: Record<string, unknown>, binding: McpOAuthIssuerBinding | null): Record<string, unknown> {
+  const oauth = { ...toRecord(connection.oauth) };
+  if (binding) oauth[ISSUER_BINDING_KEY] = binding;
+  else delete oauth[ISSUER_BINDING_KEY];
+  return { ...connection, oauth };
+}
+
+/** L2M's Client ID Metadata Document: public, holds no secret; `client_id` is exactly the document's own URL. */
+export function buildClientMetadataDocument(input: { url: string; redirectUri: string }): Record<string, unknown> {
+  return {
+    client_id: input.url,
+    client_name: "L2M",
+    client_uri: new URL(input.url).origin,
+    redirect_uris: [input.redirectUri],
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none"
+  };
 }
 
 /** What the secret holds. Never returned by any API. */
@@ -94,7 +199,7 @@ interface StoredOAuthSecret {
     clientId: string;
     clientSecret?: string;
     tokenEndpointAuthMethod: string;
-    registration: "dynamic" | "pre_registered";
+    registration: McpOAuthClientRegistration;
     redirectUri: string;
   };
 }
@@ -110,7 +215,10 @@ interface PendingAuthorization {
   redirectUri: string;
   resource: string;
   tokenEndpoint: string;
+  /** The `issuer` of the authorization server's validated metadata, recorded before the browser is sent there. */
   issuer: string;
+  /** RFC 9207: the metadata promised `iss` in every response, so a response without one is rejected. */
+  issParameterSupported?: boolean;
   scope?: string;
   client: StoredOAuthSecret["client"];
   expiresAtMs: number;
@@ -128,6 +236,16 @@ export interface McpOAuthServiceOptions {
   connectionsUrl?: string;
   /** Phase 13.1 — where pending authorizations wait for their callback. Default: in this process. */
   challenges?: ChallengeStore;
+  /**
+   * The `fetch` for the OAuth requests of the MCP server at `endpoint` (MCP_OAUTH_BLOCK_PRIVATE_HOSTS: refuses
+   * private addresses and pins connections). Absent: `fetchImpl`, else the runtime's fetch.
+   */
+  egressFetch?: (endpoint: string) => FetchLike;
+  /**
+   * The URL of L2M's Client ID Metadata Document, set only when MCP_OAUTH_CLIENT_METADATA_ENABLED is on and the URL
+   * is one an authorization server could fetch. Used as the client id when the server advertises support.
+   */
+  clientMetadataUrl?: string;
   /**
    * Phase 13.1 — cluster mode: runs a refresh while holding a cluster-wide lock for `key` (one connection). With it,
    * the refresh re-reads the stored token and keeps one another instance stored meanwhile.
@@ -244,6 +362,39 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     return this.options.redirectUri;
   }
 
+  /**
+   * Records the first successful use of a pre-registered client id: the server's binding names its issuer from then
+   * on. A binding for the same client id is never replaced here (a stale one was refused at the start); one for a
+   * client id the admin has since replaced is.
+   */
+  private async bindIssuer(serverId: string, clientId: string, issuer: string): Promise<void> {
+    const current = await this.store.getMcpServer(serverId);
+    if (!current) return;
+    // Only the client id the server is configured with now is bound (a flow for a replaced id binds nothing).
+    if (String(toRecord(current.connection.oauth).clientId ?? "").trim() !== clientId) return;
+    const existing = readIssuerBinding(current.connection);
+    if (existing && existing.clientId === clientId) return;
+    await this.store.updateMcpServer(serverId, {
+      connection: withIssuerBinding(current.connection, { clientId, issuer, boundAt: new Date().toISOString() })
+    });
+  }
+
+  /** Admin action: forget the server's issuer binding, so the next successful connection binds again. Returns the old one. */
+  async resetIssuerBinding(serverId: string): Promise<McpOAuthIssuerBinding | null> {
+    const server = await this.store.getMcpServer(serverId);
+    const binding = readIssuerBinding(server?.connection);
+    if (server && binding) {
+      await this.store.updateMcpServer(serverId, { connection: withIssuerBinding(server.connection, null) });
+    }
+    return binding;
+  }
+
+  /** Fetch options for the OAuth requests of the MCP server at `endpoint`. */
+  private fetchOptionsFor(endpoint: string): { fetchImpl?: FetchLike } {
+    if (this.options.egressFetch) return { fetchImpl: this.options.egressFetch(endpoint) };
+    return this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {};
+  }
+
   /** True when the server's connection is set up for OAuth. */
   static usesOAuth(server: Pick<McpServerRecord, "adapterId" | "connection">): boolean {
     return server.adapterId === "http_mcp" && String(server.connection.authType ?? "").trim().toLowerCase() === "oauth";
@@ -266,6 +417,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
 
   async status(serverId: string): Promise<McpOAuthConnectionStatus> {
     const row = await this.store.getMcpOAuthConnection(serverId);
+    const server = await this.store.getMcpServer(serverId);
     const base: McpOAuthConnectionStatus = {
       serverId,
       state: "not_connected",
@@ -281,7 +433,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       connectedBy: null,
       lastError: null,
       updatedAt: null,
-      redirectUri: this.options.redirectUri
+      redirectUri: this.options.redirectUri,
+      issuerBinding: readIssuerBinding(server?.connection)
     };
     if (!row) return base;
     let state = row.state;
@@ -364,7 +517,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       if (typeof value === "string" && key.trim() && key.toLowerCase() !== "authorization") customHeaders[key] = value;
     }
 
-    const fetchOptions = this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {};
+    const fetchOptions = this.fetchOptionsFor(endpoint);
     let discovery;
     try {
       discovery = await discoverMcpOAuth(endpoint, { ...fetchOptions, headers: customHeaders });
@@ -380,9 +533,24 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       (Array.isArray(discovery.resourceMetadata.scopes_supported) ? discovery.resourceMetadata.scopes_supported.join(" ") : "") ||
       undefined;
 
+    // Registration priority (MCP 2026-07-28): a configured client id, then the Client ID Metadata Document when
+    // enabled and supported, then dynamic registration (reusing an earlier one for the same issuer), then the admin.
+    const previous = input.userId
+      ? await this.readSecret(await this.store.getMcpUserOAuthConnection(server.id, input.userId))
+      : await this.readSecret(await this.store.getMcpOAuthConnection(server.id));
     let client: StoredOAuthSecret["client"];
     const configuredClientId = typeof oauthSettings.clientId === "string" ? oauthSettings.clientId.trim() : "";
     if (configuredClientId) {
+      // A pre-registered client id belongs to the authorization server it was first used with (stored on the server,
+      // so it holds for every user and survives removed connections); if the server's metadata now names another one,
+      // refuse instead of sending the id (and its secret) there.
+      const binding = readIssuerBinding(server.connection);
+      if (binding && binding.clientId === configuredClientId && binding.issuer !== metadata.issuer) {
+        throw new McpOAuthUserError(
+          `The authorization server changed: the client id was used with ${binding.issuer}, but the MCP server now names ${metadata.issuer}. Check the client id: an admin registers L2M with the new authorization server and enters its client id on the server, or resets the binding in the server's OAuth settings.`,
+          409
+        );
+      }
       const clientSecret = server.secretId ? await this.secretService.resolveSecret({ secretId: server.secretId }) : undefined;
       const method =
         typeof oauthSettings.tokenEndpointAuthMethod === "string" && oauthSettings.tokenEndpointAuthMethod.trim()
@@ -397,11 +565,15 @@ export class McpOAuthService implements McpOAuthTokenProvider {
         registration: "pre_registered",
         redirectUri
       };
+    } else if (this.options.clientMetadataUrl && metadata.client_id_metadata_document_supported === true) {
+      client = {
+        clientId: this.options.clientMetadataUrl,
+        tokenEndpointAuthMethod: "none",
+        registration: "metadata_document",
+        redirectUri
+      };
     } else {
       // Reuse an earlier dynamic registration for the same authorization server and redirect URL.
-      const previous = input.userId
-        ? await this.readSecret(await this.store.getMcpUserOAuthConnection(server.id, input.userId))
-        : await this.readSecret(await this.store.getMcpOAuthConnection(server.id));
       if (
         previous?.client.registration === "dynamic" &&
         previous.issuer === metadata.issuer &&
@@ -418,7 +590,12 @@ export class McpOAuthService implements McpOAuthTokenProvider {
         try {
           const registration = await registerOAuthClient(
             metadata.registration_endpoint,
-            { redirectUri, clientName: "L2M", ...(configuredScope ? { scope: configuredScope } : {}) },
+            {
+              redirectUri,
+              clientName: "L2M",
+              applicationType: oauthApplicationType(redirectUri),
+              ...(configuredScope ? { scope: configuredScope } : {})
+            },
             fetchOptions
           );
           client = { ...registration, registration: "dynamic", redirectUri };
@@ -441,6 +618,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       resource: discovery.resource,
       tokenEndpoint: metadata.token_endpoint,
       issuer: metadata.issuer,
+      issParameterSupported: metadata.authorization_response_iss_parameter_supported === true,
       ...(configuredScope ? { scope: configuredScope } : {}),
       client,
       expiresAtMs
@@ -474,6 +652,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     code: string | undefined;
     error?: string;
     errorDescription?: string;
+    /** RFC 9207 `iss` from the callback query as the router decoded it (absent, a string, or a repeated value). */
+    iss?: unknown;
     sessionId: string | null;
     /**
      * Phase 10.7 — who is signed in to the browser finishing the flow. A
@@ -509,6 +689,21 @@ export class McpOAuthService implements McpOAuthTokenProvider {
         };
       }
     }
+    // RFC 9207, before anything in the response is acted on or shown: a response from another authorization server
+    // (a mix-up) is dropped, error fields included, and its code never reaches a token endpoint.
+    const issuerCheck = validateAuthorizationResponseIssuer({
+      recordedIssuer: pending.issuer,
+      issParameterSupported: pending.issParameterSupported === true,
+      iss: input.iss
+    });
+    if (!issuerCheck.ok) {
+      return {
+        serverId: pending.serverId,
+        ok: false,
+        error: `${issuerCheck.message} Start again from the MCP servers page.`,
+        ...(pending.userId ? { userId: pending.userId } : {})
+      };
+    }
     const server = await this.store.getMcpServer(pending.serverId);
     if (!server) {
       return { serverId: pending.serverId, ok: false, error: "The MCP server no longer exists." };
@@ -530,6 +725,21 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     if (!input.code) {
       return failed("The authorization server sent no code.");
     }
+    // A pre-registered client id: the server's settings may have changed while the browser was away. The client id
+    // must still be the configured one, and a binding made meanwhile (by another flow) must name this issuer; the
+    // code (and the client secret) never go to another authorization server's token endpoint.
+    if (pending.client.registration === "pre_registered") {
+      const configured = String(toRecord(server.connection.oauth).clientId ?? "").trim();
+      if (configured !== pending.client.clientId) {
+        return failed("The server's client id changed while this authorization was in progress. Start again from the MCP servers page.");
+      }
+      const binding = readIssuerBinding(server.connection);
+      if (binding && binding.clientId === pending.client.clientId && binding.issuer !== pending.issuer) {
+        return failed(
+          `The authorization server changed: the client id is bound to ${binding.issuer}, but this authorization went to ${pending.issuer}. An admin can check the client id or reset the binding in the server's OAuth settings.`
+        );
+      }
+    }
 
     let tokens: OAuthTokenSet;
     try {
@@ -544,7 +754,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
           redirectUri: pending.redirectUri,
           resource: pending.resource
         },
-        this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}
+        this.fetchOptionsFor(String(server.connection.endpoint ?? pending.resource))
       );
     } catch (error) {
       const message = error instanceof McpOAuthError ? error.message : "Token exchange failed.";
@@ -584,6 +794,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
         connectedAt: now,
         lastError: null
       });
+      if (pending.client.registration === "pre_registered") await this.bindIssuer(server.id, pending.client.clientId, pending.issuer);
       return { serverId: server.id, ok: true, userId };
     }
     const existing = await this.store.getMcpOAuthConnection(server.id);
@@ -604,6 +815,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       connectedBy: pending.userEmail,
       lastError: null
     });
+    if (pending.client.registration === "pre_registered") await this.bindIssuer(server.id, pending.client.clientId, pending.issuer);
     return { serverId: server.id, ok: true };
   }
 
@@ -715,6 +927,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     }
     const current = this.refreshedElsewhere(secret, seenAccessToken);
     if (current !== null) return current;
+    const server = await this.store.getMcpServer(serverId);
     let tokens: OAuthTokenSet;
     try {
       tokens = await refreshOAuthToken(
@@ -726,7 +939,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
           refreshToken: secret.refreshToken,
           resource: secret.resource
         },
-        this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}
+        this.fetchOptionsFor(String(server?.connection.endpoint ?? secret.resource))
       );
     } catch (error) {
       const message = `Token refresh failed: ${error instanceof Error ? error.message : "unknown error"}`;
@@ -749,7 +962,6 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       ...(tokens.scope ? { scope: tokens.scope } : {})
     };
     if (!tokens.expiresAt) delete next.expiresAt;
-    const server = await this.store.getMcpServer(serverId);
     const secretId = server ? await this.writeSecret(server, row.secretId, next) : row.secretId;
     await this.store.upsertMcpOAuthConnection({
       ...row,
@@ -817,7 +1029,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
           refreshToken: secret.refreshToken,
           resource: secret.resource
         },
-        this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}
+        this.fetchOptionsFor(String(server.connection.endpoint ?? secret.resource))
       );
     } catch (error) {
       const message = `Token refresh failed: ${error instanceof Error ? error.message : "unknown error"}`;

@@ -1,0 +1,158 @@
+import { describe, expect, it } from "vitest";
+import {
+  McpOAuthError,
+  assertSecureOAuthUrl,
+  discoverAuthorizationServer,
+  isLoopbackHost,
+  oauthApplicationType,
+  registerOAuthClient,
+  validateAuthorizationResponseIssuer,
+  type FetchLike
+} from "./oauth";
+
+const ISSUER = "https://as.example.com/tenant1";
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+function metadataFor(issuer: unknown): Record<string, unknown> {
+  return {
+    ...(issuer === undefined ? {} : { issuer }),
+    authorization_endpoint: "https://as.example.com/tenant1/authorize",
+    token_endpoint: "https://as.example.com/tenant1/token",
+    code_challenge_methods_supported: ["S256"]
+  };
+}
+
+/** A fetch that answers every URL with the given metadata document and records what was asked. */
+function metadataFetch(body: Record<string, unknown>, seen: string[] = []): FetchLike {
+  return (async (input: string | URL | Request) => {
+    seen.push(String(input));
+    return jsonResponse(200, body);
+  }) as FetchLike;
+}
+
+describe("validateAuthorizationResponseIssuer (RFC 9207 as MCP 2026-07-28 applies it)", () => {
+  const recordedIssuer = "https://as.example.com";
+
+  it("advertised and present: accepts the exact issuer", () => {
+    expect(validateAuthorizationResponseIssuer({ recordedIssuer, issParameterSupported: true, iss: recordedIssuer })).toEqual({ ok: true });
+  });
+
+  it("advertised and present: rejects a different issuer", () => {
+    const check = validateAuthorizationResponseIssuer({ recordedIssuer, issParameterSupported: true, iss: "https://evil.example.com" });
+    expect(check).toMatchObject({ ok: false, reason: "mismatch" });
+  });
+
+  it("advertised and absent: rejects the response", () => {
+    expect(validateAuthorizationResponseIssuer({ recordedIssuer, issParameterSupported: true, iss: undefined })).toMatchObject({
+      ok: false,
+      reason: "missing"
+    });
+  });
+
+  it("not advertised and present: still compares (the MCP local-policy row)", () => {
+    expect(validateAuthorizationResponseIssuer({ recordedIssuer, issParameterSupported: false, iss: recordedIssuer })).toEqual({ ok: true });
+    expect(validateAuthorizationResponseIssuer({ recordedIssuer, issParameterSupported: false, iss: "https://other.example.com" })).toMatchObject({
+      ok: false,
+      reason: "mismatch"
+    });
+  });
+
+  it("not advertised and absent: proceeds", () => {
+    expect(validateAuthorizationResponseIssuer({ recordedIssuer, issParameterSupported: false, iss: undefined })).toEqual({ ok: true });
+  });
+
+  it("compares without normalisation: case, trailing slash, default port and percent-encoding all count as different", () => {
+    for (const variant of [
+      "https://AS.example.com",
+      "HTTPS://as.example.com",
+      "https://as.example.com/",
+      "https://as.example.com:443",
+      "https://as.%65xample.com",
+      ""
+    ]) {
+      expect(validateAuthorizationResponseIssuer({ recordedIssuer, issParameterSupported: false, iss: variant }), variant).toMatchObject({
+        ok: false,
+        reason: "mismatch"
+      });
+    }
+  });
+
+  it("rejects a repeated iss parameter", () => {
+    expect(
+      validateAuthorizationResponseIssuer({ recordedIssuer, issParameterSupported: false, iss: [recordedIssuer, recordedIssuer] })
+    ).toMatchObject({ ok: false, reason: "malformed" });
+  });
+});
+
+describe("discoverAuthorizationServer: issuer equality (RFC 8414 section 3.3)", () => {
+  it("uses metadata whose issuer is exactly the one it was fetched for", async () => {
+    const seen: string[] = [];
+    const metadata = await discoverAuthorizationServer(ISSUER, { fetchImpl: metadataFetch(metadataFor(ISSUER), seen) });
+    expect(metadata.issuer).toBe(ISSUER);
+    expect(seen[0]).toBe("https://as.example.com/.well-known/oauth-authorization-server/tenant1");
+  });
+
+  it("refuses metadata that names another issuer", async () => {
+    await expect(
+      discoverAuthorizationServer(ISSUER, { fetchImpl: metadataFetch(metadataFor("https://honest.example.com")) })
+    ).rejects.toThrow(/names the issuer "https:\/\/honest\.example\.com", not "https:\/\/as\.example\.com\/tenant1"/);
+  });
+
+  it("refuses metadata that differs only by a trailing slash", async () => {
+    await expect(discoverAuthorizationServer(ISSUER, { fetchImpl: metadataFetch(metadataFor(`${ISSUER}/`)) })).rejects.toBeInstanceOf(McpOAuthError);
+  });
+
+  it("refuses metadata without an issuer instead of assuming one", async () => {
+    await expect(discoverAuthorizationServer(ISSUER, { fetchImpl: metadataFetch(metadataFor(undefined)) })).rejects.toThrow(/names no issuer/);
+  });
+
+  it("keeps the iss and Client ID Metadata Document flags from the document", async () => {
+    const metadata = await discoverAuthorizationServer(ISSUER, {
+      fetchImpl: metadataFetch({ ...metadataFor(ISSUER), authorization_response_iss_parameter_supported: true, client_id_metadata_document_supported: true })
+    });
+    expect(metadata.authorization_response_iss_parameter_supported).toBe(true);
+    expect(metadata.client_id_metadata_document_supported).toBe(true);
+  });
+});
+
+describe("dynamic client registration: application_type", () => {
+  it("is web for a non-loopback redirect URL and native for loopback ones", () => {
+    expect(oauthApplicationType("https://l2m.example.com/api/mcp/oauth/callback")).toBe("web");
+    expect(oauthApplicationType("http://intranet.example.com/api/mcp/oauth/callback")).toBe("web");
+    expect(oauthApplicationType("http://localhost:4000/api/mcp/oauth/callback")).toBe("native");
+    expect(oauthApplicationType("http://127.0.0.1:4000/api/mcp/oauth/callback")).toBe("native");
+    expect(oauthApplicationType("http://[::1]:4000/api/mcp/oauth/callback")).toBe("native");
+    expect(oauthApplicationType("http://studio.localhost:5173/api/mcp/oauth/callback")).toBe("native");
+    expect(oauthApplicationType("https://127.evil.example/api/mcp/oauth/callback")).toBe("web");
+  });
+
+  it("does not treat names that start with 127. as loopback", () => {
+    expect(isLoopbackHost("127.0.0.1")).toBe(true);
+    expect(isLoopbackHost("127.255.0.9")).toBe(true);
+    expect(isLoopbackHost("127.evil.example")).toBe(false);
+    expect(isLoopbackHost("127.0.0.1.evil.example")).toBe(false);
+    expect(() => assertSecureOAuthUrl("http://127.evil.example/token", "Token endpoint")).toThrow(/must use https/);
+    expect(assertSecureOAuthUrl("http://127.0.0.1:9000/token", "Token endpoint").hostname).toBe("127.0.0.1");
+  });
+
+  it("is sent in every registration request", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse(201, { client_id: "c-1" });
+    }) as FetchLike;
+    await registerOAuthClient("https://as.example.com/register", { redirectUri: "https://l2m.example.com/api/mcp/oauth/callback" }, { fetchImpl });
+    await registerOAuthClient("https://as.example.com/register", { redirectUri: "http://localhost:4000/api/mcp/oauth/callback" }, { fetchImpl });
+    expect(bodies.map((body) => body.application_type)).toEqual(["web", "native"]);
+  });
+
+  it("surfaces a refused registration with the server's reason", async () => {
+    const fetchImpl = (async () => jsonResponse(400, { error: "invalid_redirect_uri", error_description: "native clients need loopback redirects" })) as FetchLike;
+    await expect(
+      registerOAuthClient("https://as.example.com/register", { redirectUri: "https://l2m.example.com/cb" }, { fetchImpl })
+    ).rejects.toThrow(/Dynamic client registration failed: native clients need loopback redirects/);
+  });
+});

@@ -44,6 +44,7 @@ describe("classifyNetworkScope: every route family", () => {
     ["/health", "none", []],
     ["/ready", "bearer", []],
     ["/api/auth/saml/metadata", "none", []],
+    ["/api/mcp/oauth/client-metadata.json", "none", []],
     ["/health?verbose=1", "none", []],
     // Studio + REST by credential.
     ["/api/workflows", "cookie", ["ui"]],

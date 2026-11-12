@@ -3657,6 +3657,13 @@ export async function refreshMcpServerOAuth(id: string) {
   });
 }
 
+/** Admin: forget the authorization server the server's pre-registered client id is bound to. */
+export async function resetMcpServerOAuthIssuerBinding(id: string) {
+  return apiRequest<{ status: McpOAuthConnectionStatus }>(`/api/mcp/servers/${encodeURIComponent(id)}/oauth/issuer-binding`, {
+    method: "DELETE"
+  });
+}
+
 export async function disconnectMcpServerOAuth(id: string) {
   return apiRequest<{ status: McpOAuthConnectionStatus }>(`/api/mcp/servers/${encodeURIComponent(id)}/oauth`, {
     method: "DELETE"
