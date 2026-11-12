@@ -28,7 +28,7 @@ export interface Track {
   level: Level;
   /** Guide slugs in learn/<id>/, in reading order. */
   pages: string[];
-  /** Where a reader goes after the last guide: another track's id, or a docs path. */
+  /** Where a reader goes after the last guide: another track's id, or a docs path (a guide in another track, or any page). */
   next: string;
 }
 
@@ -37,16 +37,16 @@ export const TRACKS: Track[] = [
     id: "mcp",
     title: "MCP fundamentals",
     shortTitle: "MCP fundamentals",
-    summary: "What the Model Context Protocol is, who talks to whom, and how a tool call travels.",
+    summary: "What the Model Context Protocol is, who talks to whom, how a tool call travels and how remote servers ask for OAuth.",
     level: "beginner",
     pages: ["what-is-mcp", "hosts-clients-servers", "tools-resources-prompts", "transports", "authorization", "tool-annotations"],
-    next: "security"
+    next: "/learn/security/mcp-security-risks"
   },
   {
     id: "agents",
     title: "How AI agents work",
     shortTitle: "AI agents",
-    summary: "The tool-calling loop, workflows versus agents, teams of agents, memory and human approval.",
+    summary: "The tool-calling loop, how agents stop and fail, and teams of supervisor and worker agents.",
     level: "beginner",
     pages: ["what-is-an-ai-agent", "workflows-vs-agents", "supervisor-and-workers", "agent-memory", "too-many-tools", "human-in-the-loop"],
     next: "security"
@@ -55,7 +55,7 @@ export const TRACKS: Track[] = [
     id: "security",
     title: "Agent security",
     shortTitle: "Agent security",
-    summary: "Prompt injection, the OWASP lists, MCP risks and least privilege for agents.",
+    summary: "Prompt injection, the OWASP Top 10 for LLM apps, MCP security risks and the controls that limit an agent.",
     level: "intermediate",
     pages: ["prompt-injection", "owasp-llm-top-10", "lethal-trifecta", "mcp-security-risks", "least-privilege-for-agents", "sensitive-data-in-prompts"],
     next: "testing"
@@ -64,7 +64,7 @@ export const TRACKS: Track[] = [
     id: "testing",
     title: "Testing and shipping agents",
     shortTitle: "Testing agents",
-    summary: "Evals, regression tests with recorded runs, testing MCP tools and release gates.",
+    summary: "Evals, regression tests built from recorded runs, replay without side effects and release gates.",
     level: "intermediate",
     pages: ["agent-evals", "regression-testing-agents", "testing-mcp-tools", "release-gates", "from-production-to-tests", "observing-agents"],
     next: "operations"
@@ -73,8 +73,8 @@ export const TRACKS: Track[] = [
     id: "operations",
     title: "Running AI in production",
     shortTitle: "Running in production",
-    summary: "Gateways, cost control, self-hosting, data retention, audit trails and identity.",
-    level: "advanced",
+    summary: "LLM gateways and MCP gateways, budgets and cost caps, and what a self-hosted agent platform runs.",
+    level: "intermediate",
     pages: ["llm-gateway-vs-mcp-gateway", "llm-cost-control", "self-hosting-ai-agents", "ai-data-retention-and-erasure", "audit-trails-for-agents", "identity-for-ai-platforms"],
     next: "/recipes/"
   }
@@ -142,6 +142,9 @@ export function trackPositionOf(relativePath: string, exists: (path: string) => 
     if (first) return { track, index, published, previous, next: { path: pathOf(first, following.id), label: following.title }, nextLeavesTrack: true };
     target = following.next;
   }
-  const next = target.startsWith("/") && exists(target) ? { path: target } : { path: "/learn/" };
+  // A docs path may be a guide in another track: label it with that track, like a track hand-off.
+  const targetTrack = target.startsWith("/") ? (guideOf(`${target.slice(1)}.md`)?.track ?? "") : "";
+  const label = targetTrack && targetTrack !== track.id ? trackById(targetTrack)?.title : undefined;
+  const next = target.startsWith("/") && exists(target) ? { path: target, ...(label ? { label } : {}) } : { path: "/learn/" };
   return { track, index, published, previous, next, nextLeavesTrack: true };
 }
