@@ -97,3 +97,5 @@ and Teams channels set in the environment do not receive it. Alerts name the hol
 - `POST /api/legal-holds/:id/release` (hold managers, signed-in only; step-up; `{ reason }`; 409 when already released)
 
 API keys limited to projects cannot use these routes.
+
+Background: [Retention, legal holds and data-subject requests](../blog/retention-legal-holds-and-subject-requests) (blog).
