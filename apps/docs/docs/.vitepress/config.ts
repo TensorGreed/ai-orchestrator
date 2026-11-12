@@ -129,6 +129,7 @@ export default defineConfig({
           { text: "Approval gates", link: "/product/approvals" },
           { text: "Content rules engine", link: "/product/content-rules-engine" },
           { text: "Content rules in workflows", link: "/product/content-rules" },
+          { text: "Output checks", link: "/product/content-rules-output-checks" },
           { text: "Rule set simulation", link: "/product/content-rules-simulation" },
           { text: "Content rules benchmark", link: "/product/content-rules-benchmark" },
           { text: "Data labels and destinations", link: "/product/data-labels-and-destinations" }
