@@ -74,9 +74,9 @@ The metric names are the ones L2M has always pushed, as cumulative sums (counter
 | `ao.workflow.execution.duration.p50.ms`, `.p95.ms`, `.p99.ms`, `ao.http.request.duration.p50.ms`, `.p95.ms` | Gauge, **deprecated**: use the histograms |
 | `ao.workflow.execution.duration` (unit `s`, attribute `l2m.execution.status`) | Histogram, new |
 | `ao.http.request.duration` (unit `s`, attributes `http.request.method`, `http.response.status_class`) | Histogram, new |
-| `l2m_otel_spans_dropped_total` (attribute `reason=export_failed`) | Sum, new; only while spans are exported |
+| `l2m_otel_spans_dropped_total` (attribute `reason=export_failed`) | Sum, new; counted while spans are exported, and visible only with a metrics endpoint |
 
-Differences from the previous push: the default encoding is `http/protobuf` (set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` for the old one), the instrumentation scope stays `ai-orchestrator`, and values are exported from the same counters the Prometheus `/metrics` page reads, which are unchanged. The percentile gauges are kept for one release and then removed; the histograms replace them. With `METRICS_ENABLED=false` the counters stay at zero and the histograms get no observations. Spans lost when the queue is full are not counted, only those lost to a failed export.
+Differences from the previous push: the default encoding is `http/protobuf` (set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` for the old one), the instrumentation scope stays `ai-orchestrator`, and values are exported from the same counters the Prometheus `/metrics` page reads, which are unchanged. The percentile gauges are kept for one release and then removed; the histograms replace them. With `METRICS_ENABLED=false` the counters stay at zero and the histograms get no observations. Spans lost when the queue is full, or still being exported when a shutdown times out, are not counted: only those lost to a failed export.
 
 ## Export
 

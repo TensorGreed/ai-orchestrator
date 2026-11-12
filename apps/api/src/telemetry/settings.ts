@@ -182,7 +182,7 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
   const protocolText = text(config.OTEL_EXPORTER_OTLP_PROTOCOL)?.toLowerCase();
   let protocol: TelemetrySettings["protocol"] = "http/protobuf";
   if (protocolText === "http/json" || protocolText === "http/protobuf") protocol = protocolText;
-  else if (protocolText && exporting && ((enabled && tracesEndpoint) || (metricsOn && metricsEndpoint))) {
+  else if (protocolText && ((enabled && tracesEndpoint) || (metricsOn && metricsEndpoint))) {
     if (protocolText === "grpc") {
       throw new Error("Invalid environment configuration: OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not shipped; use http/protobuf (the default) or http/json");
     }

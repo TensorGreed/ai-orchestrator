@@ -227,4 +227,33 @@ describe("OTLP delivery", () => {
     expect(text).toContain("ao.http.requests.total");
     expect(text).toContain("l2m_otel_spans_dropped_total");
   });
+
+  it("a traces collector that never answers cannot starve the final metrics export", async () => {
+    const { bodies, url } = await sink();
+    const hang = http.createServer(() => undefined);
+    await new Promise<void>((resolve) => hang.listen(0, "127.0.0.1", resolve));
+    cleanup.push(() => new Promise<void>((resolve) => { hang.closeAllConnections(); hang.close(() => resolve()); }));
+    const runtime: OtelRuntime = createOtelRuntime({
+      resourceAttributes: { "service.name": "hang" },
+      export: { url: `http://127.0.0.1:${(hang.address() as AddressInfo).port}/v1/traces`, protocol: "http/json", headers: {}, timeoutMs: 10_000 },
+      metricsExport: { url, protocol: "http/json", headers: {}, timeoutMs: 2000, intervalMs: 3_600_000 },
+      sampler: { name: "always_on" },
+      propagators: ["tracecontext"],
+      batch: DEFAULT_BATCH_OPTIONS,
+      attributeValueLengthLimit: 8192,
+      spanDetail: "standard",
+      naming: "names",
+      propagateToProviders: false,
+      propagateToMcp: true,
+      semconvOptIn: [],
+      recentSpanLimit: 10,
+      registerGlobals: false
+    });
+    registerL2mMetrics(runtime.meter, source);
+    runtime.instrumentation.startSpan({ kind: "internal", name: "probe" } as never).end();
+    const started = Date.now();
+    await runtime.shutdown(2000);
+    expect(Date.now() - started).toBeLessThan(3500);
+    expect(bodies.map((entry) => entry.body.toString("utf8")).join("\n")).toContain("ao.http.requests.total");
+  });
 });

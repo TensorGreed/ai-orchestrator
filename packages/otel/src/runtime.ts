@@ -183,8 +183,21 @@ export class OtelRuntime {
   }
 
   forceFlush(timeoutMs = SHUTDOWN_TIMEOUT_MS): Promise<void> {
-    // Spans first: a batch that fails to export adds to the dropped-span counter, which the metrics flush then carries.
-    return withTimeout(this.tracerProvider.forceFlush({ timeoutMillis: timeoutMs }).catch(() => undefined).then(() => this.metrics.forceFlush(timeoutMs)), timeoutMs);
+    return this.spansThenMetrics(timeoutMs, (budget) => this.tracerProvider.forceFlush({ timeoutMillis: budget }), (budget) => this.metrics.forceFlush(budget));
+  }
+
+  /**
+   * Spans first: a batch that fails to export adds to the dropped-span counter, which the metrics step then carries.
+   * The spans get three fifths of the budget, so an unreachable traces collector cannot starve the final metrics export.
+   */
+  private async spansThenMetrics(
+    timeoutMs: number,
+    spans: (budgetMs: number) => Promise<void>,
+    metrics: (budgetMs: number) => Promise<void>
+  ): Promise<void> {
+    const spanBudget = Math.floor(timeoutMs * 0.6);
+    await withTimeout(spans(spanBudget), spanBudget);
+    await metrics(timeoutMs - spanBudget);
   }
 
   /** Flushes and stops exporting (capped at five seconds); idempotent. */
@@ -192,10 +205,7 @@ export class OtelRuntime {
     if (!this.stopped) {
       this.stopped = (async () => {
         try {
-          await withTimeout(
-            this.tracerProvider.shutdown().catch(() => undefined).then(() => this.metrics.shutdown(timeoutMs)),
-            timeoutMs
-          );
+          await this.spansThenMetrics(timeoutMs, () => this.tracerProvider.shutdown(), (budget) => this.metrics.shutdown(budget));
         } finally {
           this.contextManager.disable();
           if (this.ownsGlobals) {
