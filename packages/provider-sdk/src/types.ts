@@ -25,6 +25,11 @@ export interface ProviderExecutionContext {
    * the iteration. Adapters ignore it; the model tape keys calls by it.
    */
   callSite?: ProviderCallSite;
+  /**
+   * W3C trace-context headers for the provider request. Set only by the instrumented registry, and only when the
+   * deployment turned propagation to model providers on (off by default); adapters pass it to `resilientFetch`.
+   */
+  traceHeaders?: Readonly<Record<string, string>>;
 }
 
 export interface ProviderCallSite {

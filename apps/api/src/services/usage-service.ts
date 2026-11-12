@@ -21,6 +21,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { ModelCostObservation } from "@ai-orchestrator/shared";
 import type { Store } from "../db/store.js";
 
 export interface ModelPricing {
@@ -160,12 +161,21 @@ export interface UsageTotals {
 export class UsageService {
   private readonly store: Store;
   private pricing: PricingTable;
+  private costObserver: ((observation: ModelCostObservation) => void) | null = null;
   private logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
   private readonly seenUnpricedModels = new Set<string>();
 
   constructor(store: Store, options: { pricingOverridesJson?: string } = {}) {
     this.store = store;
     this.pricing = mergePricing(DEFAULT_PRICING, options.pricingOverridesJson);
+  }
+
+  /**
+   * Called with the priced spend of each model of a usage event, after the event was written (the OpenTelemetry cost
+   * counter mirrors the usage table; the table stays the record). Absent: nothing is reported.
+   */
+  setCostObserver(observer: ((observation: ModelCostObservation) => void) | null): void {
+    this.costObserver = observer;
   }
 
   setLogger(logger: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void }): void {
@@ -201,7 +211,7 @@ export class UsageService {
         }))
       : collectTelemetry(input.nodeResults);
     for (const blob of input.subWorkflowTelemetry ?? []) telemetries.push(blob as NodeTelemetry);
-    const { totals, providers } = this.summarize(telemetries);
+    const { totals, providers, costs } = this.summarize(telemetries);
 
     await this.store.writeUsageEvent({
       id: `usage_${randomUUID()}`,
@@ -219,6 +229,7 @@ export class UsageService {
       durationMs: input.durationMs,
       providers
     });
+    this.reportCosts(costs, input.projectId);
 
     return totals;
   }
@@ -228,7 +239,24 @@ export class UsageService {
     return this.summarize(blobs as ReadonlyArray<NodeTelemetry>).totals;
   }
 
-  private summarize(telemetries: ReadonlyArray<NodeTelemetry>): { totals: UsageTotals; providers: Array<{ providerId: string; model: string; calls: number }> } {
+  private reportCosts(costs: ReadonlyMap<string, { providerId: string; model: string; costUsd: number }>, projectId: string | null | undefined): void {
+    const observer = this.costObserver;
+    if (!observer) return;
+    for (const entry of costs.values()) {
+      if (entry.costUsd <= 0) continue;
+      try {
+        observer({ providerId: entry.providerId, model: entry.model, projectId: projectId ?? null, costUsd: entry.costUsd, source: "run" });
+      } catch {
+        // Metrics never fail the usage write they mirror.
+      }
+    }
+  }
+
+  private summarize(telemetries: ReadonlyArray<NodeTelemetry>): {
+    totals: UsageTotals;
+    providers: Array<{ providerId: string; model: string; calls: number }>;
+    costs: Map<string, { providerId: string; model: string; costUsd: number }>;
+  } {
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedInputTokens = 0;
@@ -236,6 +264,7 @@ export class UsageService {
     let llmCallCount = 0;
     let costUsd = 0;
     const providerCounts = new Map<string, { providerId: string; model: string; calls: number }>();
+    const costs = new Map<string, { providerId: string; model: string; costUsd: number }>();
 
     for (const t of telemetries) {
       if (!t.providerId || !t.model) continue;
@@ -251,9 +280,13 @@ export class UsageService {
       cachedInputTokens += ct;
       totalTokens += tt;
       llmCallCount += calls;
-      costUsd += this.priceTelemetry(t.providerId, t.model, it, ot, ct);
+      const callCost = this.priceTelemetry(t.providerId, t.model, it, ot, ct);
+      costUsd += callCost;
 
       const key = `${t.providerId}::${t.model}`;
+      const priced = costs.get(key);
+      if (priced) priced.costUsd += callCost;
+      else costs.set(key, { providerId: t.providerId, model: t.model, costUsd: callCost });
       const existing = providerCounts.get(key);
       if (existing) existing.calls += calls;
       else providerCounts.set(key, { providerId: t.providerId, model: t.model, calls });
@@ -261,7 +294,8 @@ export class UsageService {
 
     return {
       totals: { inputTokens, outputTokens, cachedInputTokens, totalTokens, costUsd, llmCallCount },
-      providers: Array.from(providerCounts.values())
+      providers: Array.from(providerCounts.values()),
+      costs
     };
   }
 

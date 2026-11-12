@@ -70,6 +70,11 @@ export interface ResilientFetchOptions {
    * headers or URLs.
    */
   onRetry?: (info: ResilientFetchRetryInfo) => void;
+  /**
+   * Trace-context headers (`traceparent`, `tracestate`) to add to the request. Only present when the deployment turned
+   * propagation to model providers on; a header the request already sets is left as it is.
+   */
+  traceHeaders?: Readonly<Record<string, string>>;
 }
 
 export interface BoundedReadOptions {
@@ -293,6 +298,15 @@ export async function readResponseJson<T>(response: Response, options: BoundedRe
   return JSON.parse(await readResponseText(response, options)) as T;
 }
 
+/** `init` with the trace headers it does not set yet. */
+function withTraceHeaders(init: RequestInit | undefined, traceHeaders: Readonly<Record<string, string>>): RequestInit {
+  const headers = new Headers(init?.headers);
+  for (const [name, value] of Object.entries(traceHeaders)) {
+    if (!headers.has(name)) headers.set(name, value);
+  }
+  return { ...init, headers };
+}
+
 /**
  * Fetch wrapper with retry, exponential backoff, per-attempt timeout,
  * and rate-limit header awareness.
@@ -314,6 +328,7 @@ export async function resilientFetch(
     : DEFAULT_RETRYABLE_STATUSES;
   const provider = options?.provider ?? "unknown";
   const existingSignal = init?.signal ?? undefined;
+  if (options?.traceHeaders) init = withTraceHeaders(init, options.traceHeaders);
 
   let lastError: Error | undefined;
   let lastStatus: number | undefined;

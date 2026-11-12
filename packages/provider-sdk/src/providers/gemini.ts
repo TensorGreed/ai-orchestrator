@@ -226,7 +226,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(requestBody),
       signal: context.signal
-    }, { timeoutMs: 60_000, maxRetries: 3, provider: "gemini", onRetry: context.onRetry });
+    }, { timeoutMs: 60_000, maxRetries: 3, provider: "gemini", onRetry: context.onRetry, traceHeaders: context.traceHeaders });
     const bodyRead = { timeoutMs: 60_000, signal: context.signal, provider: "gemini" };
 
     if (!response.ok) {

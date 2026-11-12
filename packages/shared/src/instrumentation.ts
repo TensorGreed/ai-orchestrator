@@ -148,8 +148,60 @@ export const SPAN_OUTCOME_ATTRIBUTES = Object.freeze({
   USAGE_OUTPUT_TOKENS: "gen_ai.usage.output_tokens",
   USAGE_CACHE_READ_INPUT_TOKENS: "gen_ai.usage.cache_read.input_tokens",
   TOOL_OUTCOME: "l2m.tool.outcome",
-  CONTENT_RULES_OUTCOME: "l2m.content_rules.outcome"
+  CONTENT_RULES_OUTCOME: "l2m.content_rules.outcome",
+  RESPONSE_MODEL: "gen_ai.response.model",
+  RESPONSE_ID: "gen_ai.response.id",
+  RESPONSE_FINISH_REASONS: "gen_ai.response.finish_reasons",
+  EMBEDDINGS_DIMENSION_COUNT: "gen_ai.embeddings.dimension.count",
+  RETRY_COUNT: "l2m.retry.count",
+  /** A streamed answer its reader stopped reading before the provider finished it. */
+  STREAM_CLOSED_EARLY: "l2m.stream.closed_early"
 } as const);
+
+/**
+ * Attributes the /v1 AI gateway sets on its request's HTTP server span: ids that link the span to the gateway's usage
+ * row (`ai_gateway_requests`) and the outcome, never the prompt or the answer.
+ */
+export const GATEWAY_SPAN_ATTRIBUTES = Object.freeze({
+  REQUEST_ID: "l2m.gateway.request.id",
+  ROUTE_SET_ID: "l2m.gateway.route_set.id",
+  ROUTE_ALIAS: "l2m.gateway.route.alias",
+  CLIENT_ID: "l2m.gateway.client.id",
+  /** The usage row's status (`ok`, `upstream_error`, `blocked_prompt`, ...) or the refusal (`rate_limited`, `budget_blocked`, ...). */
+  STATUS: "l2m.gateway.status"
+} as const);
+
+/**
+ * One model call as the metrics see it, reported by the instrumented provider registries when the call ends. Ids and
+ * counts only; `packages/otel` turns it into the GenAI duration and token metrics.
+ */
+export interface ModelCallObservation {
+  operation: "chat" | "embeddings";
+  /** L2M provider id. */
+  providerId: string;
+  /** The model the provider was sent. */
+  requestModel: string;
+  /** The model the provider said answered, when it said. */
+  responseModel?: string;
+  serverAddress?: string;
+  serverPort?: number;
+  stream: boolean;
+  durationMs: number;
+  /** Token counts the provider reported (none when it reported none). */
+  usage?: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number };
+  /** Set when the call failed: a low-cardinality type, never the error's text. */
+  errorType?: string;
+}
+
+/** A priced model spend, reported after its usage row was written (the row stays the record). */
+export interface ModelCostObservation {
+  providerId: string;
+  model: string;
+  projectId?: string | null;
+  costUsd: number;
+  /** `run` (a workflow run's usage event) or `ai_gateway` (a /v1 request). */
+  source: "run" | "ai_gateway";
+}
 
 export type InstrumentationSpanKind = "internal" | "server" | "client" | "producer" | "consumer";
 

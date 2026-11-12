@@ -1,6 +1,6 @@
 /**
  * Child-process probe for telemetry-off.test.ts. Run with `node --import tsx <this file> '<env JSON>'`: it records every
- * module the process resolves, builds the API with the given settings, serves a few requests (with a `traceparent`),
+ * module the process resolves, builds the API with the given settings, serves a few requests (with a `traceparent`), runs a workflow with a model call,
  * closes it, and prints the OpenTelemetry modules that were loaded as one JSON line.
  */
 import { registerHooks } from "node:module";
@@ -46,6 +46,31 @@ try {
   for (const url of ["/health", "/api/workflows", "/api/auth/me", "/no/such/route"]) {
     await app.inject({ method: "GET", url, headers: { traceparent } });
   }
+  // A run with a model call (the echo provider: no network), so the model-call path is exercised too.
+  const auth = new AuthService(store, config.SESSION_TTL_HOURS);
+  await auth.register({ email: "probe@example.com", password: "Probe-Pass-123!", role: "admin" });
+  const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { email: "probe@example.com", password: "Probe-Pass-123!" } });
+  const cookie = String([login.headers["set-cookie"]].flat().find((value) => String(value).startsWith(`${config.SESSION_COOKIE_NAME}=`))).split(";")[0];
+  const at = { x: 0, y: 0 };
+  await store.upsertWorkflow({
+    id: "probe-llm",
+    name: "Probe",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: [
+      { id: "text", type: "text_input", name: "text", position: at, config: { text: "hello" } },
+      { id: "prompt", type: "prompt_template", name: "prompt", position: at, config: { template: "{{user_prompt}}", outputKey: "prompt" } },
+      { id: "llm", type: "llm_call", name: "llm", position: at, config: { provider: { providerId: "echo", model: "demo" }, promptKey: "prompt" } },
+      { id: "out", type: "output", name: "out", position: at, config: { responseTemplate: "{{answer}}", outputKey: "result" } }
+    ],
+    edges: [
+      { id: "e1", source: "text", target: "prompt" },
+      { id: "e2", source: "prompt", target: "llm" },
+      { id: "e3", source: "llm", target: "out" }
+    ]
+  });
+  const run = await app.inject({ method: "POST", url: "/api/workflows/probe-llm/execute", headers: { cookie, traceparent }, payload: {} });
+  if (run.statusCode !== 200 || run.json().status !== "success") throw new Error(`probe run failed: ${run.statusCode} ${run.body}`);
   await app.close();
   await store.close();
   process.stdout.write(`${JSON.stringify({ resolved, otelModules: [...otelModules] })}\n`);

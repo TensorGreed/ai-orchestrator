@@ -63,6 +63,7 @@ import {
   type McpToolProgressEvent,
   type McpElicitationView,
   type MCPServerConfig,
+  type ModelCostObservation,
   type NodeActivityEvent,
   type NodeProgressSnapshot,
   type ReleaseChannel,
@@ -208,9 +209,10 @@ import { createSharedRateLimitStore, SHARED_RATE_LIMIT_BUCKET, type SharedRateLi
 import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService } from "./services/tracing-service";
-import type { SpanProcessor } from "@ai-orchestrator/otel";
+import type { MetricReader, SpanProcessor } from "@ai-orchestrator/otel";
 import { resolveTelemetrySettings } from "./telemetry/settings.js";
 import { loadTelemetry, type Telemetry } from "./telemetry/load.js";
+import { createModelTelemetry } from "./telemetry/model-telemetry.js";
 import { installHandlerContext, installHttpServerSpans, traceLogMixin } from "./telemetry/http-tracing.js";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
@@ -1457,6 +1459,8 @@ export interface CreateAppOptions {
   telemetrySpanProcessors?: readonly SpanProcessor[];
   /** Register the process-wide OpenTelemetry globals while tracing is on (default true; tests turn it off). */
   telemetryRegisterGlobals?: boolean;
+  /** Extra OpenTelemetry metric readers (tests collect metrics in memory); they also turn the GenAI metrics on. */
+  telemetryMetricReaders?: readonly MetricReader[];
 }
 
 /** What provisionSsoUser needs to link or create the local user of an SSO login. */
@@ -1554,9 +1558,15 @@ export async function createApp(
       return (text: string) => scrubber.text(text);
     })(),
     ...(options.telemetrySpanProcessors ? { spanProcessors: options.telemetrySpanProcessors } : {}),
-    ...(options.telemetryRegisterGlobals === false ? { registerGlobals: false } : {})
+    ...(options.telemetryRegisterGlobals === false ? { registerGlobals: false } : {}),
+    ...(options.telemetryMetricReaders ? { metricReaders: options.telemetryMetricReaders } : {})
   });
   const telemetryRuntime = telemetry.runtime;
+  // Model-call spans and the GenAI metrics: the provider and embedding registries are wrapped only while tracing is on
+  // or metrics export (otherwise they are used as they are).
+  const modelTelemetry = await createModelTelemetry(telemetry, {
+    metrics: telemetrySettings.metricsEndpoint !== null || (options.telemetryMetricReaders?.length ?? 0) > 0
+  });
   const app = Fastify({
     logger: {
       level: config.LOG_LEVEL,
@@ -1608,11 +1618,16 @@ export async function createApp(
       await auditService.record(event);
       await logStreamingService.dispatchAudit(event);
     },
-    logger: (message, metadata) => app.log.warn(metadata ?? {}, message)
+    logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
+    // The outermost layer of each allowlist view records the model call, so a refused call has its span too.
+    ...(modelTelemetry.active ? { instrumentRegistry: (registry: ProviderRegistry) => modelTelemetry.providers(registry) } : {})
   });
   await modelAllowlistService.start();
   app.addHook("onClose", async () => modelAllowlistService.stop());
-  const baseProviderRegistry = createDefaultProviderRegistry();
+  // Instrumented at the base too, so a call through any other view (a tape miss, a recorded run) is recorded once.
+  const baseProviderRegistry = modelTelemetry.providers(createDefaultProviderRegistry());
+  // The embedding adapters /v1 and the runs' output checks call (instrumented the same way).
+  const runEmbeddingRegistry = modelTelemetry.embeddings(createDefaultEmbeddingRegistry());
   const providerRegistry = modelAllowlistService.registry(baseProviderRegistry, { projectId: null, source: "deployment" });
   /** The allowlist scope of a run of `workflow` (a workflow with no project uses the default project's list). */
   type ModelRun = { executionId?: string; runKey?: string; sourceExecutionId?: string };
@@ -2418,6 +2433,7 @@ export async function createApp(
           // 12.6 — checked against the model allowlist of the workflow's project (a tape replay: see above).
           providerRegistry: tapeReplay ? runModelRegistry : modelScopedRun(mergedWorkflow, runModelRegistry, runModelScope),
           checkEmbeddingModel: modelScopedEmbeddings(mergedWorkflow, runModelScope),
+          ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
           connectorRegistry,
           mcpRegistry: runPlan?.registry ?? mcpRegistry,
           agentRuntime,
@@ -2610,6 +2626,7 @@ export async function createApp(
                   // 12.6 — the error handler's model calls are checked for its own project, audited once per failed run.
                   providerRegistry: modelScopedRun(errorWf, baseProviderRegistry, errorModelRun),
                   checkEmbeddingModel: modelScopedEmbeddings(errorWf, errorModelRun),
+                  ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
                   scopeSubWorkflow: modelScopedSubWorkflows(errorScoped.scopeSubWorkflow, baseProviderRegistry, errorModelRun),
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
@@ -4937,6 +4954,7 @@ export async function createApp(
   secretService.attachExternalSecrets(externalSecretsService);
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
   const usageService = new UsageService(store, { pricingOverridesJson: config.LLM_PRICING_OVERRIDES_JSON });
+  if (modelTelemetry.active) usageService.setCostObserver((observation) => modelTelemetry.recordCost(observation));
   usageService.setLogger({
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
@@ -12306,7 +12324,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   // 12.6b — the OpenAI-compatible /v1 AI gateway and its admin API. Inert until an admin creates a route set and grants
   // it to a client: with none, every /v1 call answers 401 or 404.
-  const embeddingRegistry = createDefaultEmbeddingRegistry();
+  const embeddingRegistry = runEmbeddingRegistry;
   registerAiGatewayRoutes({
     app,
     config,
@@ -12325,6 +12343,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     network: networkControls,
     priceRequest: (providerId, model, inputTokens, outputTokens, cachedInputTokens) =>
       usageService.estimateAiGatewayCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
+    ...(modelTelemetry.active ? { instrument: modelTelemetry.instrumentation, recordCost: (observation: ModelCostObservation) => modelTelemetry.recordCost(observation) } : {}),
     checkModel:
       options.aiGatewayCheckModel ??
       (async (scope, call) =>

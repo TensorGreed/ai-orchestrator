@@ -5,7 +5,7 @@
  * Only type imports from the otel package appear in this file: they are erased at compile time, so the module
  * graph of an API with tracing off never reaches `@opentelemetry/*` (telemetry-off.test.ts checks this).
  */
-import type { MetricsPipeline, OtelRuntime, SpanProcessor } from "@ai-orchestrator/otel";
+import type { MetricReader, MetricsPipeline, OtelRuntime, SpanProcessor } from "@ai-orchestrator/otel";
 import { NOOP_RUN_INSTRUMENTATION, type RunInstrumentation } from "@ai-orchestrator/shared";
 import type { TelemetrySettings } from "./settings.js";
 
@@ -30,6 +30,8 @@ export interface LoadTelemetryOptions {
   spanProcessors?: readonly SpanProcessor[];
   /** Register the process-wide OpenTelemetry globals (default true). */
   registerGlobals?: boolean;
+  /** Extra metric readers (tests collect metrics in memory with these); used wherever a meter provider is built. */
+  metricReaders?: readonly MetricReader[];
 }
 
 export async function loadTelemetry(settings: TelemetrySettings, options: LoadTelemetryOptions = {}): Promise<Telemetry> {
@@ -48,7 +50,11 @@ export async function loadTelemetry(settings: TelemetrySettings, options: LoadTe
     }
     // A metrics endpoint without tracing: only the meter provider and its reader are built (no tracer, no globals).
     const otel = await import("@ai-orchestrator/otel");
-    const metrics = otel.createMetricsPipeline({ resourceAttributes: settings.resourceAttributes, export: metricsExport });
+    const metrics = otel.createMetricsPipeline({
+      resourceAttributes: settings.resourceAttributes,
+      export: metricsExport,
+      ...(options.metricReaders ? { readers: options.metricReaders } : {})
+    });
     return Object.freeze({ enabled: false, runtime: null, metrics, instrumentation: NOOP_RUN_INSTRUMENTATION, settings });
   }
   const otel = await import("@ai-orchestrator/otel");
@@ -70,6 +76,7 @@ export async function loadTelemetry(settings: TelemetrySettings, options: LoadTe
     recentSpanLimit: RECENT_SPAN_LIMIT,
     ...(options.scrub ? { scrub: options.scrub } : {}),
     ...(options.spanProcessors ? { spanProcessors: options.spanProcessors } : {}),
+    ...(options.metricReaders ? { metricReaders: options.metricReaders } : {}),
     ...(options.registerGlobals === false ? { registerGlobals: false } : {})
   });
   return Object.freeze({ enabled: true, runtime, metrics: runtime.metrics, instrumentation: runtime.instrumentation, settings });
