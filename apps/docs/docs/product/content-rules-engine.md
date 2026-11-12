@@ -1,5 +1,5 @@
 ---
-description: "The content rules engine inspects content flowing between users, models and tools on five channels, decides what to do with it and records why."
+description: "The content rules engine inspects content flowing between users, models and tools, channel by channel, decides what to do with it and records why."
 ---
 
 # Content rules engine
@@ -12,7 +12,7 @@ This page describes the engine. [Content rules in workflows](./content-rules.md)
 
 ### Channels
 
-Every piece of content is inspected on one of five channels. Rule sets configure each channel separately because the same text means different things in different places: a phrase that is a harmless question in a prompt is an attack inside a tool result.
+Every piece of content is inspected on one channel. Rule sets configure each channel separately because the same text means different things in different places: a phrase that is a harmless question in a prompt is an attack inside a tool result.
 
 | Channel | What it carries | Typical concerns |
 |---|---|---|
@@ -21,6 +21,14 @@ Every piece of content is inspected on one of five channels. Rule sets configure
 | `tool_arguments` | What the model wants to pass to a tool | SQL and command injection, path traversal, outbound URLs, schema violations |
 | `tool_result` | What a tool, document or web page returned | indirect injection, hidden characters, sensitive data |
 | `final_output` | The answer about to leave the run | leaked canaries, sensitive data, exfiltration |
+
+Three more channels exist only in stored rule sets; the Content Rules node never offers them:
+
+| Channel | What it carries | See |
+|---|---|---|
+| `egress` | What a step sends out (a URL, headers, a body) | [Data labels and destinations](./data-labels-and-destinations.md) |
+| `response` | What an external webhook, chat or MCP invoke caller receives | [Responses to external callers](./content-rules.md#responses-to-external-callers) |
+| `trigger_input` | A webhook payload, at the route, before the run starts | [Responses to external callers](./content-rules.md#responses-to-external-callers) |
 
 ### Detector input
 
@@ -38,8 +46,8 @@ Each detector belongs to a latency tier. Evaluation runs tiers in order, cheapes
 |---|---|---|
 | `rule` | microseconds | injection rule packs, hidden characters, exfiltration URLs, canaries, data rule patterns, command and path checks, egress check, schema validation |
 | `parser` | milliseconds | SQL check (parses to an AST per dialect) |
-| `classifier` | local model | interface only; a rule-based stand-in runs when no model is registered |
-| `judge` | an LLM call | interface only; nothing is registered by default |
+| `classifier` | local model | interfaces only (injection and content safety); rule-based stand-ins run when no model is registered. Topic checks sit here too. |
+| `judge` | an LLM call | interface only; nothing is registered by default. [Output checks](./content-rules-output-checks.md) can call a chat model of their own. |
 
 `createDefaultGuardRegistry()` returns every built-in detector. Deployments add their own with `registry.register(detector)` or swap a built-in one with `replace`.
 
@@ -111,6 +119,12 @@ The rule set's `protection.dataClasses` maps each data class to a provider. When
 | `tool.path` | rule | tool arguments | paths outside the allowed roots, traversal, encoded traversal, null bytes and symlink escapes through an injectable `realpath` |
 | `tool.egress` | rule | tool arguments | URLs whose host is not allowlisted, local or metadata hostnames, credentials in URLs, disallowed schemes and ports, and any address that is loopback, private, link-local, carrier NAT, cloud metadata, multicast or reserved, for IPv4 and IPv6 including IPv4-mapped IPv6 and decimal, octal and hex IPv4 spellings; each hop of a redirect chain |
 | `tool.arguments` | rule | tool arguments | strict JSON Schema validation (undeclared properties rejected) with size, depth, string, array and property limits |
+| `output.schema` | parser | model output, final output, response | an answer that is not JSON or does not match a JSON Schema (`schema_violation`) |
+| `output.topic` | classifier | model output, final output, response | an answer about a denied topic, or about none of the allowed ones (`off_topic`); phrases, or meaning with an embedding model |
+| `output.safety` | classifier | prompt, model output, final output, response | self-harm, violence, sexual content, sexual content involving minors, hate (`unsafe_content`); built-in rules or a chat model |
+| `output.grounding` | parser | model output, final output, response | claims the retrieved documents do not support, and citations that name no document (`ungrounded`); an optional chat model judges borderline claims |
+
+The four `output.*` detectors are the [output checks](./content-rules-output-checks.md). They need options to mean anything, so the built-in rule set has none of them.
 
 ### Limits
 
@@ -256,18 +270,17 @@ What this release of the engine covers, as a library:
 | LLM02 Sensitive information disclosure | data rule detectors with checksums, credential and key detection, masking, redaction, protection providers, canary leak detection |
 | LLM03 Supply chain | not covered by the engine |
 | LLM04 Data and model poisoning | not covered by the engine |
-| LLM05 Improper output handling | exfiltration URL detection in output, hidden-character stripping, schema validation of tool arguments |
+| LLM05 Improper output handling | exfiltration URL detection in output, hidden-character stripping, schema validation of tool arguments and of answers |
 | LLM06 Excessive agency | SQL, command, path and egress checks on tool arguments; the `require_approval` and `review` actions |
 | LLM07 System prompt leakage | prompt-extraction patterns, canary tokens |
 | LLM08 Vector and embedding weaknesses | not covered by the engine |
-| LLM09 Misinformation | not covered; a grounding check is planned |
+| LLM09 Misinformation | grounding of answers in the retrieved documents (lexical, with an optional model judge); topic limits |
 | LLM10 Unbounded consumption | argument size and depth limits; the row cap in the SQL check |
 
 ## Not yet available
 
-The engine is wired into the Content Rules node, the agent rules port, automatic rule sets, the protection port and rule events; see [Content rules in workflows](./content-rules.md). Still to come:
+The engine is wired into the Content Rules node, the agent rules port, automatic rule sets, the model boundary, responses to external callers, the Reveal node, both gateways, the protection port and rule events; see [Content rules in workflows](./content-rules.md). Still to come:
 
 - git sync for rule sets (export and import JSON in the meantime);
-- local classifier models and the LLM judge;
-- the provenance tracking that carries labels through templates and the agent context;
-- automatic checks on HTTP Request and SQL connector nodes, and on the MCP and AI gateways.
+- local classifier models, and an LLM judge tier for every detector (the output checks can already call a chat model);
+- the SQL check (`tool.sql`) on SQL connector nodes and the address check (`tool.egress`) on HTTP Request nodes without a Content Rules node in front of them.
