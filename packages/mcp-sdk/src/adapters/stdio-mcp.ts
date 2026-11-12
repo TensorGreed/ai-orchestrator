@@ -230,6 +230,8 @@ interface StdioSession {
   era: McpProtocolEra;
   /** The modern version in use (modern sessions only). */
   protocolVersion?: string;
+  /** The version `initialize` agreed on (legacy sessions only), recorded on MCP spans. */
+  legacyProtocolVersion?: string;
   mode: McpClientProtocolMode;
   /** Era cache key: a hash of the launch plan. */
   eraKey: string;
@@ -825,8 +827,11 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
         this.eraCache.invalidate(session.eraKey);
         if ((await this.probe(session, config, context, this.probeTimeoutMs(config))) === "modern") return;
       }
+      annotateMcpError(this.trace, error);
       throw error;
     }
+    const agreed = toRecord(initialized.result).protocolVersion;
+    if (typeof agreed === "string" && agreed) session.legacyProtocolVersion = agreed.slice(0, 64);
     session.capabilities = normalizeServerCapabilities(toRecord(initialized.result).capabilities);
     session.capabilitiesKnown = true;
     this.sendNotification(session, "notifications/initialized", {});
@@ -835,6 +840,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   private useModern(session: StdioSession, version: string, capabilities?: McpServerCapabilities): void {
     session.era = "modern";
     session.protocolVersion = version;
+    delete session.legacyProtocolVersion;
     session.capabilities = capabilities ?? {};
     session.capabilitiesKnown = capabilities !== undefined;
   }
@@ -1233,11 +1239,12 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     // initialize carries no trace context (as over HTTP, where it goes in headers only).
     const carrier = method === "initialize" ? undefined : mcpTraceCarrier(this.trace, session.config);
     const outgoing = this.outgoingParams(session, withProgress, options.context ?? session.context, carrier);
-    if (method !== "initialize") {
-      annotateMcpRequest(this.trace, {
-        ...(session.era === "modern" && session.protocolVersion ? { protocolVersion: session.protocolVersion } : {}),
-        requestId: id
-      });
+    // The handshake and the era probe run inside the first operation's span but are not that operation: their ids,
+    // versions and error codes stay off it (as over HTTP). openLegacy records a handshake error it gives up on.
+    const annotate = method !== "initialize" && !options.probe;
+    if (annotate) {
+      const version = session.era === "modern" ? session.protocolVersion : session.legacyProtocolVersion;
+      annotateMcpRequest(this.trace, { ...(version ? { protocolVersion: version } : {}), requestId: id });
     }
     const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params: outgoing }) + "\n";
     let written = false;
@@ -1283,14 +1290,14 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
         cleanup();
         if (response.error) {
           const failure = new McpJsonRpcError(response.error.message || "MCP JSON-RPC error", response.error.code, response.error.data);
-          annotateMcpError(this.trace, failure);
+          if (annotate) annotateMcpError(this.trace, failure);
           throw failure;
         }
         return response;
       },
       (error: unknown) => {
         cleanup();
-        annotateMcpError(this.trace, error);
+        if (annotate) annotateMcpError(this.trace, error);
         // The process ended after the request went out: the server may have acted on it (D13).
         if (written && error === session.closeError && !session.closedByClient && !session.spawnFailed && error instanceof Error) {
           throw new McpStdioConnectionLostError(error.message);

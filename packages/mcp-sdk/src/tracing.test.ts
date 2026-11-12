@@ -521,3 +521,49 @@ describe("stdio client, MCP 2026-07-28: trace context in _meta", () => {
     }
   });
 });
+
+/** An initialize-based stdio server that rejects anything before the handshake (so an `auto` probe fails). */
+const LEGACY_ONLY_SERVER = `
+process.stdin.setEncoding('utf-8');
+let buf = '';
+let ready = false;
+const send = (m) => process.stdout.write(JSON.stringify(m) + '\\n');
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let nl;
+  while ((nl = buf.indexOf('\\n')) >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (!line) continue;
+    const req = JSON.parse(line);
+    if (req.id === undefined) continue;
+    if (req.method === 'initialize') { ready = true; send({ jsonrpc: '2.0', id: req.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'old', version: '1' } } }); continue; }
+    if (!ready) { send({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'Method not found' } }); continue; }
+    send({ jsonrpc: '2.0', id: req.id, result: { tools: [{ name: 'x', inputSchema: { type: 'object' } }] } });
+  }
+});
+`;
+
+describe("stdio client: the era probe and the handshake stay off the operation's span", () => {
+  it("auto on an initialize-based server: no probe error code, and the handshake's version", async () => {
+    const trace = new RecordingInstrumentation();
+    const registry = createDefaultMCPRegistry({ instrument: trace });
+    const adapter = registry.get("stdio_mcp");
+    const config: MCPServerConfig = {
+      serverId: "stdio_mcp",
+      connection: { command: process.execPath, args: ["-e", LEGACY_ONLY_SERVER], timeoutMs: 5000, protocolMode: "auto" }
+    };
+    const context = contextOf();
+    try {
+      await adapter.discoverTools(config, context);
+      const [list] = trace.named("tools/list");
+      expect(list!.errorType).toBeUndefined();
+      expect(list!.attributes["rpc.response.status_code"]).toBeUndefined();
+      expect(list!.attributes["mcp.protocol.version"]).toBe("2025-06-18");
+      // initialize is request 2 (the probe was 1), so tools/list is 3.
+      expect(list!.attributes["jsonrpc.request.id"]).toBe("3");
+    } finally {
+      await adapter.closeSessions?.(context);
+    }
+  });
+});
