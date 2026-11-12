@@ -1,6 +1,8 @@
 // Checks the assembled lsquarem.com site (see scripts/assemble-pages-site.mjs). First the static
-// search-engine checks in scripts/pages-seo-checks.mjs (robots.txt, sitemap.xml, title, description
-// and canonical on every indexable page, noindex on /demo/, the landing's JSON-LD), then in a real browser:
+// checks in scripts/pages-seo-checks.mjs (robots.txt, sitemap.xml, title, description, their length
+// and canonical on every indexable page, JSON-LD and breadcrumbs, internal links and fragments across
+// the landing and the docs, the blog feed, banned words in visible text, noindex on /demo/), then in
+// a real browser:
 //   - the hero's primary button goes to /demo/ and the demo loads;
 //   - the nav's "Live demo" button is visible at 360 px and 1440 px;
 //   - every internal link and asset on the landing pages answers 200, and every #fragment exists;
@@ -44,6 +46,7 @@ if (!existsSync(path.join(site, "index.html")) || !existsSync(path.join(site, "d
 console.log("Search engines");
 const seo = await checkSeo(site);
 for (const message of seo.passes) console.log(`  ✓ ${message}`);
+for (const message of seo.warnings) console.log(`  ! ${message}`);
 for (const message of seo.failures) console.log(`  ✗ ${message}`);
 if (args.includes("--seo-only")) {
   console.log(seo.failures.length > 0 ? `\n${seo.failures.length} check(s) failed.` : "\nAll checks passed.");

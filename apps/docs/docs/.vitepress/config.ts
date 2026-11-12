@@ -1,6 +1,12 @@
-import { copyFileSync } from "node:fs";
+import { copyFileSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
+import { hasIndex, readingMinutes, SRC_DIR } from "./site/content.js";
+import { FEED_PATH, writeFeed } from "./site/feed.js";
+import { breadcrumbsOf, pageKindOf } from "./site/sections.js";
+import { pageHeadTags, type HubPageData } from "./site/seo.js";
+import { blogSidebar, glossarySidebar, learnSidebar, recipesSidebar } from "./site/sidebars.js";
 
 // One consent script serves the landing and the docs. It lives with the landing (repo-root
 // docs/site-consent.js); copy it into public/ so VitePress serves it in dev and ships it in the
@@ -10,16 +16,14 @@ copyFileSync(
   fileURLToPath(new URL("../public/site-consent.js", import.meta.url))
 );
 
-const SITE = "https://lsquarem.com";
-// The share card lives with the landing at the site root (source: scripts/social-card/).
-const SOCIAL_CARD = `${SITE}/assets/social-card.png`;
-const SOCIAL_CARD_ALT = "L2M: run and govern MCP agents, self-hosted. The L2M studio with an agent hub, its chat model, memory and MCP tools, and the run tape of a finished run.";
-
-/** The page's public URL: `/docs/` plus the clean path (`foo/index.md` → `foo/`, `foo.md` → `foo`). */
-function pageUrl(relativePath: string): string {
-  const clean = relativePath.replace(/(^|\/)index\.md$/, "$1").replace(/\.md$/, "");
-  return `${SITE}/docs/${clean}`;
-}
+/** Frontmatter every page of a knowledge-hub section must carry; the build stops without it. */
+const REQUIRED_FRONTMATTER: Record<string, string[]> = {
+  learn: ["title", "description", "level"],
+  glossary: ["title", "description", "term"],
+  recipe: ["title", "description"],
+  post: ["title", "description", "date", "author"],
+  "hub-index": ["title", "description"]
+};
 
 export default defineConfig({
   title: "L2M",
@@ -34,48 +38,69 @@ export default defineConfig({
   sitemap: { hostname: "https://lsquarem.com/docs/" },
   // Generated table pulled into product/importing-from-another-builder.md with @include; not a page of its own.
   srcExclude: ["product/external-import-coverage.md"],
+  // "Last updated" on every page, and dateModified in its JSON-LD (from git).
+  lastUpdated: true,
   head: [
     ["script", { src: "/docs/site-consent.js", defer: "" }],
     ["link", { rel: "icon", type: "image/svg+xml", href: "/docs/favicon.svg" }],
+    ["link", { rel: "alternate", type: "application/atom+xml", title: "L2M blog", href: `/docs${FEED_PATH}` }],
     ["meta", { name: "theme-color", content: "#07090f" }],
-    ["meta", { property: "og:type", content: "website" }],
-    ["meta", { property: "og:site_name", content: "L2M" }],
-    ["meta", { property: "og:image", content: SOCIAL_CARD }],
-    ["meta", { property: "og:image:width", content: "1200" }],
-    ["meta", { property: "og:image:height", content: "630" }],
-    ["meta", { property: "og:image:alt", content: SOCIAL_CARD_ALT }],
-    ["meta", { name: "twitter:card", content: "summary_large_image" }],
-    ["meta", { name: "twitter:image", content: SOCIAL_CARD }],
-    ["meta", { name: "twitter:image:alt", content: SOCIAL_CARD_ALT }]
+    ["meta", { property: "og:site_name", content: "L2M" }]
   ],
-  // Per page: canonical URL and the share tags that carry its own title and description.
+  // Every page gets its breadcrumb trail (shown by the theme, and in its JSON-LD); guides and posts
+  // also get a reading time. Pages of the knowledge hub must carry their section's frontmatter.
+  transformPageData(pageData) {
+    const kind = pageKindOf(pageData.relativePath);
+    const missing = (REQUIRED_FRONTMATTER[kind] ?? []).filter((key) => pageData.frontmatter[key] === undefined || pageData.frontmatter[key] === "");
+    if (missing.length > 0 && !pageData.isNotFound) {
+      throw new Error(`${pageData.relativePath}: add ${missing.map((key) => `"${key}"`).join(", ")} to the frontmatter (templates: docs/.vitepress/templates/)`);
+    }
+    const name = String(pageData.frontmatter.term ?? pageData.frontmatter.sidebarTitle ?? pageData.title ?? "");
+    const extra: HubPageData = { breadcrumbs: breadcrumbsOf(pageData.relativePath, name, hasIndex) };
+    if (kind === "learn" || kind === "post" || kind === "recipe") {
+      extra.readingMinutes = readingMinutes(readFileSync(path.join(SRC_DIR, pageData.filePath), "utf8"));
+    }
+    return extra;
+  },
+  // Per page: canonical URL, share tags with its own title, description and image, and JSON-LD.
   // The 404 page is kept out of search results instead.
   transformHead({ pageData, title, description }) {
-    if (pageData.isNotFound || pageData.relativePath === "404.md") {
-      return [["meta", { name: "robots", content: "noindex" }]];
-    }
-    const url = pageUrl(pageData.relativePath);
-    return [
-      ["link", { rel: "canonical", href: url }],
-      ["meta", { property: "og:url", content: url }],
-      ["meta", { property: "og:title", content: title }],
-      ["meta", { property: "og:description", content: description }],
-      ["meta", { name: "twitter:title", content: title }],
-      ["meta", { name: "twitter:description", content: description }]
-    ];
+    return pageHeadTags(pageData, title, description);
+  },
+  buildEnd(siteConfig) {
+    writeFeed(siteConfig.outDir);
   },
   themeConfig: {
     nav: [
-      { text: "← lsquarem.com", link: "https://lsquarem.com/" },
-      { text: "Why", link: "/why" },
-      { text: "Live demo", link: "https://lsquarem.com/demo/", target: "_self" },
-      { text: "Quickstart", link: "/getting-started/build-your-first-mcp-agent" },
-      { text: "Patterns", link: "/patterns/" },
-      { text: "Architecture", link: "/architecture/overview" },
-      { text: "Nodes", link: "/nodes/core-nodes" },
-      { text: "API", link: "/api/endpoints" }
+      { text: "← lsquarem.com", link: "https://lsquarem.com/", target: "_self" },
+      {
+        text: "Docs",
+        activeMatch: "^/(?!learn/|glossary/|recipes/|blog/)",
+        items: [
+          { text: "Docs home", link: "/" },
+          { text: "Why L2M", link: "/why" },
+          { text: "Quickstart", link: "/getting-started/build-your-first-mcp-agent" },
+          { text: "Guides", link: "/guides/" },
+          { text: "Patterns", link: "/patterns/" },
+          { text: "Architecture", link: "/architecture/overview" },
+          { text: "Nodes", link: "/nodes/core-nodes" },
+          { text: "API", link: "/api/endpoints" }
+        ]
+      },
+      { text: "Learn", link: "/learn/", activeMatch: "^/learn/" },
+      { text: "Recipes", link: "/recipes/", activeMatch: "^/recipes/" },
+      { text: "Glossary", link: "/glossary/", activeMatch: "^/glossary/" },
+      { text: "Blog", link: "/blog/", activeMatch: "^/blog/" },
+      { text: "Live demo", link: "https://lsquarem.com/demo/", target: "_self" }
     ],
-    sidebar: [
+    search: { provider: "local" },
+    // Each knowledge-hub section has its own sidebar; every other page shares the docs sidebar.
+    sidebar: {
+      "/learn/": learnSidebar(),
+      "/glossary/": glossarySidebar(),
+      "/recipes/": recipesSidebar(),
+      "/blog/": blogSidebar(),
+      "/": [
       {
         text: "Introduction",
         items: [
@@ -218,7 +243,8 @@ export default defineConfig({
           { text: "Troubleshooting", link: "/troubleshooting/common-issues" }
         ]
       }
-    ],
+      ]
+    },
     socialLinks: [
       { icon: "github", link: "https://github.com/TensorGreed/ai-orchestrator" }
     ]
