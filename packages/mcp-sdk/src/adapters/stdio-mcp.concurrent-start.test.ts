@@ -34,6 +34,8 @@ process.stdin.on('data', (chunk) => {
       answer({ tools: [{ name: 'echo', inputSchema: { type: 'object' } }] });
     } else if (req.method === 'tools/call') {
       answer({ content: [{ type: 'text', text: 'pid ' + process.pid }] });
+    } else if (req.method === 'server/discover') {
+      setTimeout(() => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'unknown' } }) + '\\n'), delayMs);
     } else if (req.id !== undefined) {
       process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'unknown' } }) + '\\n');
     }
@@ -46,7 +48,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function setup(delayMs: number): { config: MCPServerConfig; startLog: string } {
+function setup(delayMs: number, protocolMode?: "auto"): { config: MCPServerConfig; startLog: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-stdio-start-"));
   dirs.push(dir);
   const startLog = path.join(dir, "starts.log");
@@ -54,7 +56,7 @@ function setup(delayMs: number): { config: MCPServerConfig; startLog: string } {
   const config = {
     serverId: "slow",
     label: "slow start",
-    connection: { command: process.execPath, args: ["-e", SLOW_START_SERVER], env: { START_LOG: startLog, INIT_DELAY_MS: String(delayMs) }, timeoutMs: 10_000 }
+    connection: { command: process.execPath, args: ["-e", SLOW_START_SERVER], env: { START_LOG: startLog, INIT_DELAY_MS: String(delayMs) }, timeoutMs: 10_000, ...(protocolMode ? { protocolMode } : {}) }
   } as unknown as MCPServerConfig;
   return { config, startLog };
 }
@@ -101,6 +103,24 @@ describe("stdio: concurrent first calls", () => {
     const pids = starts(startLog);
     expect(pids).toHaveLength(1);
     expect(alive(Number(pids[0]))).toBe(false);
+  });
+
+  it("starts the server again for a waiting caller when the start it joined was cancelled by another caller", async () => {
+    // Auto mode: the start's server/discover probe follows the first caller's signal.
+    const { config, startLog } = setup(300, "auto");
+    const adapter = new StdioMCPServerAdapter();
+    const runtimeState = new Map<string, unknown>();
+    const cancelled = new AbortController();
+    const first: MCPExecutionContext = { resolveSecret: async () => undefined, runtimeState, signal: cancelled.signal };
+    const second: MCPExecutionContext = { resolveSecret: async () => undefined, runtimeState };
+    const firstCall = adapter.invokeTool("echo", {}, config, first);
+    const secondCall = adapter.invokeTool("echo", {}, config, second);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    cancelled.abort();
+    expect(await firstCall).toMatchObject({ ok: false });
+    expect(await secondCall).toMatchObject({ ok: true });
+    expect(starts(startLog)).toHaveLength(2);
+    await adapter.closeSessions(second);
   });
 
   it("keeps separate contexts on separate processes", async () => {

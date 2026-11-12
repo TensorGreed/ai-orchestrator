@@ -1358,13 +1358,21 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     const key = buildSessionKey(config);
     const starting = this.startingFor(cache);
 
+    // A start cancelled by its own caller's signal is not this caller's failure: it then starts the server itself.
+    let cancelledStart: Promise<StdioSession> | undefined;
     for (;;) {
       const underWay = starting.get(key);
-      if (!underWay) break;
+      if (!underWay || underWay === cancelledStart) break;
       if (!options?.forceNew) {
-        const session = await underWay;
-        session.context = context;
-        return session;
+        try {
+          const session = await underWay;
+          session.context = context;
+          return session;
+        } catch (error) {
+          if (!(error instanceof McpRequestCanceledError) || context.signal?.aborted) throw error;
+          cancelledStart = underWay;
+          continue;
+        }
       }
       await underWay.catch(() => undefined);
     }
