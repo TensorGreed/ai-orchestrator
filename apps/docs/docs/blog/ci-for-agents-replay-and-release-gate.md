@@ -23,7 +23,7 @@ So we started from what already exists in production: real runs.
 
 ## Golden runs: a run you trust, kept whole
 
-A <Term id="golden-run">golden run</Term> is a finished run saved as a reference ([PR #45](https://github.com/TensorGreed/ai-orchestrator/pull/45)). It keeps the input, every node's result, the run's MCP calls as a cassette and, when recorded, its model calls as a tape. Secrets are scrubbed before anything is stored, and golden runs stay until someone deletes them; they are not purged by age.
+A <Term id="golden-run">golden run</Term> is a finished run saved as a reference ([PR #45](https://github.com/TensorGreed/ai-orchestrator/pull/45)). It keeps the input, every node's result and the run's MCP calls as a cassette. Secrets are scrubbed before anything is stored, and golden runs stay until someone deletes them or their workflow; they are not purged by age.
 
 Writing good cases by hand is slow, so [production capture](/product/production-capture) ([PR #56](https://github.com/TensorGreed/ai-orchestrator/pull/56), 24 October) does it from traffic. It is off until a builder turns it on for a workflow, and then samples real runs (10% by default, at most 20 a day), masks the personal data in them, and puts them in a **Captured runs** inbox. A builder promotes the useful ones into a golden set in one click.
 
@@ -35,38 +35,38 @@ Writing good cases by hand is slow, so [production capture](/product/production-
 | --- | --- |
 | Logic, content rules | Runs |
 | Model (LLM Call, Agent, Supervisor) | Calls the model live, or answers from the recorded tape |
-| MCP tools | Answered from the cassette only |
+| MCP tools | Answered from the cassette, unless a job lets an admin-marked read-only tool call its server live |
 | Code, external writes (email, HTTP, database) | Answered from the recording; never runs |
-| External reads (retrieval, web) | Answered from the recording unless a job names them to run live |
+| External reads (retrieval, web, connector reads) | Answered from the recording; a job can run a few pure reads live, such as an HTTP GET or a sheet read |
 
 Two rules matter more than the table.
 
 **Inconclusive is not a pass.** If the candidate makes an MCP call the cassette cannot answer, reaches a node the golden run never saw, or changed a code node, the case is inconclusive. We could have let those through as "probably fine". We did not, because a replay that proved nothing must not look like one that passed.
 
-**Nothing leaks out.** Replays do not write session memory, knowledge bases or the tool cache, and they do not fire error workflows or notifications. The only live traffic is the model calls you chose to run live, and their spend still counts toward [budgets](/product/budgets).
+**Nothing is written.** Replays do not write session memory, knowledge bases or the tool cache, and they do not fire error workflows or notifications. By default the only live traffic is the model calls, and their spend still counts toward [budgets](/product/budgets). A job can also let named read-only nodes and read-only MCP tools call live; such a job never counts as release proof.
 
 ## Golden sets, scorers and replay jobs
 
 A <Term id="golden-set">golden set</Term> groups the cases for one workflow ([PR #47](https://github.com/TensorGreed/ai-orchestrator/pull/47)). A replay job runs every case against a candidate and scores it. By default a case is scored on its status and on JSON equality with the golden output; other scorers check a JSON schema, text similarity, the tool-call sequence, a cost budget, or ask a model to judge.
 
-Live models vary from run to run. Two features from [PR #54](https://github.com/TensorGreed/ai-orchestrator/pull/54) handle that: jobs can answer model calls from the recorded tape, which tests a change to the logic around the model with no model drift at all, and jobs can repeat each case up to five times and aggregate the results.
+Live models vary from run to run. Two features from [PR #54](https://github.com/TensorGreed/ai-orchestrator/pull/54) handle that: recorded runs now also keep their model calls as a tape, and jobs can answer model calls from that tape, which tests a change to the logic around the model with no model drift at all, and jobs can repeat each case up to five times and aggregate the results.
 
 This matches how the field describes it. Anthropic's guide to agent evals calls these regression evals, which "should have a nearly 100% pass rate" and "protect against backsliding", as distinct from capability evals that start low.
 
 ## `l2m replay run` in CI
 
-The `l2m` command line ([PR #52](https://github.com/TensorGreed/ai-orchestrator/pull/52)) runs a job from a pipeline against your own deployment. It can replay the workflow JSON in your repository as the candidate, so a pull request is tested before anything is saved on the server:
+The `l2m` command line runs a job from a pipeline against your own deployment. [PR #52](https://github.com/TensorGreed/ai-orchestrator/pull/52) made it CI-grade: it can replay the workflow JSON in your repository as the candidate, so a pull request is tested before anything is saved on the server:
 
 ```bash
 pnpm l2m replay run --set "$GOLDEN_SET_ID" --file workflows/support-bot.json \
   --max-cost 2 --junit reports/l2m-replay.xml
 ```
 
-The exit code is the verdict: `0` every case passed, `1` a regression, `2` a usage error, `4` inconclusive. We gave inconclusive its own code so a pipeline can fail on it, and by default it should. `--junit` writes one test case per golden case for your CI's test report, and `--estimate` prints the expected model calls and cost before anything runs.
+The exit code is the verdict: `0` every case passed, `1` a regression, `2` a usage error, `4` inconclusive or a failed request. We gave inconclusive its own code so a pipeline can fail on it, and by default it should. `--junit` writes one test case per golden case for your CI's test report, and `--estimate` prints the expected model calls and cost before anything runs.
 
 ## The release gate
 
-Tests in CI only help if production runs the version that was tested. The [release gate](/product/release-gate) ([PR #55](https://github.com/TensorGreed/ai-orchestrator/pull/55)) separates a workflow's draft from its published version. With a gate switched on, a version is published only when a replay job of that exact saved version passed the gate's golden sets under its policy: by default a 100% pass rate, no regressions and at least three cases. A job that replayed a file from disk, or ran with overrides, never counts as proof.
+Tests in CI only help if production runs the version that was tested. The [release gate](/product/release-gate) ([PR #55](https://github.com/TensorGreed/ai-orchestrator/pull/55)) separates a workflow's draft from its published version. With a gate switched on, a version is published only when a replay job of that exact saved version passed the gate's golden sets under its policy: by default a 100% pass rate, no regressions and at least three cases. A job that replayed a file from disk, ran with overrides, or answered models from the tape never counts as proof.
 
 Gates can also require an approver, and an admin can override a blocked publish with a reason, which is stored and audited. Every publish, override and rollback lands in the release history.
 
@@ -86,4 +86,4 @@ Open the FAQ answerer in the [live demo](https://lsquarem.com/demo/?mode=editor&
 ## Further reading
 
 - [Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents) (Anthropic, January 2026): tasks, graders, transcripts, regression versus capability evals
-- [CHANGELOG](https://github.com/TensorGreed/ai-orchestrator/blob/main/CHANGELOG.md) (GitHub)
+- Pull requests: [#45 golden runs](https://github.com/TensorGreed/ai-orchestrator/pull/45), [#47 golden sets and scorers](https://github.com/TensorGreed/ai-orchestrator/pull/47), [#52 CLI](https://github.com/TensorGreed/ai-orchestrator/pull/52), [#54 model tape](https://github.com/TensorGreed/ai-orchestrator/pull/54), [#55 release gate](https://github.com/TensorGreed/ai-orchestrator/pull/55), [#56 production capture](https://github.com/TensorGreed/ai-orchestrator/pull/56), [#58 case admission](https://github.com/TensorGreed/ai-orchestrator/pull/58) (GitHub)

@@ -1,21 +1,22 @@
 ---
-title: "Self-hosting AI agents: what you run and why"
+title: "Self-hosted AI agent platform: what you run and why"
 sidebarTitle: "Self-hosting AI agents"
 description: "What a self-hosted agent platform runs (API, workers, database, models), the trade-offs against hosted tools, and a checklist for a first production setup."
 level: intermediate
-related: [agent-loop, mcp-server, mcp-gateway, llm-gateway]
+about: self-hosted
+related: [self-hosted, master-key, sbom, mcp-server]
 socialCard: true
 ---
 
-# Self-hosting AI agents
+# Self-hosting an AI agent platform
 
 Self-hosting an AI agent platform means running its server, its database and its workers on infrastructure you control, so prompts, tool results, run history and credentials stay inside your network. The models can be local or remote: a self-hosted platform can still call a hosted model API, but you decide which one, with which key, and what is recorded. In exchange, you take on installing, upgrading, backing up and watching the platform yourself.
 
 ## Why teams self-host
 
-The reasons are usually about data and control, not price:
+Teams that self-host usually cite data and control:
 
-- **Where data sits.** An agent run records the user's message, every tool call with its arguments, every tool result and the answer. On a self-hosted platform that history sits in your database, under your retention and backup rules.
+- **Where data sits.** An agent run records the user's message, every tool call with its arguments, every tool result and the answer. On a <Term id="self-hosted">self-hosted</Term> platform that history sits in your database, under your retention and backup rules.
 - **Network reach.** Agents are useful because they reach internal systems: a ticket database, an internal API, a code host on a private network. A platform inside the network can call them without opening inbound access from someone else's cloud.
 - **Credentials.** The platform holds keys for those systems. Self-hosting keeps them in your secret store, encrypted with a key you hold.
 - **Audit.** Security reviews ask who ran what, with which tool and which data. Logs and audit records on your own systems can be kept, exported and checked on your terms.
@@ -91,7 +92,7 @@ Watch for state that lives in one process's memory. Anything a second replica ca
 A self-hosted platform encrypts stored secrets with a key you supply. That key is now the most important thing you hold:
 
 - A database backup without its key restores without the secrets. Keep the key for as long as you keep backups made with it.
-- Someone with both the backup and the key can read every stored secret. Store the master key apart from the backups, with its own access control.
+- Someone with both the backup and the key can read every stored secret. Store the <Term id="master-key">master key</Term> apart from the backups, with its own access control.
 - Test a restore into a fresh instance before you need one. A backup that was never restored is a hope, not a plan.
 - Retention and deletion do not reach backups already taken. Rotate backups within the retention you promise.
 
@@ -101,7 +102,7 @@ A platform that holds your credentials is worth checking before you run it:
 
 - **Pin images by digest**, not by a moving tag, so the image you tested is the image you deploy.
 - **Check the signature and build provenance**: who built the image, from which commit, in which build system.
-- **Read the SBOM** (software bill of materials) for the packages inside, and scan it with the tools you already use.
+- **Read the <Term id="sbom">SBOM</Term>** (software bill of materials) for the packages inside, and scan it with the tools you already use.
 - **Check what it calls out to.** Know which outbound connections the platform makes on its own, and block the rest at the network.
 
 ## What you take on
@@ -117,7 +118,7 @@ Self-hosting moves work to your team:
 ## A first production checklist
 
 1. Generate the master key, store it in your secret manager, and keep a copy apart from backups.
-2. Put the API behind TLS; bind it to localhost or a private network otherwise.
+2. Bind the API to localhost or a private network, and expose it only through a TLS proxy.
 3. Turn off public sign-up; create the first admin from configuration.
 4. Choose the database: the embedded file for one process, a database server for more.
 5. Schedule backups and run one restore drill.
@@ -129,11 +130,11 @@ Self-hosting moves work to your team:
 
 ## In L2M
 
-[L2M](/why) is open source (MIT) and runs only on your infrastructure: there is no hosted edition, and the product sends no analytics. Everything below beyond the defaults is optional.
+[L2M](/why) is open source (MIT) and runs only on your infrastructure: there is no hosted edition, and the product sends no analytics. Two things do load from the internet by default: the studio's web fonts (Google Fonts) and the API reference page at `/api/docs` (Swagger UI from a public CDN). Know both before you lock down outbound traffic. Everything below beyond the defaults is optional.
 
 - **Install.** Run from source with Node.js and pnpm ([Quickstart](/getting-started/quickstart)), with the Docker Compose files in the repository, or with the Helm chart in `ops/helm`. The API and web images are published to GHCR for `linux/amd64` and `linux/arm64`.
 - **Database.** SQLite by default with nothing to configure; [Postgres](/operations/postgres) with `DB_TYPE=postgres`, and `db:copy` to move data across.
-- **Scaling.** [Queue workers](/operations/queue-and-workers) take queued runs; [cluster mode](/operations/cluster) (`DB_TYPE=postgres` and `HA_ENABLED=true`) runs several instances on one Postgres, with one leader for schedules and purges. [Scaling](/operations/scaling) covers roles, sizing and a load test harness. MCP gateway sessions are the one piece of per-replica state; the cluster page shows how to route them.
+- **Scaling.** In [cluster mode](/operations/cluster) (`DB_TYPE=postgres` and `HA_ENABLED=true`), several API instances and separate [queue workers](/operations/queue-and-workers) share one Postgres, with one leader for schedules and purges. On SQLite, one process is its own worker. [Scaling](/operations/scaling) covers roles, sizing and a load test harness. MCP gateway sessions are the one piece that needs sticky routing; the cluster page shows how to route them.
 - **Backups.** [Backup and recovery](/operations/backup-and-recovery) has procedures for SQLite, Postgres and a portable export, a restore drill, and what to do after losing the master key (`SECRET_MASTER_KEY_BASE64`).
 - **Verification.** Each release image is signed with keyless cosign and carries SLSA build provenance and CycloneDX SBOMs: [Verify a release](/operations/verify-a-release).
 - **Observability.** Structured logs, Prometheus metrics at `/metrics`, and optional OTLP export of traces and metrics: [Observability](/operations/observability).
@@ -145,5 +146,5 @@ Follow the [Quickstart](/getting-started/quickstart) to run L2M on your laptop w
 ## Further reading
 
 - [NIST AI 600-1: Generative Artificial Intelligence Profile](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence) (nist.gov, July 2024): a voluntary companion to the AI Risk Management Framework
-- [MCP Security Best Practices](https://modelcontextprotocol.io/specification/latest/basic/security_best_practices) (modelcontextprotocol.io): local MCP server compromise and sandboxing
+- [MCP Security Best Practices](https://modelcontextprotocol.io/docs/2025-11-25/tutorials/security/security_best_practices) (modelcontextprotocol.io): local MCP server compromise and sandboxing
 - L2M docs: [Postgres](/operations/postgres), [Scaling](/operations/scaling), [Backup and recovery](/operations/backup-and-recovery), [Verify a release](/operations/verify-a-release)

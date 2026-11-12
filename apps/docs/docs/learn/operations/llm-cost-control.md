@@ -1,16 +1,16 @@
 ---
 title: "Controlling LLM and agent costs: budgets and caps"
 sidebarTitle: "LLM and agent cost control"
-description: "Why agent costs run away (loops, retries, long tool lists), where to put caps (run, user, project, client), warn vs block, and estimating usage honestly."
+description: "Why agent costs run away (loops, long tool lists), where to put spend and token budgets (user, project, client), warn vs block, and estimating usage."
 level: intermediate
 about: budget
-related: [budget, max-iterations, agent-loop, llm-gateway]
+related: [budget, token-llm, rate-limit, unbounded-consumption, max-iterations]
 socialCard: true
 ---
 
 # Controlling LLM and agent costs
 
-Agent spend is the number of tokens sent to and received from models, times each model's price. Agents spend more than single model calls because they call the model several times per task and send the whole conversation again each time. You control it with three kinds of limit: a cap on steps inside one run, a <Term id="budget">budget</Term> per scope and period that warns or blocks, and a rate limit on how fast one caller may go.
+Agent spend is the number of <Term id="token-llm">tokens</Term> sent to and received from models, times each model's price. Agents spend more than single model calls because they call the model several times per task and send the whole conversation again each time. You control it with three kinds of limit: a cap on steps inside one run, a <Term id="budget">budget</Term> per scope and period that warns or blocks, and a <Term id="rate-limit">rate limit</Term> on how fast one caller may go.
 
 ## Where agent spend comes from
 
@@ -29,15 +29,15 @@ The usual causes of a surprise bill:
 - **Loops that do not stop.** The model keeps asking for tools without converging.
 - **Long tool lists.** Fifty tool definitions on every call cost input tokens whether or not any is used.
 - **Large tool results.** A tool that returns a whole table puts all of it into every later call of the run.
-- **Retries.** A failed call that is retried is paid for again, and a retry loop around a whole agent multiplies everything above.
+- **Retries.** A call that fails after the model has started answering may be billed, and the retry is billed again. A retry loop around a whole agent multiplies everything above.
 - **Hidden callers.** Evals with a model as judge, sub-workflows, and other teams' scripts on a shared key.
-- **Abuse.** OWASP's LLM10, Unbounded Consumption, includes "Denial of Wallet": an attacker initiates "a high volume of operations" to "exploit the cost-per-use model" of AI services.
+- **Abuse.** OWASP's LLM10, <Term id="unbounded-consumption">Unbounded Consumption</Term>, includes "Denial of Wallet": an attacker initiates "a high volume of operations" to "exploit the cost-per-use model" of AI services.
 
 ## Cap the run first
 
 The cheapest control is inside the run itself:
 
-- **An iteration limit.** Every agent should have a <Term id="max-iterations">maximum number of iterations</Term>. When it is reached, the run stops with the last text the model wrote. Pick it from the task: a lookup needs two or three; research may need ten.
+- **An iteration limit.** Every agent should have a <Term id="max-iterations">maximum number of iterations</Term>. When it is reached, the agent stops asking the model and returns what it has, even if the task is not finished. Pick it from the task: a lookup needs two or three; research may need ten.
 - **Fewer tools per agent.** Attach the tools a task needs, not every tool a server has. Split a large agent into a supervisor and focused workers if one agent needs too many.
 - **Shorter tool results.** Trim results before they go back to the model: fields the task does not need, long lists, raw HTML.
 
@@ -85,7 +85,7 @@ A budget limits the total over a day, week or month. A rate limit limits the pac
 - A budget alone lets a loop spend the month's allowance in an hour, then blocks everyone for the rest of the month.
 - A rate limit alone slows a loop down but lets it run all month.
 
-Budgets are also checked when work starts and counted when it ends, so calls running at the same time can together pass a cap before any of them is counted. A limit on calls at once keeps that overshoot small. Use both for any caller you do not fully control.
+Budgets are usually checked when work starts and counted when it ends, so calls running at the same time can together pass a cap before any of them is counted. A limit on calls at once keeps that overshoot small. Use both for any caller you do not fully control.
 
 ## Prices you control
 
@@ -104,15 +104,15 @@ Cost figures come from a price table: price per million input tokens, per millio
 
 [Budgets](/product/budgets) are optional; with none set, nothing is checked. Admins set them under **Settings → FinOps**, with the scopes global, project, workflow, user and MCP client, a limit in USD or tokens, a day, week or month period in UTC, and the action warn or block. Warn alerts at 80% by default and at the cap, and can post to a notify webhook.
 
-- A used-up block budget stops a run before it starts, whatever started it. Editor runs, the API and webhooks get `HTTP 402` with `error: "budget_exceeded"` and a `Retry-After` header; schedules and polling triggers record one failed run naming the budget. [MCP gateway](/product/mcp-gateway#budgets-and-rate-limits) calls get JSON-RPC error `-32032`, and the [/v1 AI gateway](/product/ai-gateway#budgets-and-rate-limits) answers `429` with code `insufficient_quota`.
+- A used-up block budget stops a run before it starts, whatever trigger started it. Editor runs, the API and webhooks get `HTTP 402` with `error: "budget_exceeded"` and a `Retry-After` header; schedules and polling triggers record one failed run naming the budget. Eval runs, tape-only replays, approval resumes and error workflows are not refused, but their spend still counts. [MCP gateway](/product/mcp-gateway#budgets-and-rate-limits) calls get JSON-RPC error `-32032`, and the [/v1 AI gateway](/product/ai-gateway#budgets-and-rate-limits) answers `429` with code `insufficient_quota`.
 - A model call whose provider reports no usage is counted with an estimate of about three bytes of text per token, which leans high, and is marked `usageEstimated` on the node's trace.
-- Costs come from a built-in price table; `LLM_PRICING_OVERRIDES_JSON` adds models or sets your own rates. A model without a price counts its tokens at no cost.
-- The Agent Orchestrator node's `maxIterations` caps the loop, and its tool payload settings (`toolMessageMaxChars` and the `toolPayloadMax*` limits) shorten tool results before they reach the model.
+- Costs come from a built-in price table; `LLM_PRICING_OVERRIDES_JSON` adds models or sets your own rates. A model without a price counts its tokens at no cost; Azure OpenAI workflow runs are unpriced this way, so give them a token budget.
+- The Agent Orchestrator node's `maxIterations` caps the loop: at the limit the agent returns the last text the model wrote, or "Agent stopped after reaching iteration limit.", and the workflow goes on. Its tool payload settings (`toolMessageMaxChars` and the `toolPayloadMax*` limits) shorten tool results before they reach the model.
 - Gateway clients can also get a rate limit: calls per minute with a burst, and calls at once.
 
 ## Try it in L2M
 
-Import the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent), set its agent's `maxIterations`, then add a small token budget for its workflow under **Settings → FinOps** and watch the usage it counts. The recipe uses the built-in echo provider, which never asks for tools, so attach a real chat model to see the loop spend across several calls.
+Import the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent), set its agent's `maxIterations`, then add a small token budget for its workflow under **Settings → FinOps**. Run it and open the agent node's **Trace** tab to see the tokens it counted. The recipe uses the built-in echo provider, which never asks for tools and only reports rough token counts, so attach a real chat model to see the loop spend across several calls.
 
 ## Further reading
 
