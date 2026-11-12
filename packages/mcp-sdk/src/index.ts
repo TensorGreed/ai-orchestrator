@@ -1,7 +1,7 @@
 import { MockMCPServerAdapter } from "./adapters/mock-mcp";
 import { SnapshotMockMCPServerAdapter, type McpSnapshotSource } from "./snapshot-mock";
 import { HttpMCPServerAdapter, type HttpMcpProtocolOptions } from "./adapters/http-mcp";
-import { StdioMCPServerAdapter } from "./adapters/stdio-mcp";
+import { StdioMCPServerAdapter, type StdioMcpProtocolOptions } from "./adapters/stdio-mcp";
 import { BuiltInToolsMCPServerAdapter, type BuiltInToolsAdapterOptions } from "./adapters/built-in-tools";
 import { WorkflowToolMCPServerAdapter } from "./adapters/workflow-tool";
 import { MCPRegistry } from "./registry";
@@ -62,6 +62,11 @@ export interface DefaultMCPRegistryOptions {
    * is on by default.
    */
   httpProtocol?: HttpMcpProtocolOptions;
+  /**
+   * MCP 2026-07-28 — the same settings for the stdio client, plus how long
+   * an `auto` connection waits for its `server/discover` probe.
+   */
+  stdioProtocol?: StdioMcpProtocolOptions;
 }
 
 function isLauncher(value: McpSandboxPolicy | StdioLauncher): value is StdioLauncher {
@@ -84,7 +89,16 @@ export function createDefaultMCPRegistry(options?: DefaultMCPRegistryOptions): M
       )
     )
   );
-  registry.register(limited(withSecretBundle(new StdioMCPServerAdapter(launcher ? { launcher } : undefined))));
+  registry.register(
+    limited(
+      withSecretBundle(
+        new StdioMCPServerAdapter({
+          ...(launcher ? { launcher } : {}),
+          ...(options?.stdioProtocol ? { protocol: options.stdioProtocol } : {})
+        })
+      )
+    )
+  );
   registry.register(limited(new MockMCPServerAdapter()));
   // Phase 6.4 — built-in tools, under the same rate limits and breaker as any other server.
   registry.register(limited(new BuiltInToolsMCPServerAdapter(options?.builtInTools)));

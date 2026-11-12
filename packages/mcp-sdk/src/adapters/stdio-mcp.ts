@@ -1,21 +1,31 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import type {
+  McpClientProtocolMode,
   McpPrompt,
   McpPromptGetResult,
+  McpProtocolEra,
   McpResource,
   McpResourceReadResult,
   McpResourceTemplate,
   McpServerCapabilities,
   MCPServerConfig,
+  McpToolAnnotations,
   MCPToolDefinition,
   MCPToolResult
 } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter, McpReadResourceOptions, McpServerRequestOrigin } from "../types";
-import { McpJsonRpcError, McpTimeoutError, classifyMcpError } from "../errors";
+import {
+  McpJsonRpcError,
+  McpMissingClientCapabilityError,
+  McpOutcomeUnknownError,
+  McpTimeoutError,
+  classifyMcpError
+} from "../errors";
 import type { StdioLaunchPlan, StdioLauncher } from "../sandbox";
 import {
   DEFAULT_RESOURCE_MAX_BYTES,
+  JSON_RPC_INVALID_PARAMS,
   MAX_LIST_PAGES,
   answerServerRequest,
   buildClientCapabilities,
@@ -38,6 +48,29 @@ import {
   toProgressEvent,
   type ParsedProgress
 } from "../progress";
+import { effectiveToolHints } from "../tool-policy";
+import {
+  DEFAULT_MRTR_MAX_ROUNDS,
+  MCP_CLIENT_MODERN_PROTOCOL_VERSION,
+  MCP_ERROR_LEGACY_RESOURCE_NOT_FOUND,
+  MCP_ERROR_UNSUPPORTED_PROTOCOL_VERSION,
+  MCP_MODERN_PROTOCOL_VERSIONS,
+  McpEraCache,
+  chooseMcpProtocolVersion,
+  classifyMcpResult,
+  classifyStdioEraProbe,
+  initializeRejectionIsModern,
+  isMrtrMethod,
+  modernRequestMetaFor,
+  parseDiscoverResult,
+  parseMcpModernError,
+  resolveMcpClientProtocolMode,
+  runMrtrRequest,
+  stdioEraCacheKey,
+  withRequestMeta,
+  type McpMrtrMethod,
+  type McpStdioProbeOutcome
+} from "../protocol";
 
 interface JsonRpcResponse {
   jsonrpc?: string;
@@ -58,6 +91,12 @@ interface PendingRequest {
   timeoutMs: number;
   /** Set once `notifications/cancelled` went out for this request. */
   cancelled?: boolean;
+  /**
+   * The `server/discover` era probe sent before any `initialize`: it is
+   * never cancelled with a notification, because a legacy server expects
+   * nothing but `initialize` first.
+   */
+  probe?: boolean;
 }
 
 /** Thrown when the run's abort signal stopped a request; never retried. */
@@ -68,13 +107,92 @@ class McpRequestCanceledError extends Error {
   }
 }
 
+/**
+ * The server process ended after this request was written to it and before
+ * it answered, so the server may or may not have acted on it. Callers decide
+ * whether sending it again is safe (decision D13).
+ */
+class McpStdioConnectionLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpStdioConnectionLostError";
+  }
+}
+
+/**
+ * MCP 2026-07-28 — the server is not in the era the session assumed (a
+ * modern request was refused with -32022 listing only `initialize`-based
+ * versions). The request was not acted on; it goes out again on a new
+ * process in `era`.
+ */
+class StdioEraMismatchError extends Error {
+  constructor(
+    readonly era: McpProtocolEra,
+    readonly detail: string
+  ) {
+    super(`MCP stdio server needs an ${era === "legacy" ? "initialize-based" : "MCP 2026-07-28"} connection: ${detail}`);
+    this.name = "StdioEraMismatchError";
+  }
+}
+
+/** The server process ended on the `server/discover` probe: start a new one and open it with `initialize`. */
+class StdioProbeEndedProcessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StdioProbeEndedProcessError";
+  }
+}
+
 interface RpcOptions {
   signal?: AbortSignal;
   /** Progress token sent in `_meta`; notifications carrying it reach `onProgress`. */
   progressToken?: string;
   onProgress?: (progress: ParsedProgress) => void;
   toolName?: string;
+  /** The call's context, for the request `_meta`; defaults to the session's. */
+  context?: MCPExecutionContext;
+  /** Marks the `server/discover` era probe (see `PendingRequest.probe`). */
+  probe?: boolean;
 }
+
+/** Protocol settings of the stdio client (MCP 2026-07-28). Every field is optional; the defaults keep earlier behaviour. */
+export interface StdioMcpProtocolOptions {
+  /** `protocolMode` for servers whose connection sets none. Default `legacy` (decision D1). */
+  defaultMode?: McpClientProtocolMode;
+  /** Most `input_required` rounds one modern request may take. Default `DEFAULT_MRTR_MAX_ROUNDS`. */
+  mrtrMaxRounds?: number;
+  /**
+   * D13 for `initialize`-based servers: true (the default) starts a fresh
+   * process and sends a tool call again after the server process died
+   * mid-call only when the tool is marked read-only or idempotent; other
+   * calls fail as `outcome_unknown`. False sends every call again, as
+   * earlier releases did. Modern servers always follow the safe rule.
+   */
+  legacySafeReissue?: boolean;
+  /**
+   * How long an `auto` connection waits for the `server/discover` probe
+   * before treating the server as `initialize`-based. Default
+   * `DEFAULT_STDIO_ERA_PROBE_TIMEOUT_MS`; never longer than the server's
+   * request timeout. `modern` connections wait the full request timeout.
+   */
+  probeTimeoutMs?: number;
+  /** Observed eras by launch plan, shared across runs. Defaults to one cache per adapter. */
+  eraCache?: McpEraCache;
+}
+
+export interface StdioMcpServerAdapterOptions {
+  launcher?: StdioLauncher;
+  protocol?: StdioMcpProtocolOptions;
+}
+
+/** What the adapter has observed about a stdio server's protocol, for display. */
+export interface StdioMcpObservedProtocol {
+  era: McpProtocolEra;
+  version?: string;
+}
+
+/** Default wait for the `server/discover` probe of an `auto` connection. */
+export const DEFAULT_STDIO_ERA_PROBE_TIMEOUT_MS = 5_000;
 
 interface StdioSession {
   proc: ChildProcess;
@@ -93,8 +211,26 @@ interface StdioSession {
   cancelsSent: number;
   /** Tool output schemas from tools/list, once listed in this session. */
   outputSchemas?: Map<string, Record<string, unknown> | undefined>;
-  /** Phase 10.5 — what the server declared in `initialize`. */
+  /** Tool annotations from tools/list, for the safe re-issue rule (D13). */
+  toolAnnotations?: Map<string, McpToolAnnotations | undefined>;
+  /** Phase 10.5 — what the server declared in `initialize` (legacy) or `server/discover` (modern). */
   capabilities: McpServerCapabilities;
+  /** False for a modern session whose capabilities have not been asked for yet. */
+  capabilitiesKnown: boolean;
+  /**
+   * MCP 2026-07-28 — `legacy` sessions opened with `initialize`; `modern`
+   * sessions carry version and capabilities in every request's `_meta`.
+   */
+  era: McpProtocolEra;
+  /** The modern version in use (modern sessions only). */
+  protocolVersion?: string;
+  mode: McpClientProtocolMode;
+  /** Era cache key: a hash of the launch plan. */
+  eraKey: string;
+  /** Session cache key of the config. */
+  sessionKey: string;
+  /** The spawn itself failed (the command was not found, say). */
+  spawnFailed?: boolean;
   /** The context the session was created for; server-initiated requests are answered through it. */
   context: MCPExecutionContext;
   config: MCPServerConfig;
@@ -282,6 +418,26 @@ function normalizeDiscoveredTools(serverId: string, serverLabel: string, rawTool
 }
 
 const MAX_TOOL_LIST_PAGES = 20;
+/** Servers whose last tool annotations are remembered for the safe re-issue rule. */
+const MAX_REMEMBERED_TOOL_LISTS = 500;
+/** Servers whose observed protocol is remembered for display. */
+const MAX_OBSERVED_PROTOCOLS = 500;
+
+/** Server-supplied text for messages: control characters removed, length capped. */
+function safeText(value: string, max = 200): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return cleaned.length > max ? `${cleaned.slice(0, max)}…` : cleaned;
+}
+
+function serverNameOf(config: MCPServerConfig): string {
+  return safeText(config.label ?? config.registryServerId ?? config.serverId, 120);
+}
+
+/** The JSON-RPC error object an adapter error carries, for the era helpers. */
+function jsonRpcErrorObject(error: McpJsonRpcError): { code: number | undefined; message: string; data?: unknown } {
+  return { code: error.code, message: error.message, ...(error.data !== undefined ? { data: error.data } : {}) };
+}
 
 function toProgressEventFor(progress: ParsedProgress, toolName: string, config: MCPServerConfig) {
   return toProgressEvent(progress, {
@@ -295,9 +451,34 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   private readonly fallbackSessionCache = new Map<string, StdioSession>();
   /** Phase 10.7 — decides how the command starts (on the host, or in a container sandbox). */
   private launcher?: StdioLauncher;
+  private readonly protocol: StdioMcpProtocolOptions;
+  /** Eras seen by `server/discover` probes, by launch plan. */
+  private readonly eraCache: McpEraCache;
+  /**
+   * Launch plans whose server rejected `initialize` as a modern-only server,
+   * kept apart from `eraCache` so a dual-era server that an `auto`
+   * connection found modern stays legacy for `legacy` connections.
+   */
+  private readonly modernOnlyCache: McpEraCache;
+  /** Tool annotations from the last tools/list of each server (by session key), for the safe re-issue rule. */
+  private readonly rememberedAnnotations = new Map<string, Map<string, McpToolAnnotations | undefined>>();
+  /** The protocol last seen per server (by session key), for display. */
+  private readonly observed = new Map<string, StdioMcpObservedProtocol>();
 
-  constructor(options?: { launcher?: StdioLauncher }) {
+  constructor(options?: StdioMcpServerAdapterOptions) {
     this.launcher = options?.launcher;
+    this.protocol = options?.protocol ?? {};
+    this.eraCache = this.protocol.eraCache ?? new McpEraCache();
+    this.modernOnlyCache = new McpEraCache();
+  }
+
+  /**
+   * The era (and modern version) of the server's last process started by
+   * this adapter, or undefined when none was started yet.
+   */
+  observedProtocol(config: MCPServerConfig): StdioMcpObservedProtocol | undefined {
+    const entry = this.observed.get(buildSessionKey(config));
+    return entry ? { ...entry } : undefined;
   }
 
   /** Phase 10.7 — the launcher sandboxed servers start through. */
@@ -338,6 +519,11 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
         timeoutMs: {
           type: "number",
           description: "Per-RPC request timeout in milliseconds. Defaults to 120000."
+        },
+        protocolMode: {
+          type: "string",
+          enum: ["auto", "legacy", "modern"],
+          description: "MCP protocol era: legacy (initialize handshake), modern (2026-07-28) or auto. Default: the deployment's setting."
         }
       },
       required: ["command"]
@@ -374,7 +560,28 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     return session;
   }
 
-  private async createSession(config: MCPServerConfig, context: MCPExecutionContext): Promise<StdioSession> {
+  private async createSession(
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    options?: { forceLegacy?: boolean }
+  ): Promise<StdioSession> {
+    const session = await this.spawnSession(config, context);
+    try {
+      await this.openSession(session, config, context, options?.forceLegacy === true);
+    } catch (error) {
+      this.killSession(session);
+      if (error instanceof StdioProbeEndedProcessError) {
+        // Some initialize-based servers exit on a request they do not know; start again and open with initialize.
+        return this.createSession(config, context, { forceLegacy: true });
+      }
+      throw error;
+    }
+    this.noteObserved(session);
+    return session;
+  }
+
+  /** Start the server process and wire its streams; nothing is sent yet. */
+  private async spawnSession(config: MCPServerConfig, context: MCPExecutionContext): Promise<StdioSession> {
     const command = normalizeCommand(config);
     const args = normalizeArgs(config);
     const cwd = typeof config.connection?.cwd === "string" && config.connection.cwd.trim()
@@ -417,6 +624,12 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       progressListeners: new Map(),
       cancelsSent: 0,
       capabilities: {},
+      capabilitiesKnown: false,
+      era: "legacy",
+      mode: resolveMcpClientProtocolMode(config.connection, this.protocol.defaultMode),
+      // The era is a property of what is launched: command, arguments, folder, environment and sandbox.
+      eraKey: stdioEraCacheKey({ command, args, cwd: cwd ?? null, env: serverEnv, sandbox: config.sandbox ?? null }),
+      sessionKey: buildSessionKey(config),
       context,
       config,
       serverRequests: new Set(),
@@ -435,21 +648,201 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       this.handleProcError(session, error);
       this.runCleanup(session);
     });
+    return session;
+  }
 
+  /**
+   * MCP 2026-07-28 — open the session in the era its `protocolMode` asks
+   * for. `legacy` (the default) sends `initialize` exactly as earlier
+   * releases did, and switches to modern when a modern-only server rejects
+   * it (fall-forward, decision D1). `auto` probes with `server/discover`
+   * first, as the stdio binding recommends, unless the launch plan is known
+   * to be `initialize`-based. `modern` probes too, so an `initialize`-based
+   * server fails clearly instead of running requests it cannot understand.
+   */
+  private async openSession(
+    session: StdioSession,
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    forceLegacy: boolean
+  ): Promise<void> {
+    if (forceLegacy) return this.openLegacy(session, config, context, { fallForward: false });
+    if (session.mode === "legacy") {
+      // A server that rejected initialize as modern-only before: check it is still modern before using it so.
+      if (this.modernOnlyCache.get(session.eraKey)) {
+        if ((await this.probe(session, config, context, this.probeTimeoutMs(config))) === "modern") return;
+        this.modernOnlyCache.invalidate(session.eraKey);
+      }
+      return this.openLegacy(session, config, context, { fallForward: true });
+    }
+    if (session.mode === "auto") {
+      if (this.eraCache.get(session.eraKey)?.era === "legacy") {
+        return this.openLegacy(session, config, context, { fallForward: true, probeOnFailure: true });
+      }
+      if ((await this.probe(session, config, context, this.probeTimeoutMs(config))) === "modern") return;
+      return this.openLegacy(session, config, context, { fallForward: true });
+    }
+    if ((await this.probe(session, config, context, normalizeTimeoutMs(config))) === "modern") return;
+    throw new Error(
+      `MCP server '${serverNameOf(config)}' does not speak MCP ${MCP_MODERN_PROTOCOL_VERSIONS.join(", ")}: it did not answer server/discover like a ${MCP_MODERN_PROTOCOL_VERSIONS.join(", ")} server. Set its protocol to Legacy or Auto.`
+    );
+  }
+
+  private probeTimeoutMs(config: MCPServerConfig): number {
+    const configured = this.protocol.probeTimeoutMs;
+    const probe =
+      typeof configured === "number" && Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : DEFAULT_STDIO_ERA_PROBE_TIMEOUT_MS;
+    return Math.min(probe, normalizeTimeoutMs(config));
+  }
+
+  /**
+   * Send the `server/discover` probe with modern `_meta`. A discover result
+   * or a recognised modern error means modern (a version is picked from the
+   * server's list); any other error, or no answer in time, means legacy.
+   * The verdict is cached per launch plan. On a modern verdict the session
+   * is modern when this returns.
+   */
+  private async probe(
+    session: StdioSession,
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    timeoutMs: number
+  ): Promise<"modern" | "legacy"> {
+    const allowLegacy = session.mode !== "modern";
+    this.useModern(session, MCP_CLIENT_MODERN_PROTOCOL_VERSION);
+    let outcome: McpStdioProbeOutcome;
     try {
-      const initialized = await this.sendRpc(session, "initialize", {
+      const response = await this.sendRpc(session, "server/discover", {}, timeoutMs, {
+        probe: true,
+        context,
+        ...(context.signal ? { signal: context.signal } : {})
+      });
+      outcome = { result: response.result };
+    } catch (error) {
+      if (error instanceof McpRequestCanceledError) throw error;
+      if (error instanceof McpJsonRpcError) {
+        outcome = { error: jsonRpcErrorObject(error) };
+      } else if (error instanceof McpTimeoutError) {
+        outcome = { timedOut: true };
+      } else {
+        // The process never started or ended on the probe.
+        this.useLegacy(session);
+        if (session.spawnFailed || !allowLegacy) throw error;
+        throw new StdioProbeEndedProcessError(error instanceof Error ? error.message : String(error));
+      }
+    }
+    const verdict = classifyStdioEraProbe(outcome);
+    if (verdict.era === "modern") {
+      const supported =
+        verdict.discover?.supportedVersions ?? (verdict.error?.kind === "unsupported_version" ? verdict.error.supported : undefined);
+      let version: string = MCP_CLIENT_MODERN_PROTOCOL_VERSION;
+      if (supported !== undefined) {
+        const choice = chooseMcpProtocolVersion(supported, { allowLegacy });
+        if (choice.era === "none") throw this.noMutualVersionError(config, supported);
+        if (choice.era === "legacy") {
+          this.useLegacy(session);
+          this.eraCache.set(session.eraKey, "legacy");
+          return "legacy";
+        }
+        version = choice.version;
+      }
+      this.useModern(session, version, verdict.discover?.capabilities);
+      this.eraCache.set(session.eraKey, "modern", version);
+      return "modern";
+    }
+    this.useLegacy(session);
+    this.eraCache.set(session.eraKey, "legacy");
+    return "legacy";
+  }
+
+  /**
+   * The `initialize` handshake, unchanged from earlier releases. With
+   * `fallForward`, a rejection from a modern-only server (a JSON-RPC error
+   * whose `data.supported` lists a modern version) makes the session modern
+   * on the same process instead. With `probeOnFailure` (an `auto`
+   * connection that skipped the probe because the launch plan was cached
+   * as `initialize`-based), any other JSON-RPC error forgets that and
+   * probes before giving up.
+   */
+  private async openLegacy(
+    session: StdioSession,
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    options: { fallForward: boolean; probeOnFailure?: boolean }
+  ): Promise<void> {
+    let initialized: JsonRpcResponse;
+    try {
+      initialized = await this.sendRpc(session, "initialize", {
         protocolVersion: MCP_CLIENT_PROTOCOL_VERSION,
         capabilities: buildClientCapabilities(context),
         clientInfo: { name: "ai-orchestrator", version: "0.1.0" }
       }, normalizeTimeoutMs(config));
-      session.capabilities = normalizeServerCapabilities(toRecord(initialized.result).capabilities);
     } catch (error) {
-      this.killSession(session);
+      if (options.fallForward && error instanceof McpJsonRpcError && initializeRejectionIsModern({ transport: "stdio", error: jsonRpcErrorObject(error) })) {
+        const supported = ((error.data as { supported: unknown[] }).supported ?? []).filter((entry): entry is string => typeof entry === "string");
+        const choice = chooseMcpProtocolVersion(supported);
+        if (choice.era !== "modern") throw this.noMutualVersionError(config, supported);
+        this.modernOnlyCache.set(session.eraKey, "modern", choice.version);
+        this.useModern(session, choice.version);
+        return;
+      }
+      if (options.probeOnFailure && error instanceof McpJsonRpcError && !session.closed) {
+        this.eraCache.invalidate(session.eraKey);
+        if ((await this.probe(session, config, context, this.probeTimeoutMs(config))) === "modern") return;
+      }
       throw error;
     }
-
+    session.capabilities = normalizeServerCapabilities(toRecord(initialized.result).capabilities);
+    session.capabilitiesKnown = true;
     this.sendNotification(session, "notifications/initialized", {});
-    return session;
+  }
+
+  private useModern(session: StdioSession, version: string, capabilities?: McpServerCapabilities): void {
+    session.era = "modern";
+    session.protocolVersion = version;
+    session.capabilities = capabilities ?? {};
+    session.capabilitiesKnown = capabilities !== undefined;
+  }
+
+  private useLegacy(session: StdioSession): void {
+    session.era = "legacy";
+    delete session.protocolVersion;
+    session.capabilities = {};
+    session.capabilitiesKnown = false;
+  }
+
+  private noteObserved(session: StdioSession): void {
+    this.observed.delete(session.sessionKey);
+    this.observed.set(session.sessionKey, {
+      era: session.era,
+      ...(session.era === "modern" && session.protocolVersion ? { version: session.protocolVersion } : {})
+    });
+    while (this.observed.size > MAX_OBSERVED_PROTOCOLS) {
+      const oldest = this.observed.keys().next().value;
+      if (oldest === undefined) break;
+      this.observed.delete(oldest);
+    }
+  }
+
+  private noMutualVersionError(config: MCPServerConfig, supported: readonly string[]): McpJsonRpcError {
+    return new McpJsonRpcError(
+      `MCP server '${serverNameOf(config)}' supports protocol versions ${supported.slice(0, 10).map((version) => safeText(version, 40)).join(", ") || "(none listed)"}, and this client speaks ${MCP_MODERN_PROTOCOL_VERSIONS.join(", ")} or the initialize-based versions.`,
+      MCP_ERROR_UNSUPPORTED_PROTOCOL_VERSION,
+      { supported: supported.slice(0, 50) }
+    );
+  }
+
+  /**
+   * The params a request goes out with: the one place request `_meta` is
+   * written, for every request with an id in both eras (`sendRpc` calls
+   * it). Modern requests get their protocol keys here, merged with
+   * `withRequestMeta` so a progress token and any other key are kept;
+   * legacy params pass through unchanged. Trace context (`traceparent`,
+   * `tracestate`) for either era belongs here as well, merged the same way.
+   */
+  private outgoingParams(session: StdioSession, params: unknown, context: MCPExecutionContext): unknown {
+    if (session.era !== "modern") return params;
+    return withRequestMeta(toRecord(params), modernRequestMetaFor(context, session.protocolVersion ?? MCP_CLIENT_MODERN_PROTOCOL_VERSION));
   }
 
   private handleStdout(session: StdioSession, chunk: string): void {
@@ -529,6 +922,9 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       return;
     }
     if (!isServerRequest(message)) return;
+    // MCP 2026-07-28 — modern servers ask through input_required results, never with requests of their own, and a
+    // modern client must not write responses: such a request is ignored.
+    if (session.era === "modern") return;
     const origin = this.requestOrigin(session);
     // A person may take a while to answer an elicitation: the in-flight
     // request's timeout is suspended until the answer has been written.
@@ -562,8 +958,8 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   private expirePending(session: StdioSession, id: number, method: string, timeoutMs: number): void {
     const pending = session.pending.get(id);
     if (!pending) return;
-    // Phase 10.5 — a timed-out request is cancelled on the server too.
-    if (method !== "initialize") {
+    // Phase 10.5 — a timed-out request is cancelled on the server too (not the era probe: see PendingRequest.probe).
+    if (method !== "initialize" && !pending.probe) {
       this.writeMessage(session, buildCancelledNotification(id, `Timed out after ${timeoutMs}ms`));
       session.cancelsSent += 1;
     }
@@ -601,7 +997,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     const pending = session.pending.get(id);
     if (!pending || pending.cancelled) return;
     pending.cancelled = true;
-    if (pending.method !== "initialize") {
+    if (pending.method !== "initialize" && !pending.probe) {
       this.writeMessage(session, buildCancelledNotification(id, reason));
       session.cancelsSent += 1;
     }
@@ -662,6 +1058,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     } else {
       session.closeError = error;
     }
+    session.spawnFailed = true;
     this.handleClose(session);
   }
 
@@ -786,11 +1183,13 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     }
     session.rpcCounter += 1;
     const id = session.rpcCounter;
-    const withMeta =
+    const withProgress =
       options.progressToken && params && typeof params === "object"
-        ? { ...(params as Record<string, unknown>), _meta: { progressToken: options.progressToken } }
+        ? withRequestMeta(params as Record<string, unknown>, { progressToken: options.progressToken })
         : params;
-    const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params: withMeta }) + "\n";
+    const outgoing = this.outgoingParams(session, withProgress, options.context ?? session.context);
+    const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params: outgoing }) + "\n";
+    let written = false;
     if (options.progressToken && options.onProgress) {
       session.progressListeners.set(options.progressToken, options.onProgress);
     }
@@ -803,7 +1202,15 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
 
     return new Promise<JsonRpcResponse>((resolve, reject) => {
       const timer = setTimeout(() => this.expirePending(session, id, method, timeoutMs), timeoutMs);
-      session.pending.set(id, { method, resolve, reject, timer, timeoutMs, ...(options.toolName ? { toolName: options.toolName } : {}) });
+      session.pending.set(id, {
+        method,
+        resolve,
+        reject,
+        timer,
+        timeoutMs,
+        ...(options.toolName ? { toolName: options.toolName } : {}),
+        ...(options.probe ? { probe: true } : {})
+      });
 
       if (session.closed) {
         session.pending.delete(id);
@@ -814,6 +1221,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
 
       try {
         session.proc.stdin?.write(payload);
+        written = true;
       } catch (writeError) {
         session.pending.delete(id);
         clearTimeout(timer);
@@ -823,12 +1231,16 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       (response) => {
         cleanup();
         if (response.error) {
-          throw new McpJsonRpcError(response.error.message || "MCP JSON-RPC error", response.error.code);
+          throw new McpJsonRpcError(response.error.message || "MCP JSON-RPC error", response.error.code, response.error.data);
         }
         return response;
       },
       (error: unknown) => {
         cleanup();
+        // The process ended after the request went out: the server may have acted on it (D13).
+        if (written && error === session.closeError && !session.closedByClient && !session.spawnFailed && error instanceof Error) {
+          throw new McpStdioConnectionLostError(error.message);
+        }
         throw error;
       }
     );
@@ -847,7 +1259,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   private async getOrCreateSession(
     config: MCPServerConfig,
     context: MCPExecutionContext,
-    options?: { forceNew?: boolean }
+    options?: { forceNew?: boolean; forceLegacy?: boolean }
   ): Promise<StdioSession> {
     const cache = this.getCache(context);
     const key = buildSessionKey(config);
@@ -866,9 +1278,165 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       }
     }
 
-    const session = await this.createSession(config, context);
+    const session = await this.createSession(config, context, options?.forceLegacy ? { forceLegacy: true } : undefined);
     cache.set(key, session);
     return session;
+  }
+
+  /**
+   * Run `operation` on the server's session. When a modern session turns
+   * out to need `initialize` (-32022 listing only such versions), the
+   * operation runs once more on a new process opened with `initialize`.
+   * With `safe`, a modern operation whose process died after the request
+   * went out runs once more on a new process: modern servers keep no state
+   * between requests, and the operation only reads.
+   */
+  private async withSession<T>(
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    operation: (session: StdioSession) => Promise<T>,
+    options?: { safe?: boolean }
+  ): Promise<T> {
+    const session = await this.getOrCreateSession(config, context);
+    try {
+      return await operation(session);
+    } catch (error) {
+      if (error instanceof StdioEraMismatchError) {
+        try {
+          return await operation(await this.getOrCreateSession(config, context, { forceNew: true, forceLegacy: true }));
+        } catch (retryError) {
+          throw this.settledEraError(config, retryError);
+        }
+      }
+      if (options?.safe && session.era === "modern" && error instanceof McpStdioConnectionLostError) {
+        return operation(await this.getOrCreateSession(config, context, { forceNew: true }));
+      }
+      throw error;
+    }
+  }
+
+  /** A second era change in one operation: the server's answers disagree, so report what it said. */
+  private settledEraError(config: MCPServerConfig, error: unknown): unknown {
+    if (!(error instanceof StdioEraMismatchError)) return error;
+    return new Error(
+      `MCP server '${serverNameOf(config)}' answered neither like an MCP ${MCP_MODERN_PROTOCOL_VERSIONS.join(", ")} server nor like an initialize-based one: ${error.detail}`
+    );
+  }
+
+  /**
+   * One request on a modern session (`_meta` is added by `sendRpc`).
+   * Handles what a modern server may answer at the protocol level: -32022
+   * (pick a mutual version and send again once, or hand over to an
+   * `initialize`-based connection), and -32021 (missing client capability).
+   * Returns the JSON-RPC result.
+   */
+  private async modernSend(
+    session: StdioSession,
+    method: string,
+    params: Record<string, unknown>,
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    timeoutMs: number,
+    options: RpcOptions = {}
+  ): Promise<unknown> {
+    let renegotiated = false;
+    for (;;) {
+      const version = session.protocolVersion ?? MCP_CLIENT_MODERN_PROTOCOL_VERSION;
+      try {
+        const response = await this.sendRpc(session, method, params, timeoutMs, {
+          ...options,
+          context,
+          ...(context.signal ? { signal: context.signal } : {})
+        });
+        return response.result;
+      } catch (error) {
+        if (!(error instanceof McpJsonRpcError)) throw error;
+        const recognised = parseMcpModernError(jsonRpcErrorObject(error));
+        if (recognised?.kind === "unsupported_version") {
+          const choice = chooseMcpProtocolVersion(recognised.supported, { allowLegacy: session.mode !== "modern" });
+          if (!renegotiated && choice.era === "modern" && choice.version !== version) {
+            renegotiated = true;
+            session.protocolVersion = choice.version;
+            this.eraCache.set(session.eraKey, "modern", choice.version);
+            this.noteObserved(session);
+            continue;
+          }
+          if (choice.era === "legacy") {
+            this.eraCache.invalidate(session.eraKey);
+            this.modernOnlyCache.invalidate(session.eraKey);
+            throw new StdioEraMismatchError("legacy", safeText(recognised.message, 500) || "The server asked for an initialize-based protocol version.");
+          }
+          throw this.noMutualVersionError(config, recognised.supported);
+        }
+        if (recognised?.kind === "missing_client_capability") {
+          const needed = Object.keys(recognised.requiredCapabilities);
+          throw new McpMissingClientCapabilityError(
+            `MCP server '${serverNameOf(config)}' needs the client capability ${needed.length > 0 ? needed.join(", ") : "it named"} for ${method}${
+              needed.includes("sampling") ? "; attach a model to the call and allow sampling for the server" : ""
+            }. ${safeText(recognised.message, 500)}`.trim(),
+            recognised.code,
+            { requiredCapabilities: recognised.requiredCapabilities }
+          );
+        }
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * A modern request and its result: for `tools/call`, `resources/read` and
+   * `prompts/get` through the multi round-trip engine (the server's input
+   * requests are answered with the same handlers legacy servers get, and
+   * each round is a new request with a new id); for other methods the
+   * result's `resultType` is checked.
+   */
+  private async modernCall(
+    session: StdioSession,
+    method: string,
+    params: Record<string, unknown>,
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    timeoutMs: number,
+    options: RpcOptions = {}
+  ): Promise<Record<string, unknown>> {
+    const send = (roundParams: Record<string, unknown>) => this.modernSend(session, method, roundParams, config, context, timeoutMs, options);
+    if (isMrtrMethod(method)) {
+      const origin: McpServerRequestOrigin = {
+        serverId: config.serverId,
+        ...(config.registryServerId ? { registryServerId: config.registryServerId } : {}),
+        ...(options.toolName ? { toolName: options.toolName } : {})
+      };
+      return runMrtrRequest(method as McpMrtrMethod, params, send, {
+        context,
+        origin,
+        clientCapabilities: buildClientCapabilities(context),
+        maxRounds: this.protocol.mrtrMaxRounds ?? DEFAULT_MRTR_MAX_ROUNDS
+      });
+    }
+    const classified = classifyMcpResult(method, await send(params));
+    if (classified.resultType !== "complete") {
+      // classifyMcpResult only returns input_required for the three methods above.
+      throw new McpJsonRpcError(`The server answered ${method} with input_required.`, undefined);
+    }
+    return classified.result;
+  }
+
+  /** The JSON-RPC result of a request in the session's era. */
+  private async request(
+    session: StdioSession,
+    method: string,
+    params: Record<string, unknown>,
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    timeoutMs: number = normalizeTimeoutMs(config),
+    options: RpcOptions = {}
+  ): Promise<unknown> {
+    if (session.era === "modern") return this.modernCall(session, method, params, config, context, timeoutMs, options);
+    const response = await this.sendRpc(session, method, params, timeoutMs, {
+      ...options,
+      ...(context.signal ? { signal: context.signal } : {})
+    });
+    return response.result;
   }
 
   /** Follow a paginated list method to the end, collecting `key` of each page. */
@@ -882,10 +1450,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     const items: unknown[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
-      const response = await this.sendRpc(session, method, cursor ? { cursor } : {}, normalizeTimeoutMs(config), {
-        ...(context.signal ? { signal: context.signal } : {})
-      });
-      const result = toRecord(response.result);
+      const result = toRecord(await this.request(session, method, cursor ? { cursor } : {}, config, context));
       if (Array.isArray(result[key])) items.push(...(result[key] as unknown[]));
       cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
       if (!cursor) break;
@@ -893,22 +1458,59 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     return items;
   }
 
-  async describeServer(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpServerCapabilities> {
-    const session = await this.getOrCreateSession(config, context);
+  /**
+   * The server's capabilities: from `initialize` (legacy), or from
+   * `server/discover` (modern: from the probe, or asked once per session).
+   * A modern server that cannot answer `server/discover` counts as
+   * declaring nothing optional.
+   */
+  private async capabilitiesOf(session: StdioSession, config: MCPServerConfig, context: MCPExecutionContext): Promise<McpServerCapabilities> {
+    if (session.capabilitiesKnown || session.era !== "modern") return session.capabilities;
+    try {
+      const discover = parseDiscoverResult(await this.modernCall(session, "server/discover", {}, config, context, normalizeTimeoutMs(config)));
+      session.capabilities = discover?.capabilities ?? {};
+    } catch (error) {
+      // Only "cannot answer discover" counts as declaring nothing; version and capability problems are real errors.
+      if (
+        !(error instanceof McpJsonRpcError) ||
+        error instanceof McpMissingClientCapabilityError ||
+        error.code === MCP_ERROR_UNSUPPORTED_PROTOCOL_VERSION
+      ) {
+        throw error;
+      }
+      session.capabilities = {};
+    }
+    session.capabilitiesKnown = true;
     return session.capabilities;
   }
 
+  async describeServer(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpServerCapabilities> {
+    return this.withSession(config, context, (session) => this.capabilitiesOf(session, config, context), { safe: true });
+  }
+
   async listResources(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpResource[]> {
-    const session = await this.getOrCreateSession(config, context);
-    if (!session.capabilities.resources) return [];
-    return normalizeResources(await this.listAllPages(session, "resources/list", "resources", config, context));
+    return this.withSession(
+      config,
+      context,
+      async (session) => {
+        if (!(await this.capabilitiesOf(session, config, context)).resources) return [];
+        return normalizeResources(await this.listAllPages(session, "resources/list", "resources", config, context));
+      },
+      { safe: true }
+    );
   }
 
   async listResourceTemplates(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpResourceTemplate[]> {
-    const session = await this.getOrCreateSession(config, context);
-    if (!session.capabilities.resources) return [];
-    return normalizeResourceTemplates(
-      await this.listAllPages(session, "resources/templates/list", "resourceTemplates", config, context)
+    return this.withSession(
+      config,
+      context,
+      async (session) => {
+        if (!(await this.capabilitiesOf(session, config, context)).resources) return [];
+        return normalizeResourceTemplates(
+          await this.listAllPages(session, "resources/templates/list", "resourceTemplates", config, context)
+        );
+      },
+      { safe: true }
     );
   }
 
@@ -918,17 +1520,41 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     context: MCPExecutionContext,
     options: McpReadResourceOptions = {}
   ): Promise<McpResourceReadResult> {
-    const session = await this.getOrCreateSession(config, context);
-    const response = await this.sendRpc(session, "resources/read", { uri }, normalizeTimeoutMs(config), {
-      ...(context.signal ? { signal: context.signal } : {})
-    });
-    return normalizeResourceReadResult(uri, response.result, options.maxBytes ?? DEFAULT_RESOURCE_MAX_BYTES);
+    return this.withSession(
+      config,
+      context,
+      async (session) => {
+        let result: unknown;
+        try {
+          result = await this.request(session, "resources/read", { uri }, config, context);
+        } catch (error) {
+          // 2026-07-28 answers "resource not found" with -32602; earlier servers used -32002, which clients still accept.
+          if (
+            session.era === "modern" &&
+            error instanceof McpJsonRpcError &&
+            !(error instanceof McpMissingClientCapabilityError) &&
+            (error.code === JSON_RPC_INVALID_PARAMS || error.code === MCP_ERROR_LEGACY_RESOURCE_NOT_FOUND)
+          ) {
+            throw new McpJsonRpcError(`MCP resource not found: ${uri.slice(0, 500)} (${safeText(error.message, 500)})`, error.code, error.data);
+          }
+          throw error;
+        }
+        return normalizeResourceReadResult(uri, result, options.maxBytes ?? DEFAULT_RESOURCE_MAX_BYTES);
+      },
+      { safe: true }
+    );
   }
 
   async listPrompts(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpPrompt[]> {
-    const session = await this.getOrCreateSession(config, context);
-    if (!session.capabilities.prompts) return [];
-    return normalizePrompts(await this.listAllPages(session, "prompts/list", "prompts", config, context));
+    return this.withSession(
+      config,
+      context,
+      async (session) => {
+        if (!(await this.capabilitiesOf(session, config, context)).prompts) return [];
+        return normalizePrompts(await this.listAllPages(session, "prompts/list", "prompts", config, context));
+      },
+      { safe: true }
+    );
   }
 
   async getPrompt(
@@ -937,15 +1563,15 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     config: MCPServerConfig,
     context: MCPExecutionContext
   ): Promise<McpPromptGetResult> {
-    const session = await this.getOrCreateSession(config, context);
-    const response = await this.sendRpc(
-      session,
-      "prompts/get",
-      { name, ...(Object.keys(args).length > 0 ? { arguments: args } : {}) },
-      normalizeTimeoutMs(config),
-      { ...(context.signal ? { signal: context.signal } : {}) }
+    return this.withSession(
+      config,
+      context,
+      async (session) => {
+        const params = { name, ...(Object.keys(args).length > 0 ? { arguments: args } : {}) };
+        return normalizePromptGetResult(name, await this.request(session, "prompts/get", params, config, context));
+      },
+      { safe: true }
     );
-    return normalizePromptGetResult(name, response.result);
   }
 
   private async listAllTools(
@@ -956,21 +1582,25 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     const tools: MCPToolDefinition[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < MAX_TOOL_LIST_PAGES; page += 1) {
-      const response = await this.sendRpc(session, "tools/list", cursor ? { cursor } : {}, normalizeTimeoutMs(config), {
-        ...(context.signal ? { signal: context.signal } : {})
-      });
-      const result = toRecord(response.result);
+      const result = toRecord(await this.request(session, "tools/list", cursor ? { cursor } : {}, config, context));
       tools.push(...normalizeDiscoveredTools(config.serverId, config.label ?? this.definition.label, result.tools));
       cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
       if (!cursor) break;
     }
     session.outputSchemas = new Map(tools.map((tool) => [tool.name, tool.outputSchema]));
+    session.toolAnnotations = new Map(tools.map((tool) => [tool.name, tool.annotations]));
+    this.rememberedAnnotations.delete(session.sessionKey);
+    this.rememberedAnnotations.set(session.sessionKey, session.toolAnnotations);
+    while (this.rememberedAnnotations.size > MAX_REMEMBERED_TOOL_LISTS) {
+      const oldest = this.rememberedAnnotations.keys().next().value;
+      if (oldest === undefined) break;
+      this.rememberedAnnotations.delete(oldest);
+    }
     return tools;
   }
 
   async discoverTools(config: MCPServerConfig, context: MCPExecutionContext): Promise<MCPToolDefinition[]> {
-    const session = await this.getOrCreateSession(config, context);
-    return this.listAllTools(session, config, context);
+    return this.withSession(config, context, (session) => this.listAllTools(session, config, context), { safe: true });
   }
 
   /** The tool's outputSchema, listing the tools once per session when needed. Unknown → undefined. */
@@ -1001,9 +1631,8 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   ): Promise<JsonRpcResponse> {
     const onProgress = context.onProgress;
     const progressToken = onProgress ? `l2m-progress-${session.rpcCounter + 1}-${Date.now().toString(36)}` : undefined;
-    return this.sendRpc(session, "tools/call", { name: toolName, arguments: args }, timeoutMs, {
+    const rpcOptions: RpcOptions = {
       toolName,
-      ...(context.signal ? { signal: context.signal } : {}),
       ...(progressToken && onProgress
         ? {
             progressToken,
@@ -1013,7 +1642,31 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
               )
           }
         : {})
+    };
+    if (session.era === "modern") {
+      return this.modernCall(session, "tools/call", { name: toolName, arguments: args }, config, context, timeoutMs, rpcOptions).then(
+        (result) => ({ result })
+      );
+    }
+    return this.sendRpc(session, "tools/call", { name: toolName, arguments: args }, timeoutMs, {
+      ...rpcOptions,
+      ...(context.signal ? { signal: context.signal } : {})
     });
+  }
+
+  /** D13 — whether a tool call may be sent again after the process died: read-only or idempotent tools only. */
+  private toolReissueSafe(session: StdioSession, toolName: string, config: MCPServerConfig): boolean {
+    const annotations =
+      (session.toolAnnotations ?? this.rememberedAnnotations.get(session.sessionKey))?.get(toolName) ??
+      config.manualTools?.find((tool) => tool.name === toolName)?.annotations;
+    if (!annotations) return false;
+    const hints = effectiveToolHints(annotations);
+    return hints.readOnly || hints.idempotent;
+  }
+
+  /** Whether the safe re-issue rule applies to this session (always for modern; legacy unless turned off). */
+  private safeReissueApplies(session: StdioSession): boolean {
+    return session.era === "modern" || this.protocol.legacySafeReissue !== false;
   }
 
   async invokeTool(
@@ -1029,11 +1682,31 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       try {
         response = await this.callTool(session, toolName, args, config, context, timeoutMs);
       } catch (firstError) {
-        if (!session.closed || session.closedByClient || firstError instanceof McpRequestCanceledError) {
-          throw firstError;
+        if (firstError instanceof StdioEraMismatchError) {
+          // The server did not act on the refused request; it goes out again on an initialize-based connection.
+          session = await this.getOrCreateSession(config, context, { forceNew: true, forceLegacy: true });
+          try {
+            response = await this.callTool(session, toolName, args, config, context, timeoutMs);
+          } catch (retryError) {
+            throw this.settledEraError(config, retryError);
+          }
+        } else {
+          if (!session.closed || session.closedByClient || firstError instanceof McpRequestCanceledError) {
+            throw firstError;
+          }
+          // The process died after the call went out: send it again only when that is known to be safe.
+          if (
+            firstError instanceof McpStdioConnectionLostError &&
+            this.safeReissueApplies(session) &&
+            !this.toolReissueSafe(session, toolName, config)
+          ) {
+            throw new McpOutcomeUnknownError(
+              `MCP stdio tool '${toolName}' got no answer: ${firstError.message} It was not sent again because the tool is not marked read-only or idempotent, so it may or may not have run.`
+            );
+          }
+          session = await this.getOrCreateSession(config, context, { forceNew: true });
+          response = await this.callTool(session, toolName, args, config, context, timeoutMs);
         }
-        session = await this.getOrCreateSession(config, context, { forceNew: true });
-        response = await this.callTool(session, toolName, args, config, context, timeoutMs);
       }
       const outputSchema = await this.outputSchemaFor(session, toolName, config, context);
       return buildToolCallResult(toolName, response.result, outputSchema);

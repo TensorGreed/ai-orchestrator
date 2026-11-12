@@ -475,6 +475,15 @@ export function McpStdioFields({
         </div>
       )}
 
+      <McpProtocolModeField
+        connection={connection}
+        onConnectionChange={(next) => {
+          const json = formatConnection(next);
+          lastWritten.current = json;
+          onConnectionJsonChange(json);
+        }}
+      />
+
       <p className="kb-subtle mcp-host-note">
         The command runs on the machine running the L2M API, as the API&apos;s user. In Docker, it runs inside the API
         container: mount the server&apos;s folder or run it over HTTP.

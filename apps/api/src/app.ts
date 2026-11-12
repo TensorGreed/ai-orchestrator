@@ -1864,6 +1864,13 @@ export async function createApp(
       mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
       legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE
     },
+    // MCP 2026-07-28 — the same settings for stdio servers, plus the wait for their server/discover probe.
+    stdioProtocol: {
+      defaultMode: config.MCP_CLIENT_PROTOCOL_DEFAULT,
+      mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
+      legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE,
+      probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS
+    },
     // Phase 10.8 — snapshot mock servers read accepted snapshots and cassettes from the store.
     snapshots: {
       loadSnapshot: async (sourceServerId) => {
