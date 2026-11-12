@@ -1873,6 +1873,13 @@ export type McpOAuthConnectionState = "not_connected" | "connected" | "expired" 
  * What the API shows about a registry server's OAuth connection. Tokens and
  * client secrets never appear here; they live in a SecretService secret.
  */
+/**
+ * How L2M identifies itself to an MCP server's authorization server: `dynamic` (RFC 7591 registration),
+ * `pre_registered` (a client id an admin entered) or `metadata_document` (the URL of L2M's Client ID Metadata
+ * Document, opt-in with MCP_OAUTH_CLIENT_METADATA_ENABLED).
+ */
+export type McpOAuthClientRegistration = "dynamic" | "pre_registered" | "metadata_document";
+
 export interface McpOAuthConnectionStatus {
   serverId: string;
   state: McpOAuthConnectionState;
@@ -1881,8 +1888,8 @@ export interface McpOAuthConnectionStatus {
   scope: string | null;
   /** Issuer URL of the authorization server the server's metadata named. */
   authorizationServer: string | null;
-  /** How L2M got its client id: RFC 7591 registration, or an id an admin entered. */
-  clientRegistration: "dynamic" | "pre_registered" | null;
+  /** How L2M got its client id: RFC 7591 registration, an id an admin entered, or L2M's Client ID Metadata Document. */
+  clientRegistration: McpOAuthClientRegistration | null;
   clientId: string | null;
   expiresAt: string | null;
   hasRefreshToken: boolean;

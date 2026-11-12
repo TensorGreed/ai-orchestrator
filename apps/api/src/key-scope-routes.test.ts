@@ -45,6 +45,7 @@ const NO_API_KEY_ROUTES = new Set<string>([
   "GET /api/forms/:path",
   "GET /api/mcp-server/:path/manifest",
   "GET /api/mcp/oauth/callback",
+  "GET /api/mcp/oauth/client-metadata.json",
   "GET /api/openapi.json",
   "GET /api/workflows/import-shared",
   "POST /api/auth/break-glass",

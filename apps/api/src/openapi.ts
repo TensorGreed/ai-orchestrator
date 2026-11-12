@@ -1942,9 +1942,31 @@ export const openApiSpec = {
         parameters: [
           { name: "code", in: "query", required: false, schema: { type: "string" } },
           { name: "state", in: "query", required: true, schema: { type: "string" } },
-          { name: "error", in: "query", required: false, schema: { type: "string" } }
+          { name: "error", in: "query", required: false, schema: { type: "string" } },
+          {
+            name: "iss",
+            in: "query",
+            required: false,
+            description:
+              "RFC 9207 issuer of the authorization response. When present it must equal the authorization server's issuer exactly; when the server advertises authorization_response_iss_parameter_supported it is required. A response that fails this check is discarded, error fields included.",
+            schema: { type: "string" }
+          }
         ],
-        responses: { "200": { description: "HTML: connected" }, "400": { description: "HTML: refused (unknown, used or expired state, other session, token error)" } }
+        responses: {
+          "200": { description: "HTML: connected" },
+          "400": { description: "HTML: refused (unknown, used or expired state, other session, issuer check, token error)" }
+        }
+      }
+    },
+    "/api/mcp/oauth/client-metadata.json": {
+      get: {
+        tags: ["MCP"],
+        summary:
+          "L2M's OAuth Client ID Metadata Document, fetched by authorization servers (public, no secret). Served only when MCP_OAUTH_CLIENT_METADATA_ENABLED is on; its client_id is the document's URL.",
+        responses: {
+          "200": { description: "{ client_id, client_name, client_uri, redirect_uris, grant_types, response_types, token_endpoint_auth_method }" },
+          "404": { description: "Not enabled" }
+        }
       }
     },
     "/api/mcp/servers/{id}/snapshots/{snapshotId}": {

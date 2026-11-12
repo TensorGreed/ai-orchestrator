@@ -330,6 +330,31 @@ const envSchema = z.object({
   /** Access tokens are refreshed this long before they expire. */
   MCP_OAUTH_REFRESH_SKEW_MS: z.coerce.number().int().nonnegative().max(3_600_000).default(60_000),
   /**
+   * Refuse OAuth requests (metadata discovery, client registration, token exchange and refresh) to private,
+   * loopback, link-local and cloud metadata addresses, checked after DNS resolution and pinned for the connection.
+   * Off by default. The MCP server's own host and port stay allowed; loopback only when the MCP server is itself on
+   * loopback.
+   */
+  MCP_OAUTH_BLOCK_PRIVATE_HOSTS: booleanFromEnv.default(false),
+  /**
+   * Comma-separated hosts (`idp.corp.example`, `*.corp.example`, `idp.corp.example:8443`) or CIDRs (`10.0.0.0/8`,
+   * `fd00::/8`) of identity providers on a private network that OAuth may reach while MCP_OAUTH_BLOCK_PRIVATE_HOSTS
+   * is on. Metadata and link-local addresses stay blocked whatever this says.
+   */
+  MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: z
+    .string()
+    .default("")
+    .transform((value) => value.split(",").map((entry) => entry.trim()).filter(Boolean))
+    .refine((entries) => entries.every((entry) => !/[\s/]/.test(entry.replace(/\/\d{1,3}$/, "")) && !entry.includes("://")), {
+      message: "MCP_OAUTH_PRIVATE_HOST_ALLOWLIST takes hosts (idp.corp.example, *.corp.example, host:port) or CIDRs (10.0.0.0/8), not URLs"
+    }),
+  /**
+   * Offer L2M's Client ID Metadata Document (`<redirect base>/api/mcp/oauth/client-metadata.json`) as the client id
+   * to authorization servers that advertise `client_id_metadata_document_supported`, before dynamic registration.
+   * Off by default; only used when the redirect base is a public https URL the authorization server can fetch.
+   */
+  MCP_OAUTH_CLIENT_METADATA_ENABLED: booleanFromEnv.default(false),
+  /**
    * Phase 10.5 — longest an MCP elicitation request waits for a person. The
    * run's execution timeout keeps counting while it waits, so a wait is also
    * capped by that.

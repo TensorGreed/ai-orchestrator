@@ -139,10 +139,14 @@ export function classifyIp(ip: ParsedIp): IpClass {
     // Deprecated IPv4-compatible form ::a.b.c.d.
     return classifyIpv4(tail);
   }
+  // ::ffff:0:a.b.c.d (IPv4-translated, RFC 2765) carries an IPv4 address in its tail.
+  if (b.slice(0, 8).every((x) => x === 0) && b[8] === 0xff && b[9] === 0xff && b[10] === 0 && b[11] === 0) return classifyIpv4(b.slice(12));
   // 64:ff9b::/96 (NAT64) carries an IPv4 address in its tail.
   if (b[0] === 0 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && b.slice(4, 12).every((x) => x === 0)) return classifyIpv4(b.slice(12));
   if (b[0] === 0xfd && b[1] === 0x00 && b[2] === 0x0e && b[3] === 0xc2) return "metadata";
   if ((b[0]! & 0xfe) === 0xfc) return "unique_local";
+  // fec0::/10, the deprecated site-local range: private like unique-local addresses.
+  if (b[0] === 0xfe && (b[1]! & 0xc0) === 0xc0) return "unique_local";
   if (b[0] === 0xfe && (b[1]! & 0xc0) === 0x80) return "link_local";
   if (b[0] === 0xff) return "multicast";
   if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x0d && b[3] === 0xb8) return "documentation";

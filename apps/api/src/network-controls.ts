@@ -82,7 +82,8 @@ export interface ScopeRequest {
   hasApiKey: boolean;
 }
 
-const EXEMPT_PATHS = new Set(["/health", "/ready", "/api/auth/saml/metadata"]);
+/** Probes and documents identity providers fetch from their own servers (SAML metadata, the MCP OAuth client metadata document). */
+const EXEMPT_PATHS = new Set(["/health", "/ready", "/api/auth/saml/metadata", "/api/mcp/oauth/client-metadata.json"]);
 const METRICS_PATHS = new Set(["/metrics", "/api/docs", "/api/openapi.json"]);
 const PUBLIC_PATHS = new Set(["/widget.js", "/helper-chat"]);
 /** `/api/auth/*` routes an API key may call; every other auth route (sign-in, registration, SSO, MFA) is studio traffic. */

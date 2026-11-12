@@ -48,7 +48,19 @@ const fake = {
   tokenCounter: 0,
   expiresIn: 3600,
   mcpAuthHeaders: [] as string[],
+  /** Authorization servers the protected resource metadata names (default: the fake's own `/auth`). */
+  authorizationServers: null as string[] | null,
+  /** Extra fields for every authorization server metadata document. */
+  metadataExtra: {} as Record<string, unknown>,
+  /** Replaces the `issuer` the metadata document names (undefined: the issuer it is served for). */
+  metadataIssuer: undefined as string | undefined,
+  /** Adjusts the redirect back to L2M after consent (adds `iss`, turns it into an error response, ...). */
+  shapeRedirect: null as ((redirect: URL) => void) | null,
   reset() {
+    this.authorizationServers = null;
+    this.metadataExtra = {};
+    this.metadataIssuer = undefined;
+    this.shapeRedirect = null;
     this.registrations = [];
     this.authorizeRequests = [];
     this.tokenRequests = [];
@@ -131,16 +143,23 @@ const MCP_TOOLS = [
 async function handleFake(request: IncomingMessage, response: ServerResponse) {
   const url = new URL(request.url ?? "/", fake.base);
   if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
-    return json(response, 200, { resource: `${fake.base}/mcp`, authorization_servers: [`${fake.base}/auth`], scopes_supported: ["tools:read", "tools:write"] });
-  }
-  if (url.pathname === "/.well-known/oauth-authorization-server/auth") {
     return json(response, 200, {
-      issuer: `${fake.base}/auth`,
+      resource: `${fake.base}/mcp`,
+      authorization_servers: fake.authorizationServers ?? [`${fake.base}/auth`],
+      scopes_supported: ["tools:read", "tools:write"]
+    });
+  }
+  // Two authorization servers on one host (`/auth` and `/auth2`), sharing endpoints and codes.
+  const asMatch = /^\/\.well-known\/oauth-authorization-server\/(auth2?)$/.exec(url.pathname);
+  if (asMatch) {
+    return json(response, 200, {
+      issuer: fake.metadataIssuer ?? `${fake.base}/${asMatch[1]}`,
       authorization_endpoint: `${fake.base}/auth/authorize`,
       token_endpoint: `${fake.base}/auth/token`,
       registration_endpoint: `${fake.base}/auth/register`,
       code_challenge_methods_supported: ["S256"],
-      response_types_supported: ["code"]
+      response_types_supported: ["code"],
+      ...fake.metadataExtra
     });
   }
   if (url.pathname === "/auth/register" && request.method === "POST") {
@@ -161,6 +180,7 @@ async function handleFake(request: IncomingMessage, response: ServerResponse) {
     const redirect = new URL(url.searchParams.get("redirect_uri") ?? "");
     redirect.searchParams.set("code", code);
     redirect.searchParams.set("state", url.searchParams.get("state") ?? "");
+    fake.shapeRedirect?.(redirect);
     response.writeHead(302, { location: redirect.toString() });
     response.end();
     return;
@@ -943,5 +963,268 @@ describe("Phase 10.5 schema", () => {
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("MCP 2026-07-28 authorization rules", () => {
+  const ISS = () => `${fake.base}/auth`;
+
+  /** Connect, expecting the callback to be refused, and return the callback page. */
+  async function refusedCallback(context: TestContext, admin: string, serverId: string) {
+    const { callback } = await connect(context, admin, serverId);
+    expect(callback.statusCode).toBe(400);
+    expect(callback.body).toContain('"ok":false');
+    return callback.body;
+  }
+
+  it("accepts a response whose iss is the recorded issuer when the server advertises iss", async () => {
+    fake.metadataExtra = { authorization_response_iss_parameter_supported: true };
+    fake.shapeRedirect = (redirect) => redirect.searchParams.set("iss", ISS());
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    const { callback } = await connect(context, admin, serverId);
+    expect(callback.statusCode).toBe(200);
+    expect((await oauthStatus(context, admin, serverId)).state).toBe("connected");
+  });
+
+  it("rejects a response without iss when the server advertises iss, before any token request", async () => {
+    fake.metadataExtra = { authorization_response_iss_parameter_supported: true };
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    expect(await refusedCallback(context, admin, serverId)).toContain("named no issuer");
+    expect(fake.tokenRequests).toEqual([]);
+    expect((await oauthStatus(context, admin, serverId)).state).toBe("not_connected");
+  });
+
+  it("rejects a response with another issuer, advertised or not, before any token request", async () => {
+    for (const advertised of [true, false]) {
+      fake.reset();
+      fake.metadataExtra = advertised ? { authorization_response_iss_parameter_supported: true } : {};
+      fake.shapeRedirect = (redirect) => redirect.searchParams.set("iss", "https://attacker.example.test");
+      const context = await createTestContext();
+      const admin = await login(context, "admin");
+      const serverId = await registerOAuthServer(context, admin);
+      expect(await refusedCallback(context, admin, serverId)).toContain("different authorization server");
+      expect(fake.tokenRequests).toEqual([]);
+    }
+  });
+
+  it("compares iss without normalising it", async () => {
+    fake.shapeRedirect = (redirect) => redirect.searchParams.set("iss", `${ISS()}/`);
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    await refusedCallback(context, admin, serverId);
+    expect(fake.tokenRequests).toEqual([]);
+  });
+
+  it("does not show the error fields of a response from another issuer", async () => {
+    fake.shapeRedirect = (redirect) => {
+      redirect.searchParams.delete("code");
+      redirect.searchParams.set("error", "access_denied");
+      redirect.searchParams.set("error_description", "Visit evil.example.test to fix your account");
+      redirect.searchParams.set("iss", "https://attacker.example.test");
+    };
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    const body = await refusedCallback(context, admin, serverId);
+    expect(body).not.toContain("evil.example.test");
+    expect(body).not.toContain("access_denied");
+    expect((await oauthStatus(context, admin, serverId)).lastError).toBeNull();
+  });
+
+  it("refuses a repeated iss", async () => {
+    fake.shapeRedirect = (redirect) => {
+      redirect.searchParams.append("iss", ISS());
+      redirect.searchParams.append("iss", ISS());
+    };
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    expect(await refusedCallback(context, admin, serverId)).toContain("more than once");
+    expect(fake.tokenRequests).toEqual([]);
+  });
+
+  it("refuses authorization server metadata that names another issuer", async () => {
+    fake.metadataIssuer = "https://honest.example.test";
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    const started = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+    expect(started.statusCode).toBe(502);
+    expect(started.json<{ error: string }>().error).toMatch(/names the issuer "https:\/\/honest\.example\.test".*refusing to use it/);
+    expect(fake.registrations).toEqual([]);
+  });
+
+  it("sends application_type web in dynamic registration for an https redirect URL", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    await connect(context, admin, serverId);
+    expect(fake.registrations).toEqual([expect.objectContaining({ application_type: "web" })]);
+  });
+
+  it("sends application_type native when the redirect URL is on loopback", async () => {
+    const context = await createTestContext({ MCP_OAUTH_REDIRECT_BASE_URL: "http://localhost:4000" });
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    const started = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+    expect(started.statusCode).toBe(200);
+    expect(fake.registrations).toEqual([expect.objectContaining({ application_type: "native" })]);
+  });
+
+  it("keeps a pre-registered client id bound to the issuer it was first used with", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin, { oauth: { clientId: "pre-registered-1" } });
+    const first = await connect(context, admin, serverId);
+    expect(first.callback.statusCode).toBe(200);
+    expect(await oauthStatus(context, admin, serverId)).toMatchObject({ clientRegistration: "pre_registered", authorizationServer: ISS() });
+
+    // The MCP server now names a different authorization server: the old client id is not sent there.
+    fake.authorizationServers = [`${fake.base}/auth2`];
+    const authorizeBefore = fake.authorizeRequests.length;
+    const again = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+    expect(again.statusCode).toBe(409);
+    expect(again.json<{ error: string }>().error).toMatch(/authorization server changed.*Check the client id/);
+    expect(fake.authorizeRequests.length).toBe(authorizeBefore);
+
+    // After a disconnect the admin can start over with the new server.
+    expect((await call(context, "DELETE", `/api/mcp/servers/${serverId}/oauth`, admin)).statusCode).toBe(200);
+    const fresh = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+    expect(fresh.statusCode).toBe(200);
+  });
+
+  it("re-registers dynamically when the authorization server changes", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    await connect(context, admin, serverId);
+    fake.authorizationServers = [`${fake.base}/auth2`];
+    await connect(context, admin, serverId);
+    expect(fake.registrations).toHaveLength(2);
+    expect(await oauthStatus(context, admin, serverId)).toMatchObject({ clientId: "dyn-client-2", authorizationServer: `${fake.base}/auth2` });
+  });
+
+  describe("private-address blocking (MCP_OAUTH_BLOCK_PRIVATE_HOSTS)", () => {
+    it("still connects a server whose OAuth endpoints are on its own loopback host", async () => {
+      const context = await createTestContext({ MCP_OAUTH_BLOCK_PRIVATE_HOSTS: "true" });
+      const admin = await login(context, "admin");
+      const serverId = await registerOAuthServer(context, admin);
+      const { callback } = await connect(context, admin, serverId);
+      expect(callback.statusCode).toBe(200);
+      const refreshed = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/refresh`, admin);
+      expect(refreshed.statusCode).toBe(200);
+      expect(fake.tokenRequests.map((params) => params.get("grant_type"))).toEqual(["authorization_code", "refresh_token"]);
+    });
+
+    it("refuses an authorization server on a metadata, link-local or private address", async () => {
+      for (const target of ["https://169.254.169.254/auth", "https://[fe80::1]/auth", "https://10.255.255.1/auth", "https://[::ffff:192.168.7.7]/auth"]) {
+        fake.reset();
+        fake.authorizationServers = [target];
+        const context = await createTestContext({ MCP_OAUTH_BLOCK_PRIVATE_HOSTS: "true" });
+        const admin = await login(context, "admin");
+        const serverId = await registerOAuthServer(context, admin);
+        const started = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+        expect(started.statusCode, target).toBe(502);
+        expect(started.json<{ error: string }>().error, target).toMatch(/refused to contact .* MCP_OAUTH_PRIVATE_HOST_ALLOWLIST/);
+      }
+    });
+
+    it("lets an allow-listed private identity provider through the policy (and still not metadata)", async () => {
+      fake.authorizationServers = ["https://169.254.169.254/auth"];
+      const context = await createTestContext({ MCP_OAUTH_BLOCK_PRIVATE_HOSTS: "true", MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: "169.254.0.0/16" });
+      const admin = await login(context, "admin");
+      const serverId = await registerOAuthServer(context, admin);
+      const started = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+      expect(started.statusCode).toBe(502);
+      expect(started.json<{ error: string }>().error).toMatch(/refused to contact/);
+    });
+
+    it("rejects allow list entries written as URLs", () => {
+      expect(() =>
+        parseConfig({ SECRET_MASTER_KEY_BASE64: crypto.randomBytes(32).toString("base64"), MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: "https://idp.corp.example" })
+      ).toThrow(/MCP_OAUTH_PRIVATE_HOST_ALLOWLIST/);
+      const parsed = parseConfig({
+        SECRET_MASTER_KEY_BASE64: crypto.randomBytes(32).toString("base64"),
+        MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: "idp.corp.example, *.corp.example ,10.0.0.0/8,idp.corp.example:8443,fd00::/8"
+      });
+      expect(parsed.MCP_OAUTH_PRIVATE_HOST_ALLOWLIST).toEqual(["idp.corp.example", "*.corp.example", "10.0.0.0/8", "idp.corp.example:8443", "fd00::/8"]);
+      expect(parsed.MCP_OAUTH_BLOCK_PRIVATE_HOSTS).toBe(false);
+    });
+  });
+
+  describe("Client ID Metadata Documents (MCP_OAUTH_CLIENT_METADATA_ENABLED)", () => {
+    const DOCUMENT_URL = `${REDIRECT_BASE}/api/mcp/oauth/client-metadata.json`;
+
+    it("is off by default: no document, and dynamic registration even when the server supports documents", async () => {
+      fake.metadataExtra = { client_id_metadata_document_supported: true };
+      const context = await createTestContext();
+      const admin = await login(context, "admin");
+      expect((await context.app.inject({ method: "GET", url: "/api/mcp/oauth/client-metadata.json" })).statusCode).toBe(404);
+      const serverId = await registerOAuthServer(context, admin);
+      await connect(context, admin, serverId);
+      expect(fake.registrations).toHaveLength(1);
+      expect((await oauthStatus(context, admin, serverId)).clientRegistration).toBe("dynamic");
+    });
+
+    it("serves a public document whose client_id is its own URL", async () => {
+      const context = await createTestContext({ MCP_OAUTH_CLIENT_METADATA_ENABLED: "true" });
+      const response = await context.app.inject({ method: "GET", url: "/api/mcp/oauth/client-metadata.json" });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toMatch(/application\/json/);
+      expect(response.json()).toEqual({
+        client_id: DOCUMENT_URL,
+        client_name: "L2M",
+        client_uri: REDIRECT_BASE,
+        redirect_uris: [`${REDIRECT_BASE}/api/mcp/oauth/callback`],
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none"
+      });
+    });
+
+    it("uses the document URL as the client id when the server supports it, without registering", async () => {
+      fake.metadataExtra = { client_id_metadata_document_supported: true };
+      const context = await createTestContext({ MCP_OAUTH_CLIENT_METADATA_ENABLED: "true" });
+      const admin = await login(context, "admin");
+      const serverId = await registerOAuthServer(context, admin);
+      const { authorizationUrl, callback } = await connect(context, admin, serverId);
+      expect(new URL(authorizationUrl).searchParams.get("client_id")).toBe(DOCUMENT_URL);
+      expect(callback.statusCode).toBe(200);
+      expect(fake.registrations).toEqual([]);
+      expect(fake.tokenRequests[0]?.get("client_id")).toBe(DOCUMENT_URL);
+      expect(await oauthStatus(context, admin, serverId)).toMatchObject({ clientRegistration: "metadata_document", clientId: DOCUMENT_URL });
+    });
+
+    it("falls back to dynamic registration when the server does not advertise support", async () => {
+      const context = await createTestContext({ MCP_OAUTH_CLIENT_METADATA_ENABLED: "true" });
+      const admin = await login(context, "admin");
+      const serverId = await registerOAuthServer(context, admin);
+      await connect(context, admin, serverId);
+      expect(fake.registrations).toHaveLength(1);
+      expect((await oauthStatus(context, admin, serverId)).clientRegistration).toBe("dynamic");
+    });
+
+    it("keeps a configured client id first", async () => {
+      fake.metadataExtra = { client_id_metadata_document_supported: true };
+      const context = await createTestContext({ MCP_OAUTH_CLIENT_METADATA_ENABLED: "true" });
+      const admin = await login(context, "admin");
+      const serverId = await registerOAuthServer(context, admin, { oauth: { clientId: "pre-registered-2" } });
+      const { authorizationUrl } = await connect(context, admin, serverId);
+      expect(new URL(authorizationUrl).searchParams.get("client_id")).toBe("pre-registered-2");
+    });
+
+    it("is not offered when the redirect base is not public https", async () => {
+      fake.metadataExtra = { client_id_metadata_document_supported: true };
+      const context = await createTestContext({ MCP_OAUTH_CLIENT_METADATA_ENABLED: "true", MCP_OAUTH_REDIRECT_BASE_URL: "http://localhost:4000" });
+      const admin = await login(context, "admin");
+      const serverId = await registerOAuthServer(context, admin);
+      const started = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+      expect(new URL(started.json<{ authorizationUrl: string }>().authorizationUrl).searchParams.get("client_id")).toBe("dyn-client-1");
+    });
   });
 });

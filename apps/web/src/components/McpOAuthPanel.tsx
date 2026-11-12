@@ -204,7 +204,9 @@ export function McpOAuthPanel({ serverId, isAdmin }: { serverId: string; isAdmin
               ? "Registered automatically"
               : status.clientRegistration === "pre_registered"
                 ? "Pre-registered client id"
-                : "—"}
+                : status.clientRegistration === "metadata_document"
+                  ? "L2M client metadata document"
+                  : "—"}
             {status.clientId ? (
               <>
                 {" "}

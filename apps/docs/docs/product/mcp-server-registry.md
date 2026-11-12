@@ -123,21 +123,42 @@ When a run is cancelled or a call times out (the connection's `timeoutMs`, and t
 HTTP servers that use OAuth 2.1 can be connected once per registry entry. The connection belongs to the server, not to a user: every workflow that uses the entry calls it with the same token.
 
 1. Register the server with auth type **OAuth**. Optionally enter a client id (and pick its client secret from the Secrets store) if you registered L2M with the authorization server yourself; leave it empty to let L2M register itself. An optional scope overrides the scope the server asks for.
-2. Press **Connect** on the server page. L2M calls the server without a token and reads its `401` challenge, then fetches the protected resource metadata (RFC 9728) and the authorization server's metadata (RFC 8414, or OpenID Connect discovery). Without a client id it registers itself with dynamic client registration (RFC 7591) as a public client.
+2. Press **Connect** on the server page. L2M calls the server without a token and reads its `401` challenge, then fetches the protected resource metadata (RFC 9728) and the authorization server's metadata (RFC 8414, or OpenID Connect discovery). The metadata is used only when its `issuer` is exactly the authorization server it was fetched for. Without a client id, L2M offers its [client metadata document](#client-metadata-document) when that is enabled and the authorization server supports it, and otherwise registers itself with dynamic client registration (RFC 7591) as a public client, with `application_type` `web` (or `native` when the redirect URL is on loopback).
 3. A popup opens the authorization server's sign-in page. The request uses PKCE (`S256`), a random `state` and the `resource` parameter (RFC 8707) naming the MCP server.
-4. After consent the authorization server sends the browser to `/api/mcp/oauth/callback`. L2M checks the state, exchanges the code for tokens and the popup closes. The page shows **Connected**, the account it is connected as (when the authorization server says), when the token expires and when it was last refreshed.
+4. After consent the authorization server sends the browser to `/api/mcp/oauth/callback`. L2M checks the state and the response's issuer, exchanges the code for tokens and the popup closes. The page shows **Connected**, the account it is connected as (when the authorization server says), when the token expires and when it was last refreshed.
 
 Probes and tool calls then send `Authorization: Bearer <token>`. Tokens are refreshed shortly before they expire (`MCP_OAUTH_REFRESH_SKEW_MS`), and again when the server answers `401`, after which the call is retried once. When the authorization server issues a new refresh token it replaces the old one. If a refresh fails, the connection shows **Error** with the reason and calls fail with a message asking an admin to reconnect. **Disconnect** deletes the tokens and the client registration.
 
 How the flow is protected:
 
 - The `state` is single-use, expires after `MCP_OAUTH_STATE_TTL_MS` (10 minutes by default) and is bound to the admin's sign-in session and the server. A callback from another session, a replayed callback and an expired one are all refused. Pending authorizations are kept in memory, so restarting the API cancels them.
-- Discovery and token endpoints must use `https`, except on loopback addresses for local testing. The protected resource metadata must name the server's own origin.
+- Discovery and token endpoints must use `https`, except on loopback addresses for local testing. The protected resource metadata must name the server's own origin. Redirects are never followed.
+- Mix-up protection (RFC 9207): before the redirect, L2M records the authorization server's issuer. When the callback carries `iss`, it must equal that issuer exactly (no case folding, trailing-slash or port normalisation); when the authorization server says it always sends `iss` (`authorization_response_iss_parameter_supported`), a callback without it is refused. A refused callback is discarded before its code reaches any token endpoint, and its error text is not shown.
+- A client id you entered stays bound to the authorization server it was first used with. If the MCP server later names a different authorization server, **Connect** stops with "the authorization server changed; check the client id" instead of sending the id there. Register L2M with the new authorization server and enter its client id, or **Disconnect** to start over. A dynamic registration is reused only with the authorization server that issued it; otherwise L2M registers again.
+- Optional private-address blocking (`MCP_OAUTH_BLOCK_PRIVATE_HOSTS=true`, off by default): the URLs in OAuth metadata come from the MCP server, so a hostile server could point them at internal hosts. With the setting on, every OAuth request (metadata, registration, token and refresh) is refused when its host resolves to a private, loopback, link-local or cloud metadata address, including IPv4-mapped and other IPv6 forms that carry such an address. The address is checked when the connection is made, so a name cannot pass the check and then resolve somewhere else. The MCP server's own host and port stay allowed, and so does loopback when the MCP server itself is on loopback. List identity providers on a private network in `MCP_OAUTH_PRIVATE_HOST_ALLOWLIST` (hosts such as `idp.corp.example`, `*.corp.example` or `idp.corp.example:8443`, or ranges such as `10.20.0.0/16`); metadata and link-local addresses stay blocked whatever the list says.
 - Access tokens, refresh tokens and the client registration are stored only as an encrypted secret through the secret service. They are not shown in the Secrets list, cannot be used as a node's `secretRef`, and are never returned by the API or written to logs or the audit log. The page sees only the status fields above.
 
 ### The redirect URL
 
 The authorization server must send the browser back to a URL that reaches the L2M API: `<base>/api/mcp/oauth/callback`. The base is `MCP_OAUTH_REDIRECT_BASE_URL` when set, otherwise `MCP_GATEWAY_PUBLIC_URL`, otherwise the first `WEB_ORIGIN` (the web app proxies `/api` to the API in development). The server page shows the URL in use. Register exactly that URL when you pre-register a client; dynamic registration sends it for you. The callback needs the admin's session cookie, so it must be on the same site as the web app.
+
+### Client metadata document
+
+With `MCP_OAUTH_CLIENT_METADATA_ENABLED=true` (off by default), L2M serves an OAuth Client ID Metadata Document at `<base>/api/mcp/oauth/client-metadata.json`, using the same base as the redirect URL. The document's URL is L2M's client id, so authorization servers that support these documents need no registration step. It is public and holds no secret:
+
+```json
+{
+  "client_id": "https://l2m.example.com/api/mcp/oauth/client-metadata.json",
+  "client_name": "L2M",
+  "client_uri": "https://l2m.example.com",
+  "redirect_uris": ["https://l2m.example.com/api/mcp/oauth/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}
+```
+
+L2M picks a client id in this order: the client id entered on the server, then the document (only when the authorization server advertises `client_id_metadata_document_supported`), then dynamic registration, then it asks you to enter a client id. The document is offered only when the base is a public `https` URL; with a loopback, private or `.local` base L2M logs a warning at start-up and keeps using dynamic registration. The authorization server must be able to fetch the document from the internet, so leave the setting off for installs it cannot reach. The server page shows **L2M client metadata document** as the client for connections made this way.
 
 ## Tool telemetry
 
@@ -310,6 +331,9 @@ Admins can restrict which tools of a server each role may use, per project, and 
 | `MCP_OAUTH_REDIRECT_BASE_URL` | empty | Base URL for the OAuth callback. Empty uses `MCP_GATEWAY_PUBLIC_URL`, then the first `WEB_ORIGIN`. |
 | `MCP_OAUTH_STATE_TTL_MS` | `600000` | How long a started OAuth authorization stays valid (1 to 60 minutes). |
 | `MCP_OAUTH_REFRESH_SKEW_MS` | `60000` | Refresh OAuth access tokens this long before they expire. |
+| `MCP_OAUTH_BLOCK_PRIVATE_HOSTS` | `false` | Refuse OAuth requests to private, loopback, link-local and cloud metadata addresses (checked at connect time; the MCP server's own host stays allowed). |
+| `MCP_OAUTH_PRIVATE_HOST_ALLOWLIST` | empty | Comma-separated hosts or CIDRs of private identity providers OAuth may still reach while blocking is on. |
+| `MCP_OAUTH_CLIENT_METADATA_ENABLED` | `false` | Offer L2M's client metadata document as the client id to authorization servers that support it. |
 | `MCP_ELICITATION_TIMEOUT_MS` | `600000` | How long a server's question waits for an answer (10 seconds to 24 hours), capped by the run's execution timeout. |
 | `MCP_RESOURCE_MAX_BYTES` | `5242880` | Largest resource a run or the playground reads. |
 | `MCP_SANDBOX_DEFAULT` | `none` | Sandbox for stdio servers that do not choose one: `none` or `container`. |
@@ -353,7 +377,8 @@ Deleting a server that nodes still use is refused with the list of those nodes, 
 - `POST /api/mcp/servers/:id/oauth/connect`: start the authorization flow; body `{ "scope"?: string }`; returns `{ authorizationUrl, expiresAt, redirectUri }` (admin)
 - `POST /api/mcp/servers/:id/oauth/refresh`: refresh the access token now (admin)
 - `DELETE /api/mcp/servers/:id/oauth`: disconnect and delete the tokens (admin)
-- `GET /api/mcp/oauth/callback?code=&state=`: the authorization server's redirect target; renders a page that reports the result to the opener and closes
+- `GET /api/mcp/oauth/callback?code=&state=&iss=`: the authorization server's redirect target; checks the issuer, renders a page that reports the result to the opener and closes
+- `GET /api/mcp/oauth/client-metadata.json`: L2M's public client metadata document (only with `MCP_OAUTH_CLIENT_METADATA_ENABLED=true`, else 404)
 - `GET /api/mcp/servers/:id/resources?projectId=&refresh=true`: resources and resource templates from the last probe (`refresh` lists them again now), each with an `access` mark for the caller's role
 - `POST /api/mcp/servers/:id/resources/read`: `{ uri, projectId? }`; returns `contents`, `bytes` and `durationMs`. 403 when policy blocks it, 404 when the server has no such resource, 413 over `MCP_RESOURCE_MAX_BYTES`
 - `GET /api/mcp/servers/:id/prompts?projectId=&refresh=true`: prompts with their arguments and `access` marks

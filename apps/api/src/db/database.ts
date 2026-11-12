@@ -30,6 +30,7 @@ import type {
   McpElicitationSchema,
   McpElicitationStatus,
   McpElicitationView,
+  McpOAuthClientRegistration,
   McpOAuthConnectionState,
   McpPolicyKind,
   McpPrompt,
@@ -767,7 +768,7 @@ export interface McpUserOAuthConnectionRecord {
   subject: string | null;
   scope: string | null;
   authorizationServer: string | null;
-  clientRegistration: "dynamic" | "pre_registered" | null;
+  clientRegistration: McpOAuthClientRegistration | null;
   clientId: string | null;
   expiresAt: string | null;
   hasRefreshToken: boolean;
@@ -1145,7 +1146,7 @@ export interface McpOAuthConnectionRecord {
   subject: string | null;
   scope: string | null;
   authorizationServer: string | null;
-  clientRegistration: "dynamic" | "pre_registered" | null;
+  clientRegistration: McpOAuthClientRegistration | null;
   clientId: string | null;
   expiresAt: string | null;
   hasRefreshToken: boolean;
@@ -1175,6 +1176,12 @@ interface McpOAuthConnectionRow {
 }
 
 const MCP_OAUTH_STATES: readonly McpOAuthConnectionState[] = ["not_connected", "connected", "expired", "error"];
+const MCP_OAUTH_CLIENT_REGISTRATIONS: readonly McpOAuthClientRegistration[] = ["dynamic", "pre_registered", "metadata_document"];
+
+/** A stored `client_registration` value, or null when it is none L2M knows. Shared by the SQLite and Postgres stores. */
+export function toClientRegistration(value: string | null): McpOAuthClientRegistration | null {
+  return value !== null && (MCP_OAUTH_CLIENT_REGISTRATIONS as readonly string[]).includes(value) ? (value as McpOAuthClientRegistration) : null;
+}
 
 /**
  * Phase 10.7 — a stored sandbox block. One that no longer validates is kept
@@ -1203,7 +1210,7 @@ function mapMcpUserOAuthConnection(row: McpUserOAuthConnectionRow): McpUserOAuth
     subject: optional(row.subject),
     scope: optional(row.scope),
     authorizationServer: optional(row.authorization_server),
-    clientRegistration: registration === "dynamic" || registration === "pre_registered" ? registration : null,
+    clientRegistration: toClientRegistration(registration),
     clientId: optional(row.client_id),
     expiresAt: optional(row.expires_at),
     hasRefreshToken: toNumber(row.has_refresh_token) === 1,
@@ -1225,7 +1232,7 @@ function mapMcpOAuthConnection(row: McpOAuthConnectionRow): McpOAuthConnectionRe
     subject: optional(row.subject),
     scope: optional(row.scope),
     authorizationServer: optional(row.authorization_server),
-    clientRegistration: registration === "dynamic" || registration === "pre_registered" ? registration : null,
+    clientRegistration: toClientRegistration(registration),
     clientId: optional(row.client_id),
     expiresAt: optional(row.expires_at),
     hasRefreshToken: toNumber(row.has_refresh_token) === 1,

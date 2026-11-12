@@ -354,14 +354,19 @@ import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 import {
+  buildClientMetadataDocument,
+  clientMetadataDocumentUrlProblem,
   createClusterRefreshLock,
+  MCP_OAUTH_CLIENT_METADATA_PATH,
   MCP_OAUTH_MAX_PENDING,
   McpOAuthService,
   McpOAuthUserError,
   renderOAuthCallbackPage,
   resolveMcpConnectionsUrl,
+  resolveMcpOAuthClientMetadataUrl,
   resolveMcpOAuthRedirectUri
 } from "./services/mcp-oauth-service.js";
+import { createMcpOAuthEgressFetch } from "./services/mcp-oauth-egress.js";
 import { isInternalSecretProvider } from "./services/secret-service.js";
 import type { QueueClaimFence, SessionAuthMethod, Store } from "./db/store.js";
 
@@ -1758,9 +1763,22 @@ export async function createApp(
 
   // Phase 10.5 — OAuth connections for remote MCP servers. The http adapter
   // asks this service for access tokens; tokens stay in SecretService.
+  // Client ID Metadata Document (optional): used only when its URL is one an authorization server could fetch.
+  const mcpOAuthClientMetadataUrl = resolveMcpOAuthClientMetadataUrl(config);
+  const mcpOAuthClientMetadataProblem = config.MCP_OAUTH_CLIENT_METADATA_ENABLED ? clientMetadataDocumentUrlProblem(mcpOAuthClientMetadataUrl) : null;
+  if (mcpOAuthClientMetadataProblem) {
+    app.log.warn(
+      { url: mcpOAuthClientMetadataUrl },
+      `MCP_OAUTH_CLIENT_METADATA_ENABLED is on, but L2M will not offer its client metadata document because ${mcpOAuthClientMetadataProblem}; set MCP_OAUTH_REDIRECT_BASE_URL to a public https URL. Dynamic registration is used instead.`
+    );
+  }
   const mcpOAuthService = new McpOAuthService(store, secretService, {
     connectionsUrl: resolveMcpConnectionsUrl(config),
     redirectUri: resolveMcpOAuthRedirectUri(config),
+    ...(config.MCP_OAUTH_CLIENT_METADATA_ENABLED && !mcpOAuthClientMetadataProblem ? { clientMetadataUrl: mcpOAuthClientMetadataUrl } : {}),
+    ...(config.MCP_OAUTH_BLOCK_PRIVATE_HOSTS
+      ? { egressFetch: (endpoint: string) => createMcpOAuthEgressFetch(endpoint, { allowlist: config.MCP_OAUTH_PRIVATE_HOST_ALLOWLIST }) }
+      : {}),
     stateTtlMs: config.MCP_OAUTH_STATE_TTL_MS,
     refreshSkewMs: config.MCP_OAUTH_REFRESH_SKEW_MS,
     challenges: challengeStore,
@@ -13762,6 +13780,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
   });
 
+  // L2M's Client ID Metadata Document: public (authorization servers fetch it), holds no secret, and is served
+  // only when MCP_OAUTH_CLIENT_METADATA_ENABLED is on. Its `client_id` is exactly the URL it is served at.
+  app.get(MCP_OAUTH_CLIENT_METADATA_PATH, async (_request, reply) => {
+    if (!config.MCP_OAUTH_CLIENT_METADATA_ENABLED) {
+      reply.code(404);
+      return { error: "Client ID Metadata Documents are not enabled (MCP_OAUTH_CLIENT_METADATA_ENABLED)." };
+    }
+    reply.header("cache-control", "public, max-age=3600");
+    return buildClientMetadataDocument({ url: mcpOAuthClientMetadataUrl, redirectUri: mcpOAuthService.redirectUri });
+  });
+
   app.get<{ Querystring: Record<string, string | undefined> }>("/api/mcp/oauth/callback", async (request, reply) => {
     const query = request.query ?? {};
     const sessionId = getSessionIdFromRequest(request);
@@ -13773,6 +13802,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           code: query.code,
           ...(query.error ? { error: query.error } : {}),
           ...(query.error_description ? { errorDescription: query.error_description } : {}),
+          // RFC 9207: passed as the router decoded it, so a repeated `iss` is seen and refused.
+          ...(Object.prototype.hasOwnProperty.call(query, "iss") ? { iss: (query as Record<string, unknown>).iss } : {}),
           sessionId,
           actor: { userId: sessionUser.id, isAdmin: sessionUser.role === "admin" }
         })
