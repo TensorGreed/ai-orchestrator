@@ -350,6 +350,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
+import { gatewayCorsAllowedHeaders } from "./services/mcp-gateway-modern.js";
 import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
 import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
@@ -6414,7 +6415,7 @@ export async function createApp(
     },
     credentials: false,
     methods: ["GET", "POST", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type", "Accept", "Mcp-Session-Id", "MCP-Protocol-Version", "Last-Event-ID"],
+    allowedHeaders: gatewayCorsAllowedHeaders("off", undefined),
     exposedHeaders: ["Mcp-Session-Id", "WWW-Authenticate"]
   };
   // 12.6b — /v1 follows the same origin rules, but a browser OpenAI SDK sends headers of its own (x-stainless-*,
@@ -6444,6 +6445,12 @@ export async function createApp(
     delegator: (request, callback) => {
       const url = request.url ?? "";
       // 12.6b — the /v1 AI gateway is bearer-token traffic too.
+      if (url.startsWith("/mcp/") && config.MCP_GATEWAY_MODERN_PROTOCOL === "on") {
+        // MCP 2026-07-28 — a tool's Mcp-Param-* headers cannot be listed in advance: well-formed ones a preflight asks
+        // for are allowed, nothing else is reflected.
+        callback(null, { ...mcpCorsOptions, allowedHeaders: gatewayCorsAllowedHeaders("on", request.headers["access-control-request-headers"]) });
+        return;
+      }
       callback(null, url.startsWith("/v1/") ? aiGatewayCorsOptions : url.startsWith("/mcp/") ? mcpCorsOptions : studioCorsOptions);
     }
   });
@@ -12174,6 +12181,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     priceSampling: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
     limiter: gatewayClientLimiter,
     network: networkControls,
+    clusterMode,
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;

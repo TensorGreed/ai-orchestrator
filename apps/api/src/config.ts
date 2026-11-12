@@ -298,6 +298,21 @@ const envSchema = z.object({
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
     z.coerce.number().int().min(10_000).max(7 * 24 * 60 * 60 * 1000).optional()
   ),
+  /**
+   * MCP 2026-07-28 — serve modern clients (per-request protocol metadata, no sessions) on /mcp/:toolset next to
+   * session-based ones. `off` (default): modern requests get the answer a request without a session gets today, so
+   * dual-era clients fall back to `initialize` and nothing changes. `on`: they are served statelessly, scoped to the
+   * client credential and toolset. Unset or empty = off.
+   */
+  MCP_GATEWAY_MODERN_PROTOCOL: z.preprocess(
+    (value) => (typeof value === "string" ? (value.trim() === "" ? undefined : value.trim().toLowerCase()) : value),
+    z.enum(["off", "on"]).optional()
+  ),
+  /** MCP 2026-07-28 — how long (ms) modern clients may cache `tools/list` and `server/discover` results; 0 = always re-fetch. Unset or empty = 60000. */
+  MCP_GATEWAY_LIST_TTL_MS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).max(86_400_000).optional()
+  ),
   /** Base URL clients reach this instance at, used for the endpoint URLs shown in the UI. Empty = the browser's origin. */
   MCP_GATEWAY_PUBLIC_URL: z
     .string()
@@ -1035,7 +1050,20 @@ export interface NetworkSettings {
 
 const LOOPBACK_RANGES = ["127.0.0.0/8", "::1/128"];
 /** Headers a client certificate may never be read from (they carry other things the server relies on). */
-const RESERVED_CERT_HEADERS = new Set(["authorization", "cookie", "host", "x-forwarded-for", "x-real-ip", "x-forwarded-proto", "content-type", "mcp-session-id"]);
+const RESERVED_CERT_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "host",
+  "x-forwarded-for",
+  "x-real-ip",
+  "x-forwarded-proto",
+  "content-type",
+  "mcp-session-id",
+  // MCP 2026-07-28 request metadata headers.
+  "mcp-protocol-version",
+  "mcp-method",
+  "mcp-name"
+]);
 
 function parseAddressSetting(name: string, raw: string | undefined): string[] {
   const { ranges, invalid } = parseIpAllowlist(splitIpAllowlist(raw));
@@ -1076,7 +1104,7 @@ export function resolveNetworkSettings(config: AppConfig): NetworkSettings {
   const headerRaw = (config.MCP_GATEWAY_CLIENT_CERT_HEADER ?? "").trim().toLowerCase();
   let clientCertProxies: string[] = [];
   if (headerRaw) {
-    if (!/^[a-z0-9-]+$/.test(headerRaw) || RESERVED_CERT_HEADERS.has(headerRaw)) {
+    if (!/^[a-z0-9-]+$/.test(headerRaw) || RESERVED_CERT_HEADERS.has(headerRaw) || headerRaw.startsWith("mcp-param-")) {
       throw new Error(
         `Invalid environment configuration: MCP_GATEWAY_CLIENT_CERT_HEADER "${headerRaw}" must be a header name of letters, digits and '-', ` +
           "and not one the server reads for something else (such as authorization or x-forwarded-for)"

@@ -3,16 +3,21 @@
  * protocol versions, message classification, error codes, list cursors and
  * how tool outcomes become `tools/call` results.
  */
+import { MCP_LEGACY_PROTOCOL_VERSIONS } from "@ai-orchestrator/mcp-sdk";
 
-/** Newest first. The first entry is offered when a client asks for a version we do not speak. */
-export const MCP_SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26"] as const;
+/**
+ * The versions `initialize` negotiates (the legacy versions, shared with the MCP SDK), newest first. The first entry
+ * is offered when a client asks for a version we do not speak. Modern (2026-07-28) requests are served statelessly
+ * when MCP_GATEWAY_MODERN_PROTOCOL is on; see `mcp-gateway-modern.ts`.
+ */
+export const MCP_SUPPORTED_PROTOCOL_VERSIONS = MCP_LEGACY_PROTOCOL_VERSIONS;
 export type McpProtocolVersion = (typeof MCP_SUPPORTED_PROTOCOL_VERSIONS)[number];
 export const MCP_LATEST_PROTOCOL_VERSION: McpProtocolVersion = MCP_SUPPORTED_PROTOCOL_VERSIONS[0];
 /** What the transport assumes when a client sends no MCP-Protocol-Version header and none was negotiated. */
 export const MCP_DEFAULT_TRANSPORT_VERSION: McpProtocolVersion = "2025-03-26";
 
 /** JSON-RPC batches exist only in the 2025-03-26 revision; later revisions removed them. */
-export function versionAllowsBatches(version: McpProtocolVersion): boolean {
+export function versionAllowsBatches(version: string): boolean {
   return version === "2025-03-26";
 }
 
