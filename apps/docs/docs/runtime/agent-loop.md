@@ -5,6 +5,8 @@ description: "How the L2M agent loop runs: messages, tool discovery, model calls
 
 # Agent Loop
 
+Concepts: [What is an AI agent?](/learn/agents/what-is-an-ai-agent) explains the loop in plain words, and [supervisor and worker agents](/learn/agents/supervisor-and-workers) covers the `worker` port.
+
 ## Execution model
 
 Agent orchestration is iterative, not one-shot.
