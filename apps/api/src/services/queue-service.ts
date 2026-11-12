@@ -204,7 +204,8 @@ export class QueueProducer {
    */
   async add(payload: EnqueueInput, options: { enforceBackpressure?: boolean; dedupeWindowMs?: number } = {}): Promise<{ executionId: string; added: boolean }> {
     const executionId = payload.executionId ?? randomUUID();
-    const { priority, executionId: _id, queueItemId, maxAttempts, pool: requestedPool, ...rest } = payload;
+    // A caller never supplies the trace context: it is written below, from the active span, or not at all.
+    const { priority, executionId: _id, queueItemId, maxAttempts, pool: requestedPool, traceContext: _callerTrace, ...rest } = payload;
     const pool = requestedPool ?? DEFAULT_QUEUE_POOL;
     if (!QUEUE_POOL_PATTERN.test(pool)) {
       throw new Error(`Invalid queue pool "${pool.slice(0, 64)}": letters, digits, _ or - (at most 63).`);

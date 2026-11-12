@@ -245,6 +245,24 @@ describe("queued runs continue the trace of the request that enqueued them", () 
     expect(runSpanOf(context, "old-job")[0]!.parentSpanContext?.spanId).toBe(consumer!.spanContext().spanId);
   });
 
+  it("starts a job with no context as a new root even when its poll was woken inside a request", async () => {
+    const context = await start(TRACING, (_c, app) => {
+      app.get("/api/otel-wake", async () => {
+        await context.store.enqueueExecution({ id: "woken-job", workflowId: "wf-woken", payload: { executionId: "woken-job", workflowId: "wf-woken" } });
+        context.queue!.wake();
+        await until(async () => (await context.store.getExecutionHistory("woken-job"))?.status === "success", "the woken job");
+        return { ok: true };
+      });
+    });
+    const cookie = await context.login("builder");
+    await publish(context, cookie, simple("wf-woken"));
+    await context.app.inject({ method: "GET", url: "/api/otel-wake", headers: { cookie, traceparent: REQUEST_PARENT } });
+    await until(() => spansNamed(context, "process l2m.queue").length === 1, "the consumer span");
+    const [consumer] = spansNamed(context, "process l2m.queue");
+    expect(consumer!.parentSpanContext).toBeUndefined();
+    expect(consumer!.spanContext().traceId).not.toBe(REQUEST_TRACE);
+  });
+
   it("ignores a malformed context in a payload", async () => {
     const context = await start(TRACING);
     const cookie = await context.login("builder");
