@@ -26,4 +26,11 @@ describe("MCP client protocol settings", () => {
     expect(() => parseConfig({ MCP_CLIENT_MRTR_MAX_ROUNDS: "0" })).toThrow();
     expect(() => parseConfig({ MCP_CLIENT_MRTR_MAX_ROUNDS: "21" })).toThrow();
   });
+
+  it("waits five seconds for a stdio server's discovery answer by default and bounds the setting", () => {
+    expect(parseConfig({}).MCP_CLIENT_ERA_PROBE_TIMEOUT_MS).toBe(5000);
+    expect(parseConfig({ MCP_CLIENT_ERA_PROBE_TIMEOUT_MS: "1500" }).MCP_CLIENT_ERA_PROBE_TIMEOUT_MS).toBe(1500);
+    expect(() => parseConfig({ MCP_CLIENT_ERA_PROBE_TIMEOUT_MS: "100" })).toThrow();
+    expect(() => parseConfig({ MCP_CLIENT_ERA_PROBE_TIMEOUT_MS: "60001" })).toThrow();
+  });
 });
