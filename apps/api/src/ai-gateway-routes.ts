@@ -1044,7 +1044,10 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
 
   const handle = (fn: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) => async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      return await fn(request, reply);
+      // While content capture is on, a request's model calls record their (masked) content: the gateway has no
+      // sensitive marking of its own, so nothing here excludes it beyond what masking removes.
+      const contentScope = instrument?.withContentExclusion;
+      return contentScope ? await contentScope.call(instrument, () => false, () => fn(request, reply)) : await fn(request, reply);
     } catch (error) {
       if (reply.sent || reply.raw.headersSent) {
         if (!(error instanceof AiGatewayHttpError)) app.log.error({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "AI gateway request failed after the response started");

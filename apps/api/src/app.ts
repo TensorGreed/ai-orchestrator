@@ -210,7 +210,7 @@ import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService } from "./services/tracing-service";
 import type { MetricReader, SpanProcessor } from "@ai-orchestrator/otel";
-import { resolveTelemetrySettings } from "./telemetry/settings.js";
+import { headerSecretValues, resolveTelemetrySettings } from "./telemetry/settings.js";
 import { loadTelemetry, type Telemetry } from "./telemetry/load.js";
 import { createModelTelemetry } from "./telemetry/model-telemetry.js";
 import { pausedTraceContext, traceQueueJob } from "./telemetry/queue-tracing.js";
@@ -284,6 +284,8 @@ import { buildRunFacts } from "./services/run-facts.js";
 import { createReplaySandbox, type ReplaySandbox } from "./services/replay-sandbox.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
 import { SecretScrubber, environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
+import type { GuardDictionary } from "@ai-orchestrator/guard-sdk";
+import { OtelContentMasker, deriveOtelContentSurrogateKey, environmentUrlSecrets } from "./telemetry/content-masker.js";
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
@@ -1552,12 +1554,61 @@ export async function createApp(
   // OpenTelemetry is loaded first, and only when tracing is configured (telemetry/load.ts): the log mixin, the
   // handler context and the HTTP span hooks below exist only then. With tracing off nothing from the SDK is imported.
   const telemetrySettings = resolveTelemetrySettings(config);
+  // Content capture on GenAI spans (off by default): prompts, answers and tool arguments and results are secret-scrubbed,
+  // masked by content rules and truncated before export (telemetry/content-masker.ts). It needs the master key for its
+  // surrogate key; without one nothing is captured.
+  const contentMasterKey = Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64");
+  let contentCapture = telemetrySettings.contentCapture;
+  if (contentCapture !== "NO_CONTENT" && contentMasterKey.length !== 32) {
+    telemetrySettings.warnings.push(
+      "OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT needs SECRET_MASTER_KEY_BASE64 (32 bytes) to mask content; no content is captured"
+    );
+    contentCapture = "NO_CONTENT";
+  }
+  const otelContentMasker =
+    contentCapture === "NO_CONTENT"
+      ? null
+      : new OtelContentMasker({
+          key: deriveOtelContentSurrogateKey(contentMasterKey),
+          storedSecretValues: () => secretService.valuesForScrubbing(),
+          otherSecretValues: () => [
+            ...environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
+            ...environmentUrlSecrets(process.env),
+            ...headerSecretValues(telemetrySettings.headers)
+          ],
+          // Every content-rule profile's dictionaries: content leaves the deployment, so every custom class is masked.
+          dictionaries: async () => {
+            const dictionaries: GuardDictionary[] = [];
+            for (const profile of await guardService.listProfiles()) {
+              dictionaries.push(...((await guardService.loadProfile(profile.id))?.profile.dictionaries ?? []));
+            }
+            return dictionaries;
+          },
+          redact: (value) => {
+            const redacted = secretService.redact(value);
+            return typeof redacted === "string" ? redacted : value;
+          }
+        });
+  // Exported content is no longer than any other attribute value the exporter sends.
+  const contentMaxChars = Math.min(telemetrySettings.contentMaxChars, telemetrySettings.attributeValueLengthLimit);
+  if (otelContentMasker) secretService.onSecretValue((values) => otelContentMasker.addSecretValues(values));
   const telemetry: Telemetry = await loadTelemetry(telemetrySettings, {
+    ...(otelContentMasker && contentCapture !== "NO_CONTENT"
+      ? {
+          content: {
+            mode: contentCapture,
+            maxChars: contentMaxChars,
+            // Content is copied and masked whole before it is cut, so how much is taken in is bounded too.
+            maxInputChars: Math.min(1024 * 1024, Math.max(64 * 1024, 8 * contentMaxChars)),
+            masker: otelContentMasker.mask
+          }
+        }
+      : {}),
     scrub: (() => {
       if (!telemetrySettings.enabled) return undefined;
       const scrubber = new SecretScrubber([
         ...environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
-        ...Object.values(telemetrySettings.headers)
+        ...headerSecretValues(telemetrySettings.headers)
       ]);
       return (text: string) => scrubber.text(text);
     })(),
@@ -1596,6 +1647,29 @@ export async function createApp(
     genReqId: () => nanoid()
   });
   for (const warning of telemetrySettings.warnings) app.log.warn(warning);
+  // Reported by /api/observability; NO_CONTENT unless tracing is on and content is captured.
+  const contentCaptureMode = telemetryRuntime?.contentCapture ?? "NO_CONTENT";
+  if (contentCaptureMode !== "NO_CONTENT") {
+    app.log.warn(
+      { contentCapture: contentCaptureMode, maxChars: contentMaxChars },
+      "OpenTelemetry content capture is on: prompts, answers and tool arguments and results are exported after secret removal and content-rule masking"
+    );
+    app.addHook("onReady", async () => {
+      try {
+        await auditService.record({
+          category: "system",
+          eventType: "telemetry.content_capture_enabled",
+          action: "update",
+          outcome: "success",
+          actor: { type: "system" },
+          resourceType: "telemetry",
+          metadata: { mode: contentCaptureMode, maxChars: contentMaxChars }
+        });
+      } catch (error) {
+        app.log.warn({ err: error }, "Could not record the content capture audit event");
+      }
+    });
+  }
   if (telemetryRuntime) {
     // Registered first, so it runs last on close: spans ended by other close hooks are still flushed (5 s cap).
     app.addHook("onClose", async () => {
@@ -6794,7 +6868,9 @@ export async function createApp(
         sampler: telemetrySettings.sampler.name,
         httpServerSpans: tracingService.isEnabled() && telemetrySettings.httpServerSpans,
         trustInbound: telemetrySettings.trustInbound,
-        spanDetail: telemetrySettings.spanDetail
+        spanDetail: telemetrySettings.spanDetail,
+        contentCapture: contentCaptureMode,
+        contentMaxChars: contentCaptureMode === "NO_CONTENT" ? null : contentMaxChars
       },
       otlpMetrics: {
         enabled: telemetry.metrics !== null && telemetrySettings.metricsEndpoint !== null,

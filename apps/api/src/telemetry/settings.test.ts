@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { OTLP_PROTOCOLS, PROPAGATOR_NAMES, SAMPLER_NAMES } from "@ai-orchestrator/otel";
 import { parseConfig } from "../config.js";
-import { OTEL_TRACES_SAMPLERS, parseOtelKeyValueList, resolveTelemetrySettings } from "./settings.js";
+import { OTEL_TRACES_SAMPLERS, headerSecretValues, parseContentCapture, parseOtelKeyValueList, resolveTelemetrySettings } from "./settings.js";
 
 const BASE = { SECRET_MASTER_KEY_BASE64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" };
 
@@ -222,5 +222,54 @@ describe("parseOtelKeyValueList", () => {
   it("keeps a malformed percent-encoding as written and skips pairs without a key or value", () => {
     expect(parseOtelKeyValueList("a=%zz,=b,c=,d")).toEqual({ a: "%zz" });
     expect(parseOtelKeyValueList(undefined)).toEqual({});
+  });
+});
+
+describe("content capture settings", () => {
+  it("is NO_CONTENT by default, and while tracing is off whatever is asked", () => {
+    expect(settings()).toMatchObject({ contentCapture: "NO_CONTENT", contentMaxChars: 8192 });
+    expect(settings({ OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "SPAN_ONLY" }).contentCapture).toBe("NO_CONTENT");
+    expect(settings({ OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "nonsense" }).warnings).toEqual([]);
+  });
+
+  it("reads the four modes in any case once tracing is on", () => {
+    for (const mode of ["NO_CONTENT", "SPAN_ONLY", "EVENT_ONLY", "SPAN_AND_EVENT"]) {
+      expect(settings({ TRACING_ENABLED: "true", OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: mode.toLowerCase() }).contentCapture).toBe(mode);
+    }
+  });
+
+  it("treats an unknown value as NO_CONTENT with a warning", () => {
+    const resolved = settings({ TRACING_ENABLED: "true", OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "everything" });
+    expect(resolved.contentCapture).toBe("NO_CONTENT");
+    expect(resolved.warnings.some((warning) => warning.includes("OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT=everything"))).toBe(true);
+  });
+
+  it("accepts the older variable, with true and false, and lets the new one win", () => {
+    expect(parseContentCapture(undefined, "true")).toBe("SPAN_ONLY");
+    expect(parseContentCapture(undefined, "false")).toBe("NO_CONTENT");
+    expect(parseContentCapture(undefined, "span_and_event")).toBe("SPAN_AND_EVENT");
+    expect(parseContentCapture("NO_CONTENT", "true")).toBe("NO_CONTENT");
+    expect(parseContentCapture(" ", "event_only")).toBe("EVENT_ONLY");
+    // The new name has no boolean form.
+    const warnings: string[] = [];
+    expect(parseContentCapture("true", undefined, warnings)).toBe("NO_CONTENT");
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("validates L2M_OTEL_CONTENT_MAX_CHARS", () => {
+    expect(settings({ L2M_OTEL_CONTENT_MAX_CHARS: "2048" }).contentMaxChars).toBe(2048);
+    expect(settings({ L2M_OTEL_CONTENT_MAX_CHARS: "" }).contentMaxChars).toBe(8192);
+    expect(() => settings({ L2M_OTEL_CONTENT_MAX_CHARS: "12" })).toThrow();
+    expect(() => settings({ L2M_OTEL_CONTENT_MAX_CHARS: "2000000" })).toThrow();
+    expect(() => settings({ L2M_OTEL_CONTENT_MAX_CHARS: "lots" })).toThrow();
+  });
+});
+
+describe("headerSecretValues", () => {
+  it("returns header values and their credentials without the scheme", () => {
+    const basic = Buffer.from("user:pa55-word-x").toString("base64");
+    expect(headerSecretValues({ authorization: "Bearer tok-123456", "x-api-key": "plainkey123", other: `Basic ${basic}` }).sort()).toEqual(
+      ["Bearer tok-123456", "tok-123456", "plainkey123", `Basic ${basic}`, basic, "user:pa55-word-x", "pa55-word-x"].sort()
+    );
   });
 });

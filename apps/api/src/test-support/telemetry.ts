@@ -26,6 +26,8 @@ export function testTelemetrySettings(overrides: Partial<TelemetrySettings> = {}
     httpServerSpans: true,
     trustInbound: "authenticated",
     trustedProxies: [],
+    contentCapture: "NO_CONTENT",
+    contentMaxChars: 8192,
     warnings: [],
     ...overrides
   };

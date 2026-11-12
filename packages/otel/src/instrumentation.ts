@@ -19,6 +19,7 @@ import {
 } from "@opentelemetry/api";
 import type {
   AgentIterationSpanInfo,
+  InstrumentationContentKind,
   AgentSpanInfo,
   GenericSpanInfo,
   InstrumentationAttributes,
@@ -37,6 +38,7 @@ import type {
 } from "@ai-orchestrator/shared";
 import { NOOP_INSTRUMENTATION_SPAN, NOOP_SCOPED_INSTRUMENTATION_SPAN } from "@ai-orchestrator/shared";
 import type { OtelRuntimeOptions } from "./options.js";
+import { CONTENT_EXCLUSION_KEY, ContentPipeline, composeExclusion, exclusionIn, type SpanContentBinding } from "./content.js";
 import { MCP_CLIENT_METRIC_KEYS, MCP_REQUEST_KEYS, MCP_SERVER_METRIC_KEYS, McpMetrics, mcpSpanSpec, metricValue } from "./mcp.js";
 import { ATTR_ERROR_TYPE, ATTR_EXCEPTION_MESSAGE, ATTR_EXCEPTION_TYPE, ATTR_SERVER_ADDRESS, ATTR_SERVER_PORT, GEN_AI, GEN_AI_OPERATION, L2M, MCP, genAiProviderName } from "./semconv.js";
 
@@ -104,8 +106,19 @@ export class OtelSpanHandle implements InstrumentationSpan {
 
   constructor(
     readonly span: Span,
-    private readonly scrub: (text: string) => string
+    private readonly scrub: (text: string) => string,
+    /** Set only while content capture is on and this span may carry content. */
+    readonly contentBinding?: SpanContentBinding
   ) {}
+
+  get capturesContent(): boolean {
+    return this.contentBinding !== undefined && !this.ended && this.span.isRecording();
+  }
+
+  addContent(kind: InstrumentationContentKind, value: unknown): void {
+    if (!this.contentBinding || this.ended || !this.span.isRecording()) return;
+    this.contentBinding.pipeline.add(this.span, this.contentBinding, kind, value);
+  }
 
   get recording(): boolean {
     return this.span.isRecording();
@@ -175,9 +188,10 @@ export class McpSpanHandle extends OtelSpanHandle {
     scrub: (text: string) => string,
     initial: InstrumentationAttributes,
     private readonly side: "client" | "server",
-    private readonly metrics: McpMetrics | undefined
+    private readonly metrics: McpMetrics | undefined,
+    contentBinding?: SpanContentBinding
   ) {
-    super(span, scrub);
+    super(span, scrub, contentBinding);
     this.capture(initial);
   }
 
@@ -224,9 +238,10 @@ export class OtelScopedSpan extends OtelSpanHandle implements ScopedInstrumentat
   constructor(
     span: Span,
     scrub: (text: string) => string,
-    private readonly contextManager: ContextManager
+    private readonly contextManager: ContextManager,
+    contentBinding?: SpanContentBinding
   ) {
-    super(span, scrub);
+    super(span, scrub, contentBinding);
   }
 
   enter<T>(fn: () => Promise<T>): Promise<T> {
@@ -249,6 +264,8 @@ export interface InstrumentationDeps {
   scrub: (text: string) => string;
   /** Where the MCP operation duration histograms are recorded; without one no MCP metric is recorded. */
   meter?: Meter;
+  /** Content capture; absent while it is off (then no span accepts content). */
+  content?: ContentPipeline;
 }
 
 export interface StartSpanSpec {
@@ -258,6 +275,8 @@ export interface StartSpanSpec {
   links?: readonly TraceCarrier[];
   /** Parent context; default: the active one. */
   parent?: Context;
+  /** The span may carry content (when capture is on); `inference` for a model call. */
+  content?: "inference" | "tool";
 }
 
 /** Implements the shared `RunInstrumentation` seam over an OpenTelemetry tracer. */
@@ -266,6 +285,8 @@ export class OtelRunInstrumentation implements RunInstrumentation {
   private readonly mcpMetrics: McpMetrics | undefined;
   /** Open MCP spans by their OpenTelemetry span, so `annotate` reaches their handle (and their metric). */
   private readonly mcpHandles = new WeakMap<Span, McpSpanHandle>();
+  /** `execute_tool` spans that capture content: an MCP request made under one records none of its own. */
+  private readonly toolContentSpans = new WeakSet<Span>();
 
   constructor(private readonly deps: InstrumentationDeps) {
     this.mcpMetrics = deps.meter ? new McpMetrics(deps.meter) : undefined;
@@ -284,7 +305,38 @@ export class OtelRunInstrumentation implements RunInstrumentation {
       },
       parent
     );
-    return new OtelSpanHandle(span, this.deps.scrub);
+    return new OtelSpanHandle(span, this.deps.scrub, this.contentBinding(spec.content, parent));
+  }
+
+  /** True while content capture is on. */
+  get capturesContent(): boolean {
+    return this.deps.content !== undefined;
+  }
+
+  /**
+   * How a span started under `parent` queues content: with the sensitivity checks in force there. None while capture
+   * is off, for spans that carry no content, for tool spans when only the inference event is recorded, outside any
+   * `withContentExclusion` scope (work that did not declare how to tell it is sensitive captures nothing), and for an
+   * MCP request made by an agent's tool call, whose `execute_tool` span already carries the result as the agent
+   * kept it (after its labels and content rules).
+   */
+  private contentBinding(kind: "inference" | "tool" | undefined, parent: Context, mcpClient = false): SpanContentBinding | undefined {
+    const pipeline = this.deps.content;
+    if (!pipeline || !kind) return undefined;
+    if (kind === "tool" && pipeline.mode === "EVENT_ONLY") return undefined;
+    const exclusion = exclusionIn(parent);
+    if (!exclusion) return undefined;
+    if (mcpClient) {
+      const parentSpan = trace.getSpan(parent);
+      if (parentSpan && this.toolContentSpans.has(parentSpan)) return undefined;
+    }
+    return { pipeline, exclusion, inference: kind === "inference" };
+  }
+
+  withContentExclusion<T>(isSensitive: () => boolean, fn: () => T): T {
+    if (!this.deps.content) return fn();
+    const active = this.deps.contextManager.active();
+    return this.deps.contextManager.with(active.setValue(CONTENT_EXCLUSION_KEY, composeExclusion(isSensitive, exclusionIn(active))), fn);
   }
 
   /** Runs `fn` with `handle`'s span active, ending it when `fn` settles unless it was kept open. */
@@ -352,7 +404,7 @@ export class OtelRunInstrumentation implements RunInstrumentation {
     const active = this.deps.contextManager.active();
     const parentContext = parent instanceof OtelSpanHandle ? trace.setSpan(active, parent.span) : active;
     const handle = this.startSpan({ ...spec, parent: parentContext });
-    return new OtelScopedSpan(handle.span, this.deps.scrub, this.deps.contextManager);
+    return new OtelScopedSpan(handle.span, this.deps.scrub, this.deps.contextManager, handle.contentBinding);
   }
 
   startNode(info: NodeSpanInfo, parent?: InstrumentationSpan): ScopedInstrumentationSpan {
@@ -365,7 +417,9 @@ export class OtelRunInstrumentation implements RunInstrumentation {
   }
 
   startToolCall(info: ToolCallSpanInfo, parent?: InstrumentationSpan): ScopedInstrumentationSpan {
-    return this.open(this.toolSpec(info), parent);
+    const scoped = this.open(this.toolSpec(info), parent);
+    if (scoped.capturesContent) this.toolContentSpans.add(scoped.span);
+    return scoped;
   }
 
   agent<T>(info: AgentSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {
@@ -400,6 +454,8 @@ export class OtelRunInstrumentation implements RunInstrumentation {
       {
         name: `${operation} ${info.model}`,
         kind: "client",
+        // Embedding inputs (retrieval queries, documents) are not captured.
+        ...(operation === GEN_AI_OPERATION.CHAT || operation === "text_completion" ? { content: "inference" as const } : {}),
         attributes: {
           [GEN_AI.OPERATION_NAME]: operation,
           [GEN_AI.PROVIDER_NAME]: genAiProviderName(info.providerId),
@@ -419,6 +475,7 @@ export class OtelRunInstrumentation implements RunInstrumentation {
   private toolSpec(info: ToolCallSpanInfo): StartSpanSpec {
     return {
       name: `${GEN_AI_OPERATION.EXECUTE_TOOL} ${info.toolName}`,
+      content: "tool",
       attributes: {
         [GEN_AI.OPERATION_NAME]: GEN_AI_OPERATION.EXECUTE_TOOL,
         [GEN_AI.TOOL_NAME]: info.toolName,
@@ -463,7 +520,9 @@ export class OtelRunInstrumentation implements RunInstrumentation {
       { kind: side === "server" ? SpanKind.SERVER : SpanKind.CLIENT, attributes: cleanAttributes(spec.attributes), ...(links.length > 0 ? { links } : {}) },
       parent
     );
-    const handle = new McpSpanHandle(span, this.deps.scrub, spec.attributes, side, info.round && info.round > 1 ? undefined : this.mcpMetrics);
+    // Content (tool arguments and results) only on the client side: the gateway's server spans carry none.
+    const content = side === "client" ? this.contentBinding("tool", parent, true) : undefined;
+    const handle = new McpSpanHandle(span, this.deps.scrub, spec.attributes, side, info.round && info.round > 1 ? undefined : this.mcpMetrics, content);
     this.mcpHandles.set(span, handle);
     return this.within(handle, fn);
   }

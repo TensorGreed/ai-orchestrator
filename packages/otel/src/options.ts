@@ -1,5 +1,6 @@
 import type { MetricReader } from "@opentelemetry/sdk-metrics";
 import type { SpanProcessor } from "@opentelemetry/sdk-trace";
+import type { ContentCaptureOptions } from "./content.js";
 
 export const SAMPLER_NAMES = [
   "always_on",
@@ -66,6 +67,11 @@ export interface OtelRuntimeOptions {
   recentSpanLimit: number;
   /** Removes secret values from text before it becomes an attribute or event (error messages). */
   scrub?: (text: string) => string;
+  /**
+   * Content capture (prompts, answers, tool arguments and results), masked before export. Absent: no span carries
+   * content, whatever a caller hands over.
+   */
+  content?: ContentCaptureOptions;
   /** Extra span processors, run before the exporter (tests add an in-memory exporter here). */
   spanProcessors?: readonly SpanProcessor[];
   /** Where metrics go (OTEL_METRICS_ENABLED with a metrics endpoint); null: `OtelRuntime.meter` records nowhere. */

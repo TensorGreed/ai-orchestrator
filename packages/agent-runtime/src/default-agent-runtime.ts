@@ -11,6 +11,7 @@ import {
   NODE_ACTIVITY_PREVIEW_CHARS,
   NOOP_SCOPED_INSTRUMENTATION_SPAN,
   SPAN_OUTCOME_ATTRIBUTES,
+  labelsMarkSensitive,
   unionDataLabels,
   withoutDataClasses,
   type DataLabels,
@@ -18,6 +19,19 @@ import {
 } from "@ai-orchestrator/shared";
 import type { AgentGuardCheck, AgentRuntimeAdapter, AgentRuntimeContext, AgentRuntimeEvent, AgentToolRuntime, InternalToolResult } from "./types";
 import { AgentGuardInterrupt, createToolErrorResult, isAgentGuardInterrupt } from "./types";
+
+/**
+ * Hands a tool call's arguments or result to its span when the span captures content (off by default). The span's
+ * implementation drops it for sensitive work and masks it before export; it never fails the call.
+ */
+function captureToolContent(span: ScopedInstrumentationSpan, kind: "tool_call_arguments" | "tool_call_result", value: unknown): void {
+  if (span.capturesContent !== true || !span.addContent || value === undefined) return;
+  try {
+    span.addContent(kind, value);
+  } catch {
+    // Never fails the call.
+  }
+}
 
 /** The error `run()` throws once the run's abort signal fires: its reason when that is an Error. */
 function abortErrorFor(signal: AbortSignal): Error {
@@ -846,6 +860,27 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
   readonly id = "default-agent-runtime";
 
   async run(request: AgentRunRequest, tools: AgentToolRuntime, context: AgentRuntimeContext): Promise<AgentRunState> {
+    const instrument = context.instrument;
+    // Content capture (off by default): on a run that tracks labels, the loop's model and tool spans export no content
+    // once what the model has seen is sensitive (its input, memory, or a tool result labelled so).
+    if (instrument?.capturesContent === true && instrument.withContentExclusion && context.dataLabels) {
+      const seen: { labels?: () => DataLabels } = {};
+      const startLabels = context.dataLabels;
+      return await instrument.withContentExclusion(
+        () => labelsMarkSensitive(seen.labels ? seen.labels() : unionLabels([startLabels.input, startLabels.prompt])),
+        () => this.runLoop(request, tools, context, seen)
+      );
+    }
+    return await this.runLoop(request, tools, context);
+  }
+
+  private async runLoop(
+    request: AgentRunRequest,
+    tools: AgentToolRuntime,
+    context: AgentRuntimeContext,
+    /** Content capture: receives the loop's label accumulator, read by the sensitivity check. */
+    seen?: { labels?: () => DataLabels }
+  ): Promise<AgentRunState> {
     const providerAdapter = context.providerRegistry.get(request.provider.providerId);
     const memoryEnabled = Boolean(context.memoryStore && request.sessionId);
     const memoryNamespace = request.memory?.namespace?.trim() || "default";
@@ -869,6 +904,7 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
       return found.length > 0 ? unionLabels([labels, { provenance: [], dataClasses: found, source: "propagated" }]) : labels;
     };
     const accumulatedLabels = (): DataLabels => unionLabels([inputLabels, promptLabels, memoryLabels, ...seenLabels]);
+    if (seen) seen.labels = accumulatedLabels;
     const withLabels = (state: AgentRunState): AgentRunState =>
       labelTracking
         ? {
@@ -1664,6 +1700,8 @@ ${effectiveSystemPrompt}`;
                 iteration,
                 argsPreview: previewText(JSON.stringify(callArguments) ?? "", NODE_ACTIVITY_PREVIEW_CHARS)
               });
+              // Content capture (off by default): the arguments as sent, after the checks above.
+              captureToolContent(toolSpan, "tool_call_arguments", callArguments);
               let output: unknown;
               if (internalTool) {
                 output = await toolSpan.enter(() => internalTool.invoke(callArguments));
@@ -1715,6 +1753,8 @@ ${effectiveSystemPrompt}`;
               });
               // The model sees this result from here on.
               if (resultLabels) seenLabels.push(resultLabels);
+              // Content capture: the result as the model sees it (dropped when its labels made the loop sensitive).
+              captureToolContent(toolSpan, "tool_call_result", output);
 
               reportToolEnd("ok");
               // Reset failure count on success

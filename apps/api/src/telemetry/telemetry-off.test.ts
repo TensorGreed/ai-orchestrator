@@ -28,6 +28,11 @@ describe("off means off", () => {
     expect(result.otelModules).toEqual([]);
   }, 150_000);
 
+  it("loads none with content capture asked for but tracing unset", async () => {
+    const result = await loadedOtelModules({ OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "SPAN_AND_EVENT", L2M_OTEL_CONTENT_MAX_CHARS: "4096" });
+    expect(result.otelModules).toEqual([]);
+  }, 150_000);
+
   it("loads none with an endpoint set but OTEL_SDK_DISABLED=true", async () => {
     const result = await loadedOtelModules({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:9", OTEL_SDK_DISABLED: "true" });
     expect(result.otelModules).toEqual([]);
