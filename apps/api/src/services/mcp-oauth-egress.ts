@@ -28,7 +28,7 @@ import {
   type OutboundBlockReason,
   type OutboundGuardConfig
 } from "@ai-orchestrator/workflow-engine";
-import { parseIp, type DnsResolver } from "@ai-orchestrator/guard-sdk";
+import type { DnsResolver } from "@ai-orchestrator/guard-sdk";
 import { McpOAuthError, isLoopbackHost, type FetchLike } from "@ai-orchestrator/mcp-sdk";
 
 const DEFAULT_PORTS: Record<string, string> = { "http:": "80", "https:": "443" };
@@ -45,9 +45,9 @@ export function mcpOAuthEgressPolicy(endpoint: string, allowlist: readonly strin
   }
   if (url && (url.protocol === "http:" || url.protocol === "https:")) {
     const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "");
-    const literal = parseIp(host);
-    // The configured endpoint itself: its exact address for a literal, else its name on its port.
-    entries.push(literal ? `${host}/${literal.family === 4 ? 32 : 128}` : `${host}:${url.port || DEFAULT_PORTS[url.protocol]}`);
+    // The configured endpoint itself, on its own port only (for a literal address too: the last colon splits the
+    // port off an IPv6 entry, and the URL parser has already normalised the address the same way on both sides).
+    entries.push(`${host}:${url.port || DEFAULT_PORTS[url.protocol]}`);
     if (isLoopbackHost(url.hostname)) entries.push(...LOOPBACK_ENTRIES);
   }
   return { denyPrivate: true, allowlist: entries };

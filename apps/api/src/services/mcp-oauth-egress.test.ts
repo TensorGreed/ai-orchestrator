@@ -123,6 +123,17 @@ describe("mcpOAuthEgressPolicy verdicts", () => {
     expect(await verdict("https://10.9.9.9/token", endpoint)).toBe(false);
   });
 
+  it("allows a literal-address MCP server's own port only", async () => {
+    expect(await verdict("http://10.0.0.5:8080/.well-known/oauth-protected-resource", "http://10.0.0.5:8080/mcp")).toBe(true);
+    expect(await verdict("http://10.0.0.5:2375/containers/json", "http://10.0.0.5:8080/mcp")).toBe(false);
+    expect(await verdict("http://[fd00::5]:8080/.well-known/oauth-protected-resource", "http://[fd00::5]:8080/mcp")).toBe(true);
+    expect(await verdict("http://[fd00::5]:2375/x", "http://[fd00::5]:8080/mcp")).toBe(false);
+  });
+
+  it("does not treat a name that starts with 127. as loopback", async () => {
+    expect(await verdict("http://127.0.0.1:6379/x", "https://127.evil.example/mcp")).toBe(false);
+  });
+
   it("allows loopback only when the MCP server itself is on loopback", async () => {
     expect(await verdict("http://127.0.0.1:9000/token", "http://127.0.0.1:4000/mcp")).toBe(true);
     expect(await verdict("http://localhost:9000/token", "http://localhost:4000/mcp")).toBe(true);

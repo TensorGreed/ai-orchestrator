@@ -88,10 +88,15 @@ export type FetchLike = typeof fetch;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
-/** True for `localhost`, `*.localhost`, 127.0.0.0/8 and `::1` (as a URL hostname, brackets allowed). */
+/**
+ * True for `localhost`, `*.localhost`, an IPv4 address in 127.0.0.0/8 and `::1` (as a URL hostname, brackets
+ * allowed). A name that merely starts with `127.` (such as `127.example.com`) is not loopback.
+ */
 export function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  return host === "localhost" || host === "::1" || host.startsWith("127.") || host.endsWith(".localhost");
+  const host = hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
+  const octets = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return octets !== null && octets.slice(1).every((part) => Number(part) <= 255);
 }
 
 /**

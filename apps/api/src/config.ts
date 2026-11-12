@@ -345,9 +345,20 @@ const envSchema = z.object({
     .string()
     .default("")
     .transform((value) => value.split(",").map((entry) => entry.trim()).filter(Boolean))
-    .refine((entries) => entries.every((entry) => !/[\s/]/.test(entry.replace(/\/\d{1,3}$/, "")) && !entry.includes("://")), {
-      message: "MCP_OAUTH_PRIVATE_HOST_ALLOWLIST takes hosts (idp.corp.example, *.corp.example, host:port) or CIDRs (10.0.0.0/8), not URLs"
-    }),
+    .refine(
+      (entries) =>
+        entries.every(
+          (entry) =>
+            !/[\s/]/.test(entry.replace(/\/\d{1,3}$/, "")) &&
+            !entry.includes("://") &&
+            // A bare IPv6 address would be read as host:port; it has to be written as a range (fd00::5/128).
+            (entry.includes("/") || (entry.match(/:/g) ?? []).length <= 1)
+        ),
+      {
+        message:
+          "MCP_OAUTH_PRIVATE_HOST_ALLOWLIST takes hosts (idp.corp.example, *.corp.example, host:port) or CIDRs (10.0.0.0/8, fd00::5/128), not URLs or bare IPv6 addresses"
+      }
+    ),
   /**
    * Offer L2M's Client ID Metadata Document (`<redirect base>/api/mcp/oauth/client-metadata.json`) as the client id
    * to authorization servers that advertise `client_id_metadata_document_supported`, before dynamic registration.

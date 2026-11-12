@@ -319,6 +319,20 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     return this.options.redirectUri;
   }
 
+  /**
+   * The issuer a pre-registered client id of this server was used with, from any of its connections (the caller's
+   * secret, the shared connection's row and every user's row), or null when it has not been used yet.
+   */
+  private async boundIssuerFor(serverId: string, clientId: string, previous: StoredOAuthSecret | null): Promise<string | null> {
+    if (previous?.client.registration === "pre_registered" && previous.client.clientId === clientId && previous.issuer) return previous.issuer;
+    const rows: Array<Pick<McpOAuthConnectionRecord, "clientRegistration" | "clientId" | "authorizationServer">> = [];
+    const shared = await this.store.getMcpOAuthConnection(serverId);
+    if (shared) rows.push(shared);
+    rows.push(...(await this.store.listMcpUserOAuthConnections({ serverId })));
+    const used = rows.find((row) => row.clientRegistration === "pre_registered" && row.clientId === clientId && row.authorizationServer);
+    return used?.authorizationServer ?? null;
+  }
+
   /** Fetch options for the OAuth requests of the MCP server at `endpoint`. */
   private fetchOptionsFor(endpoint: string): { fetchImpl?: FetchLike } {
     if (this.options.egressFetch) return { fetchImpl: this.options.egressFetch(endpoint) };
@@ -470,10 +484,12 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     const configuredClientId = typeof oauthSettings.clientId === "string" ? oauthSettings.clientId.trim() : "";
     if (configuredClientId) {
       // A pre-registered client id belongs to the authorization server it was first used with; if the server's
-      // metadata now names another one, refuse instead of sending the id (and its secret) there.
-      if (previous?.client.registration === "pre_registered" && previous.client.clientId === configuredClientId && previous.issuer !== metadata.issuer) {
+      // metadata now names another one, refuse instead of sending the id (and its secret) there. Every connection of
+      // the server counts (the shared one and each user's), so a user connecting for the first time is held to it too.
+      const boundIssuer = await this.boundIssuerFor(server.id, configuredClientId, previous);
+      if (boundIssuer !== null && boundIssuer !== metadata.issuer) {
         throw new McpOAuthUserError(
-          `The authorization server changed: the client id was used with ${previous.issuer}, but the MCP server now names ${metadata.issuer}. Check the client id (register L2M with the new authorization server and enter its client id), or disconnect to start over.`,
+          `The authorization server changed: the client id was used with ${boundIssuer}, but the MCP server now names ${metadata.issuer}. Check the client id: an admin registers L2M with the new authorization server and enters its client id on the server.`,
           409
         );
       }

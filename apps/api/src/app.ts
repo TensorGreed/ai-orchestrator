@@ -13783,9 +13783,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // L2M's Client ID Metadata Document: public (authorization servers fetch it), holds no secret, and is served
   // only when MCP_OAUTH_CLIENT_METADATA_ENABLED is on. Its `client_id` is exactly the URL it is served at.
   app.get(MCP_OAUTH_CLIENT_METADATA_PATH, async (_request, reply) => {
-    if (!config.MCP_OAUTH_CLIENT_METADATA_ENABLED) {
+    if (!config.MCP_OAUTH_CLIENT_METADATA_ENABLED || mcpOAuthClientMetadataProblem) {
       reply.code(404);
-      return { error: "Client ID Metadata Documents are not enabled (MCP_OAUTH_CLIENT_METADATA_ENABLED)." };
+      return {
+        error: mcpOAuthClientMetadataProblem
+          ? "The client metadata document is not offered: its URL is not a public https URL (see MCP_OAUTH_REDIRECT_BASE_URL)."
+          : "Client ID Metadata Documents are not enabled (MCP_OAUTH_CLIENT_METADATA_ENABLED)."
+      };
     }
     reply.header("cache-control", "public, max-age=3600");
     return buildClientMetadataDocument({ url: mcpOAuthClientMetadataUrl, redirectUri: mcpOAuthService.redirectUri });

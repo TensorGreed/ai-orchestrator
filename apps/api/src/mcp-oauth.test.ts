@@ -1228,3 +1228,34 @@ describe("MCP 2026-07-28 authorization rules", () => {
     });
   });
 });
+
+describe("MCP 2026-07-28 authorization rules: review follow-ups", () => {
+  it("holds a user connecting for the first time to the issuer another user's connection bound the client id to", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const alice = await login(context, "builder", "alice");
+    const bob = await login(context, "builder", "bob");
+    const serverId = await registerDelegatedServer(context, admin, {
+      connection: { endpoint: `${fake.base}/mcp`, transport: "http_streamable", authType: "oauth", oauth: { clientId: "pre-registered-3" } }
+    });
+    await connectOwn(context, alice, serverId);
+
+    fake.authorizationServers = [`${fake.base}/auth2`];
+    const authorizeBefore = fake.authorizeRequests.length;
+    const started = await call(context, "POST", `/api/mcp/connections/${serverId}/connect`, bob, {});
+    expect(started.statusCode).toBe(409);
+    expect(started.json<{ error: string }>().error).toMatch(/authorization server changed/);
+    expect(fake.authorizeRequests.length).toBe(authorizeBefore);
+  });
+
+  it("does not serve the client metadata document when its URL is not public https", async () => {
+    const context = await createTestContext({ MCP_OAUTH_CLIENT_METADATA_ENABLED: "true", MCP_OAUTH_REDIRECT_BASE_URL: "http://localhost:4000" });
+    expect((await context.app.inject({ method: "GET", url: "/api/mcp/oauth/client-metadata.json" })).statusCode).toBe(404);
+  });
+
+  it("rejects a bare IPv6 address in the allow list and accepts it as a range", () => {
+    const key = crypto.randomBytes(32).toString("base64");
+    expect(() => parseConfig({ SECRET_MASTER_KEY_BASE64: key, MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: "fd00::5" })).toThrow(/bare IPv6/);
+    expect(parseConfig({ SECRET_MASTER_KEY_BASE64: key, MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: "fd00::5/128" }).MCP_OAUTH_PRIVATE_HOST_ALLOWLIST).toEqual(["fd00::5/128"]);
+  });
+});

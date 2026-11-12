@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   McpOAuthError,
+  assertSecureOAuthUrl,
   discoverAuthorizationServer,
+  isLoopbackHost,
   oauthApplicationType,
   registerOAuthClient,
   validateAuthorizationResponseIssuer,
@@ -124,6 +126,16 @@ describe("dynamic client registration: application_type", () => {
     expect(oauthApplicationType("http://127.0.0.1:4000/api/mcp/oauth/callback")).toBe("native");
     expect(oauthApplicationType("http://[::1]:4000/api/mcp/oauth/callback")).toBe("native");
     expect(oauthApplicationType("http://studio.localhost:5173/api/mcp/oauth/callback")).toBe("native");
+    expect(oauthApplicationType("https://127.evil.example/api/mcp/oauth/callback")).toBe("web");
+  });
+
+  it("does not treat names that start with 127. as loopback", () => {
+    expect(isLoopbackHost("127.0.0.1")).toBe(true);
+    expect(isLoopbackHost("127.255.0.9")).toBe(true);
+    expect(isLoopbackHost("127.evil.example")).toBe(false);
+    expect(isLoopbackHost("127.0.0.1.evil.example")).toBe(false);
+    expect(() => assertSecureOAuthUrl("http://127.evil.example/token", "Token endpoint")).toThrow(/must use https/);
+    expect(assertSecureOAuthUrl("http://127.0.0.1:9000/token", "Token endpoint").hostname).toBe("127.0.0.1");
   });
 
   it("is sent in every registration request", async () => {
