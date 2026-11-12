@@ -91,5 +91,5 @@ Retention, holds and deletes do not reach backups already taken. Rotate backups 
 ## Further reading
 
 - [Data retention](/operations/data-retention), [Legal holds](/operations/legal-hold), [Data-subject requests](/security/data-subject-requests), [Production capture: data-subject lookup](/product/production-capture#data-subject-lookup)
-- [GDPR Article 17: right to erasure](https://gdpr-info.eu/art-17-gdpr/) and [Article 15: right of access](https://gdpr-info.eu/art-15-gdpr/) and [Article 12: time limits](https://gdpr-info.eu/art-12-gdpr/) (gdpr-info.eu, reproducing Regulation (EU) 2016/679)
+- [GDPR Article 17: right to erasure](https://gdpr-info.eu/art-17-gdpr/), [Article 15: right of access](https://gdpr-info.eu/art-15-gdpr/) and [Article 12: time limits](https://gdpr-info.eu/art-12-gdpr/) (gdpr-info.eu, reproducing Regulation (EU) 2016/679)
 - Pull requests: [#174 retention service](https://github.com/TensorGreed/ai-orchestrator/pull/174), [#176 per-project retention](https://github.com/TensorGreed/ai-orchestrator/pull/176), [#177 legal holds](https://github.com/TensorGreed/ai-orchestrator/pull/177), [#178 data-subject requests](https://github.com/TensorGreed/ai-orchestrator/pull/178) (GitHub)
