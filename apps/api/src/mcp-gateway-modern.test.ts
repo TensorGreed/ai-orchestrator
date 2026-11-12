@@ -447,6 +447,13 @@ describe("modern mode on", () => {
       expect(response.json().error.code).toBe(-32601);
     }
 
+    // initialize sent as a modern request (modern header and _meta): a method 2026-07-28 removed, so 404 with -32601
+    // and the request's id, and no session.
+    const modernInit = await send({ protocolVersion: MODERN, capabilities: {}, clientInfo: { name: "x", version: "1" }, _meta: modernMeta() }, modernHeaders("initialize"), "initialize");
+    expect(modernInit.statusCode).toBe(404);
+    expect(modernInit.json()).toMatchObject({ jsonrpc: "2.0", id: 9, error: { code: -32601 } });
+    expect(modernInit.headers["mcp-session-id"]).toBeUndefined();
+
     // Only the one valid call created the caller's state; refused requests never do.
     expect(await auditEvents(fixture.context.store, "mcp_gateway.caller_seen")).toHaveLength(1);
   });

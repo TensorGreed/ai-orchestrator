@@ -46,6 +46,12 @@ describe("isModernGatewayMessage", () => {
     // Batches never.
     expect(isModernGatewayMessage([{ jsonrpc: "2.0", id: 1, method: "tools/list" }], "2026-07-28")).toBe(false);
   });
+
+  it("treats initialize as modern only with a modern MCP-Protocol-Version header", () => {
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: { _meta: META } }, "2026-07-28")).toBe(true);
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: { _meta: META } }, undefined)).toBe(false);
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } }, "2025-11-25")).toBe(false);
+  });
 });
 
 describe("validateModernGatewayMessage", () => {

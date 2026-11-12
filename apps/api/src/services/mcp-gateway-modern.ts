@@ -3,10 +3,10 @@
  * modern clients next to legacy ones on the same endpoint (a "dual-era
  * server"), kept out of the routes file.
  *
- * A request is modern when it is a single JSON-RPC message (not a batch,
- * not `initialize`) whose `params._meta` carries
- * `io.modelcontextprotocol/protocolVersion`, or that is sent with a modern
- * `MCP-Protocol-Version` header. Everything else follows the
+ * A request is modern when it is a single JSON-RPC message sent with a
+ * modern `MCP-Protocol-Version` header, or a single message (not
+ * `initialize`) whose `params._meta` carries
+ * `io.modelcontextprotocol/protocolVersion`. Everything else follows the
  * legacy session path unchanged. Modern requests are only served when
  * MCP_GATEWAY_MODERN_PROTOCOL is `on`; with it `off` (the default) they get
  * the legacy answer for a request without a session, which dual-era clients
@@ -67,15 +67,17 @@ export function isModernProtocolVersionHeader(value: string | undefined): boolea
 }
 
 /**
- * Whether a parsed body is a modern request: one message with a method other than `initialize` whose `_meta` has the
- * protocol version key (even a malformed value: that is answered with -32602, not with the legacy session error), or
- * one message sent with a modern `MCP-Protocol-Version` header. A header-modern message without the `_meta` keys is a
- * malformed modern request (-32602 with its id), not a request without a session: legacy clients never send a modern
- * version in that header.
+ * Whether a parsed body is a modern request: one message sent with a modern `MCP-Protocol-Version` header, or one
+ * message with a method other than `initialize` whose `_meta` has the protocol version key (even a malformed value:
+ * that is answered with -32602, not with the legacy session error). A header-modern message without the `_meta` keys
+ * is a malformed modern request (-32602 with its id), not a request without a session, and a header-modern
+ * `initialize` asks for a method 2026-07-28 removed (404 with -32601): legacy clients never send a modern version in
+ * that header. An `initialize` without it opens a legacy session, whatever its `_meta` holds.
  */
 export function isModernGatewayMessage(parsed: unknown, versionHeader?: string): boolean {
-  if (!isRecord(parsed) || typeof parsed.method !== "string" || parsed.method === "initialize") return false;
+  if (!isRecord(parsed) || typeof parsed.method !== "string") return false;
   if (isModernProtocolVersionHeader(versionHeader)) return true;
+  if (parsed.method === "initialize") return false;
   return inspectRequestMeta(parsed.params).era === "modern";
 }
 
