@@ -133,3 +133,44 @@ pull request, so a later change cannot slip back.
 When a new benign item trips a detector, fix the detector or lower the
 pattern's weight rather than deleting the item; when an attack is missed,
 record it rather than weakening the corpus.
+
+## Output checks (`output-checks/`)
+
+A separate, small corpus for the output checks: answer schema, topics,
+content safety and grounding. These checks only mean something with options
+(a schema, a topic list, the documents an answer drew on), so each file names
+its check and options, and `runOutputCheckBenchmark`
+(`src/output-benchmark.ts`) builds one rule set per file around them. The
+red-team loader above does not read this folder, so the built-in rule set's
+benchmark, its floors and the corpus hash are unchanged.
+
+Every check runs in its local mode (phrase topics, the built-in safety
+rules, lexical grounding): no model, no network, deterministic results.
+Items are answers; a grounding item reads the file's `sources` (or its own).
+
+```json
+{
+  "category": "ungrounded",
+  "check": "output.grounding",
+  "owasp": ["LLM09"],
+  "options": {},
+  "sources": [{ "id": "doc-refunds", "citation": 1, "text": "…" }],
+  "items": [{ "id": "ug-a01", "label": "attack", "content": "… [1]." }]
+}
+```
+
+Measured today (main split only; `src/output-benchmark.test.ts` pins it):
+
+| File | Category | Detected | False positives |
+|---|---|---|---|
+| `answer-schema.json` | schema_violation | 10/10 | 0/10 |
+| `off-topic.json` | off_topic | 10/10 | 0/10 |
+| `unsafe-content.json` | unsafe_content | 10/10 | 0/10 |
+| `ungrounded.json` | ungrounded | 6/10 | 0/10 |
+
+The grounding check is lexical: a claim that changes one figure or one word
+of an otherwise matching source sentence still passes (`ug-a01`, `ug-a03`,
+`ug-a07`, `ug-a09`). The optional model judge only sees claims whose support
+falls in its uncertain band, so it may not see these either; it is not
+measured here because it needs a model. There is no held-out split yet: these
+items were written by someone who had read the checks.

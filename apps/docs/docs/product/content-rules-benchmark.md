@@ -162,6 +162,10 @@ An eval run can also take `guardProfile: { profileId, version? }`. That rule set
 
 Verdicts from eval runs and replay jobs are kept in the run's trace. They are left out of **Security → Overview**, `GET /api/guard/events` and `GET /api/guard/stats`, unless you tick **Include eval and replay runs** on the Overview or add `includeEval=true`. Eval runs are live (real model, tools and secrets), so tick it to see what a poisoned document did during one. Each such event carries an **eval** chip (`runSource: "eval"`), and an eval run that pauses for approval keeps the tag when it resumes.
 
+## Output checks
+
+The answer schema, topic, content safety and grounding checks have their own small corpus in `packages/guard-sdk/corpus/output-checks/`, run by `runOutputCheckBenchmark()` with local modes only. It is not part of this benchmark, the Security page or `l2m guard benchmark`. See [Output checks](./content-rules-output-checks.md#benchmark).
+
 ## Adding an external corpus
 
 The corpus contains only items written for L2M. To benchmark against a public dataset, convert it to the corpus format and keep it apart:

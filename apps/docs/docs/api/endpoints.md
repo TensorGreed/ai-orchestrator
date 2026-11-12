@@ -249,7 +249,7 @@ Bindings:
 Events (masked evidence only):
 
 - `GET /api/executions/:id/guard-events` (viewer)
-- `GET /api/guard/events?projectId=&workflowId=&profileId=&channel=&action=&days=&since=&findings=true&placement=&limit=&offset=` (viewer; `{ events, total }`, newest first; `placement=gateway` for MCP gateway calls only, `run` for runs only)
+- `GET /api/guard/events?projectId=&workflowId=&profileId=&channel=&action=&days=&since=&findings=true&placement=&limit=&offset=` (viewer; `{ events, total }`, newest first; `placement=gateway` for gateway calls only, `run` for runs only, `response` for responses to external callers, `request` for refused or rewritten webhook payloads)
 - `GET /api/guard/stats?projectId=&workflowId=&profileId=&placement=&days=` (viewer; counts by verdict, action, category, channel and detector, shadow would-block, budget overruns and per-day counts; 14 days by default)
 
 Verdicts from eval runs and replay jobs are left out of `/api/guard/events` and `/api/guard/stats` unless `includeEval=true`; a run's own `/api/executions/:id/guard-events` lists them. Their events carry `runSource: "eval"`, also after an approval resume.
@@ -350,6 +350,22 @@ See [Approval gates](../product/approvals.md). Release requests (Phase 15.4) app
 - `ANY /webhook/:path`
 - `ANY /webhook-test/:path`
 
+### Content rules on responses (`content_filter`)
+
+When a rule set has a `response` channel, what `/webhook/:path`, `/webhook-test/:path`, `POST /api/chat/:id` and `POST /api/mcp-server/:path/invoke` return is checked first (see [Responses to external callers](../product/content-rules.md#responses-to-external-callers)). Without one, nothing changes.
+
+| Case | Webhooks | Chat | MCP invoke |
+|---|---|---|---|
+| Response withheld (block, review, approval, or a check that could not run) | `422 { error: "The response was withheld by content rules.", code: "content_filter", executionId }` | the same `422`, plus `session_id` | `200 { ok: false, executionId, code: "content_filter", error, result: { isError: true, content: [{ type: "text", text }] } }` |
+| Run paused for approval | `output` is `{ waitingForApproval: true, executionId }` | the same `output` | `result` is the same object |
+| Run failed | `400` with `error: "The workflow run failed."` and `executionId` | `status: "error"`, no error text | `500 { error: "The workflow run failed.", executionId }` |
+
+An idempotent retry of a withheld webhook call answers the same `422`.
+
+With a `trigger_input` channel, a webhook payload the rules refuse answers `400 { error: "The request was refused by content rules.", code: "content_filter" }` before anything runs. `/api/chat` and MCP invoke are not checked this way.
+
+`POST /api/webhooks/execute` (builder) is not checked.
+
 ## Helper
 
 - `GET /helper-chat`
@@ -360,3 +376,4 @@ See [Approval gates](../product/approvals.md). Release requests (Phase 15.4) app
 - `403`: authorization/signature/replay errors
 - `404`: resource not found
 - `409`: idempotency conflicts
+- `422`: content rules withheld a response (`code: "content_filter"`)

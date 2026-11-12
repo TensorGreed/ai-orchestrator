@@ -111,6 +111,10 @@ A rule set that rewrites the answer (redact, mask, protect, or the hidden-charac
 
 `"stream": "buffer"` on any `final_output` rule always buffers.
 
+[Output checks](./content-rules-output-checks.md) that judge a complete answer (answer schema, grounding) are skipped by the checks at each boundary and run in the check of the whole answer. When one of them would block (not in shadow, not `allow`), the answer is buffered, so the block can stop it before anything is sent. Topic and safety checks run at each boundary like any other detector, on the text checked so far. A topic allow list can then flag an answer whose first part names no allowed topic yet; set `"stream": "buffer"` on the `off_topic` rule so the whole answer is judged once.
+
+Output checks set to call a model (safety by model, topics by meaning, the grounding judge) do not run on `/v1`. A rule set with one cannot be bound to a route set or a client: the binding, or a save that adds such a check to a bound rule set, answers `400`. A project's enforced rule set is not refused; on `/v1` such a check cannot run, and the rule set's failure policy decides (`fail_closed`, the default, blocks every answer).
+
 With windowed rewrites, the held-back tail has limits. Text that was released cannot be recalled. If a value to rewrite turns out to have started in text already sent, the stream is cut rather than rewriting only the rest. If the check of the whole answer rewrites a value that went out unchanged, the stream ends with `content_filter` and the request is recorded as blocked, never as rewritten. So part of a match can reach the caller, followed by a cut, when:
 
 - a match with spaces in it is longer than the tail, such as a long custom phrase;
