@@ -1,9 +1,9 @@
 # Data-subject requests
 
 When someone asks what you hold about them, an admin (or a user with the `data_subject:manage` permission) makes a
-**data-subject request**: L2M looks for the person's identifier in what it stores and builds a zip export that is
-downloaded once. Nothing here is on by default and a
-deployment that never uses it behaves exactly as before.
+**data-subject request**: L2M looks for the person's identifier in what it stores and either builds a zip export that is
+downloaded once, or, after you confirm what it found, deletes it. Nothing here is on by default and a deployment that
+never uses it behaves exactly as before.
 
 Two parts work together:
 
@@ -12,8 +12,9 @@ Two parts work together:
 - **Requests**: an admin enters the person's value; L2M follows the references and, unless turned off, also searches
   stored data for the value.
 
-Deleting a person's data is a separate step, covered in [Production capture](../product/production-capture.md#data-subject-lookup)
-for golden and captured runs.
+Deleting is covered in [Deleting a person's data](#deleting-a-persons-data) below. The older
+[data-subject lookup](../product/production-capture.md#data-subject-lookup) for golden and captured runs still works and
+leaves the same erasure records.
 
 ## Subject references
 
@@ -126,6 +127,63 @@ The download is spent when it starts: if the file cannot be opened (the master k
 **Review the export before you pass it on.** A matched run, approval or memory session is exported whole, and it may
 name other people too (a support conversation about a second customer, a batch run).
 
+## Deleting a person's data
+
+Choose **Delete (erasure)** instead of **Export** when you make the request. The lookup runs exactly as for an export
+(references, and the search when it is on) and then stops at **Preview ready: confirm to delete**, showing what it found
+per kind. Nothing is deleted until an admin (or a `data_subject:manage` holder) presses **Confirm deletion**, which needs
+a recent MFA check when step-up is on. A preview not confirmed within `SUBJECT_EXPORT_TTL_HOURS` expires, and the value
+is dropped. Reversible tokens cannot be revealed on a deletion request.
+
+The deletion then runs in the background on the leader, resumes after a restart, and checks each row found by the
+search again before deleting it (a row that no longer holds the value is skipped).
+
+### End users
+
+| What was found | What is deleted |
+|---|---|
+| A run | The run, its paused state, tool-call telemetry, rule events, MCP cassettes, approval requests, elicitations, queue jobs (and dead letters), and its subject references. |
+| Usage of a deleted run | **Kept**, with `user_id` and `user_email` cleared: tokens and cost stay, so totals, budgets and spend reports do not change. |
+| Approval request, paused run, MCP cassette | The row. |
+| Agent memory session or artifact | The row. |
+| Golden or captured run, golden-set case, eval or replay result | The row, as the data-subject lookup deletes it. Release-gate jobs whose evidence it removed are marked stale. |
+| Reversible tokens | The vault entries of tokens that appear in the deleted rows and stand for **this person's** value. A later reveal of such a token finds nothing. Tokens of other people's values stay. |
+
+### Staff members
+
+For a staff member the preview shows whether the account exists and how many runs, workflows, approvals, eval runs and
+releases record them, and how many audit-log rows they have. On confirmation:
+
+- their email is replaced with a pseudonym (`erased-user-` and 8 hex characters, the same for every row) in every column
+  that records who started, wrote, shared, decided or changed something (runs, usage, approvals, workflows, versions,
+  releases, gates, rules, MCP servers and policies, destinations, variables, legal holds, requests and more);
+- their account is deleted the way **Settings → Users → Delete** does: sessions, API keys, MFA, SSO identities, project
+  roles, invites and their MCP sign-ins go with it;
+- **their audit-log rows are kept unchanged** for security logging until `AUDIT_LOG_RETENTION_DAYS` removes them.
+  Rewriting them would break the audit chain, which still verifies afterwards.
+
+You cannot erase your own account, nor the only admin who can sign in. A staff request does not search runs for the
+email; make an end-user request too if their own data flows through runs.
+
+### Legal holds
+
+A row under an active [legal hold](../operations/legal-hold.md) is not deleted: the request finishes as **Partly
+deleted: waiting for a legal hold**, with how many rows it kept. When the hold is released the deletion runs again for
+those rows (`data_subject.deletion_requeued`); a row another hold still keeps waits for that one. Holds outrank
+erasure (GDPR Art. 17(3)(e)).
+
+### Erasure records and backups
+
+Every erased row leaves an **erasure record** (a tombstone: the kind, the row id and when; agent memory and staff
+members by a keyed hash, never the value). `db:import` and `db:copy` re-apply them after a restore, so a backup written
+before the deletion does not bring the data back: they print `re-applied N erasures`. See
+[Backup and recovery](../operations/backup-and-recovery.md#erasures-after-a-restore). Records are kept for
+`ERASURE_TOMBSTONE_RETENTION_DAYS` (400 by default): keep it longer than the oldest backup you might restore.
+
+**Not covered** by a deletion: logs, metrics, traces and log-streaming destinations; backups already written (until
+restored, see above); model providers, MCP servers and other systems the runs sent data to; knowledge bases; tokens
+that are not in the person's rows, and format-preserving tokens.
+
 ## Due dates and notices
 
 Each request is due `SUBJECT_REQUEST_DUE_DAYS` after it was made (30 days by default). Once a request is past its due
@@ -142,6 +200,12 @@ the audit log. The notice names the request, never the person.
 | `data_subject.request_failed` | The lookup failed. |
 | `data_subject.export_downloaded` | A download, or a refused one (`failure`, with the reason). |
 | `data_subject.request_overdue` | The request passed its due date. |
+| `data_subject.deletion_ready` | A deletion's preview is ready (counts; for a staff member, the preview). |
+| `data_subject.deletion_confirmed` | Someone confirmed a deletion. Written before anything is deleted. |
+| `data_subject.deleted` | The deletion finished (deleted per kind, usage rows cleared, vault tokens deleted, a staff member's pseudonym). |
+| `data_subject.deletion_deferred` | It finished except for rows a legal hold keeps. |
+| `data_subject.deletion_requeued` | A hold was released and the kept rows are tried again. |
+| `data_subject.erasures_skipped_on_restore` | A restore ran with `--skip-erasures --i-understand` (written at the next start). |
 
 All are in the `data_protection` audit category. The person's value never appears in the audit log, in logs, in API
 answers or in error messages.
@@ -153,6 +217,7 @@ answers or in error messages.
 | `SUBJECT_REQUEST_DUE_DAYS` | 30 | Days until a request is due (1 to 365). |
 | `SUBJECT_EXPORT_TTL_HOURS` | 72 | Hours an export can be downloaded (1 to 720). |
 | `SUBJECT_EXPORT_MAX_BYTES` | 209715200 | Most bytes of rows in one export, before compression (1 MB to 512 MB). |
+| `ERASURE_TOMBSTONE_RETENTION_DAYS` | 400 | Days an erasure record is kept so restores re-apply it (0 keeps them). |
 
 ## API
 
@@ -166,6 +231,10 @@ GET  /api/data-protection/requests
 GET  /api/data-protection/requests/:id
 GET  /api/data-protection/requests/:id/export        # application/zip, once
 
+POST /api/data-protection/requests
+{ "type": "delete", "subjectKind": "staff", "value": "former.employee@example.com" }
+POST /api/data-protection/requests/:id/confirm       # {} — step-up when it is on
+
 POST /api/data-protection/subject-refs/preview
 { "workflowId": "wf_…", "subjectRefs": ["{{input.customerId}}"] }
 ```
@@ -174,4 +243,5 @@ POST /api/data-protection/subject-refs/preview
 
 The reference key and a running request's sealed value are in backups and are re-sealed by `db:import
 --source-master-key`, so references keep matching after a restore with a new master key. Exports are never in
-backups: a request that was ready when the backup was taken shows as **Expired** after a restore.
+backups: a request that was ready when the backup was taken shows as **Expired** after a restore. Erasure records are
+in backups and are re-applied on every restore (see above).

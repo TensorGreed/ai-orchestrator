@@ -26,6 +26,9 @@ While a hold is active, the data it covers is kept from:
   only its last messages, as before.
 - **Data-subject deletes** (`find-subject/delete`). Each held row is skipped with reason `held`; the rest go ahead. A
   hold keeps data even from an erasure request, as GDPR Art. 17(3)(e) allows for legal claims.
+- **Data-subject deletion requests.** Held rows are deferred (the request shows **Partly deleted: waiting for a legal
+  hold**) and a staff member's email stays in held rows; releasing the hold runs the deletion again for them. See
+  [Deleting a person's data](../security/data-subject-requests.md#deleting-a-persons-data).
 
 What a hold does **not** keep:
 

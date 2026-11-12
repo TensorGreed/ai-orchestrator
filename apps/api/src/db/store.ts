@@ -110,6 +110,7 @@ import type { SubjectStore } from "./subject-store.js";
 import type { LegalHoldItemView, LegalHoldRef, LegalHoldStatus, LegalHoldView, RetentionDataClass, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
 import type { RetentionScope, RetentionTable } from "./retention-tables.js";
 import type { LegalHoldInsert, LegalHoldTarget } from "./legal-hold-sql.js";
+import type { ErasureTombstoneWrite, SubjectDeleteKind, SubjectErasure, SubjectRowDeletion } from "./erasure.js";
 
 /** The decision `decideApprovalRequest` records. */
 export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0];
@@ -1206,13 +1207,29 @@ export interface Store extends AiGatewayStore, SubjectStore {
   /** Rows the data-subject lookup searches, per store. */
   countSubjectRows(kind: SubjectStoreKind): Promise<number>;
   /**
-   * Deletes one row the data-subject lookup found. A golden run takes the
-   * golden-set cases made from it, and the results of those cases, with it.
+   * Deletes one row a data-subject lookup or request found, with what belongs to it, in one transaction (db/erasure.ts):
+   * a golden run takes its golden-set cases and their results; a run or paused run takes its whole run, keeping its
+   * usage rows with the person cleared; a memory session takes its artifacts and cached tool results. A row a legal
+   * hold keeps stays (`heldBy`). With `erasure`, tombstones are written for the row and what it took, in the same
+   * transaction.
    */
-  deleteSubjectRow(
-    kind: SubjectStoreKind,
-    id: string
-  ): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }>; heldBy?: LegalHoldRef[] }>;
+  deleteSubjectRow(kind: SubjectDeleteKind, id: string, erasure?: SubjectErasure): Promise<SubjectRowDeletion>;
+  /** 13.3 — writes erasure tombstones (vault tokens and staff erasures; row deletions write their own). */
+  writeErasureTombstones(rows: ErasureTombstoneWrite[]): Promise<void>;
+  /** 13.3 — deletes token vault entries with their tombstones; returns how many entries were deleted. */
+  deleteGuardVaultTokens(tokens: string[], erasure: Pick<SubjectErasure, "requestId" | "erasedAt">): Promise<number>;
+  /** 13.3 — removes up to `limit` tombstones erased before `before`; returns how many. */
+  pruneErasureTombstones(before: string, limit: number): Promise<number>;
+  /** 13.3 — the markers of restores that skipped re-applying erasures, removed as they are read (one reader gets each). */
+  takeRestoreSkippedMarkers(): Promise<Array<{ id: string; at: string }>>;
+  /** 13.3 — tombstones kept (restore markers left out). */
+  countErasureTombstones(): Promise<number>;
+  /**
+   * 13.3 — replaces a staff member's email with `pseudonym` in every authorship column (STAFF_AUTHORSHIP_COLUMNS), in
+   * batches. Rows a legal hold keeps are left and counted (`held`); `remaining` counts rows another transaction had
+   * locked (Postgres SKIP LOCKED), to retry.
+   */
+  pseudonymiseStaff(input: { emails: string[]; pseudonym: string; batch?: number }): Promise<{ changed: number; held: number; remaining: number }>;
   /** Bytes one workflow's captured candidates use (REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW). */
   sumReplayCaptureBytesForWorkflow(workflowId: string): Promise<number>;
   /** The oldest candidates of a workflow with their sizes, oldest first (byte-budget eviction), held ones left out. */

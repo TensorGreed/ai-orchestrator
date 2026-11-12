@@ -169,9 +169,38 @@ sign-in session ids; `db:export` leaves sessions out.
        or, when it is lost, pass `--allow-key-mismatch` and recover as in
        [Restore after losing the master key](#restore-after-losing-the-master-key). The check opens only the
        backup's first `secrets` and `mfa_secrets` rows: a backup with neither is not checked against the key.
+     After the rows are loaded it re-applies the [erasure records](#erasures-after-a-restore) and prints
+     `re-applied N erasures`.
 3. **Start the API with the same `SECRET_MASTER_KEY_BASE64`** (and the same build, or a newer one: it migrates the
    schema forward at start). Start one instance first, then the rest.
 4. **Verify** (below).
+
+### Erasures after a restore
+
+A [data-subject deletion](../security/data-subject-requests.md#deleting-a-persons-data) leaves an erasure record for each
+row it removed (`erasure_tombstones`; agent memory and staff members by a keyed hash). A backup written before the
+deletion still holds the rows, so `db:import` and `db:copy` re-apply every record after loading, inside the same
+transaction, and print `Erasures: re-applied N erasures`:
+
+- the records in the backup itself;
+- with `db:import --replace`, the destination's own records from before the replace, so restoring an older backup over
+  the live database does not bring back what was erased since;
+- with `db:import --erasures-from /backups/newest.json`, the records of another (newer) `db:export` file, for a restore
+  of an older backup into an empty database.
+
+Records of agent memory or of a staff member need the subject key, which is sealed with `SECRET_MASTER_KEY_BASE64`: run
+the restore with that key set. When it cannot be opened the restore is refused and nothing is written.
+
+`--skip-erasures` restores without re-applying any record: data deleted after the backup was written comes back. It is
+refused unless `--i-understand` is passed too, and the next API start writes `data_subject.erasures_skipped_on_restore`
+to the audit log.
+
+File-level restores (copying a SQLite file, `pg_restore`, point-in-time recovery) do not re-apply anything: they bring
+back the database exactly as it was. Before one, take a `db:export` of the current database; after it, restore with
+`db:import --replace --erasures-from` that export instead, or repeat the deletion requests made since the backup.
+
+Records are kept for `ERASURE_TOMBSTONE_RETENTION_DAYS` (400 by default; 0 keeps them). Keep it longer than the oldest
+backup you might restore.
 
 The bootstrap admin (`BOOTSTRAP_ADMIN_EMAIL`) is only created when the user table is empty, so a restored database
 keeps its own users and passwords.
@@ -302,7 +331,9 @@ export DB_POSTGRESDB_URL=postgres://l2m:...@db:5432/ai_orchestrator   # an empty
 pnpm --filter @ai-orchestrator/api db:copy -- --from sqlite:/backups/l2m-20261029-0400.db --to postgres --yes
 ```
 
-Start the API with `DB_TYPE=postgres` and the same master key.
+Start the API with `DB_TYPE=postgres` and the same master key. `db:copy` re-applies the
+[erasure records](#erasures-after-a-restore) it copies before committing (`--skip-erasures --i-understand` to leave them
+out).
 
 ## Cluster mode
 

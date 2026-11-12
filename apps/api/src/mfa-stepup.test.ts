@@ -362,7 +362,8 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "POST", url: "/api/legal-holds", payload: { name: "Matter", reason: "r", scopeType: "project", scopeId: project.id } },
       { method: "POST", url: "/api/legal-holds/lh_x/release", payload: { reason: "r" } },
       { method: "POST", url: "/api/data-protection/requests", payload: { type: "export", value: "ana@example.com", revealTokens: true } },
-      { method: "GET", url: "/api/data-protection/requests/dsr_x/export" }
+      { method: "GET", url: "/api/data-protection/requests/dsr_x/export" },
+      { method: "POST", url: "/api/data-protection/requests/dsr_x/confirm", payload: {} }
     ];
     const seen = new Set<string>();
     for (const route of routes) {

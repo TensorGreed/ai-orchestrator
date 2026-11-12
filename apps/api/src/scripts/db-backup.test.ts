@@ -16,6 +16,10 @@ import Database from "better-sqlite3";
 import { SqliteStore } from "../db/database.js";
 import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes, wtf8 } from "./legacy-audit.test-helper.js";
 import { SecretService } from "../services/secret-service.js";
+import { SubjectRequestService } from "../services/subject-request-service.js";
+import { memorySessionTombstoneId } from "../db/erasure.js";
+import { memorySessionRowId } from "../db/subject-store.js";
+import { ErasureKeyMissing } from "./erasure-restore.js";
 import {
   AuditVerdictMismatch,
   EXPORTED_TABLES,
@@ -360,6 +364,86 @@ describe("db:export records the audit verdict; db:import refuses a restore that 
     expect((await destinationState()).workflows).toEqual(["wf-before"]);
     await importInto(destPath, dump, { replace: true, allowReplaceHeld: true });
     expect((await destinationState()).workflows).toEqual(["wf-new"]);
+  });
+
+  it("13.3: a restore re-applies erasures made after the backup (replace, and --erasures-from into an empty database)", async () => {
+    const master = Buffer.alloc(32, 5);
+    const secretsKey = master.toString("base64");
+    const source = await SqliteStore.create(sourcePath);
+    const subjects = new SubjectRequestService({
+      store: source,
+      secrets: new SecretService(source, secretsKey),
+      matcher: async () => ({ match: () => null }) as never,
+      instanceId: "i",
+      isLeader: () => false,
+      dueDays: 30,
+      exportTtlHours: 72
+    });
+    const key = await subjects.subjectKey();
+    await source.upsertWorkflow({ id: "wf-1", name: "W", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
+    for (const id of ["run-erased", "run-kept"]) {
+      await source.saveExecutionHistory({ id, workflowId: "wf-1", workflowName: "W", status: "success", startedAt: "2026-11-01T00:00:00.000Z", inputJson: { id }, outputJson: {} });
+    }
+    const raw = new Database(sourcePath);
+    raw.prepare("INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at) VALUES ('ns', 'sess-1', '[]', 'x', 'x')").run();
+    raw.close();
+    await source.close();
+    const before = await exportFrom(sourcePath);
+
+    // The erasure, after the backup: a run, and a memory session (named by a keyed hash).
+    const live = await SqliteStore.create(sourcePath);
+    const erasedAt = new Date().toISOString();
+    expect((await live.deleteSubjectRow("execution", "run-erased", { requestId: "dsr-1", erasedAt })).deleted).toBe(true);
+    const sessionRow = memorySessionRowId("ns", "sess-1");
+    expect((await live.deleteSubjectRow("memory_session", sessionRow, { requestId: "dsr-1", erasedAt, tombstoneId: memorySessionTombstoneId(key, "ns", "sess-1") })).deleted).toBe(true);
+    await live.close();
+    const after = await exportFrom(sourcePath);
+    expect(after.tables.erasure_tombstones).toHaveLength(2);
+
+    const runs = (file: string) => {
+      const db = new Database(file, { readonly: true });
+      try {
+        return {
+          runs: (db.prepare("SELECT id FROM execution_history ORDER BY id").all() as Array<{ id: string }>).map((row) => row.id),
+          sessions: (db.prepare("SELECT COUNT(*) AS n FROM session_memory").get() as { n: number }).n
+        };
+      } finally {
+        db.close();
+      }
+    };
+
+    // --replace of the older backup over the live database: its own tombstones are kept and re-applied.
+    lines.length = 0;
+    const report = await importInto(sourcePath, before, { replace: true, erasures: { masterKey: master } });
+    expect(report.erasures).toMatchObject({ erasures: 2, carried: 2, skipped: false });
+    expect(lines.join("\n")).toMatch(/re-applied 2 erasures/);
+    expect(runs(sourcePath)).toEqual({ runs: ["run-kept"], sessions: 0 });
+
+    // Into an empty database, the older backup with --erasures-from the newer one's tombstones.
+    await importInto(destPath, before, { erasures: { masterKey: master, carry: after.tables.erasure_tombstones } });
+    expect(runs(destPath)).toEqual({ runs: ["run-kept"], sessions: 0 });
+
+    // Without the master key the keyed memory tombstone cannot be matched: refused, nothing changed.
+    const other = path.join(dir, "other.db");
+    const refused = await importInto(other, before, { erasures: { masterKey: null, carry: after.tables.erasure_tombstones } }).then(
+      () => undefined,
+      (error: unknown) => error as Error
+    );
+    expect(refused).toBeInstanceOf(ErasureKeyMissing);
+    expect(runs(other)).toEqual({ runs: [], sessions: 0 });
+
+    // --skip-erasures --i-understand: the rows come back and a marker is left for the next start to audit.
+    const skipped = path.join(dir, "skipped.db");
+    lines.length = 0;
+    await importInto(skipped, before, { erasures: { skip: true, carry: after.tables.erasure_tombstones } });
+    expect(runs(skipped)).toEqual({ runs: ["run-erased", "run-kept"], sessions: 1 });
+    expect(lines.join("\n")).toMatch(/erasures were NOT re-applied/);
+    const marker = new Database(skipped, { readonly: true });
+    try {
+      expect(marker.prepare("SELECT COUNT(*) AS n FROM erasure_tombstones WHERE kind = 'restore_skipped'").get()).toEqual({ n: 1 });
+    } finally {
+      marker.close();
+    }
   });
 
   it("refuses and rolls back a restore whose chain breaks where the backup recorded it intact (an edited backup file)", async () => {

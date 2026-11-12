@@ -132,7 +132,7 @@ export const openApiSpec = {
       post: {
         tags: ["Observability"],
         summary:
-          "Make a data-subject request (admin or data_subject:manage): { type: 'export', subjectKind: 'end_user'|'staff', value, scan?, revealTokens? }. The value is used for the lookup and never stored, logged or returned; revealTokens needs step-up when it is on. The lookup runs in the background",
+          "Make a data-subject request (admin or data_subject:manage): { type: 'export'|'delete', subjectKind: 'end_user'|'staff', value, scan?, revealTokens? }. The value is used for the lookup and never logged or returned (kept sealed while the request runs); revealTokens (exports only) needs step-up when it is on. The lookup runs in the background; a deletion then waits for POST /api/data-protection/requests/{id}/confirm",
         responses: {
           "201": { description: "The request, status searching" },
           "400": { description: "Invalid request (the value is never echoed)" },
@@ -142,7 +142,8 @@ export const openApiSpec = {
       },
       get: {
         tags: ["Observability"],
-        summary: "Data-subject requests, newest first (admin or data_subject:manage): status, counts per kind, progress, due date and the export's state",
+        summary:
+          "Data-subject requests, newest first (admin or data_subject:manage): status, counts per kind, progress, due date, the export's state, and what a deletion did (deleted per kind, usage rows cleared, vault tokens deleted, rows deferred by a legal hold, a staff member's pseudonym)",
         responses: { "200": { description: "{ requests }" }, "403": { description: "Not an admin or data_subject:manage holder" } }
       }
     },
@@ -163,6 +164,20 @@ export const openApiSpec = {
           "403": { description: "Not an admin or data_subject:manage holder, or step-up required" },
           "404": { description: "Not found" },
           "409": { description: "Not ready, already downloaded, or expired" }
+        }
+      }
+    },
+    "/api/data-protection/requests/{id}/confirm": {
+      post: {
+        tags: ["Observability"],
+        summary:
+          "Confirm a deletion request whose preview is ready (admin or data_subject:manage; step-up). It runs in the background: an end user's rows are deleted (a run with its tool calls, rule events, approvals, cassettes and queue jobs; usage rows kept with the person cleared) and their vault tokens deleted; a staff member's email is pseudonymised in every authorship column and the user deleted, their audit-log rows kept. Rows under a legal hold are deferred until it is released. Every erased row leaves a tombstone a restore re-applies",
+        responses: {
+          "200": { description: "The request, status running" },
+          "403": { description: "Not an admin or data_subject:manage holder, or step-up required" },
+          "404": { description: "Not found" },
+          "409": { description: "Not a deletion, not ready, your own account, or the last admin" },
+          "503": { description: "No master key" }
         }
       }
     },

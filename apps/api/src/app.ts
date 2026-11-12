@@ -14585,6 +14585,33 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     dueDays: subjectRequestSettings.dueDays,
     exportTtlHours: subjectRequestSettings.exportTtlHours,
     exportMaxBytes: subjectRequestSettings.exportMaxBytes,
+    tombstoneRetentionDays: subjectRequestSettings.tombstoneRetentionDays,
+    // Release gate admission: as the data-subject lookup's delete, a deletion is never refused, but admitted cases it
+    // takes are audited and the jobs whose evidence it removed are marked stale.
+    subjectRowRemoval: async (actor, row) => {
+      const confirmer = actor.id ? await store.getUserById(actor.id) : null;
+      return await releaseService.dataSubjectRemoval({ id: actor.id, email: actor.email, role: safeUserRole(confirmer?.role ?? "admin") }, row);
+    },
+    // A staff erasure deletes the user through the same steps as DELETE /api/users/:id.
+    staffUser: {
+      check: async (email, actor) => {
+        const target = await store.getUserByEmail(email);
+        if (!target) return null;
+        if (target.id === actor.id) return "You cannot erase your own account. Ask another admin.";
+        if (target.role === "admin" && target.kind === "human") {
+          const pending = new Set((await store.listOpenUserInvites()).map((invite) => invite.userId));
+          const otherAdmins = (await store.listUsers({ kind: "human" })).filter((u) => u.role === "admin" && u.id !== target.id && !pending.has(u.id));
+          if (!pending.has(target.id) && otherAdmins.length === 0) return "This is the only admin who can sign in. Make another person an admin first.";
+        }
+        return null;
+      },
+      remove: async (email) => {
+        const target = await store.getUserByEmail(email);
+        if (!target) return "not_found";
+        await mcpOAuthService.disconnectUserEverywhere(target.id);
+        return await store.deleteUserKeepingAdmin(target.id);
+      }
+    },
     audit: async (event) => {
       await auditService.record(event);
       await logStreamingService.dispatchAudit(event);
@@ -14624,7 +14651,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         audit: async (event) => await audit(request, user, event),
         notify: async (event) => await notificationService.notify(event),
         ...(captureAvailable ? { findSubject: async (query) => await captureService.findSubject(query) } : {}),
-        logger: { warn: (fields, message) => app.log.warn(fields, message) }
+        logger: { warn: (fields, message) => app.log.warn(fields, message) },
+        // 13.3 — deletions the hold deferred run again (on the leader, which picks up `running` requests).
+        ...(captureAvailable ? { onReleased: async () => await subjectRequestService.requeueDeferred() } : {})
       }),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),

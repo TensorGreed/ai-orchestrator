@@ -85,6 +85,20 @@ export function ensureSubjectSchema(db: BetterSqlite3Database): void {
   `);
 }
 
+/** The v69 table (erasure tombstones), as the Postgres chain creates it (TEXT timestamps). */
+export function ensureErasureSchema(db: BetterSqlite3Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS erasure_tombstones (
+      kind TEXT NOT NULL,
+      row_id TEXT NOT NULL,
+      request_id TEXT,
+      erased_at TEXT NOT NULL,
+      PRIMARY KEY (kind, row_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_erasure_tombstones_erased ON erasure_tombstones(erased_at);
+  `);
+}
+
 const quoted = (values: readonly string[]) => values.map((value) => `'${value}'`).join(", ");
 
 /** Each scan kind's rows with `rid` (the cursor) and `id`. `{where}` takes the extra condition. */
@@ -234,14 +248,14 @@ export function sqliteSubjectStore(db: BetterSqlite3Database): SubjectStore {
     async listOverdueSubjectRequests(at, limit) {
       return all(
         `SELECT ${SUBJECT_REQUEST_COLUMNS} FROM subject_requests
-         WHERE status IN ('searching', 'ready') AND due_notified_at IS NULL AND due_at < ? ORDER BY due_at, id LIMIT ?`,
+         WHERE status IN ('searching', 'ready', 'running') AND due_notified_at IS NULL AND due_at < ? ORDER BY due_at, id LIMIT ?`,
         [at, Math.max(1, Math.min(500, Math.floor(limit)))]
       ).map(mapSubjectRequestRow);
     },
 
     async expireReadySubjectRequestsWithoutExport(at) {
       return db.transaction(() => {
-        const where = `status = 'ready' AND NOT EXISTS (SELECT 1 FROM subject_exports e WHERE e.request_id = subject_requests.id)`;
+        const where = `type = 'export' AND status = 'ready' AND NOT EXISTS (SELECT 1 FROM subject_exports e WHERE e.request_id = subject_requests.id)`;
         const ids = all<{ id: string }>(`SELECT id FROM subject_requests WHERE ${where}`, []).map((row) => String(row.id));
         if (ids.length > 0) run(`UPDATE subject_requests SET status = 'expired', updated_at = ? WHERE ${where}`, [at]);
         return ids;

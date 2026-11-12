@@ -15,9 +15,23 @@ import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "../store-s
 import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
-import type { LegalHoldRef } from "@ai-orchestrator/shared";
-import { ITEM_KIND_TABLES, LEGAL_HOLD_LOCK_SHARED_SQL } from "../legal-hold-sql.js";
+import { LEGAL_HOLD_LOCK_SHARED_SQL, toPgPlaceholders } from "../legal-hold-sql.js";
+import {
+  CLEAR_RUN_USAGE_SQL,
+  deletionTombstones,
+  holdsOnAny,
+  memoryArtifactErasureStatements,
+  memorySessionErasureStatements,
+  runErasureStatements,
+  subjectRowHoldTargets,
+  type ErasureStatement,
+  type SubjectDeleteKind,
+  type SubjectErasure,
+  type SubjectRowDeletion
+} from "../erasure.js";
+import { parseMemoryArtifactRowId, parseMemorySessionRowId } from "../subject-store.js";
 import { legalHoldsOnWith } from "./legal-holds.js";
+import { writeErasureTombstonesWith } from "./erasure.js";
 
 type Row = Record<string, unknown>;
 
@@ -102,48 +116,78 @@ async function deleted(client: PoolClient, sql: string, params: unknown[]): Prom
 }
 
 /**
- * Deletes one row the data-subject lookup found, in one transaction. A golden run takes the golden-set cases made
- * from it, and the results of those cases, with it.
+ * Deletes one row a data-subject lookup or request found, with what belongs to it, in one transaction (as on SQLite;
+ * db/erasure.ts). The legal-hold lock is taken shared first, then the holds are checked; with `erasure`, tombstones
+ * are written in the same transaction.
  */
-export async function deleteSubjectRow(
-  ctx: PgContext,
-  kind: SubjectStoreKind,
-  id: string
-): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }>; heldBy?: LegalHoldRef[] }> {
+export async function deleteSubjectRow(ctx: PgContext, kind: SubjectDeleteKind, id: string, erasure?: SubjectErasure): Promise<SubjectRowDeletion> {
   return ctx.withTransaction(async (client) => {
     // 13.3 — a row a legal hold keeps stays: the lock first (shared, to commit), then the check.
     await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
-    const heldBy = await legalHoldsOnWith(client, { kind: "row", table: ITEM_KIND_TABLES[kind], id });
+    const heldBy = await holdsOnAny(subjectRowHoldTargets(kind, id), async (target) => await legalHoldsOnWith(client, target));
     if (heldBy.length > 0) return { deleted: false, cascaded: [], heldBy };
-    const resultsOf = async (fixtureIds: string[]) => {
-      if (fixtureIds.length === 0) return [];
-      const resultIds = await ids(client, `SELECT id FROM eval_results WHERE fixture_id = ANY($1::text[]) ORDER BY seq`, [fixtureIds]);
-      if (resultIds.length > 0) await client.query(`DELETE FROM eval_results WHERE fixture_id = ANY($1::text[])`, [fixtureIds]);
-      return resultIds.map((resultId) => ({ kind: "eval_result" as const, id: resultId }));
-    };
-    switch (kind) {
-      case "recording": {
-        const found = await client.query(`SELECT 1 FROM replay_recordings WHERE id = $1 FOR UPDATE`, [id]);
-        if ((found.rowCount ?? 0) === 0) return { deleted: false, cascaded: [] };
-        const fixtureIds = await ids(client, `SELECT id FROM eval_fixtures WHERE recording_id = $1 ORDER BY seq`, [id]);
-        const cascaded = [...(await resultsOf(fixtureIds)), ...fixtureIds.map((fixtureId) => ({ kind: "fixture" as const, id: fixtureId }))];
-        await client.query(`DELETE FROM eval_fixtures WHERE recording_id = $1`, [id]);
-        return { deleted: await deleted(client, `DELETE FROM replay_recordings WHERE id = $1`, [id]), cascaded };
-      }
-      case "fixture": {
-        const cascaded = await resultsOf([id]);
-        return { deleted: await deleted(client, `DELETE FROM eval_fixtures WHERE id = $1`, [id]), cascaded };
-      }
-      case "eval_result":
-        return { deleted: await deleted(client, `DELETE FROM eval_results WHERE id = $1`, [id]), cascaded: [] };
-      case "execution": {
-        if (!(await deleted(client, `DELETE FROM execution_history WHERE id = $1`, [id]))) return { deleted: false, cascaded: [] };
-        // The run's side rows go with it: tool-call telemetry (arguments and errors), guard events and usage.
-        for (const table of ["mcp_tool_calls", "guard_events", "usage_events"]) await client.query(`DELETE FROM ${table} WHERE execution_id = $1`, [id]);
-        return { deleted: true, cascaded: [] };
-      }
-      case "cassette":
-        return { deleted: await deleted(client, `DELETE FROM mcp_cassettes WHERE id = $1`, [id]), cascaded: [] };
-    }
+    const outcome = await deleteSubjectRowWith(client, kind, id);
+    if (erasure) await writeErasureTombstonesWith(client, deletionTombstones(kind, id, outcome, erasure));
+    return outcome;
   });
+}
+
+async function runStatements(client: PoolClient, statements: ErasureStatement[]): Promise<number> {
+  let changed = 0;
+  for (const statement of statements) changed += (await client.query(toPgPlaceholders(statement.sql), statement.params)).rowCount ?? 0;
+  return changed;
+}
+
+async function deleteSubjectRowWith(client: PoolClient, kind: SubjectDeleteKind, id: string): Promise<SubjectRowDeletion> {
+  const resultsOf = async (fixtureIds: string[]) => {
+    if (fixtureIds.length === 0) return [];
+    const resultIds = await ids(client, `SELECT id FROM eval_results WHERE fixture_id = ANY($1::text[]) ORDER BY seq`, [fixtureIds]);
+    if (resultIds.length > 0) await client.query(`DELETE FROM eval_results WHERE fixture_id = ANY($1::text[])`, [fixtureIds]);
+    return resultIds.map((resultId) => ({ kind: "eval_result" as const, id: resultId }));
+  };
+  switch (kind) {
+    case "recording": {
+      const found = await client.query(`SELECT 1 FROM replay_recordings WHERE id = $1 FOR UPDATE`, [id]);
+      if ((found.rowCount ?? 0) === 0) return { deleted: false, cascaded: [] };
+      const fixtureIds = await ids(client, `SELECT id FROM eval_fixtures WHERE recording_id = $1 ORDER BY seq`, [id]);
+      const cascaded = [...(await resultsOf(fixtureIds)), ...fixtureIds.map((fixtureId) => ({ kind: "fixture" as const, id: fixtureId }))];
+      await client.query(`DELETE FROM eval_fixtures WHERE recording_id = $1`, [id]);
+      return { deleted: await deleted(client, `DELETE FROM replay_recordings WHERE id = $1`, [id]), cascaded };
+    }
+    case "fixture": {
+      const cascaded = await resultsOf([id]);
+      return { deleted: await deleted(client, `DELETE FROM eval_fixtures WHERE id = $1`, [id]), cascaded };
+    }
+    case "eval_result":
+      return { deleted: await deleted(client, `DELETE FROM eval_results WHERE id = $1`, [id]), cascaded: [] };
+    case "execution":
+    case "production_execution":
+    case "paused_run": {
+      const found = await client.query(
+        `SELECT 1 FROM execution_history WHERE id = $1 UNION ALL SELECT 1 FROM workflow_executions WHERE id = $1`,
+        [id]
+      );
+      if ((found.rowCount ?? 0) === 0) return { deleted: false, cascaded: [] };
+      // 13.3 — usage rows stay with the person cleared (totals and budgets do not move); the rest of the run goes.
+      const usageCleared = (await client.query(toPgPlaceholders(CLEAR_RUN_USAGE_SQL), [id])).rowCount ?? 0;
+      await runStatements(client, runErasureStatements(id));
+      return { deleted: true, cascaded: [], usageCleared };
+    }
+    case "approval":
+      return { deleted: await deleted(client, `DELETE FROM approval_requests WHERE id = $1`, [id]), cascaded: [] };
+    case "cassette":
+    case "cassette_any":
+      return { deleted: await deleted(client, `DELETE FROM mcp_cassettes WHERE id = $1`, [id]), cascaded: [] };
+    case "memory_session": {
+      const key = parseMemorySessionRowId(id);
+      return { deleted: key ? (await runStatements(client, memorySessionErasureStatements(key.namespace, key.sessionId))) > 0 : false, cascaded: [] };
+    }
+    case "memory_artifact": {
+      const key = parseMemoryArtifactRowId(id);
+      return {
+        deleted: key ? (await runStatements(client, memoryArtifactErasureStatements(key.namespace, key.sessionId, key.artifactKey))) > 0 : false,
+        cascaded: []
+      };
+    }
+  }
 }

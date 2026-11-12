@@ -4,8 +4,26 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import { ensureAiGatewaySchema, sqliteAiGatewayStore } from "./ai-gateway-sqlite.js";
-import { ensureSubjectSchema, sqliteSubjectStore } from "./subject-sqlite.js";
-import type { SubjectStore } from "./subject-store.js";
+import { ensureErasureSchema, ensureSubjectSchema, sqliteSubjectStore } from "./subject-sqlite.js";
+import { parseMemoryArtifactRowId, parseMemorySessionRowId, type SubjectStore } from "./subject-store.js";
+import {
+  CLEAR_RUN_USAGE_SQL,
+  INSERT_TOMBSTONE_SQL,
+  RESTORE_SKIPPED_KIND,
+  STAFF_AUTHORSHIP_COLUMNS,
+  STAFF_BATCH,
+  deletionTombstones,
+  memoryArtifactErasureStatements,
+  memorySessionErasureStatements,
+  runErasureStatements,
+  staffWhere,
+  subjectRowHoldTargets,
+  type ErasureStatement,
+  type ErasureTombstoneWrite,
+  type SubjectDeleteKind,
+  type SubjectErasure,
+  type SubjectRowDeletion
+} from "./erasure.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
 import type {
   ApprovalRequestKind,
@@ -91,7 +109,6 @@ import {
   type RetentionTable
 } from "./retention-tables.js";
 import {
-  ITEM_KIND_TABLES,
   LEGAL_HOLD_COLUMNS,
   LegalHoldError,
   holdRefs,
@@ -4444,6 +4461,8 @@ export class SqliteStore implements Store {
     `);
     // 13.3 (v67) — data-subject requests: subject references, requests, sealed exports and the subject key.
     ensureSubjectSchema(this.db);
+    // 13.3 (v69) — erasure tombstones.
+    ensureErasureSchema(this.db);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -14929,22 +14948,34 @@ export class SqliteStore implements Store {
   }
 
   /**
-   * Deletes one row the data-subject lookup found. A golden run takes the
-   * golden-set cases made from it, and the results of those cases, with it.
+   * Deletes one row a data-subject lookup or request found, with what belongs to it, in one transaction. A golden run
+   * takes the golden-set cases made from it and their results; a run (or paused run) takes its whole run
+   * (db/erasure.ts runErasureStatements) and keeps its usage rows with the person cleared; a memory session takes its
+   * artifacts and cached tool results. A row a legal hold keeps stays (heldBy). With `erasure`, a tombstone is written
+   * for the row and for each one it took with it, in the same transaction.
    */
-  async deleteSubjectRow(
-    kind: SubjectStoreKind,
-    id: string
-  ): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }>; heldBy?: LegalHoldRef[] }> {
-    // The row and what it cascades to go together, or not at all. A row a legal hold keeps stays (13.3).
+  async deleteSubjectRow(kind: SubjectDeleteKind, id: string, erasure?: SubjectErasure): Promise<SubjectRowDeletion> {
     return this.transaction(() => {
-      const heldBy = this.legalHoldsOnSync({ kind: "row", table: ITEM_KIND_TABLES[kind], id });
+      const heldBy: LegalHoldRef[] = [];
+      for (const target of subjectRowHoldTargets(kind, id)) for (const hold of this.legalHoldsOnSync(target)) if (!heldBy.some((one) => one.id === hold.id)) heldBy.push(hold);
       if (heldBy.length > 0) return { deleted: false, cascaded: [], heldBy };
-      return this.deleteSubjectRowSync(kind, id);
+      const outcome = this.deleteSubjectRowSync(kind, id);
+      if (erasure) this.writeErasureTombstonesSync(deletionTombstones(kind, id, outcome, erasure));
+      return outcome;
     });
   }
 
-  private deleteSubjectRowSync(kind: SubjectStoreKind, id: string): { deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }> } {
+  private writeErasureTombstonesSync(rows: ErasureTombstoneWrite[]): void {
+    for (const row of rows) this.db.prepare(INSERT_TOMBSTONE_SQL).run(row.kind, row.rowId, row.requestId, row.erasedAt);
+  }
+
+  private runErasureSync(statements: ErasureStatement[]): number {
+    let changed = 0;
+    for (const statement of statements) changed += this.db.prepare(statement.sql).run(...(statement.params as unknown[])).changes;
+    return changed;
+  }
+
+  private deleteSubjectRowSync(kind: SubjectDeleteKind, id: string): SubjectRowDeletion {
     const resultsOf = (fixtureIds: string[]) => {
       if (fixtureIds.length === 0) return [];
       const marks = fixtureIds.map(() => "?").join(", ");
@@ -14973,16 +15004,99 @@ export class SqliteStore implements Store {
         this.exec(`DELETE FROM eval_results WHERE id = ?`, [id]);
         return { deleted: true, cascaded: [] };
       }
-      case "execution": {
-        if (!exists("execution_history")) return { deleted: false, cascaded: [] };
-        this.exec(`DELETE FROM execution_history WHERE id = ?`, [id]);
-        // The run's side rows go with it: tool-call telemetry (arguments and errors), guard events and usage.
-        for (const table of ["mcp_tool_calls", "guard_events", "usage_events"]) this.exec(`DELETE FROM ${table} WHERE execution_id = ?`, [id]);
-        return { deleted: true, cascaded: [] };
+      case "execution":
+      case "production_execution":
+      case "paused_run": {
+        if (!exists("execution_history") && !exists("workflow_executions")) return { deleted: false, cascaded: [] };
+        // 13.3 — usage rows stay with the person cleared (totals and budgets do not move); the rest of the run goes.
+        const usageCleared = this.db.prepare(CLEAR_RUN_USAGE_SQL).run(id).changes;
+        this.runErasureSync(runErasureStatements(id));
+        return { deleted: true, cascaded: [], usageCleared };
       }
+      case "approval":
+        return { deleted: this.runErasureSync([{ sql: "DELETE FROM approval_requests WHERE id = ?", params: [id] }]) > 0, cascaded: [] };
       case "cassette":
+      case "cassette_any":
         return { deleted: this.deleteMcpCassetteSync(id), cascaded: [] };
+      case "memory_session": {
+        const key = parseMemorySessionRowId(id);
+        return { deleted: key ? this.runErasureSync(memorySessionErasureStatements(key.namespace, key.sessionId)) > 0 : false, cascaded: [] };
+      }
+      case "memory_artifact": {
+        const key = parseMemoryArtifactRowId(id);
+        return { deleted: key ? this.runErasureSync(memoryArtifactErasureStatements(key.namespace, key.sessionId, key.artifactKey)) > 0 : false, cascaded: [] };
+      }
     }
+  }
+
+  /** 13.3 — writes erasure tombstones (vault tokens and staff erasures; row deletions write their own). */
+  async writeErasureTombstones(rows: ErasureTombstoneWrite[]): Promise<void> {
+    if (rows.length === 0) return;
+    this.db.transaction(() => this.writeErasureTombstonesSync(rows))();
+  }
+
+  /** 13.3 — deletes token vault entries and writes their tombstones; returns how many entries were deleted. */
+  async deleteGuardVaultTokens(tokens: string[], erasure: Pick<SubjectErasure, "requestId" | "erasedAt">): Promise<number> {
+    return this.db.transaction(() => {
+      let deleted = 0;
+      for (const token of new Set(tokens)) {
+        if (this.db.prepare(`DELETE FROM guard_token_vault WHERE token = ?`).run(token).changes === 0) continue;
+        deleted += 1;
+        this.writeErasureTombstonesSync([{ kind: "vault_token", rowId: token, requestId: erasure.requestId, erasedAt: erasure.erasedAt }]);
+      }
+      return deleted;
+    })();
+  }
+
+  /** 13.3 — removes up to `limit` tombstones older than `before` (ERASURE_TOMBSTONE_RETENTION_DAYS); returns how many. */
+  async pruneErasureTombstones(before: string, limit: number): Promise<number> {
+    const cap = Math.max(0, Math.floor(limit));
+    if (cap === 0) return 0;
+    return this.db
+      .prepare(`DELETE FROM erasure_tombstones WHERE rowid IN (SELECT rowid FROM erasure_tombstones WHERE erased_at < ? AND kind <> ? LIMIT ?)`)
+      .run(before, RESTORE_SKIPPED_KIND, cap).changes;
+  }
+
+  /** 13.3 — the markers a restore that skipped re-applying erasures left, removed as they are read (one reader wins). */
+  async takeRestoreSkippedMarkers(): Promise<Array<{ id: string; at: string }>> {
+    const rows = this.queryAll<{ row_id: string; erased_at: string }>(`DELETE FROM erasure_tombstones WHERE kind = ? RETURNING row_id, erased_at`, [RESTORE_SKIPPED_KIND]);
+    if (rows.length > 0) this.persist();
+    return rows.map((row) => ({ id: toString(row.row_id), at: toString(row.erased_at) }));
+  }
+
+  /** 13.3 — tombstones kept (restore markers left out). */
+  async countErasureTombstones(): Promise<number> {
+    const row = this.queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM erasure_tombstones WHERE kind <> ?`, [RESTORE_SKIPPED_KIND]);
+    return row ? toNumber(row.n) : 0;
+  }
+
+  /**
+   * 13.3 — replaces a staff member's email with `pseudonym` in every authorship column (db/erasure.ts), in batches of
+   * `batch` rows with a turn for the event loop between them. Rows a legal hold keeps are left and counted (`held`).
+   */
+  async pseudonymiseStaff(input: { emails: string[]; pseudonym: string; batch?: number }): Promise<{ changed: number; held: number; remaining: number }> {
+    const emails = [...new Set(input.emails.map((email) => email.trim().toLowerCase()))].filter(Boolean);
+    if (emails.length === 0) return { changed: 0, held: 0, remaining: 0 };
+    const batch = Math.max(1, Math.floor(input.batch ?? STAFF_BATCH));
+    let changed = 0;
+    let held = 0;
+    for (const column of STAFF_AUTHORSHIP_COLUMNS) {
+      const unheld = staffWhere(column, emails.length, "unheld");
+      for (;;) {
+        const step = this.db
+          .prepare(`UPDATE ${column.table} SET ${column.column} = ? WHERE rowid IN (SELECT t.rowid FROM ${column.table} t WHERE ${unheld} LIMIT ?)`)
+          .run(input.pseudonym, ...emails, batch).changes;
+        changed += step;
+        if (step < batch) break;
+        await yieldToEventLoop();
+      }
+      // A column no hold can keep has no held rows (and its "held" predicate takes no parameter).
+      if (!column.held) continue;
+      const count = this.queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM ${column.table} t WHERE ${staffWhere(column, emails.length, "held")}`, emails);
+      held += count ? toNumber(count.n) : 0;
+    }
+    if (changed > 0) this.persist();
+    return { changed, held, remaining: 0 };
   }
 
   /** Bytes one workflow's captured candidates use (REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW). */

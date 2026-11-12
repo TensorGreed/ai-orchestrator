@@ -290,7 +290,9 @@ export type LegalHoldTarget =
   | { kind: "workflow"; id: string }
   | { kind: "project"; id: string }
   | { kind: "dataset"; id: string }
-  | { kind: "row"; table: HoldableTable; id: string };
+  | { kind: "row"; table: HoldableTable; id: string }
+  /** An agent memory session or artifact, by its namespace (memory has no id column). */
+  | { kind: "namespace"; table: "session_memory" | "session_artifacts" | "session_tool_cache"; namespace: string };
 
 /** The holds on a target: the SQL (with `?` placeholders) and its parameters. */
 export function legalHoldsOnSql(target: LegalHoldTarget): { sql: string; params: string[] } {
@@ -304,6 +306,12 @@ export function legalHoldsOnSql(target: LegalHoldTarget): { sql: string; params:
     case "row":
       if (!isHoldableTable(target.table)) throw new Error(`Not a holdable table: ${String(target.table)}`);
       return { sql: holdsOnRowSql(target.table), params: [target.id] };
+    case "namespace":
+      return {
+        sql: `SELECT DISTINCT lh.id, lh.name, lh.created_at FROM legal_holds lh, (SELECT CAST(? AS TEXT) AS namespace) lht
+          WHERE lh.status = 'active' AND ${holdMatchSql(target.table, "lht", "lh")} ORDER BY lh.created_at, lh.id`,
+        params: [target.namespace]
+      };
   }
 }
 
