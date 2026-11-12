@@ -2882,6 +2882,18 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_usage_events_execution;
       DROP TABLE IF EXISTS erasure_tombstones;
     `
+  },
+  {
+    version: 70,
+    description: "OpenTelemetry — the trace id of a run's span, so a run can be found in a trace backend",
+    // Nullable and unindexed: NULL for runs made while tracing was off (the default), and a run is looked up by its id,
+    // never by trace id. Deleted with the row, so run retention and erasure need no extra step.
+    up: `
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS trace_id TEXT;
+    `,
+    down: `
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS trace_id;
+    `
   }
 ];
 

@@ -6,6 +6,7 @@ import { McpElicitationForm } from "./McpElicitationForm";
 import { DataLabelChips, EndorsementNote } from "./DataLabelChips";
 import { GuardTracePanel } from "./GuardTracePanel";
 import { AuditBundlePanel } from "./AuditBundlePanel";
+import { CopyButton } from "./McpToolsetsView";
 import { GoldenRunViewer, GoldenStarIcon, SaveGoldenRunDialog } from "./GoldenRunPanel";
 
 /** Phase 10.5 — how often the Runs page looks for server questions waiting on a person. */
@@ -488,6 +489,17 @@ export function ExecutionHistoryPanel({
                               <div className="execution-custom-data">
                                 <span className="pg-eyebrow">Custom data</span>
                                 <pre className="result-block">{stringifyPretty(customData)}</pre>
+                              </div>
+                            )}
+                            {detail.traceId && (
+                              <div className="execution-trace-id">
+                                <span className="pg-eyebrow">Trace id</span> <code>{detail.traceId}</code>{" "}
+                                <CopyButton text={detail.traceId} label="Copy trace id" ariaLabel="Copy trace id" />
+                                {detail.traceUrl && (
+                                  <a className="pg-btn small" href={detail.traceUrl} target="_blank" rel="noopener noreferrer">
+                                    Open trace
+                                  </a>
+                                )}
                               </div>
                             )}
                             <AuditBundlePanel executionId={item.id} status={item.status} completedAt={item.completedAt} />

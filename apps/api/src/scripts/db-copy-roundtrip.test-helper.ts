@@ -297,6 +297,7 @@ export async function seedAllDomains(target: Store): Promise<void> {
   });
   await store.setExecutionRelease("exec-1", "production", 2);
   await store.setExecutionRelease("exec-2", "draft", null);
+  await store.setExecutionTraceId("exec-1", "0123456789abcdef0123456789abcdef");
   await store.insertApprovalRequest(approvalRequest("apr-1", {
     workflowName: "Support triage", nodeType: "approval_gate", message: "Approve the refund?", details: { amount: 30 },
     requestedByUserId: "u-builder", requestedBy: "builder@example.com", timeoutMinutes: 60, expiresAt: T(4130), createdAt: T(531)
@@ -665,6 +666,7 @@ export function roundTripReads(): NamedRead[] {
     { name: "getExecutionHistory", read: async (s) => [canonicalCreatedAt(await s.getExecutionHistory("exec-1")), canonicalCreatedAt(await s.getExecutionHistory("exec-2"))] },
     { name: "getWorkflowExecutionState", read: (s) => s.getWorkflowExecutionState("exec-paused") },
     { name: "listPendingApprovals", read: (s) => s.listPendingApprovals() },
+    { name: "executionTraceId", read: async (s) => [(await s.getExecutionHistory("exec-1"))?.traceId, (await s.getExecutionHistory("exec-2"))?.traceId] },
     { name: "getExecutionRelease", read: async (s) => [await s.getExecutionRelease("exec-1"), await s.getExecutionRelease("exec-2")] },
     { name: "getApprovalRequest", read: async (s) => [await s.getApprovalRequest("apr-1"), await s.getApprovalRequest("apr-2")] },
     { name: "getPendingApprovalRequestForExecution", read: (s) => s.getPendingApprovalRequestForExecution("exec-paused") },

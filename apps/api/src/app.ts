@@ -2161,6 +2161,22 @@ export async function createApp(
     entry.job.leaseLost(`${what} was refused`);
   };
 
+  // v70 — the trace id of each in-flight run's span (only while tracing is on). Bounded: a run whose history is never
+  // persisted must not grow it forever. `stored` is set once the id is on the run's history row.
+  const runTraceIds = new Map<string, { traceId: string; stored: boolean }>();
+  const storeRunTraceId = async (executionId: string, phase: "progress" | "final") => {
+    const entry = runTraceIds.get(executionId);
+    if (!entry) return;
+    if (phase === "final") runTraceIds.delete(executionId);
+    if (entry.stored) return;
+    try {
+      await store.setExecutionTraceId(executionId, entry.traceId);
+      entry.stored = true;
+    } catch (error) {
+      app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record the trace id of a run");
+    }
+  };
+
   const persistExecutionHistoryRecord = async (
     record: ExecutionHistoryRecord,
     meta: {
@@ -2209,6 +2225,7 @@ export async function createApp(
         }
         return false;
       }
+      await storeRunTraceId(meta.executionId, meta.phase);
       if (meta.phase === "final") {
         handOffCapture(meta.executionId);
         retentionService?.nudge();
@@ -2278,6 +2295,10 @@ export async function createApp(
         replay: Boolean(input.replay)
       },
       async (span) => {
+        if (input.executionId && span.recording && span.traceId) {
+          if (runTraceIds.size >= 5_000) runTraceIds.delete(runTraceIds.keys().next().value!);
+          runTraceIds.set(input.executionId, { traceId: span.traceId, stored: false });
+        }
         const result = await runWorkflowExecutionInScope(input);
         describeRunResult(span, result);
         return result;
@@ -2919,6 +2940,7 @@ export async function createApp(
     if (input.result.status === "waiting_approval") {
       // The resumed run is recorded apart: what the children spent so far is recorded now.
       await subWorkflowSpend.take(input.executionId)?.closeDetached();
+      await storeRunTraceId(input.executionId, "final");
       app.log.info(
         {
           executionId: input.executionId,

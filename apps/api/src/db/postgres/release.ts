@@ -504,6 +504,10 @@ export async function setExecutionRelease(ctx: PgContext, executionId: string, c
   await ctx.execute(`UPDATE execution_history SET release_channel = $1, release_version = $2 WHERE id = $3`, [channel, version, executionId]);
 }
 
+export async function setExecutionTraceId(ctx: PgContext, executionId: string, traceId: string): Promise<void> {
+  await ctx.execute(`UPDATE execution_history SET trace_id = $1 WHERE id = $2`, [traceId, executionId]);
+}
+
 export async function getExecutionRelease(ctx: PgContext, executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {
   const row = await ctx.queryOne<{ release_channel: string | null; release_version: number | null }>(
     `SELECT release_channel, release_version FROM execution_history WHERE id = $1`,

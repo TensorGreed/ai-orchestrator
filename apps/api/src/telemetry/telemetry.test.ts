@@ -355,3 +355,54 @@ describe("run spans and node metrics through the API", () => {
     expect(await nodeCount(context)).toBe(3);
   });
 });
+
+describe("trace id on runs (v70)", () => {
+  const runnable = {
+    id: "wf-otel-trace-id",
+    name: "Trace id run",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: [
+      { id: "in", type: "webhook_input", name: "In", position: { x: 0, y: 0 }, config: {} },
+      { id: "out", type: "output", name: "Out", position: { x: 200, y: 0 }, config: {} }
+    ],
+    edges: [{ id: "e1", source: "in", target: "out" }]
+  };
+  const TEMPLATE = "https://traces.example.com/trace/{traceId}";
+
+  async function runAndRead(env: Record<string, string>) {
+    const context = await start(env);
+    await context.store.upsertWorkflow(runnable as never);
+    const cookie = await signIn(context);
+    const response = await context.app.inject({ method: "POST", url: "/api/workflows/wf-otel-trace-id/execute", headers: { cookie }, payload: {} });
+    expect(response.statusCode, response.body).toBe(200);
+    const executionId = response.json<{ executionId: string }>().executionId;
+    const detail = await context.app.inject({ method: "GET", url: `/api/executions/${executionId}`, headers: { cookie } });
+    expect(detail.statusCode, detail.body).toBe(200);
+    return { context, executionId, detail: detail.json<Record<string, unknown>>() };
+  }
+
+  it("stores the run span's trace id and returns it on run detail, with no link by default", async () => {
+    const { context, detail } = await runAndRead(TRACING);
+    const runSpan = context.exporter.getFinishedSpans().find((span) => span.name === "invoke_workflow Trace id run")!;
+    expect(detail.traceId).toBe(runSpan.spanContext().traceId);
+    expect(detail.traceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(detail).not.toHaveProperty("traceUrl");
+  });
+
+  it("adds a trace link when L2M_OTEL_TRACE_URL_TEMPLATE is set", async () => {
+    const { detail } = await runAndRead({ ...TRACING, L2M_OTEL_TRACE_URL_TEMPLATE: TEMPLATE });
+    expect(detail.traceUrl).toBe(`https://traces.example.com/trace/${String(detail.traceId)}`);
+  });
+
+  it("stores no trace id while tracing is off, and shows no link even with a template", async () => {
+    const { detail } = await runAndRead({ L2M_OTEL_TRACE_URL_TEMPLATE: TEMPLATE });
+    expect(detail.traceId).toBeNull();
+    expect(detail).not.toHaveProperty("traceUrl");
+  });
+
+  it("refuses a template without {traceId} or a non-http URL", () => {
+    expect(() => parseConfig({ SECRET_MASTER_KEY_BASE64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", L2M_OTEL_TRACE_URL_TEMPLATE: "https://t.example.com/" })).toThrow(/L2M_OTEL_TRACE_URL_TEMPLATE/);
+    expect(() => parseConfig({ SECRET_MASTER_KEY_BASE64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", L2M_OTEL_TRACE_URL_TEMPLATE: "javascript:alert('{traceId}')" })).toThrow(/L2M_OTEL_TRACE_URL_TEMPLATE/);
+  });
+});

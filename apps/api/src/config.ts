@@ -3,6 +3,7 @@ import net from "node:net";
 import { z } from "zod";
 import { parseSessionPolicy } from "./services/session-policy.js";
 import { resolveTelemetrySettings } from "./telemetry/settings.js";
+import { traceUrlTemplateProblem } from "./telemetry/trace-url.js";
 import {
   NETWORK_SCOPES,
   NETWORK_SCOPE_ENV,
@@ -686,6 +687,20 @@ const envSchema = z.object({
   L2M_OTEL_TRUST_INBOUND: blankAsUndefined(z.enum(["authenticated", "all", "none"]).optional()),
   /** Comma list of addresses or CIDR ranges (the connecting socket) whose inbound `traceparent` is always trusted. */
   L2M_OTEL_TRUSTED_PROXIES: z.string().optional(),
+  /**
+   * Optional link from a run to its trace in your trace backend: an absolute http(s) URL containing `{traceId}`.
+   * Off by default; the run page shows an "Open trace" link only when it is set and the run has a trace id.
+   */
+  L2M_OTEL_TRACE_URL_TEMPLATE: blankAsUndefined(
+    z
+      .string()
+      .trim()
+      .superRefine((value, ctx) => {
+        const problem = traceUrlTemplateProblem(value);
+        if (problem) ctx.addIssue({ code: "custom", message: `L2M_OTEL_TRACE_URL_TEMPLATE ${problem}` });
+      })
+      .optional()
+  ),
 
   // Phase 8.2 — FinOps cost rollups.
   // JSON object overlaying `services/usage-service.ts` DEFAULT_PRICING. Same
