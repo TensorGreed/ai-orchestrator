@@ -11,7 +11,9 @@ import { JSON_RPC_INVALID_PARAMS } from "./client-features";
 export class McpJsonRpcError extends Error {
   constructor(
     message: string,
-    readonly code: number | undefined
+    readonly code: number | undefined,
+    /** MCP 2026-07-28 — the error's `data` member, for errors such as -32022 whose data the client acts on. */
+    readonly data?: unknown
   ) {
     super(message);
     this.name = "McpJsonRpcError";
@@ -70,6 +72,12 @@ export function classifyMcpError(error: unknown, signal?: AbortSignal): McpToolE
   if (error instanceof McpDelegatedCredentialError) return "credentials";
   if (error instanceof McpTimeoutError) return "timeout";
   if (error instanceof McpJsonRpcError) return error.code === JSON_RPC_INVALID_PARAMS ? "invalid_arguments" : "protocol";
+  // MCP 2026-07-28 protocol errors (`protocol/`), matched by name to keep this module free of import cycles.
+  if (error instanceof Error) {
+    if (error.name === "McpHeaderValueError") return "invalid_arguments";
+    if (error.name === "McpInputRequestError") return (error as Error & { reason?: string }).reason === "refused" ? "tool" : "protocol";
+    if (error.name === "McpInvalidResultError" || error.name === "McpMrtrRoundLimitError") return "protocol";
+  }
   if (signal?.aborted) return "canceled";
   if (error instanceof Error && error.name === "McpRequestCanceledError") return "canceled";
   return "transport";

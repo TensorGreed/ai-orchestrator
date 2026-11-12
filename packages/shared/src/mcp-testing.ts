@@ -51,6 +51,8 @@ export interface McpCassetteServer {
   label?: string;
   /** Hash of the server's accepted tool snapshot when the cassette was recorded. */
   snapshotHash?: string | null;
+  /** MCP 2026-07-28 — the protocol version the server spoke while recording, when known. Cassettes stay version 1. */
+  protocolVersion?: string;
 }
 
 /** A server-initiated request made during a call: sampling or elicitation. */
