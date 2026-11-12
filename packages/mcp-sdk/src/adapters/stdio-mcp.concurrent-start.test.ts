@@ -107,7 +107,7 @@ describe("stdio: concurrent first calls", () => {
 
   it("starts the server again for a waiting caller when the start it joined was cancelled by another caller", async () => {
     // Auto mode: the start's server/discover probe follows the first caller's signal.
-    const { config, startLog } = setup(300, "auto");
+    const { config, startLog } = setup(1000, "auto");
     const adapter = new StdioMCPServerAdapter();
     const runtimeState = new Map<string, unknown>();
     const cancelled = new AbortController();
@@ -115,7 +115,8 @@ describe("stdio: concurrent first calls", () => {
     const second: MCPExecutionContext = { resolveSecret: async () => undefined, runtimeState };
     const firstCall = adapter.invokeTool("echo", {}, config, first);
     const secondCall = adapter.invokeTool("echo", {}, config, second);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Cancel once the shared process has started (its probe is then waiting on the slow server), however slow the host.
+    while (starts(startLog).length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
     cancelled.abort();
     expect(await firstCall).toMatchObject({ ok: false });
     expect(await secondCall).toMatchObject({ ok: true });

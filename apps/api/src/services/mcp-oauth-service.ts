@@ -971,6 +971,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     );
     this.localLocks.set(key, settled);
     void settled.then(() => {
+      // promise-ok: identity check: a writer queued meanwhile replaced the tail and keeps it
       if (this.localLocks.get(key) === settled) this.localLocks.delete(key);
     });
     return await run;
