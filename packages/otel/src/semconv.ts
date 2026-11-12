@@ -5,6 +5,8 @@
  * Development status). Stable names (HTTP, URL, service, deployment, error) come from the package; GenAI, MCP and
  * L2M names are string literals because they are not in its stable entry point.
  */
+import { SPAN_OUTCOME_ATTRIBUTES as OUTCOME } from "@ai-orchestrator/shared";
+
 export {
   ATTR_CLIENT_ADDRESS,
   ATTR_DEPLOYMENT_ENVIRONMENT_NAME,
@@ -43,9 +45,9 @@ export const GEN_AI = {
   RESPONSE_MODEL: "gen_ai.response.model",
   RESPONSE_ID: "gen_ai.response.id",
   RESPONSE_FINISH_REASONS: "gen_ai.response.finish_reasons",
-  USAGE_INPUT_TOKENS: "gen_ai.usage.input_tokens",
-  USAGE_OUTPUT_TOKENS: "gen_ai.usage.output_tokens",
-  USAGE_CACHE_READ_INPUT_TOKENS: "gen_ai.usage.cache_read.input_tokens",
+  USAGE_INPUT_TOKENS: OUTCOME.USAGE_INPUT_TOKENS,
+  USAGE_OUTPUT_TOKENS: OUTCOME.USAGE_OUTPUT_TOKENS,
+  USAGE_CACHE_READ_INPUT_TOKENS: OUTCOME.USAGE_CACHE_READ_INPUT_TOKENS,
   CONVERSATION_ID: "gen_ai.conversation.id",
   AGENT_ID: "gen_ai.agent.id",
   AGENT_NAME: "gen_ai.agent.name",
@@ -86,8 +88,16 @@ export const L2M = {
   NODE_ID: "l2m.node.id",
   NODE_TYPE: "l2m.node.type",
   NODE_NAME: "l2m.node.name",
-  NODE_ATTEMPTS: "l2m.node.attempts",
+  NODE_ATTEMPTS: OUTCOME.NODE_ATTEMPTS,
+  NODE_STATUS: OUTCOME.NODE_STATUS,
+  NODE_LOOP_INDEX: OUTCOME.NODE_LOOP_INDEX,
+  RUN_STATUS: OUTCOME.RUN_STATUS,
   AGENT_ITERATION: "l2m.agent.iteration",
+  AGENT_ITERATIONS: OUTCOME.AGENT_ITERATIONS,
+  AGENT_STOP_REASON: OUTCOME.AGENT_STOP_REASON,
+  AGENT_FINAL: OUTCOME.AGENT_FINAL,
+  TOOL_OUTCOME: OUTCOME.TOOL_OUTCOME,
+  CONTENT_RULES_OUTCOME: OUTCOME.CONTENT_RULES_OUTCOME,
   AGENT_SUPERVISOR: "l2m.agent.supervisor",
   PROVIDER_ID: "l2m.provider.id",
   TOOL_INTERNAL: "l2m.tool.internal",

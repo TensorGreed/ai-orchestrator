@@ -1,7 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { NOOP_RUN_INSTRUMENTATION, parseTraceparentHeader, type InstrumentationSpan } from "./instrumentation";
+import {
+  NOOP_RUN_INSTRUMENTATION,
+  NOOP_SCOPED_INSTRUMENTATION_SPAN,
+  SPAN_OUTCOME_ATTRIBUTES,
+  parseTraceparentHeader,
+  type InstrumentationSpan
+} from "./instrumentation";
 
 describe("NOOP_RUN_INSTRUMENTATION", () => {
+  it("opens one frozen no-op scoped span whose enter only calls fn", async () => {
+    const noop = NOOP_RUN_INSTRUMENTATION;
+    const spans = [
+      noop.startNode({ nodeId: "n", nodeType: "t" }),
+      noop.startIteration({ iteration: 1 }),
+      noop.startToolCall({ toolName: "t" }, NOOP_SCOPED_INSTRUMENTATION_SPAN)
+    ];
+    expect(new Set(spans).size).toBe(1);
+    expect(spans[0]).toBe(NOOP_SCOPED_INSTRUMENTATION_SPAN);
+    expect(Object.isFrozen(spans[0])).toBe(true);
+    expect(spans[0]).toMatchObject({ recording: false, traceId: "", spanId: "" });
+    expect(await spans[0]!.enter(async () => 42)).toBe(42);
+    const failure = new Error("boom");
+    await expect(spans[0]!.enter(async () => { throw failure; })).rejects.toBe(failure);
+    spans[0]!.end();
+    expect(Object.isFrozen(SPAN_OUTCOME_ATTRIBUTES)).toBe(true);
+  });
+
+
   it("runs every wrapped function with one frozen no-op span and returns its result", async () => {
     const seen: InstrumentationSpan[] = [];
     const record = async (span: InstrumentationSpan) => {

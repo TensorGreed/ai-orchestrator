@@ -66,6 +66,7 @@ import {
   type McpToolOpenWorldOverride
 } from "@ai-orchestrator/shared";
 import type {
+  RunInstrumentation,
   DataLabels,
   LabelEndorsement,
   ApprovalDecisionValue,
@@ -97,6 +98,7 @@ import type {
   WorkflowNode
 } from "@ai-orchestrator/shared";
 import { isAuxiliaryEdge, isExecutionEdge, DescendantCache } from "./graph";
+import { finishNodeSpan, openNodeSpan, runAgentInSpan, runChildInSpan } from "./run-instrumentation";
 import {
   type RetrieverAdapter,
   InMemoryRetrieverAdapter,
@@ -588,6 +590,11 @@ export interface WorkflowExecutionDependencies {
   onNodeActivity?: (event: NodeActivityEvent) => Promise<void> | void;
   /** Set by the engine for the duration of a run; not part of the caller contract. */
   activityRecorder?: NodeActivityRecorder;
+  /**
+   * Trace spans for the run's nodes, agent loops, agent turns, tool calls and sub-workflow runs (see
+   * run-instrumentation.ts). Children and workers inherit it. Absent or the no-op: nothing is recorded.
+   */
+  instrument?: RunInstrumentation;
   /** Phase 10.5 — a `list_changed` notification from an upstream server; the API re-probes the registry entry. */
   onMcpListChanged?: (event: McpListChangedEvent & { nodeId: string }) => Promise<void> | void;
   /**
@@ -7231,6 +7238,13 @@ async function executeNodeHandler(
               ...workerTools.map(wt => ({ name: wt.name, description: wt.description, inputSchema: wt.inputSchema }))
             ],
             describeUnavailableTool: (toolName) => resolvedTools.describeBlocked(toolName),
+            // Trace spans: a worker, a workflow tool or a built-in tool runs in process; anything else is an MCP server's.
+            toolType: (toolName) => {
+              if (workerTools.some((worker) => worker.name === toolName)) return "function";
+              const entry = resolvedTools.lookup(toolName);
+              if (!entry) return undefined;
+              return entry.serverId === WORKFLOW_TOOL_ADAPTER_ID || entry.serverId === BUILT_IN_TOOLS_ADAPTER_ID ? "function" : "extension";
+            },
             // Phase 16 — a worker's result carries the worker's labels; any other tool's result is external
             // (12.2: and sensitive when its MCP Tool node declares sensitive output).
             resultLabels: (toolName, toolCallId) => {
@@ -7384,11 +7398,13 @@ async function executeNodeHandler(
             ...(guardSession ? { guard: guardSession.hooks } : {}),
             ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
             ...(agentProviderRetry ? { onProviderRetry: agentProviderRetry } : {}),
-            ...(dependencies.activityRecorder ? { onEvent: (event) => emitNodeActivity(dependencies, node.id, event) } : {})
+            ...(dependencies.activityRecorder ? { onEvent: (event) => emitNodeActivity(dependencies, node.id, event) } : {}),
+            ...(dependencies.instrument?.enabled ? { instrument: dependencies.instrument } : {})
           }
         );
         // Phase 16 — reads made while the agent runs (tool configs rendered at call time) join its labels.
-        agentState = labelScope ? await labelScope.segmentAsync(AGENT_RUN_SEGMENT, runAgent) : await runAgent();
+        const runAgentInItsSpan = () => runAgentInSpan(dependencies.instrument, { node, sessionId }, runAgent);
+        agentState = labelScope ? await labelScope.segmentAsync(AGENT_RUN_SEGMENT, runAgentInItsSpan) : await runAgentInItsSpan();
         } catch (error) {
           if (isAgentGuardInterrupt(error)) {
             if (error.reason === "approval_required") {
@@ -8738,8 +8754,10 @@ export async function executeWorkflow(
     // A sub-workflow run reuses its parent's dependencies: its nodes report nothing of their own.
     // Its template reads belong to its own nodes, never to the parent node that started it.
     if (dependencies.activityRecorder) {
-      return runInLabelScope(undefined, () =>
-        executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined })
+      return runChildInSpan(
+        dependencies.instrument,
+        { workflow: request.resumeState?.workflow ?? request.workflow, executionId: request.executionId, triggerType: request.triggerType },
+        () => runInLabelScope(undefined, () => executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined }))
       );
     }
     // Phase 12 coverage — revealed values reach this run's own nodes only; the result, the paused state, the live
@@ -9809,6 +9827,8 @@ async function executeWorkflowRun(
 
     // Phase 12 coverage — model calls the node's content rule checks make, recorded as they happen (see checkUsage).
     const nodeCheckUsage: CheckModelUsage[] = [];
+    // The node's span: active while its handler runs, ended (with the outcome its result records) on every exit.
+    const nodeSpan = openNodeSpan(dependencies.instrument, node);
     try {
       if (hasOwnRecordKey(pinnedData, node.id)) {
         // Pinned data made no model call: usage it was copied with is not counted again.
@@ -9942,8 +9962,10 @@ async function executeWorkflowRun(
               input: childInput
             });
 
+            // A loop body's node: a child of the Loop node's span, one per pass.
+            const childSpan = openNodeSpan(dependencies.instrument, childNode, nodeSpan, loopIndex);
             try {
-              const { output: childOutput, attempts: childAttempts } = await executeNodeWithRetry(
+              const { output: childOutput, attempts: childAttempts } = await childSpan.enter(() => executeNodeWithRetry(
                 childNode,
                 {
                   globals: iterationGlobals,
@@ -9962,7 +9984,7 @@ async function executeWorkflowRun(
                   labelScope: childLabelScope
                 },
                 dependencies
-              );
+              ));
               approvedHandoffKeys.clear();
               writeToolCalls.clear();
 
@@ -10024,6 +10046,8 @@ async function executeWorkflowRun(
               throw new Error(
                 `Loop node '${node.id}' failed at iteration ${loopIndex} on child '${childNode.id}': ${childErrorMessage}`
               );
+            } finally {
+              finishNodeSpan(childSpan, nodeResults, childNode.id);
             }
           }
 
@@ -10084,13 +10108,13 @@ async function executeWorkflowRun(
           globals
         });
 
-        return await pauseForApproval({ node, index, nodeInput, startedAtNode, started, approvalMessage, timeoutMinutes, labelScope, shown });
+        return await nodeSpan.enter(() => pauseForApproval({ node, index, nodeInput, startedAtNode, started, approvalMessage, timeoutMinutes, labelScope, shown }));
       }
 
       // Phase 11.2 — the decision belongs to the node the run paused at, once.
       const resumeDecision = pendingResumeDecision?.nodeId === node.id ? pendingResumeDecision : undefined;
       pendingResumeDecision = undefined;
-      const { output: nodeOutput, attempts } = await executeNodeWithRetry(
+      const { output: nodeOutput, attempts } = await nodeSpan.enter(() => executeNodeWithRetry(
         node,
         {
           globals,
@@ -10111,7 +10135,7 @@ async function executeWorkflowRun(
           checkUsage: nodeCheckUsage
         },
         dependencies
-      );
+      ));
       const output = withRecordedCheckUsage(nodeOutput, nodeCheckUsage);
       // Single use: a granted approval covers the re-run of the node it paused, not later nodes or runs.
       approvedHandoffKeys.clear();
@@ -10424,6 +10448,8 @@ async function executeWorkflowRun(
         runOutputLabels.set(failedResult, labelScope.pendingLabels());
         return failedResult;
       }
+    } finally {
+      finishNodeSpan(nodeSpan, nodeResults, node.id);
     }
   }
 
