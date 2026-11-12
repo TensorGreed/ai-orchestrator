@@ -64,7 +64,8 @@ process.stdin.on('data', (chunk) => {
       reply(req.id, { tools: [
         { name: 'regional', description: 'Region in a header', inputSchema: { type: 'object', properties: { region: { type: 'string', 'x-mcp-header': 'Region' }, query: { type: 'string' } } }, annotations: { readOnlyHint: true } },
         { name: 'pid', description: 'Returns the server pid', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
-        { name: 'hang', description: 'Never answers', inputSchema: { type: 'object' } }
+        { name: 'hang', description: 'Never answers', inputSchema: { type: 'object' } },
+        { name: 'slow_pid', description: 'Returns the pid after a while', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }
       ] });
     } else if (req.method === 'tools/call') {
       const name = req.params && req.params.name;
@@ -72,6 +73,7 @@ process.stdin.on('data', (chunk) => {
       if (name === 'regional') reply(req.id, { content: [{ type: 'text', text: 'region: ' + (args.region || '') }] });
       else if (name === 'pid') reply(req.id, { content: [{ type: 'text', text: String(process.pid) }] });
       else if (name === 'hang') { /* never answers */ }
+      else if (name === 'slow_pid') setTimeout(() => reply(req.id, { content: [{ type: 'text', text: String(process.pid) }] }), 1500);
       else process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'Unknown tool' } }) + '\\n');
     } else if (req.id !== undefined) {
       reply(req.id, {});
@@ -619,6 +621,53 @@ describe("modern mode on", () => {
     // A finished response is not a cancellation: the next call works and starts the server again.
     const after = await modern(fixture, "tools/call", { name: "header_server__pid", arguments: {} });
     expect(Number(textOf(after.json().result))).not.toBe(pid);
+  });
+
+  it("lets a caller's other calls finish when one of its calls is cancelled, then stops the servers", async () => {
+    const fixture = await setup({ env: on });
+    const pid = Number(textOf((await modern(fixture, "tools/call", { name: "header_server__pid", arguments: {} })).json().result));
+    const controller = new AbortController();
+    const hanging = fetch(`${fixture.context.baseUrl}/mcp/${fixture.toolset.slug}`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${fixture.token}`, ...modernHeaders("tools/call", "header_server__hang") },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "header_server__hang", arguments: {}, _meta: modernMeta() } })
+    }).catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Another conversation of the same caller, with the same JSON-RPC id.
+    const slow = modern(fixture, "tools/call", { name: "header_server__slow_pid", arguments: {} });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    controller.abort();
+    await hanging;
+    const answered = await slow;
+    expect(answered.json().result.isError).toBeUndefined();
+    expect(Number(textOf(answered.json().result))).toBe(pid);
+    // Once nothing is in flight, the servers the cancelled call used are stopped.
+    await waitFor(() => !processAlive(pid));
+  });
+
+  it("ends an SSE call with a cancellation error when the caller's state ends, and stops its workflow run", async () => {
+    const fixture = await setup({ env: on });
+    const response = await fetch(`${fixture.context.baseUrl}/mcp/${fixture.toolset.slug}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${fixture.token}`, ...modernHeaders("tools/call", "slow_workflow") },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "slow_workflow", arguments: { text: "x" }, _meta: modernMeta({ progressToken: "p" }) } })
+    });
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    let executionId: string | undefined;
+    await waitFor(async () => {
+      executionId = (await fixture.context.store.listExecutionHistory({ triggerType: "mcp_gateway", pageSize: 10 })).items.find((item) => item.workflowId === "wf-slow")?.id;
+      return executionId !== undefined;
+    });
+    expect((await api(fixture.context, fixture.cookie, "POST", `/api/mcp/clients/${fixture.client.id}/revoke`)).status).toBe(200);
+    const body = await response.text();
+    const final = body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)) as { id?: number; error?: { code: number } })
+      .find((message) => message.id === 4);
+    expect(final?.error?.code).toBe(-32800);
+    await waitFor(async () => (await fixture.context.store.getExecutionHistory(executionId!))?.status === "canceled", 10_000);
   });
 
   it("answers 503 with a modern retry-later error when the session cap is full of busy callers", async () => {

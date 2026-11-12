@@ -15,10 +15,17 @@
  * needs. The gateway still keeps per-caller state for modern calls (upstream
  * stdio servers, the read-only audit sampling, content-rule block counts and
  * the 12.2 label mark), in a principal state keyed by the caller's client
- * credential and toolset (and the user its token acts for). The caller cannot
- * reset it: it is never named in a request, it lives as long as a session
+ * credential and toolset (and the user its token acts for). Nothing in a
+ * request names or replaces it: it lives as long as a session
  * would (idle expiry, revoke, toolset removal, the cap, shutdown) and it
- * counts against the same cap as sessions.
+ * counts against the same cap as sessions, which evicts idle legacy sessions
+ * first and an idle principal state that holds outside content last.
+ *
+ * Limits: a caller's legacy sessions and its principal state keep separate
+ * marks (a new session always starts clean, as before), and a principal
+ * state that is evicted at the cap, idles out or ends starts clean when the
+ * caller comes back. Sharing the mark across eras and instances is a later
+ * step.
  */
 
 import crypto from "node:crypto";
@@ -42,6 +49,11 @@ export interface GatewayInFlight {
   executionId?: string;
   /** Called on cancellation, after the controller aborts. */
   onCancel?: (reason: string) => void | Promise<void>;
+  /**
+   * MCP 2026-07-28 — a modern request holds its principal state from lookup to response: the entry only keeps the
+   * state from being evicted or swept while the request runs; there is no call to cancel.
+   */
+  holdOnly?: true;
 }
 
 export interface GatewaySession {
@@ -72,6 +84,11 @@ export interface GatewaySession {
   labels: SessionLabelMark;
   /** 12.6 — calls Guard blocked in this session (on this instance), and the latest one (short redacted reason only). */
   guard: SessionGuardBlocks;
+  /**
+   * MCP 2026-07-28 — a principal's upstream servers must be stopped (a cancelled call may still run there), but other
+   * calls of the same principal are using them: they are stopped once no call is in flight.
+   */
+  closeWhenDrained?: boolean;
 }
 
 /** 12.6 — a session's Guard blocks. */
@@ -213,11 +230,17 @@ export class GatewaySessionManager {
   }
 
   /** Room for one more session or principal state: the least recently used idle one is closed past the cap. */
+  /**
+   * Room for one more session or principal state. Past the cap the least recently used idle entry is closed, in this
+   * order: legacy sessions, then principal states without outside content, then the others. A caller cannot shed its
+   * principal mark by opening sessions.
+   */
   private async makeRoom(): Promise<void> {
     if (this.sessions.size < this.options.maxSessions) return;
+    const rank = (session: GatewaySession) => (session.era === "legacy" ? 0 : markRaised(session.labels) || session.labels.unobserved ? 2 : 1);
     const idle = [...this.sessions.values()]
       .filter((session) => session.inFlight.size === 0)
-      .sort((a, b) => a.lastSeenAt - b.lastSeenAt)[0];
+      .sort((a, b) => rank(a) - rank(b) || a.lastSeenAt - b.lastSeenAt)[0];
     if (!idle) throw new GatewaySessionLimitError(this.options.maxSessions);
     await this.end(idle.id, "evicted");
   }
@@ -285,6 +308,8 @@ export class GatewaySessionManager {
     // Another request of the same caller may have created it while the cap made room.
     const raced = this.principalState(input.principalScope);
     if (raced) {
+      raced.protocolVersion = input.protocolVersion;
+      if (input.clientInfo.name !== undefined || input.clientInfo.version !== undefined) raced.clientInfo = input.clientInfo;
       this.touch(raced);
       return { state: raced, created: false };
     }
@@ -329,10 +354,21 @@ export class GatewaySessionManager {
     if (!session) return false;
     this.sessions.delete(id);
     if (session.principalScope !== undefined && this.principals.get(session.principalScope) === id) this.principals.delete(session.principalScope);
-    for (const entry of session.inFlight.values()) {
-      entry.controller.abort(`MCP session ended (${reason})`);
-    }
+    const entries = [...session.inFlight.values()];
     session.inFlight.clear();
+    for (const entry of entries) {
+      if (entry.controller.signal.aborted) continue;
+      entry.controller.abort(`MCP session ended (${reason})`);
+      // A principal state's calls are cancelled for real (a workflow run stops), since its caller cannot cancel them
+      // any more. Legacy sessions keep their behaviour: the controller only.
+      if (session.era === "modern" && entry.onCancel) {
+        try {
+          await entry.onCancel(`MCP caller state ended (${reason})`);
+        } catch {
+          // Best effort: the context is closed next anyway.
+        }
+      }
+    }
     await this.options.closeContext(session.mcpContext);
     await this.options.onEnded?.(session, reason);
     return true;

@@ -111,6 +111,40 @@ describe("GatewaySessionManager principal states (MCP 2026-07-28)", () => {
     expect(manager.principalState(revoked.state.principalScope!)).toBeUndefined();
   });
 
+  it("evicts idle legacy sessions first and a principal state holding outside content last", async () => {
+    const { manager, ended, advance } = makeManager({ maxSessions: 3 });
+    const raised = (await manager.principal(principalInput("c1"))).state;
+    raiseSessionLabels(raised.labels, { provenance: ["untrusted_external"], dataClasses: [] }, true);
+    advance(10);
+    const clean = (await manager.principal(principalInput("c2"))).state;
+    advance(10);
+    const legacy = await manager.create(sessionInput);
+    advance(10);
+    // The legacy session is the newest, yet it goes first.
+    const c3 = (await manager.principal(principalInput("c3"))).state;
+    advance(10);
+    // Then the clean principal state, although the raised one is older.
+    await manager.principal(principalInput("c4"));
+    advance(10);
+    await manager.principal(principalInput("c5"));
+    expect(ended.map((entry) => entry.id)).toEqual([legacy.id, clean.id, c3.id]);
+    expect(manager.principalState(raised.principalScope!)).toBe(raised);
+  });
+
+  it("cancels a principal state's calls when it ends; legacy sessions only abort", async () => {
+    const { manager } = makeManager();
+    const cancelled: string[] = [];
+    const { state } = await manager.principal(principalInput());
+    state.inFlight.set("modern:1", { controller: new AbortController(), onCancel: () => void cancelled.push("modern") });
+    state.inFlight.set("hold:1", { controller: new AbortController(), holdOnly: true });
+    const legacy = await manager.create(sessionInput);
+    const legacyController = new AbortController();
+    legacy.inFlight.set("number:1", { controller: legacyController, onCancel: () => void cancelled.push("legacy") });
+    await manager.endWhere(() => true, "revoked");
+    expect(cancelled).toEqual(["modern"]);
+    expect(legacyController.signal.aborted).toBe(true);
+  });
+
   it("does not create two states for one caller when two first requests race past a full cap", async () => {
     const { manager } = makeManager({ maxSessions: 1 });
     await manager.create(sessionInput);

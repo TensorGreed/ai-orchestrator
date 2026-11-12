@@ -197,6 +197,8 @@ export function stripDescriptorHeaderAnnotations(descriptor: Record<string, unkn
 
 /** Header names a browser may send to the gateway, besides the fixed list: `Mcp-Param-*` headers. */
 const MCP_PARAM_HEADER = /^mcp-param-[!#$%&'*+.^_`|~0-9a-z-]+$/;
+/** At most this many `Mcp-Param-*` names are reflected in one preflight. */
+const MAX_REFLECTED_PARAM_HEADERS = 32;
 
 /** The legacy CORS request headers of the gateway. */
 export const GATEWAY_CORS_LEGACY_HEADERS = ["Authorization", "Content-Type", "Accept", "Mcp-Session-Id", "MCP-Protocol-Version", "Last-Event-ID"] as const;
@@ -205,7 +207,7 @@ export const GATEWAY_CORS_MODERN_HEADERS = ["Mcp-Method", "Mcp-Name"] as const;
 
 /**
  * The `Access-Control-Allow-Headers` list for a preflight: the legacy list, plus (modern mode on) `Mcp-Method`,
- * `Mcp-Name` and each requested header that is a well-formed `Mcp-Param-*` name. Nothing else is reflected.
+ * `Mcp-Name` and each requested header that is a well-formed `Mcp-Param-*` name (at most 32). Nothing else is reflected.
  */
 export function gatewayCorsAllowedHeaders(mode: GatewayModernMode, requested: string | string[] | undefined): string[] {
   const base: string[] = [...GATEWAY_CORS_LEGACY_HEADERS];
@@ -214,5 +216,5 @@ export function gatewayCorsAllowedHeaders(mode: GatewayModernMode, requested: st
     .split(",")
     .map((entry) => entry.trim().toLowerCase())
     .filter((entry) => entry.length <= 128 && MCP_PARAM_HEADER.test(entry));
-  return [...base, ...GATEWAY_CORS_MODERN_HEADERS, ...new Set(params)];
+  return [...base, ...GATEWAY_CORS_MODERN_HEADERS, ...[...new Set(params)].slice(0, MAX_REFLECTED_PARAM_HEADERS)];
 }

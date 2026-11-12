@@ -1658,6 +1658,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       onCancel: async (reason) => {
         if (tool.kind === "workflow") {
           deps.cancelExecution(executionId, reason);
+        } else if (session.era === "modern" && [...session.inFlight.entries()].some(([other, value]) => other !== key && !value.holdOnly)) {
+          // A principal's servers are shared by its concurrent calls: the cancelled call returns now (its controller
+          // aborted) and the servers are stopped once the other calls are done.
+          session.closeWhenDrained = true;
         } else {
           // Adapters cannot abort one call, so stop the session's servers; the next call starts them again.
           await mcpRegistry.closeSessions(session.mcpContext);
@@ -1703,6 +1707,14 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       modern?.disconnect.removeEventListener("abort", onDisconnect);
       session.inFlight.delete(key);
       sessions.touch(session);
+      if (session.closeWhenDrained && ![...session.inFlight.values()].some((value) => !value.holdOnly)) {
+        session.closeWhenDrained = false;
+        try {
+          await mcpRegistry.closeSessions(session.mcpContext);
+        } catch (error) {
+          app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "MCP gateway could not stop a caller's servers after a cancelled call");
+        }
+      }
     }
   };
 
@@ -1925,6 +1937,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
     // The caller's principal state.
     let state: GatewaySession;
+    const holdKey = `hold:${crypto.randomUUID()}`;
     {
       const principalScope = gatewayPrincipalScope({ clientId: auth.client.id, toolsetId: toolset.id, userId: auth.subject.userId ?? null });
       try {
@@ -1936,6 +1949,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           clientInfo: validated.clientInfo
         });
         state = found.state;
+        // Held from here until the response is sent, so the cap or the idle sweep cannot end it under this request.
+        state.inFlight.set(holdKey, { controller: new AbortController(), holdOnly: true });
         if (found.created) {
           // First modern request of this caller in an idle window (the counterpart of session_started).
           await deps.auditRaw({
@@ -1957,6 +1972,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           });
         }
       } catch (error) {
+        // An audit failure must not leave the state held forever.
+        sessions.principalState(principalScope)?.inFlight.delete(holdKey);
         if (error instanceof GatewaySessionLimitError) {
           reply
             .code(503)
@@ -2004,10 +2021,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         const response = await run((notification) => {
           if (!disconnect.signal.aborted) writeSse(reply, notification);
         });
-        if (response !== SUPPRESSED && !disconnect.signal.aborted) writeSse(reply, modernizeGatewayResponse(response, serverInfo));
+        if (!disconnect.signal.aborted) {
+          // Cancelled by the gateway (the caller's state ended): the stream still ends with an answer.
+          const final = response === SUPPRESSED ? rpcError(message.id, JSON_RPC_ERRORS.requestCancelled, "Request cancelled.") : response;
+          writeSse(reply, modernizeGatewayResponse(final, serverInfo));
+        }
       } finally {
         stopHeartbeat();
         reply.raw.off("close", onClose);
+        state.inFlight.delete(holdKey);
         if (!reply.raw.writableEnded) reply.raw.end();
       }
       return;
@@ -2017,6 +2039,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       response = await run(() => undefined);
     } finally {
       reply.raw.off("close", onClose);
+      state.inFlight.delete(holdKey);
     }
     reply
       .code(200)
@@ -2631,7 +2654,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return { error: "Client not found" };
     }
     const revoked = (await store.revokeMcpClient(existing.id))!;
-    const closed = await sessions.endWhere((session) => session.clientId === existing.id, "revoked");
+    const closedLegacy = sessions.count((session) => session.era === "legacy" && session.clientId === existing.id);
+    await sessions.endWhere((session) => session.clientId === existing.id, "revoked");
+    const closed = closedLegacy;
     // 12.6 — a revoked client keeps no Guard binding.
     const clearedGuard = await deps.guard?.clearGatewayBinding("mcp_client", existing.id, user.id);
     if (!existing.revokedAt) {
