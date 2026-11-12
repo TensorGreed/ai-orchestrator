@@ -5,7 +5,7 @@
  * Development status). Stable names (HTTP, URL, service, deployment, error) come from the package; GenAI, MCP and
  * L2M names are string literals because they are not in its stable entry point.
  */
-import { SPAN_OUTCOME_ATTRIBUTES as OUTCOME } from "@ai-orchestrator/shared";
+import { MCP_OUTCOME_ATTRIBUTES as MCP_OUTCOME, SPAN_OUTCOME_ATTRIBUTES as OUTCOME } from "@ai-orchestrator/shared";
 
 export {
   ATTR_CLIENT_ADDRESS,
@@ -53,7 +53,8 @@ export const GEN_AI = {
   AGENT_NAME: "gen_ai.agent.name",
   TOOL_NAME: "gen_ai.tool.name",
   TOOL_CALL_ID: "gen_ai.tool.call.id",
-  TOOL_TYPE: "gen_ai.tool.type"
+  TOOL_TYPE: "gen_ai.tool.type",
+  PROMPT_NAME: "gen_ai.prompt.name"
 } as const;
 
 /** `gen_ai.operation.name` values. */
@@ -66,14 +67,26 @@ export const GEN_AI_OPERATION = {
   INVOKE_WORKFLOW: "invoke_workflow"
 } as const;
 
-/** MCP conventions (Development, v1.41.0). */
+/** MCP conventions (Development, v1.41.0). The outcome names come from the shared module the adapters use. */
 export const MCP = {
   METHOD_NAME: "mcp.method.name",
-  SESSION_ID: "mcp.session.id",
-  PROTOCOL_VERSION: "mcp.protocol.version",
-  JSONRPC_REQUEST_ID: "jsonrpc.request.id",
-  NETWORK_TRANSPORT: "network.transport"
+  SESSION_ID: MCP_OUTCOME.SESSION_ID,
+  PROTOCOL_VERSION: MCP_OUTCOME.PROTOCOL_VERSION,
+  JSONRPC_REQUEST_ID: MCP_OUTCOME.JSONRPC_REQUEST_ID,
+  RESOURCE_URI: "mcp.resource.uri",
+  RPC_RESPONSE_STATUS_CODE: MCP_OUTCOME.RPC_RESPONSE_STATUS_CODE,
+  NETWORK_TRANSPORT: "network.transport",
+  NETWORK_PROTOCOL_NAME: "network.protocol.name"
 } as const;
+
+/** MCP metrics (Development, v1.41.0): histograms in seconds. */
+export const MCP_METRICS = {
+  CLIENT_OPERATION_DURATION: "mcp.client.operation.duration",
+  SERVER_OPERATION_DURATION: "mcp.server.operation.duration"
+} as const;
+
+/** The bucket boundaries the MCP conventions advise for the operation duration histograms. */
+export const MCP_DURATION_BUCKETS_SECONDS: readonly number[] = Object.freeze([0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120, 300]);
 
 /** L2M's own attributes. Ids only: they link a span to L2M's execution history, never copy it. */
 export const L2M = {
@@ -102,6 +115,10 @@ export const L2M = {
   PROVIDER_ID: "l2m.provider.id",
   TOOL_INTERNAL: "l2m.tool.internal",
   MCP_SERVER_ID: "l2m.mcp.server.id",
+  MCP_ROUND: "l2m.mcp.round",
+  MCP_ROUNDS: MCP_OUTCOME.ROUNDS,
+  TOOLSET_ID: "l2m.toolset.id",
+  GATEWAY_CLIENT_ID: "l2m.gateway.client.id",
   LINK_REASON: "l2m.link.reason"
 } as const;
 

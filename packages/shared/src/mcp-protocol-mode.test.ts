@@ -20,3 +20,14 @@ describe("MCP server connection protocolMode", () => {
     expect(mcpServerConnectionSchema.safeParse({ protocolMode: 1 }).success).toBe(false);
   });
 });
+
+describe("MCP server connection propagateTraceContext", () => {
+  it("accepts true, false or nothing, and rejects anything else on that field", () => {
+    for (const value of [true, false]) {
+      expect(mcpServerConnectionSchema.parse({ endpoint: "https://x/mcp", propagateTraceContext: value })).toEqual({ endpoint: "https://x/mcp", propagateTraceContext: value });
+    }
+    const parsed = mcpServerConnectionSchema.safeParse({ endpoint: "https://x/mcp", propagateTraceContext: "no" });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues[0]?.path).toEqual(["propagateTraceContext"]);
+  });
+});

@@ -8,7 +8,9 @@ import { MCPRegistry } from "./registry";
 import { withSecretBundle } from "./secret-bundle";
 import { withRuntimeLimits, type McpRuntimeGuard } from "./runtime-limits";
 import { ContainerSandboxLauncher, type McpSandboxPolicy, type StdioLauncher } from "./sandbox";
+import { InstrumentedMCPRegistry } from "./tracing";
 import type { McpOAuthTokenProvider, MCPServerAdapter } from "./types";
+import type { RunInstrumentation } from "@ai-orchestrator/shared";
 
 export * from "./types";
 export * from "./registry";
@@ -29,6 +31,7 @@ export * from "./runtime-limits";
 export * from "./delegated";
 export * from "./cassette";
 export * from "./tool-argument-summary";
+export * from "./tracing";
 export * from "./snapshot-mock";
 export * from "./mock-stdio-server";
 export * from "./adapters/mock-mcp";
@@ -62,6 +65,12 @@ export interface DefaultMCPRegistryOptions {
    * is on by default.
    */
   httpProtocol?: HttpMcpProtocolOptions;
+  /**
+   * Tracing, passed only while it is on: every MCP operation gets a CLIENT span (`tools/call search`), and the HTTP
+   * and stdio clients send the active trace context to the server (`params._meta` and, over HTTP, headers). Unset or
+   * the no-op: no spans, nothing sent, the registry is a plain one.
+   */
+  instrument?: RunInstrumentation;
 }
 
 function isLauncher(value: McpSandboxPolicy | StdioLauncher): value is StdioLauncher {
@@ -69,7 +78,8 @@ function isLauncher(value: McpSandboxPolicy | StdioLauncher): value is StdioLaun
 }
 
 export function createDefaultMCPRegistry(options?: DefaultMCPRegistryOptions): MCPRegistry {
-  const registry = new MCPRegistry();
+  const instrument = options?.instrument?.enabled ? options.instrument : undefined;
+  const registry = instrument ? new InstrumentedMCPRegistry(instrument) : new MCPRegistry();
   const guard = options?.runtimeGuard;
   const limited = <T extends MCPServerAdapter>(adapter: T): T => (guard ? withRuntimeLimits(adapter, guard) : adapter);
   const launcher = options?.sandbox ? (isLauncher(options.sandbox) ? options.sandbox : new ContainerSandboxLauncher(options.sandbox)) : undefined;
@@ -79,12 +89,13 @@ export function createDefaultMCPRegistry(options?: DefaultMCPRegistryOptions): M
       withSecretBundle(
         new HttpMCPServerAdapter({
           ...(options?.oauth ? { oauth: options.oauth } : {}),
-          ...(options?.httpProtocol ? { protocol: options.httpProtocol } : {})
+          ...(options?.httpProtocol ? { protocol: options.httpProtocol } : {}),
+          ...(instrument ? { trace: instrument } : {})
         })
       )
     )
   );
-  registry.register(limited(withSecretBundle(new StdioMCPServerAdapter(launcher ? { launcher } : undefined))));
+  registry.register(limited(withSecretBundle(new StdioMCPServerAdapter(launcher || instrument ? { ...(launcher ? { launcher } : {}), ...(instrument ? { trace: instrument } : {}) } : undefined))));
   registry.register(limited(new MockMCPServerAdapter()));
   // Phase 6.4 — built-in tools, under the same rate limits and breaker as any other server.
   registry.register(limited(new BuiltInToolsMCPServerAdapter(options?.builtInTools)));

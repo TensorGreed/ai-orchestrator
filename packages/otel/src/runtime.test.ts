@@ -110,6 +110,7 @@ describe("OtelRunInstrumentation span shapes", () => {
     expect(mcp.parentSpanContext?.spanId).toBe(tool.spanContext().spanId);
     expect(mcp.attributes).toEqual({
       "mcp.method.name": "tools/call",
+      "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": "search",
       "mcp.session.id": "mcp-sess",
       "jsonrpc.request.id": "7",

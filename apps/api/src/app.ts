@@ -1864,6 +1864,9 @@ export async function createApp(
       mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
       legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE
     },
+    // Tracing (only while it is on): a CLIENT span per MCP operation, and trace context sent to MCP servers in
+    // `_meta` and HTTP headers unless L2M_OTEL_PROPAGATE_TO_MCP=false or the server's connection opts out.
+    ...(telemetry.instrumentation.enabled ? { instrument: telemetry.instrumentation } : {}),
     // Phase 10.8 — snapshot mock servers read accepted snapshots and cassettes from the store.
     snapshots: {
       loadSnapshot: async (sourceServerId) => {
@@ -12228,6 +12231,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     limiter: gatewayClientLimiter,
     network: networkControls,
     clusterMode,
+    // A SERVER span per gateway request while tracing is on; `_meta` trace context follows the inbound trust rule.
+    ...(telemetry.instrumentation.enabled
+      ? { tracing: { instrumentation: telemetry.instrumentation, trustInbound: telemetrySettings.trustInbound } }
+      : {}),
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;

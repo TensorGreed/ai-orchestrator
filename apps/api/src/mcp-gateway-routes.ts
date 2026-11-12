@@ -65,6 +65,7 @@ import { checkGatewayCall, type GatewayGuardChannel, type GatewayGuardOutcome } 
 import type { z } from "zod";
 import { DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS, toolArgumentSummariesEnabled, type AppConfig } from "./config.js";
 import type { AuditEventInput } from "./services/audit-service.js";
+import { traceGatewayRequest, type McpGatewayTracing } from "./telemetry/mcp-gateway-tracing.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
@@ -318,6 +319,11 @@ export interface McpGatewayDeps {
    * on toolsets that track outside content per session: their label mark would stay on one instance.
    */
   clusterMode?: boolean;
+  /**
+   * Tracing, only while it is on: a SERVER span per JSON-RPC request (both eras), parented on the trace context in
+   * the request's `_meta` under the inbound trust rule. Absent: no spans.
+   */
+  tracing?: McpGatewayTracing;
 }
 
 /**
@@ -1718,7 +1724,30 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
   };
 
+  /** The span facts of a request on `session` (a legacy session or a modern caller's principal state). */
+  const spanFacts = (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset, request: Pick<JsonRpcRequest, "id" | "method" | "params">) => ({
+    method: request.method,
+    params: request.params,
+    requestId: request.id,
+    era: session.era,
+    sessionId: session.id,
+    protocolVersion: session.protocolVersion,
+    toolsetId: toolset.id,
+    clientId: auth.client.id
+  });
+
+  /** One JSON-RPC request, in its SERVER span while tracing is on. */
   const dispatch = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    request: JsonRpcRequest,
+    emit: Emit,
+    modern?: ModernCallScope
+  ): Promise<JsonRpcResponse | typeof SUPPRESSED> =>
+    await traceGatewayRequest(deps.tracing, spanFacts(session, auth, toolset, request), () => dispatchRequest(session, auth, toolset, request, emit, modern));
+
+  const dispatchRequest = async (
     session: GatewaySession,
     auth: AuthenticatedClient,
     toolset: McpToolset,
@@ -1929,10 +1958,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return;
     }
     if (message.method === "server/discover") {
-      reply
-        .code(200)
-        .header("content-type", "application/json")
-        .send(modernizeGatewayResponse(rpcResult(message.id, gatewayDiscoverResult({ toolset, mode: modernMode, ttlMs: listTtlMs })), serverInfo));
+      await traceGatewayRequest(
+        deps.tracing,
+        { method: message.method, params: message.params, requestId: message.id, era: "modern", protocolVersion: validated.protocolVersion, toolsetId: toolset.id, clientId: auth.client.id },
+        async () => {
+          reply
+            .code(200)
+            .header("content-type", "application/json")
+            .send(modernizeGatewayResponse(rpcResult(message.id, gatewayDiscoverResult({ toolset, mode: modernMode, ttlMs: listTtlMs })), serverInfo));
+        }
+      );
       return;
     }
     // The caller's principal state.
@@ -2136,7 +2171,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           reply.code(400).send(rpcError(initialize.message.id, JSON_RPC_ERRORS.invalidRequest, "This request already belongs to a session; start a new one without Mcp-Session-Id."));
           return reply;
         }
-        await handleInitialize(request, reply, auth, toolset, initialize.message);
+        await traceGatewayRequest(
+          deps.tracing,
+          { method: "initialize", params: initialize.message.params, requestId: initialize.message.id, era: "legacy", toolsetId: toolset.id, clientId: auth.client.id },
+          async () => await handleInitialize(request, reply, auth, toolset, initialize.message)
+        );
         return reply;
       }
 

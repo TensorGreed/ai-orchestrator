@@ -109,8 +109,10 @@ export interface ToolCallSpanInfo {
 export interface McpRequestSpanInfo {
   /** JSON-RPC method: tools/call, tools/list, resources/read, ... */
   method: string;
-  /** The tool, prompt or resource the method targets. */
+  /** The tool (tools/call) or prompt (prompts/get) the method targets: it goes into the span name. */
   target?: string;
+  /** resources/read: the resource URI (`mcp.resource.uri`); the implementation drops its query, fragment and credentials. */
+  resourceUri?: string;
   /** `client` for L2M calling a server, `server` for the MCP gateway answering a client. */
   side?: "client" | "server";
   /** The registry id of the MCP server (never its URL). */
@@ -119,9 +121,36 @@ export interface McpRequestSpanInfo {
   protocolVersion?: string;
   requestId?: string | number;
   transport?: "tcp" | "pipe";
+  /** `http` for Streamable HTTP (`network.protocol.name`). */
+  networkProtocol?: string;
   serverAddress?: string;
   serverPort?: number;
+  /** Server side: the caller's address (`client.address`). */
+  clientAddress?: string;
+  /** Gateway (server side): the toolset and the MCP client the request came through. */
+  toolsetId?: string;
+  gatewayClientId?: string;
+  /**
+   * Client side: a later round of a multi round-trip request (2026-07-28), numbered from 2. Round 1 is the request's
+   * own span; each later round is a child span of it.
+   */
+  round?: number;
+  /**
+   * Server side: the trace context the request carried in `params._meta`. `parent` makes it the span's parent (and
+   * links the transport's span); `link` keeps the transport's span as parent and only links it (an untrusted caller).
+   */
+  remoteParent?: { carrier: TraceCarrier; use: "parent" | "link" };
 }
+
+/** Attribute names an MCP span's outcome is recorded under (the response's JSON-RPC error code, round count). */
+export const MCP_OUTCOME_ATTRIBUTES = Object.freeze({
+  RPC_RESPONSE_STATUS_CODE: "rpc.response.status_code",
+  ERROR_TYPE: "error.type",
+  SESSION_ID: "mcp.session.id",
+  PROTOCOL_VERSION: "mcp.protocol.version",
+  JSONRPC_REQUEST_ID: "jsonrpc.request.id",
+  ROUNDS: "l2m.mcp.rounds"
+} as const);
 
 /**
  * A span opened without running anything in it, for work that is not one function: a workflow node or an agent turn

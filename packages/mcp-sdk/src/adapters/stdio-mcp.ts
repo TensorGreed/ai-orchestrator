@@ -9,10 +9,13 @@ import type {
   McpServerCapabilities,
   MCPServerConfig,
   MCPToolDefinition,
-  MCPToolResult
+  MCPToolResult,
+  RunInstrumentation
 } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter, McpReadResourceOptions, McpServerRequestOrigin } from "../types";
 import { McpJsonRpcError, McpTimeoutError, classifyMcpError } from "../errors";
+import { withRequestMeta } from "../protocol/meta";
+import { annotateMcpError, annotateMcpRequest, mcpTraceCarrier, withTraceContext } from "../tracing";
 import type { StdioLaunchPlan, StdioLauncher } from "../sandbox";
 import {
   DEFAULT_RESOURCE_MAX_BYTES,
@@ -296,8 +299,12 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   /** Phase 10.7 — decides how the command starts (on the host, or in a container sandbox). */
   private launcher?: StdioLauncher;
 
-  constructor(options?: { launcher?: StdioLauncher }) {
+  /** Tracing (only while it is on): requests carry the active span's trace context in `params._meta`. */
+  private readonly trace?: RunInstrumentation;
+
+  constructor(options?: { launcher?: StdioLauncher; trace?: RunInstrumentation }) {
     this.launcher = options?.launcher;
+    this.trace = options?.trace?.enabled ? options.trace : undefined;
   }
 
   /** Phase 10.7 — the launcher sandboxed servers start through. */
@@ -786,10 +793,14 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     }
     session.rpcCounter += 1;
     const id = session.rpcCounter;
-    const withMeta =
-      options.progressToken && params && typeof params === "object"
-        ? { ...(params as Record<string, unknown>), _meta: { progressToken: options.progressToken } }
-        : params;
+    // One `_meta` merge for every writer (progress token, trace context), keeping keys the params already carry.
+    // initialize carries no trace context (as over HTTP, where it goes in headers only).
+    const record = params && typeof params === "object" && !Array.isArray(params) ? (params as Record<string, unknown>) : undefined;
+    const carrier = method === "initialize" ? undefined : mcpTraceCarrier(this.trace, session.config);
+    let withMeta: unknown = params;
+    if (record && options.progressToken) withMeta = withRequestMeta(record, { progressToken: options.progressToken });
+    if (carrier && (record || params === undefined)) withMeta = withTraceContext(withMeta as Record<string, unknown> | undefined, carrier);
+    if (method !== "initialize") annotateMcpRequest(this.trace, { requestId: id });
     const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params: withMeta }) + "\n";
     if (options.progressToken && options.onProgress) {
       session.progressListeners.set(options.progressToken, options.onProgress);
@@ -823,12 +834,15 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       (response) => {
         cleanup();
         if (response.error) {
-          throw new McpJsonRpcError(response.error.message || "MCP JSON-RPC error", response.error.code);
+          const failure = new McpJsonRpcError(response.error.message || "MCP JSON-RPC error", response.error.code);
+          annotateMcpError(this.trace, failure);
+          throw failure;
         }
         return response;
       },
       (error: unknown) => {
         cleanup();
+        annotateMcpError(this.trace, error);
         throw error;
       }
     );
