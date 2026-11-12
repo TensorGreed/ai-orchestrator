@@ -1118,6 +1118,16 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
    */
   async closeSessions(context: MCPExecutionContext): Promise<void> {
     const cache = this.getCache(context);
+    const starts = [...(this.starting.get(cache)?.values() ?? [])];
+    // The cached sessions are told to stop right away (before anything is awaited).
+    const closing = this.closeCachedSessions(context, cache);
+    if (starts.length === 0) return await closing;
+    // A session still starting is closed once it has started, not left cached after the others are gone.
+    await Promise.all(starts.map((start) => start.catch(() => undefined)));
+    await Promise.all([closing, this.closeCachedSessions(context, cache)]);
+  }
+
+  private async closeCachedSessions(context: MCPExecutionContext, cache: Map<string, StdioSession>): Promise<void> {
     const exits: Array<Promise<void>> = [];
     const closing: StdioSession[] = [];
     const reason = context.signal?.aborted ? cancelReason(context.signal) : "MCP session closed.";
@@ -1317,6 +1327,23 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     }
   }
 
+  /** Session starts under way, per session cache and key, so concurrent first calls share one process. */
+  private readonly starting = new WeakMap<Map<string, StdioSession>, Map<string, Promise<StdioSession>>>();
+
+  private startingFor(cache: Map<string, StdioSession>): Map<string, Promise<StdioSession>> {
+    let starting = this.starting.get(cache);
+    if (!starting) {
+      starting = new Map();
+      this.starting.set(cache, starting);
+    }
+    return starting;
+  }
+
+  /**
+   * The server's session in this context. Concurrent callers share one start: a caller that finds a start under
+   * way waits for it instead of spawning a second process (whose session would replace the first in the cache and
+   * leave the first process running). `forceNew` waits for a start under way, then replaces whatever is cached.
+   */
   private async getOrCreateSession(
     config: MCPServerConfig,
     context: MCPExecutionContext,
@@ -1324,6 +1351,18 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   ): Promise<StdioSession> {
     const cache = this.getCache(context);
     const key = buildSessionKey(config);
+    const starting = this.startingFor(cache);
+
+    for (;;) {
+      const underWay = starting.get(key);
+      if (!underWay) break;
+      if (!options?.forceNew) {
+        const session = await underWay;
+        session.context = context;
+        return session;
+      }
+      await underWay.catch(() => undefined);
+    }
 
     if (options?.forceNew) {
       const existing = cache.get(key);
@@ -1339,9 +1378,16 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       }
     }
 
-    const session = await this.createSession(config, context, options?.forceLegacy ? { forceLegacy: true } : undefined);
-    cache.set(key, session);
-    return session;
+    const start = this.createSession(config, context, options?.forceLegacy ? { forceLegacy: true } : undefined).then((session) => {
+      cache.set(key, session);
+      return session;
+    });
+    starting.set(key, start);
+    try {
+      return await start;
+    } finally {
+      if (starting.get(key) === start) starting.delete(key);
+    }
   }
 
   /**
