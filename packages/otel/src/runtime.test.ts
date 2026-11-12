@@ -198,6 +198,18 @@ describe("OtelRunInstrumentation span shapes", () => {
     expect(spans()[0]!.attributes).toEqual({ a: 1 });
   });
 
+  it("ends a span kept open when the wrapped function throws", async () => {
+    const { inst, spans } = setup();
+    await expect(
+      inst.modelCall({ providerId: "openai", model: "m", stream: true }, async (span) => {
+        span.keepOpen();
+        throw new Error("stream setup failed");
+      })
+    ).rejects.toThrow("stream setup failed");
+    expect(spans()).toHaveLength(1);
+    expect(spans()[0]!.status.code).toBe(SpanStatusCode.ERROR);
+  });
+
   it("annotates the active span", async () => {
     const { inst, byName } = setup();
     await inst.span({ name: "outer" }, async () => {
@@ -255,10 +267,34 @@ describe("propagation", () => {
     expect(byName("root").parentSpanContext).toBeUndefined();
   });
 
-  it("propagates nothing with OTEL_PROPAGATORS=none", async () => {
-    const { inst } = setup({ propagators: ["none"] });
-    await inst.span({ name: "outer" }, async () => {
+  it("propagates nothing outward with OTEL_PROPAGATORS=none, but keeps L2M's own hand-offs", async () => {
+    const { inst, byName } = setup({ propagators: ["none"] });
+    const queued: Record<string, string> = {};
+    await inst.span({ name: "outer" }, async (span) => {
       expect(inst.inject({}, "mcp")).toBe(false);
+      expect(inst.inject({}, "http")).toBe(false);
+      expect(inst.inject(queued, "queue")).toBe(true);
+      expect(queued.traceparent).toBe(`00-${span.traceId}-${span.spanId}-01`);
+      const state: Record<string, string> = {};
+      expect(inst.inject(state, "state")).toBe(true);
+    });
+    await inst.withParent(queued, () => inst.span({ name: "consumer" }, async () => undefined));
+    expect(byName("consumer").parentSpanContext?.spanId).toBe(byName("outer").spanContext().spanId);
+    await inst.run({ executionId: "e", workflowId: "w", links: [queued] }, async () => undefined);
+    expect(byName("invoke_workflow w").links).toHaveLength(1);
+  });
+
+  it("replaces a stale traceparent already in the carrier", async () => {
+    const { inst } = setup();
+    const carrier: Record<string, string> = { traceparent: `00-${INBOUND_TRACE}-${INBOUND_SPAN}-01`, tracestate: "old=1" };
+    await inst.span({ name: "outer" }, async (span) => {
+      expect(inst.inject(carrier, "mcp")).toBe(true);
+      expect(carrier.traceparent).toBe(`00-${span.traceId}-${span.spanId}-01`);
+      expect(carrier.tracestate).toBeUndefined();
+    });
+    const provider: Record<string, string> = { traceparent: `00-${INBOUND_TRACE}-${INBOUND_SPAN}-01` };
+    await inst.span({ name: "outer2" }, async () => {
+      expect(inst.inject(provider, "provider")).toBe(false);
     });
   });
 });

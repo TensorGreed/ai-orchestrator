@@ -157,7 +157,13 @@ export class OtelSpanHandle implements InstrumentationSpan {
 export interface InstrumentationDeps {
   tracer: Tracer;
   contextManager: ContextManager;
+  /** The deployment's OTEL_PROPAGATORS: used for HTTP, MCP and provider carriers and inbound requests. */
   propagator: TextMapPropagator;
+  /**
+   * W3C trace context, whatever OTEL_PROPAGATORS says: used for L2M's own hand-offs (queue payloads, persisted run
+   * state, links, withParent), which must never lose their context.
+   */
+  internalPropagator: TextMapPropagator;
   options: Pick<OtelRuntimeOptions, "spanDetail" | "naming" | "propagateToProviders" | "propagateToMcp">;
   scrub: (text: string) => string;
 }
@@ -199,7 +205,9 @@ export class OtelRunInstrumentation implements RunInstrumentation {
     try {
       return await this.deps.contextManager.with(context, () => fn(handle));
     } catch (error) {
+      // A span kept open for work that outlives `fn` still ends when `fn` fails: nobody owns it then.
       handle.recordError(error);
+      handle.end();
       throw error;
     } finally {
       if (!handle.isKeptOpen) handle.end();
@@ -346,14 +354,25 @@ export class OtelRunInstrumentation implements RunInstrumentation {
     const active = this.deps.contextManager.active();
     const spanContext = trace.getSpanContext(active);
     if (!spanContext || !isSpanContextValid(spanContext)) return false;
-    this.deps.propagator.inject(active, carrier, defaultTextMapSetter);
+    // A stale value already in the carrier must not count as injected.
+    delete carrier.traceparent;
+    delete carrier.tracestate;
+    this.propagatorFor(target).inject(active, carrier, defaultTextMapSetter);
     return typeof carrier.traceparent === "string";
   }
 
-  /** The context a carrier names as parent (ROOT_CONTEXT-based), or null when it holds no valid span context. */
-  extract(carrier: TraceCarrier | null | undefined, base: Context = ROOT_CONTEXT): Context | null {
+  private propagatorFor(target: TraceInjectTarget | "internal"): TextMapPropagator {
+    return target === "queue" || target === "state" || target === "internal" ? this.deps.internalPropagator : this.deps.propagator;
+  }
+
+  /**
+   * The context a carrier names as parent (on `base`), or null when it holds no valid span context. `inbound` reads
+   * it with the deployment's propagators (a request from outside); otherwise with W3C trace context (L2M's own).
+   */
+  extract(carrier: TraceCarrier | null | undefined, base: Context = ROOT_CONTEXT, source: "inbound" | "internal" = "internal"): Context | null {
     if (!carrier || typeof carrier.traceparent !== "string") return null;
-    const extracted = this.deps.propagator.extract(base, carrier, defaultTextMapGetter);
+    const propagator = source === "inbound" ? this.deps.propagator : this.deps.internalPropagator;
+    const extracted = propagator.extract(base, carrier, defaultTextMapGetter);
     const spanContext = trace.getSpanContext(extracted);
     return spanContext && isSpanContextValid(spanContext) ? extracted : null;
   }

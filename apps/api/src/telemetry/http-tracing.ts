@@ -86,9 +86,8 @@ export function installHttpServerSpans(app: FastifyInstance, runtime: OtelRuntim
   };
 
   app.addHook("onRequest", async (request, reply) => {
-    const redacted = redactSensitiveUrl(request.url);
-    const path = redacted.split("?")[0] ?? "";
     if (UNTRACED_PATHS.has(request.url.split("?")[0] ?? "")) return;
+    const path = redactSensitiveUrl(request.url).split("?")[0] ?? "";
     const traceparent = headerText(request, "traceparent");
     const tracestate = headerText(request, "tracestate");
     const inbound = traceparent ? { traceparent, ...(tracestate ? { tracestate } : {}) } : undefined;

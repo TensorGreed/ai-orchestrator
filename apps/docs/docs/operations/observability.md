@@ -63,7 +63,7 @@ To send traces and metrics to different places, set `OTEL_EXPORTER_OTLP_TRACES_E
 
 ## Export
 
-- **Protocol.** `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/protobuf` (the default, as in the OpenTelemetry specification) or `http/json`. Collectors listening on port 4318 accept both. gRPC is not shipped.
+- **Protocol.** `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/protobuf` (the default, as in the OpenTelemetry specification) or `http/json`, for traces. Collectors listening on port 4318 accept both. The metrics push (`OTEL_METRICS_ENABLED`) always sends OTLP/HTTP JSON. gRPC is not shipped: `grpc` with a traces endpoint set stops the API at start-up.
 - **Batching.** Spans are exported in batches by the SDK's batch span processor, never one request per span. The `OTEL_BSP_*` variables tune it (see the [settings table](#settings)). When the queue is full, new spans are dropped rather than slowing requests down.
 - **Unreachable collector.** An export that fails or takes longer than `OTEL_EXPORTER_OTLP_TIMEOUT` (10 seconds by default) is dropped. Exporting never blocks a request.
 - **Shutdown.** On a clean stop, L2M flushes the spans still queued, waiting at most 5 seconds.
@@ -86,11 +86,12 @@ Every span and metric carries:
 - `service.name`: `OTEL_SERVICE_NAME`, else `TRACING_SERVICE_NAME` (default `ai-orchestrator`). `OTEL_SERVICE_NAME` wins over a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`.
 - `service.version`: `OTEL_SERVICE_VERSION`, if set.
 - `telemetry.sdk.name`, `telemetry.sdk.language` and `telemetry.sdk.version`, set by the OpenTelemetry SDK.
-- Every `key=value` pair in `OTEL_RESOURCE_ATTRIBUTES`. Set `deployment.environment.name` here.
+- `host.name` (the machine's host name), `process.pid` and `service.instance.id` (a random id per start), so replicas can be told apart.
+- Every `key=value` pair in `OTEL_RESOURCE_ATTRIBUTES`; it overrides any of the above except `service.name`. Set `deployment.environment.name` here.
 
 ## Sampling
 
-`OTEL_TRACES_SAMPLER` takes the specification's built-in samplers: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on` (the default), `parentbased_always_off` and `parentbased_traceidratio`. The two ratio samplers need `OTEL_TRACES_SAMPLER_ARG`, a number from 0 to 1. An unknown sampler, or a ratio sampler without its ratio, stops the API at start-up with a message naming the setting.
+`OTEL_TRACES_SAMPLER` takes the specification's built-in samplers: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on` (the default), `parentbased_always_off` and `parentbased_traceidratio`. The two ratio samplers read `OTEL_TRACES_SAMPLER_ARG`, a number from 0 to 1; without it (or with a value outside that range) they sample every trace, as the specification says, and the API logs a warning. An unknown sampler falls back to the default with a warning.
 
 To bound volume on a busy deployment, use `parentbased_traceidratio` with a small ratio, and keep tail sampling (for example "keep every trace with an error") in the collector.
 
@@ -100,25 +101,25 @@ A caller can send a W3C `traceparent` header (and `tracestate`). Whether L2M con
 
 | Value | Behaviour |
 |---|---|
-| `authenticated` (default) | The trace continues (and its sampled flag is honoured) when the request carries a valid credential: a signed-in session, an API key, or an MCP / AI gateway client token. It also continues for connections from `L2M_OTEL_TRUSTED_PROXIES`. Anyone else's request starts a new trace with a **link** to theirs. |
+| `authenticated` (default) | The trace continues (and its sampled flag is honoured) when the request carries a valid credential: a live signed-in session, an unexpired API key (whatever its scopes), or an MCP / AI gateway client token. It also continues for connections from `L2M_OTEL_TRUSTED_PROXIES`. Anyone else's request starts a new trace with a **link** to theirs. |
 | `all` | Every caller's trace continues. Use only when the API is reachable solely through your own services. |
 | `none` | No caller's trace continues; every request starts a new trace that links to the caller's. |
 
-This stops an anonymous caller (a public webhook, for example) from switching sampling on or off for your traces, or from making your spans part of their trace. The credential check only reads the credential: it does not count as session activity, and the route still authenticates the request as usual.
+This stops an anonymous caller (a public webhook, for example) from switching sampling on or off for your traces, or from making your spans part of their trace. The credential check only reads the credential: it records no key or token use, does not count as session activity and ends no session, and the route still authenticates (and authorizes) the request as usual. Holding any valid credential is enough to continue a trace, even one that the route then refuses for lack of permission.
 
-`L2M_OTEL_TRUSTED_PROXIES` is a comma list of IP addresses or CIDR ranges. It is matched against the address that opened the connection (not `X-Forwarded-For`), so list the proxy or gateway in front of L2M that passes on your own services' trace context.
+`L2M_OTEL_TRUSTED_PROXIES` is a comma list of IP addresses or CIDR ranges. It is matched against the address that opened the connection (not `X-Forwarded-For`), so list the proxy or gateway in front of L2M that passes on your own services' trace context. Every request arriving through a listed address is trusted, so do not list an internet-facing load balancer or ingress: that trusts every caller on the internet, as `all` does.
 
-`OTEL_PROPAGATORS` chooses the formats read: `tracecontext` (default), `baggage`, or `none` to ignore inbound context entirely. Baggage is never copied into span attributes.
+`OTEL_PROPAGATORS` chooses the formats read from callers (and, as later releases add outbound propagation, sent to them): `tracecontext` (default), `baggage`, or `none` to ignore inbound context entirely. An unsupported entry is ignored with a warning. Baggage is never copied into span attributes.
 
 ## Trace ids in logs
 
-While tracing is on, each request's log lines (from its first hook onwards, including Fastify's `request completed` line) carry `trace_id` and `span_id` next to `reqId`. Other lines written inside a span carry `trace_id`, `span_id` and `trace_flags`. Search your logs for a trace id to find every line of that request. The `incoming request` line is written before the span starts and has `reqId` only.
+While tracing is on, each request's log lines (from the tracing hook onwards, including Fastify's `request completed` line) carry `trace_id` and `span_id` next to `reqId`. Other lines written inside a span carry `trace_id`, `span_id` and `trace_flags`. Search your logs for a trace id to find every line of that request. The `incoming request` line is written before the span starts and has `reqId` only.
 
 With tracing off, log lines are unchanged.
 
 ## HTTP server spans
 
-`OTEL_HTTP_SERVER_SPANS` (default `true`) records one SERVER span per request while tracing is on. With tracing off, no hooks are installed at all. Attributes follow the stable HTTP semantic conventions:
+`OTEL_HTTP_SERVER_SPANS` (default `true`) records one SERVER span per request while tracing is on, from the tracing hook onwards. A request refused earlier (by network rules or a rate limit) gets no span. With tracing off, no hooks are installed at all. Attributes follow the stable HTTP semantic conventions:
 
 | Attribute | Value |
 |---|---|
@@ -140,7 +141,7 @@ A 5xx response sets the span status to ERROR; a 4xx leaves it unset. A request t
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Combined OTLP/HTTP endpoint. Setting it turns tracing on. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Traces endpoint (full URL); overrides the combined one. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | Metrics endpoint (full URL); overrides the combined one. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | Or `http/json`. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | Or `http/json`. Traces only. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | empty | `key=value` pairs, percent-decoded. |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Milliseconds per export. |
 | `OTEL_SDK_DISABLED` | `false` | `true` turns every OpenTelemetry signal off, whatever else is set. |
@@ -166,7 +167,7 @@ A 5xx response sets the span status to ERROR; a 4xx leaves it unset. A request t
 | `L2M_OTEL_PROPAGATE_TO_PROVIDERS` | `false` | Reserved for outbound propagation to model providers. |
 | `L2M_OTEL_PROPAGATE_TO_MCP` | `true` | Reserved for outbound propagation to MCP servers. |
 
-An endpoint that is not an absolute `http://` or `https://` URL, an unknown sampler or propagator, or a bad trusted-proxy entry stops the API at start-up with a message naming the setting.
+The standard `OTEL_*` values are read only while they are used, so values meant for other tools sharing the environment never stop L2M. While tracing is on, an unsupported value (a sampler, propagator, protocol or number L2M cannot use) falls back to its default with a warning at start-up. Only these stop the API at start-up, with a message naming the setting: an endpoint L2M is about to use that is not an absolute `http://` or `https://` URL, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` with a traces endpoint set, and a bad `L2M_OTEL_*` value (such as a trusted-proxy entry that is not an IP address or CIDR range).
 
 ## Deprecated settings
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { OTLP_PROTOCOLS, PROPAGATOR_NAMES, SAMPLER_NAMES } from "@ai-orchestrator/otel";
-import { OTEL_TRACES_SAMPLERS, parseConfig } from "../config.js";
-import { parseOtelKeyValueList, resolveTelemetrySettings } from "./settings.js";
+import { parseConfig } from "../config.js";
+import { OTEL_TRACES_SAMPLERS, parseOtelKeyValueList, resolveTelemetrySettings } from "./settings.js";
 
 const BASE = { SECRET_MASTER_KEY_BASE64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" };
 
@@ -82,8 +82,17 @@ describe("resolveTelemetrySettings", () => {
       OTEL_SERVICE_VERSION: "1.2.3"
     });
     expect(resolved.headers).toEqual({ authorization: "Basic abc==", "x-tenant": "t1" });
-    expect(resolved.resourceAttributes).toEqual({ "service.name": "l2m-prod", "service.version": "1.2.3", team: "platform/ai" });
+    expect(resolved.resourceAttributes).toMatchObject({ "service.name": "l2m-prod", "service.version": "1.2.3", team: "platform/ai" });
     expect(resolved.serviceName).toBe("l2m-prod");
+  });
+
+  it("names the host and instance so replicas can be told apart, unless OTEL_RESOURCE_ATTRIBUTES says otherwise", () => {
+    const first = settings().resourceAttributes;
+    expect(first["host.name"]).toBeTruthy();
+    expect(first["process.pid"]).toBe(String(process.pid));
+    expect(first["service.instance.id"]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(settings().resourceAttributes["service.instance.id"]).not.toBe(first["service.instance.id"]);
+    expect(settings({ OTEL_RESOURCE_ATTRIBUTES: "host.name=web-1" }).resourceAttributes["host.name"]).toBe("web-1");
   });
 
   it("maps the deprecated OTEL_DEPLOYMENT_ENVIRONMENT to deployment.environment.name, with a warning", () => {
@@ -129,24 +138,69 @@ describe("resolveTelemetrySettings", () => {
     expect(settings({ OTEL_PROPAGATORS: "baggage,none" }).propagators).toEqual(["none"]);
   });
 
-  it("refuses to start on a bad value, naming the setting", () => {
+  it("refuses to start only on a bad L2M setting or an endpoint or protocol it is about to use", () => {
+    const on = { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318" };
     const cases: Array<[Record<string, string>, RegExp]> = [
       [{ OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4318" }, /OTEL_EXPORTER_OTLP_ENDPOINT must be an absolute/],
       [{ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "ftp://collector/v1/traces" }, /OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must be an absolute/],
       [{ TRACING_ENDPOINT: "not a url" }, /TRACING_ENDPOINT must be an absolute/],
-      [{ OTEL_EXPORTER_OTLP_PROTOCOL: "grpc" }, /OTEL_EXPORTER_OTLP_PROTOCOL must be http\/protobuf or http\/json/],
-      [{ OTEL_TRACES_SAMPLER: "sometimes" }, /OTEL_TRACES_SAMPLER must be one of/],
-      [{ OTEL_TRACES_SAMPLER: "traceidratio" }, /needs OTEL_TRACES_SAMPLER_ARG/],
-      [{ OTEL_TRACES_SAMPLER_ARG: "1.5" }, /OTEL_TRACES_SAMPLER_ARG/],
-      [{ OTEL_PROPAGATORS: "tracecontext,b3" }, /OTEL_PROPAGATORS entry "b3"/],
+      [{ ...on, OTEL_METRICS_ENABLED: "true", OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "metrics:4318" }, /OTEL_EXPORTER_OTLP_METRICS_ENDPOINT must be an absolute/],
+      [{ ...on, OTEL_EXPORTER_OTLP_PROTOCOL: "grpc" }, /OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not shipped/],
       [{ L2M_OTEL_TRUST_INBOUND: "everyone" }, /L2M_OTEL_TRUST_INBOUND/],
       [{ L2M_OTEL_SPAN_DETAIL: "debug" }, /L2M_OTEL_SPAN_DETAIL/],
-      [{ L2M_OTEL_TRUSTED_PROXIES: "10.0.0.0/8,proxy.internal" }, /L2M_OTEL_TRUSTED_PROXIES entry "proxy.internal"/],
-      [{ OTEL_BSP_MAX_QUEUE_SIZE: "0" }, /OTEL_BSP_MAX_QUEUE_SIZE/]
+      [{ L2M_OTEL_TRUSTED_PROXIES: "10.0.0.0/8,proxy.internal" }, /L2M_OTEL_TRUSTED_PROXIES entry "proxy.internal"/]
     ];
     for (const [env, message] of cases) {
-      expect(() => parseConfig({ ...BASE, ...env }), JSON.stringify(env)).toThrow(message);
+      expect(() => settings(env), JSON.stringify(env)).toThrow(message);
     }
+  });
+
+  it("ignores unsupported standard values while tracing is off, without a warning", () => {
+    const shared = {
+      OTEL_PROPAGATORS: "b3,xray",
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc",
+      OTEL_TRACES_SAMPLER: "sometimes",
+      OTEL_TRACES_SAMPLER_ARG: "5",
+      OTEL_BSP_MAX_QUEUE_SIZE: "0",
+      OTEL_EXPORTER_OTLP_TIMEOUT: "soon",
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "metrics:4318"
+    };
+    expect(settings(shared)).toMatchObject({ enabled: false, warnings: [] });
+    const disabled = settings({ ...shared, OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4318", OTEL_SDK_DISABLED: "true", OTEL_METRICS_ENABLED: "true" });
+    expect(disabled).toMatchObject({ enabled: false, metricsEndpoint: null, warnings: [] });
+  });
+
+  it("falls back to the defaults for unsupported standard values while tracing is on, with a warning each", () => {
+    const resolved = settings({
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318",
+      OTEL_PROPAGATORS: "tracecontext,b3",
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/xml",
+      OTEL_TRACES_SAMPLER: "sometimes",
+      OTEL_BSP_MAX_QUEUE_SIZE: "0",
+      OTEL_EXPORTER_OTLP_TIMEOUT: "soon"
+    });
+    expect(resolved).toMatchObject({
+      enabled: true,
+      propagators: ["tracecontext"],
+      protocol: "http/protobuf",
+      sampler: { name: "parentbased_always_on" },
+      batch: { maxQueueSize: 2048 },
+      timeoutMs: 10_000
+    });
+    const warnings = resolved.warnings.join("\n");
+    for (const name of ['OTEL_PROPAGATORS entry "b3"', "OTEL_EXPORTER_OTLP_PROTOCOL=http/xml", "OTEL_TRACES_SAMPLER=sometimes", "OTEL_BSP_MAX_QUEUE_SIZE=0", "OTEL_EXPORTER_OTLP_TIMEOUT=soon"]) {
+      expect(warnings).toContain(name);
+    }
+  });
+
+  it("samples every trace when a ratio sampler has no ratio or a bad one, as the specification says", () => {
+    const on = { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318" };
+    const missing = settings({ ...on, OTEL_TRACES_SAMPLER: "traceidratio" });
+    expect(missing.sampler).toEqual({ name: "traceidratio", ratio: 1 });
+    expect(missing.warnings.join(" ")).toContain("without OTEL_TRACES_SAMPLER_ARG");
+    const bad = settings({ ...on, OTEL_TRACES_SAMPLER: "parentbased_traceidratio", OTEL_TRACES_SAMPLER_ARG: "1.5" });
+    expect(bad.sampler).toEqual({ name: "parentbased_traceidratio", ratio: 1 });
+    expect(bad.warnings.join(" ")).toContain("OTEL_TRACES_SAMPLER_ARG=1.5");
   });
 
   it("works on a hand-built config that predates these settings", () => {

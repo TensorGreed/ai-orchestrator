@@ -49,7 +49,7 @@ export function startHttpServerSpan(instrumentation: OtelRunInstrumentation, inp
   const method = known ? upper : "_OTHER";
   const name = input.route ? `${known ? method : "HTTP"} ${input.route}` : known ? method : "HTTP";
 
-  const inbound = input.inboundUse === "ignore" ? null : instrumentation.extract(input.inbound);
+  const inbound = input.inboundUse === "ignore" ? null : instrumentation.extract(input.inbound, ROOT_CONTEXT, "inbound");
   const parent: Context = inbound && input.inboundUse === "parent" ? inbound : ROOT_CONTEXT;
   const handle = instrumentation.startSpan({
     name,

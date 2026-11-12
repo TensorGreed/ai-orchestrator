@@ -40,34 +40,6 @@ function blankAsUndefined<T extends z.ZodType>(schema: T) {
   return z.preprocess((value) => (typeof value === "string" && value.trim() === "" ? undefined : value), schema);
 }
 
-/** The OTEL_TRACES_SAMPLER values (the specification's built-in samplers). */
-export const OTEL_TRACES_SAMPLERS = [
-  "always_on",
-  "always_off",
-  "traceidratio",
-  "parentbased_always_on",
-  "parentbased_always_off",
-  "parentbased_traceidratio"
-] as const;
-
-/** An OTLP endpoint: unset, or an absolute http(s) URL. */
-function optionalOtlpUrl(name: string) {
-  return blankAsUndefined(
-    z
-      .string()
-      .trim()
-      .refine((value) => {
-        try {
-          const url = new URL(value);
-          return url.protocol === "http:" || url.protocol === "https:";
-        } catch {
-          return false;
-        }
-      }, `${name} must be an absolute http:// or https:// URL`)
-      .optional()
-  );
-}
-
 /** Like booleanFromEnv, but unset or blank stays undefined (for settings that are only read when a feature is on). */
 const optionalBooleanFromEnv = z.preprocess(
   (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
@@ -578,15 +550,15 @@ const envSchema = z.object({
   METRICS_SLO_SUCCESS_TARGET: z.coerce.number().min(0).max(1).default(0.99),
   METRICS_SLO_P95_LATENCY_MS: z.coerce.number().int().positive().default(30000),
   TRACING_ENABLED: booleanFromEnv.default(false),
-  TRACING_ENDPOINT: optionalOtlpUrl("TRACING_ENDPOINT"),
+  TRACING_ENDPOINT: z.string().optional(),
   TRACING_SERVICE_NAME: z.string().default("ai-orchestrator"),
 
   // OpenTelemetry. Standard OTEL_* variables: when an OTLP endpoint is set, traces are exported through the
   // OpenTelemetry SDK (http/protobuf unless OTEL_EXPORTER_OTLP_PROTOCOL says http/json), and metrics too with
   // OTEL_METRICS_ENABLED. The legacy TRACING_* variables still work (deprecated). Resolved in telemetry/settings.ts.
-  OTEL_EXPORTER_OTLP_ENDPOINT: optionalOtlpUrl("OTEL_EXPORTER_OTLP_ENDPOINT"),
-  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: optionalOtlpUrl("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
-  OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: optionalOtlpUrl("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"),
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: z.string().optional(),
+  OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: z.string().optional(),
   /** Comma-separated `key=value` pairs added to every OTLP request (auth headers, tenant IDs). */
   OTEL_EXPORTER_OTLP_HEADERS: z.string().default(""),
   OTEL_SERVICE_NAME: z.string().optional(),
@@ -600,34 +572,31 @@ const envSchema = z.object({
   OTEL_HTTP_SERVER_SPANS: booleanFromEnv.default(true),
   // OpenTelemetry SDK settings (see telemetry/settings.ts). Tracing stays off until an OTLP endpoint or
   // TRACING_ENABLED is set, and nothing from the SDK is loaded while it is off.
-  /** `true` turns every OpenTelemetry signal off, whatever else is set (the standard switch). */
-  // Optional (unset = the default noted), so tests and embedders that build a config by hand need none of them;
-  // telemetry/settings.ts applies the defaults.
+  // Optional (unset = the default noted), so tests and embedders that build a config by hand need none of them.
+  // The standard OTEL_* values are read as text and checked in telemetry/settings.ts only while tracing is on (a
+  // value meant for another tool never stops the API; an unknown one is ignored with a warning, as the
+  // specification asks).
   /** `true` turns every OpenTelemetry signal off, whatever else is set (the standard switch). Default false. */
-  OTEL_SDK_DISABLED: optionalBooleanFromEnv,
-  /** `http/protobuf` (default, the specification's default) or `http/json`. */
-  OTEL_EXPORTER_OTLP_PROTOCOL: blankAsUndefined(
-    z.enum(["http/protobuf", "http/json"], { message: "OTEL_EXPORTER_OTLP_PROTOCOL must be http/protobuf or http/json (grpc is not shipped)" }).optional()
-  ),
+  OTEL_SDK_DISABLED: z.string().optional(),
+  /** `http/protobuf` (default, the specification's default) or `http/json`, for traces. */
+  OTEL_EXPORTER_OTLP_PROTOCOL: z.string().optional(),
   /** Milliseconds one OTLP export may take. Default 10000. */
-  OTEL_EXPORTER_OTLP_TIMEOUT: blankAsUndefined(z.coerce.number().int().positive().optional()),
+  OTEL_EXPORTER_OTLP_TIMEOUT: z.string().optional(),
   /** Default parentbased_always_on. */
-  OTEL_TRACES_SAMPLER: blankAsUndefined(
-    z.enum(OTEL_TRACES_SAMPLERS, { message: `OTEL_TRACES_SAMPLER must be one of ${OTEL_TRACES_SAMPLERS.join(", ")}` }).optional()
-  ),
-  /** The ratio for the traceidratio samplers, 0 to 1. */
-  OTEL_TRACES_SAMPLER_ARG: blankAsUndefined(z.coerce.number().min(0).max(1).optional()),
+  OTEL_TRACES_SAMPLER: z.string().optional(),
+  /** The ratio for the traceidratio samplers, 0 to 1 (default 1). */
+  OTEL_TRACES_SAMPLER_ARG: z.string().optional(),
   /** Comma list of tracecontext, baggage, none. Default tracecontext. */
   OTEL_PROPAGATORS: z.string().optional(),
   /** Comma list; `gen_ai_latest_experimental` opts in to the newest (unreleased) GenAI names. */
   OTEL_SEMCONV_STABILITY_OPT_IN: z.string().optional(),
-  /** Default 8192. */
-  OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT: blankAsUndefined(z.coerce.number().int().positive().optional()),
+  /** Longest attribute value. Default 8192. */
+  OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT: z.string().optional(),
   /** Batch span processor: delay (5000 ms), export timeout (30000 ms), queue size (2048), batch size (512). */
-  OTEL_BSP_SCHEDULE_DELAY: blankAsUndefined(z.coerce.number().int().positive().optional()),
-  OTEL_BSP_EXPORT_TIMEOUT: blankAsUndefined(z.coerce.number().int().positive().optional()),
-  OTEL_BSP_MAX_QUEUE_SIZE: blankAsUndefined(z.coerce.number().int().positive().optional()),
-  OTEL_BSP_MAX_EXPORT_BATCH_SIZE: blankAsUndefined(z.coerce.number().int().positive().optional()),
+  OTEL_BSP_SCHEDULE_DELAY: z.string().optional(),
+  OTEL_BSP_EXPORT_TIMEOUT: z.string().optional(),
+  OTEL_BSP_MAX_QUEUE_SIZE: z.string().optional(),
+  OTEL_BSP_MAX_EXPORT_BATCH_SIZE: z.string().optional(),
   /** `standard` (default) or `verbose` (adds agent-turn and queue-producer spans). */
   L2M_OTEL_SPAN_DETAIL: blankAsUndefined(z.enum(["standard", "verbose"]).optional()),
   /** `names` (default): workflow, node and agent names appear in spans; `ids`: ids only. */
@@ -774,7 +743,7 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   parseSessionPolicy(parsed.data);
   // Phase 13.2 — a bad address list refuses to start, naming the setting and the entry.
   resolveNetworkSettings(parsed.data);
-  // OpenTelemetry — a sampler without its ratio, an unknown propagator or a bad trusted-proxy entry refuses to start.
+  // OpenTelemetry — while tracing is on, a bad endpoint, grpc or a bad trusted-proxy entry refuses to start.
   resolveTelemetrySettings(parsed.data);
   // 13.3 — retention bounds that contradict each other refuse to start.
   resolveRetentionSettings(parsed.data);

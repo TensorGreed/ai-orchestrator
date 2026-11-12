@@ -107,7 +107,14 @@ export class OtelRuntime {
     this.contextManager.enable();
     const propagator = buildPropagator(options.propagators);
     const tracer = this.tracerProvider.getTracer(INSTRUMENTATION_SCOPE, undefined, { schemaUrl: SEMCONV_SCHEMA_URL });
-    this.instrumentation = new OtelRunInstrumentation({ tracer, contextManager: this.contextManager, propagator, options, scrub });
+    this.instrumentation = new OtelRunInstrumentation({
+      tracer,
+      contextManager: this.contextManager,
+      propagator,
+      internalPropagator: new W3CTraceContextPropagator(),
+      options,
+      scrub
+    });
     this.semconvLatestGenAi = options.semconvOptIn.includes("gen_ai_latest_experimental");
 
     let registered = false;

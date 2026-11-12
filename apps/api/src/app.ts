@@ -6609,16 +6609,16 @@ export async function createApp(
     installHttpServerSpans(app, telemetryRuntime, {
       trustInbound: telemetrySettings.trustInbound,
       trustedProxies: telemetrySettings.trustedProxies,
-      // A check only: it records no sign-in context and no session activity (the handler resolves the caller itself).
+      // A check only: it records no sign-in context, no key or token use and no session activity, and ends no session
+      // (the route resolves the caller itself, as before).
       isAuthenticated: async (request) => {
         const bearer = extractBearerToken(request.headers);
         if (bearer) {
-          if (await apiKeyService.verify(bearer)) return true;
-          if ((await traceClientService.verify(bearer)).ok) return true;
+          if (await apiKeyService.check(bearer)) return true;
+          if (await traceClientService.check(bearer)) return true;
         }
         const sessionId = getSessionIdFromRequest(request);
-        if (!sessionId) return false;
-        return (await authService.resolveSession(sessionId, undefined, { background: true })).ok;
+        return sessionId ? await authService.checkSession(sessionId) : false;
       }
     });
   }
