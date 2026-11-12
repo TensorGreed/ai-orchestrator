@@ -457,6 +457,10 @@ describe("modern mode on", () => {
     expect(modernInit.statusCode).toBe(404);
     expect(modernInit.json()).toMatchObject({ jsonrpc: "2.0", id: 9, error: { code: -32601 } });
     expect(modernInit.headers["mcp-session-id"]).toBeUndefined();
+    // ...also with legacy-shaped params and no _meta: the removed method comes first, not the missing keys.
+    const bareInit = await send({ protocolVersion: MODERN, capabilities: {}, clientInfo: { name: "x", version: "1" } }, modernHeaders("initialize"), "initialize");
+    expect(bareInit.statusCode).toBe(404);
+    expect(bareInit.json()).toMatchObject({ jsonrpc: "2.0", id: 9, error: { code: -32601 } });
 
     // Only the one valid call created the caller's state; refused requests never do.
     expect(await auditEvents(fixture.context.store, "mcp_gateway.caller_seen")).toHaveLength(1);

@@ -121,6 +121,10 @@ export function validateModernGatewayMessage(parsed: unknown, headers: McpHeader
   const message = classified.message;
   const meta = inspectRequestMeta(message.params);
   if (meta.era !== "modern") {
+    // `initialize` with a modern header and legacy params: 2026-07-28 removed the method, whatever `_meta` holds.
+    if (message.method === "initialize") {
+      return { ok: false, status: 404, response: rpcError(message.id, JSON_RPC_ERRORS.methodNotFound, "Method not found: initialize") };
+    }
     // A modern version in the header but no protocol version in `_meta`: a malformed modern request (-32602).
     const present = isRecord(message.params) && isRecord(message.params._meta) ? message.params._meta : {};
     const missing = isRecord(present[MCP_META_CLIENT_CAPABILITIES])
