@@ -1,5 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import { MCP_CLIENT_PROTOCOL_VERSION } from "./progress";
+import {
+  MCP_CLIENT_INFO,
+  MCP_CLIENT_MODERN_PROTOCOL_VERSION,
+  MCP_META_CLIENT_CAPABILITIES,
+  MCP_META_CLIENT_INFO,
+  MCP_META_PROTOCOL_VERSION
+} from "./protocol/constants";
+import { buildMcpStandardHeaders } from "./protocol/headers";
 
 /**
  * Phase 10.5 — OAuth 2.1 client for remote MCP servers, following the MCP
@@ -190,6 +198,38 @@ export function authorizationServerMetadataUrls(issuer: string): string[] {
 }
 
 /**
+ * The unauthenticated requests that ask an MCP endpoint for its 401 challenge, in order: the legacy `initialize`
+ * (unchanged from earlier releases), then a 2026-07-28 `server/discover` with the modern headers and `_meta`. A
+ * modern-only server may answer `initialize` with 400 instead of 401 (it is not a 2026-07-28 method), and some
+ * servers let `initialize` through without a token; both challenge the modern request. The second probe is sent only
+ * when the first did not get a 401.
+ */
+function oauthProbeRequests(): Array<{ headers: Record<string, string>; body: Record<string, unknown> }> {
+  const modernParams = {
+    _meta: {
+      [MCP_META_PROTOCOL_VERSION]: MCP_CLIENT_MODERN_PROTOCOL_VERSION,
+      [MCP_META_CLIENT_CAPABILITIES]: {},
+      [MCP_META_CLIENT_INFO]: { ...MCP_CLIENT_INFO }
+    }
+  };
+  return [
+    {
+      headers: {},
+      body: {
+        jsonrpc: "2.0",
+        id: "l2m-oauth-probe",
+        method: "initialize",
+        params: { protocolVersion: MCP_CLIENT_PROTOCOL_VERSION, capabilities: {}, clientInfo: { ...MCP_CLIENT_INFO } }
+      }
+    },
+    {
+      headers: buildMcpStandardHeaders(MCP_CLIENT_MODERN_PROTOCOL_VERSION, "server/discover", modernParams),
+      body: { jsonrpc: "2.0", id: "l2m-oauth-probe-discover", method: "server/discover", params: modernParams }
+    }
+  ];
+}
+
+/**
  * Ask the MCP endpoint, without credentials, where its metadata lives. A 401
  * challenge with `resource_metadata` wins; otherwise the well-known URLs are
  * tried. Extra headers (the server's configured custom headers) are sent so
@@ -201,23 +241,26 @@ export async function discoverProtectedResource(
 ): Promise<{ resourceMetadataUrl: string; metadata: ProtectedResourceMetadata; scopeHint?: string }> {
   const fetchImpl = options.fetchImpl ?? fetch;
   let challenge: Record<string, string> | null = null;
-  try {
-    const probe = await fetchWithTimeout(fetchImpl, endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(options.headers ?? {}) },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "l2m-oauth-probe",
-        method: "initialize",
-        params: { protocolVersion: MCP_CLIENT_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "ai-orchestrator", version: "0.1.0" } }
-      })
-    });
-    await probe.text().catch(() => "");
-    if (probe.status === 401) {
-      challenge = parseWwwAuthenticate(probe.headers.get("www-authenticate"));
+  for (const request of oauthProbeRequests()) {
+    try {
+      const probe = await fetchWithTimeout(fetchImpl, endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...request.headers,
+          ...(options.headers ?? {})
+        },
+        body: JSON.stringify(request.body)
+      });
+      await probe.text().catch(() => "");
+      if (probe.status === 401) {
+        challenge = parseWwwAuthenticate(probe.headers.get("www-authenticate"));
+        break;
+      }
+    } catch {
+      // Try the next probe, then the well-known URLs.
     }
-  } catch {
-    // Fall back to the well-known URLs.
   }
 
   const candidates = challenge?.resource_metadata

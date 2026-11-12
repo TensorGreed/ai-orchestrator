@@ -3,6 +3,7 @@ import {
   McpOAuthError,
   assertSecureOAuthUrl,
   discoverAuthorizationServer,
+  discoverProtectedResource,
   isLoopbackHost,
   oauthApplicationType,
   registerOAuthClient,
@@ -154,5 +155,74 @@ describe("dynamic client registration: application_type", () => {
     await expect(
       registerOAuthClient("https://as.example.com/register", { redirectUri: "https://l2m.example.com/cb" }, { fetchImpl })
     ).rejects.toThrow(/Dynamic client registration failed: native clients need loopback redirects/);
+  });
+});
+
+describe("discoverProtectedResource: the 401 challenge probe", () => {
+  const endpoint = "https://mcp.example.com/mcp";
+  const prm = { resource: endpoint, authorization_servers: [ISSUER], scopes_supported: ["profile"] };
+  const challenge = `Bearer scope="mcp:basic", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"`;
+
+  /** A server whose MCP endpoint answers each probe with `answer(body, headers)`; metadata is served at its URL. */
+  function server(answer: (body: Record<string, unknown>, headers: Record<string, string>) => Response, posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>): FetchLike {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === endpoint && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const headers = Object.fromEntries(Object.entries((init.headers ?? {}) as Record<string, string>).map(([key, value]) => [key.toLowerCase(), value]));
+        posts.push({ body, headers });
+        return answer(body, headers);
+      }
+      if (url.includes("/.well-known/oauth-protected-resource")) return jsonResponse(200, prm);
+      return jsonResponse(404, {});
+    }) as FetchLike;
+  }
+
+  it("keeps the legacy initialize probe alone when it is challenged", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(() => new Response("", { status: 401, headers: { "www-authenticate": challenge } }), posts);
+    const found = await discoverProtectedResource(endpoint, { fetchImpl });
+    expect(found.scopeHint).toBe("mcp:basic");
+    expect(posts.map((post) => post.body.method)).toEqual(["initialize"]);
+    expect(posts[0]!.headers["mcp-protocol-version"]).toBeUndefined();
+  });
+
+  it("asks with a modern server/discover when a modern-only server answers initialize with 400", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(
+      (body) =>
+        body.method === "initialize"
+          ? jsonResponse(400, { jsonrpc: "2.0", id: body.id, error: { code: -32602, message: "Invalid params: _meta is missing" } })
+          : new Response("", { status: 401, headers: { "www-authenticate": challenge } }),
+      posts
+    );
+    const found = await discoverProtectedResource(endpoint, { fetchImpl, headers: { "x-tenant": "t1" } });
+    expect(found.scopeHint).toBe("mcp:basic");
+    expect(found.resourceMetadataUrl).toBe("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
+    expect(posts.map((post) => post.body.method)).toEqual(["initialize", "server/discover"]);
+    const discover = posts[1]!;
+    expect(discover.headers).toMatchObject({ "mcp-protocol-version": "2026-07-28", "mcp-method": "server/discover", "x-tenant": "t1" });
+    expect((discover.body.params as { _meta: Record<string, unknown> })._meta).toMatchObject({
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {}
+    });
+  });
+
+  it("asks with server/discover when initialize is let through without a token", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(
+      (body) => (body.method === "initialize" ? jsonResponse(200, { jsonrpc: "2.0", id: body.id, result: {} }) : new Response("", { status: 401, headers: { "www-authenticate": challenge } })),
+      posts
+    );
+    expect((await discoverProtectedResource(endpoint, { fetchImpl })).scopeHint).toBe("mcp:basic");
+  });
+
+  it("falls back to the well-known URLs when neither probe is challenged", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(() => jsonResponse(400, {}), posts);
+    const found = await discoverProtectedResource(endpoint, { fetchImpl });
+    expect(found.scopeHint).toBeUndefined();
+    expect(found.resourceMetadataUrl).toBe("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
+    expect(posts).toHaveLength(2);
   });
 });
