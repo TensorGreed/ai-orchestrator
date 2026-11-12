@@ -4,7 +4,7 @@ term: "AI agent"
 topic: agents
 definition: "A system in which a language model decides, step by step, which tools to call and in what order, reading each result before it chooses the next step, until it can answer."
 description: "An AI agent is a model that decides which tools to call, in a loop, until it can answer. How it differs from a chatbot or a fixed workflow."
-related: [agent-loop, tool-calling, workflow-dag, supervisor-agent, max-iterations, human-in-the-loop]
+related: [agent-loop, tool-calling, workflow-dag, max-iterations, human-in-the-loop]
 guide: [/learn/agents/what-is-an-ai-agent]
 ---
 

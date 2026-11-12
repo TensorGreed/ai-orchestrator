@@ -89,7 +89,10 @@ export function jsonLdOf(page: HubPage, title: string, description: string): Rec
     ...extra
   });
   const about = fmString(frontmatter.about);
-  const aboutTerm = about ? { about: { "@type": "DefinedTerm", "@id": `${docsUrl(`/glossary/${about}`)}#term`, url: docsUrl(`/glossary/${about}`) } } : {};
+  // A term with a page is "<page>#term"; an index-only term is "<glossary index>#<slug>" (see the DefinedTermSet below).
+  const aboutUrl = frontmatter.aboutIndexEntry === true ? `${docsUrl("/glossary/")}#${about}` : docsUrl(`/glossary/${about}`);
+  const aboutId = frontmatter.aboutIndexEntry === true ? aboutUrl : `${aboutUrl}#term`;
+  const aboutTerm = about ? { about: { "@type": "DefinedTerm", "@id": aboutId, url: aboutUrl } } : {};
   const level = LEVEL_LABELS[fmString(frontmatter.level) as Level];
 
   switch (kind) {

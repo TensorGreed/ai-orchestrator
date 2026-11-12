@@ -4,7 +4,7 @@ term: "Prompt injection"
 topic: security
 definition: "Input that makes a language model ignore or change the instructions its application gave it, so it does something the application did not intend."
 description: "Prompt injection is input that makes a model ignore or change its instructions. Direct vs indirect, agent examples, and why it is hard to fix."
-related: [indirect-prompt-injection, jailbreak, spotlighting, excessive-agency, least-privilege, tool-poisoning]
+related: [indirect-prompt-injection, jailbreak, least-privilege, tool-poisoning]
 guide: [/learn/security/prompt-injection]
 ---
 

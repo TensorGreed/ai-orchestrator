@@ -3,7 +3,7 @@ title: "OWASP Top 10 for LLM apps, explained for agents"
 sidebarTitle: "OWASP Top 10 for LLM apps"
 description: "The ten OWASP LLM risks for 2025, one by one, with what each looks like in an agent that calls tools and a concrete control for each one."
 level: intermediate
-related: [prompt-injection, excessive-agency, output-checks, spotlighting]
+related: [prompt-injection]
 socialCard: true
 ---
 
@@ -73,7 +73,7 @@ Each entry below has four parts: what OWASP means, what it looks like in an agen
 
 ### LLM06: Excessive agency
 
-**What it is.** <Term id="excessive-agency">Excessive agency</Term>: the application can take harmful actions because it has more functionality, permissions or autonomy than its task needs. OWASP names those three root causes.
+**What it is.** Excessive agency: the application can take harmful actions because it has more functionality, permissions or autonomy than its task needs. OWASP names those three root causes.
 
 **In an agent.** This is the central agent risk. A support agent connected to a server with 40 tools, including `delete_customer`, has excessive functionality even if it never calls it, because an injection or a bad plan can.
 

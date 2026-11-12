@@ -4,7 +4,7 @@ sidebarTitle: "MCP authorization"
 description: "How a remote MCP server asks for OAuth: the 401 challenge, resource metadata, PKCE, the resource parameter, and why tokens must never be passed through."
 level: intermediate
 about: oauth-2-1
-related: [oauth-2-1, pkce, token-passthrough, confused-deputy, delegated-credentials]
+related: [oauth-2-1, pkce, delegated-credentials]
 socialCard: true
 ---
 
@@ -80,11 +80,11 @@ On the server side, the rule is short: an MCP server must check that every token
 Two mistakes break that rule:
 
 - **No audience check.** A server that accepts any valid token from the identity provider will also accept a token that was issued for a different service. A token stolen from one place now works in another.
-- **<Term id="token-passthrough">Token passthrough</Term>.** A server that forwards the client's token to a downstream API, instead of getting its own, is the anti-pattern the specification forbids outright. The downstream API sees a request it cannot attribute, its rate limits can be bypassed and its audit trail can point at the wrong caller, and a stolen token can use the MCP server as a proxy.
+- **Token passthrough.** A server that forwards the client's token to a downstream API, instead of getting its own, is the anti-pattern the specification forbids outright. The downstream API sees a request it cannot attribute, its rate limits can be bypassed and its audit trail can point at the wrong caller, and a stolen token can use the MCP server as a proxy.
 
 If an MCP server calls other APIs, it acts as an OAuth client toward them, with separate tokens from those APIs' authorization servers.
 
-The <Term id="confused-deputy">confused deputy</Term> problem is the related attack on MCP proxy servers. A proxy that uses one static client id at a third-party API, and also lets MCP clients register dynamically, can be tricked into sending an authorization code to an attacker when the third party remembers an earlier consent. The fix in the security best practices is consent per client at the proxy, exact redirect URI matching, and a single-use `state` that is set only after consent.
+The confused deputy problem is the related attack on MCP proxy servers. A proxy that uses one static client id at a third-party API, and also lets MCP clients register dynamically, can be tricked into sending an authorization code to an attacker when the third party remembers an earlier consent. The fix in the security best practices is consent per client at the proxy, exact redirect URI matching, and a single-use `state` that is set only after consent.
 
 ## Scopes and step-up
 

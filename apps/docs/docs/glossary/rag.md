@@ -4,7 +4,7 @@ term: "RAG (retrieval-augmented generation)"
 topic: agents
 definition: "A pattern that first retrieves documents relevant to a question and puts them in the prompt, so the model answers from that text instead of from memory alone."
 description: "RAG fetches relevant documents and puts them in the prompt so the model answers from them. The pipeline, citations, and where it goes wrong."
-related: [vector-store, hybrid-search, grounding, context-window, indirect-prompt-injection]
+related: [context-window, indirect-prompt-injection]
 ---
 
 # RAG (retrieval-augmented generation)
@@ -15,8 +15,8 @@ A model only knows what was in its training data, and it cannot say where a fact
 
 ## The pipeline
 
-1. **Ingest.** Split documents into chunks and store them, usually with an embedding (a vector) per chunk in a <Term id="vector-store">vector store</Term>.
-2. **Retrieve.** Turn the question into the same kind of vector and fetch the nearest chunks. <Term id="hybrid-search">Hybrid search</Term> also matches keywords, which catches names and error codes that vectors miss.
+1. **Ingest.** Split documents into chunks and store them, usually with an embedding (a vector) per chunk in a vector store.
+2. **Retrieve.** Turn the question into the same kind of vector and fetch the nearest chunks. Hybrid search also matches keywords, which catches names and error codes that vectors miss.
 3. **Generate.** Put the chunks in the prompt with an instruction to answer only from them, and ideally to cite them.
 
 ## Example

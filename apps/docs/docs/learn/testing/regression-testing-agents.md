@@ -4,7 +4,7 @@ sidebarTitle: "Regression testing agents"
 description: "Catch a prompt, model or tool change that breaks your agent before users do: save known-good runs, replay changes against recordings, gate CI."
 level: intermediate
 about: golden-run
-related: [golden-run, replay, golden-set, release-gate, eval]
+related: [golden-run, eval]
 socialCard: true
 ---
 
@@ -39,7 +39,7 @@ Save the common path first, then the edge cases, then every run that once went w
 
 ## Replay without side effects
 
-Running a test case against live systems is a problem when the agent can act. A refund agent's test would refund someone. <Term id="replay">Replay</Term> solves this by answering the outside world from the recording:
+Running a test case against live systems is a problem when the agent can act. A refund agent's test would refund someone. Replay solves this by answering the outside world from the recording:
 
 1. Take the changed workflow (the candidate) and the golden run's input.
 2. Run the candidate. When a step would call a tool, an API or a database, look up the same call in the recording and return the recorded answer instead.
@@ -63,7 +63,7 @@ How strict "behaved like" is depends on the graders. Exact equality of the outpu
 
 ## Grouping runs into a set
 
-One golden run is a test case. A <Term id="golden-set">golden set</Term> is the suite: the golden runs that together describe what one workflow must keep doing. Practical rules:
+One golden run is a test case. A golden set is the suite: the golden runs that together describe what one workflow must keep doing. Practical rules:
 
 - **One set per workflow**, or per behaviour of a large workflow (refunds, address changes, escalations).
 - **Name cases by what they check**, not by when they were recorded: "refund outside 30-day window is declined".
@@ -78,7 +78,7 @@ A regression suite is worth most when it runs without anyone remembering to run 
 2. On every pull request, replay the golden set against the changed definition.
 3. Map the result to an exit code: 0 when every case passed, non-zero when any failed or was inconclusive.
 4. Write a JUnit XML report, so your CI system shows each case as a test.
-5. Only let a version reach production after its tests passed on that exact version: a <Term id="release-gate">release gate</Term>.
+5. Only let a version reach production after its tests passed on that exact version: a release gate.
 
 Replays with a live model cost money and time, so set a cost cap and a timeout on the step.
 

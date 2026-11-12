@@ -4,7 +4,7 @@ term: "Eval"
 topic: testing
 definition: "A test for an AI system: give it an input, run it, and apply grading logic to the result to decide whether it succeeded."
 description: "An eval is a test for an AI system: an input, a run, and grading logic. Capability vs regression evals and the graders they use."
-related: [grader, regression-eval, golden-set, golden-run, llm-as-judge, pass-at-k]
+related: [grader, regression-eval, golden-run, llm-as-judge, pass-at-k]
 guide: [/learn/testing/agent-evals]
 ---
 

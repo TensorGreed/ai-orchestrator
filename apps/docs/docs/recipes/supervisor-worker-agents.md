@@ -8,7 +8,7 @@ nodeCount: 11
 sample: "supervisor-worker-swarm-flow.json"
 demo: "wf-supervisor-worker-swarm"
 demoRecorded: false
-related: ["supervisor-agent","worker-agent","ai-agent","agent-loop","tool-calling"]
+related: ["worker-agent","ai-agent","agent-loop","tool-calling"]
 ---
 
 <!--

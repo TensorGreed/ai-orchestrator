@@ -8,7 +8,7 @@ nodeCount: 7
 sample: "agentic-mcp-flow.json"
 demo: "wf-agent-mcp-webhook"
 demoRecorded: false
-related: ["ai-agent","agent-memory","human-in-the-loop","mcp-tool"]
+related: ["ai-agent","human-in-the-loop","mcp-tool"]
 ---
 
 <!--

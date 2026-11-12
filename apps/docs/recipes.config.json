@@ -93,7 +93,6 @@
       "makeItSafer": "- The sample takes `system_prompt` from the request, so any caller can rewrite the agent's instructions. Write the system prompt on the agent node instead.\n- Require approval before write tools: with **Ask before write tools** on, the agent pauses before `calculator` (it has no read-only annotation). See [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Cap what callers can spend with a workflow [budget](/product/budgets).",
       "related": [
         "ai-agent",
-        "agent-memory",
         "human-in-the-loop",
         "mcp-tool"
       ],
@@ -133,7 +132,6 @@
       "makeItYours": "- Give each worker its own real chat model on its `chat_model` port: a small, cheap model often does for a narrow worker, while the Supervisor needs one that plans well.\n- Swap a worker's mock tools for your own MCP servers.\n- Add a third worker on the Supervisor's `worker` port when a new kind of task appears, rather than giving one agent every tool. Each worker adds a tool to the Supervisor's list and model calls to each run, so add one only for a distinct job.",
       "makeItSafer": "- Keep write tools on one worker only, and require approval for them: see [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Record a good run as a [golden run](/product/golden-runs) and replay it after each change.",
       "related": [
-        "supervisor-agent",
         "worker-agent",
         "ai-agent",
         "agent-loop",
@@ -263,9 +261,8 @@
       "makeItSafer": "- Retrieved documents are outside content: a document can carry instructions for the model. [Content rules](/product/content-rules#outside-content-at-the-model-boundary) can check each retrieved document before it reaches the model.\n- Cap model spend with a [budget](/product/budgets) once you switch to a paid model.",
       "related": [
         "rag",
-        "vector-store",
-        "hybrid-search",
-        "grounding"
+        "indirect-prompt-injection",
+        "context-window"
       ],
       "docs": [
         {

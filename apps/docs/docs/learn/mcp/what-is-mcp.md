@@ -6,13 +6,13 @@ level: beginner
 about: model-context-protocol
 demo: wf-demo-support-agent
 demoRecorded: true
-related: [model-context-protocol, mcp-server, mcp-client, mcp-host, mcp-tool, tool-calling]
+related: [model-context-protocol, mcp-server, mcp-host, mcp-tool, tool-calling]
 socialCard: true
 ---
 
 # What is the Model Context Protocol (MCP)?
 
-The <Term id="model-context-protocol">Model Context Protocol</Term> (MCP) is an open standard for connecting AI applications to tools and data. A program called an <Term id="mcp-server">MCP server</Term> offers tools, resources and prompts; an AI application connects to it as an <Term id="mcp-client">MCP client</Term>, lists what it offers and calls it with JSON-RPC messages. Write a server once, and MCP-capable apps and agents can use it.
+The <Term id="model-context-protocol">Model Context Protocol</Term> (MCP) is an open standard for connecting AI applications to tools and data. A program called an <Term id="mcp-server">MCP server</Term> offers tools, resources and prompts; an AI application connects to it as an MCP client, lists what it offers and calls it with JSON-RPC messages. Write a server once, and MCP-capable apps and agents can use it.
 
 ## The problem it solves
 

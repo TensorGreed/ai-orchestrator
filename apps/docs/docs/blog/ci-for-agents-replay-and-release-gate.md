@@ -3,7 +3,7 @@ title: "CI for agents: golden runs, replay and a release gate"
 description: "How L2M tests an agent change before it ships: save known-good runs, replay changes against recordings in CI, and publish only the version that passed."
 date: 2026-11-12
 author: "The L2M team"
-related: [golden-run, replay, golden-set, release-gate]
+related: [golden-run]
 demo: wf-demo-faq-release
 demoRecorded: true
 socialCard: true
@@ -29,7 +29,7 @@ Writing good cases by hand is slow, so [production capture](/product/production-
 
 ## Replay: run what is safe, answer the rest from the recording
 
-<Term id="replay">Replay</Term> runs a candidate version of the workflow on a golden run's input. Each node is handled by its class:
+Replay runs a candidate version of the workflow on a golden run's input. Each node is handled by its class:
 
 | Node | In a replay |
 | --- | --- |
@@ -47,7 +47,7 @@ Two rules matter more than the table.
 
 ## Golden sets, scorers and replay jobs
 
-A <Term id="golden-set">golden set</Term> groups the cases for one workflow ([PR #47](https://github.com/TensorGreed/ai-orchestrator/pull/47)). A replay job runs every case against a candidate and scores it. By default a case is scored on its status and on JSON equality with the golden output; other scorers check a JSON schema, text similarity, the tool-call sequence, a cost budget, or ask a model to judge.
+A golden set groups the cases for one workflow ([PR #47](https://github.com/TensorGreed/ai-orchestrator/pull/47)). A replay job runs every case against a candidate and scores it. By default a case is scored on its status and on JSON equality with the golden output; other scorers check a JSON schema, text similarity, the tool-call sequence, a cost budget, or ask a model to judge.
 
 Live models vary from run to run. [PR #54](https://github.com/TensorGreed/ai-orchestrator/pull/54) added two answers. First, recorded runs now keep their model calls as a tape, and a job can answer model calls from it. That tests a change to the logic around the model with no model drift. Second, a job can repeat each case up to five times and aggregate the results.
 

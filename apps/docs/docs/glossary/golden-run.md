@@ -4,7 +4,7 @@ term: "Golden run"
 topic: testing
 definition: "A recorded run of a workflow or agent that you have checked and keep as the reference: its input, every step's result and every outside call, for replaying changes against."
 description: "A golden run records what went in, every step's result and every tool call, so a changed workflow can be replayed against it."
-related: [replay, golden-set, cassette, eval, regression-eval, release-gate]
+related: [cassette, eval, regression-eval]
 guide: [/learn/testing/regression-testing-agents, /learn/testing/agent-evals]
 ---
 
@@ -23,11 +23,11 @@ Agents are hard to regression test because they call the outside world. Rerun la
 
 ## Example
 
-A support workflow answered "Where is my order 1182?" well: it called `lookup_order`, then `get_shipment`, and replied with a tracking link. You save that run as golden. Next week you switch to a cheaper model and <Term id="replay">replay</Term> the golden run against the new version. The new model skips `get_shipment` and invents a date. The replay fails before any customer sees it.
+A support workflow answered "Where is my order 1182?" well: it called `lookup_order`, then `get_shipment`, and replied with a tracking link. You save that run as golden. Next week you switch to a cheaper model and replay the golden run against the new version. The new model skips `get_shipment` and invents a date. The replay fails before any customer sees it.
 
 ## Common confusion
 
-A golden run is not a snapshot test of the final text. Model wording changes from run to run, so useful comparisons look at the path (which tools, with what arguments), the structure of the output, and limits on cost, rather than demanding identical sentences. Several golden runs together make a <Term id="golden-set">golden set</Term>.
+A golden run is not a snapshot test of the final text. Model wording changes from run to run, so useful comparisons look at the path (which tools, with what arguments), the structure of the output, and limits on cost, rather than demanding identical sentences. Several golden runs together make a golden set.
 
 ## In L2M
 

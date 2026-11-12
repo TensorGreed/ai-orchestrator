@@ -8,7 +8,7 @@ nodeCount: 5
 sample: "rag-knowledge-base-flow.json"
 demo: "wf-rag-knowledge-base-flow"
 demoRecorded: false
-related: ["rag","vector-store","hybrid-search","grounding"]
+related: ["rag"]
 ---
 
 <!--

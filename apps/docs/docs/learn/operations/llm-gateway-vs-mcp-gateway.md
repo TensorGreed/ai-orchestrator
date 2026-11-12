@@ -4,7 +4,7 @@ sidebarTitle: "LLM gateway vs MCP gateway"
 description: "An LLM gateway sits between apps and models; an MCP gateway sits between agents and tools. What each controls, where they overlap, and when you need both."
 level: intermediate
 about: llm-gateway
-related: [llm-gateway, mcp-gateway, openai-compatible-api, toolset, model-allowlist, budget]
+related: [llm-gateway, mcp-gateway, openai-compatible-api, model-allowlist, budget]
 socialCard: true
 ---
 
@@ -101,7 +101,7 @@ If you run both, give each caller one identity across them. A cap per client the
 [L2M](/why) has both, and both are optional: nothing is served until you configure it.
 
 - **The [/v1 AI gateway](/product/ai-gateway)** serves an OpenAI-compatible API (`/v1/chat/completions`, `/v1/embeddings`, `/v1/models`). Admins define route sets that map public model names to providers and stored keys. Each request is checked against the client's grant, its rate limit, [budgets](/product/budgets) and the [model allowlists](/security/model-allowlists) before the provider is called, and writes a usage row with tokens and estimated cost, never the prompt or answer. A used-up block budget answers `429` with code `insufficient_quota`.
-- **The [MCP gateway](/product/mcp-gateway)** serves <Term id="toolset">toolsets</Term> at `/mcp/<toolset>` over Streamable HTTP, speaking MCP protocol versions 2025-11-25, 2025-06-18 and 2025-03-26. A toolset can hold workflows exposed as tools and tools of registered MCP servers. Calls to server tools go through [MCP tool policy](/product/mcp-tool-policy) and get the server's secret from the gateway; a workflow tool runs its workflow, whose agents check policy in turn. Calls that reach a tool write a telemetry row. Budgets and per-client rate limits are optional: a used-up block budget refuses the call with JSON-RPC error `-32032`, and a rate limit with `-32029`.
+- **The [MCP gateway](/product/mcp-gateway)** serves toolsets at `/mcp/<toolset>` over Streamable HTTP, speaking MCP protocol versions 2025-11-25, 2025-06-18 and 2025-03-26. A toolset can hold workflows exposed as tools and tools of registered MCP servers. Calls to server tools go through [MCP tool policy](/product/mcp-tool-policy) and get the server's secret from the gateway; a workflow tool runs its workflow, whose agents check policy in turn. Calls that reach a tool write a telemetry row. Budgets and per-client rate limits are optional: a used-up block budget refuses the call with JSON-RPC error `-32032`, and a rate limit with `-32029`.
 
 The two share one set of client tokens, created under **MCP → Clients**. A client's rate limit is one allowance across both paths, and a budget with the MCP client scope counts its `/v1` usage and its gateway usage together. The reverse direction also works: an agent inside an L2M workflow can send its model calls to an existing corporate gateway through the **AI Gateway Chat Model** node.
 

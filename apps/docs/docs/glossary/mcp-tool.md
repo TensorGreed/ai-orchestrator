@@ -4,7 +4,7 @@ term: "MCP tool"
 topic: mcp
 definition: "A named action an MCP server offers, described by a JSON Schema for its input, that a model can ask to call and a client runs with a tools/call request."
 description: "An MCP tool is a named action with a JSON Schema input that a model can call through a server. How tools are listed, called and how errors return."
-related: [tool-calling, mcp-server, tool-annotations, write-tool, tool-poisoning]
+related: [tool-calling, mcp-server, write-tool, tool-poisoning]
 guide: [/learn/mcp/tools-resources-prompts, /learn/mcp/what-is-mcp]
 ---
 

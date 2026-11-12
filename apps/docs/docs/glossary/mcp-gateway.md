@@ -4,7 +4,7 @@ term: "MCP gateway"
 topic: mcp
 definition: "A service that sits between MCP clients and MCP tools and serves them through one endpoint, adding per-client credentials, access rules, limits and a log of every call."
 description: "An MCP gateway serves many tools behind one endpoint with per-client credentials, tool rules and logs. What it adds over connecting servers directly."
-related: [model-context-protocol, mcp-server, toolset, llm-gateway, mcp-tool-policy, least-privilege]
+related: [model-context-protocol, mcp-server, llm-gateway, least-privilege]
 guide: [/learn/operations/llm-gateway-vs-mcp-gateway]
 ---
 

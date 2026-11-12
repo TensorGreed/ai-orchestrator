@@ -4,7 +4,7 @@ term: "Least privilege"
 topic: security
 definition: "The security principle that each user, program or agent gets only the access it needs for its task, and nothing more."
 description: "Least privilege means an agent, key or person gets only the access its task needs. How it applies to MCP tools, arguments and data."
-related: [excessive-agency, mcp-tool-policy, write-tool, toolset, human-in-the-loop, prompt-injection]
+related: [write-tool, human-in-the-loop, prompt-injection]
 guide: [/learn/security/least-privilege-for-agents, /learn/security/mcp-security-risks]
 ---
 
@@ -12,7 +12,7 @@ guide: [/learn/security/least-privilege-for-agents, /learn/security/mcp-security
 
 **The security principle that each user, program or agent gets only the access it needs for its task, and nothing more.**
 
-NIST defines it as restricting "the access privileges of users (or processes acting on behalf of users) to the minimum necessary to accomplish assigned tasks". The idea is old; agents make it urgent. An agent decides its own steps, and anything it reads can try to steer it (<Term id="prompt-injection">prompt injection</Term>). You cannot fully control what it will try, so you control what it can do. OWASP calls the opposite <Term id="excessive-agency">excessive agency</Term>: too many tools, too broad permissions, or too much autonomy.
+NIST defines it as restricting "the access privileges of users (or processes acting on behalf of users) to the minimum necessary to accomplish assigned tasks". The idea is old; agents make it urgent. An agent decides its own steps, and anything it reads can try to steer it (<Term id="prompt-injection">prompt injection</Term>). You cannot fully control what it will try, so you control what it can do. OWASP calls the opposite excessive agency: too many tools, too broad permissions, or too much autonomy.
 
 ## What it means for an agent
 

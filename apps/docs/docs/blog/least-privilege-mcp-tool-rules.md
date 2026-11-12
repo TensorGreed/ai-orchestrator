@@ -3,7 +3,7 @@ title: "Least privilege for MCP tools, learned from real calls"
 description: "Argument-aware MCP tool rules, safe argument summaries in telemetry, and rule suggestions tested on the last 7 or 30 days of real calls before you enforce."
 date: 2026-11-12
 author: "The L2M team"
-related: [least-privilege, mcp-tool-policy, shadow-mode, tool-call-telemetry, approval-gate]
+related: [least-privilege, shadow-mode, tool-call-telemetry, approval-gate]
 socialCard: true
 ---
 

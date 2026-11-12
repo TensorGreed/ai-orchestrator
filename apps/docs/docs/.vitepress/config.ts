@@ -93,9 +93,14 @@ export default defineConfig({
     }
     // Glossary slugs: `about` feeds the JSON-LD, so a missing term is dropped (with a warning) rather
     // than left as a dangling reference; `related` terms not written yet are skipped where shown.
+    // An index-only term is defined on the A–Z index under its own anchor, so `about` points there.
     if (typeof fmIn.about === "string" && !pageExists(`/glossary/${fmIn.about}`)) {
-      console.warn(`[glossary] ${pageData.relativePath}: "about: ${fmIn.about}" names no glossary page yet; left out of the JSON-LD`);
-      delete pageData.frontmatter.about;
+      if (INDEX_ENTRIES.some((entry) => entry.slug === fmIn.about)) {
+        pageData.frontmatter.aboutIndexEntry = true;
+      } else {
+        console.warn(`[glossary] ${pageData.relativePath}: "about: ${fmIn.about}" names no glossary term; left out of the JSON-LD`);
+        delete pageData.frontmatter.about;
+      }
     }
     if (Array.isArray(fmIn.related) && !pageData.relativePath.startsWith("glossary/")) {
       const indexOnly = new Set(INDEX_ENTRIES.map((entry) => entry.slug));

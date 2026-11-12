@@ -4,7 +4,7 @@ term: "Model Context Protocol (MCP)"
 topic: mcp
 definition: "An open protocol that lets AI applications discover and use tools, data and prompt templates from separate servers through one standard set of JSON-RPC messages."
 description: "The Model Context Protocol is an open standard for connecting AI apps to tools and data through servers. What it defines and what it leaves out."
-related: [mcp-server, mcp-tool, mcp-client, mcp-gateway, tool-calling]
+related: [mcp-server, mcp-tool, mcp-gateway, tool-calling]
 guide: [/learn/mcp/what-is-mcp]
 ---
 

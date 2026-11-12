@@ -4,7 +4,7 @@ sidebarTitle: "MCP security risks"
 description: "The main MCP security risks from the spec and OWASP: tool poisoning, rug pulls, shadowing, confused deputy, token passthrough, SSRF and their controls."
 level: intermediate
 about: tool-poisoning
-related: [tool-poisoning, rug-pull, tool-shadowing, confused-deputy, token-passthrough, ssrf, mcp-gateway]
+related: [tool-poisoning, tool-shadowing, ssrf, mcp-gateway]
 socialCard: true
 ---
 
@@ -36,7 +36,7 @@ Controls:
 
 ## Rug pulls
 
-A <Term id="rug-pull">rug pull</Term> is a server that changes its tool definitions after you reviewed them. The tool you approved last week was harmless; today its description carries an instruction, or a read tool quietly gained a write parameter.
+A rug pull is a server that changes its tool definitions after you reviewed them. The tool you approved last week was harmless; today its description carries an instruction, or a read tool quietly gained a write parameter.
 
 Controls:
 
@@ -58,7 +58,7 @@ Controls:
 
 ## Confused deputy
 
-A <Term id="confused-deputy">confused deputy</Term> is a program with authority that is tricked into using it for someone else. In MCP, the classic case is an MCP server that proxies a third-party API with a single, static OAuth client ID. The spec describes how an attacker can use the third-party consent cookie left over from a user's earlier, legitimate login to skip the consent screen and receive an authorization code meant for the user.
+A confused deputy is a program with authority that is tricked into using it for someone else. In MCP, the classic case is an MCP server that proxies a third-party API with a single, static OAuth client ID. The spec describes how an attacker can use the third-party consent cookie left over from a user's earlier, legitimate login to skip the consent screen and receive an authorization code meant for the user.
 
 The spec's controls are concrete: the proxy server **must** get per-client consent before forwarding to the third party, validate the `redirect_uri` by exact string match, and handle the OAuth `state` parameter correctly (random, single-use, set only after consent).
 
@@ -66,7 +66,7 @@ There is a broader form of the same problem in agents. An agent calls tools with
 
 ## Token passthrough
 
-<Term id="token-passthrough">Token passthrough</Term> is an MCP server accepting a token from the client and forwarding it to a downstream API without checking that the token was issued for the MCP server itself. The spec forbids it: MCP servers **must not** accept tokens that were not explicitly issued for them.
+Token passthrough is an MCP server accepting a token from the client and forwarding it to a downstream API without checking that the token was issued for the MCP server itself. The spec forbids it: MCP servers **must not** accept tokens that were not explicitly issued for them.
 
 Why it matters: the downstream API cannot tell who is really calling, the MCP server's own rate limits and audit trail are bypassed, and a stolen token for one service can be used through the server against another. The fix is audience validation: each hop gets its own token, issued for that hop.
 
