@@ -12,6 +12,7 @@ import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService } from "./services/tracing-service";
+import { loadTestTelemetry } from "./test-support/telemetry.js";
 
 interface TestContext {
   app: FastifyInstance;
@@ -431,8 +432,9 @@ describe("Phase 5.7 — MetricsService unit behavior", () => {
 });
 
 describe("Phase 5.7 — TracingService unit behavior", () => {
-  it("starts, ends, and retrieves spans when enabled", () => {
-    const tracing = new TracingService({ enabled: true, serviceName: "ut" });
+  it("starts, ends, and retrieves spans when enabled", async () => {
+    const telemetry = await loadTestTelemetry({ resourceAttributes: { "service.name": "ut" } });
+    const tracing = new TracingService({ runtime: telemetry.runtime });
     const span = tracing.startSpan({ operationName: "test.op", attributes: { foo: "bar" } });
     tracing.addEvent(span, "checkpoint", { x: 1 });
     tracing.endSpan(span, "ok");
@@ -446,10 +448,11 @@ describe("Phase 5.7 — TracingService unit behavior", () => {
 
     const byTrace = tracing.spansByTrace(span.traceId);
     expect(byTrace).toHaveLength(1);
+    await telemetry.runtime?.shutdown();
   });
 
   it("drops spans when disabled (no leak via recentSpans)", () => {
-    const tracing = new TracingService({ enabled: false });
+    const tracing = new TracingService({});
     const span = tracing.startSpan({ operationName: "noop" });
     tracing.endSpan(span, "ok");
     expect(tracing.recentSpans()).toHaveLength(0);

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import { z } from "zod";
 import { parseSessionPolicy } from "./services/session-policy.js";
+import { resolveTelemetrySettings } from "./telemetry/settings.js";
 import {
   NETWORK_SCOPES,
   NETWORK_SCOPE_ENV,
@@ -34,6 +35,11 @@ const booleanFromEnv = z.preprocess((value) => {
   }
   return value;
 }, z.boolean());
+
+/** Wraps a schema so a blank value reads as unset (and gets the schema's default). */
+function blankAsUndefined<T extends z.ZodType>(schema: T) {
+  return z.preprocess((value) => (typeof value === "string" && value.trim() === "" ? undefined : value), schema);
+}
 
 /** Like booleanFromEnv, but unset or blank stays undefined (for settings that are only read when a feature is on). */
 const optionalBooleanFromEnv = z.preprocess(
@@ -621,11 +627,9 @@ const envSchema = z.object({
   TRACING_ENDPOINT: z.string().optional(),
   TRACING_SERVICE_NAME: z.string().default("ai-orchestrator"),
 
-  // Phase 8.1 — OpenTelemetry-grade observability.
-  // Standard OTEL_* env vars. When OTEL_EXPORTER_OTLP_ENDPOINT is set we
-  // export traces (and optionally metrics) over OTLP/HTTP-JSON. Trace export
-  // also activates if the legacy TRACING_ENDPOINT is set — both paths share
-  // the same TracingService.
+  // OpenTelemetry. Standard OTEL_* variables: when an OTLP endpoint is set, traces are exported through the
+  // OpenTelemetry SDK (http/protobuf unless OTEL_EXPORTER_OTLP_PROTOCOL says http/json), and metrics too with
+  // OTEL_METRICS_ENABLED. The legacy TRACING_* variables still work (deprecated). Resolved in telemetry/settings.ts.
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: z.string().optional(),
   OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: z.string().optional(),
@@ -638,8 +642,50 @@ const envSchema = z.object({
   OTEL_RESOURCE_ATTRIBUTES: z.string().default(""),
   OTEL_METRICS_ENABLED: booleanFromEnv.default(false),
   OTEL_METRICS_PUSH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
-  /** Emit a SERVER span per HTTP request (in addition to per-execution/per-node spans). */
+  /** Emit a SERVER span per HTTP request while tracing is on (no hooks are installed while it is off). */
   OTEL_HTTP_SERVER_SPANS: booleanFromEnv.default(true),
+  // OpenTelemetry SDK settings (see telemetry/settings.ts). Tracing stays off until an OTLP endpoint or
+  // TRACING_ENABLED is set, and nothing from the SDK is loaded while it is off.
+  // Optional (unset = the default noted), so tests and embedders that build a config by hand need none of them.
+  // The standard OTEL_* values are read as text and checked in telemetry/settings.ts only while tracing is on (a
+  // value meant for another tool never stops the API; an unknown one is ignored with a warning, as the
+  // specification asks).
+  /** `true` turns every OpenTelemetry signal off, whatever else is set (the standard switch). Default false. */
+  OTEL_SDK_DISABLED: z.string().optional(),
+  /** `http/protobuf` (default, the specification's default) or `http/json`, for traces. */
+  OTEL_EXPORTER_OTLP_PROTOCOL: z.string().optional(),
+  /** Milliseconds one OTLP export may take. Default 10000. */
+  OTEL_EXPORTER_OTLP_TIMEOUT: z.string().optional(),
+  /** Default parentbased_always_on. */
+  OTEL_TRACES_SAMPLER: z.string().optional(),
+  /** The ratio for the traceidratio samplers, 0 to 1 (default 1). */
+  OTEL_TRACES_SAMPLER_ARG: z.string().optional(),
+  /** Comma list of tracecontext, baggage, none. Default tracecontext. */
+  OTEL_PROPAGATORS: z.string().optional(),
+  /** Comma list; `gen_ai_latest_experimental` opts in to the newest (unreleased) GenAI names. */
+  OTEL_SEMCONV_STABILITY_OPT_IN: z.string().optional(),
+  /** Longest attribute value. Default 8192. */
+  OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT: z.string().optional(),
+  /** Batch span processor: delay (5000 ms), export timeout (30000 ms), queue size (2048), batch size (512). */
+  OTEL_BSP_SCHEDULE_DELAY: z.string().optional(),
+  OTEL_BSP_EXPORT_TIMEOUT: z.string().optional(),
+  OTEL_BSP_MAX_QUEUE_SIZE: z.string().optional(),
+  OTEL_BSP_MAX_EXPORT_BATCH_SIZE: z.string().optional(),
+  /** `standard` (default) or `verbose` (adds agent-turn and queue-producer spans). */
+  L2M_OTEL_SPAN_DETAIL: blankAsUndefined(z.enum(["standard", "verbose"]).optional()),
+  /** `names` (default): workflow, node and agent names appear in spans; `ids`: ids only. */
+  L2M_OTEL_NAMES: blankAsUndefined(z.enum(["names", "ids"]).optional()),
+  /** Send `traceparent` to model providers. Default false: their endpoints are outside the deployment's traces. */
+  L2M_OTEL_PROPAGATE_TO_PROVIDERS: optionalBooleanFromEnv,
+  /** Send `traceparent` to MCP servers (HTTP headers and `params._meta`). Default true. */
+  L2M_OTEL_PROPAGATE_TO_MCP: optionalBooleanFromEnv,
+  /**
+   * Whose inbound `traceparent` continues a trace: `authenticated` (default: signed-in sessions, API keys, gateway
+   * client tokens and L2M_OTEL_TRUSTED_PROXIES), `all`, or `none`. Anyone else's starts a new trace that links to it.
+   */
+  L2M_OTEL_TRUST_INBOUND: blankAsUndefined(z.enum(["authenticated", "all", "none"]).optional()),
+  /** Comma list of addresses or CIDR ranges (the connecting socket) whose inbound `traceparent` is always trusted. */
+  L2M_OTEL_TRUSTED_PROXIES: z.string().optional(),
 
   // Phase 8.2 — FinOps cost rollups.
   // JSON object overlaying `services/usage-service.ts` DEFAULT_PRICING. Same
@@ -771,6 +817,8 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   parseSessionPolicy(parsed.data);
   // Phase 13.2 — a bad address list refuses to start, naming the setting and the entry.
   resolveNetworkSettings(parsed.data);
+  // OpenTelemetry — while tracing is on, a bad endpoint, grpc or a bad trusted-proxy entry refuses to start.
+  resolveTelemetrySettings(parsed.data);
   // 13.3 — retention bounds that contradict each other refuse to start.
   resolveRetentionSettings(parsed.data);
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.

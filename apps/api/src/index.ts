@@ -115,8 +115,22 @@ async function bootstrap() {
         void shutdown(received);
       });
     }
+  } else if (lifecycle.hasExitFlush()) {
+    // Tracing on without a drain: the process still exits on the first signal, as Node's default does, but first
+    // exports the spans still queued (at most TELEMETRY_EXIT_FLUSH_MS). A second signal exits at once.
+    for (const signal of ["SIGTERM", "SIGINT"] as const) {
+      process.once(signal, (received) => {
+        void lifecycle.flushBeforeExit(TELEMETRY_EXIT_FLUSH_MS).finally(() => {
+          // The listener is gone, so this re-raise ends the process the default way (exit code 128 + signal).
+          process.kill(process.pid, received);
+        });
+      });
+    }
   }
 }
+
+/** How long a signal waits for queued spans to export when tracing is on and no drain is configured. */
+const TELEMETRY_EXIT_FLUSH_MS = 5_000;
 
 /** Time allowed after the drain budget for closing the app and the database (20 s + 5 s fits a 30 s grace period). */
 const SHUTDOWN_CLOSE_GRACE_MS = 5_000;

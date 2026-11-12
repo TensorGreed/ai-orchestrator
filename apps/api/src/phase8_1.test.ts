@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service.js";
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter.js";
 import { MetricsService } from "./services/metrics-service.js";
+import { loadTestTelemetry } from "./test-support/telemetry.js";
 
 describe("Phase 8.1 — OpenTelemetry bridge", () => {
   describe("parseTraceparent", () => {
@@ -38,6 +39,14 @@ describe("Phase 8.1 — OpenTelemetry bridge", () => {
       });
     });
 
+    it("percent-decodes keys and values, as the OpenTelemetry specification asks", () => {
+      expect(parseKeyValueList("authorization=Basic%20dXNlcjpwYXNz,team%2Fname=a%2Cb,bad=%E0%A4%A")).toEqual({
+        authorization: "Basic dXNlcjpwYXNz",
+        "team/name": "a,b",
+        bad: "%E0%A4%A"
+      });
+    });
+
     it("ignores malformed pairs", () => {
       expect(parseKeyValueList(undefined)).toEqual({});
       expect(parseKeyValueList("")).toEqual({});
@@ -45,23 +54,24 @@ describe("Phase 8.1 — OpenTelemetry bridge", () => {
     });
   });
 
-  describe("TracingService", () => {
-    it("exposes resource attributes including host.name and service.version", () => {
-      const t = new TracingService({
-        enabled: true,
-        serviceName: "test-svc",
-        resourceAttributes: { "service.version": "1.2.3", "deployment.environment": "staging" }
+  describe("TracingService (over the OpenTelemetry SDK)", () => {
+    it("exposes resource attributes including the SDK's and service.version", async () => {
+      const telemetry = await loadTestTelemetry({
+        resourceAttributes: { "service.name": "test-svc", "service.version": "1.2.3", "deployment.environment.name": "staging" }
       });
+      const t = new TracingService({ runtime: telemetry.runtime });
       const attrs = t.getResourceAttributes();
       expect(attrs["service.name"]).toBe("test-svc");
       expect(attrs["service.version"]).toBe("1.2.3");
-      expect(attrs["deployment.environment"]).toBe("staging");
-      expect(attrs["host.name"]).toBeTypeOf("string");
-      expect(attrs["telemetry.sdk.name"]).toBe("ai-orchestrator");
+      expect(attrs["deployment.environment.name"]).toBe("staging");
+      expect(attrs["telemetry.sdk.name"]).toBe("opentelemetry");
+      expect(attrs["telemetry.sdk.language"]).toBe("nodejs");
+      await telemetry.runtime?.shutdown();
     });
 
-    it("continues an upstream trace when traceId/parentSpanId are passed", () => {
-      const t = new TracingService({ enabled: true });
+    it("continues an upstream trace when traceId/parentSpanId are passed", async () => {
+      const telemetry = await loadTestTelemetry();
+      const t = new TracingService({ runtime: telemetry.runtime });
       const span = t.startSpan({
         operationName: "GET /foo",
         kind: "server",
@@ -71,28 +81,38 @@ describe("Phase 8.1 — OpenTelemetry bridge", () => {
       expect(span.traceId).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
       expect(span.parentSpanId).toBe("00f067aa0ba902b7");
       expect(span.kind).toBe("server");
+      t.endSpan(span);
+      expect(t.recentSpans()[0]).toMatchObject({ traceId: "4bf92f3577b34da6a3ce929d0e0e4736", parentSpanId: "00f067aa0ba902b7", kind: "server", status: "ok" });
+      await telemetry.runtime?.shutdown();
     });
 
-    it("toTraceparent renders a valid header value", () => {
-      const t = new TracingService({ enabled: true });
+    it("toTraceparent renders a valid header value", async () => {
+      const telemetry = await loadTestTelemetry();
+      const t = new TracingService({ runtime: telemetry.runtime });
       const span = t.startSpan({ operationName: "x" });
       const tp = t.toTraceparent(span);
       expect(parseTraceparent(tp)).not.toBeNull();
+      await telemetry.runtime?.shutdown();
     });
 
-    it("retains spans in the in-memory ring buffer when enabled", () => {
-      const t = new TracingService({ enabled: true });
+    it("retains spans in the in-memory ring buffer when enabled, with error status", async () => {
+      const telemetry = await loadTestTelemetry();
+      const t = new TracingService({ runtime: telemetry.runtime });
       const span = t.startSpan({ operationName: "test-op" });
-      t.endSpan(span, "ok");
+      t.setAttribute(span, "k", "v");
+      t.endSpan(span, "error");
       expect(t.recentSpans()).toHaveLength(1);
-      expect(t.recentSpans()[0]!.operationName).toBe("test-op");
+      expect(t.recentSpans()[0]).toMatchObject({ operationName: "test-op", status: "error", attributes: { k: "v" } });
+      await telemetry.runtime?.shutdown();
     });
 
     it("does not retain spans when disabled (no leak in dev)", () => {
-      const t = new TracingService({ enabled: false });
+      const t = new TracingService({ resourceAttributes: { "service.name": "off" } });
       const span = t.startSpan({ operationName: "ignored" });
       t.endSpan(span);
       expect(t.recentSpans()).toHaveLength(0);
+      expect(t.isEnabled()).toBe(false);
+      expect(t.getResourceAttributes()).toEqual({ "service.name": "off" });
     });
   });
 

@@ -126,6 +126,15 @@ export class McpClientService {
   }
 
   async verify(rawToken: string, now: Date = new Date(Date.now())): Promise<McpClientVerification> {
+    return await this.verifyToken(rawToken, now, true);
+  }
+
+  /** True when `rawToken` is a live client token. A check only: unlike verify it records no use. */
+  async check(rawToken: string, now: Date = new Date(Date.now())): Promise<boolean> {
+    return (await this.verifyToken(rawToken, now, false)).ok;
+  }
+
+  private async verifyToken(rawToken: string, now: Date, recordUse: boolean): Promise<McpClientVerification> {
     const token = rawToken.trim();
     const separator = token.indexOf(".");
     if (!token.startsWith(MCP_CLIENT_TOKEN_PREFIX) || separator <= MCP_CLIENT_TOKEN_PREFIX.length) {
@@ -156,7 +165,7 @@ export class McpClientService {
 
     const { tokenHash: _hash, previousTokenHash: _previousHash, ...client } = record;
     const last = this.lastTouched.get(client.id) ?? 0;
-    if (now.getTime() - last >= TOUCH_INTERVAL_MS) {
+    if (recordUse && now.getTime() - last >= TOUCH_INTERVAL_MS) {
       this.lastTouched.set(client.id, now.getTime());
       const at = now.toISOString();
       await this.store.touchMcpClient(client.id, at);

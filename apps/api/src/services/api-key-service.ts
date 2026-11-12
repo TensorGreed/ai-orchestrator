@@ -146,6 +146,18 @@ export class ApiKeyService {
   }
 
   async verify(rawKey: string): Promise<ApiKeyVerification | null> {
+    const record = await this.match(rawKey);
+    if (!record) return null;
+    await this.store.touchApiKey(record.id);
+    return { userId: record.userId, keyId: record.id, scopes: record.scopes };
+  }
+
+  /** True when `rawKey` is a live key. A check only: unlike verify it records no use. */
+  async check(rawKey: string): Promise<boolean> {
+    return (await this.match(rawKey)) !== null;
+  }
+
+  private async match(rawKey: string) {
     if (!rawKey || typeof rawKey !== "string") return null;
     const trimmed = rawKey.trim();
     const separatorIndex = trimmed.indexOf(".");
@@ -163,13 +175,7 @@ export class ApiKeyService {
     const candidate = Buffer.from(hashSecret(secret), "hex");
     if (expected.length !== candidate.length) return null;
     if (!crypto.timingSafeEqual(expected, candidate)) return null;
-
-    await this.store.touchApiKey(record.id);
-    return {
-      userId: record.userId,
-      keyId: record.id,
-      scopes: record.scopes
-    };
+    return record;
   }
 }
 
