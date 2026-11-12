@@ -1584,7 +1584,22 @@ export interface McpServerCapabilities {
   prompts?: { listChanged?: boolean };
   logging?: Record<string, never>;
   completions?: Record<string, never>;
+  /** MCP 2026-07-28 — extensions the server supports, by identifier (for example `io.modelcontextprotocol/tasks`). */
+  extensions?: Record<string, Record<string, unknown>>;
 }
+
+/**
+ * MCP 2026-07-28 — "modern" protocol versions carry version and capabilities in every request's `_meta`
+ * (2026-07-28 and later); "legacy" versions open with an `initialize` handshake (2025-11-25 and earlier).
+ */
+export type McpProtocolEra = "modern" | "legacy";
+
+/**
+ * MCP 2026-07-28 — how L2M talks to an upstream server: `legacy` (the `initialize` handshake, switching to modern
+ * only when the server rejects it with a modern error), `auto` (try modern first, fall back to legacy) or `modern`.
+ * Set per server as `connection.protocolMode`; absent means the deployment default.
+ */
+export type McpClientProtocolMode = "auto" | "legacy" | "modern";
 
 export interface McpResourceAnnotations {
   audience?: Array<"user" | "assistant">;
@@ -1666,6 +1681,10 @@ export interface McpPromptGetResult {
  */
 export interface McpServerCatalog {
   capabilities: McpServerCapabilities;
+  /** MCP 2026-07-28 — the protocol version the last probe used, when known. */
+  protocolVersion?: string;
+  /** MCP 2026-07-28 — the era the last probe observed, when known. */
+  protocolEra?: McpProtocolEra;
   resources: McpResource[];
   resourceTemplates: McpResourceTemplate[];
   prompts: McpPrompt[];

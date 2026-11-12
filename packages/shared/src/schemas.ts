@@ -500,6 +500,12 @@ export const mcpToolPolicyEvaluateSchema = z.object({
   connection: z.record(z.string(), z.unknown()).optional()
 });
 
+/**
+ * MCP 2026-07-28 — `connection.protocolMode` of an upstream MCP server and the deployment default
+ * (`McpClientProtocolMode`). Connection JSON stays a free-form record; this schema validates the one field.
+ */
+export const mcpClientProtocolModeSchema = z.enum(["auto", "legacy", "modern"]);
+
 // Phase 10.5 — resources, prompts, elicitation and sampling.
 export const mcpSamplingSettingsSchema = z.object({
   allow: z.boolean().default(false),
