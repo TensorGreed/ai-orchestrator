@@ -64,6 +64,13 @@ pnpm --filter @ai-orchestrator/workflow-engine test
 
 For the API, integration tests cover RBAC, executor flows, webhook signatures, leader election, request-ID propagation, and master-key rotation. Add cases that fail before your change and pass after.
 
+For the MCP gateway and the MCP client (`packages/mcp-sdk`), the official MCP conformance suite runs against both, for spec versions 2025-11-25 and 2026-07-28 (the "MCP conformance" job in CI, about a minute locally):
+```bash
+node apps/api/conformance/run.mjs                          # every run
+node apps/api/conformance/run.mjs --only client-2026-07-28 # one run
+```
+Known gaps are listed with a reason in `apps/api/conformance/baselines/`. The run fails on a new failure and on a listed scenario that now passes (delete its entry then), so the lists only shrink.
+
 ## Coding conventions
 
 - **TypeScript-first.** ESM modules, NodeNext resolution. The trailing `.js` on relative imports in `.ts` source is intentional — don't strip them.

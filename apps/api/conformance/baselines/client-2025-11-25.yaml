@@ -1,0 +1,15 @@
+# Known failures of the client-2025-11-25 conformance run (see apps/api/conformance/run.mjs).
+# The run fails when a listed scenario starts passing: delete its entry then. A scenario counts as failing when
+# any of its checks fails or warns. Conformance package 0.2.0-alpha.12.
+client:
+  # The scenario server sends elicitation/create on the standalone GET stream. The HTTP client does not open that
+  # stream (server-initiated requests reach it only on the response stream of a call it made), so the tool call waits
+  # for an answer that never comes.
+  - elicitation-sep1034-client-defaults
+  # The client does not reconnect with GET and Last-Event-ID after the server closes an SSE stream gracefully
+  # (stream resumption is not implemented).
+  - sse-retry
+  # Warning only: see client-2026-07-28.
+  - auth/basic-cimd
+  # No scope step-up after a 403 insufficient_scope answer (see client-2026-07-28).
+  - auth/scope-step-up
