@@ -2105,18 +2105,31 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       retryLater(`This client already has ${open} subscription streams open (at most ${listenMaxPerClient}).`, "listen_streams_limit");
       return;
     }
+    // Reserved before the limiter is awaited, so two requests cannot both pass the cap.
+    listenCounts.set(clientKey, open + 1);
+    const unreserve = () => {
+      const left = (listenCounts.get(clientKey) ?? 1) - 1;
+      if (left <= 0) listenCounts.delete(clientKey);
+      else listenCounts.set(clientKey, left);
+    };
     // A stream holds one of the client's concurrency slots (never a rate token) for as long as it is open.
     let release = () => undefined as void;
     const effective = effectiveGatewayRateLimit(auth.client, toolset);
     if (effective) {
-      const admitted = await limiter.acquire(effective.key, { ...effective.limit, requestsPerMinute: null, burst: null });
+      let admitted;
+      try {
+        admitted = await limiter.acquire(effective.key, { ...effective.limit, requestsPerMinute: null, burst: null });
+      } catch (error) {
+        unreserve();
+        throw error;
+      }
       if (!admitted.ok) {
+        unreserve();
         retryLater(admitted.message, admitted.reason);
         return;
       }
       release = admitted.release;
     }
-    listenCounts.set(clientKey, open + 1);
 
     const hookHeaders = hookHeadersOf(reply);
     reply.hijack();
@@ -2139,9 +2152,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       listenStreams.delete(finish);
       reply.raw.off("close", cleanup);
       release();
-      const left = (listenCounts.get(clientKey) ?? 1) - 1;
-      if (left <= 0) listenCounts.delete(clientKey);
-      else listenCounts.set(clientKey, left);
+      unreserve();
     };
     /** Graceful end: the `complete` result, then close. */
     const finish = () => {
@@ -2151,6 +2162,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       if (!reply.raw.writableEnded) reply.raw.end();
     };
     reply.raw.on("close", cleanup);
+    // Gone already (during admission): its close event has fired, so free the slots now.
+    if (reply.raw.destroyed || request.raw.socket?.destroyed) {
+      cleanup();
+      return;
+    }
     listenStreams.add(finish);
     stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => ended);
     timer = setTimeout(finish, listenMaxMs);

@@ -817,9 +817,15 @@ describe("MCP gateway subscriptions/listen (acknowledge-only)", () => {
     expect(third.json().error).toMatchObject({ code: -31029, data: { reason: "listen_streams_limit" } });
     first.controller.abort();
     await first.pump;
-    let retried = await listen(fixture, { id: 3 });
-    await waitFor(() => retried.messages().length === 1 || retried.response.status !== 200);
-    expect(retried.response.status).toBe(200);
+    // The server sees the close a moment after the client aborts.
+    let retried!: Awaited<ReturnType<typeof listen>>;
+    await waitFor(async () => {
+      retried = await listen(fixture, { id: 3 });
+      if (retried.response.status === 200) return true;
+      await retried.pump;
+      return false;
+    });
+    await waitFor(() => retried.messages().length === 1);
     for (const stream of [second, retried]) {
       stream.controller.abort();
       await stream.pump;
