@@ -1579,6 +1579,8 @@ export async function createApp(
     app.addHook("onClose", async () => {
       await telemetryRuntime.shutdown();
     });
+    // A signal without a drain exits without closing the app; index.ts flushes the queued spans first through this.
+    options.lifecycle?.setExitFlush(() => telemetryRuntime.forceFlush());
     // Before any route is added: every handler then runs in its request's server span (when one was started).
     if (telemetrySettings.httpServerSpans) installHandlerContext(app, telemetryRuntime);
   }
