@@ -12,6 +12,7 @@ import type {
   NodeActivityEvent,
   ReleaseChannel,
   ResponseBoundary,
+  TraceCarrier,
   Workflow,
   WorkflowExecutionState
 } from "@ai-orchestrator/shared";
@@ -48,6 +49,8 @@ export type WorkflowExecutionEventHooks = {
 /** What a run is started with (app.ts runWorkflowExecution). */
 export interface RunWorkflowExecutionInput {
   workflow: Workflow;
+  /** Earlier traces this run continues without being their child (an approval resume links to its pause). */
+  traceLinks?: readonly TraceCarrier[];
   startNodeId?: string;
   runMode?: "workflow" | "single_node";
   usePinnedData?: boolean;

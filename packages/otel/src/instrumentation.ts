@@ -426,6 +426,10 @@ export class OtelRunInstrumentation implements RunInstrumentation {
     return context ? this.deps.contextManager.with(context, fn) : fn();
   }
 
+  withNewTrace<T>(fn: () => T): T {
+    return this.deps.contextManager.with(ROOT_CONTEXT, fn);
+  }
+
   activeTraceIds(): TraceIds | null {
     const spanContext = trace.getSpanContext(this.deps.contextManager.active());
     if (!spanContext || !isSpanContextValid(spanContext)) return null;
