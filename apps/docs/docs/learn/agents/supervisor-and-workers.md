@@ -63,7 +63,7 @@ The live demo's research team got this request: "Brief the team: what is RAG, an
 1. The supervisor's model called `delegate_to_researcher` with "Look up what RAG is in the knowledge base."
 2. The researcher called `lookup_kb` with `{"topic": "rag"}`, read the entry, and answered in one sentence.
 3. The supervisor's model called `delegate_to_analyst` with "Compute 1250 * 0.18 for the daily uncached retrievals."
-4. The analyst called `calculator` with `1250*0.18` and answered `225`.
+4. The analyst called `calculator` with `1250*0.18` and answered "1250 × 0.18 = 225."
 5. The supervisor wrote the summary: what RAG is, and about 225 uncached retrievals a day.
 
 That run made seven model calls: three by the supervisor (two delegations and the summary) and two by each worker (one tool call and one answer). The recording used a scripted stand-in model so the demo needs no key, but the count is what the structure implies: every delegation costs at least one extra model call in the worker, plus a supervisor call to read its result.
