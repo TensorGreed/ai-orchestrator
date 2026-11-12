@@ -14,8 +14,52 @@ import {
   newRowId,
   parseCommandLine,
   parseConnectionJson,
+  PROTOCOL_MODE_CHOICES,
+  protocolModeOf,
+  withProtocolMode,
+  type ProtocolModeChoice,
   type StdioDraft
 } from "./mcpConnection";
+
+/**
+ * MCP 2026-07-28 — which protocol L2M uses with the server. Tucked away: the deployment default suits almost every
+ * server, and a server that only speaks 2026-07-28 is reached with the default too.
+ */
+export function McpProtocolModeField({
+  connection,
+  onConnectionChange
+}: {
+  connection: Record<string, unknown>;
+  onConnectionChange: (next: Record<string, unknown>) => void;
+}) {
+  const mode = protocolModeOf(connection);
+  return (
+    <details className="mcp-protocol" open={mode !== "" ? true : undefined}>
+      <summary>Protocol version</summary>
+      <div className="kb-form-row">
+        <label>
+          MCP protocol
+          <select
+            value={mode}
+            onChange={(event) => onConnectionChange(withProtocolMode(connection, event.target.value as ProtocolModeChoice))}
+            aria-describedby="mcp-protocol-hint"
+          >
+            {PROTOCOL_MODE_CHOICES.map((choice) => (
+              <option key={choice.value || "default"} value={choice.value}>
+                {choice.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <small id="mcp-protocol-hint" className="kb-subtle">
+          Leave this on the default unless the server needs otherwise. Legacy opens each session with a handshake and
+          still reaches servers that only speak MCP 2026-07-28. Auto tries 2026-07-28 first and falls back. 2026-07-28
+          only fails against older servers.
+        </small>
+      </div>
+    </details>
+  );
+}
 
 export function McpHttpFields({
   connectionJson,
@@ -60,6 +104,10 @@ export function McpHttpFields({
         Uses the HTTP Streamable transport, the only one this adapter supports. Credentials go in the Auth secret
         below.
       </small>
+      <McpProtocolModeField
+        connection={connection}
+        onConnectionChange={(next) => onConnectionJsonChange(formatConnection(next))}
+      />
     </div>
   );
 }

@@ -938,6 +938,12 @@ export type McpToolErrorKind =
   | "credentials"
   /** Refused by the sandbox policy before anything started. */
   | "sandbox"
+  /**
+   * MCP 2026-07-28 — the request was sent and the connection broke (or timed out) before an answer, and the call
+   * was not sent again automatically because the tool is not marked read-only or idempotent: it may or may not
+   * have run.
+   */
+  | "outcome_unknown"
   | McpRuntimeRejection;
 
 /**

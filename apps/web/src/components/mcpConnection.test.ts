@@ -7,7 +7,9 @@ import {
   hasUneditableValues,
   kindForAdapter,
   parseCommandLine,
-  parseConnectionJson
+  parseConnectionJson,
+  protocolModeOf,
+  withProtocolMode
 } from "./mcpConnection";
 
 const tokens = (input: string) => {
@@ -132,5 +134,22 @@ describe("parseConnectionJson", () => {
     expect(parseConnectionJson('{"a":1}')).toEqual({ a: 1 });
     expect(parseConnectionJson("[1]")).toBeNull();
     expect(parseConnectionJson("{oops")).toBeNull();
+  });
+});
+
+describe("protocol mode", () => {
+  it("reads a known protocolMode and treats anything else as the deployment default", () => {
+    expect(protocolModeOf({ protocolMode: "auto" })).toBe("auto");
+    expect(protocolModeOf({ protocolMode: "modern" })).toBe("modern");
+    expect(protocolModeOf({ protocolMode: "legacy" })).toBe("legacy");
+    expect(protocolModeOf({})).toBe("");
+    expect(protocolModeOf({ protocolMode: "MODERN" })).toBe("");
+  });
+
+  it("sets protocolMode, removes it for the default and keeps every other key", () => {
+    const base = { endpoint: "https://x/mcp", headers: { a: "b" } };
+    expect(withProtocolMode(base, "auto")).toEqual({ ...base, protocolMode: "auto" });
+    expect(withProtocolMode({ ...base, protocolMode: "modern" }, "")).toEqual(base);
+    expect(base).not.toHaveProperty("protocolMode");
   });
 });

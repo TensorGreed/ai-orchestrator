@@ -23,6 +23,30 @@ export function connectionTemplate(kind: ConnectionKind): Record<string, unknown
   return {};
 }
 
+/** MCP 2026-07-28 — the protocol a server's connection asks for; "" follows the deployment default. */
+export type ProtocolModeChoice = "" | "legacy" | "auto" | "modern";
+
+export const PROTOCOL_MODE_CHOICES: ReadonlyArray<{ value: ProtocolModeChoice; label: string }> = [
+  { value: "", label: "Deployment default" },
+  { value: "legacy", label: "Legacy (initialize handshake)" },
+  { value: "auto", label: "Auto (try 2026-07-28 first)" },
+  { value: "modern", label: "2026-07-28 only" }
+];
+
+/** The connection's `protocolMode`, or "" when it has none or one the form does not know. */
+export function protocolModeOf(connection: Record<string, unknown>): ProtocolModeChoice {
+  const mode = connection.protocolMode;
+  return mode === "legacy" || mode === "auto" || mode === "modern" ? mode : "";
+}
+
+/** The connection with `protocolMode` set, or removed for the deployment default. Other keys are kept. */
+export function withProtocolMode(connection: Record<string, unknown>, mode: ProtocolModeChoice): Record<string, unknown> {
+  const next = { ...connection };
+  if (mode) next.protocolMode = mode;
+  else delete next.protocolMode;
+  return next;
+}
+
 export function formatConnection(connection: Record<string, unknown>): string {
   return JSON.stringify(connection, null, 2);
 }

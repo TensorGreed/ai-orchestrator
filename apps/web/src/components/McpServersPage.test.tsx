@@ -533,6 +533,18 @@ describe("McpServersPage", () => {
       expect(command).not.toHaveAttribute("aria-invalid");
     });
 
+    it("sets the MCP protocol of a remote server and drops it again for the deployment default", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      expect(JSON.parse(json(form))).not.toHaveProperty("protocolMode");
+      const select = within(form).getByLabelText("MCP protocol");
+      expect(select).toHaveValue("");
+      await user.selectOptions(select, "auto");
+      expect(JSON.parse(json(form)).protocolMode).toBe("auto");
+      await user.selectOptions(within(form).getByLabelText("MCP protocol"), "");
+      expect(JSON.parse(json(form))).toEqual({ endpoint: "http://127.0.0.1:7001/mcp", transport: "http_streamable" });
+    });
+
     it("marks an empty endpoint invalid and focuses it", async () => {
       const user = userEvent.setup();
       const form = await openForm(user);

@@ -506,6 +506,21 @@ export const mcpToolPolicyEvaluateSchema = z.object({
  */
 export const mcpClientProtocolModeSchema = z.enum(["auto", "legacy", "modern"]);
 
+/**
+ * MCP 2026-07-28 — an MCP server's connection JSON: free-form, except that `protocolMode`, when present, must be
+ * one of `auto`, `legacy` or `modern`.
+ */
+export const mcpServerConnectionSchema = z.record(z.string(), z.unknown()).superRefine((connection, ctx) => {
+  if (connection.protocolMode === undefined) return;
+  if (!mcpClientProtocolModeSchema.safeParse(connection.protocolMode).success) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["protocolMode"],
+      message: "protocolMode must be one of auto, legacy or modern"
+    });
+  }
+});
+
 // Phase 10.5 — resources, prompts, elicitation and sampling.
 export const mcpSamplingSettingsSchema = z.object({
   allow: z.boolean().default(false),

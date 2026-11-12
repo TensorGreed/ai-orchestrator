@@ -1,6 +1,6 @@
 import { MockMCPServerAdapter } from "./adapters/mock-mcp";
 import { SnapshotMockMCPServerAdapter, type McpSnapshotSource } from "./snapshot-mock";
-import { HttpMCPServerAdapter } from "./adapters/http-mcp";
+import { HttpMCPServerAdapter, type HttpMcpProtocolOptions } from "./adapters/http-mcp";
 import { StdioMCPServerAdapter } from "./adapters/stdio-mcp";
 import { BuiltInToolsMCPServerAdapter, type BuiltInToolsAdapterOptions } from "./adapters/built-in-tools";
 import { WorkflowToolMCPServerAdapter } from "./adapters/workflow-tool";
@@ -55,6 +55,13 @@ export interface DefaultMCPRegistryOptions {
    * runtime's fetch is used with no outbound policy.
    */
   builtInTools?: BuiltInToolsAdapterOptions;
+  /**
+   * MCP 2026-07-28 — how the HTTP client picks a server's protocol era
+   * (default `legacy`), the input round limit, and the safe re-issue rule for
+   * legacy servers. Unset keeps earlier behaviour apart from that rule, which
+   * is on by default.
+   */
+  httpProtocol?: HttpMcpProtocolOptions;
 }
 
 function isLauncher(value: McpSandboxPolicy | StdioLauncher): value is StdioLauncher {
@@ -67,7 +74,16 @@ export function createDefaultMCPRegistry(options?: DefaultMCPRegistryOptions): M
   const limited = <T extends MCPServerAdapter>(adapter: T): T => (guard ? withRuntimeLimits(adapter, guard) : adapter);
   const launcher = options?.sandbox ? (isLauncher(options.sandbox) ? options.sandbox : new ContainerSandboxLauncher(options.sandbox)) : undefined;
   // Phase 10.6 — servers with several credentials keep them in one JSON secret bundle.
-  registry.register(limited(withSecretBundle(new HttpMCPServerAdapter(options?.oauth ? { oauth: options.oauth } : undefined))));
+  registry.register(
+    limited(
+      withSecretBundle(
+        new HttpMCPServerAdapter({
+          ...(options?.oauth ? { oauth: options.oauth } : {}),
+          ...(options?.httpProtocol ? { protocol: options.httpProtocol } : {})
+        })
+      )
+    )
+  );
   registry.register(limited(withSecretBundle(new StdioMCPServerAdapter(launcher ? { launcher } : undefined))));
   registry.register(limited(new MockMCPServerAdapter()));
   // Phase 6.4 — built-in tools, under the same rate limits and breaker as any other server.
