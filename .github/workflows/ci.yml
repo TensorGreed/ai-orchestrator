@@ -6,10 +6,45 @@ on:
     branches:
       - main
 
+# A new push to a pull request cancels that pull request's older run; runs on main are never cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Docs-only pull requests (files under apps/docs/ or docs/, or Markdown files at the repo root) skip the test,
+  # Postgres and E2E steps. The jobs still run and report success, so the required checks stay the same.
+  changes:
+    name: Detect docs-only change
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - name: Detect
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "docs_only=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename')
+          count=$(printf '%s\n' "$files" | grep -c . || true)
+          other=$(printf '%s\n' "$files" | grep . | grep -Ev '^(apps/docs/|docs/)|^[^/]+\.md$' || true)
+          # The files API lists at most 3000 files; treat anything that large as a full change.
+          if [ "$count" -gt 0 ] && [ "$count" -lt 3000 ] && [ -z "$other" ]; then docs_only=true; else docs_only=false; fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "Changed files: $count; docs only: $docs_only"
+
   quality:
     name: Lint Test Build
     runs-on: ubuntu-latest
+    needs: changes
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -39,22 +74,27 @@ jobs:
 
       # The release workflow's vulnerability gate (scripts/release/vuln-gate.mjs).
       - name: Release script tests
+        if: needs.changes.outputs.docs_only != 'true'
         run: node --test scripts/release/vuln-gate.test.mjs
 
       # The workflow-engine web_browse rendering tests need a real Chromium;
       # without it they skip themselves, which would hide regressions.
       - name: Install Playwright Chromium
+        if: needs.changes.outputs.docs_only != 'true'
         run: pnpm --filter @ai-orchestrator/web exec playwright install --with-deps chromium
 
       - name: Test
+        if: needs.changes.outputs.docs_only != 'true'
         run: pnpm test
 
       # The red-team corpus through the default rule set, offline (a few seconds):
       # fails when any category drops below its measured floor.
       - name: Content rules benchmark (default rule set)
+        if: needs.changes.outputs.docs_only != 'true'
         run: node packages/cli/bin/l2m.mjs guard benchmark --builtin
 
       - name: Build
+        if: needs.changes.outputs.docs_only != 'true'
         run: pnpm build
 
       - name: Build docs
@@ -63,7 +103,7 @@ jobs:
   api-postgres:
     name: API on Postgres
     runs-on: ubuntu-latest
-    needs: quality
+    needs: [changes, quality]
     timeout-minutes: 30
     services:
       postgres:
@@ -82,6 +122,7 @@ jobs:
       REQUIRE_TEST_POSTGRES: "true"
     steps:
       - name: Checkout
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
 
       # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
@@ -89,20 +130,24 @@ jobs:
       # on PATH at that point. The previous order failed with "Unable to
       # locate executable file: pnpm".
       - name: Enable Corepack
+        if: needs.changes.outputs.docs_only != 'true'
         run: corepack enable
 
       - name: Setup Node.js
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: "pnpm"
 
       - name: Install dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: pnpm install --frozen-lockfile
 
       # The service database holds throwaway test data only: skip the disk flushes that make every CREATE and DROP
       # DATABASE (one per test file and store contract test) wait for a checkpoint.
       - name: Tune the test database for throwaway data
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           psql "$TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET fsync = off"
           psql "$TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET full_page_writes = off"
@@ -112,17 +157,23 @@ jobs:
       # Phase 13.1: the whole API suite on Postgres. Each test file runs on its own clone of one migrated template
       # database (dropped when the file is done); store contract and two-instance tests run on both stores.
       - name: API tests on Postgres
+        if: needs.changes.outputs.docs_only != 'true'
         env:
           TEST_STORE: postgres
         run: pnpm --filter @ai-orchestrator/api test
 
+      - name: Docs-only change
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change; the API suite on Postgres is not needed."
+
   e2e:
     name: Web E2E
     runs-on: ubuntu-latest
-    needs: quality
+    needs: [changes, quality]
     timeout-minutes: 30
     steps:
       - name: Checkout
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
 
       # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
@@ -130,26 +181,32 @@ jobs:
       # on PATH at that point. The previous order failed with "Unable to
       # locate executable file: pnpm".
       - name: Enable Corepack
+        if: needs.changes.outputs.docs_only != 'true'
         run: corepack enable
 
       - name: Setup Node.js
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: "pnpm"
 
       - name: Install dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Install Playwright Chromium
+        if: needs.changes.outputs.docs_only != 'true'
         run: pnpm --filter @ai-orchestrator/web exec playwright install --with-deps chromium
 
       - name: Run web E2E tests
+        if: needs.changes.outputs.docs_only != 'true'
         run: pnpm --filter @ai-orchestrator/web e2e
 
       # The static demo (lsquarem.com/demo/): built with --mode demo and served
       # by vite preview on its own port; no API or database involved.
       - name: Run static demo E2E
+        if: needs.changes.outputs.docs_only != 'true'
         env:
           DEMO_SCREENSHOT_DIR: ${{ github.workspace }}/apps/web/demo-screenshots
         run: |
@@ -158,7 +215,7 @@ jobs:
 
       # One screenshot per step of the demo journey, for reviewers.
       - name: Upload demo screenshots
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: demo-screenshots
@@ -166,7 +223,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Playwright report
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: playwright-report
@@ -175,10 +232,15 @@ jobs:
             apps/web/playwright-report-demo
           if-no-files-found: ignore
 
+      - name: Docs-only change
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change; the web E2E suites are not needed."
+
   vscode-extension:
     name: VS Code Extension Package
     runs-on: ubuntu-latest
-    needs: quality
+    needs: [changes, quality]
+    if: needs.changes.outputs.docs_only != 'true'
     timeout-minutes: 15
     steps:
       - name: Checkout
