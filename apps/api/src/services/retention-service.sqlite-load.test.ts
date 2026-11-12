@@ -1,8 +1,9 @@
 /**
  * 13.3 — a large first purge on SQLite keeps the event loop responsive: the store deletes in batches and yields between
- * them, so no gap between timer turns comes close to the length of the whole purge. (better-sqlite3 is synchronous: one
- * unbatched DELETE held the loop for the whole purge.) The bound is relative to the purge's own duration, so it holds
- * on a slow shared CI runner and still fails when batching or the yield is removed.
+ * them, so the timer keeps firing while the purge runs and no gap between timer turns comes close to the length of the
+ * whole purge. (better-sqlite3 is synchronous: one unbatched DELETE held the loop for the whole purge, so the timer never
+ * fired during it.) Both bounds are relative to the purge itself, so a single garbage-collection pause on a busy CI
+ * runner can't fail the test, while removing the batching or the yield still does.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { Database as BetterSqlite3Database } from "better-sqlite3";
@@ -45,6 +46,7 @@ describe("retention purge on SQLite under load", () => {
     let worstGap = 0;
     let fired = 0;
     let purgeMs = 0;
+    let firedDuringPurge = 0;
     const timer = setInterval(() => {
       const now = performance.now();
       worstGap = Math.max(worstGap, now - last);
@@ -56,6 +58,7 @@ describe("retention purge on SQLite under load", () => {
       const startedAt = last;
       const result = await service.tick("manual");
       purgeMs = performance.now() - startedAt;
+      firedDuringPurge = fired;
       expect(result.status === "ran" && result.run.counts.runs).toBe(ROWS);
       // One more timer turn, so a purge that blocked the loop up to its end is measured too (a synchronous DELETE
       // never lets the timer fire while it runs), and count the gap still open.
@@ -66,8 +69,9 @@ describe("retention purge on SQLite under load", () => {
     }
     const left = db.prepare(`SELECT COUNT(*) AS n FROM execution_history`).get() as { n: number };
     expect(left.n).toBe(0);
-    // 200 batches: batched, the worst gap is about one batch; unbatched, it is the whole purge.
-    expect(worstGap).toBeLessThan(Math.max(100, purgeMs / 10));
-    expect(fired).toBeGreaterThanOrEqual(5);
+    // 200 batches: batched with a yield, the timer fires many times during the purge and the worst gap is a small part
+    // of it; unbatched or never yielding, the timer can't fire until the purge ends and that one gap is the whole purge.
+    expect(firedDuringPurge).toBeGreaterThanOrEqual(20);
+    expect(worstGap).toBeLessThan(Math.max(100, purgeMs / 2));
   }, 120_000);
 });
