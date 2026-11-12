@@ -3,9 +3,10 @@
  * modern clients next to legacy ones on the same endpoint (a "dual-era
  * server"), kept out of the routes file.
  *
- * A request is modern exactly when it is a single JSON-RPC message (not a
- * batch, not `initialize`) whose `params._meta` carries
- * `io.modelcontextprotocol/protocolVersion`. Everything else follows the
+ * A request is modern when it is a single JSON-RPC message (not a batch,
+ * not `initialize`) whose `params._meta` carries
+ * `io.modelcontextprotocol/protocolVersion`, or that is sent with a modern
+ * `MCP-Protocol-Version` header. Everything else follows the
  * legacy session path unchanged. Modern requests are only served when
  * MCP_GATEWAY_MODERN_PROTOCOL is `on`; with it `off` (the default) they get
  * the legacy answer for a request without a session, which dual-era clients
@@ -60,12 +61,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Whether an `MCP-Protocol-Version` header value names a modern (per-request metadata) version. */
+export function isModernProtocolVersionHeader(value: string | undefined): boolean {
+  return value !== undefined && (MCP_MODERN_PROTOCOL_VERSIONS as readonly string[]).includes(value.trim());
+}
+
 /**
  * Whether a parsed body is a modern request: one message with a method other than `initialize` whose `_meta` has the
- * protocol version key (even a malformed value: that is answered with -32602, not with the legacy session error).
+ * protocol version key (even a malformed value: that is answered with -32602, not with the legacy session error), or
+ * one message sent with a modern `MCP-Protocol-Version` header. A header-modern message without the `_meta` keys is a
+ * malformed modern request (-32602 with its id), not a request without a session: legacy clients never send a modern
+ * version in that header.
  */
-export function isModernGatewayMessage(parsed: unknown): boolean {
+export function isModernGatewayMessage(parsed: unknown, versionHeader?: string): boolean {
   if (!isRecord(parsed) || typeof parsed.method !== "string" || parsed.method === "initialize") return false;
+  if (isModernProtocolVersionHeader(versionHeader)) return true;
   return inspectRequestMeta(parsed.params).era === "modern";
 }
 
@@ -106,8 +116,12 @@ export function validateModernGatewayMessage(parsed: unknown, headers: McpHeader
   const message = classified.message;
   const meta = inspectRequestMeta(message.params);
   if (meta.era !== "modern") {
-    // Callers check `isModernGatewayMessage` first; this keeps the function total.
-    return { ok: false, status: 400, response: rpcErrorFrom(message.id, missingRequestMetaError([MCP_META_PROTOCOL_VERSION])) };
+    // A modern version in the header but no protocol version in `_meta`: a malformed modern request (-32602).
+    const present = isRecord(message.params) && isRecord(message.params._meta) ? message.params._meta : {};
+    const missing = isRecord(present[MCP_META_CLIENT_CAPABILITIES])
+      ? [MCP_META_PROTOCOL_VERSION]
+      : [MCP_META_PROTOCOL_VERSION, MCP_META_CLIENT_CAPABILITIES];
+    return { ok: false, status: 400, response: rpcErrorFrom(message.id, missingRequestMetaError(missing)) };
   }
   if (meta.missing.includes(MCP_META_PROTOCOL_VERSION) || meta.protocolVersion === undefined) {
     return { ok: false, status: 400, response: rpcErrorFrom(message.id, missingRequestMetaError(meta.missing)) };

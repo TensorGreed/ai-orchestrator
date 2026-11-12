@@ -2270,7 +2270,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         httpError(reply, 406, "Accept must allow application/json or text/event-stream.");
         return reply;
       }
-      // MCP 2026-07-28 — a modern request (a single message with the protocol version in its _meta) is served
+      // MCP 2026-07-28 — a modern request (a single message with the protocol version in its _meta, or sent with a
+      // modern MCP-Protocol-Version header) is served
       // statelessly when modern mode is on. Anything else, and everything when it is off, takes the session path below
       // exactly as before (a modern request then gets the "session required" answer, so dual-era clients fall back).
       if (modernMode === "on") {
@@ -2282,7 +2283,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         } catch {
           // Not JSON: the session path answers with its parse error.
         }
-        if (earlyParsed && isModernGatewayMessage(early)) {
+        if (earlyParsed && isModernGatewayMessage(early, headerValue(request, "mcp-protocol-version"))) {
           await handleModernPost(request, reply, auth, toolset, early, accept);
           return reply;
         }

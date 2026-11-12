@@ -426,6 +426,15 @@ describe("modern mode on", () => {
     expect(encodedName.statusCode).toBe(200);
     expect(encodedName.json().result.structuredContent).toMatchObject({ result: 2 });
 
+    // A modern version in the header but no _meta (or no version in it): -32602 with the request's id, not the
+    // legacy "unsupported version" answer with id null.
+    for (const params of [undefined, {}, { _meta: { "io.modelcontextprotocol/clientCapabilities": {} } }]) {
+      const bare = await rpc(fixture, { jsonrpc: "2.0", id: 101, method: "server/discover", ...(params ? { params } : {}) }, modernHeaders("server/discover"));
+      expect(bare.statusCode).toBe(400);
+      expect(bare.json()).toMatchObject({ jsonrpc: "2.0", id: 101, error: { code: -32602 } });
+      expect(bare.json().error.data.missing).toContain("io.modelcontextprotocol/protocolVersion");
+    }
+
     // Capabilities missing: -32602 naming the key.
     const noCapabilities = await send({ _meta: { "io.modelcontextprotocol/protocolVersion": MODERN } }, modernHeaders("tools/list"));
     expect(noCapabilities.statusCode).toBe(400);

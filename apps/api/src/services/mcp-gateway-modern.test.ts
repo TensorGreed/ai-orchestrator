@@ -36,6 +36,16 @@ describe("isModernGatewayMessage", () => {
     expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, result: {} })).toBe(false);
     expect(isModernGatewayMessage("text")).toBe(false);
   });
+
+  it("is modern for a single message sent with a modern MCP-Protocol-Version header, even without _meta", () => {
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, "2026-07-28")).toBe(true);
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }, " 2026-07-28 ")).toBe(true);
+    // Legacy versions in the header keep the session path.
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, "2025-11-25")).toBe(false);
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, undefined)).toBe(false);
+    // Batches never.
+    expect(isModernGatewayMessage([{ jsonrpc: "2.0", id: 1, method: "tools/list" }], "2026-07-28")).toBe(false);
+  });
 });
 
 describe("validateModernGatewayMessage", () => {
@@ -60,6 +70,17 @@ describe("validateModernGatewayMessage", () => {
     // A version key of the wrong type: -32602 before anything else.
     const wrongType = validate({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { "io.modelcontextprotocol/protocolVersion": 7 } } }, {});
     expect(wrongType).toMatchObject({ ok: false, status: 400, response: { error: { code: -32602 } } });
+  });
+
+  it("answers a header-modern request without the _meta keys with -32602 and its id", () => {
+    const bare = validate({ jsonrpc: "2.0", id: 101, method: "server/discover" });
+    expect(bare).toMatchObject({
+      ok: false,
+      status: 400,
+      response: { id: 101, error: { code: -32602, data: { missing: ["io.modelcontextprotocol/protocolVersion", "io.modelcontextprotocol/clientCapabilities"] } } }
+    });
+    const noVersion = validate({ jsonrpc: "2.0", id: "r-2", method: "server/discover", params: { _meta: { "io.modelcontextprotocol/clientCapabilities": {} } } });
+    expect(noVersion).toMatchObject({ ok: false, status: 400, response: { id: "r-2", error: { code: -32602, data: { missing: ["io.modelcontextprotocol/protocolVersion"] } } } });
   });
 
   it("rejects invalid JSON-RPC and accepts notifications without further checks", () => {
