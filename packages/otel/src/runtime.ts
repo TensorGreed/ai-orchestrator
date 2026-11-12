@@ -129,7 +129,8 @@ export class OtelRuntime {
       propagator,
       internalPropagator: new W3CTraceContextPropagator(),
       options,
-      scrub
+      scrub,
+      meter: this.meter
     });
     this.semconvLatestGenAi = options.semconvOptIn.includes("gen_ai_latest_experimental");
 

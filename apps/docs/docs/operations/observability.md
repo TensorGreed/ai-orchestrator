@@ -22,8 +22,8 @@ Traces and OTLP metrics go to any OTLP-compatible backend, or to an [OpenTelemet
 - **One SERVER span per HTTP request**, named `{method} {route}` (for example `POST /api/workflows/:id/execute`), with the stable HTTP attribute names listed [below](#http-server-spans). `/health`, `/ready` and `/metrics` get no span.
 - **Workflow runs, nodes, agents and tool calls**: one `invoke_workflow` span per run, one span per node that ran, `invoke_agent` per Agent or Supervisor loop and `execute_tool` per tool call the model made. See [run spans](#run-spans).
 - **Model calls**: one `chat {model}` or `embeddings {model}` CLIENT span per call to a model provider, from a run, the `/v1` AI gateway or anywhere else, with token usage. See [model spans](#model-spans).
+- **MCP calls and the MCP gateway**: a CLIENT span per request L2M sends to an MCP server, a SERVER span per request the gateway answers, and trace context sent on to MCP servers. See [MCP spans](#mcp-spans-and-trace-context).
 - **Queue jobs and approval resumes**: a worker's job continues the trace of whoever enqueued it, on any instance, and a resume after an approval links back to the node that paused. See [queues, clusters and approvals](#queues-clusters-and-approvals).
-- MCP calls are **not recorded yet**.
 - L2M does **not** send `traceparent` to model providers unless `L2M_OTEL_PROPAGATE_TO_PROVIDERS=true`.
 
 ## Quickstart: send traces to a collector
@@ -81,6 +81,7 @@ The metric names are the ones L2M has always pushed, as cumulative sums (counter
 | `l2m_otel_spans_dropped_total` (attribute `reason=export_failed`) | Sum, new; counted while spans are exported, and visible only with a metrics endpoint |
 | `gen_ai.client.operation.duration` (s) and `gen_ai.client.token.usage` ({token}) | Histograms, new: the [GenAI metrics](#genai-and-cost-metrics) |
 | `l2m.gen_ai.cost` (USD) | Sum, new: priced model spend |
+| `mcp.client.operation.duration` and `mcp.server.operation.duration` (s) | Histograms, new: the [MCP metrics](#mcp-spans-and-trace-context), recorded only while tracing is on |
 
 Differences from the previous push: the default encoding is `http/protobuf` (set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` for the old one), the instrumentation scope stays `ai-orchestrator`, and values are exported from the same counters the Prometheus `/metrics` page reads, which are unchanged. The percentile gauges are kept for one release and then removed; the histograms replace them. With `METRICS_ENABLED=false` the counters stay at zero and the histograms get no observations. Spans lost when the queue is full, or still being exported when a shutdown times out, are not counted: only those lost to a failed export.
 
@@ -132,7 +133,7 @@ This stops an anonymous caller (a public webhook, for example) from switching sa
 
 `L2M_OTEL_TRUSTED_PROXIES` is a comma list of IP addresses or CIDR ranges. It is matched against the address that opened the connection (not `X-Forwarded-For`), so list the proxy or gateway in front of L2M that passes on your own services' trace context. Every request arriving through a listed address is trusted, so do not list an internet-facing load balancer or ingress: that trusts every caller on the internet, as `all` does.
 
-`OTEL_PROPAGATORS` chooses the formats read from callers (and, as later releases add outbound propagation, sent to them): `tracecontext` (default), `baggage`, or `none` to ignore inbound context entirely. An unsupported entry is ignored with a warning. Baggage is never copied into span attributes.
+`OTEL_PROPAGATORS` chooses the formats read from callers and sent to MCP servers: `tracecontext` (default), `baggage`, or `none` to ignore inbound context entirely. An unsupported entry is ignored with a warning. Baggage is never copied into span attributes.
 
 ## Trace ids in logs
 
@@ -224,6 +225,40 @@ With metrics exported (`OTEL_METRICS_ENABLED=true` and a metrics endpoint; traci
 - **No per-run ids on metrics.** Execution, workflow, node, session and client ids are on spans only.
 - **Newer names.** The GenAI conventions are still experimental, and their newer, unreleased text renames these metrics. `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` switches to those names: chat calls report `gen_ai.client.inference.duration`, the counters `gen_ai.client.inference.usage.input_tokens`, `.output_tokens` and `.cache_read.input_tokens` (with `gen_ai.token.modality=unknown`, since providers report totals) and the histograms `gen_ai.client.inference.operation.input_tokens` and `.output_tokens`; embeddings calls report `gen_ai.client.embeddings.duration` and `gen_ai.client.embeddings.operation.input_tokens`. These names may change again before that text is released. The cost counter is the same in both modes.
 
+## MCP spans and trace context
+
+While tracing is on, MCP traffic is traced in both directions, for servers on either protocol era (the `initialize` handshake or 2026-07-28). Names and attributes follow the OpenTelemetry MCP semantic conventions pinned at v1.41.0, which are still marked experimental upstream.
+
+```
+execute_tool {tool}                    an agent's tool call (or the MCP Tool node's span)
+└─ tools/call {tool}          CLIENT   the request to the MCP server
+   └─ tools/call {tool}       CLIENT   a later input round (2026-07-28), one per round
+
+POST /mcp/:toolset            SERVER   the HTTP request to the gateway (linked, see below)
+tools/call {tool}             SERVER   one per JSON-RPC request, batches included
+└─ tools/call {upstream tool} CLIENT   the gateway's call to the server behind the tool
+```
+
+- **Client spans.** Every operation on an MCP server (`tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, `resources/read`, `prompts/list`, `prompts/get`) gets a CLIENT span named after the method, and after the tool or prompt for `tools/call` and `prompts/get`. The `initialize` handshake or the `server/discover` probe a first call needs happens inside that call's span. Built-in tools and workflow tools run inside L2M and get no MCP span. Calls answered from a recorded cassette get none either.
+- **Input rounds.** When a 2026-07-28 server answers with `input_required`, each later round of the request is a child span with `l2m.mcp.round`, and the request's span gets `l2m.mcp.rounds`.
+- **Gateway spans.** Every JSON-RPC request the gateway answers on `/mcp/:toolset` gets a SERVER span: `initialize`, `ping`, `tools/list` and `tools/call` from session-based clients, `server/discover`, `tools/list` and `tools/call` from 2026-07-28 clients. A batch gets one span per request.
+- **Outcomes.** A JSON-RPC error sets `error.type` and `rpc.response.status_code` to its code; a tool result with `isError` sets `error.type=tool_error`; a failure in L2M's client sets its kind (`transport`, `timeout`, `outcome_unknown`, ...). Only the type is recorded, never the server's error text, arguments or results.
+
+| Span | Attributes |
+|---|---|
+| CLIENT | `mcp.method.name`, `gen_ai.operation.name` (`execute_tool` for `tools/call`), `gen_ai.tool.name`, `gen_ai.prompt.name`, `mcp.resource.uri` (without credentials, query or fragment), `mcp.session.id` (session-based servers), `mcp.protocol.version`, `jsonrpc.request.id`, `network.transport` (`tcp` or `pipe` for stdio), `network.protocol.name`, `server.address` and `server.port` (host only), `l2m.mcp.server.id` (the registry id), `rpc.response.status_code`, `error.type` |
+| SERVER (gateway) | the same names without `server.*`, plus `l2m.toolset.id` and `l2m.gateway.client.id` |
+
+Metrics, exported with the other OTLP metrics: `mcp.client.operation.duration` and `mcp.server.operation.duration` (seconds), by method, protocol version, transport and outcome. The client histogram also carries the tool and prompt name; the gateway's does not, because callers choose those names. For the same reason a gateway request whose method MCP does not define is named `_OTHER`, and a JSON-RPC error code outside the range JSON-RPC reserves (-32768 to -32000) is recorded as `_OTHER` on the metrics (the span keeps the code).
+
+### Trace context sent to MCP servers
+
+Each request to an MCP server carries the active span's trace context in `params._meta` (`traceparent`, `tracestate`, and `baggage` when that propagator is on), for both protocol eras; over HTTP it is also sent as headers. The `initialize` request carries it in its headers only. It is merged with the request's other `_meta` keys (the progress token and the 2026-07-28 protocol keys), and trace context alone never makes a request look like a 2026-07-28 one. A server that rejects unknown request fields can be excluded: set `"propagateTraceContext": false` in its connection JSON (or untick **Send trace context** under **Protocol version** in its connection settings, for HTTP and stdio servers). `L2M_OTEL_PROPAGATE_TO_MCP=false` stops it for every server.
+
+### Trace context the gateway receives
+
+A gateway client can send trace context in `params._meta`, in the HTTP headers, or both. The `_meta` context wins: it becomes the parent of the request's SERVER span, and the HTTP request's span is linked (`l2m.link.reason=transport`). Every request that reaches the gateway carries a valid client token, so its context is continued under `L2M_OTEL_TRUST_INBOUND=authenticated` (the default) and `all`; with `none` the span stays in the HTTP request's trace and only links the caller's (`l2m.link.reason=untrusted_inbound`). The servers behind the gateway never receive a caller's `_meta` as it was sent: they get the context of the gateway's own CLIENT span, which keeps the caller's trace (and its `tracestate`) only when the caller's context was continued. Baggage in a caller's `_meta` is not carried on. In `_meta`, `traceparent` and `tracestate` longer than 512 characters and `baggage` longer than 8192 are ignored.
+
 ## Queues, clusters and approvals
 
 The trace follows work that leaves the request, with no database change: the context is a few characters in JSON that is stored anyway.
@@ -273,7 +308,7 @@ POST /api/workflows/:id/enqueue         SERVER      (any instance)
 | `L2M_OTEL_SPAN_DETAIL` | `standard` | `verbose` adds one span per agent turn (`l2m.agent.iteration`). |
 | `L2M_OTEL_NAMES` | `names` | `ids` keeps workflow, node and agent names out of spans. |
 | `L2M_OTEL_PROPAGATE_TO_PROVIDERS` | `false` | Send `traceparent` (and `tracestate`) to model providers. |
-| `L2M_OTEL_PROPAGATE_TO_MCP` | `true` | Reserved for outbound propagation to MCP servers. |
+| `L2M_OTEL_PROPAGATE_TO_MCP` | `true` | Send trace context to MCP servers (`_meta` and HTTP headers). A server can opt out in its connection settings. |
 
 The standard `OTEL_*` values are read only while they are used, so values meant for other tools sharing the environment never stop L2M. While tracing is on, an unsupported value (a sampler, propagator, protocol or number L2M cannot use) falls back to its default with a warning at start-up. Only these stop the API at start-up, with a message naming the setting: an endpoint L2M is about to use that is not an absolute `http://` or `https://` URL, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` with a traces endpoint set, and a bad `L2M_OTEL_*` value (such as a trusted-proxy entry that is not an IP address or CIDR range).
 

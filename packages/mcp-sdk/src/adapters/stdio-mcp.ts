@@ -12,8 +12,11 @@ import type {
   MCPServerConfig,
   McpToolAnnotations,
   MCPToolDefinition,
-  MCPToolResult
+  MCPToolResult,
+  RunInstrumentation,
+  TraceCarrier
 } from "@ai-orchestrator/shared";
+import { MCP_OUTCOME_ATTRIBUTES } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter, McpReadResourceOptions, McpServerRequestOrigin } from "../types";
 import {
   McpJsonRpcError,
@@ -22,6 +25,7 @@ import {
   McpTimeoutError,
   classifyMcpError
 } from "../errors";
+import { annotateMcpError, annotateMcpRequest, mcpTraceCarrier, traceMcpRound, withTraceContext } from "../tracing";
 import type { StdioLaunchPlan, StdioLauncher } from "../sandbox";
 import {
   DEFAULT_RESOURCE_MAX_BYTES,
@@ -183,6 +187,8 @@ export interface StdioMcpProtocolOptions {
 export interface StdioMcpServerAdapterOptions {
   launcher?: StdioLauncher;
   protocol?: StdioMcpProtocolOptions;
+  /** Tracing (only while it is on): requests carry the active span's trace context in `params._meta`. */
+  trace?: RunInstrumentation;
 }
 
 /** What the adapter has observed about a stdio server's protocol, for display. */
@@ -466,12 +472,15 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   private readonly rememberedAnnotations = new Map<string, Map<string, McpToolAnnotations | undefined>>();
   /** The protocol last seen per server (by session key), for display. */
   private readonly observed = new Map<string, StdioMcpObservedProtocol>();
+  /** Tracing (only while it is on): requests carry the active span's trace context in `params._meta`. */
+  private readonly trace?: RunInstrumentation;
 
   constructor(options?: StdioMcpServerAdapterOptions) {
     this.launcher = options?.launcher;
     this.protocol = options?.protocol ?? {};
     this.eraCache = this.protocol.eraCache ?? new McpEraCache();
     this.modernOnlyCache = new McpEraCache();
+    this.trace = options?.trace?.enabled ? options.trace : undefined;
   }
 
   /**
@@ -863,12 +872,19 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
    * written, for every request with an id in both eras (`sendRpc` calls
    * it). Modern requests get their protocol keys here, merged with
    * `withRequestMeta` so a progress token and any other key are kept;
-   * legacy params pass through unchanged. Trace context (`traceparent`,
-   * `tracestate`) for either era belongs here as well, merged the same way.
+   * legacy params get no protocol keys. Trace context (`traceparent`,
+   * `tracestate`) is merged the same way for either era, when tracing gave
+   * a carrier for the request; array or scalar params are left as they are.
    */
-  private outgoingParams(session: StdioSession, params: unknown, context: MCPExecutionContext): unknown {
-    if (session.era !== "modern") return params;
-    return withRequestMeta(toRecord(params), modernRequestMetaFor(context, session.protocolVersion ?? MCP_CLIENT_MODERN_PROTOCOL_VERSION));
+  private outgoingParams(session: StdioSession, params: unknown, context: MCPExecutionContext, carrier?: TraceCarrier): unknown {
+    const withProtocol =
+      session.era === "modern"
+        ? withRequestMeta(toRecord(params), modernRequestMetaFor(context, session.protocolVersion ?? MCP_CLIENT_MODERN_PROTOCOL_VERSION))
+        : params;
+    if (!carrier) return withProtocol;
+    if (withProtocol === undefined) return withTraceContext(undefined, carrier);
+    if (!withProtocol || typeof withProtocol !== "object" || Array.isArray(withProtocol)) return withProtocol;
+    return withTraceContext(withProtocol as Record<string, unknown>, carrier);
   }
 
   private handleStdout(session: StdioSession, chunk: string): void {
@@ -1214,7 +1230,15 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       options.progressToken && params && typeof params === "object"
         ? withRequestMeta(params as Record<string, unknown>, { progressToken: options.progressToken })
         : params;
-    const outgoing = this.outgoingParams(session, withProgress, options.context ?? session.context);
+    // initialize carries no trace context (as over HTTP, where it goes in headers only).
+    const carrier = method === "initialize" ? undefined : mcpTraceCarrier(this.trace, session.config);
+    const outgoing = this.outgoingParams(session, withProgress, options.context ?? session.context, carrier);
+    if (method !== "initialize") {
+      annotateMcpRequest(this.trace, {
+        ...(session.era === "modern" && session.protocolVersion ? { protocolVersion: session.protocolVersion } : {}),
+        requestId: id
+      });
+    }
     const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params: outgoing }) + "\n";
     let written = false;
     if (options.progressToken && options.onProgress) {
@@ -1258,12 +1282,15 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       (response) => {
         cleanup();
         if (response.error) {
-          throw new McpJsonRpcError(response.error.message || "MCP JSON-RPC error", response.error.code, response.error.data);
+          const failure = new McpJsonRpcError(response.error.message || "MCP JSON-RPC error", response.error.code, response.error.data);
+          annotateMcpError(this.trace, failure);
+          throw failure;
         }
         return response;
       },
       (error: unknown) => {
         cleanup();
+        annotateMcpError(this.trace, error);
         // The process ended after the request went out: the server may have acted on it (D13).
         if (written && error === session.closeError && !session.closedByClient && !session.spawnFailed && error instanceof Error) {
           throw new McpStdioConnectionLostError(error.message);
@@ -1433,19 +1460,33 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     timeoutMs: number,
     options: RpcOptions = {}
   ): Promise<Record<string, unknown>> {
-    const send = (roundParams: Record<string, unknown>) => this.modernSend(session, method, roundParams, config, context, timeoutMs, options);
+    const target = options.toolName ?? (typeof params.name === "string" ? params.name : undefined);
+    let rounds = 0;
+    // Round 1 runs in the operation's own span; each later input round gets a child CLIENT span (as over HTTP).
+    const send = async (roundParams: Record<string, unknown>) => {
+      rounds += 1;
+      return await traceMcpRound(
+        this.trace,
+        { method, ...(target ? { target } : {}), round: rounds, serverId: config.registryServerId ?? config.serverId },
+        () => this.modernSend(session, method, roundParams, config, context, timeoutMs, options)
+      );
+    };
     if (isMrtrMethod(method)) {
       const origin: McpServerRequestOrigin = {
         serverId: config.serverId,
         ...(config.registryServerId ? { registryServerId: config.registryServerId } : {}),
         ...(options.toolName ? { toolName: options.toolName } : {})
       };
-      return runMrtrRequest(method as McpMrtrMethod, params, send, {
-        context,
-        origin,
-        clientCapabilities: buildClientCapabilities(context),
-        maxRounds: this.protocol.mrtrMaxRounds ?? DEFAULT_MRTR_MAX_ROUNDS
-      });
+      try {
+        return await runMrtrRequest(method as McpMrtrMethod, params, send, {
+          context,
+          origin,
+          clientCapabilities: buildClientCapabilities(context),
+          maxRounds: this.protocol.mrtrMaxRounds ?? DEFAULT_MRTR_MAX_ROUNDS
+        });
+      } finally {
+        if (rounds > 1) this.trace?.annotate({ [MCP_OUTCOME_ATTRIBUTES.ROUNDS]: rounds });
+      }
     }
     const classified = classifyMcpResult(method, await send(params));
     if (classified.resultType !== "complete") {

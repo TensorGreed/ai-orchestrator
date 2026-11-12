@@ -9,7 +9,9 @@ import {
   parseCommandLine,
   parseConnectionJson,
   protocolModeOf,
-  withProtocolMode
+  traceContextAllowed,
+  withProtocolMode,
+  withTraceContextAllowed
 } from "./mcpConnection";
 
 const tokens = (input: string) => {
@@ -151,5 +153,15 @@ describe("protocol mode", () => {
     expect(withProtocolMode(base, "auto")).toEqual({ ...base, protocolMode: "auto" });
     expect(withProtocolMode({ ...base, protocolMode: "modern" }, "")).toEqual(base);
     expect(base).not.toHaveProperty("protocolMode");
+  });
+});
+
+describe("trace context opt-out", () => {
+  it("is allowed unless the connection says false, and turning it back on removes the key", () => {
+    expect(traceContextAllowed({ endpoint: "x" })).toBe(true);
+    expect(traceContextAllowed({ propagateTraceContext: false })).toBe(false);
+    const off = withTraceContextAllowed({ endpoint: "x", protocolMode: "auto" }, false);
+    expect(off).toEqual({ endpoint: "x", protocolMode: "auto", propagateTraceContext: false });
+    expect(withTraceContextAllowed(off, true)).toEqual({ endpoint: "x", protocolMode: "auto" });
   });
 });

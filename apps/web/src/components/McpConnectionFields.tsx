@@ -16,7 +16,9 @@ import {
   parseConnectionJson,
   PROTOCOL_MODE_CHOICES,
   protocolModeOf,
+  traceContextAllowed,
   withProtocolMode,
+  withTraceContextAllowed,
   type ProtocolModeChoice,
   type StdioDraft
 } from "./mcpConnection";
@@ -33,8 +35,9 @@ export function McpProtocolModeField({
   onConnectionChange: (next: Record<string, unknown>) => void;
 }) {
   const mode = protocolModeOf(connection);
+  const sendTraceContext = traceContextAllowed(connection);
   return (
-    <details className="mcp-protocol" open={mode !== "" ? true : undefined}>
+    <details className="mcp-protocol" open={mode !== "" || !sendTraceContext ? true : undefined}>
       <summary>Protocol version</summary>
       <div className="kb-form-row">
         <label>
@@ -55,6 +58,21 @@ export function McpProtocolModeField({
           Leave this on the default unless the server needs otherwise. Legacy opens each session with a handshake and
           still reaches servers that only speak MCP 2026-07-28. Auto tries 2026-07-28 first and falls back. 2026-07-28
           only fails against older servers.
+        </small>
+      </div>
+      <div className="kb-form-row">
+        <label>
+          <input
+            type="checkbox"
+            checked={sendTraceContext}
+            onChange={(event) => onConnectionChange(withTraceContextAllowed(connection, event.target.checked))}
+            aria-describedby="mcp-trace-hint"
+          />{" "}
+          Send trace context
+        </label>
+        <small id="mcp-trace-hint" className="kb-subtle">
+          When tracing is on, each request tells the server which trace it belongs to, so its own spans join the run.
+          Turn this off for a server that rejects unknown request fields.
         </small>
       </div>
     </details>

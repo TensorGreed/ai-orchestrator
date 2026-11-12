@@ -511,12 +511,19 @@ export const mcpClientProtocolModeSchema = z.enum(["auto", "legacy", "modern"]);
  * one of `auto`, `legacy` or `modern`.
  */
 export const mcpServerConnectionSchema = z.record(z.string(), z.unknown()).superRefine((connection, ctx) => {
-  if (connection.protocolMode === undefined) return;
-  if (!mcpClientProtocolModeSchema.safeParse(connection.protocolMode).success) {
+  if (connection.protocolMode !== undefined && !mcpClientProtocolModeSchema.safeParse(connection.protocolMode).success) {
     ctx.addIssue({
       code: "custom",
       path: ["protocolMode"],
       message: "protocolMode must be one of auto, legacy or modern"
+    });
+  }
+  // Tracing: `false` keeps trace context away from this server (it is sent by default while tracing is on).
+  if (connection.propagateTraceContext !== undefined && typeof connection.propagateTraceContext !== "boolean") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["propagateTraceContext"],
+      message: "propagateTraceContext must be true or false"
     });
   }
 });

@@ -47,6 +47,19 @@ export function withProtocolMode(connection: Record<string, unknown>, mode: Prot
   return next;
 }
 
+/** Tracing: false when the connection keeps trace context away from the server (it is sent by default). */
+export function traceContextAllowed(connection: Record<string, unknown>): boolean {
+  return connection.propagateTraceContext !== false;
+}
+
+/** The connection with trace context allowed (the key removed: the default) or turned off. Other keys are kept. */
+export function withTraceContextAllowed(connection: Record<string, unknown>, allowed: boolean): Record<string, unknown> {
+  const next = { ...connection };
+  if (allowed) delete next.propagateTraceContext;
+  else next.propagateTraceContext = false;
+  return next;
+}
+
 export function formatConnection(connection: Record<string, unknown>): string {
   return JSON.stringify(connection, null, 2);
 }
