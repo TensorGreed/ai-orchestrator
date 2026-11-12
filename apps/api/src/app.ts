@@ -2177,16 +2177,22 @@ export async function createApp(
     }
   };
 
-  const persistExecutionHistoryRecord = async (
-    record: ExecutionHistoryRecord,
-    meta: {
-      phase: "progress" | "final";
-      executionId: string;
-      workflowId: string;
-      triggerType?: string;
-      status: string;
+  type PersistExecutionHistoryMeta = {
+    phase: "progress" | "final";
+    executionId: string;
+    workflowId: string;
+    triggerType?: string;
+    status: string;
+  };
+  // A final write ends the run's bookkeeping whatever its outcome (stored, refused, aborted or failed).
+  const persistExecutionHistoryRecord = async (record: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
+    try {
+      return await persistExecutionHistoryRecordUnsettled(record, meta);
+    } finally {
+      if (meta.phase === "final") runTraceIds.delete(meta.executionId);
     }
-  ): Promise<boolean> => {
+  };
+  const persistExecutionHistoryRecordUnsettled = async (record: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
     if (meta.phase === "final") await progressWrites.settle(meta.executionId);
     const active = activeExecutions.get(meta.executionId);
     // A stopped run keeps the canceled record the cancel route wrote. A
@@ -2296,6 +2302,7 @@ export async function createApp(
       },
       async (span) => {
         if (input.executionId && span.recording && span.traceId) {
+          runTraceIds.delete(input.executionId);
           if (runTraceIds.size >= 5_000) runTraceIds.delete(runTraceIds.keys().next().value!);
           runTraceIds.set(input.executionId, { traceId: span.traceId, stored: false });
         }
