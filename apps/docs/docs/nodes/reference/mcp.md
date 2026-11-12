@@ -1,5 +1,6 @@
 ---
-description: "Reference for the 1 node in the L2M MCP category, with every config field and default. Model Context Protocol clients and the workflow-as-MCP-tool exposure node."
+title: "MCP nodes: config fields and defaults"
+description: "Reference for the 1 node in the L2M MCP category, with every config field and default."
 ---
 
 <!--

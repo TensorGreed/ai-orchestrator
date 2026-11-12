@@ -1,4 +1,5 @@
 ---
+title: "Service accounts and API keys for automation"
 description: "Service accounts for automation, and API keys scoped by a role ceiling and a project list."
 ---
 
@@ -147,7 +148,7 @@ expiry; rotate them to bring them under it.
 
 The `credential.expiring` notification warns before a credential stops working:
 
-- an API key (personal or a service account's) or a [gateway client](../product/mcp-gateway.md#rotating-a-clients-token)
+- an API key (personal or a service account's) or a [gateway client](../product/mcp-gateway.md#rotating-a-client-s-token)
   that expires within 7 days;
 - a rotated key that is still being used after the rotation, when its grace window ends within 24 hours (a caller has
   not switched to the new key yet). A rotated key nobody uses any more ends quietly.

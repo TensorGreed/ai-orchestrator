@@ -1,4 +1,5 @@
 ---
+title: "Scaling: API replicas, workers and load testing"
 description: "Scale L2M out: API replicas and queue workers, a compose example, the Postgres connection budget, sizing, and the load and chaos test harness."
 ---
 

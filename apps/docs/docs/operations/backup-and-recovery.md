@@ -1,4 +1,5 @@
 ---
+title: "Backup and recovery: restore a self-hosted L2M"
 description: "Back up, restore and recover a self-hosted L2M deployment: what to keep, SQLite and Postgres methods, master-key loss, point-in-time recovery, RPO and RTO."
 ---
 

@@ -1,5 +1,6 @@
 ---
-description: "Approval gates in L2M pause a run until a person decides: who may approve, timeouts, editable fields, and an audit trail recorded in the run's signed manifest."
+title: "Approvals: pause a run until a person decides"
+description: "Approval gates in L2M pause a run until a person decides: who may approve, timeouts, editable fields, and an audit trail in the run's signed manifest."
 ---
 
 # Approval gates

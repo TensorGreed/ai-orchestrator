@@ -349,7 +349,8 @@ section {
 }
 
 .nav a {
-  padding: 8px 10px;
+  padding: 8px 9px;
+  white-space: nowrap;
   border-radius: var(--r-md);
   color: var(--fg-muted);
   text-decoration: none;
@@ -962,7 +963,15 @@ section {
   }
 }
 
-@media (max-width: 920px) {
+/* The nav holds the page sections and the docs, Learn, Glossary, Recipes and Blog links: it folds
+   into the menu below 1240 px, and the brand tagline steps aside below 1480 px to make room. */
+@media (max-width: 1480px) {
+  .brand-tag {
+    display: none;
+  }
+}
+
+@media (max-width: 1240px) {
   .menu-toggle {
     display: inline-flex;
   }

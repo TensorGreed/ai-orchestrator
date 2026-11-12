@@ -1,5 +1,6 @@
 ---
-description: "The L2M MCP control plane: one place for every MCP server your agents call, with fleet health, a tool catalogue, policies, toolsets, the gateway and change history."
+title: "MCP control plane: manage all MCP servers"
+description: "The L2M MCP control plane: one place for every MCP server agents call: fleet health, tool catalogue, policies, toolsets, the gateway and history."
 ---
 
 # MCP control plane

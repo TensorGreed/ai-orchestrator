@@ -1,4 +1,5 @@
 ---
+title: "Legal holds: keep data from deletion and purges"
 description: "Keep a project, workflow, set of runs or one person's data in L2M from retention purges, deletes and data-subject deletes until the hold is released."
 ---
 

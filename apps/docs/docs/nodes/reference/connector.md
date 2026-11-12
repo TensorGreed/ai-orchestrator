@@ -1,5 +1,6 @@
 ---
-description: "Reference for the 41 nodes in the L2M Connector category, with every config field and default. External system integrations — HTTP, SQL, NoSQL, cloud SDKs, SaaS APIs."
+title: "Connector nodes: config fields and defaults"
+description: "Reference for the 41 nodes in the L2M Connector category, with every config field and default."
 ---
 
 <!--

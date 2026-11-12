@@ -1,5 +1,6 @@
 ---
-description: "Ship l2m-nodes-* npm packages that add LLM providers, MCP transports and connectors to a running L2M instance without changing its source; admins install them by name."
+title: "Community nodes: add providers and connectors by npm"
+description: "Ship l2m-nodes-* npm packages that add LLM providers, MCP transports and connectors to a running L2M instance without changing its source."
 ---
 
 # Community Nodes

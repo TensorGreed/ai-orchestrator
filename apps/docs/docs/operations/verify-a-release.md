@@ -1,4 +1,5 @@
 ---
+title: "Verify a release: cosign signatures, provenance, SBOMs"
 description: "Check an L2M release before you run it: keyless cosign signatures, GitHub build provenance, CycloneDX SBOMs and pinning image digests in Helm and Compose."
 ---
 

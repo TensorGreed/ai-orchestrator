@@ -1,4 +1,5 @@
 ---
+title: "Node reference: every L2M node type and config field"
 description: "Reference for all 141 L2M node types across 8 categories, generated from the node definitions: every config field and default value."
 ---
 

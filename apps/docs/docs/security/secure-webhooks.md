@@ -1,5 +1,6 @@
 ---
-description: "Secure L2M webhook triggers with bearer tokens or HMAC-SHA256 signatures, replay protection windows and idempotency keys, with the exact signing format and error responses."
+title: "Secure webhooks: bearer tokens, HMAC and replay checks"
+description: "Secure L2M webhook triggers with bearer tokens or HMAC-SHA256 signatures, replay windows and idempotency keys, with the signing format and error responses."
 ---
 
 # Secure Webhooks

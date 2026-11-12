@@ -1,5 +1,6 @@
 ---
-description: "Register each MCP server once in L2M: scheduled health probes, tool schema history, breaking-change detection, OAuth and sampling settings, shared by every workflow."
+title: "MCP server registry: health probes and schema history"
+description: "Register each MCP server once in L2M: scheduled health probes, tool schema history, breaking-change detection, and OAuth and sampling settings."
 ---
 
 # MCP server registry

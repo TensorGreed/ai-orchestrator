@@ -1,6 +1,6 @@
 ---
-title: "Self-hosted MCP gateway: one governed endpoint for your MCP tools"
-description: "Run a self-hosted MCP gateway with L2M: group tools into toolsets, give each MCP client its own token and role, and apply the same tool policy and telemetry."
+title: "Self-hosted MCP gateway: one governed endpoint"
+description: "Run a self-hosted MCP gateway with L2M: group tools into toolsets, give each MCP client its own token and role, and apply tool policy and telemetry."
 ---
 
 # Run a self-hosted MCP gateway

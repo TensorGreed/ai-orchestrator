@@ -1,6 +1,6 @@
 ---
-title: "Human approval for agent tool calls: pause, decide, prove it"
-description: "Make AI agents ask a person before they call an MCP write tool: approve or reject in the Approvals inbox, and find each decision in the run's signed manifest."
+title: "Human approval for agent tool calls: pause and decide"
+description: "Make AI agents ask a person before they call an MCP write tool: approve or reject in the Approvals inbox, and find each decision in the signed manifest."
 ---
 
 # Human approval for agent tool calls

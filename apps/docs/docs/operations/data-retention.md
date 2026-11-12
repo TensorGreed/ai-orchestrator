@@ -1,5 +1,6 @@
 ---
-description: "How long L2M keeps run history, tool calls, rule events, agent memory, usage and gateway data, which settings control it, and how purges run on one instance or a cluster."
+title: "Data retention: how long L2M keeps run data"
+description: "How long L2M keeps run history, tool calls, rule events, agent memory, usage and gateway data, which settings control it, and how purges run on a cluster."
 ---
 
 # Data retention

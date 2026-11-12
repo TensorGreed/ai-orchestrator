@@ -1,5 +1,6 @@
 ---
-description: "L2M release gates: a workflow version reaches production only after a replay job of that exact version passes its golden sets. Drafts, published versions and overrides."
+title: "Release gate: publish only after replay jobs pass"
+description: "L2M release gates: a workflow version reaches production only after a replay job of that exact version passes its golden sets. Drafts, versions, overrides."
 ---
 
 # Release gate and publish

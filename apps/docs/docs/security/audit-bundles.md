@@ -1,5 +1,6 @@
 ---
-description: "Export any finished L2M run as an audit bundle with an Ed25519-signed run manifest, and verify offline that nothing changed after signing, with no hosted service."
+title: "Audit bundles: signed run manifests, verified offline"
+description: "Export a finished L2M run as an audit bundle with an Ed25519-signed run manifest, and verify offline that nothing changed after signing. No hosted service."
 ---
 
 # Audit bundles and signed run manifests

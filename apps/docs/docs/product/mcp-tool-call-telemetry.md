@@ -1,5 +1,6 @@
 ---
-description: "What L2M records for every MCP tool call: timings, errors, tokens and an allow-list argument summary with keyed hashes. What it keeps, and how to switch it off."
+title: "MCP tool-call telemetry: what L2M records per call"
+description: "What L2M records for every MCP tool call: timings, errors, tokens and an allow-list argument summary with keyed hashes, what it keeps, how to turn it off."
 ---
 
 # MCP tool-call telemetry

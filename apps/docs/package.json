@@ -4,10 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vitepress dev docs --host 0.0.0.0 --port 4173",
-    "build": "pnpm gen:nodes && vitepress build docs",
+    "dev": "pnpm gen:recipes && vitepress dev docs --host 0.0.0.0 --port 4173",
+    "build": "pnpm gen:nodes && pnpm gen:recipes && vitepress build docs",
     "preview": "vitepress preview docs --host 0.0.0.0 --port 4173",
-    "gen:nodes": "tsx scripts/generate-node-reference.ts"
+    "gen:nodes": "tsx scripts/generate-node-reference.ts",
+    "gen:recipes": "tsx scripts/generate-recipes.ts"
   },
   "dependencies": {
     "@ai-orchestrator/shared": "workspace:*"

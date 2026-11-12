@@ -1,4 +1,5 @@
 ---
+title: "Rule set simulation: test a change before saving it"
 description: "Simulate a rule set change on recent golden and captured runs before saving it, and compare the outcome at every checkpoint with the current rule set."
 ---
 

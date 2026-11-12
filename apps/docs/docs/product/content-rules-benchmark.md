@@ -1,4 +1,5 @@
 ---
+title: "Content rules benchmark: measure detection on a corpus"
 description: "Measure a rule set on a labelled red-team corpus mapped to the OWASP LLM Top 10: detection and false-positive rates, held-out split, CI gate."
 ---
 

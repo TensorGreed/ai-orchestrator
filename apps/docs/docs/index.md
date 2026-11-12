@@ -2,7 +2,7 @@
 layout: home
 title: "L2M documentation: run and govern MCP agents, self-hosted"
 titleTemplate: false
-description: "Documentation for L2M, the open-source, self-hosted studio and runtime to build, run and govern MCP agents: tutorials, MCP control plane, approvals, audit and API reference."
+description: "Docs for L2M, the open-source, self-hosted studio and runtime to build, run and govern MCP agents: tutorials, MCP control plane, approvals, audit, API."
 hero:
   name: L2M
   text: The MCP-native agent runtime
@@ -36,6 +36,7 @@ features:
 - [Guides](/guides/) — run an MCP gateway, govern MCP tools, test MCP servers and agents in CI, require approval for tool calls
 - [Pattern library](/patterns/) — 10 battle-tested topologies with runnable samples
 - [Sample projects (l2m-samples)](https://github.com/TensorGreed/l2m-samples) — full reference implementations: helpdesk agent, support triage, VS Code repo reviewer
+- **Learn the concepts:** [Learn](/learn/) (guided tracks, starting with [what an AI agent is](/learn/agents/what-is-an-ai-agent)) · [Glossary](/glossary/) · [Recipes](/recipes/) (ready-to-import workflows) · [Blog](/blog/)
 - [Why L2M?](/why) — the differentiators in detail
 - [Quickstart](/getting-started/quickstart)
 - [Workflow editor](/product/workflow-editor)

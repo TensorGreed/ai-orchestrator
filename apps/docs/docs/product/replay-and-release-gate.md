@@ -1,5 +1,6 @@
 ---
-description: "Test an L2M workflow file from git against golden sets in CI with the l2m CLI, fail the build on regressions, upload JUnit results and publish through the release gate."
+title: "Replay in CI: test workflows with the l2m CLI"
+description: "Test an L2M workflow file from git against golden sets in CI with the l2m CLI, fail the build on regressions, upload JUnit, publish via the release gate."
 ---
 
 # Replay in CI and the release gate

@@ -1,5 +1,6 @@
 ---
-description: "Reference for the 27 nodes in the L2M Input category, with every config field and default. Workflow entry points: triggers (cron, webhook, manual, form, chat, MCP-server) and static-input helpers."
+title: "Input nodes: config fields and defaults"
+description: "Reference for the 27 nodes in the L2M Input category, with every config field and default."
 ---
 
 <!--

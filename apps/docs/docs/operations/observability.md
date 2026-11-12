@@ -1,5 +1,6 @@
 ---
-description: "Observability for self-hosted L2M: JSON request logs with request IDs (and trace IDs when tracing is on), Prometheus metrics, OpenTelemetry traces and metrics over OTLP, and SLO budgets, all opt-in."
+title: "Observability: logs, metrics and OTLP traces"
+description: "Observability for self-hosted L2M: JSON logs with request and trace IDs, Prometheus metrics, OTLP traces and metrics, and SLO budgets, all opt-in."
 ---
 
 # Observability

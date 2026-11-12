@@ -1,0 +1,5 @@
+{
+  "$comment": "Pages whose <title> or meta description was already over the limit when the length check came in. Warnings only; the list may only shrink. Paths as the check prints them.",
+  "longTitles": [],
+  "longDescriptions": []
+}

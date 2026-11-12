@@ -1,5 +1,6 @@
 ---
-description: "L2M HTTP API endpoints by area: auth, SSO, workflows, runs, MCP registry and gateway, content rules, audit bundles, replay, releases, approvals and secrets."
+title: "API endpoints: every L2M HTTP route by area"
+description: "L2M HTTP API endpoints by area: auth, SSO, workflows, runs, MCP registry and gateway, content rules, audit bundles, replay, releases, approvals, secrets."
 ---
 
 # API Endpoints

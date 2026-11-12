@@ -1,5 +1,6 @@
 ---
-description: "How MCP tools reach L2M agents: MCP Tool nodes, the built-in HTTP and mock adapters, tool discovery and shortlisting, and best practices for wiring MCP servers."
+title: "MCP integration: connect MCP tools to agents"
+description: "How MCP tools reach L2M agents: MCP Tool nodes, the built-in HTTP and mock adapters, tool discovery and shortlisting, and tips for wiring MCP servers."
 ---
 
 # MCP Integration

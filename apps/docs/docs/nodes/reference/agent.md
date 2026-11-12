@@ -1,5 +1,6 @@
 ---
-description: "Reference for the 3 nodes in the L2M Agent category, with every config field and default. Tool-calling agent runtimes and the multi-turn memory + artifact stores that back them."
+title: "Agent nodes: config fields and defaults"
+description: "Reference for the 3 nodes in the L2M Agent category, with every config field and default."
 ---
 
 <!--

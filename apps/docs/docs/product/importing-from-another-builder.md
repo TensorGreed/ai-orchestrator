@@ -1,5 +1,6 @@
 ---
-description: "Import a workflow exported from another visual workflow builder into L2M: node conversion, rebuilt edges, and a report of what needs a human look before it runs."
+title: "Import a workflow from another builder into L2M"
+description: "Import a workflow exported from another visual builder into L2M: node conversion, rebuilt edges, and a report of what needs a human look before it runs."
 ---
 
 # Importing a workflow from another builder

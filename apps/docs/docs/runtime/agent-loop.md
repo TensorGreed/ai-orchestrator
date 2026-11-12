@@ -1,5 +1,6 @@
 ---
-description: "How the L2M agent loop runs: messages, tool discovery, model calls and tool execution until a final answer, plus attachment ports, the session tool cache and mid-run clarification."
+title: "Agent loop: how L2M agents call tools to an answer"
+description: "How the L2M agent loop runs: messages, tool discovery, model calls and tool execution to a final answer, plus attachment ports and the session tool cache."
 ---
 
 # Agent Loop

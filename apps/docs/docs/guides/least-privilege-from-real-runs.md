@@ -1,6 +1,6 @@
 ---
-title: "Least privilege from real runs: simulate and suggest MCP tool rules"
-description: "Tighten MCP tool access from recorded calls: simulate a draft rule on the last 7 or 30 days, review suggested allow and deny rules, shadow them, then enforce."
+title: "Least privilege from real runs: MCP tool rules"
+description: "Tighten MCP tool access from recorded calls: simulate a draft rule on the last 7 or 30 days, review suggested rules, shadow them, then enforce."
 ---
 
 # Least privilege from real runs

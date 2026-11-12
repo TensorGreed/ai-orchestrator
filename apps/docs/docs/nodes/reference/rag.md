@@ -1,5 +1,6 @@
 ---
-description: "Reference for the 5 nodes in the L2M RAG category, with every config field and default. Retrieval-Augmented Generation: embedders, vector stores, document loaders, retrievers."
+title: "RAG nodes: config fields and defaults"
+description: "Reference for the 5 nodes in the L2M RAG category, with every config field and default."
 ---
 
 <!--

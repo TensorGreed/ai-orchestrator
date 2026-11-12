@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>L2M integrations: built-in nodes and any MCP server</title>
-    <meta name="description" content="The built-in nodes in L2M: chat models, agents, MCP tools, knowledge bases, app and database nodes, and signed triggers. Anything else, your agents reach through an MCP server." />
+    <meta name="description" content="The built-in nodes in L2M: chat models, agents, MCP tools, knowledge bases, app and database nodes, signed triggers. Agents reach the rest through MCP." />
     <link rel="canonical" href="https://lsquarem.com/integrations.html" />
     <meta name="theme-color" content="#07090f" />
     <meta property="og:type" content="website" />
@@ -22,6 +22,31 @@
     <meta name="twitter:image" content="https://lsquarem.com/assets/social-card.png" />
     <meta name="twitter:image:alt" content="L2M: run and govern MCP agents, self-hosted. The L2M studio with an agent hub, its chat model, memory and MCP tools, and the run tape of a finished run." />
     <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg" />
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "BreadcrumbList",
+          "@id": "https://lsquarem.com/integrations.html#breadcrumbs",
+          "itemListElement": [
+            { "@type": "ListItem", "position": 1, "name": "L2M", "item": "https://lsquarem.com/" },
+            { "@type": "ListItem", "position": 2, "name": "Integrations", "item": "https://lsquarem.com/integrations.html" }
+          ]
+        },
+        {
+          "@type": "WebPage",
+          "@id": "https://lsquarem.com/integrations.html#page",
+          "url": "https://lsquarem.com/integrations.html",
+          "name": "L2M integrations",
+          "inLanguage": "en",
+          "isPartOf": { "@id": "https://lsquarem.com/#website" },
+          "about": { "@id": "https://lsquarem.com/#software" }
+        }
+      ]
+    }
+    </script>
+    <link rel="alternate" type="application/atom+xml" title="L2M blog" href="https://lsquarem.com/docs/blog/feed.xml" />
     <link rel="preload" href="./assets/fonts/inter-latin-var.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="./styles.css" />
     <script>
@@ -54,6 +79,10 @@
           <a href="./#ship">Ship</a>
           <a href="./#self-host">Self-host</a>
           <a href="./docs/">Docs</a>
+          <a href="./docs/learn/">Learn</a>
+          <a href="./docs/glossary/">Glossary</a>
+          <a href="./docs/recipes/">Recipes</a>
+          <a href="./docs/blog/">Blog</a>
           <a href="./integrations.html" aria-current="page">Integrations</a>
           <a class="nav-github" href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener">GitHub</a>
         </nav>
@@ -220,6 +249,11 @@
           <a href="./docs/getting-started/build-your-first-mcp-agent">Get started</a>
           <a href="./docs/product/mcp-control-plane">MCP control plane</a>
           <a href="./docs/patterns/">Patterns</a>
+          <a href="./docs/learn/">Learn</a>
+          <a href="./docs/glossary/">Glossary</a>
+          <a href="./docs/recipes/">Recipes</a>
+          <a href="./docs/blog/">Blog</a>
+          <a href="./docs/blog/feed.xml">Blog feed</a>
           <a href="./integrations.html">Integrations</a>
           <a href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener">GitHub</a>
           <a href="https://tensorgreed.com" rel="noopener">TensorGreed</a>
