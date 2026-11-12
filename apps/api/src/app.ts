@@ -2170,8 +2170,10 @@ export async function createApp(
     if (phase === "final") runTraceIds.delete(executionId);
     if (entry.stored) return;
     try {
-      await store.setExecutionTraceId(executionId, entry.traceId);
-      entry.stored = true;
+      // A queued run in cluster mode writes under its claim's fence, like its history writes: a worker whose claim was
+      // taken back must not overwrite the new owner's trace id.
+      const fence = queueRunFences.get(executionId)?.fence;
+      entry.stored = await store.setExecutionTraceId(executionId, entry.traceId, fence ? { fence } : {});
     } catch (error) {
       app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record the trace id of a run");
     }

@@ -492,8 +492,12 @@ export interface Store extends AiGatewayStore, SubjectStore {
   getEvalRunSetSnapshot(runId: string): Promise<Record<string, GoldenSetSnapshot> | null>;
   /** Phase 15.4 — the channel and published version a finished run ran on (null version: the draft). */
   setExecutionRelease(executionId: string, channel: "production" | "draft", version: number | null): Promise<void>;
-  /** v70 — records the trace id of a run's span (only called while tracing is on). */
-  setExecutionTraceId(executionId: string, traceId: string): Promise<void>;
+  /**
+   * v70 — records the trace id of a run's span (only called while tracing is on). With `fence` (a queued run in
+   * cluster mode) it writes only while that claim still holds the queue item, like the run's history writes; false
+   * when the claim was lost. True otherwise, also for a run with no history row (nothing to update).
+   */
+  setExecutionTraceId(executionId: string, traceId: string, options?: { fence?: QueueClaimFence }): Promise<boolean>;
   getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null>;
   /** The hashes `version` had when it was released (any release, rollbacks included). */
   listReleasedVersionHashes(workflowId: string, version: number): Promise<string[]>;

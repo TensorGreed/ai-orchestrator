@@ -1101,6 +1101,17 @@ button.tag-chip:hover {
   border-left: 2px solid var(--accent-line);
 }
 
+.execution-trace-id {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.execution-trace-id code {
+  overflow-wrap: anywhere;
+}
+
 .execution-custom-data {
   display: flex;
   flex-direction: column;

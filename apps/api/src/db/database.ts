@@ -9851,9 +9851,21 @@ export class SqliteStore implements Store {
     this.persist();
   }
 
-  async setExecutionTraceId(executionId: string, traceId: string): Promise<void> {
-    this.exec(`UPDATE execution_history SET trace_id = ? WHERE id = ?`, [traceId, executionId]);
+  async setExecutionTraceId(executionId: string, traceId: string, options: { fence?: QueueClaimFence } = {}): Promise<boolean> {
+    const fence = options.fence;
+    const write = () => this.exec(`UPDATE execution_history SET trace_id = ? WHERE id = ?`, [traceId, executionId]);
+    if (fence) {
+      const written = this.db.transaction(() => {
+        if (!this.queueClaimHeldSync(fence)) return false;
+        write();
+        return true;
+      })();
+      if (written) this.persist();
+      return written;
+    }
+    write();
     this.persist();
+    return true;
   }
 
   async getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {

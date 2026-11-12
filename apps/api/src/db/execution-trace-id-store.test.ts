@@ -16,7 +16,7 @@ describeStoreContract("run trace id (v70)", (ctx) => {
   it("is stored, read back, and kept by later writes of the run's history", async () => {
     const store = ctx.store();
     await store.saveExecutionHistory({ id: "run-traced", workflowId: "wf", status: "running", startedAt });
-    await store.setExecutionTraceId("run-traced", ID);
+    expect(await store.setExecutionTraceId("run-traced", ID)).toBe(true);
     expect((await store.getExecutionHistory("run-traced"))?.traceId).toBe(ID);
     await store.saveExecutionHistory({ id: "run-traced", workflowId: "wf", status: "success", startedAt, completedAt: new Date().toISOString() });
     const after = await store.getExecutionHistory("run-traced");
