@@ -442,7 +442,7 @@ describe("trace id on runs (v70)", () => {
     expect(runSpans.map((span) => span.spanContext().traceId)).toContain(resumed);
   });
 
-  it("a run canceled before any progress write has no trace id and the cancel still works", async () => {
+  it("cancelling a traced-run-less history row (never progressed) still works and shows no trace id", async () => {
     const context = await start(TRACING);
     await context.store.upsertWorkflow(runnable as never);
     const cookie = await signIn(context);
