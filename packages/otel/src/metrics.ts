@@ -1,5 +1,5 @@
 import { ValueType, type Meter } from "@opentelemetry/api";
-import { OTLPMetricExporter as OTLPJsonMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import { AggregationTemporalityPreference, OTLPMetricExporter as OTLPJsonMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPMetricExporter as OTLPProtoMetricExporter } from "@opentelemetry/exporter-metrics-otlp-proto";
 import { defaultResource, resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import { MeterProvider, PeriodicExportingMetricReader, type MetricReader } from "@opentelemetry/sdk-metrics";
@@ -66,7 +66,7 @@ const DEPRECATED = " (deprecated: use the matching histogram)";
 type SnapshotOf = ReturnType<MetricsSnapshotSource["getSnapshot"]>;
 
 /**
- * Registers the `ao.*` instruments on `meter`. Counters and gauges are observable: each collection reads the
+ * Registers the `ao.*` instruments on `meter`. Counters and gauges are observable and carry no unit (as before: a unit would rename the series in Prometheus-style backends): each collection reads the
  * current snapshot, so existing counts are exported without touching the code that records them (cumulative Sum for
  * counters, Gauge for the rest, exactly as the previous hand-built push). Returns a recorder for the histograms.
  */
@@ -78,21 +78,21 @@ export function registerL2mMetrics(meter: Meter, source: MetricsSnapshotSource):
     ["ao.workflow.executions.success.total", "Successful executions", (s) => s.executionsSuccess],
     ["ao.workflow.executions.failure.total", "Failed/canceled executions", (s) => s.executionsFailure]
   ];
-  const gauges: Array<[string, string, string, (s: SnapshotOf) => number, ValueType]> = [
-    ["ao.workflow.executions.active", "Currently active workflow executions", "1", (s) => s.activeExecutions, ValueType.INT],
-    ["ao.workflow.execution.duration.p50.ms", "Execution latency p50" + DEPRECATED, "ms", (s) => s.executionP50Ms, ValueType.INT],
-    ["ao.workflow.execution.duration.p95.ms", "Execution latency p95" + DEPRECATED, "ms", (s) => s.executionP95Ms, ValueType.INT],
-    ["ao.workflow.execution.duration.p99.ms", "Execution latency p99" + DEPRECATED, "ms", (s) => s.executionP99Ms, ValueType.INT],
-    ["ao.http.request.duration.p50.ms", "HTTP latency p50" + DEPRECATED, "ms", (s) => s.httpP50Ms, ValueType.INT],
-    ["ao.http.request.duration.p95.ms", "HTTP latency p95" + DEPRECATED, "ms", (s) => s.httpP95Ms, ValueType.INT],
-    ["ao.slo.success.rate", "Current execution success rate", "1", (s) => s.slo.currentSuccessRate, ValueType.DOUBLE],
-    ["ao.slo.healthy", "1 if SLOs are met, 0 otherwise", "1", (s) => (s.slo.healthy ? 1 : 0), ValueType.INT],
-    ["ao.uptime.seconds", "Process uptime in seconds", "s", (s) => s.uptimeSeconds, ValueType.INT]
+  const gauges: Array<[string, string, (s: SnapshotOf) => number, ValueType]> = [
+    ["ao.workflow.executions.active", "Currently active workflow executions", (s) => s.activeExecutions, ValueType.INT],
+    ["ao.workflow.execution.duration.p50.ms", "Execution latency p50" + DEPRECATED, (s) => s.executionP50Ms, ValueType.INT],
+    ["ao.workflow.execution.duration.p95.ms", "Execution latency p95" + DEPRECATED, (s) => s.executionP95Ms, ValueType.INT],
+    ["ao.workflow.execution.duration.p99.ms", "Execution latency p99" + DEPRECATED, (s) => s.executionP99Ms, ValueType.INT],
+    ["ao.http.request.duration.p50.ms", "HTTP latency p50" + DEPRECATED, (s) => s.httpP50Ms, ValueType.INT],
+    ["ao.http.request.duration.p95.ms", "HTTP latency p95" + DEPRECATED, (s) => s.httpP95Ms, ValueType.INT],
+    ["ao.slo.success.rate", "Current execution success rate", (s) => s.slo.currentSuccessRate, ValueType.DOUBLE],
+    ["ao.slo.healthy", "1 if SLOs are met, 0 otherwise", (s) => (s.slo.healthy ? 1 : 0), ValueType.INT],
+    ["ao.uptime.seconds", "Process uptime in seconds", (s) => s.uptimeSeconds, ValueType.INT]
   ];
 
   const counterInstruments = counters.map(([name, description]) => meter.createObservableCounter(name, { description, ...int }));
-  const gaugeInstruments = gauges.map(([name, description, unit, , valueType]) =>
-    meter.createObservableGauge(name, { description, unit, valueType })
+  const gaugeInstruments = gauges.map(([name, description, , valueType]) =>
+    meter.createObservableGauge(name, { description, valueType })
   );
 
   meter.addBatchObservableCallback(
@@ -104,7 +104,7 @@ export function registerL2mMetrics(meter: Meter, source: MetricsSnapshotSource):
         return;
       }
       counters.forEach(([, , read], index) => result.observe(counterInstruments[index]!, Math.trunc(read(snapshot))));
-      gauges.forEach(([, , , read, valueType], index) => {
+      gauges.forEach(([, , read, valueType], index) => {
         const value = read(snapshot);
         result.observe(gaugeInstruments[index]!, valueType === ValueType.INT ? Math.trunc(value) : value);
       });
@@ -137,7 +137,14 @@ export function registerL2mMetrics(meter: Meter, source: MetricsSnapshotSource):
 }
 
 function buildMetricExporter(options: OtlpMetricExportOptions) {
-  const config = { url: options.url, headers: { ...options.headers }, timeoutMillis: options.timeoutMs };
+  // Always cumulative, as the previous push was: the exporter would otherwise read OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+  // from an environment shared with other tools, and delta sums would break the dashboards built on these names.
+  const config = {
+    url: options.url,
+    headers: { ...options.headers },
+    timeoutMillis: options.timeoutMs,
+    temporalityPreference: AggregationTemporalityPreference.CUMULATIVE
+  };
   return options.protocol === "http/json" ? new OTLPJsonMetricExporter(config) : new OTLPProtoMetricExporter(config);
 }
 

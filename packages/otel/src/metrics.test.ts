@@ -165,6 +165,29 @@ describe("OTLP delivery", () => {
     expect(total.sum).toMatchObject({ isMonotonic: true, aggregationTemporality: 2 });
   });
 
+  it("stays cumulative and unit-free for the legacy metrics even when the environment asks for delta", async () => {
+    const { bodies, url } = await sink();
+    const previous = process.env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE;
+    process.env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE = "delta";
+    try {
+      const pipeline = createMetricsPipeline({
+        resourceAttributes: { "service.name": "delta-env" },
+        export: { url, protocol: "http/json", headers: {}, timeoutMs: 2000, intervalMs: 3_600_000 }
+      });
+      registerL2mMetrics(pipeline.meter, source);
+      await pipeline.shutdown();
+    } finally {
+      if (previous === undefined) delete process.env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE;
+      else process.env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE = previous;
+    }
+    const payload = JSON.parse(bodies[0]!.body.toString("utf8")) as {
+      resourceMetrics: Array<{ scopeMetrics: Array<{ metrics: Array<{ name: string; unit?: string; sum?: { aggregationTemporality: number } }> }> }>;
+    };
+    const metrics = payload.resourceMetrics[0]!.scopeMetrics.flatMap((scope) => scope.metrics);
+    expect(metrics.find((metric) => metric.name === "ao.http.requests.total")!.sum!.aggregationTemporality).toBe(2);
+    for (const name of LEGACY_METRIC_NAMES) expect(metrics.find((metric) => metric.name === name)!.unit ?? "").toBe("");
+  });
+
   it("the default protocol is protobuf (binary body)", async () => {
     const { bodies, url } = await sink();
     const pipeline = createMetricsPipeline({

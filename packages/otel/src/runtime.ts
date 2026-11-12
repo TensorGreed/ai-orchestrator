@@ -183,7 +183,8 @@ export class OtelRuntime {
   }
 
   forceFlush(timeoutMs = SHUTDOWN_TIMEOUT_MS): Promise<void> {
-    return withTimeout(Promise.all([this.tracerProvider.forceFlush({ timeoutMillis: timeoutMs }), this.metrics.forceFlush(timeoutMs)]).then(() => undefined), timeoutMs);
+    // Spans first: a batch that fails to export adds to the dropped-span counter, which the metrics flush then carries.
+    return withTimeout(this.tracerProvider.forceFlush({ timeoutMillis: timeoutMs }).catch(() => undefined).then(() => this.metrics.forceFlush(timeoutMs)), timeoutMs);
   }
 
   /** Flushes and stops exporting (capped at five seconds); idempotent. */
@@ -192,7 +193,7 @@ export class OtelRuntime {
       this.stopped = (async () => {
         try {
           await withTimeout(
-            Promise.all([this.tracerProvider.shutdown(), this.metrics.shutdown(timeoutMs)]).then(() => undefined),
+            this.tracerProvider.shutdown().catch(() => undefined).then(() => this.metrics.shutdown(timeoutMs)),
             timeoutMs
           );
         } finally {
