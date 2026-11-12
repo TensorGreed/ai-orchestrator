@@ -19,7 +19,8 @@ Traces and OTLP metrics go to any OTLP-compatible backend, or to an [OpenTelemet
 ### What is traced today
 
 - **One SERVER span per HTTP request**, named `{method} {route}` (for example `POST /api/workflows/:id/execute`), with the stable HTTP attribute names listed [below](#http-server-spans). `/health`, `/ready` and `/metrics` get no span.
-- Spans inside a request (workflow runs, nodes, agents, model calls, tool calls, MCP calls and queue workers) are **not recorded yet**.
+- **Workflow runs, nodes, agents and tool calls**: one `invoke_workflow` span per run, one span per node that ran, `invoke_agent` per Agent or Supervisor loop and `execute_tool` per tool call the model made. See [run spans](#run-spans).
+- Model calls, MCP calls and queue workers are **not recorded yet**.
 - L2M does **not** send `traceparent` on its outbound calls yet, so a trace stops at L2M.
 
 ## Quickstart: send traces to a collector
@@ -134,6 +135,37 @@ With tracing off, log lines are unchanged.
 
 A 5xx response sets the span status to ERROR; a 4xx leaves it unset. A request that matched no route is named after its method alone.
 
+## Run spans
+
+While tracing is on, every workflow run is traced below the request (or the trigger) that started it. Span names and the GenAI attributes follow the OpenTelemetry GenAI semantic conventions pinned at v1.41.0, which are still marked experimental upstream.
+
+```
+POST /api/workflows/:id/execute         SERVER
+└─ invoke_workflow {workflow name}      the run
+   ├─ l2m.node {node type}              one per node that ran
+   │  └─ invoke_workflow {child name}   an Execute Workflow node's child run
+   └─ l2m.node agent_orchestrator
+      └─ invoke_agent {agent name}      the agent loop
+         ├─ l2m.agent.iteration         one per turn (L2M_OTEL_SPAN_DETAIL=verbose only)
+         └─ execute_tool {tool name}    one per tool call the model made
+            └─ invoke_agent {worker}    a Supervisor's worker, under the call that delegated to it
+```
+
+- **Nodes.** Only nodes that ran get a span. Skipped nodes (a branch not taken, a disconnected node, pinned data) and nodes on an agent's attachment ports (chat model, memory, tools, workers) get none: they are not steps of the workflow, and their work shows up inside the agent's spans. A Loop node's body nodes are children of the Loop node's span, one per pass, with `l2m.node.loop_index`.
+- **Outcomes, not errors.** `l2m.run.status` and `l2m.node.status` hold the result (`success`, `error`, `canceled`, `waiting_approval`, ...). Only a failed run or node sets the span status to ERROR, with the L2M error category as `error.type`; a canceled run, an approval pause or a node that failed but let the run continue are not errors of the run.
+- **Tool calls.** `l2m.tool.outcome` is `ok`, `error`, `blocked` or `paused`. A call that content rules or a tool policy blocked is an outcome, not an error; `l2m.content_rules.outcome` (`blocked`, `rewritten`, `paused`) says what content rules did. A failed call records its error type only, never the tool's error text. `gen_ai.tool.type` is `extension` for an MCP server's tool and `function` for one that runs in L2M (a worker, a workflow tool, a built-in or internal tool, with `l2m.tool.internal` for the internal ones).
+- **Names.** Workflow, node and agent names appear in span names and attributes. `L2M_OTEL_NAMES=ids` uses ids instead.
+
+| Span | Attributes |
+|---|---|
+| `invoke_workflow` | `gen_ai.operation.name`, `l2m.execution.id`, `l2m.workflow.id`, `l2m.workflow.name`, `l2m.project.id`, `l2m.trigger.type`, `l2m.run.mode`, `l2m.replay`, `l2m.run.status` |
+| `l2m.node` | `l2m.node.id`, `l2m.node.type`, `l2m.node.name`, `l2m.node.status`, `l2m.node.attempts`, `l2m.node.loop_index` |
+| `invoke_agent` | `gen_ai.operation.name`, `gen_ai.agent.id` (the node id), `gen_ai.agent.name`, `gen_ai.conversation.id` (the memory session id; hashed when it looks like an email address or phone number), `l2m.agent.supervisor`, `l2m.agent.iterations`, `l2m.agent.stop_reason`, summed `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and `gen_ai.usage.cache_read.input_tokens` |
+| `l2m.agent.iteration` | `l2m.agent.iteration`, `l2m.agent.final` |
+| `execute_tool` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type`, `l2m.tool.internal`, `l2m.tool.outcome`, `l2m.content_rules.outcome` |
+
+Spans carry ids and timings, not content: prompts, tool arguments and results stay in L2M's execution history. Use `l2m.execution.id` to go from a trace to the run in L2M.
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -162,8 +194,8 @@ A 5xx response sets the span status to ERROR; a 4xx leaves it unset. A request t
 | `OTEL_METRICS_PUSH_INTERVAL_MS` | `60000` | Metrics push interval. |
 | `L2M_OTEL_TRUST_INBOUND` | `authenticated` | See [Inbound trace context](#inbound-trace-context-and-who-is-trusted). |
 | `L2M_OTEL_TRUSTED_PROXIES` | empty | Connections whose trace context is always continued. |
-| `L2M_OTEL_SPAN_DETAIL` | `standard` | `verbose` will add more detailed spans as they are added. |
-| `L2M_OTEL_NAMES` | `names` | `ids` keeps workflow, node and agent names out of spans as they are added. |
+| `L2M_OTEL_SPAN_DETAIL` | `standard` | `verbose` adds one span per agent turn (`l2m.agent.iteration`). |
+| `L2M_OTEL_NAMES` | `names` | `ids` keeps workflow, node and agent names out of spans. |
 | `L2M_OTEL_PROPAGATE_TO_PROVIDERS` | `false` | Reserved for outbound propagation to model providers. |
 | `L2M_OTEL_PROPAGATE_TO_MCP` | `true` | Reserved for outbound propagation to MCP servers. |
 

@@ -28,5 +28,6 @@ export * from "./code-sandbox";
 export { configureExpressionSandbox, expressionSandboxLimits, EXPRESSION_SANDBOX_DEFAULTS, ExpressionSandboxError, isExpressionSandboxFailure } from "./expression-sandbox";
 export { runWithSandboxOwner } from "./quickjs-sandbox";
 export * from "./outbound-url-guard";
+export { describeRunResult } from "./run-instrumentation";
 export * from "./model-references";
 export * from "./redteam-suite";

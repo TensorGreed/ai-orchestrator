@@ -98,6 +98,7 @@ import {
   ExternalWorkflowImportError,
   outputLabelsOf,
   checkTriggerInput,
+  describeRunResult,
   workflowDeclaresSensitiveSource,
   type ChunkOptions,
   type EmbeddingAdapter,
@@ -2228,7 +2229,37 @@ export async function createApp(
   // Bounded: a run whose history is never persisted must not grow it forever.
   const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
 
+  // The run's trace span (only while tracing is on): it covers the host's work around the engine as well, and the
+  // engine's node, agent and tool spans are its children.
+  const runInstrumentation = telemetry.instrumentation;
   const runWorkflowExecutionUnsettled = async (input: RunWorkflowExecutionInput) => {
+    if (!runInstrumentation.enabled) return await runWorkflowExecutionInScope(input);
+    return await runInstrumentation.run(
+      {
+        ...(input.executionId ? { executionId: input.executionId } : {}),
+        workflowId: input.workflow.id,
+        ...(input.workflow.name ? { workflowName: input.workflow.name } : {}),
+        projectId: input.workflow.projectId ?? DEFAULT_PROJECT_ID,
+        ...(input.triggerType ? { triggerType: input.triggerType } : {}),
+        runMode: input.runMode ?? "workflow",
+        replay: Boolean(input.replay)
+      },
+      async (span) => {
+        const result = await runWorkflowExecutionInScope(input);
+        describeRunResult(span, result);
+        return result;
+      }
+    );
+  };
+  // Phase 13 metrics — every node that ran (skipped steps and attachment nodes an agent consumed are not node runs);
+  // replays stay out of the metrics, as their runs do.
+  const recordNodeMetric = (input: RunWorkflowExecutionInput, event: { status: string; durationMs: number; output?: unknown }) => {
+    if (input.replay || input.triggerType === REPLAY_TRIGGER_TYPE || event.status === "skipped") return;
+    const reason = event.output && typeof event.output === "object" ? (event.output as { reason?: unknown }).reason : undefined;
+    if (reason === "attachment_consumed_by_agent") return;
+    metricsService.recordNodeExecution(event.durationMs);
+  };
+  const runWorkflowExecutionInScope = async (input: RunWorkflowExecutionInput) => {
     const channel: ReleaseChannel = input.channel ?? "draft";
     const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
     // Phase 15.4 — the run's history records which published version it ran, so a retry runs that version again.
@@ -2522,7 +2553,8 @@ export async function createApp(
             const errorScoped = runScope.dependenciesFor(errorWf, { actor: sameProject ? input.policyActor : null, channel });
             const errorModelRun: ModelRun = { runKey: `error:${payload.executionId}:${errorWf.id}`, sourceExecutionId: payload.executionId };
             try {
-              await executeWorkflow(
+              const errorToolPolicySubject = await resolveToolPolicySubject(errorWf.id);
+              const runErrorWorkflow = () => executeWorkflow(
                 {
                   workflow: errorWf,
                   input: {
@@ -2534,7 +2566,7 @@ export async function createApp(
                     timestamp: payload.timestamp
                   },
                   triggerType: "error",
-                  toolPolicySubject: await resolveToolPolicySubject(errorWf.id),
+                  toolPolicySubject: errorToolPolicySubject,
                   executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
                 },
                 {
@@ -2551,18 +2583,38 @@ export async function createApp(
                   loadMcpToolPolicy,
                   codeSandbox: codeSandboxPlan,
                   outboundGuard,
-                  outboundDnsResolver: nodeDnsResolver
+                  outboundDnsResolver: nodeDnsResolver,
+                  ...(runInstrumentation.enabled ? { instrument: runInstrumentation } : {})
                 }
               );
+              // The error workflow's run is its own span, a child of the failed run's.
+              if (runInstrumentation.enabled) {
+                await runInstrumentation.run(
+                  { workflowId: errorWf.id, ...(errorWf.name ? { workflowName: errorWf.name } : {}), projectId: errorWf.projectId ?? DEFAULT_PROJECT_ID, triggerType: "error" },
+                  async (span) => {
+                    const errorResult = await runErrorWorkflow();
+                    describeRunResult(span, errorResult);
+                    return errorResult;
+                  }
+                );
+              } else {
+                await runErrorWorkflow();
+              }
             } catch (err) {
               app.log.warn({ err: err instanceof Error ? err.message : String(err), errorWorkflowId: payload.errorWorkflowId }, "Error workflow execution failed");
             }
           },
           onNodeStart: input.hooks?.onNodeStart,
-          onNodeComplete: input.hooks?.onNodeComplete,
+          onNodeComplete: metricsService.isEnabled()
+            ? async (event) => {
+                recordNodeMetric(input, event);
+                await input.hooks?.onNodeComplete?.(event);
+              }
+            : input.hooks?.onNodeComplete,
           onLLMDelta: input.hooks?.onLLMDelta,
           onMcpProgress: input.hooks?.onMcpProgress,
           onNodeActivity: input.hooks?.onNodeActivity,
+          ...(runInstrumentation.enabled ? { instrument: runInstrumentation } : {}),
           abortSignal: runController.signal
         }
       );

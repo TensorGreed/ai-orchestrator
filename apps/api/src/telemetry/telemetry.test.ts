@@ -292,3 +292,66 @@ describe("/api/observability", () => {
     expect(traces.spans.some((span) => span.operationName === "GET /api/observability" && span.kind === "server")).toBe(true);
   });
 });
+
+describe("run spans and node metrics through the API", () => {
+  const runnable = {
+    id: "wf-otel-run",
+    name: "Traced run",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: [
+      { id: "in", type: "webhook_input", name: "In", position: { x: 0, y: 0 }, config: {} },
+      { id: "set", type: "set_node", name: "Set", position: { x: 200, y: 0 }, config: { assignments: [{ key: "a", valueTemplate: "1" }] } },
+      { id: "out", type: "output", name: "Out", position: { x: 400, y: 0 }, config: {} },
+      { id: "stray", type: "set_node", name: "Stray", position: { x: 0, y: 200 }, config: { assignments: [{ key: "b", valueTemplate: "2" }] } }
+    ],
+    edges: [
+      { id: "e1", source: "in", target: "set" },
+      { id: "e2", source: "set", target: "out" }
+    ]
+  };
+
+  const nodeCount = async (context: Context): Promise<number> => {
+    const metrics = (await context.app.inject({ method: "GET", url: "/metrics" })).body;
+    const match = /^ao_node_execution_duration_ms_count (\d+)$/m.exec(metrics);
+    return match ? Number(match[1]) : NaN;
+  };
+
+  it("puts the run span under the request's server span and the node spans under the run", async () => {
+    const context = await start(TRACING);
+    await context.store.upsertWorkflow(runnable as never);
+    const cookie = await signIn(context);
+    const response = await context.app.inject({ method: "POST", url: "/api/workflows/wf-otel-run/execute", headers: { cookie }, payload: {} });
+    expect(response.statusCode, response.body).toBe(200);
+    const executionId = response.json<{ executionId: string }>().executionId;
+
+    const server = onlyServerSpan(context, "/api/workflows/:id/execute");
+    const runSpan = context.exporter.getFinishedSpans().find((span) => span.name === "invoke_workflow Traced run")!;
+    expect(runSpan.parentSpanContext?.spanId).toBe(server.spanContext().spanId);
+    expect(runSpan.attributes).toMatchObject({
+      "gen_ai.operation.name": "invoke_workflow",
+      "l2m.execution.id": executionId,
+      "l2m.workflow.id": "wf-otel-run",
+      "l2m.project.id": "default",
+      "l2m.trigger.type": "manual",
+      "l2m.run.mode": "workflow",
+      "l2m.replay": false,
+      "l2m.run.status": "success"
+    });
+    const nodeSpans = context.exporter.getFinishedSpans().filter((span) => span.name.startsWith("l2m.node "));
+    expect(nodeSpans.map((span) => span.attributes["l2m.node.id"]).sort()).toEqual(["in", "out", "set"]);
+    expect(nodeSpans.every((span) => span.parentSpanContext?.spanId === runSpan.spanContext().spanId)).toBe(true);
+    // Executed nodes are counted in ao_node_execution_duration_ms; the disconnected one is not.
+    expect(await nodeCount(context)).toBe(3);
+  });
+
+  it("records node metrics and no spans while tracing is off", async () => {
+    const context = await start();
+    await context.store.upsertWorkflow(runnable as never);
+    const cookie = await signIn(context);
+    const response = await context.app.inject({ method: "POST", url: "/api/workflows/wf-otel-run/execute", headers: { cookie }, payload: {} });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(context.exporter.getFinishedSpans()).toHaveLength(0);
+    expect(await nodeCount(context)).toBe(3);
+  });
+});

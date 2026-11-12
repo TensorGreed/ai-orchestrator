@@ -28,12 +28,13 @@ import type {
   NodeSpanInfo,
   RunInstrumentation,
   RunSpanInfo,
+  ScopedInstrumentationSpan,
   ToolCallSpanInfo,
   TraceCarrier,
   TraceIds,
   TraceInjectTarget
 } from "@ai-orchestrator/shared";
-import { NOOP_INSTRUMENTATION_SPAN } from "@ai-orchestrator/shared";
+import { NOOP_INSTRUMENTATION_SPAN, NOOP_SCOPED_INSTRUMENTATION_SPAN } from "@ai-orchestrator/shared";
 import type { OtelRuntimeOptions } from "./options.js";
 import { ATTR_ERROR_TYPE, ATTR_EXCEPTION_MESSAGE, ATTR_EXCEPTION_TYPE, ATTR_SERVER_ADDRESS, ATTR_SERVER_PORT, GEN_AI, GEN_AI_OPERATION, L2M, MCP, genAiProviderName } from "./semconv.js";
 
@@ -154,6 +155,22 @@ export class OtelSpanHandle implements InstrumentationSpan {
   }
 }
 
+/** A span the caller opened and enters for parts of its work (see `ScopedInstrumentationSpan`). */
+export class OtelScopedSpan extends OtelSpanHandle implements ScopedInstrumentationSpan {
+  constructor(
+    span: Span,
+    scrub: (text: string) => string,
+    private readonly contextManager: ContextManager
+  ) {
+    super(span, scrub);
+  }
+
+  enter<T>(fn: () => Promise<T>): Promise<T> {
+    // Only OpenTelemetry's own context changes: other async-local state of the caller stays as it is at the call.
+    return this.contextManager.with(trace.setSpan(this.contextManager.active(), this.span), fn);
+  }
+}
+
 export interface InstrumentationDeps {
   tracer: Tracer;
   contextManager: ContextManager;
@@ -243,19 +260,41 @@ export class OtelRunInstrumentation implements RunInstrumentation {
     );
   }
 
+  private nodeSpec(info: NodeSpanInfo): StartSpanSpec {
+    return {
+      name: `l2m.node ${info.nodeType}`,
+      attributes: {
+        [L2M.NODE_ID]: info.nodeId,
+        [L2M.NODE_TYPE]: info.nodeType,
+        [L2M.NODE_NAME]: this.deps.options.naming === "names" ? info.nodeName : undefined,
+        [L2M.NODE_ATTEMPTS]: info.attempt
+      }
+    };
+  }
+
   node<T>(info: NodeSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {
-    return this.wrap(
-      {
-        name: `l2m.node ${info.nodeType}`,
-        attributes: {
-          [L2M.NODE_ID]: info.nodeId,
-          [L2M.NODE_TYPE]: info.nodeType,
-          [L2M.NODE_NAME]: this.deps.options.naming === "names" ? info.nodeName : undefined,
-          [L2M.NODE_ATTEMPTS]: info.attempt
-        }
-      },
-      fn
-    );
+    return this.wrap(this.nodeSpec(info), fn);
+  }
+
+  /** Opens a span that is not made active; `parent` (an L2M span) wins over the active context. */
+  private open(spec: StartSpanSpec, parent: InstrumentationSpan | undefined): OtelScopedSpan {
+    const active = this.deps.contextManager.active();
+    const parentContext = parent instanceof OtelSpanHandle ? trace.setSpan(active, parent.span) : active;
+    const handle = this.startSpan({ ...spec, parent: parentContext });
+    return new OtelScopedSpan(handle.span, this.deps.scrub, this.deps.contextManager);
+  }
+
+  startNode(info: NodeSpanInfo, parent?: InstrumentationSpan): ScopedInstrumentationSpan {
+    return this.open(this.nodeSpec(info), parent);
+  }
+
+  startIteration(info: AgentIterationSpanInfo, parent?: InstrumentationSpan): ScopedInstrumentationSpan {
+    if (this.deps.options.spanDetail !== "verbose") return NOOP_SCOPED_INSTRUMENTATION_SPAN;
+    return this.open(this.iterationSpec(info), parent);
+  }
+
+  startToolCall(info: ToolCallSpanInfo, parent?: InstrumentationSpan): ScopedInstrumentationSpan {
+    return this.open(this.toolSpec(info), parent);
   }
 
   agent<T>(info: AgentSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {
@@ -277,7 +316,11 @@ export class OtelRunInstrumentation implements RunInstrumentation {
 
   iteration<T>(info: AgentIterationSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {
     if (this.deps.options.spanDetail !== "verbose") return fn(NOOP_INSTRUMENTATION_SPAN);
-    return this.wrap({ name: "l2m.agent.iteration", attributes: { [L2M.AGENT_ITERATION]: info.iteration } }, fn);
+    return this.wrap(this.iterationSpec(info), fn);
+  }
+
+  private iterationSpec(info: AgentIterationSpanInfo): StartSpanSpec {
+    return { name: "l2m.agent.iteration", attributes: { [L2M.AGENT_ITERATION]: info.iteration } };
   }
 
   modelCall<T>(info: ModelCallSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {
@@ -302,20 +345,21 @@ export class OtelRunInstrumentation implements RunInstrumentation {
     );
   }
 
+  private toolSpec(info: ToolCallSpanInfo): StartSpanSpec {
+    return {
+      name: `${GEN_AI_OPERATION.EXECUTE_TOOL} ${info.toolName}`,
+      attributes: {
+        [GEN_AI.OPERATION_NAME]: GEN_AI_OPERATION.EXECUTE_TOOL,
+        [GEN_AI.TOOL_NAME]: info.toolName,
+        [GEN_AI.TOOL_CALL_ID]: info.toolCallId,
+        [GEN_AI.TOOL_TYPE]: info.toolType ?? "function",
+        [L2M.TOOL_INTERNAL]: info.internal
+      }
+    };
+  }
+
   toolCall<T>(info: ToolCallSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {
-    return this.wrap(
-      {
-        name: `${GEN_AI_OPERATION.EXECUTE_TOOL} ${info.toolName}`,
-        attributes: {
-          [GEN_AI.OPERATION_NAME]: GEN_AI_OPERATION.EXECUTE_TOOL,
-          [GEN_AI.TOOL_NAME]: info.toolName,
-          [GEN_AI.TOOL_CALL_ID]: info.toolCallId,
-          [GEN_AI.TOOL_TYPE]: info.toolType ?? "function",
-          [L2M.TOOL_INTERNAL]: info.internal
-        }
-      },
-      fn
-    );
+    return this.wrap(this.toolSpec(info), fn);
   }
 
   mcpRequest<T>(info: McpRequestSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {

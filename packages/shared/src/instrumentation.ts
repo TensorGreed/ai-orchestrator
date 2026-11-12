@@ -52,7 +52,8 @@ export interface InstrumentationSpan {
 }
 
 export interface RunSpanInfo {
-  executionId: string;
+  /** The run's execution id; a sub-workflow's child run has none of its own (its span is a child of the caller's). */
+  executionId?: string;
   workflowId: string;
   workflowName?: string;
   projectId?: string;
@@ -122,6 +123,34 @@ export interface McpRequestSpanInfo {
   serverPort?: number;
 }
 
+/**
+ * A span opened without running anything in it, for work that is not one function: a workflow node or an agent turn
+ * with many exits. `enter(fn)` runs `fn` with this span active, so spans started inside become its children; it does
+ * not end the span or record errors. The caller owns the end (in a `finally`) and sets the outcome itself.
+ */
+export interface ScopedInstrumentationSpan extends InstrumentationSpan {
+  enter<T>(fn: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * Attribute names the engine and the agent runtime set themselves, for outcomes known only when the work ends.
+ * `packages/otel`'s semconv module takes them from here, so each name still has one source.
+ */
+export const SPAN_OUTCOME_ATTRIBUTES = Object.freeze({
+  RUN_STATUS: "l2m.run.status",
+  NODE_STATUS: "l2m.node.status",
+  NODE_ATTEMPTS: "l2m.node.attempts",
+  NODE_LOOP_INDEX: "l2m.node.loop_index",
+  AGENT_ITERATIONS: "l2m.agent.iterations",
+  AGENT_STOP_REASON: "l2m.agent.stop_reason",
+  AGENT_FINAL: "l2m.agent.final",
+  USAGE_INPUT_TOKENS: "gen_ai.usage.input_tokens",
+  USAGE_OUTPUT_TOKENS: "gen_ai.usage.output_tokens",
+  USAGE_CACHE_READ_INPUT_TOKENS: "gen_ai.usage.cache_read.input_tokens",
+  TOOL_OUTCOME: "l2m.tool.outcome",
+  CONTENT_RULES_OUTCOME: "l2m.content_rules.outcome"
+} as const);
+
 export type InstrumentationSpanKind = "internal" | "server" | "client" | "producer" | "consumer";
 
 /** A span the typed wrappers do not cover (queue messages, gateway requests). */
@@ -147,6 +176,15 @@ export interface RunInstrumentation {
   toolCall<T>(info: ToolCallSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T>;
   mcpRequest<T>(info: McpRequestSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T>;
   span<T>(info: GenericSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T>;
+  /**
+   * Opens a node span (see `ScopedInstrumentationSpan`) under `parent`, or under the active span when `parent` is
+   * absent or the no-op. The caller must end it.
+   */
+  startNode(info: NodeSpanInfo, parent?: InstrumentationSpan): ScopedInstrumentationSpan;
+  /** Opens an agent-turn span; the no-op unless the span detail is verbose. The caller must end it. */
+  startIteration(info: AgentIterationSpanInfo, parent?: InstrumentationSpan): ScopedInstrumentationSpan;
+  /** Opens an `execute_tool` span. The caller must end it. */
+  startToolCall(info: ToolCallSpanInfo, parent?: InstrumentationSpan): ScopedInstrumentationSpan;
   /** Sets attributes on the active span (for example the HTTP server span of a gateway request). */
   annotate(attributes: InstrumentationAttributes): void;
   /**
@@ -170,6 +208,13 @@ const NOOP_SPAN: InstrumentationSpan = Object.freeze({
   end: () => undefined
 });
 
+const NOOP_SCOPED_SPAN: ScopedInstrumentationSpan = Object.freeze({
+  ...NOOP_SPAN,
+  enter: <T>(fn: () => Promise<T>): Promise<T> => fn()
+});
+
+const openNothing = (): ScopedInstrumentationSpan => NOOP_SCOPED_SPAN;
+
 const passThrough = <T>(_info: unknown, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> => fn(NOOP_SPAN);
 
 /** The no-op instrumentation: every wrapper calls `fn` with a frozen no-op span; nothing is recorded or allocated. */
@@ -183,6 +228,9 @@ export const NOOP_RUN_INSTRUMENTATION: RunInstrumentation = Object.freeze({
   toolCall: passThrough,
   mcpRequest: passThrough,
   span: passThrough,
+  startNode: openNothing,
+  startIteration: openNothing,
+  startToolCall: openNothing,
   annotate: () => undefined,
   inject: () => false,
   withParent: <T>(_carrier: TraceCarrier | null | undefined, fn: () => T): T => fn(),
@@ -191,6 +239,9 @@ export const NOOP_RUN_INSTRUMENTATION: RunInstrumentation = Object.freeze({
 
 /** The no-op span, for callers that need one outside a wrapper. */
 export const NOOP_INSTRUMENTATION_SPAN: InstrumentationSpan = NOOP_SPAN;
+
+/** The no-op scoped span: `enter` calls `fn`, nothing else happens. */
+export const NOOP_SCOPED_INSTRUMENTATION_SPAN: ScopedInstrumentationSpan = NOOP_SCOPED_SPAN;
 
 const TRACEPARENT_PATTERN = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(?:-.*)?$/;
 
