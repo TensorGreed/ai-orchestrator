@@ -95,11 +95,12 @@ See [Secure webhooks](/security/secure-webhooks) for the signing format and erro
 These controls are optional; the recipe runs without them.
 
 - The sample takes `system_prompt` from the request, so any caller can rewrite the agent's instructions. Write the system prompt on the agent node instead.
-- Require approval before write tools: with **Ask before write tools** on, the agent pauses before `calculator` (it has no read-only annotation). See [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).
+- Require approval before write tools: with **Ask before write tools** on, the agent pauses before every tool call, `get_current_time` included, until an admin marks a tool read-only on the MCP servers page. This gate ignores the server's own read-only annotation. See [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).
 - Cap what callers can spend with a workflow [budget](/product/budgets).
 
 ## Further reading
 
+- [What is an AI agent?](/learn/agents/what-is-an-ai-agent)
 - [Secure webhooks](/security/secure-webhooks)
 - [Agent loop: session tool cache](/runtime/agent-loop#session-tool-cache-multi-turn-reuse)
 - [Human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls)

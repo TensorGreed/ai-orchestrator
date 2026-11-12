@@ -33,7 +33,7 @@ A manual trigger starts one Agent Orchestrator node. Its chat model is the built
 
 1. Download <a href="/docs/recipes/files/mcp-agent-quickstart-flow.json" download>mcp-agent-quickstart-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/mcp-agent-quickstart-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. Click **Run** in the editor, or call the run API with your own question. The API takes an API key from **Settings › Account › API Keys**:
+3. Click **Run** in the editor, or call the run API with your own question. The API takes an API key from **Settings → Account → API Keys**:
 
    ```bash
    curl -X POST http://localhost:4000/api/workflows/wf-mcp-agent-quickstart/execute \
@@ -74,7 +74,7 @@ An empty question fails the run: the agent's user prompt template is <span v-pre
 
 ## See the loop with tool calls
 
-The demo's copy of this workflow plays an echo run too, so it shows no tool calls either. The demo's **Support agent** workflow plays a run recorded with a real model, in which the agent calls a knowledge-base tool once and a calculator tool twice before it answers: <a href="/demo/?mode=editor&amp;workflowId=wf-demo-support-agent&amp;demoRun=recorded" target="_self">open it in the demo</a>.
+The demo's copy of this workflow plays an echo run too, so it shows no tool calls either. The demo's **Support agent** workflow plays a run recorded with a scripted stand-in model, so the demo needs no key. In that run the agent calls a knowledge-base tool once and a calculator tool twice before it answers: <a href="/demo/?mode=editor&amp;workflowId=wf-demo-support-agent&amp;demoRun=recorded" target="_self">open it in the demo</a>.
 
 ## Make it yours
 

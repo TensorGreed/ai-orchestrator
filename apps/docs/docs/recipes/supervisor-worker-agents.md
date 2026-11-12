@@ -71,7 +71,7 @@ The Supervisor is offered one tool per worker, named `delegate_to_` plus the wor
 
 ## See delegation in a recorded run
 
-The demo's **Research swarm** workflow is the same pattern with a researcher and an analyst, recorded with a real model. In its run the Supervisor calls `delegate_to_researcher`, then `delegate_to_analyst`, then writes the team summary: three iterations. <a href="/demo/?mode=editor&amp;workflowId=wf-demo-research-swarm&amp;demoRun=recorded" target="_self">Play it in the demo</a>.
+The demo's **Research swarm** workflow is the same pattern with a researcher and an analyst, recorded with a scripted stand-in model, so it shows the delegation without a key. In its run the Supervisor calls `delegate_to_researcher`, then `delegate_to_analyst`, then writes the team summary: three iterations. <a href="/demo/?mode=editor&amp;workflowId=wf-demo-research-swarm&amp;demoRun=recorded" target="_self">Play it in the demo</a>.
 
 ## Make it yours
 
@@ -88,6 +88,7 @@ These controls are optional; the recipe runs without them.
 
 ## Further reading
 
+- [Multi-agent systems: supervisor and worker agents](/learn/agents/supervisor-and-workers)
 - [Agent loop: attachment ports](/runtime/agent-loop#attachment-ports)
 - [Golden runs and replay](/product/golden-runs)
 - [Pattern library](/patterns/)

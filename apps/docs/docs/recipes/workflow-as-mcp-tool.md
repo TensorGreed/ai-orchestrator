@@ -121,6 +121,7 @@ These controls are optional; the recipe runs without them.
 
 ## Further reading
 
+- [What is MCP?](/learn/mcp/what-is-mcp)
 - [Expose a workflow as an MCP tool](/runtime/workflow-as-mcp-tool)
 - [MCP gateway](/product/mcp-gateway)
 - [Run a self-hosted MCP gateway](/guides/self-hosted-mcp-gateway)

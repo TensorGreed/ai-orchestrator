@@ -8,7 +8,7 @@ nodeCount: 5
 sample: "rag-knowledge-base-flow.json"
 demo: "wf-rag-knowledge-base-flow"
 demoRecorded: false
-related: ["rag"]
+related: ["rag","indirect-prompt-injection","context-window"]
 ---
 
 <!--
@@ -57,7 +57,7 @@ A **Question** node holds the question. **RAG Retrieve** searches a built-in kno
 ## Create a knowledge base with the API
 
 ```bash
-# An admin's API key, from Settings › Account › API Keys.
+# An admin's API key, from Settings → Account → API Keys.
 export L2M_API_KEY=ao_...
 
 # Create a knowledge base. The response holds its id: kb_...

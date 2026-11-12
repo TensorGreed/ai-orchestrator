@@ -15,7 +15,7 @@ track: mcp
 <section class="hub-section" aria-labelledby="mcp-track-notes-title">
   <h2 id="mcp-track-notes-title" class="hub-section-title">Before and after</h2>
   <p class="hub-card-text"><strong>Prerequisites:</strong> none. Knowing what an HTTP request and JSON look like helps with the authorization guide.</p>
-  <p class="hub-card-text"><strong>After this track:</strong> see how agents use MCP tools in a loop in <a href="/docs/learn/agents/">How AI agents work</a>, or build one with the <a href="/docs/recipes/zero-key-mcp-agent">zero-key MCP agent recipe</a>.</p>
+  <p class="hub-card-text"><strong>After this track:</strong> <a href="/docs/learn/security/mcp-security-risks">MCP security risks</a> covers what can go wrong with servers, and <a href="/docs/learn/agents/">How AI agents work</a> shows how agents use MCP tools in a loop. To build one, try the <a href="/docs/recipes/zero-key-mcp-agent">zero-key MCP agent recipe</a>.</p>
 </section>
 
 </div>

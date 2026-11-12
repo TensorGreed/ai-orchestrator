@@ -5,7 +5,7 @@ topic: agents
 definition: "A design in which a person can see, approve, change or stop an AI system's action before it takes effect, instead of the system acting alone."
 description: "Human in the loop means a person can approve, change or stop an agent's action before it happens. Where the MCP spec says to use it and how."
 related: [approval-gate, write-tool, tool-calling, least-privilege]
-guide: [/learn/agents/human-in-the-loop, /learn/security/mcp-security-risks]
+guide: [/learn/agents/human-in-the-loop, /learn/security/prompt-injection]
 ---
 
 # Human in the loop

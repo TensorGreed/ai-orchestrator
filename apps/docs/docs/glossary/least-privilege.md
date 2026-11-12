@@ -5,7 +5,7 @@ topic: security
 definition: "The security principle that each user, program or agent gets only the access it needs for its task, and nothing more."
 description: "Least privilege means an agent, key or person gets only the access its task needs. How it applies to MCP tools, arguments and data."
 related: [write-tool, human-in-the-loop, prompt-injection]
-guide: [/learn/security/least-privilege-for-agents, /learn/security/mcp-security-risks]
+guide: [/learn/security/least-privilege-for-agents, /learn/security/owasp-llm-top-10]
 ---
 
 # Least privilege

@@ -134,7 +134,7 @@ The gaps listed above are covered by optional L2M features: [tool policy](/produ
 
 ## Try it in L2M
 
-The live demo has a support agent with two MCP tools on a small HTTP server: a knowledge-base lookup and a calculator. Its recorded run shows the full exchange: one `lookup_kb` call, then a calculator call that fails with `isError: true` because the model passed words instead of digits, then a retry with `49*12*12` that works. The run was recorded with a scripted stand-in model, so the demo needs no key.
+The live demo has a support agent with two MCP tools on a small HTTP server: a knowledge-base lookup and a calculator. Its recorded run shows the full exchange: one `lookup_kb` call, then a calculator call that fails because the model passed words instead of digits (the server answers with `isError: true`; the trace shows its error message), then a retry with `49*12*12` that works. The run was recorded with a scripted stand-in model, so the demo needs no key.
 
 To build one yourself with no API key, use the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) or the [five-minute tutorial](/getting-started/build-your-first-mcp-agent). Both use the built-in echo model, which never asks for a tool, so a local run stops after one model call. Attach a real chat model to watch tools get called.
 

@@ -68,6 +68,7 @@ Suggestions only tighten: one that would loosen an existing deny or approval rul
 
 ## Further reading
 
+- Concepts: [MCP security risks](/learn/security/mcp-security-risks), [OWASP Top 10 for LLM apps](/learn/security/owasp-llm-top-10)
 - Guides: [Least privilege from real runs](/guides/least-privilege-from-real-runs), [Govern MCP tools](/guides/govern-mcp-tools)
 - Reference: [MCP tool policy](/product/mcp-tool-policy), [MCP tool-call telemetry](/product/mcp-tool-call-telemetry)
 - [OWASP MCP Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/MCP_Security_Cheat_Sheet.html) (owasp.org)

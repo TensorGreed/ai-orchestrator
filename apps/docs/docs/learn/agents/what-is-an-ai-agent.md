@@ -90,7 +90,7 @@ These attachments are not steps in the workflow; the agent uses them while it ru
 What the runtime does at each edge of the loop:
 
 - Tool calls from one reply run one after another, and every result is added before the next model call. A tool that fails returns its error to the model as the tool's result, so the model can retry. After two failures in a row, that tool is disabled for the rest of the run.
-- `maxIterations` on the node is the limit: new nodes start at 6, and the engine uses 4 if the field is missing. If the model is still asking for tools when the limit is reached, the run stops with the text of the model's last reply, or with "Agent stopped after reaching iteration limit." if that reply had none.
+- `maxIterations` on the node is the limit. It is required (validation rejects an agent without it), and new nodes start at 6. If the model is still asking for tools when the limit is reached, the run stops with the text of the model's last reply, or with "Agent stopped after reaching iteration limit." if that reply had none.
 - If the model sends back an empty reply while iterations remain, the runtime asks it to answer or call a tool instead of accepting the empty reply.
 - The agent can call a built-in `agent_clarify` tool to ask the person a question. The run then stops and returns the question, and the next message in the same session is fed back as the answer.
 - With a session id, full tool results are kept outside the prompt, and the agent gets `session_cache_list` and `session_cache_get` tools to read them again on later turns instead of calling the server twice.

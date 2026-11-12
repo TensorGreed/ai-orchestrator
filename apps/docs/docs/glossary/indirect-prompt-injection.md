@@ -35,7 +35,7 @@ It is not only a web-browsing problem. <Term id="tool-poisoning">Tool poisoning<
 
 ## In L2M
 
-Content rules can check tool results and retrieved documents before they reach the model ([content rules](/product/content-rules)). Optionally, [data labels](/product/data-labels-and-destinations) record which steps of a run handled outside content, and destination rules can block or hold data that came from it before it leaves.
+Content rules can check tool results and retrieved documents before they reach the model ([content rules](/product/content-rules)). Every run tracks which of its steps handled outside content. Optionally, [data labels](/product/data-labels-and-destinations) also store that with results and memory, and destination rules can block or hold data that came from it before it leaves.
 
 ## Further reading
 

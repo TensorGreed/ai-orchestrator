@@ -125,6 +125,10 @@ L2M is a self-hosted workflow builder and agent runtime with an MCP server regis
 
 The gateway speaks MCP protocol versions 2025-11-25, 2025-06-18 and 2025-03-26, not yet the stateless 2026-07-28 revision. For a step-by-step setup, see [Govern MCP tools](/guides/govern-mcp-tools) and the [self-hosted MCP gateway guide](/guides/self-hosted-mcp-gateway).
 
+## Try it in L2M
+
+Open the **MCP → Tools** page in the [live demo](https://lsquarem.com/demo/){target="_self"} to see each tool with the annotations its server declares, the policy that applies to it, and its call telemetry. To set the controls up on your own deployment, follow [Govern MCP tools](/guides/govern-mcp-tools).
+
 ## Further reading
 
 - [MCP Security Best Practices](https://modelcontextprotocol.io/specification/latest/basic/security_best_practices) (MCP specification, latest revision)

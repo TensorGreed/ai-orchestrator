@@ -85,5 +85,6 @@ Open the FAQ answerer in the [live demo](https://lsquarem.com/demo/?mode=editor&
 
 ## Further reading
 
+- Concepts: [Regression testing AI agents](/learn/testing/regression-testing-agents), [AI agent evals](/learn/testing/agent-evals)
 - [Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents) (Anthropic, January 2026): tasks, graders, transcripts, regression versus capability evals
 - Pull requests: [#45 golden runs](https://github.com/TensorGreed/ai-orchestrator/pull/45), [#47 golden sets and scorers](https://github.com/TensorGreed/ai-orchestrator/pull/47), [#52 CLI](https://github.com/TensorGreed/ai-orchestrator/pull/52), [#54 model tape](https://github.com/TensorGreed/ai-orchestrator/pull/54), [#55 release gate](https://github.com/TensorGreed/ai-orchestrator/pull/55), [#56 production capture](https://github.com/TensorGreed/ai-orchestrator/pull/56), [#58 case admission](https://github.com/TensorGreed/ai-orchestrator/pull/58) (GitHub)

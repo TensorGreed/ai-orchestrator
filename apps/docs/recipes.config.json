@@ -17,7 +17,7 @@
       "whatYouGet": "One agent with a chat model and two MCP tools, a clock and a calculator, that runs on a fresh install.",
       "summary": "A manual trigger starts one Agent Orchestrator node. Its chat model is the built-in echo provider, and its tools come from the mock MCP server that runs inside L2M: `get_current_time` and `calculator`. Nothing needs a key, a network connection or a separate server. Echo is not a real model: it repeats the prompt back and never asks for a tool, so a local run makes one model call and ends. That proves the wiring works. To see the agent call tools, attach a real chat model.",
       "steps": [
-        "Click **Run** in the editor, or call the run API with your own question. The API takes an API key from **Settings › Account › API Keys**:\n\n   ```bash\n   curl -X POST http://localhost:4000/api/workflows/wf-mcp-agent-quickstart/execute \\\n     -H \"Authorization: Bearer $L2M_API_KEY\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"user_prompt\": \"What is 2340 * 0.17?\"}'\n   ```",
+        "Click **Run** in the editor, or call the run API with your own question. The API takes an API key from **Settings → Account → API Keys**:\n\n   ```bash\n   curl -X POST http://localhost:4000/api/workflows/wf-mcp-agent-quickstart/execute \\\n     -H \"Authorization: Bearer $L2M_API_KEY\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"user_prompt\": \"What is 2340 * 0.17?\"}'\n   ```",
         "Open the run in the execution history and click the **Agent** node to read its trace.",
         "Then change one thing at a time (see below)."
       ],
@@ -28,7 +28,7 @@
         },
         {
           "heading": "See the loop with tool calls",
-          "body": "The demo's copy of this workflow plays an echo run too, so it shows no tool calls either. The demo's **Support agent** workflow plays a run recorded with a real model, in which the agent calls a knowledge-base tool once and a calculator tool twice before it answers: <a href=\"/demo/?mode=editor&amp;workflowId=wf-demo-support-agent&amp;demoRun=recorded\" target=\"_self\">open it in the demo</a>."
+          "body": "The demo's copy of this workflow plays an echo run too, so it shows no tool calls either. The demo's **Support agent** workflow plays a run recorded with a scripted stand-in model, so the demo needs no key. In that run the agent calls a knowledge-base tool once and a calculator tool twice before it answers: <a href=\"/demo/?mode=editor&amp;workflowId=wf-demo-support-agent&amp;demoRun=recorded\" target=\"_self\">open it in the demo</a>."
         }
       ],
       "makeItYours": "- Replace the echo chat model node with a real one (OpenAI, Anthropic, Ollama or any OpenAI-compatible endpoint) on the agent's `chat_model` port. A model that supports tool calling can then call the clock and the calculator.\n- Replace the mock MCP tools with a server from your [MCP server registry](/product/mcp-server-registry), such as a filesystem or database server.\n- Write your own system prompt on the agent node, and raise `maxIterations` (4 in the sample) only if the task needs more steps.",
@@ -90,13 +90,17 @@
         }
       ],
       "makeItYours": "- Switch the chat model to OpenAI, Anthropic, Gemini or any OpenAI-compatible endpoint, with its key stored as a [secret](/security/secrets).\n- Replace the mock tools with a server from your [MCP server registry](/product/mcp-server-registry).\n- Raise `maxMessages` on the memory node for longer conversations, or lower it to keep prompts small.",
-      "makeItSafer": "- The sample takes `system_prompt` from the request, so any caller can rewrite the agent's instructions. Write the system prompt on the agent node instead.\n- Require approval before write tools: with **Ask before write tools** on, the agent pauses before `calculator` (it has no read-only annotation). See [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Cap what callers can spend with a workflow [budget](/product/budgets).",
+      "makeItSafer": "- The sample takes `system_prompt` from the request, so any caller can rewrite the agent's instructions. Write the system prompt on the agent node instead.\n- Require approval before write tools: with **Ask before write tools** on, the agent pauses before every tool call, `get_current_time` included, until an admin marks a tool read-only on the MCP servers page. This gate ignores the server's own read-only annotation. See [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Cap what callers can spend with a workflow [budget](/product/budgets).",
       "related": [
         "ai-agent",
         "human-in-the-loop",
         "mcp-tool"
       ],
       "docs": [
+        {
+          "text": "What is an AI agent?",
+          "link": "/learn/agents/what-is-an-ai-agent"
+        },
         {
           "text": "Secure webhooks",
           "link": "/security/secure-webhooks"
@@ -139,6 +143,10 @@
       ],
       "docs": [
         {
+          "text": "Multi-agent systems: supervisor and worker agents",
+          "link": "/learn/agents/supervisor-and-workers"
+        },
+        {
           "text": "Agent loop: attachment ports",
           "link": "/runtime/agent-loop#attachment-ports"
         },
@@ -163,7 +171,7 @@
         },
         {
           "heading": "See delegation in a recorded run",
-          "body": "The demo's **Research swarm** workflow is the same pattern with a researcher and an analyst, recorded with a real model. In its run the Supervisor calls `delegate_to_researcher`, then `delegate_to_analyst`, then writes the team summary: three iterations. <a href=\"/demo/?mode=editor&amp;workflowId=wf-demo-research-swarm&amp;demoRun=recorded\" target=\"_self\">Play it in the demo</a>."
+          "body": "The demo's **Research swarm** workflow is the same pattern with a researcher and an analyst, recorded with a scripted stand-in model, so it shows the delegation without a key. In its run the Supervisor calls `delegate_to_researcher`, then `delegate_to_analyst`, then writes the team summary: three iterations. <a href=\"/demo/?mode=editor&amp;workflowId=wf-demo-research-swarm&amp;demoRun=recorded\" target=\"_self\">Play it in the demo</a>."
         }
       ]
     },
@@ -206,6 +214,10 @@
       ],
       "docs": [
         {
+          "text": "What is MCP?",
+          "link": "/learn/mcp/what-is-mcp"
+        },
+        {
           "text": "Expose a workflow as an MCP tool",
           "link": "/runtime/workflow-as-mcp-tool"
         },
@@ -246,7 +258,7 @@
       "sections": [
         {
           "heading": "Create a knowledge base with the API",
-          "body": "```bash\n# An admin's API key, from Settings › Account › API Keys.\nexport L2M_API_KEY=ao_...\n\n# Create a knowledge base. The response holds its id: kb_...\ncurl -X POST http://localhost:4000/api/knowledge-bases \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"name\": \"Helpdesk FAQ\", \"embedderId\": \"token-embedder\", \"embedderConfig\": {}}'\n\n# Load, chunk, embed and store a Markdown file in one call.\nexport KB_ID=kb_...   # the id from the response above\ncurl -X POST http://localhost:4000/api/knowledge-bases/$KB_ID/upload \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"filename\": \"helpdesk-faq.md\", \"sourceId\": \"helpdesk-faq-v1\",\n       \"content\": \"# Helpdesk FAQ\\n\\n## Reset your password\\nTo reset your password, open the sign-in page, choose Forgot password, and enter your work email. The reset link is valid for 30 minutes.\\n\\n## Change your billing plan\\nAdmins can change the billing plan under Settings, then Billing. Changes apply from the next invoice.\\n\\n## Export your data\\nGo to Settings, then Data, and choose Export. You get a ZIP file with one CSV per table.\",\n       \"chunking\": {\"strategy\": \"recursive\", \"chunkSize\": 300, \"chunkOverlap\": 0}}'\n```\n\nOn our install the upload answered `{\"sourceId\":\"helpdesk-faq-v1\",\"documentsLoaded\":1,\"chunksInserted\":2,\"dimensions\":64}`. The embedder you create the knowledge base with must match the `embedderId` on the RAG Retrieve node, or the question and the chunks are not compared in the same space."
+          "body": "```bash\n# An admin's API key, from Settings → Account → API Keys.\nexport L2M_API_KEY=ao_...\n\n# Create a knowledge base. The response holds its id: kb_...\ncurl -X POST http://localhost:4000/api/knowledge-bases \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"name\": \"Helpdesk FAQ\", \"embedderId\": \"token-embedder\", \"embedderConfig\": {}}'\n\n# Load, chunk, embed and store a Markdown file in one call.\nexport KB_ID=kb_...   # the id from the response above\ncurl -X POST http://localhost:4000/api/knowledge-bases/$KB_ID/upload \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"filename\": \"helpdesk-faq.md\", \"sourceId\": \"helpdesk-faq-v1\",\n       \"content\": \"# Helpdesk FAQ\\n\\n## Reset your password\\nTo reset your password, open the sign-in page, choose Forgot password, and enter your work email. The reset link is valid for 30 minutes.\\n\\n## Change your billing plan\\nAdmins can change the billing plan under Settings, then Billing. Changes apply from the next invoice.\\n\\n## Export your data\\nGo to Settings, then Data, and choose Export. You get a ZIP file with one CSV per table.\",\n       \"chunking\": {\"strategy\": \"recursive\", \"chunkSize\": 300, \"chunkOverlap\": 0}}'\n```\n\nOn our install the upload answered `{\"sourceId\":\"helpdesk-faq-v1\",\"documentsLoaded\":1,\"chunksInserted\":2,\"dimensions\":64}`. The embedder you create the knowledge base with must match the `embedderId` on the RAG Retrieve node, or the question and the chunks are not compared in the same space."
         },
         {
           "heading": "What a run does",
