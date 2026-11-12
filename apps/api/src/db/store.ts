@@ -52,6 +52,7 @@ import type {
   WorkflowListItem
 } from "@ai-orchestrator/shared";
 import type { BudgetScopeType, McpGatewayRateLimit } from "@ai-orchestrator/shared";
+import type { McpGatewayLabelMark, McpGatewayLabelMarkKey, McpGatewayLabelMarkRaise } from "./gateway-label-marks.js";
 import type {
   ApprovalReadScope,
   ApprovalRequestInsert,
@@ -847,7 +848,23 @@ export interface Store extends AiGatewayStore, SubjectStore {
   /** With the token hash; for the credential check only. */
   findMcpClientByTokenPrefix(prefix: string): Promise<McpClientSecretRecord | null>;
   listMcpClients(): Promise<McpClient[]>;
+  /** Revokes the client; its stateless callers' label marks (v71) are deleted with it. */
   revokeMcpClient(id: string): Promise<McpClient | null>;
+  /**
+   * MCP 2026-07-28 (v71) — the label mark of a stateless gateway caller, when it has a live one; reading it moves its
+   * expiry to `at.expiresAt` (a call keeps the mark alive). Null when there is none or it expired.
+   */
+  readMcpGatewayLabelMark(key: McpGatewayLabelMarkKey, at: { now: string; expiresAt: string }): Promise<McpGatewayLabelMark | null>;
+  /**
+   * v71 — merges a call's labels into the caller's mark (created when missing; an expired mark starts clean) and moves
+   * its expiry on, atomically across instances (row lock on Postgres). Labels never leave a mark. `firstRaise` is true
+   * for exactly one call per mark: the one that first raised it to outside content or sensitive data.
+   */
+  raiseMcpGatewayLabelMark(input: McpGatewayLabelMarkRaise): Promise<{ mark: McpGatewayLabelMark; firstRaise: boolean }>;
+  /** v71 — a client's live marks, latest call first. */
+  listMcpGatewayLabelMarks(filter: { clientId: string }, now: string): Promise<McpGatewayLabelMark[]>;
+  /** v71 — deletes up to `limit` marks that expired at or before `now`; returns how many. */
+  sweepMcpGatewayLabelMarks(now: string, limit: number): Promise<number>;
   /** 13.2 — replaces the client's address list and certificate pin; null when the client does not exist. */
   updateMcpClientNetwork(id: string, input: { allowedIps: string[]; certFingerprints: string[]; certSubject: string | null }): Promise<McpClient | null>;
   touchMcpClient(id: string, at: string): Promise<void>;

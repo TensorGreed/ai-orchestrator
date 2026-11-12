@@ -1600,6 +1600,8 @@ export async function deleteMcpToolset(ctx: PgContext, ...[id]: Parameters<Store
     if (!existing) return false;
     await client.query(`DELETE FROM mcp_toolset_members WHERE toolset_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_toolsets WHERE id = $1`, [id]);
+    // v71 — the label marks of the toolset's stateless callers end with it.
+    await client.query(`DELETE FROM mcp_gateway_label_marks WHERE toolset_id = $1`, [id]);
     const clients = await rows(client, `SELECT * FROM mcp_clients FOR UPDATE`);
     for (const row of clients) {
       const record = mapMcpClient(row);
@@ -1658,7 +1660,11 @@ export async function listMcpClients(ctx: PgContext, ..._args: Parameters<Store[
 }
 
 export async function revokeMcpClient(ctx: PgContext, ...[id]: Parameters<Store["revokeMcpClient"]>): ReturnType<Store["revokeMcpClient"]> {
-  await ctx.execute(`UPDATE mcp_clients SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL`, [new Date().toISOString(), id]);
+  await ctx.withTransaction(async (client) => {
+    await client.query(`UPDATE mcp_clients SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL`, [new Date().toISOString(), id]);
+    // v71 — the label marks of the client's stateless calls end with the credential.
+    await client.query(`DELETE FROM mcp_gateway_label_marks WHERE client_id = $1`, [id]);
+  });
   return getMcpClientOn(ctx.pool, id);
 }
 

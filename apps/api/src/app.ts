@@ -12234,7 +12234,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     priceSampling: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
     limiter: gatewayClientLimiter,
     network: networkControls,
-    clusterMode,
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;
