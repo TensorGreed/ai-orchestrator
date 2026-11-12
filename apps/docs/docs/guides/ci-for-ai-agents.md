@@ -1,6 +1,6 @@
 ---
-title: "CI for AI agents: golden runs, replay jobs and a release gate"
-description: "Regression-test AI agents in CI: save golden runs, group them into golden sets, replay changes with l2m replay run, upload JUnit, and publish through a release gate."
+title: "CI for AI agents: golden runs, replay, release gate"
+description: "Regression-test AI agents in CI: save golden runs, group them in golden sets, replay changes with l2m replay run, upload JUnit, publish via a release gate."
 ---
 
 # CI for AI agents

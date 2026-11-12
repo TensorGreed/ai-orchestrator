@@ -1,5 +1,6 @@
 ---
-description: "Why L2M: MCP-first agents, Supervisor and worker swarms, a VS Code agent surface, webhook signature checks and production basics in an open-source, self-hosted platform."
+title: "Why L2M: open-source, self-hosted MCP agent platform"
+description: "Why L2M: MCP-first agents, Supervisor and worker swarms, a VS Code agent, webhook signature checks and production basics, open source and self-hosted."
 ---
 
 # Why L2M?

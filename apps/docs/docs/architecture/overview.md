@@ -1,5 +1,6 @@
 ---
-description: "How L2M is built: the monorepo layout, the data flow from the visual editor through the API and workflow engine to the agent runtime, and the adapter registries you extend."
+title: "Architecture: how the editor, API and runtime fit"
+description: "How L2M is built: the monorepo layout, the data flow from the editor through the API and workflow engine to the agent runtime, and the adapter registries."
 ---
 
 # Architecture Overview

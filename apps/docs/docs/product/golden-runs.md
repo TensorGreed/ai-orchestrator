@@ -1,5 +1,6 @@
 ---
-description: "Save known-good runs as golden runs and replay a changed L2M workflow against them, with external calls answered from the recording, to get a pass or fail verdict."
+title: "Golden runs: replay a workflow against known-good runs"
+description: "Save known-good runs as golden runs and replay a changed L2M workflow against them, with external calls answered from the recording, for a pass or fail."
 ---
 
 # Golden runs and replay

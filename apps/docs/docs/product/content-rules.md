@@ -1,5 +1,6 @@
 ---
-description: "Where content rules run in workflows: the Content Rules node, the agent rules port, automatic project and workflow rule sets, the protection port, and verdicts."
+title: "Content rules in workflows: nodes, ports and verdicts"
+description: "Where content rules run in workflows: the Content Rules node, the agent rules port, automatic project and workflow rule sets, protection port, verdicts."
 ---
 
 # Content rules in workflows

@@ -1,5 +1,6 @@
 ---
-description: "The L2M Azure nodes (Azure OpenAI chat and embeddings, Storage, Cosmos DB, Monitor, AI Search): credential setup through secret references, value formats and operations."
+title: "Azure nodes: OpenAI, Storage, Cosmos DB and AI Search"
+description: "The L2M Azure nodes (OpenAI chat and embeddings, Storage, Cosmos DB, Monitor, AI Search): credential setup via secret references and operations."
 ---
 
 # Azure Nodes

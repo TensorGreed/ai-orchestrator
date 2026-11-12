@@ -1,4 +1,5 @@
 ---
+title: "AI gateway: OpenAI-compatible /v1 endpoint for apps"
 description: "The /v1 AI gateway: an OpenAI-compatible endpoint for apps outside L2M, with per-client tokens, content rules, budgets, rate limits and streaming."
 ---
 

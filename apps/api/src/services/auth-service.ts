@@ -218,6 +218,20 @@ export class AuthService {
     return { ok: true, user, session };
   }
 
+  /**
+   * True when `sessionId` names a live session of an active user. A check only: unlike resolveSession it records no
+   * activity and never ends a session that has run out (the request's own sign-in check does that).
+   */
+  async checkSession(sessionId: string): Promise<boolean> {
+    if (!sessionId) return false;
+    const session = await this.store.getSession(sessionId);
+    if (!session || session.revokedAt) return false;
+    const stored = await this.store.getUserById(session.userId);
+    const user = stored && stored.kind !== "service" ? this.toSafeUser(stored) : null;
+    if (!user) return false;
+    return this.sessions.verdict(session, user.role) === null;
+  }
+
   /** The user and live session a session ID names, or null (see resolveSession). */
   async getSessionAuth(
     sessionId: string,

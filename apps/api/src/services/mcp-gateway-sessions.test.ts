@@ -4,12 +4,14 @@ import {
   GatewaySessionLimitError,
   GatewaySessionManager,
   emptySessionLabelMark,
+  gatewayPrincipalScope,
   raiseSessionLabels,
   sessionCallLabels,
   sessionLabelsView,
   type GatewaySessionEndReason
 } from "./mcp-gateway-sessions.js";
 import {
+  MCP_SUPPORTED_PROTOCOL_VERSIONS,
   classifyMessage,
   decodeCursor,
   encodeCursor,
@@ -46,6 +48,112 @@ function makeManager(options: { idleMs?: number; maxSessions?: number } = {}) {
 }
 
 const sessionInput = { clientId: "c1", toolsetId: "t1", protocolVersion: "2025-11-25" as const, clientInfo: {} };
+
+const principalInput = (clientId = "c1", toolsetId = "t1") => ({
+  principalScope: gatewayPrincipalScope({ clientId, toolsetId, userId: "u1" }),
+  clientId,
+  toolsetId,
+  protocolVersion: "2026-07-28",
+  clientInfo: { name: "modern", version: "1" }
+});
+
+describe("GatewaySessionManager principal states (MCP 2026-07-28)", () => {
+  it("keys a principal scope by client, toolset and the user the token acts for", () => {
+    expect(gatewayPrincipalScope({ clientId: "c1", toolsetId: "t1", userId: "u1" })).toBe("client:c1/toolset:t1/user:u1");
+    expect(gatewayPrincipalScope({ clientId: "c1", toolsetId: "t1" })).toBe("client:c1/toolset:t1");
+  });
+
+  it("creates one state per caller, reuses it, and never hands it out as a session", async () => {
+    const { manager, advance } = makeManager();
+    const first = await manager.principal(principalInput());
+    expect(first.created).toBe(true);
+    expect(first.state).toMatchObject({ era: "modern", principalScope: "client:c1/toolset:t1/user:u1", clientId: "c1", toolsetId: "t1", initialized: true });
+    advance(5_000);
+    const again = await manager.principal({ ...principalInput(), clientInfo: { name: "modern", version: "2" } });
+    expect(again.created).toBe(false);
+    expect(again.state).toBe(first.state);
+    expect(again.state.clientInfo).toEqual({ name: "modern", version: "2" });
+    expect(again.state.lastSeenAt).toBe(first.state.createdAt + 5_000);
+    // No request can name it: a session lookup by its id finds nothing.
+    expect(manager.get(first.state.id)).toBeUndefined();
+    const other = await manager.principal(principalInput("c2"));
+    expect(other.state).not.toBe(first.state);
+    const legacy = await manager.create(sessionInput);
+    expect(manager.get(legacy.id)?.era).toBe("legacy");
+  });
+
+  it("shares the session cap, expires when idle, and ends on revoke like sessions", async () => {
+    const { manager, closed, ended, advance } = makeManager({ maxSessions: 2, idleMs: 60_000 });
+    const legacy = await manager.create(sessionInput);
+    const { state } = await manager.principal(principalInput());
+    state.inFlight.set("modern:x", { controller: new AbortController() });
+    legacy.inFlight.set("number:1", { controller: new AbortController() });
+    await expect(manager.principal(principalInput("c2"))).rejects.toBeInstanceOf(GatewaySessionLimitError);
+    state.inFlight.clear();
+    // The idle principal state is the one evicted for a new caller.
+    const next = await manager.principal(principalInput("c2"));
+    expect(next.created).toBe(true);
+    expect(ended).toEqual([{ id: state.id, reason: "evicted" }]);
+    expect(manager.principalState(principalInput().principalScope)).toBeUndefined();
+    // Back again: a fresh state (a new idle window), not the evicted one.
+    legacy.inFlight.clear();
+    const back = await manager.principal(principalInput());
+    expect(back.created).toBe(true);
+    expect(back.state.id).not.toBe(state.id);
+    expect(closed).toContain(state.mcpContext);
+
+    advance(61_000);
+    expect(await manager.sweepIdle()).toBeGreaterThanOrEqual(1);
+    expect(manager.principalState(principalInput().principalScope)).toBeUndefined();
+
+    const revoked = await manager.principal(principalInput("c3"));
+    expect(await manager.endWhere((entry) => entry.clientId === "c3", "revoked")).toBe(1);
+    expect(manager.principalState(revoked.state.principalScope!)).toBeUndefined();
+  });
+
+  it("evicts idle legacy sessions first and a principal state holding outside content last", async () => {
+    const { manager, ended, advance } = makeManager({ maxSessions: 3 });
+    const raised = (await manager.principal(principalInput("c1"))).state;
+    raiseSessionLabels(raised.labels, { provenance: ["untrusted_external"], dataClasses: [] }, true);
+    advance(10);
+    const clean = (await manager.principal(principalInput("c2"))).state;
+    advance(10);
+    const legacy = await manager.create(sessionInput);
+    advance(10);
+    // The legacy session is the newest, yet it goes first.
+    const c3 = (await manager.principal(principalInput("c3"))).state;
+    advance(10);
+    // Then the clean principal state, although the raised one is older.
+    await manager.principal(principalInput("c4"));
+    advance(10);
+    await manager.principal(principalInput("c5"));
+    expect(ended.map((entry) => entry.id)).toEqual([legacy.id, clean.id, c3.id]);
+    expect(manager.principalState(raised.principalScope!)).toBe(raised);
+  });
+
+  it("cancels a principal state's calls when it ends; legacy sessions only abort", async () => {
+    const { manager } = makeManager();
+    const cancelled: string[] = [];
+    const { state } = await manager.principal(principalInput());
+    state.inFlight.set("modern:1", { controller: new AbortController(), onCancel: () => void cancelled.push("modern") });
+    state.inFlight.set("hold:1", { controller: new AbortController(), holdOnly: true });
+    const legacy = await manager.create(sessionInput);
+    const legacyController = new AbortController();
+    legacy.inFlight.set("number:1", { controller: legacyController, onCancel: () => void cancelled.push("legacy") });
+    await manager.endWhere(() => true, "revoked");
+    expect(cancelled).toEqual(["modern"]);
+    expect(legacyController.signal.aborted).toBe(true);
+  });
+
+  it("does not create two states for one caller when two first requests race past a full cap", async () => {
+    const { manager } = makeManager({ maxSessions: 1 });
+    await manager.create(sessionInput);
+    const [a, b] = await Promise.all([manager.principal(principalInput()), manager.principal(principalInput())]);
+    expect(a.state).toBe(b.state);
+    expect([a.created, b.created].sort()).toEqual([false, true]);
+    expect(manager.size).toBe(1);
+  });
+});
 
 describe("GatewaySessionManager", () => {
   it("closes idle sessions and their contexts, but keeps sessions with a request in flight", async () => {
@@ -94,6 +202,9 @@ describe("MCP gateway protocol helpers", () => {
     expect(negotiateProtocolVersion("2024-11-05")).toBe("2025-11-25");
     expect(versionAllowsBatches("2025-03-26")).toBe(true);
     expect(versionAllowsBatches("2025-11-25")).toBe(false);
+    expect(versionAllowsBatches("2026-07-28")).toBe(false);
+    // The gateway's initialize versions are the MCP SDK's legacy set.
+    expect(MCP_SUPPORTED_PROTOCOL_VERSIONS).toEqual(["2025-11-25", "2025-06-18", "2025-03-26"]);
   });
 
   it("classifies requests, notifications, responses and invalid messages", () => {

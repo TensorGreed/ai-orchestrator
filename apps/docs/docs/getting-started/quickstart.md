@@ -1,5 +1,6 @@
 ---
-description: "Install and run L2M locally: prerequisites (Node.js 24+, pnpm 10+), environment setup, starting the API and web studio, the docs site, and the build and test gates."
+title: "Quickstart: install and run L2M locally"
+description: "Install and run L2M locally: prerequisites (Node.js 24+, pnpm 10+), environment setup, starting the API and web studio, the docs site, build and tests."
 ---
 
 # Quickstart

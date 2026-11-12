@@ -1,4 +1,5 @@
 ---
+title: "Testing MCP workflows: cassettes and snapshot mocks"
 description: "Keep MCP-dependent L2M workflows testable: record and replay MCP calls as cassettes, generate snapshot mock servers, and fail CI with l2m mcp check."
 ---
 

@@ -1,5 +1,6 @@
 ---
-description: "Built-in L2M knowledge bases: a SQLite-backed vector store with no external dependencies. Create one, ingest documents and query it from a RAG Retrieve node."
+title: "Knowledge bases: built-in vector store for RAG"
+description: "Built-in L2M knowledge bases: a SQLite-backed vector store with no external dependencies. Create one, ingest documents and query it from RAG Retrieve."
 ---
 
 # Knowledge Bases (built-in persistent vector store)

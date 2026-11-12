@@ -1957,9 +1957,40 @@ export const openApiSpec = {
         parameters: [
           { name: "code", in: "query", required: false, schema: { type: "string" } },
           { name: "state", in: "query", required: true, schema: { type: "string" } },
-          { name: "error", in: "query", required: false, schema: { type: "string" } }
+          { name: "error", in: "query", required: false, schema: { type: "string" } },
+          {
+            name: "iss",
+            in: "query",
+            required: false,
+            description:
+              "RFC 9207 issuer of the authorization response. When present it must equal the authorization server's issuer exactly; when the server advertises authorization_response_iss_parameter_supported it is required. A response that fails this check is discarded, error fields included.",
+            schema: { type: "string" }
+          }
         ],
-        responses: { "200": { description: "HTML: connected" }, "400": { description: "HTML: refused (unknown, used or expired state, other session, token error)" } }
+        responses: {
+          "200": { description: "HTML: connected" },
+          "400": { description: "HTML: refused (unknown, used or expired state, other session, issuer check, token error)" }
+        }
+      }
+    },
+    "/api/mcp/servers/{id}/oauth/issuer-binding": {
+      delete: {
+        tags: ["MCP"],
+        summary:
+          "Admin: forget the authorization server the server's pre-registered client id is bound to (audited as mcp_server.oauth_issuer_binding_reset). The next successful connection binds again. Removing connections never clears the binding.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ status: McpOAuthConnectionStatus }" }, "403": { description: "Not an admin" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/oauth/client-metadata.json": {
+      get: {
+        tags: ["MCP"],
+        summary:
+          "L2M's OAuth Client ID Metadata Document, fetched by authorization servers (public, no secret). Served only when MCP_OAUTH_CLIENT_METADATA_ENABLED is on; its client_id is the document's URL.",
+        responses: {
+          "200": { description: "{ client_id, client_name, client_uri, redirect_uris, grant_types, response_types, token_endpoint_auth_method }" },
+          "404": { description: "Not enabled" }
+        }
       }
     },
     "/api/mcp/servers/{id}/snapshots/{snapshotId}": {
@@ -3275,22 +3306,29 @@ export const openApiSpec = {
       post: {
         tags: ["MCP"],
         summary:
-          "MCP Streamable HTTP endpoint for a toolset (JSON-RPC 2.0: initialize, ping, tools/list, tools/call, notifications/initialized, notifications/cancelled). Bearer client token scoped to the toolset.",
+          "MCP Streamable HTTP endpoint for a toolset (JSON-RPC 2.0: initialize, ping, tools/list, tools/call, notifications/initialized, notifications/cancelled; with MCP_GATEWAY_MODERN_PROTOCOL=on also server/discover, tools/list and tools/call from MCP 2026-07-28 clients). Bearer client token scoped to the toolset.",
         description:
-          "Protocol versions 2025-11-25, 2025-06-18 and 2025-03-26 (batches only in 2025-03-26). Responds with application/json, or text/event-stream when a request carries _meta.progressToken and Accept allows SSE. initialize returns the Mcp-Session-Id header that later requests must send. Origin must be absent, WEB_ORIGIN, MCP_GATEWAY_PUBLIC_URL or listed in MCP_GATEWAY_ALLOWED_ORIGINS.",
+          "Protocol versions 2025-11-25, 2025-06-18 and 2025-03-26 (batches only in 2025-03-26). Responds with application/json, or text/event-stream when a request carries _meta.progressToken and Accept allows SSE. initialize returns the Mcp-Session-Id header that later requests must send. Origin must be absent, WEB_ORIGIN, MCP_GATEWAY_PUBLIC_URL or listed in MCP_GATEWAY_ALLOWED_ORIGINS. " +
+          "With MCP_GATEWAY_MODERN_PROTOCOL=on the endpoint also serves protocol version 2026-07-28 without sessions: a single request whose params._meta carries io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities, with the MCP-Protocol-Version, Mcp-Method and (tools/call) Mcp-Name headers matching the body. " +
+          "Failed checks answer HTTP 400 with -32022 (unsupported version; data.supported lists every version), -32020 (header mismatch) or -32602 (missing _meta keys); other methods answer 404 with -32601. " +
+          "Results carry resultType and _meta[\"io.modelcontextprotocol/serverInfo\"]; tools/list and server/discover also carry ttlMs and cacheScope \"private\". Mcp-Session-Id is ignored for these requests and never returned; closing the connection cancels the call. " +
+          "The gateway's own errors use -31029 (retry later), -31030 (approval pending), -31031 (approval rejected) and -31032 (budget exceeded) for 2026-07-28 callers, and -32029 to -32032 for sessions. " +
+          "In cluster mode a toolset that tracks outside content per session answers 2026-07-28 requests like a request without a session.",
         parameters: [
           { name: "toolset", in: "path", required: true, schema: { type: "string" } },
           { name: "Mcp-Session-Id", in: "header", required: false, schema: { type: "string" } },
-          { name: "MCP-Protocol-Version", in: "header", required: false, schema: { type: "string" } }
+          { name: "MCP-Protocol-Version", in: "header", required: false, schema: { type: "string" } },
+          { name: "Mcp-Method", in: "header", required: false, schema: { type: "string" }, description: "2026-07-28: the request method" },
+          { name: "Mcp-Name", in: "header", required: false, schema: { type: "string" }, description: "2026-07-28: the tool name for tools/call (Base64 sentinel form for names outside plain ASCII)" }
         ],
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", description: "JSON-RPC 2.0 message (or batch, 2025-03-26 only)" } } } },
         responses: {
           "200": { description: "JSON-RPC response (application/json) or SSE stream with progress notifications and the response" },
           "202": { description: "Notifications accepted" },
-          "400": { description: "Parse error, missing session id, unsupported protocol version or batch" },
+          "400": { description: "Parse error, missing session id, unsupported protocol version, batch, or a 2026-07-28 request that failed its version, header or _meta checks" },
           "401": { description: "Missing, invalid, revoked or expired client token" },
           "403": { description: "Origin not allowed, or the token is not scoped to this toolset" },
-          "404": { description: "Unknown or disabled toolset, or unknown session" },
+          "404": { description: "Unknown or disabled toolset, unknown session, or a method 2026-07-28 callers cannot use" },
           "503": { description: "Session limit reached and no session is idle" }
         }
       },

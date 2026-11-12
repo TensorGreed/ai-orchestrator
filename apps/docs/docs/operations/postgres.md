@@ -1,5 +1,6 @@
 ---
-description: "Run L2M on Postgres instead of the default SQLite: when to choose it, connection settings, copying data over from SQLite, backups and running more than one instance."
+title: "Postgres: run L2M on Postgres instead of SQLite"
+description: "Run L2M on Postgres instead of the default SQLite: when to choose it, connection settings, copying data from SQLite, backups, several instances."
 ---
 
 # Postgres

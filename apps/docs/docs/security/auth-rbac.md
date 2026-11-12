@@ -1,4 +1,5 @@
 ---
+title: "Authentication and RBAC: roles, SSO and MFA"
 description: "Authentication and access control in L2M: session cookies, admin, builder, operator and viewer roles, projects, OIDC and SAML single sign-on, and MFA."
 ---
 
@@ -731,7 +732,7 @@ such work.
 
 **Turning MFA off.** A user in a listed role cannot turn their own MFA off: `POST /api/auth/mfa/disable` answers
 `409 { code: "mfa_required_for_role" }` (except from a break-glass session). A lost or replaced device goes through an
-admin's [MFA reset](#resetting-a-users-mfa). For other roles, turning MFA off clears the current session's MFA check at
+admin's [MFA reset](#resetting-a-user-s-mfa). For other roles, turning MFA off clears the current session's MFA check at
 once and ends the user's other sessions.
 
 **LDAP.** LDAP has no TOTP step of its own, so the password login's rules apply: a user with TOTP gets the code step

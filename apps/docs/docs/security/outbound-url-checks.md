@@ -1,4 +1,5 @@
 ---
+title: "Outbound URL checks: block request forgery in nodes"
 description: "L2M outbound URL checks cover every URL that HTTP Request, Web Browse, Chart, PDF, RAG and feed nodes fetch, blocking request forgery and local file reads."
 ---
 

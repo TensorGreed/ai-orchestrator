@@ -1,5 +1,6 @@
 ---
-description: "Budgets cap model spend or tokens per deployment, project, workflow, user or MCP client. A block budget stops new runs from every trigger and gateway calls."
+title: "Budgets: cap LLM spend per project, user or client"
+description: "Budgets cap model spend or tokens per deployment, project, workflow, user or MCP client. A block budget stops new runs from any trigger, and gateway calls."
 ---
 
 # Budgets

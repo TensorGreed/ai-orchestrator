@@ -23,6 +23,7 @@ export class AppLifecycle {
   private readonly checks = new Map<string, ReadinessCheck>();
   private readonly steps: Array<{ name: string; run: DrainStep }> = [];
   private logger: DrainLogger | null = null;
+  private exitFlush: (() => Promise<void>) | null = null;
 
   setLogger(logger: DrainLogger): void {
     this.logger = logger;
@@ -49,6 +50,33 @@ export class AppLifecycle {
       }
     }
     return { ready: reasons.length === 0, reasons };
+  }
+
+  /**
+   * Work that must run before the process exits even without a drain (index.ts keeps Node's default exit on a signal
+   * otherwise): exporting the spans still queued while tracing is on. A later call replaces the earlier one.
+   */
+  setExitFlush(flush: () => Promise<void>): void {
+    this.exitFlush = flush;
+  }
+
+  hasExitFlush(): boolean {
+    return this.exitFlush !== null;
+  }
+
+  /** Runs the exit flush, if any, for at most `timeoutMs`. Never throws. */
+  async flushBeforeExit(timeoutMs: number): Promise<void> {
+    const flush = this.exitFlush;
+    if (!flush) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      flush().catch((error) => this.logger?.warn("Flushing before exit failed", { error: error instanceof Error ? error.message : String(error) })),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, timeoutMs));
+        timer.unref();
+      })
+    ]);
+    clearTimeout(timer);
   }
 
   /** A step of the shutdown drain; steps run in the order they were added. */

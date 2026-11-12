@@ -1,4 +1,5 @@
 ---
+title: "Build your first MCP agent in 5 minutes, no API keys"
 description: "Tutorial: from a fresh clone to a self-hosted L2M agent calling MCP tools in five minutes, with no API keys: the built-in echo model and a mock MCP server."
 ---
 

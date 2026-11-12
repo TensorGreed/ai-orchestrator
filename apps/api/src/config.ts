@@ -2,10 +2,12 @@ import fs from "node:fs";
 import net from "node:net";
 import { z } from "zod";
 import { parseSessionPolicy } from "./services/session-policy.js";
+import { resolveTelemetrySettings } from "./telemetry/settings.js";
 import {
   NETWORK_SCOPES,
   NETWORK_SCOPE_ENV,
   QUEUE_POOL_NAME_PATTERN,
+  mcpClientProtocolModeSchema,
   parseIpAllowlist,
   splitIpAllowlist,
   type NetworkAllowlistMode,
@@ -33,6 +35,11 @@ const booleanFromEnv = z.preprocess((value) => {
   }
   return value;
 }, z.boolean());
+
+/** Wraps a schema so a blank value reads as unset (and gets the schema's default). */
+function blankAsUndefined<T extends z.ZodType>(schema: T) {
+  return z.preprocess((value) => (typeof value === "string" && value.trim() === "" ? undefined : value), schema);
+}
 
 /** Like booleanFromEnv, but unset or blank stays undefined (for settings that are only read when a feature is on). */
 const optionalBooleanFromEnv = z.preprocess(
@@ -297,6 +304,21 @@ const envSchema = z.object({
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
     z.coerce.number().int().min(10_000).max(7 * 24 * 60 * 60 * 1000).optional()
   ),
+  /**
+   * MCP 2026-07-28 — serve modern clients (per-request protocol metadata, no sessions) on /mcp/:toolset next to
+   * session-based ones. `off` (default): modern requests get the answer a request without a session gets today, so
+   * dual-era clients fall back to `initialize` and nothing changes. `on`: they are served statelessly, scoped to the
+   * client credential and toolset. Unset or empty = off.
+   */
+  MCP_GATEWAY_MODERN_PROTOCOL: z.preprocess(
+    (value) => (typeof value === "string" ? (value.trim() === "" ? undefined : value.trim().toLowerCase()) : value),
+    z.enum(["off", "on"]).optional()
+  ),
+  /** MCP 2026-07-28 — how long (ms) modern clients may cache `tools/list` and `server/discover` results; 0 = always re-fetch. Unset or empty = 60000. */
+  MCP_GATEWAY_LIST_TTL_MS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).max(86_400_000).optional()
+  ),
   /** Base URL clients reach this instance at, used for the endpoint URLs shown in the UI. Empty = the browser's origin. */
   MCP_GATEWAY_PUBLIC_URL: z
     .string()
@@ -335,6 +357,42 @@ const envSchema = z.object({
   /** Access tokens are refreshed this long before they expire. */
   MCP_OAUTH_REFRESH_SKEW_MS: z.coerce.number().int().nonnegative().max(3_600_000).default(60_000),
   /**
+   * Refuse OAuth requests (metadata discovery, client registration, token exchange and refresh) to private,
+   * loopback, link-local and cloud metadata addresses, checked after DNS resolution and pinned for the connection.
+   * Off by default. The MCP server's own host and port stay allowed; loopback only when the MCP server is itself on
+   * loopback.
+   */
+  MCP_OAUTH_BLOCK_PRIVATE_HOSTS: booleanFromEnv.default(false),
+  /**
+   * Comma-separated hosts (`idp.corp.example`, `*.corp.example`, `idp.corp.example:8443`) or CIDRs (`10.0.0.0/8`,
+   * `fd00::/8`) of identity providers on a private network that OAuth may reach while MCP_OAUTH_BLOCK_PRIVATE_HOSTS
+   * is on. Metadata and link-local addresses stay blocked whatever this says.
+   */
+  MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: z
+    .string()
+    .default("")
+    .transform((value) => value.split(",").map((entry) => entry.trim()).filter(Boolean))
+    .refine(
+      (entries) =>
+        entries.every(
+          (entry) =>
+            !/[\s/]/.test(entry.replace(/\/\d{1,3}$/, "")) &&
+            !entry.includes("://") &&
+            // A bare IPv6 address would be read as host:port; it has to be written as a range (fd00::5/128).
+            (entry.includes("/") || (entry.match(/:/g) ?? []).length <= 1)
+        ),
+      {
+        message:
+          "MCP_OAUTH_PRIVATE_HOST_ALLOWLIST takes hosts (idp.corp.example, *.corp.example, host:port) or CIDRs (10.0.0.0/8, fd00::5/128), not URLs or bare IPv6 addresses"
+      }
+    ),
+  /**
+   * Offer L2M's Client ID Metadata Document (`<redirect base>/api/mcp/oauth/client-metadata.json`) as the client id
+   * to authorization servers that advertise `client_id_metadata_document_supported`, before dynamic registration.
+   * Off by default; only used when the redirect base is a public https URL the authorization server can fetch.
+   */
+  MCP_OAUTH_CLIENT_METADATA_ENABLED: booleanFromEnv.default(false),
+  /**
    * Phase 10.5 — longest an MCP elicitation request waits for a person. The
    * run's execution timeout keeps counting while it waits, so a wait is also
    * capped by that.
@@ -346,6 +404,23 @@ const envSchema = z.object({
   MCP_CASSETTE_MAX_BYTES: z.coerce.number().int().min(1_024).max(268_435_456).default(5_242_880),
   /** Phase 10.8 — most MCP calls one cassette keeps. */
   MCP_CASSETTE_MAX_CALLS: z.coerce.number().int().min(1).max(100_000).default(5_000),
+  /**
+   * MCP 2026-07-28 — how L2M talks to MCP servers whose connection sets no `protocolMode`: `legacy` (the
+   * `initialize` handshake; a server that only speaks 2026-07-28 is still reached), `auto` (try 2026-07-28 first,
+   * fall back) or `modern` (2026-07-28 only).
+   */
+  MCP_CLIENT_PROTOCOL_DEFAULT: z.preprocess(
+    (value) => (typeof value === "string" ? value.trim().toLowerCase() || undefined : value),
+    mcpClientProtocolModeSchema.default("legacy")
+  ),
+  /** MCP 2026-07-28 — most times one call may ask for more input (elicitation, sampling) before it fails. */
+  MCP_CLIENT_MRTR_MAX_ROUNDS: z.coerce.number().int().min(1).max(20).default(5),
+  /**
+   * MCP 2026-07-28 — after a broken connection or a timeout, send a request to an `initialize`-based server again
+   * only when that is safe (anything but a tool call, or a tool marked read-only or idempotent). False sends every
+   * request again, as earlier releases did. 2026-07-28 servers always follow the safe rule.
+   */
+  MCP_CLIENT_LEGACY_SAFE_REISSUE: booleanFromEnv.default(true),
   /**
    * Phase 12.1 — apply the built-in default guard profile to agent traffic
    * in projects and workflows with no guard binding. Bindings and guard
@@ -552,11 +627,9 @@ const envSchema = z.object({
   TRACING_ENDPOINT: z.string().optional(),
   TRACING_SERVICE_NAME: z.string().default("ai-orchestrator"),
 
-  // Phase 8.1 — OpenTelemetry-grade observability.
-  // Standard OTEL_* env vars. When OTEL_EXPORTER_OTLP_ENDPOINT is set we
-  // export traces (and optionally metrics) over OTLP/HTTP-JSON. Trace export
-  // also activates if the legacy TRACING_ENDPOINT is set — both paths share
-  // the same TracingService.
+  // OpenTelemetry. Standard OTEL_* variables: when an OTLP endpoint is set, traces are exported through the
+  // OpenTelemetry SDK (http/protobuf unless OTEL_EXPORTER_OTLP_PROTOCOL says http/json), and metrics too with
+  // OTEL_METRICS_ENABLED. The legacy TRACING_* variables still work (deprecated). Resolved in telemetry/settings.ts.
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: z.string().optional(),
   OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: z.string().optional(),
@@ -569,8 +642,50 @@ const envSchema = z.object({
   OTEL_RESOURCE_ATTRIBUTES: z.string().default(""),
   OTEL_METRICS_ENABLED: booleanFromEnv.default(false),
   OTEL_METRICS_PUSH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
-  /** Emit a SERVER span per HTTP request (in addition to per-execution/per-node spans). */
+  /** Emit a SERVER span per HTTP request while tracing is on (no hooks are installed while it is off). */
   OTEL_HTTP_SERVER_SPANS: booleanFromEnv.default(true),
+  // OpenTelemetry SDK settings (see telemetry/settings.ts). Tracing stays off until an OTLP endpoint or
+  // TRACING_ENABLED is set, and nothing from the SDK is loaded while it is off.
+  // Optional (unset = the default noted), so tests and embedders that build a config by hand need none of them.
+  // The standard OTEL_* values are read as text and checked in telemetry/settings.ts only while tracing is on (a
+  // value meant for another tool never stops the API; an unknown one is ignored with a warning, as the
+  // specification asks).
+  /** `true` turns every OpenTelemetry signal off, whatever else is set (the standard switch). Default false. */
+  OTEL_SDK_DISABLED: z.string().optional(),
+  /** `http/protobuf` (default, the specification's default) or `http/json`, for traces. */
+  OTEL_EXPORTER_OTLP_PROTOCOL: z.string().optional(),
+  /** Milliseconds one OTLP export may take. Default 10000. */
+  OTEL_EXPORTER_OTLP_TIMEOUT: z.string().optional(),
+  /** Default parentbased_always_on. */
+  OTEL_TRACES_SAMPLER: z.string().optional(),
+  /** The ratio for the traceidratio samplers, 0 to 1 (default 1). */
+  OTEL_TRACES_SAMPLER_ARG: z.string().optional(),
+  /** Comma list of tracecontext, baggage, none. Default tracecontext. */
+  OTEL_PROPAGATORS: z.string().optional(),
+  /** Comma list; `gen_ai_latest_experimental` opts in to the newest (unreleased) GenAI names. */
+  OTEL_SEMCONV_STABILITY_OPT_IN: z.string().optional(),
+  /** Longest attribute value. Default 8192. */
+  OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT: z.string().optional(),
+  /** Batch span processor: delay (5000 ms), export timeout (30000 ms), queue size (2048), batch size (512). */
+  OTEL_BSP_SCHEDULE_DELAY: z.string().optional(),
+  OTEL_BSP_EXPORT_TIMEOUT: z.string().optional(),
+  OTEL_BSP_MAX_QUEUE_SIZE: z.string().optional(),
+  OTEL_BSP_MAX_EXPORT_BATCH_SIZE: z.string().optional(),
+  /** `standard` (default) or `verbose` (adds agent-turn and queue-producer spans). */
+  L2M_OTEL_SPAN_DETAIL: blankAsUndefined(z.enum(["standard", "verbose"]).optional()),
+  /** `names` (default): workflow, node and agent names appear in spans; `ids`: ids only. */
+  L2M_OTEL_NAMES: blankAsUndefined(z.enum(["names", "ids"]).optional()),
+  /** Send `traceparent` to model providers. Default false: their endpoints are outside the deployment's traces. */
+  L2M_OTEL_PROPAGATE_TO_PROVIDERS: optionalBooleanFromEnv,
+  /** Send `traceparent` to MCP servers (HTTP headers and `params._meta`). Default true. */
+  L2M_OTEL_PROPAGATE_TO_MCP: optionalBooleanFromEnv,
+  /**
+   * Whose inbound `traceparent` continues a trace: `authenticated` (default: signed-in sessions, API keys, gateway
+   * client tokens and L2M_OTEL_TRUSTED_PROXIES), `all`, or `none`. Anyone else's starts a new trace that links to it.
+   */
+  L2M_OTEL_TRUST_INBOUND: blankAsUndefined(z.enum(["authenticated", "all", "none"]).optional()),
+  /** Comma list of addresses or CIDR ranges (the connecting socket) whose inbound `traceparent` is always trusted. */
+  L2M_OTEL_TRUSTED_PROXIES: z.string().optional(),
 
   // Phase 8.2 — FinOps cost rollups.
   // JSON object overlaying `services/usage-service.ts` DEFAULT_PRICING. Same
@@ -702,6 +817,8 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   parseSessionPolicy(parsed.data);
   // Phase 13.2 — a bad address list refuses to start, naming the setting and the entry.
   resolveNetworkSettings(parsed.data);
+  // OpenTelemetry — while tracing is on, a bad endpoint, grpc or a bad trusted-proxy entry refuses to start.
+  resolveTelemetrySettings(parsed.data);
   // 13.3 — retention bounds that contradict each other refuse to start.
   resolveRetentionSettings(parsed.data);
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.
@@ -981,7 +1098,20 @@ export interface NetworkSettings {
 
 const LOOPBACK_RANGES = ["127.0.0.0/8", "::1/128"];
 /** Headers a client certificate may never be read from (they carry other things the server relies on). */
-const RESERVED_CERT_HEADERS = new Set(["authorization", "cookie", "host", "x-forwarded-for", "x-real-ip", "x-forwarded-proto", "content-type", "mcp-session-id"]);
+const RESERVED_CERT_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "host",
+  "x-forwarded-for",
+  "x-real-ip",
+  "x-forwarded-proto",
+  "content-type",
+  "mcp-session-id",
+  // MCP 2026-07-28 request metadata headers.
+  "mcp-protocol-version",
+  "mcp-method",
+  "mcp-name"
+]);
 
 function parseAddressSetting(name: string, raw: string | undefined): string[] {
   const { ranges, invalid } = parseIpAllowlist(splitIpAllowlist(raw));
@@ -1022,7 +1152,7 @@ export function resolveNetworkSettings(config: AppConfig): NetworkSettings {
   const headerRaw = (config.MCP_GATEWAY_CLIENT_CERT_HEADER ?? "").trim().toLowerCase();
   let clientCertProxies: string[] = [];
   if (headerRaw) {
-    if (!/^[a-z0-9-]+$/.test(headerRaw) || RESERVED_CERT_HEADERS.has(headerRaw)) {
+    if (!/^[a-z0-9-]+$/.test(headerRaw) || RESERVED_CERT_HEADERS.has(headerRaw) || headerRaw.startsWith("mcp-param-")) {
       throw new Error(
         `Invalid environment configuration: MCP_GATEWAY_CLIENT_CERT_HEADER "${headerRaw}" must be a header name of letters, digits and '-', ` +
           "and not one the server reads for something else (such as authorization or x-forwarded-for)"

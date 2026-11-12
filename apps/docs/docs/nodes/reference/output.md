@@ -1,4 +1,5 @@
 ---
+title: "Output nodes: config fields and defaults"
 description: "Reference for the 5 nodes in the L2M Output category, with every config field and default. Terminal nodes that shape the workflow's response payload."
 ---
 

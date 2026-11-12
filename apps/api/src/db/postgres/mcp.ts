@@ -68,6 +68,7 @@ import type {
   McpToolSnapshotRecord,
   McpUserOAuthConnectionRecord
 } from "../database.js";
+import { toClientRegistration } from "../database.js";
 import { mcpGatewayApprovalRetentionCutoff, type McpGatewayApprovalCreateResult, type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
@@ -239,7 +240,7 @@ function mapMcpOAuthConnection(row: Row): McpOAuthConnectionRecord {
     subject: optional(row.subject),
     scope: optional(row.scope),
     authorizationServer: optional(row.authorization_server),
-    clientRegistration: registration === "dynamic" || registration === "pre_registered" ? registration : null,
+    clientRegistration: toClientRegistration(registration),
     clientId: optional(row.client_id),
     expiresAt: optional(row.expires_at),
     hasRefreshToken: toNum(row.has_refresh_token) === 1,
@@ -262,7 +263,7 @@ function mapMcpUserOAuthConnection(row: Row): McpUserOAuthConnectionRecord {
     subject: optional(row.subject),
     scope: optional(row.scope),
     authorizationServer: optional(row.authorization_server),
-    clientRegistration: registration === "dynamic" || registration === "pre_registered" ? registration : null,
+    clientRegistration: toClientRegistration(registration),
     clientId: optional(row.client_id),
     expiresAt: optional(row.expires_at),
     hasRefreshToken: toNum(row.has_refresh_token) === 1,

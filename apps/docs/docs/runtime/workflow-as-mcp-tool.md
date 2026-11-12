@@ -1,4 +1,5 @@
 ---
+title: "Expose a workflow as an MCP tool for other agents"
 description: "Expose any L2M workflow as a Model Context Protocol tool with the Expose as MCP Tool trigger, so other agents call a whole multi-step workflow as one tool."
 ---
 

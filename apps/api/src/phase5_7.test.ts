@@ -12,6 +12,7 @@ import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService } from "./services/tracing-service";
+import { loadTestTelemetry } from "./test-support/telemetry.js";
 
 interface TestContext {
   app: FastifyInstance;
@@ -142,10 +143,16 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     MCP_OAUTH_REDIRECT_BASE_URL: "",
     MCP_OAUTH_STATE_TTL_MS: 600000,
     MCP_OAUTH_REFRESH_SKEW_MS: 60000,
+    MCP_OAUTH_BLOCK_PRIVATE_HOSTS: false,
+    MCP_OAUTH_PRIVATE_HOST_ALLOWLIST: [],
+    MCP_OAUTH_CLIENT_METADATA_ENABLED: false,
     MCP_ELICITATION_TIMEOUT_MS: 600000,
     MCP_RESOURCE_MAX_BYTES: 5242880,
     MCP_CASSETTE_MAX_BYTES: 5242880,
     MCP_CASSETTE_MAX_CALLS: 5000,
+    MCP_CLIENT_PROTOCOL_DEFAULT: "legacy",
+    MCP_CLIENT_MRTR_MAX_ROUNDS: 5,
+    MCP_CLIENT_LEGACY_SAFE_REISSUE: true,
     AUDIT_BUNDLE_MAX_BYTES: 104857600,
     REPLAY_RECORDING_MAX_BYTES: 4194304,
     REPLAY_RECORDINGS_MAX_PER_WORKFLOW: 500,
@@ -425,8 +432,9 @@ describe("Phase 5.7 — MetricsService unit behavior", () => {
 });
 
 describe("Phase 5.7 — TracingService unit behavior", () => {
-  it("starts, ends, and retrieves spans when enabled", () => {
-    const tracing = new TracingService({ enabled: true, serviceName: "ut" });
+  it("starts, ends, and retrieves spans when enabled", async () => {
+    const telemetry = await loadTestTelemetry({ resourceAttributes: { "service.name": "ut" } });
+    const tracing = new TracingService({ runtime: telemetry.runtime });
     const span = tracing.startSpan({ operationName: "test.op", attributes: { foo: "bar" } });
     tracing.addEvent(span, "checkpoint", { x: 1 });
     tracing.endSpan(span, "ok");
@@ -440,10 +448,11 @@ describe("Phase 5.7 — TracingService unit behavior", () => {
 
     const byTrace = tracing.spansByTrace(span.traceId);
     expect(byTrace).toHaveLength(1);
+    await telemetry.runtime?.shutdown();
   });
 
   it("drops spans when disabled (no leak via recentSpans)", () => {
-    const tracing = new TracingService({ enabled: false });
+    const tracing = new TracingService({});
     const span = tracing.startSpan({ operationName: "noop" });
     tracing.endSpan(span, "ok");
     expect(tracing.recentSpans()).toHaveLength(0);

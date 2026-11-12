@@ -1,5 +1,6 @@
 ---
-description: "L2M HTTP API endpoints by area: auth, SSO, workflows, runs, MCP registry and gateway, content rules, audit bundles, replay, releases, approvals and secrets."
+title: "API endpoints: every L2M HTTP route by area"
+description: "L2M HTTP API endpoints by area: auth, SSO, workflows, runs, MCP registry and gateway, content rules, audit bundles, replay, releases, approvals, secrets."
 ---
 
 # API Endpoints
@@ -99,7 +100,9 @@ See [MCP server registry](../product/mcp-server-registry.md).
 - `POST /api/mcp/servers/:id/oauth/connect` (admin; `{ scope? }` → `{ authorizationUrl, expiresAt, redirectUri }`)
 - `POST /api/mcp/servers/:id/oauth/refresh` (admin)
 - `DELETE /api/mcp/servers/:id/oauth` (admin)
-- `GET /api/mcp/oauth/callback?code=&state=` (authorization server redirect target, for the service connection and for users' own connections; see [OAuth for remote servers](../product/mcp-server-registry.md#oauth-for-remote-servers))
+- `DELETE /api/mcp/servers/:id/oauth/issuer-binding` (admin, audited; forget the authorization server a pre-registered client id is bound to)
+- `GET /api/mcp/oauth/callback?code=&state=&iss=` (authorization server redirect target, for the service connection and for users' own connections; checks the RFC 9207 issuer; see [OAuth for remote servers](../product/mcp-server-registry.md#oauth-for-remote-servers))
+- `GET /api/mcp/oauth/client-metadata.json` (public; L2M's client metadata document, only with `MCP_OAUTH_CLIENT_METADATA_ENABLED=true`; see [Client metadata document](../product/mcp-server-registry.md#client-metadata-document))
 - `GET /api/mcp/servers/:id/runtime` (builder; breaker state, in-flight and queued calls, refused-call counts; the last failure for admins only)
 - `POST /api/mcp/servers/:id/breaker/reset` (admin)
 - `GET /api/mcp/servers/:id/connections` (admin; users connected to a delegated server, never tokens)

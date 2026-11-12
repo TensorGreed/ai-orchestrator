@@ -1,5 +1,6 @@
 ---
-description: "Give an L2M agent Wikipedia, SearXNG or SerpAPI web search and Wolfram Alpha as built-in MCP tools, plus an optional Think step, with no extra server to run."
+title: "Built-in agent tools: web search and Wolfram Alpha"
+description: "Give an L2M agent Wikipedia, SearXNG or SerpAPI web search and Wolfram Alpha as built-in MCP tools, plus an optional Think step, with no extra server."
 ---
 
 # Built-in Agent Tools

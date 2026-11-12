@@ -1,5 +1,6 @@
 ---
-description: "Fixes for common L2M problems: missing master key, webhook 404s, unexpected MCP tools, agents hitting max iterations, context overflow, local LLM crashes and parser errors."
+title: "Common issues: fixes for frequent L2M problems"
+description: "Fixes for common L2M problems: missing master key, webhook 404s, unexpected MCP tools, max iterations, context overflow, local LLM crashes, parser errors."
 ---
 
 # Common Issues

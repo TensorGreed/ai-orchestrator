@@ -10,9 +10,16 @@ import { MCP_CLIENT_PROTOCOL_VERSION } from "./progress";
  *   2. the metadata's `authorization_servers` lead to Authorization Server
  *      Metadata (RFC 8414, then OpenID Connect discovery)
  *   3. without a configured client id the client registers itself
- *      (RFC 7591 dynamic client registration)
+ *      (RFC 7591 dynamic client registration, with `application_type`), or
+ *      names its Client ID Metadata Document when the caller enables that
  *   4. authorization code flow with PKCE (S256) and the `resource`
  *      parameter (RFC 8707), then token exchange and refresh
+ *
+ * MCP 2026-07-28 rules that hold in every protocol era: authorization server
+ * metadata is used only when its `issuer` is exactly the issuer it was
+ * fetched for (RFC 8414 section 3.3), and the authorization response's `iss`
+ * is checked against that issuer before the code goes to any token endpoint
+ * (RFC 9207, `validateAuthorizationResponseIssuer`).
  *
  * These are pure protocol steps; where state and tokens are kept is up to
  * the caller (the API keeps tokens in SecretService only).
@@ -40,6 +47,10 @@ export interface AuthorizationServerMetadata {
   scopes_supported?: string[];
   code_challenge_methods_supported?: string[];
   token_endpoint_auth_methods_supported?: string[];
+  /** RFC 9207: the server puts `iss` in every authorization response. Absent means false. */
+  authorization_response_iss_parameter_supported?: boolean;
+  /** The server accepts an https URL naming a Client ID Metadata Document as `client_id`. */
+  client_id_metadata_document_supported?: boolean;
   [key: string]: unknown;
 }
 
@@ -77,9 +88,15 @@ export type FetchLike = typeof fetch;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
-function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  return host === "localhost" || host === "::1" || host.startsWith("127.") || host.endsWith(".localhost");
+/**
+ * True for `localhost`, `*.localhost`, an IPv4 address in 127.0.0.0/8 and `::1` (as a URL hostname, brackets
+ * allowed). A name that merely starts with `127.` (such as `127.example.com`) is not loopback.
+ */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
+  const octets = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return octets !== null && octets.slice(1).every((part) => Number(part) <= 255);
 }
 
 /**
@@ -251,6 +268,15 @@ export async function discoverAuthorizationServer(
       continue;
     }
     const metadata = (await readJson(response, "Authorization server metadata")) as AuthorizationServerMetadata;
+    // RFC 8414 section 3.3 / OpenID Connect Discovery 4.3: the document must name exactly the issuer it was fetched
+    // for, compared as plain strings; otherwise one server could hand out another's endpoints (mix-up).
+    if (typeof metadata.issuer !== "string" || metadata.issuer !== issuer) {
+      throw new McpOAuthError(
+        typeof metadata.issuer === "string"
+          ? `The authorization server metadata at ${candidate} names the issuer ${JSON.stringify(metadata.issuer.slice(0, 200))}, not ${JSON.stringify(issuer)}; refusing to use it.`
+          : `The authorization server metadata at ${candidate} names no issuer; refusing to use it.`
+      );
+    }
     if (typeof metadata.authorization_endpoint !== "string" || typeof metadata.token_endpoint !== "string") {
       throw new McpOAuthError("Authorization server metadata lacks authorization_endpoint or token_endpoint.");
     }
@@ -263,7 +289,7 @@ export async function discoverAuthorizationServer(
         "The authorization server does not advertise PKCE with S256 (code_challenge_methods_supported), which MCP requires."
       );
     }
-    return { ...metadata, issuer: typeof metadata.issuer === "string" ? metadata.issuer : issuer };
+    return metadata;
   }
   throw new McpOAuthError(`Could not load authorization server metadata for ${issuer} (${lastError}).`);
 }
@@ -289,10 +315,24 @@ export async function discoverMcpOAuth(
   };
 }
 
+/**
+ * The OpenID Connect `application_type` for a redirect URL: `native` when the browser comes back to a loopback
+ * address (a locally run L2M), `web` otherwise. MCP 2026-07-28 requires dynamic registration to send one.
+ */
+export function oauthApplicationType(redirectUri: string): "web" | "native" {
+  let hostname: string;
+  try {
+    hostname = new URL(redirectUri).hostname;
+  } catch {
+    return "web";
+  }
+  return isLoopbackHost(hostname) ? "native" : "web";
+}
+
 /** RFC 7591 dynamic client registration as a public client (PKCE, no secret) when the server allows it. */
 export async function registerOAuthClient(
   registrationEndpoint: string,
-  input: { redirectUri: string; clientName?: string; scope?: string },
+  input: { redirectUri: string; clientName?: string; scope?: string; applicationType?: "web" | "native" },
   options: { fetchImpl?: FetchLike } = {}
 ): Promise<OAuthClientRegistration> {
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -302,6 +342,7 @@ export async function registerOAuthClient(
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
       client_name: input.clientName ?? "L2M",
+      application_type: input.applicationType ?? oauthApplicationType(input.redirectUri),
       redirect_uris: [input.redirectUri],
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
@@ -330,6 +371,49 @@ export async function registerOAuthClient(
     tokenEndpointAuthMethod: method,
     ...(typeof body.client_secret_expires_at === "number" ? { clientSecretExpiresAt: body.client_secret_expires_at } : {})
   };
+}
+
+export type AuthorizationResponseIssuerCheck =
+  | { ok: true }
+  | { ok: false; reason: "missing" | "mismatch" | "malformed"; message: string };
+
+/**
+ * RFC 9207 section 2.4 as MCP 2026-07-28 applies it, run on the authorization response before its code goes to any
+ * token endpoint (and before its error fields are shown):
+ *
+ * | server advertises `iss` | `iss` in response | result                             |
+ * | true                    | present           | must equal the recorded issuer     |
+ * | true                    | absent            | rejected                           |
+ * | false or absent         | present           | must equal the recorded issuer     |
+ * | false or absent         | absent            | accepted                           |
+ *
+ * `iss` is the decoded query value as the router parsed it. The comparison is plain string equality: no case
+ * folding, default-port, trailing-slash or percent-encoding normalisation. A repeated `iss` (an array) is rejected.
+ */
+export function validateAuthorizationResponseIssuer(input: {
+  recordedIssuer: string;
+  issParameterSupported: boolean;
+  iss: unknown;
+}): AuthorizationResponseIssuerCheck {
+  if (input.iss === undefined || input.iss === null) {
+    if (!input.issParameterSupported) return { ok: true };
+    return {
+      ok: false,
+      reason: "missing",
+      message: "The authorization server says it identifies itself in its responses, but this response named no issuer, so it was discarded."
+    };
+  }
+  if (typeof input.iss !== "string") {
+    return { ok: false, reason: "malformed", message: "The authorization response named its issuer more than once, so it was discarded." };
+  }
+  if (input.iss !== input.recordedIssuer) {
+    return {
+      ok: false,
+      reason: "mismatch",
+      message: "The authorization response came from a different authorization server than the one this connection started with, so it was discarded."
+    };
+  }
+  return { ok: true };
 }
 
 function base64Url(buffer: Buffer): string {

@@ -1,4 +1,5 @@
 ---
+title: "Workflow Tool: let an agent call another workflow"
 description: "Let an L2M agent call another workflow as one tool with the Workflow Tool node: derived input schema, tool rules, labels, approvals, replay and spend."
 ---
 

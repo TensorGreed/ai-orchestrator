@@ -20,6 +20,31 @@ export class McpJsonRpcError extends Error {
   }
 }
 
+/**
+ * MCP 2026-07-28 — a request was sent and no answer arrived (the connection
+ * broke, or the response stream closed early), and it was not sent again
+ * because doing so is not known to be safe: the tool is not marked
+ * read-only or idempotent. The server may or may not have acted on it.
+ */
+export class McpOutcomeUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpOutcomeUnknownError";
+  }
+}
+
+/**
+ * MCP 2026-07-28 — a modern server refused a request with -32021
+ * (MissingRequiredClientCapability): it needs a client capability the
+ * request did not declare. `data.requiredCapabilities` names it.
+ */
+export class McpMissingClientCapabilityError extends McpJsonRpcError {
+  constructor(message: string, code: number, data?: unknown) {
+    super(message, code, data);
+    this.name = "McpMissingClientCapabilityError";
+  }
+}
+
 /** A request ran past its timeout. */
 export class McpTimeoutError extends Error {
   constructor(message: string) {
@@ -71,6 +96,10 @@ export function classifyMcpError(error: unknown, signal?: AbortSignal): McpToolE
   if (error instanceof McpSandboxPolicyError) return "sandbox";
   if (error instanceof McpDelegatedCredentialError) return "credentials";
   if (error instanceof McpTimeoutError) return "timeout";
+  if (error instanceof McpOutcomeUnknownError) return "outcome_unknown";
+  // MCP 2026-07-28 -32021 from a modern server: the call needs a client capability it did not declare (no model
+  // attached for sampling, say). A setup matter, not a sign the server is unhealthy.
+  if (error instanceof McpMissingClientCapabilityError) return "tool";
   if (error instanceof McpJsonRpcError) return error.code === JSON_RPC_INVALID_PARAMS ? "invalid_arguments" : "protocol";
   // MCP 2026-07-28 protocol errors (`protocol/`), matched by name to keep this module free of import cycles.
   if (error instanceof Error) {

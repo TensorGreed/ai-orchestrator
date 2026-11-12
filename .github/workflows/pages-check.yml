@@ -3,8 +3,9 @@ name: Pages site check
 # Builds the lsquarem.com site the way the Pages workflow does (landing from
 # `docs/`, the VitePress docs at /docs/, the live demo at /demo/), assembles
 # _site/ and checks it with scripts/check-pages-site.mjs: robots.txt, the sitemap,
-# title, description and canonical on every indexable page, noindex on the demo
-# and the landing's JSON-LD; then, in a browser, the hero
+# title, description (and their length) and canonical on every indexable page,
+# JSON-LD and breadcrumbs, internal links, orphan hub pages, the blog feed, banned
+# words, noindex on the demo; then, in a browser, the hero
 # reaches a loading demo, the nav demo button shows at 360 and 1440 px, every
 # internal link answers 200, nothing is requested off the site's origin, and
 # no console errors. It publishes nothing; deploys stay in pages.yml.
@@ -17,6 +18,11 @@ on:
       - "scripts/assemble-pages-site.mjs"
       - "scripts/check-pages-site.mjs"
       - "scripts/pages-seo-checks.mjs"
+      - "scripts/pages-seo-baseline.json"
+      - "scripts/social-card/**"
+      # Recipe pages are generated from the samples and the demo's fixtures.
+      - "samples/workflows/**"
+      - "apps/web/src/demo/fixtures/**"
       # The demo's head (title, noindex) is set by its Vite config.
       - "apps/web/vite.config.ts"
       - ".github/workflows/pages.yml"
@@ -33,6 +39,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        # Full history: the docs build dates every page (lastUpdated, sitemap lastmod, JSON-LD)
+        # from git; a shallow clone would give every page the same date.
+        with:
+          fetch-depth: 0
 
       # Corepack must run before setup-node: `cache: "pnpm"` calls pnpm.
       - name: Enable Corepack

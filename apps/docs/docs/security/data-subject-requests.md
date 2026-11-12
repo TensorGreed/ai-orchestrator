@@ -1,3 +1,8 @@
+---
+title: "Data-subject requests: find and export a person's data"
+description: "Answer a data-subject request: find what L2M stores about one person by identifier and export it as a zip downloaded once. Optional; off until used."
+---
+
 # Data-subject requests
 
 When someone asks what you hold about them, an admin (or a user with the `data_subject:manage` permission) makes a
@@ -127,7 +132,7 @@ The download is spent when it starts: if the file cannot be opened (the master k
 **Review the export before you pass it on.** A matched run, approval or memory session is exported whole, and it may
 name other people too (a support conversation about a second customer, a batch run).
 
-## Deleting a person's data
+## Deleting a person's data {#deleting-a-persons-data}
 
 Choose **Delete (erasure)** instead of **Export** when you make the request. The lookup runs exactly as for an export
 (references, and the search when it is on) and then stops at **Preview ready: confirm to delete**, showing what it found
