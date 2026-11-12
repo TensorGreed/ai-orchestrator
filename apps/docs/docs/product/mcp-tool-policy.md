@@ -214,6 +214,8 @@ Each tool is read-only or a write tool, decided in this order:
 
 The HTTP and stdio adapters keep the annotations a server sends: `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`. Annotations are hints from the server, not guarantees, which is why the admin override exists. Servers configured inline on a node have no registry entry, so their tools are read-only only through annotations.
 
+The same override decides whether the HTTP and stdio clients may send a tool call again after the connection or the server process broke before an answer arrived. Only read-only or idempotent tools are sent again; other calls fail as `outcome_unknown`. A tool marked read-only is sent again even without annotations, and a tool marked write is not sent again even if the server calls it read-only. A change applies within a few seconds on every instance.
+
 The built-in `mock-mcp` server marks `get_current_time` and `lookup_kb` read-only and leaves `calculator` unannotated, so `calculator` counts as a write tool. That makes it handy for trying the switch below.
 
 ## Annotation conditions

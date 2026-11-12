@@ -132,6 +132,46 @@ export function manualReadOnlyFor(
   return match ? match.readOnly : null;
 }
 
+/** How long the safe re-issue rule reuses one server's read-only marks before reading them again. */
+export const READ_ONLY_MARKS_TTL_MS = 5_000;
+
+/**
+ * The admins' read-only marks (tool policy classifications) as the MCP clients read them for the safe re-issue rule:
+ * one store read per server per `ttlMs` at most, since every tool call asks. `invalidate` drops a server's marks
+ * (this instance's change applies at once; other instances see it within `ttlMs`). A failed read is not cached and
+ * counts as "no mark" for that call.
+ */
+export function createReadOnlyMarkLookup(
+  load: (registryServerId: string) => Promise<readonly McpToolClassificationOverride[]>,
+  options: { ttlMs?: number; now?: () => number; maxServers?: number } = {}
+): { lookup: (registryServerId: string, toolName: string) => Promise<boolean | null>; invalidate: (registryServerId?: string) => void } {
+  const ttlMs = options.ttlMs ?? READ_ONLY_MARKS_TTL_MS;
+  const now = options.now ?? Date.now;
+  const maxServers = options.maxServers ?? 1000;
+  const cache = new Map<string, { at: number; marks: Promise<readonly McpToolClassificationOverride[]> }>();
+  return {
+    lookup: async (registryServerId, toolName) => {
+      let entry = cache.get(registryServerId);
+      if (!entry || now() - entry.at > ttlMs) {
+        const marks = load(registryServerId);
+        entry = { at: now(), marks };
+        cache.delete(registryServerId);
+        if (cache.size >= maxServers) cache.delete(cache.keys().next().value as string);
+        cache.set(registryServerId, entry);
+        const stored = entry;
+        marks.catch(() => {
+          if (cache.get(registryServerId) === stored) cache.delete(registryServerId);
+        });
+      }
+      return manualReadOnlyFor(await entry.marks, registryServerId, toolName);
+    },
+    invalidate: (registryServerId) => {
+      if (registryServerId === undefined) cache.clear();
+      else cache.delete(registryServerId);
+    }
+  };
+}
+
 export function evaluateToolForContext(
   context: McpToolMarkingContext,
   tool: { name: string; annotations?: McpToolAnnotations },

@@ -20,7 +20,8 @@ import type {
   MCPServerAdapter,
   McpOAuthTokenProvider,
   McpReadResourceOptions,
-  McpServerRequestOrigin
+  McpServerRequestOrigin,
+  McpToolReadOnlyOverride
 } from "../types";
 import {
   McpDelegatedCredentialError,
@@ -60,7 +61,7 @@ import {
   readSseStream,
   toProgressEvent
 } from "../progress";
-import { effectiveToolHints } from "../tool-policy";
+import { readOnlyOverrideFor, toolReissueSafe } from "../tool-policy";
 import {
   DEFAULT_MRTR_MAX_ROUNDS,
   MCP_CLIENT_MODERN_PROTOCOL_VERSION,
@@ -744,6 +745,11 @@ export interface HttpMcpProtocolOptions {
    * milliseconds; never longer than the server's own timeout. Default `DEFAULT_HTTP_ERA_PROBE_TIMEOUT_MS`.
    */
   probeTimeoutMs?: number;
+  /**
+   * An admin's read-only mark per registry tool (tool policy). It decides the safe re-issue rule before the
+   * server's annotations do. Unset: annotations only.
+   */
+  toolReadOnlyOverride?: McpToolReadOnlyOverride;
   /** Observed eras by endpoint, shared across runs. Defaults to one cache per adapter. */
   eraCache?: McpEraCache;
   /** Where warnings go (tools left out for invalid `x-mcp-header` annotations). Default `console.warn`. */
@@ -1288,13 +1294,13 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
   }
 
   /** D13 — whether a tool call may be sent again after a broken connection: read-only or idempotent tools only. */
-  private toolReissueSafe(session: PreparedSession, toolName: string, config: MCPServerConfig): boolean {
+  private async toolReissueSafe(session: PreparedSession, toolName: string, config: MCPServerConfig): Promise<boolean> {
     const annotations =
       (session.toolAnnotations ?? this.rememberedAnnotations.get(session.cacheKey))?.get(toolName) ??
       config.manualTools?.find((tool) => tool.name === toolName)?.annotations;
-    if (!annotations) return false;
-    const hints = effectiveToolHints(annotations);
-    return hints.readOnly || hints.idempotent;
+    // Without the rule (legacy, turned off) every call is sent again anyway: no lookup needed.
+    const manual = this.safeReissueApplies(session) ? await readOnlyOverrideFor(this.protocol.toolReadOnlyOverride, config.registryServerId, toolName) : null;
+    return toolReissueSafe(annotations, manual);
   }
 
   /** Whether the safe re-issue rule applies to this connection (always for modern; legacy unless turned off). */
@@ -1802,7 +1808,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
         );
       }
       const result = await this.modernCall(session, "tools/call", params, context, config, {
-        safe: this.toolReissueSafe(session, toolName, config),
+        safe: await this.toolReissueSafe(session, toolName, config),
         toolName,
         ...(onMessage ? { onMessage } : {}),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
@@ -1820,7 +1826,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
       toolName,
       ...(onMessage ? { onMessage } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      reissue: this.reissueMode(session, this.toolReissueSafe(session, toolName, config))
+      reissue: this.reissueMode(session, await this.toolReissueSafe(session, toolName, config))
     });
     return result.response;
   }
@@ -1956,10 +1962,10 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
    * connections have no session to renew, so only an era change sends a
    * call again (handled before this).
    */
-  private mayRetryCall(error: unknown, session: PreparedSession, toolName: string, config: MCPServerConfig): boolean {
+  private async mayRetryCall(error: unknown, session: PreparedSession, toolName: string, config: MCPServerConfig): Promise<boolean> {
     if (isCanceledError(error) || error instanceof McpOutcomeUnknownError || error instanceof McpInsufficientScopeError) return false;
     if (session.era === "modern") return false;
-    if (this.safeReissueApplies(session) && error instanceof McpTimeoutError && !this.toolReissueSafe(session, toolName, config)) {
+    if (this.safeReissueApplies(session) && error instanceof McpTimeoutError && !(await this.toolReissueSafe(session, toolName, config))) {
       return false;
     }
     return true;
@@ -1986,7 +1992,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
             throw this.settledEraError(config, retryError);
           }
         } else {
-          if (!this.mayRetryCall(error, session, toolName, config)) throw error;
+          if (!(await this.mayRetryCall(error, session, toolName, config))) throw error;
           // Retry once with a fresh session if the cached session is no longer
           // valid; an OAuth server answering 401 gets a refreshed token first.
           const unauthorized = error instanceof McpHttpError && error.status === 401 && authTypeOf(config) === "oauth";

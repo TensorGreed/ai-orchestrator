@@ -114,6 +114,13 @@ export interface McpOAuthTokenProvider {
   noteInsufficientScope?(registryServerId: string, scope: string | undefined, options?: McpAccessTokenOptions): Promise<void>;
 }
 
+/**
+ * An admin's read-only mark for a registry server's tool in tool policy: true or false when one is set, null (or
+ * undefined) when not. The HTTP and stdio clients read it for the safe re-issue rule (D13), where it wins over the
+ * server's own annotations. Lookups that fail count as "no mark".
+ */
+export type McpToolReadOnlyOverride = (registryServerId: string, toolName: string) => boolean | null | undefined | Promise<boolean | null | undefined>;
+
 export interface McpAccessTokenOptions {
   forceRefresh?: boolean;
   /**

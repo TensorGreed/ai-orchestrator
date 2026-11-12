@@ -706,6 +706,41 @@ describe("re-issuing after a broken connection (D13)", () => {
     expect(toolCalls(seen)).toHaveLength(2);
   });
 
+  it("an admin's read-only mark in tool policy decides re-issue before the server's annotations", async () => {
+    const asked: Array<[string, string]> = [];
+    const marks: Record<string, boolean> = { write_row: true, lookup: false };
+    const toolReadOnlyOverride = (serverId: string, toolName: string) => {
+      asked.push([serverId, toolName]);
+      return marks[toolName] ?? null;
+    };
+    for (const era of ["modern", "legacy"] as const) {
+      // Marked read-only by an admin: sent again although the server gives no hints.
+      const write = await startServer(brokenOnce(era, era === "modern" ? { sse: [] } : { destroy: true }));
+      const adapter = new HttpMCPServerAdapter({ protocol: { toolReadOnlyOverride } });
+      const config = { ...configFor(write.endpoint, { protocolMode: era }), registryServerId: "reg-1" };
+      const context = contextOf();
+      if (era === "legacy") await adapter.discoverTools(config, context);
+      expect(await adapter.invokeTool("write_row", {}, config, context), era).toMatchObject({ ok: true, output: "ran" });
+      expect(toolCalls(write.seen)).toHaveLength(2);
+
+      // Marked not read-only: an outcome_unknown failure although the server says read-only.
+      const read = await startServer(brokenOnce(era, era === "modern" ? { sse: [] } : { destroy: true }));
+      const readConfig = { ...configFor(read.endpoint, { protocolMode: era }), registryServerId: "reg-1" };
+      if (era === "legacy") await adapter.discoverTools(readConfig, context);
+      expect(await adapter.invokeTool("lookup", {}, readConfig, context), era).toMatchObject({ ok: false, errorKind: "outcome_unknown" });
+      expect(toolCalls(read.seen)).toHaveLength(1);
+    }
+    expect(asked).toContainEqual(["reg-1", "write_row"]);
+    // A lookup that fails counts as no mark; inline servers (no registry id) are never looked up.
+    const failing = await startServer(brokenOnce("modern", { sse: [] }));
+    const adapter = new HttpMCPServerAdapter({ protocol: { toolReadOnlyOverride: () => Promise.reject(new Error("store down")) } });
+    expect(await adapter.invokeTool("lookup", {}, { ...configFor(failing.endpoint, { protocolMode: "modern" }), registryServerId: "reg-1" }, contextOf())).toMatchObject({ ok: true });
+    asked.length = 0;
+    const inline = await startServer(brokenOnce("modern", { sse: [] }));
+    await new HttpMCPServerAdapter({ protocol: { toolReadOnlyOverride } }).invokeTool("write_row", {}, configFor(inline.endpoint, { protocolMode: "modern" }), contextOf());
+    expect(asked).toEqual([]);
+  });
+
   it("legacy: a timed-out write is not sent again, and the server is told to stop", async () => {
     const { endpoint, seen } = await startServer(legacyServer((rpc) => (rpc.method === "tools/call" ? { hang: true } : { status: 202, text: "" })));
     const adapter = new HttpMCPServerAdapter();

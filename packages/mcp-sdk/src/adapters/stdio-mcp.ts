@@ -17,7 +17,7 @@ import type {
   TraceCarrier
 } from "@ai-orchestrator/shared";
 import { MCP_OUTCOME_ATTRIBUTES } from "@ai-orchestrator/shared";
-import type { MCPExecutionContext, MCPServerAdapter, McpReadResourceOptions, McpServerRequestOrigin } from "../types";
+import type { MCPExecutionContext, MCPServerAdapter, McpReadResourceOptions, McpServerRequestOrigin, McpToolReadOnlyOverride } from "../types";
 import {
   McpJsonRpcError,
   McpMissingClientCapabilityError,
@@ -52,7 +52,7 @@ import {
   toProgressEvent,
   type ParsedProgress
 } from "../progress";
-import { effectiveToolHints } from "../tool-policy";
+import { readOnlyOverrideFor, toolReissueSafe } from "../tool-policy";
 import {
   DEFAULT_MRTR_MAX_ROUNDS,
   MCP_CLIENT_MODERN_PROTOCOL_VERSION,
@@ -180,6 +180,11 @@ export interface StdioMcpProtocolOptions {
    * request timeout. `modern` connections wait the full request timeout.
    */
   probeTimeoutMs?: number;
+  /**
+   * An admin's read-only mark per registry tool (tool policy). It decides the safe re-issue rule before the
+   * server's annotations do. Unset: annotations only.
+   */
+  toolReadOnlyOverride?: McpToolReadOnlyOverride;
   /** Observed eras by launch plan, shared across runs. Defaults to one cache per adapter. */
   eraCache?: McpEraCache;
 }
@@ -1783,13 +1788,11 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   }
 
   /** D13 — whether a tool call may be sent again after the process died: read-only or idempotent tools only. */
-  private toolReissueSafe(session: StdioSession, toolName: string, config: MCPServerConfig): boolean {
+  private async toolReissueSafe(session: StdioSession, toolName: string, config: MCPServerConfig): Promise<boolean> {
     const annotations =
       (session.toolAnnotations ?? this.rememberedAnnotations.get(session.sessionKey))?.get(toolName) ??
       config.manualTools?.find((tool) => tool.name === toolName)?.annotations;
-    if (!annotations) return false;
-    const hints = effectiveToolHints(annotations);
-    return hints.readOnly || hints.idempotent;
+    return toolReissueSafe(annotations, await readOnlyOverrideFor(this.protocol.toolReadOnlyOverride, config.registryServerId, toolName));
   }
 
   /** Whether the safe re-issue rule applies to this session (always for modern; legacy unless turned off). */
@@ -1826,7 +1829,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
           if (
             firstError instanceof McpStdioConnectionLostError &&
             this.safeReissueApplies(session) &&
-            !this.toolReissueSafe(session, toolName, config)
+            !(await this.toolReissueSafe(session, toolName, config))
           ) {
             throw new McpOutcomeUnknownError(
               `MCP stdio tool '${toolName}' got no answer: ${firstError.message} It was not sent again because the tool is not marked read-only or idempotent, so it may or may not have run.`
