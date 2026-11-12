@@ -70,6 +70,7 @@ import {
 } from "../db/subject-store.js";
 import { yieldToEventLoop } from "../db/retention-tables.js";
 import {
+  ERASED_RUN_SCRUB_HOURS,
   memoryArtifactTombstoneId,
   memorySessionTombstoneId,
   staffEmails,
@@ -742,7 +743,12 @@ export class SubjectRequestService {
       const state = readState(record.progress);
       if (!state.deletion) continue;
       const at = this.now().toISOString();
-      const progress = { ...state, found: deferredOf(record), deletion: { ...state.deletion, index: 0 } };
+      // Each row is tried afresh: a run that was waiting and is now held is reported as held, not waiting.
+      const found = deferredOf(record).map((row) => {
+        const { busy: _busy, ...rest } = row as FoundRow & { busy?: boolean };
+        return rest as FoundRow;
+      });
+      const progress = { ...state, found, deletion: { ...state.deletion, index: 0 } };
       if (await store.updateSubjectRequest(record.id, { status: "running", progress, deferred: [], updatedAt: at }, "deferred_by_hold")) {
         requeued += 1;
         await this.options.audit?.({
@@ -915,6 +921,14 @@ export class SubjectRequestService {
       if (requeued > 0) this.options.logger?.info({ requests: requeued }, "Re-queued deletions a legal hold had deferred");
     } catch (error) {
       this.options.logger?.warn({ error: this.message(error) }, "Could not re-queue deferred deletions");
+    }
+    try {
+      // What an executor wrote for a run after its erasure (a canceled run still stopping, or a write racing the delete).
+      const since = new Date(now.getTime() - ERASED_RUN_SCRUB_HOURS * HOUR_MS).toISOString();
+      const scrubbed = await store.scrubErasedRuns(since, TOMBSTONES_PER_SWEEP);
+      if (scrubbed > 0) this.options.logger?.info({ rows: scrubbed }, "Deleted rows written for erased runs after their erasure");
+    } catch (error) {
+      this.options.logger?.warn({ error: this.message(error) }, "Could not delete rows written for erased runs after their erasure");
     }
     try {
       const days = this.options.tombstoneRetentionDays ?? ERASURE_TOMBSTONE_DEFAULT_RETENTION_DAYS;

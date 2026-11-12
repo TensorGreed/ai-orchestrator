@@ -12,8 +12,11 @@ import {
   RESTORE_SKIPPED_KIND,
   STAFF_AUTHORSHIP_COLUMNS,
   STAFF_BATCH,
+  LATE_RECORDINGS_SQL,
+  RECENT_RUN_TOMBSTONES_SQL,
   RUN_ACTIVE_CHECKS,
   deletionTombstones,
+  idErasureStatements,
   isRunKind,
   memoryArtifactErasureStatements,
   memorySessionErasureStatements,
@@ -14973,6 +14976,30 @@ export class SqliteStore implements Store {
       if (erasure) this.writeErasureTombstonesSync(deletionTombstones(kind, id, outcome, erasure));
       return outcome;
     });
+  }
+
+  /** 13.3 — see Store.scrubErasedRuns. */
+  async scrubErasedRuns(since: string, limit: number): Promise<number> {
+    const tombstones = this.queryAll<{ row_id: string; request_id: string | null; erased_at: string }>(RECENT_RUN_TOMBSTONES_SQL, [since, Math.max(0, Math.floor(limit))]);
+    let changed = 0;
+    for (const tombstone of tombstones) {
+      const id = toString(tombstone.row_id);
+      changed += this.transaction(() => {
+        if (RUN_ACTIVE_CHECKS.some((sql) => Boolean(this.queryOne(sql, [id])))) return 0;
+        for (const target of subjectRowHoldTargets("production_execution", id)) if (this.legalHoldsOnSync(target).length > 0) return 0;
+        let rows = this.runErasureSync(idErasureStatements("run", id) ?? []);
+        const erasure = { requestId: tombstone.request_id === null ? null : toString(tombstone.request_id), erasedAt: toString(tombstone.erased_at) };
+        for (const recording of this.queryAll<{ id: string }>(LATE_RECORDINGS_SQL, [id, erasure.erasedAt])) {
+          const recordingId = toString(recording.id);
+          if (subjectRowHoldTargets("recording", recordingId).some((target) => this.legalHoldsOnSync(target).length > 0)) continue;
+          const outcome = this.deleteSubjectRowSync("recording", recordingId);
+          this.writeErasureTombstonesSync(deletionTombstones("recording", recordingId, outcome, erasure));
+          if (outcome.deleted) rows += 1 + outcome.cascaded.length;
+        }
+        return rows;
+      });
+    }
+    return changed;
   }
 
   /** 13.3 — whether a run is still in flight (RUN_ACTIVE_CHECKS). */

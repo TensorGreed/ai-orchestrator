@@ -332,7 +332,7 @@ for (const kind of kinds) {
     });
 
     it("waits for a run still in flight: its executor finishes it, then the sweep deletes it and no late write brings it back", async () => {
-      const { store, service } = await setup();
+      const { store, service, clock } = await setup();
       await store.upsertWorkflow(WORKFLOW);
       await seedRun(store, service, "run-1", "CUST-777");
       const finalWrite = {
@@ -375,6 +375,33 @@ for (const kind of kinds) {
       expect(await count(store, "execution_history", "id = 'run-1'")).toBe(0);
       expect(await service.recordRunRefs({ executionId: "run-1", workflow: WORKFLOW, run: { input: { customerId: "CUST-777" }, sessionId: "sess-run-1" } })).toBe(0);
       expect(await count(store, "subject_refs", "row_id = 'run-1'")).toBe(0);
+
+      // Rows the executor wrote after the erasure (a history row raced in under the guard, a tool call, the usage user,
+      // a recording captured from it): the sweep deletes them again, and keeps none of the person.
+      const sql = testSql(store);
+      const late = new Date(T0.getTime() + 60_000).toISOString();
+      await sql.run("INSERT INTO execution_history (id, workflow_id, status, started_at, input_json) VALUES ('run-1', ?, 'canceled', ?, '{\"customerId\":\"CUST-777\"}')", WORKFLOW.id, AT);
+      await sql.run(
+        "INSERT INTO mcp_tool_calls (id, execution_id, workflow_id, node_id, adapter_id, tool_name, started_at, ok) VALUES ('tc-late', 'run-1', ?, 'n', 'mock-mcp', 'lookup', ?, 1)",
+        WORKFLOW.id, AT
+      );
+      await sql.run(
+        `INSERT INTO usage_events (id, execution_id, workflow_id, user_id, user_email, status, total_tokens, cost_usd, created_at)
+         VALUES ('ue-late', 'run-1', ?, 'u-op', 'op@example.com', 'success', 7, 0.2, ?)`,
+        WORKFLOW.id, AT
+      );
+      await sql.run(
+        `INSERT INTO replay_recordings (id, workflow_id, name, source_status, workflow_hash, captured_workflow_json, node_outputs_json, facts_json, capabilities_json, bytes, created_at, status, captured_at, source_execution_id)
+         VALUES ('rec-late', ?, 'Capture', 'success', 'h', '{}', '{}', '{}', '{}', 2, ?, 'candidate', ?, 'run-1')`,
+        WORKFLOW.id, late, late
+      );
+      clock.now = new Date(T0.getTime() + 5 * 60_000);
+      await service.sweep();
+      expect(await count(store, "execution_history", "id = 'run-1'")).toBe(0);
+      expect(await count(store, "mcp_tool_calls", "execution_id = 'run-1'")).toBe(0);
+      expect(await count(store, "replay_recordings", "id = 'rec-late'")).toBe(0);
+      expect(await count(store, "erasure_tombstones", "row_id = 'rec-late'")).toBe(1);
+      expect(await sql.all("SELECT user_id, user_email, total_tokens FROM usage_events WHERE id = 'ue-late'")).toEqual([{ user_id: null, user_email: null, total_tokens: 7 }]);
     });
 
     it("a pass that made progress resets the error count, so one more error after two failed passes does not fail it", async () => {
@@ -398,6 +425,28 @@ for (const kind of kinds) {
       expect(done.error).toBeNull();
       expect(done.status).toBe("done");
       expect(await count(store, "execution_history")).toBe(0);
+    });
+
+    it("a waiting run that a legal hold keeps once it has finished is reported as held, not waiting", async () => {
+      const { store, service } = await setup();
+      await store.upsertWorkflow(WORKFLOW);
+      await seedRun(store, service, "run-1", "CUST-777");
+      await testSql(store).run("UPDATE execution_history SET status = 'running' WHERE id = 'run-1'");
+      const created = await service.create({ type: "delete", subjectKind: "end_user", value: "cust-777", scan: false, revealTokens: false }, ADMIN);
+      await settle(service);
+      await service.confirm(created.id, ADMIN);
+      await settle(service);
+      expect((await service.get(created.id))!.deletion).toMatchObject({ deferred: 0, waitingForRuns: 1 });
+      await store.placeLegalHold({
+        id: "h-w", name: "M", reason: "r", matterRef: null, scopeType: "workflow", scopeId: WORKFLOW.id, endsAt: null, createdBy: null, createdAt: AT, items: []
+      });
+      await testSql(store).run("UPDATE execution_history SET status = 'success' WHERE id = 'run-1'");
+      expect(await service.requeueDeferred()).toBe(1);
+      await settle(service);
+      const held = (await service.get(created.id))!;
+      expect(held.status).toBe("deferred_by_hold");
+      expect(held.deletion).toMatchObject({ deferred: 1, waitingForRuns: 0 });
+      expect(await count(store, "execution_history", "id = 'run-1'")).toBe(1);
     });
 
     it("treats a resuming run and a run with an open queue job as in flight", async () => {

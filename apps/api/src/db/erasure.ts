@@ -112,6 +112,16 @@ export const RUN_ACTIVE_CHECKS = [
   "SELECT 1 AS busy FROM execution_queue WHERE execution_id = ? AND status IN ('pending', 'running')"
 ] as const;
 
+/** Run tombstones erased within this window are scrubbed again on each sweep (rows a finishing executor wrote late). */
+export const ERASED_RUN_SCRUB_HOURS = 24;
+
+/** Recent run tombstones, oldest first (the sweep's scrub). */
+export const RECENT_RUN_TOMBSTONES_SQL =
+  "SELECT row_id, request_id, erased_at FROM erasure_tombstones WHERE kind = 'run' AND erased_at >= ? ORDER BY erased_at, row_id LIMIT ?";
+
+/** Recordings captured from a run after it was erased. */
+export const LATE_RECORDINGS_SQL = "SELECT id FROM replay_recordings WHERE source_execution_id = ? AND created_at >= ?";
+
 /** The subject row kinds that are runs. */
 export function isRunKind(kind: SubjectDeleteKind): boolean {
   return kind === "execution" || kind === "production_execution" || kind === "paused_run";

@@ -18,9 +18,12 @@ import type { PgContext } from "./context.js";
 import { LEGAL_HOLD_LOCK_SHARED_SQL, toPgPlaceholders } from "../legal-hold-sql.js";
 import {
   CLEAR_RUN_USAGE_SQL,
+  LATE_RECORDINGS_SQL,
+  RECENT_RUN_TOMBSTONES_SQL,
   RUN_ACTIVE_CHECKS,
   deletionTombstones,
   holdsOnAny,
+  idErasureStatements,
   isRunKind,
   memoryArtifactErasureStatements,
   memorySessionErasureStatements,
@@ -128,18 +131,55 @@ export async function deleteSubjectRow(ctx: PgContext, kind: SubjectDeleteKind, 
     await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
     const heldBy = await holdsOnAny(subjectRowHoldTargets(kind, id), async (target) => await legalHoldsOnWith(client, target));
     if (heldBy.length > 0) return { deleted: false, cascaded: [], heldBy };
-    // 13.3 — a run in flight would be written back by its executor: it waits. FOR UPDATE makes a concurrent executor
-    // write wait for this transaction, which then finds the run tombstone and writes nothing.
+    // 13.3 — a run in flight would be written back by its executor: it waits. The run's rows are locked first, whatever
+    // their status, so a resume claim or queue claim cannot commit between the check and the delete. An executor write
+    // already blocked on the history row can still insert it again once this commits (its tombstone check ran before);
+    // the sweep's scrubErasedRuns deletes such late rows.
     if (isRunKind(kind)) {
-      for (const sql of RUN_ACTIVE_CHECKS) {
-        if (((await client.query(toPgPlaceholders(`${sql} FOR UPDATE`), [id])).rowCount ?? 0) > 0) return { deleted: false, cascaded: [], busy: true };
-      }
       await client.query(`SELECT 1 FROM execution_history WHERE id = $1 FOR UPDATE`, [id]);
+      await client.query(`SELECT 1 FROM workflow_executions WHERE id = $1 FOR UPDATE`, [id]);
+      await client.query(`SELECT 1 FROM execution_queue WHERE execution_id = $1 FOR UPDATE`, [id]);
+      for (const sql of RUN_ACTIVE_CHECKS) {
+        if (((await client.query(toPgPlaceholders(sql), [id])).rowCount ?? 0) > 0) return { deleted: false, cascaded: [], busy: true };
+      }
     }
     const outcome = await deleteSubjectRowWith(client, kind, id);
     if (erasure) await writeErasureTombstonesWith(client, deletionTombstones(kind, id, outcome, erasure));
     return outcome;
   });
+}
+
+/** 13.3 — see Store.scrubErasedRuns (one transaction per run, under the shared legal-hold lock, as deleteSubjectRow). */
+export async function scrubErasedRuns(ctx: PgContext, since: string, limit: number): Promise<number> {
+  const tombstones = await ctx.query<{ row_id: string; request_id: string | null; erased_at: unknown }>(
+    toPgPlaceholders(RECENT_RUN_TOMBSTONES_SQL),
+    [since, Math.max(0, Math.floor(limit))]
+  );
+  let changed = 0;
+  for (const tombstone of tombstones) {
+    const id = String(tombstone.row_id);
+    const erasedAt = tombstone.erased_at instanceof Date ? tombstone.erased_at.toISOString() : String(tombstone.erased_at);
+    changed += await ctx.withTransaction(async (client) => {
+      await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+      await client.query(`SELECT 1 FROM execution_history WHERE id = $1 FOR UPDATE`, [id]);
+      await client.query(`SELECT 1 FROM workflow_executions WHERE id = $1 FOR UPDATE`, [id]);
+      await client.query(`SELECT 1 FROM execution_queue WHERE execution_id = $1 FOR UPDATE`, [id]);
+      for (const sql of RUN_ACTIVE_CHECKS) if (((await client.query(toPgPlaceholders(sql), [id])).rowCount ?? 0) > 0) return 0;
+      const held = await holdsOnAny(subjectRowHoldTargets("production_execution", id), async (target) => await legalHoldsOnWith(client, target));
+      if (held.length > 0) return 0;
+      let rows = await runStatements(client, idErasureStatements("run", id) ?? []);
+      const erasure = { requestId: tombstone.request_id === null ? null : String(tombstone.request_id), erasedAt };
+      for (const recordingId of await ids(client, toPgPlaceholders(LATE_RECORDINGS_SQL), [id, erasedAt])) {
+        const recordingHeld = await holdsOnAny(subjectRowHoldTargets("recording", recordingId), async (target) => await legalHoldsOnWith(client, target));
+        if (recordingHeld.length > 0) continue;
+        const outcome = await deleteSubjectRowWith(client, "recording", recordingId);
+        await writeErasureTombstonesWith(client, deletionTombstones("recording", recordingId, outcome, erasure));
+        if (outcome.deleted) rows += 1 + outcome.cascaded.length;
+      }
+      return rows;
+    });
+  }
+  return changed;
 }
 
 async function runStatements(client: PoolClient, statements: ErasureStatement[]): Promise<number> {

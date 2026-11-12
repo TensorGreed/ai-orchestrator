@@ -784,6 +784,30 @@ describe("with service accounts and signed-in sessions", () => {
     expect((await booted.app.inject({ method: "DELETE", url: `/api/users/${tia.id}`, ...as(session) })).statusCode).toBe(200);
   });
 
+  it("M2: with step-up on, a service account's admin key cannot confirm a staff erasure that deletes a person's account", async () => {
+    const booted = await boot({ STEP_UP_MAX_AGE_MINUTES: "10" });
+    const { session, mintKey } = await adminWithServiceAccount(booted);
+    const tia = await register(booted, "tia@example.com", "builder");
+    const key = await mintKey({ role: "admin" });
+    const created = await booted.app.inject({
+      method: "POST",
+      url: "/api/data-protection/requests",
+      payload: { type: "delete", subjectKind: "staff", value: "tia@example.com" },
+      ...as(session)
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const id = (created.json() as { id: string }).id;
+    for (let tries = 0; tries < 100; tries += 1) {
+      const view = (await booted.app.inject({ method: "GET", url: `/api/data-protection/requests/${id}`, ...as(session) })).json() as { status: string };
+      if (view.status === "ready") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const refused = await booted.app.inject({ method: "POST", url: `/api/data-protection/requests/${id}/confirm`, payload: {}, headers: key });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ code: "step_up_required", stepUp: { action: "user.delete", credential: "api_key", target: "person" } });
+    expect(await booted.store.getUserById(tia.id)).not.toBeNull();
+  });
+
   it("M2 is a step-up rule: with step-up off, keys behave as before on those routes", async () => {
     const booted = await boot();
     const { mintKey } = await adminWithServiceAccount(booted);

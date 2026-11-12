@@ -802,7 +802,7 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Change a project's data retention | `PUT /api/projects/:id/retention` |
 | Make a data-subject export that reveals tokenised values | `POST /api/data-protection/requests` with `revealTokens: true` |
 | Download a data-subject export | `GET /api/data-protection/requests/:id/export` |
-| Confirm a data-subject deletion | `POST /api/data-protection/requests/:id/confirm` (a staff erasure of an existing account is admin-only) |
+| Confirm a data-subject deletion | `POST /api/data-protection/requests/:id/confirm` (a staff erasure of an existing account is admin-only and also needs the `user.delete` check, which refuses a service-account key) |
 
 **API keys.** With step-up on, personal API keys are refused on these actions with `403 step_up_required`
 (`stepUp.credential: "api_key"`): a key cannot answer a code, and a stolen personal key should not mint more keys or
