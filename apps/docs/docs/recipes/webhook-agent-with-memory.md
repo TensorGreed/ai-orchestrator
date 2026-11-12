@@ -33,7 +33,7 @@ A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `
 
 1. Download <a href="/docs/recipes/files/agentic-mcp-flow.json" download>agentic-mcp-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/agentic-mcp-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. Open the chat model node and point it at a model you have: pull `qwen2.5:7b` into Ollama, type another model name, or switch the provider. In Docker, `localhost` is the container, so use the host's address for Ollama. To check the webhook and memory first without a model, set the provider to echo. Save.
+3. Open the chat model node and point it at a model you have: pull `qwen2.5:7b` into Ollama, type another model name, or switch the provider. In Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host. To check the webhook and memory first without a model, set the provider to echo. Save.
 4. Send a request:
 
    ```bash
@@ -67,7 +67,7 @@ A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `
 
 Two things are worth knowing before you call it from an app.
 
-**A model error comes back as the answer.** If the chat model call fails (the model is not pulled, the server is down, the key is wrong), the agent does not fail the run. It returns the error message as its answer, such as `Provider ollama request failed (404): ...`, with `stopReason: "error"`, and the webhook replies with that text in `output.result`. If an app gets text like that back, open the run and look at the Agent node.
+**A model error comes back as the answer.** If the chat model call fails (the model is not pulled, the server is down, the key is wrong), the agent usually does not fail the run. It returns the error message as its answer, such as `Provider ollama request failed (404): ...`, with `stopReason: "error"`, and the webhook replies with that text in `output.result`. If an app gets text like that back, open the run and look at the Agent node.
 
 **Memory, checked with the echo model.** To test the webhook and memory without a model, we set the chat model to the built-in echo provider. Two requests with `session_id: "demo-2"` returned `Echo: What is 12 * 7?` and then `Echo: And what time is it in Toronto?`. The second run's agent messages held the first question and answer before the new question: that is the memory. Echo never calls tools, so this check says nothing about tool use; a model that supports tool calling can call `get_current_time` and `calculator`.
 

@@ -28,7 +28,7 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     slug: "mcp-resource",
     term: "MCP resource",
     topic: "mcp",
-    definition: "Data an MCP server shares by URI, such as a file or a record, for the application to read. Unlike a tool, the model does not call it.",
+    definition: "Data an MCP server shares by URI, such as a file or a record, for the application to read. Unlike a tool, it is usually the application, not the model, that decides when to read it.",
     docs: "/product/mcp-server-registry#resources-and-prompts"
   },
   {
@@ -42,7 +42,7 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     slug: "mcp-session",
     term: "MCP session",
     topic: "mcp",
-    definition: "Over Streamable HTTP, the state that ties a client's requests together: the server returns an Mcp-Session-Id when the client initializes, and the client sends it with every later request.",
+    definition: "Over Streamable HTTP, the state that ties a client's requests together: if the server returns an MCP-Session-Id when the client initializes, the client sends it with every later request.",
     docs: "/product/mcp-gateway"
   },
   {
@@ -56,7 +56,7 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     slug: "elicitation",
     term: "Elicitation (MCP)",
     topic: "mcp",
-    definition: "An MCP server pausing a tool call to ask the person for input, through the client, with a message and a simple form schema.",
+    definition: "An MCP server asking the person for input through the client, usually while it handles a request such as a tool call: a message with a simple form, or a URL to open for sensitive steps.",
     docs: "/product/mcp-server-registry#elicitation-a-server-asks-the-person-a-question"
   },
   {
@@ -147,8 +147,7 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     slug: "tool-shadowing",
     term: "Tool shadowing",
     topic: "security",
-    definition: "One MCP server's tool descriptions changing how an agent uses another server's tools, for example by telling it to copy data into every email it sends.",
-    docs: "/runtime/agent-loop#tool-names-the-model-sees"
+    definition: "One MCP server's tool descriptions changing how an agent uses another server's tools, for example by telling it to copy data into every email it sends."
   },
   {
     slug: "jailbreak",

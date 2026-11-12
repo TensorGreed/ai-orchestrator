@@ -15,7 +15,7 @@ const items = computed(() => {
 });
 if (import.meta.env.SSR) {
   const wanted = props.terms ?? [];
-  for (const slug of wanted) if (!glossary.some((term) => term.slug === slug)) console.warn(`[glossary] related term "${slug}" has no glossary page`);
+  for (const slug of wanted) if (!glossary.some((term) => term.slug === slug)) console.warn(`[glossary] related term "${slug}" is not a glossary term (no page and no index entry)`);
 }
 </script>
 
