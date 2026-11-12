@@ -250,7 +250,7 @@ export function SubjectRequestsSection() {
         {type === "delete" && subjectKind === "staff" && (
           <p className="settings-muted">
             Their email is replaced with a pseudonym wherever it records who started, wrote or decided something, and
-            their account is deleted. Their audit-log rows are kept for security logging.
+            their account is deleted. Their audit-log rows are kept for security logging. Only an admin can confirm it.
           </p>
         )}
         {formError && <div className="settings-error">{formError}</div>}

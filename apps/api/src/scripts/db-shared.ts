@@ -665,7 +665,13 @@ export interface ImportOptions {
    * replace, and `carry`, e.g. read from a newer backup) is re-applied with the subject key opened by `masterKey`.
    * `skip` re-applies nothing and leaves a marker the next API start audits.
    */
-  erasures?: { skip?: boolean; masterKey?: Buffer | null; carry?: ReadonlyArray<Record<string, unknown>> };
+  erasures?: {
+    skip?: boolean;
+    masterKey?: Buffer | null;
+    carry?: ReadonlyArray<Record<string, unknown>>;
+    /** The subject_ref_keys rows of the backup the carried tombstones come from (they are keyed with its key). */
+    carryKeys?: ReadonlyArray<Record<string, unknown>>;
+  };
   /** Rows of a table as they go in (db:import re-encrypts secrets here); returns the rows and how many were changed. */
   prepare?: (table: string, rows: Record<string, unknown>[]) => { rows: Record<string, unknown>[]; touched: number };
   log?: (line: string) => void;
@@ -769,6 +775,8 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
     const auditWasEmpty = !options.merge || !restoresAudit || (await adapter.countChainedAuditRows()) === 0;
     // 13.3 — the destination's own tombstones survive a replace: an older backup must not bring back what was erased since.
     const kept = options.merge ? [] : await readTombstones(adapter);
+    // Its subject key too: the kept tombstones of memory and staff are keyed with it.
+    const keptKeys = options.merge ? [] : await readSubjectKeys(adapter);
     if (!options.merge) {
       // Every exported table, so nothing of what the destination held survives next to the backup (and rows a
       // migration seeded are replaced by the backup's), and the destination's sessions. Reverse order, so a later
@@ -813,7 +821,14 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
       tables.push({ table, action: "restored", rows: prepared.length });
       log(`  ${table}: restored, ${prepared.length} rows${touched > 0 ? ` (${touched} re-encrypted)` : ""}`);
     }
-    const erasures = await restoreErasures(adapter, [...kept, ...(options.erasures?.carry ?? [])], options, log, warn);
+    const erasures = await restoreErasures(
+      adapter,
+      [...kept, ...(options.erasures?.carry ?? [])],
+      [...keptKeys, ...(options.erasures?.carryKeys ?? [])],
+      options,
+      log,
+      warn
+    );
     if (notInBackup.length > 0) {
       warn(
         `Note: the backup does not hold ${notInBackup.length} table(s) this build exports (${notInBackup.slice(0, 8).join(", ")}` +
@@ -877,21 +892,49 @@ async function readTombstones(adapter: BackupAdapter): Promise<Array<Record<stri
   }
 }
 
-/** Adds the carried tombstones the restored table lacks, then re-applies them all (or records the skip). */
+/** The destination's subject key rows (none on a schema without the table). */
+async function readSubjectKeys(adapter: BackupAdapter): Promise<Array<Record<string, unknown>>> {
+  try {
+    return await adapter.all("SELECT * FROM subject_ref_keys", []);
+  } catch (error) {
+    if (isMissingTableError(error)) return [];
+    throw error;
+  }
+}
+
+/**
+ * Adds the carried tombstones the restored table lacks, then re-applies them all (or records the skip). A backup
+ * written before the first data-subject request has no subject key: the destination's (or the carried backup's) is
+ * kept, so references and tombstones keyed with it keep matching. Carried tombstones keyed with another key are
+ * re-applied with that key as well.
+ */
 async function restoreErasures(
   adapter: BackupAdapter,
   carry: ReadonlyArray<Record<string, unknown>>,
+  carryKeys: ReadonlyArray<Record<string, unknown>>,
   options: ImportOptions,
   log: (line: string) => void,
   warn: (line: string) => void
 ): Promise<RestoreErasuresReport & { carried: number }> {
+  if (carryKeys.length > 0 && (await adapter.all("SELECT id FROM subject_ref_keys", [])).length === 0) {
+    const first = carryKeys.find((row) => row.id === "default") ?? carryKeys[0]!;
+    await adapter.insertRows("subject_ref_keys", [first]);
+    log("  subject_ref_keys: the backup holds none; the destination's subject key is kept");
+  }
+  const extraSealedKeys = carryKeys.map((row) => row.key_sealed).filter((value): value is string => typeof value === "string");
   const present = new Set((await adapter.all("SELECT kind, row_id FROM erasure_tombstones", [])).map((row) => `${String(row.kind)}\u0000${String(row.row_id)}`));
   const missing = tombstoneRows(carry).filter((row) => !present.has(`${row.kind}\u0000${row.row_id}`));
   if (missing.length > 0) {
     await adapter.insertRows("erasure_tombstones", missing);
     log(`  erasure_tombstones: ${missing.length} kept from the destination or carried in (erased after the backup was written)`);
   }
-  const report = await reapplyAfterRestore(adapter, { skip: options.erasures?.skip, masterKey: options.erasures?.masterKey ?? null, log, warn });
+  const report = await reapplyAfterRestore(adapter, {
+    skip: options.erasures?.skip,
+    masterKey: options.erasures?.masterKey ?? null,
+    extraSealedKeys,
+    log,
+    warn
+  });
   return { ...report, carried: missing.length };
 }
 

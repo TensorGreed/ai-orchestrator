@@ -92,6 +92,9 @@ export function runErasureStatements(executionId: string): ErasureStatement[] {
   ];
 }
 
+/** The holdable tables a run's delete takes rows of by `execution_id` (runErasureStatements). */
+export const RUN_SIDE_HOLDABLE = ["mcp_tool_calls", "guard_events", "mcp_cassettes", "approval_requests", "execution_queue"] as const;
+
 /** Clears the person from a run's usage rows; tokens and cost stay. */
 export const CLEAR_RUN_USAGE_SQL = "UPDATE usage_events SET user_id = NULL, user_email = NULL WHERE execution_id = ? AND (user_id IS NOT NULL OR user_email IS NOT NULL)";
 
@@ -314,18 +317,40 @@ export interface ReapplyReport {
   rowsChanged: number;
   /** Tombstones named by a keyed hash that could not be re-applied without the subject key. */
   needKey: number;
+  /**
+   * Keyed rows left alone: a memory session or account created after its erasure (the same session id or email used
+   * again), a staff member's rows a legal hold keeps, and the only admin who can sign in.
+   */
+  rowsKept: number;
+}
+
+/** A timestamp as either driver returns it (Date, ISO text, or SQLite `YYYY-MM-DD HH:MM:SS` in UTC); NaN when unknown. */
+export function timeOf(value: unknown): number {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value !== "string" || value === "") return Number.NaN;
+  const sqlite = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(value) ? `${value.replace(" ", "T")}Z` : value;
+  return Date.parse(sqlite);
+}
+
+/** Whether a row created at `createdAt` predates (or may predate: unknown time) an erasure at `erasedAt`. */
+function createdBy(createdAt: unknown, erasedAt: number): boolean {
+  const created = timeOf(createdAt);
+  return Number.isNaN(created) || Number.isNaN(erasedAt) || created <= erasedAt;
 }
 
 /**
- * Re-applies every tombstone in the restored database (holds are not consulted: a tombstone records a row that was
- * really erased). `subjectKey` (opened from subject_ref_keys) is needed for memory sessions and staff members only.
+ * Re-applies every tombstone in the restored database. A tombstone named by its row id records a row that was really
+ * erased, so holds are not consulted for it (an erased row cannot be held). Tombstones named by a keyed hash need
+ * `subjectKey` (opened from subject_ref_keys) and match by value, so they are re-applied only to rows created before
+ * the erasure (a session id or email used again later is another person's, or a re-hired one's), staff authorship rows
+ * a legal hold keeps are left as the live erasure left them, and the only admin who can sign in is never deleted.
  */
 export async function reapplyErasures(exec: ErasureExecutor, subjectKey: Buffer | null): Promise<ReapplyReport> {
-  const rows = (await exec.all("SELECT kind, row_id FROM erasure_tombstones ORDER BY erased_at, kind, row_id", [])) as unknown as TombstoneRow[];
-  const report: ReapplyReport = { erasures: 0, rowsChanged: 0, needKey: 0 };
-  const sessions = new Set<string>();
-  const artifacts = new Set<string>();
-  const staff = new Set<string>();
+  const rows = (await exec.all("SELECT kind, row_id, erased_at FROM erasure_tombstones ORDER BY erased_at, kind, row_id", [])) as unknown as TombstoneRow[];
+  const report: ReapplyReport = { erasures: 0, rowsChanged: 0, needKey: 0, rowsKept: 0 };
+  const sessions = new Map<string, number>();
+  const artifacts = new Map<string, number>();
+  const staff = new Map<string, number>();
   for (const row of rows) {
     const kind = String(row.kind) as ErasureKind;
     const rowId = String(row.row_id);
@@ -340,44 +365,98 @@ export async function reapplyErasures(exec: ErasureExecutor, subjectKey: Buffer 
       report.needKey += 1;
       continue;
     }
-    (kind === "memory_session" ? sessions : kind === "memory_artifact" ? artifacts : staff).add(rowId);
+    const target = kind === "memory_session" ? sessions : kind === "memory_artifact" ? artifacts : staff;
+    // The latest erasure of the same value counts.
+    target.set(rowId, Math.max(target.get(rowId) ?? Number.NEGATIVE_INFINITY, timeOf(row.erased_at)));
     report.erasures += 1;
   }
   if (!subjectKey) return report;
 
   if (sessions.size > 0) {
-    const keys = await exec.all(
-      `SELECT namespace, session_id FROM session_memory
-       UNION SELECT namespace, session_id FROM session_artifacts
-       UNION SELECT namespace, session_id FROM session_tool_cache`,
-      []
-    );
-    for (const key of keys) {
-      const namespace = String(key.namespace);
-      const sessionId = String(key.session_id);
-      if (!sessions.has(memorySessionTombstoneId(subjectKey, namespace, sessionId))) continue;
-      for (const statement of memorySessionErasureStatements(namespace, sessionId)) report.rowsChanged += await exec.run(statement.sql, statement.params);
+    const erasedAtOf = (namespace: string, sessionId: string) => sessions.get(memorySessionTombstoneId(subjectKey, namespace, sessionId));
+    for (const row of await exec.all("SELECT namespace, session_id, created_at FROM session_memory", [])) {
+      const erasedAt = erasedAtOf(String(row.namespace), String(row.session_id));
+      if (erasedAt === undefined) continue;
+      if (!createdBy(row.created_at, erasedAt)) {
+        report.rowsKept += 1;
+        continue;
+      }
+      report.rowsChanged += await exec.run("DELETE FROM session_memory WHERE namespace = ? AND session_id = ?", [row.namespace, row.session_id]);
+      report.rowsChanged += await exec.run("DELETE FROM subject_refs WHERE kind = 'memory_session' AND row_id = ?", [JSON.stringify([String(row.namespace), String(row.session_id)])]);
+    }
+    for (const row of await exec.all("SELECT namespace, session_id, artifact_key, created_at FROM session_artifacts", [])) {
+      const erasedAt = erasedAtOf(String(row.namespace), String(row.session_id));
+      if (erasedAt === undefined) continue;
+      if (!createdBy(row.created_at, erasedAt)) {
+        report.rowsKept += 1;
+        continue;
+      }
+      report.rowsChanged += await exec.run("DELETE FROM session_artifacts WHERE namespace = ? AND session_id = ? AND artifact_key = ?", [row.namespace, row.session_id, row.artifact_key]);
+    }
+    for (const row of await exec.all("SELECT id, namespace, session_id, created_at FROM session_tool_cache", [])) {
+      const erasedAt = erasedAtOf(String(row.namespace), String(row.session_id));
+      if (erasedAt === undefined) continue;
+      if (!createdBy(row.created_at, erasedAt)) {
+        report.rowsKept += 1;
+        continue;
+      }
+      report.rowsChanged += await exec.run("DELETE FROM session_tool_cache WHERE id = ?", [row.id]);
     }
   }
   if (artifacts.size > 0) {
-    for (const key of await exec.all("SELECT namespace, session_id, artifact_key FROM session_artifacts", [])) {
+    for (const key of await exec.all("SELECT namespace, session_id, artifact_key, created_at FROM session_artifacts", [])) {
       const [namespace, sessionId, artifactKey] = [String(key.namespace), String(key.session_id), String(key.artifact_key)];
-      if (!artifacts.has(memoryArtifactTombstoneId(subjectKey, namespace, sessionId, artifactKey))) continue;
+      const erasedAt = artifacts.get(memoryArtifactTombstoneId(subjectKey, namespace, sessionId, artifactKey));
+      if (erasedAt === undefined) continue;
+      if (!createdBy(key.created_at, erasedAt)) {
+        report.rowsKept += 1;
+        continue;
+      }
       for (const statement of memoryArtifactErasureStatements(namespace, sessionId, artifactKey)) report.rowsChanged += await exec.run(statement.sql, statement.params);
     }
   }
   if (staff.size > 0) {
-    // Every distinct email the authorship columns and the users table hold, hashed: the erased ones are replaced.
+    // A staff member whose email has an account created after the erasure was re-hired: their tombstone is left out
+    // (their rows are theirs again). The others' accounts are deleted, unless one is the only admin who can sign in.
+    const users = await exec.all("SELECT id, email, role, kind, created_at FROM users", []);
+    const rehired = new Set<string>();
+    for (const user of users) {
+      const id = staffTombstoneId(subjectKey, String(user.email));
+      const erasedAt = staff.get(id);
+      if (erasedAt !== undefined && !createdBy(user.created_at, erasedAt)) rehired.add(id);
+    }
+    for (const id of rehired) {
+      staff.delete(id);
+      report.rowsKept += 1;
+    }
+    // Every distinct email the authorship columns hold, hashed: the erased ones are replaced where no hold keeps them.
     for (const column of STAFF_AUTHORSHIP_COLUMNS) {
       for (const value of await exec.all(`SELECT DISTINCT ${column.column} AS v FROM ${column.table} WHERE ${column.column} IS NOT NULL`, [])) {
         const email = String(value.v);
         const id = staffTombstoneId(subjectKey, email);
         if (!staff.has(id)) continue;
-        report.rowsChanged += await exec.run(`UPDATE ${column.table} SET ${column.column} = ? WHERE ${column.column} = ?`, [staffPseudonym(id), email]);
+        const where = `t.${column.column} = ?`;
+        report.rowsChanged += await exec.run(
+          `UPDATE ${column.table} AS t SET ${column.column} = ? WHERE ${where}${column.held ? ` AND NOT ${column.held}` : ""}`,
+          [staffPseudonym(id), email]
+        );
+        if (column.held) {
+          const kept = await exec.all(`SELECT COUNT(*) AS n FROM ${column.table} t WHERE ${where} AND ${column.held}`, [email]);
+          report.rowsKept += Number(kept[0]?.n ?? 0);
+        }
       }
     }
-    for (const user of await exec.all("SELECT id, email FROM users", [])) {
+    const isSignInAdmin = (user: Record<string, unknown>) => user.role === "admin" && (user.kind ?? "human") === "human";
+    let admins = users.filter(isSignInAdmin).length;
+    for (const user of users) {
       if (!staff.has(staffTombstoneId(subjectKey, String(user.email)))) continue;
+      if (isSignInAdmin(user)) {
+        if (admins <= 1) {
+          report.rowsKept += 1;
+          continue;
+        }
+        admins -= 1;
+      }
       for (const statement of userErasureStatements(String(user.id))) report.rowsChanged += await exec.run(statement.sql, statement.params);
     }
   }
@@ -447,9 +526,11 @@ export function subjectRowHoldTargets(kind: SubjectDeleteKind, id: string): Lega
     case "execution":
     case "production_execution":
     case "paused_run":
+      // The run and every side row its delete takes (a hold may name a cassette or reach a tool call by its project).
       return [
         { kind: "row", table: "execution_history", id },
-        { kind: "row", table: "workflow_executions", id }
+        { kind: "row", table: "workflow_executions", id },
+        ...RUN_SIDE_HOLDABLE.map((table) => ({ kind: "row" as const, table, id, idColumn: "execution_id" as const }))
       ];
     case "recording":
       return [{ kind: "row", table: "replay_recordings", id }];

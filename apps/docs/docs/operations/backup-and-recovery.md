@@ -189,7 +189,12 @@ transaction, and print `Erasures: re-applied N erasures`:
   of an older backup into an empty database.
 
 Records of agent memory or of a staff member need the subject key, which is sealed with `SECRET_MASTER_KEY_BASE64`: run
-the restore with that key set. When it cannot be opened the restore is refused and nothing is written.
+the restore with that key set. A backup written before the first data-subject request holds no subject key; the
+destination's is then kept. When no key can be opened the restore is refused and nothing is written.
+
+Records keyed by value are re-applied only to rows created before the erasure (a session id or email used again
+since belongs to someone, or to a re-hired account). A staff member's rows that an active legal hold keeps are left
+as the live erasure left them, and the only admin who can sign in is never deleted. The output counts the rows left.
 
 `--skip-erasures` restores without re-applying any record: data deleted after the backup was written comes back. It is
 refused unless `--i-understand` is passed too, and the next API start writes `data_subject.erasures_skipped_on_restore`

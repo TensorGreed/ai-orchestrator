@@ -174,7 +174,7 @@ export const openApiSpec = {
           "Confirm a deletion request whose preview is ready (admin or data_subject:manage; step-up). It runs in the background: an end user's rows are deleted (a run with its tool calls, rule events, approvals, cassettes and queue jobs; usage rows kept with the person cleared) and their vault tokens deleted; a staff member's email is pseudonymised in every authorship column and the user deleted, their audit-log rows kept. Rows under a legal hold are deferred until it is released. Every erased row leaves a tombstone a restore re-applies",
         responses: {
           "200": { description: "The request, status running" },
-          "403": { description: "Not an admin or data_subject:manage holder, or step-up required" },
+          "403": { description: "Not an admin or data_subject:manage holder; a staff erasure of an existing account by a non-admin; or step-up required" },
           "404": { description: "Not found" },
           "409": { description: "Not a deletion, not ready, your own account, or the last admin" },
           "503": { description: "No master key" }

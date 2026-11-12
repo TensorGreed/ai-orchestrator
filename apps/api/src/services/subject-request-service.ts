@@ -200,10 +200,13 @@ export type SubjectRowRemovalHook = (actor: { id: string; email: string }, row: 
 
 /** The staff user behind a staff erasure (the app's user delete). */
 export interface StaffUserHooks {
-  /** Why erasing this person cannot be confirmed by `actor` (their own account, the last admin), or null. */
+  /**
+   * Why `actor` cannot erase this person (not an admin while the person has an account, their own account, the last
+   * admin), or null. Checked at confirmation and again before the account is deleted.
+   */
   check(email: string, actor: { id: string; email: string }): Promise<string | null>;
-  /** Deletes the user with this email through the existing user delete. */
-  remove(email: string): Promise<"deleted" | "not_found" | "last_admin">;
+  /** Deletes the user with this email through the existing user delete (audited as `user.delete`). */
+  remove(email: string, actor: { id: string; email: string }, requestId: string): Promise<"deleted" | "not_found" | "last_admin">;
 }
 
 export interface SubjectRequestServiceOptions {
@@ -403,6 +406,19 @@ function deleteKindOf(found: FoundRow): SubjectDeleteKind {
 }
 
 /** The deferred entries of a request (rows a hold kept), as stored in `deferred_json`. */
+/**
+ * What a deletion left for a legal hold: deferred rows, plus a staff member's held authorship rows and vault entries
+ * kept while a hold is active (recorded as markers beside the rows).
+ */
+function deferredCount(record: Pick<SubjectRequestRecord, "deferred">): number {
+  let count = deferredOf(record as SubjectRequestRecord).length;
+  for (const entry of record.deferred as Array<Record<string, unknown>>) {
+    if (entry && entry.staff === true) count += numberOf(entry.held);
+    if (entry && entry.vault === true) count += numberOf(entry.tokens);
+  }
+  return count;
+}
+
 function deferredOf(record: SubjectRequestRecord): FoundRow[] {
   return (record.deferred as FoundRow[]).filter((row) => row && typeof row.id === "string" && (SUBJECT_ROW_KINDS as readonly string[]).includes(row.k));
 }
@@ -691,6 +707,20 @@ export class SubjectRequestService {
       this.kick();
     }
     return view;
+  }
+
+  /**
+   * A staff deletion request's email, for the caller's authorization checks (who may erase that account); null for
+   * any other request or once the value is dropped. Never returned to a client.
+   */
+  async staffTarget(id: string): Promise<string | null> {
+    const record = await this.options.store.getSubjectRequest(id);
+    if (!record || record.type !== "delete" || record.subjectKind !== "staff" || !record.valueSealed) return null;
+    try {
+      return this.options.secrets.openValue(REQUEST_VALUE_PURPOSE, record.valueSealed);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1290,8 +1320,9 @@ export class SubjectRequestService {
     const state = readState(initial.progress);
     const deletion = state.deletion;
     const deferred: unknown[] = [...initial.deferred];
+    // A save after progress resets the error count: a deletion fails after SUBJECT_REQUEST_MAX_ERRORS errors in a row.
     const save = async (): Promise<boolean> =>
-      await store.updateSubjectRequest(initial.id, { progress: { ...state }, deferred, updatedAt: this.now().toISOString() }, "running");
+      await store.updateSubjectRequest(initial.id, { progress: { ...state, errors: 0 }, deferred, updatedAt: this.now().toISOString() }, "running");
     try {
       if (!deletion) throw new Error("The deletion was never confirmed");
       if (!initial.valueSealed) throw new Error("The request's value is no longer stored");
@@ -1366,33 +1397,47 @@ export class SubjectRequestService {
           const original = await this.options.revealToken(token);
           if (original !== null && normalizeSubjectValue(original) === subject) theirs.push(token);
         }
-        deletion.vaultTokensDeleted += await store.deleteGuardVaultTokens(theirs, { requestId: initial.id, erasedAt });
-        deletion.tokens = [];
+        // A token can also stand in rows this request did not find (another workflow's run, a tool call), which a
+        // legal hold may keep: while any hold is active the entries wait, and the hold's release runs them again.
+        if (theirs.length > 0 && (await store.listLegalHolds({ status: "active" })).length > 0) {
+          deferred.push({ vault: true, tokens: theirs.length });
+          deletion.tokens = theirs;
+        } else {
+          deletion.vaultTokensDeleted += await store.deleteGuardVaultTokens(theirs, { requestId: initial.id, erasedAt });
+          deletion.tokens = [];
+        }
       }
 
       if (initial.subjectKind === "staff") {
         const user = (await store.staffSubjectRows(value)).user;
         const tombstoneId = staffTombstoneId(key, value);
         const pseudonym = staffPseudonym(tombstoneId);
-        // The tombstone first: a restore of a backup taken before this re-applies it even if the rest stops midway.
+        const previous = deletion.staff;
+        // The account first (checked again: it may have become the last admin since the confirmation), so the person
+        // can write nothing more under the email; then the tombstone, written only once the account is gone, so a
+        // restore never re-applies an erasure whose account delete was refused; then the authorship rows.
+        let userDeleted = previous?.userDeleted ?? false;
+        if (!userDeleted && this.options.staffUser) {
+          const refusal = await this.options.staffUser.check(value, actor);
+          if (refusal) throw new PermanentDeletionError(refusal);
+          const removed = await this.options.staffUser.remove(value, actor, initial.id);
+          if (removed === "last_admin") throw new PermanentDeletionError("The user is the only admin who can sign in; make another person an admin, then make a new request.");
+          userDeleted = true;
+          deletion.staff = { pseudonym, rowsPseudonymised: previous?.rowsPseudonymised ?? 0, userDeleted, held: previous?.held ?? 0 };
+          if (!(await save())) return;
+        }
         await store.writeErasureTombstones([{ kind: "staff", rowId: tombstoneId, requestId: initial.id, erasedAt }]);
         const result = await store.pseudonymiseStaff({ emails: staffEmails(value, typeof user?.email === "string" ? user.email : null), pseudonym });
-        const previous = deletion.staff;
         deletion.staff = {
           pseudonym,
-          rowsPseudonymised: (previous?.rowsPseudonymised ?? 0) + result.changed,
-          userDeleted: previous?.userDeleted ?? false,
+          rowsPseudonymised: (deletion.staff?.rowsPseudonymised ?? previous?.rowsPseudonymised ?? 0) + result.changed,
+          userDeleted,
           held: result.held
         };
         if (result.remaining > 0) {
           // Rows another transaction had locked: tried again on the next pass.
           await save();
           return;
-        }
-        if (!deletion.staff.userDeleted && this.options.staffUser) {
-          const removed = await this.options.staffUser.remove(value);
-          if (removed === "last_admin") throw new PermanentDeletionError("The user is the only admin who can sign in; make another person an admin, then make a new request.");
-          deletion.staff.userDeleted = true;
         }
         if (deletion.staff.held > 0) deferred.push({ staff: true, held: deletion.staff.held });
       }
@@ -1424,7 +1469,7 @@ export class SubjectRequestService {
           usageRowsCleared: deletion.usageRowsCleared,
           vaultTokensDeleted: deletion.vaultTokensDeleted,
           skipped: deletion.skipped,
-          deferred: deferredOf({ ...initial, deferred }).length,
+          deferred: deferredCount({ deferred }),
           ...(deletion.staff
             ? { pseudonym: deletion.staff.pseudonym, rowsPseudonymised: deletion.staff.rowsPseudonymised, userDeleted: deletion.staff.userDeleted, staffRowsHeld: deletion.staff.held }
             : {})
@@ -1493,7 +1538,7 @@ function deletionView(record: SubjectRequestRecord, deletion: DeletionState): Su
     deleted: deletion.deleted,
     usageRowsCleared: deletion.usageRowsCleared,
     vaultTokensDeleted: deletion.vaultTokensDeleted,
-    deferred: deferredOf(record).length,
+    deferred: deferredCount(record),
     skipped: deletion.skipped,
     staff: deletion.staff
       ? { pseudonym: deletion.staff.pseudonym, rowsPseudonymised: deletion.staff.rowsPseudonymised, userDeleted: deletion.staff.userDeleted, auditLog: STAFF_AUDIT_LOG_KEPT }

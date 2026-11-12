@@ -147,7 +147,7 @@ search again before deleting it (a row that no longer holds the value is skipped
 | Approval request, paused run, MCP cassette | The row. |
 | Agent memory session or artifact | The row. |
 | Golden or captured run, golden-set case, eval or replay result | The row, as the data-subject lookup deletes it. Release-gate jobs whose evidence it removed are marked stale. |
-| Reversible tokens | The vault entries of tokens that appear in the deleted rows and stand for **this person's** value. A later reveal of such a token finds nothing. Tokens of other people's values stay. |
+| Reversible tokens | The vault entries of tokens that appear in the deleted rows and stand for **this person's** value. A later reveal of such a token finds nothing. Tokens of other people's values stay. While any legal hold is active the entries wait (the same token may stand in a held row the request did not find) and are deleted when the hold is released. |
 
 ### Staff members
 
@@ -162,7 +162,11 @@ releases record them, and how many audit-log rows they have. On confirmation:
 - **their audit-log rows are kept unchanged** for security logging until `AUDIT_LOG_RETENTION_DAYS` removes them.
   Rewriting them would break the audit chain, which still verifies afterwards.
 
-You cannot erase your own account, nor the only admin who can sign in. A staff request does not search runs for the
+Erasing a person who has an account deletes that account, so **only an admin** can confirm it (with the `user.delete`
+step-up as well, when step-up is on); the account delete is audited as `user.delete` without the email. A
+`data_subject:manage` role can still make the request and see its preview. You cannot erase your own account, nor the
+only admin who can sign in. The account is deleted first, so the person cannot write anything more under the email,
+and then their authorship rows are renamed. A staff request does not search runs for the
 email; make an end-user request too if their own data flows through runs.
 
 ### Legal holds
@@ -175,7 +179,9 @@ erasure (GDPR Art. 17(3)(e)).
 ### Erasure records and backups
 
 Every erased row leaves an **erasure record** (a tombstone: the kind, the row id and when; agent memory and staff
-members by a keyed hash, never the value). `db:import` and `db:copy` re-apply them after a restore, so a backup written
+members by a keyed hash, never the value). A record keyed by value is re-applied only to rows created before the
+erasure: a customer who comes back under the same session id, or a person re-hired with the same email, keeps what
+is theirs since. `db:import` and `db:copy` re-apply them after a restore, so a backup written
 before the deletion does not bring the data back: they print `re-applied N erasures`. See
 [Backup and recovery](../operations/backup-and-recovery.md#erasures-after-a-restore). Records are kept for
 `ERASURE_TOMBSTONE_RETENTION_DAYS` (400 by default): keep it longer than the oldest backup you might restore.

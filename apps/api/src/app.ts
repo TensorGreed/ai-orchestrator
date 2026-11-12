@@ -14598,6 +14598,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         const target = await store.getUserByEmail(email);
         if (!target) return null;
         if (target.id === actor.id) return "You cannot erase your own account. Ask another admin.";
+        // Deleting an account is an admin's action (DELETE /api/users/:id), whatever data_subject:manage allows.
+        const confirmer = actor.id ? await store.getUserById(actor.id) : null;
+        if (confirmer?.role !== "admin") return "Only an admin can erase a staff member who has an account.";
         if (target.role === "admin" && target.kind === "human") {
           const pending = new Set((await store.listOpenUserInvites()).map((invite) => invite.userId));
           const otherAdmins = (await store.listUsers({ kind: "human" })).filter((u) => u.role === "admin" && u.id !== target.id && !pending.has(u.id));
@@ -14605,11 +14608,27 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
         return null;
       },
-      remove: async (email) => {
+      remove: async (email, actor, requestId) => {
         const target = await store.getUserByEmail(email);
         if (!target) return "not_found";
         await mcpOAuthService.disconnectUserEverywhere(target.id);
-        return await store.deleteUserKeepingAdmin(target.id);
+        const deleted = await store.deleteUserKeepingAdmin(target.id);
+        if (deleted === "deleted") {
+          // As DELETE /api/users/:id audits it, without the email being erased.
+          const event: AuditEventInput = {
+            category: "auth",
+            eventType: "user.delete",
+            action: "delete",
+            outcome: "success" as const,
+            actor: { type: "user" as const, userId: actor.id || null, email: actor.email },
+            resourceType: "user",
+            resourceId: target.id,
+            metadata: { via: "data_subject_erasure", requestId }
+          };
+          await auditService.record(event);
+          await logStreamingService.dispatchAudit(event);
+        }
+        return deleted;
       }
     },
     audit: async (event) => {
@@ -14635,7 +14654,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requests: subjectRequestService,
     available: captureAvailable,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    requireStepUp: async (request, reply, action, targetUserId) => await requireStepUp(request, reply, action, targetUserId ? { targetUserId } : undefined),
+    staffAccount: async (email) => {
+      const account = await store.getUserByEmail(email);
+      return account ? { id: account.id } : null;
+    },
     canManage: async (user) => await rbacService.canDeployment(user, "data_subject:manage"),
     runAccess,
     audit: async (request, user, event) => await audit(request, user, event)

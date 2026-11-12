@@ -89,4 +89,34 @@ describeStoreContract("store contract: erasure tombstones", (ctx) => {
     ]);
     expect(await sql.all("SELECT created_by FROM variables")).toEqual([{ created_by: "erased-user-12345678" }]);
   });
+
+  it("keeps a run whose cassette a hold names, and one whose tool call a project hold reaches", async () => {
+    const store = ctx.store();
+    const sql = testSql(store);
+    await store.upsertProject({ id: "proj-held", name: "Held" });
+    await store.upsertWorkflow({ id: "wf", name: "W", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [], projectId: "default" } as never);
+    for (const id of ["run-c", "run-t"]) await sql.run("INSERT INTO execution_history (id, workflow_id, status, started_at) VALUES (?, 'wf', 'success', ?)", id, AT);
+    await sql.run("INSERT INTO mcp_cassettes (id, execution_id, workflow_id, cassette_json, created_at) VALUES ('cas-1', 'run-c', 'wf', '{}', ?)", AT);
+    await sql.run(
+      `INSERT INTO mcp_tool_calls (id, execution_id, workflow_id, project_id, node_id, adapter_id, tool_name, started_at, ok, created_at)
+       VALUES ('call-1', 'run-t', 'wf', 'proj-held', 'n', 'http-mcp', 't', ?, 1, ?)`,
+      AT, AT
+    );
+    await store.placeLegalHold({
+      id: "h-cas", name: "Cassette", reason: "r", matterRef: null, scopeType: "runs", scopeId: "", endsAt: null, createdBy: null, createdAt: AT,
+      items: [{ kind: "cassette", rowId: "cas-1" }]
+    } as never);
+    await store.placeLegalHold({
+      id: "h-proj", name: "Project", reason: "r", matterRef: null, scopeType: "project", scopeId: "proj-held", endsAt: null, createdBy: null, createdAt: AT, items: []
+    });
+    for (const [run, hold] of [["run-c", "h-cas"], ["run-t", "h-proj"]] as const) {
+      const outcome = await store.deleteSubjectRow("execution", run, { requestId: "dsr-1", erasedAt: AT });
+      expect(outcome.deleted).toBe(false);
+      expect(outcome.heldBy?.map((ref) => ref.id)).toContain(hold);
+    }
+    expect(await sql.all("SELECT id FROM mcp_cassettes")).toEqual([{ id: "cas-1" }]);
+    expect(await sql.all("SELECT id FROM mcp_tool_calls")).toEqual([{ id: "call-1" }]);
+    expect(await sql.all("SELECT id FROM execution_history ORDER BY id")).toEqual([{ id: "run-c" }, { id: "run-t" }]);
+    expect(await store.countErasureTombstones()).toBe(0);
+  });
 });

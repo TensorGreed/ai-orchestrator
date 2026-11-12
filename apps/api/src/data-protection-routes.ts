@@ -33,7 +33,9 @@ export interface DataProtectionRoutesDeps {
   /** False when the master key is missing: references and requests need it. */
   available: boolean;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
-  requireStepUp: (request: FastifyRequest, reply: FastifyReply, action: StepUpAction) => Promise<boolean>;
+  requireStepUp: (request: FastifyRequest, reply: FastifyReply, action: StepUpAction, targetUserId?: string) => Promise<boolean>;
+  /** The account a staff erasure would delete, or null. */
+  staffAccount: (email: string) => Promise<{ id: string } | null>;
   /** `data_subject:manage` (deployment-wide). */
   canManage: (user: SafeUser) => Promise<boolean>;
   runAccess: RunAccess;
@@ -161,7 +163,15 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
     const user = await manager(request, reply);
     if (!user) return reply;
     if (!deps.available) return unavailable(reply);
+    // A staff erasure deletes the person's account: only an admin may confirm it, with the user.delete step-up too.
+    const staffEmail = await requests.staffTarget(request.params.id);
+    const account = staffEmail ? await deps.staffAccount(staffEmail) : null;
+    if (account && user.role !== "admin") {
+      reply.code(403);
+      return { error: "Only an admin can erase a staff member who has an account (it deletes the account)." };
+    }
     if (!(await requireStepUp(request, reply, "subject_request.delete"))) return reply;
+    if (account && !(await requireStepUp(request, reply, "user.delete", account.id))) return reply;
     const parsed = subjectRequestConfirmSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);

@@ -298,6 +298,51 @@ describe("data-subject requests in the app", () => {
     expect(await context.store.getUserByEmail(email)).not.toBeNull();
   });
 
+  it("only an admin may confirm a staff erasure of an existing account; it is audited as user.delete without the email", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const privacyCookie = await login(context, "builder");
+    const privacy = (await context.store.listUsers()).find((user) => user.role === "builder")!;
+    await context.store.upsertCustomRole({ id: "privacy", projectId: null, name: "Privacy", description: null, permissions: ["data_subject:manage"], createdBy: null });
+    await context.store.upsertProjectRole({ userId: privacy.id, projectId: "default", role: "custom", customRoleId: "privacy" });
+    const target = `target-${crypto.randomUUID().slice(0, 6)}@example.com`;
+    await context.authService.register({ email: target, password: "Target-Pass-123!", role: "admin" });
+    const targetId = (await context.store.getUserByEmail(target))!.id;
+
+    const made = await call(context, "POST", "/api/data-protection/requests", privacyCookie, { type: "delete", subjectKind: "staff", value: target });
+    expect(made.statusCode, made.body).toBe(201);
+    const id = made.json<SubjectRequestView>().id;
+    await waitFor(context, privacyCookie, id, "ready");
+    // The privacy role may make and see the request, but not delete an account with it.
+    const refused = await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, privacyCookie, {});
+    expect(refused.statusCode).toBe(403);
+    expect(refused.body).toContain("Only an admin");
+    expect(await context.store.getUserByEmail(target)).not.toBeNull();
+
+    const confirmed = await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, admin, {});
+    expect(confirmed.statusCode, confirmed.body).toBe(200);
+    await waitFor(context, admin, id, "done");
+    expect(await context.store.getUserByEmail(target)).toBeNull();
+    const rows = await testSql(context.store).all<{ resource_id: string; metadata_json: string }>(
+      "SELECT resource_id, metadata_json FROM audit_logs WHERE event_type = 'user.delete'"
+    );
+    expect(rows.map((row) => row.resource_id)).toEqual([targetId]);
+    expect(rows[0]!.metadata_json).toContain("data_subject_erasure");
+    expect(rows[0]!.metadata_json).not.toContain(target);
+  });
+
+  it("asks for a recent MFA check before a staff erasure of an existing account", async () => {
+    const context = await createTestContext({ STEP_UP_MAX_AGE_MINUTES: "15" });
+    const admin = await login(context, "admin");
+    const target = `target-${crypto.randomUUID().slice(0, 6)}@example.com`;
+    await context.authService.register({ email: target, password: "Target-Pass-123!", role: "builder" });
+    const id = (await call(context, "POST", "/api/data-protection/requests", admin, { type: "delete", subjectKind: "staff", value: target })).json<SubjectRequestView>().id;
+    await waitFor(context, admin, id, "ready");
+    const confirm = await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, admin, {});
+    expect(confirm.statusCode).toBe(403);
+    expect(confirm.json()).toMatchObject({ code: "step_up_required" });
+  });
+
   it("a deployment-wide custom role with data_subject:manage may make requests; a project role may not, and only an admin hands it out", async () => {
     const context = await createTestContext();
     const builderCookie = await login(context, "builder");

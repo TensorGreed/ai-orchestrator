@@ -16,12 +16,18 @@ const SUBJECT_KEY_PURPOSE = "subject-ref";
 
 /** Thrown when tombstones need the subject key and it cannot be opened: the restore is refused. */
 export class ErasureKeyMissing extends Error {
-  constructor(readonly tombstones: number) {
+  constructor(
+    readonly tombstones: number,
+    readonly noKeyRow = false
+  ) {
     super(
-      `${tombstones} erasure tombstone(s) name agent memory or a staff member by a keyed hash, and the subject key cannot be ` +
-        `opened with SECRET_MASTER_KEY_BASE64, so they cannot be re-applied. Restore with the master key the backup was ` +
-        `written with (--source-master-key-file), or pass --skip-erasures --i-understand to restore without re-applying ` +
-        `erasures (audited at the next start). Nothing was changed.`
+      `${tombstones} erasure tombstone(s) name agent memory or a staff member by a keyed hash and cannot be re-applied: ` +
+        (noKeyRow
+          ? `neither the backup nor the destination holds a subject key (the key they were made with is gone). `
+          : `the subject key cannot be opened with SECRET_MASTER_KEY_BASE64. Set it to the master key the database was ` +
+            `written with, or give the backup's with --source-master-key-file. `) +
+        `Passing --skip-erasures --i-understand restores without re-applying any erasure (audited at the next start). ` +
+        `Nothing was changed.`
     );
     this.name = "ErasureKeyMissing";
   }
@@ -41,15 +47,25 @@ export function openSealed(sealed: string, purpose: string, key: Buffer): string
   }
 }
 
-/** The restored database's subject key, opened with the master key; null when there is none or it cannot be opened. */
-export async function restoredSubjectKey(exec: ErasureExecutor, masterKey: Buffer | null): Promise<Buffer | null> {
-  if (!masterKey) return null;
-  const row = (await exec.all("SELECT key_sealed FROM subject_ref_keys WHERE id = 'default'", []))[0];
-  if (!row || typeof row.key_sealed !== "string") return null;
-  const opened = openSealed(row.key_sealed, SUBJECT_KEY_PURPOSE, masterKey);
+/** A sealed subject key opened with the master key; null when it cannot be. */
+export function openSubjectKey(sealed: string, masterKey: Buffer): Buffer | null {
+  const opened = openSealed(sealed, SUBJECT_KEY_PURPOSE, masterKey);
   if (opened === null) return null;
   const key = Buffer.from(opened, "base64");
   return key.length === 32 ? key : null;
+}
+
+/** The restored database's sealed subject key, or null when it holds none. */
+async function restoredSealedKey(exec: ErasureExecutor): Promise<string | null> {
+  const row = (await exec.all("SELECT key_sealed FROM subject_ref_keys WHERE id = 'default'", []))[0];
+  return row && typeof row.key_sealed === "string" ? row.key_sealed : null;
+}
+
+/** The restored database's subject key, opened with the master key; null when there is none or it cannot be opened. */
+export async function restoredSubjectKey(exec: ErasureExecutor, masterKey: Buffer | null): Promise<Buffer | null> {
+  if (!masterKey) return null;
+  const sealed = await restoredSealedKey(exec);
+  return sealed ? openSubjectKey(sealed, masterKey) : null;
 }
 
 export interface RestoreErasuresOptions {
@@ -57,6 +73,8 @@ export interface RestoreErasuresOptions {
   skip?: boolean;
   /** SECRET_MASTER_KEY_BASE64 of the restored database (opens the subject key). */
   masterKey?: Buffer | null;
+  /** Other sealed subject keys carried tombstones may be keyed with (the destination's before a replace). */
+  extraSealedKeys?: readonly string[];
   log?: (line: string) => void;
   warn?: (line: string) => void;
   now?: () => Date;
@@ -81,14 +99,30 @@ export async function reapplyAfterRestore(exec: ErasureExecutor, options: Restor
       "WARNING: erasures were NOT re-applied (--skip-erasures --i-understand): data erased by data-subject requests after this " +
         "backup was written may be back. The next API start records this in the audit log."
     );
-    return { erasures: 0, rowsChanged: 0, needKey: 0, skipped: true };
+    return { erasures: 0, rowsChanged: 0, needKey: 0, rowsKept: 0, skipped: true };
   }
-  const key = await restoredSubjectKey(exec, options.masterKey ?? null);
-  const report = await reapplyErasures(exec, key);
-  if (report.needKey > 0) throw new ErasureKeyMissing(report.needKey);
+  const masterKey = options.masterKey ?? null;
+  const sealed = await restoredSealedKey(exec);
+  const sealedKeys = [...new Set([...(sealed ? [sealed] : []), ...(options.extraSealedKeys ?? [])])];
+  const keys: Buffer[] = [];
+  for (const candidate of sealedKeys) {
+    const key = masterKey ? openSubjectKey(candidate, masterKey) : null;
+    if (key && !keys.some((known) => known.equals(key))) keys.push(key);
+  }
+  // The first key re-applies every tombstone; another key (the destination's before a replace) re-applies the keyed
+  // ones made with it (an id-named tombstone applied twice changes nothing the second time).
+  let report = await reapplyErasures(exec, keys[0] ?? null);
+  for (const key of keys.slice(1)) {
+    const more = await reapplyErasures(exec, key);
+    report = { erasures: report.erasures, rowsChanged: report.rowsChanged + more.rowsChanged, needKey: 0, rowsKept: report.rowsKept + more.rowsKept };
+  }
+  if (report.needKey > 0) throw new ErasureKeyMissing(report.needKey, sealedKeys.length === 0);
   log(
     `Erasures: re-applied ${report.erasures} erasure${report.erasures === 1 ? "" : "s"}` +
-      (report.rowsChanged > 0 ? ` (${report.rowsChanged} row(s) the backup brought back were deleted or pseudonymised again).` : ".")
+      (report.rowsChanged > 0 ? ` (${report.rowsChanged} row(s) the backup brought back were deleted or pseudonymised again)` : "") +
+      (report.rowsKept > 0
+        ? `; ${report.rowsKept} row(s) left: created after their erasure (a session id or email used again), kept by a legal hold, or the only admin.`
+        : ".")
   );
   return { ...report, skipped: false };
 }

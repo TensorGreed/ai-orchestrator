@@ -446,6 +446,47 @@ describe("db:export records the audit verdict; db:import refuses a restore that 
     }
   });
 
+  it("13.3: --replace with a backup older than the subject key keeps the destination's key and re-applies its keyed erasures", async () => {
+    const master = Buffer.alloc(32, 6);
+    const first = await SqliteStore.create(sourcePath);
+    await first.close();
+    const seedRaw = new Database(sourcePath);
+    seedRaw.prepare("INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at) VALUES ('ns', 'sess-old', '[]', '2026-01-01T00:00:00.000Z', 'x')").run();
+    seedRaw.close();
+    const before = await exportFrom(sourcePath);
+    expect(before.tables.subject_ref_keys ?? []).toEqual([]);
+
+    // The first data-subject request makes the key; the session is erased with a keyed tombstone.
+    const live = await SqliteStore.create(sourcePath);
+    const subjects = new SubjectRequestService({
+      store: live,
+      secrets: new SecretService(live, master.toString("base64")),
+      matcher: async () => ({ match: () => null }) as never,
+      instanceId: "i",
+      isLeader: () => false,
+      dueDays: 30,
+      exportTtlHours: 72
+    });
+    const key = await subjects.subjectKey();
+    const sessionRow = memorySessionRowId("ns", "sess-old");
+    expect(
+      (await live.deleteSubjectRow("memory_session", sessionRow, { requestId: "dsr-1", erasedAt: new Date().toISOString(), tombstoneId: memorySessionTombstoneId(key, "ns", "sess-old") })).deleted
+    ).toBe(true);
+    await live.close();
+
+    lines.length = 0;
+    const report = await importInto(sourcePath, before, { replace: true, erasures: { masterKey: master } });
+    expect(report.erasures).toMatchObject({ erasures: 1, skipped: false });
+    expect(lines.join("\n")).toMatch(/the destination's subject key is kept/);
+    const raw = new Database(sourcePath, { readonly: true });
+    try {
+      expect(raw.prepare("SELECT COUNT(*) AS n FROM session_memory").get()).toEqual({ n: 0 });
+      expect(raw.prepare("SELECT COUNT(*) AS n FROM subject_ref_keys").get()).toEqual({ n: 1 });
+    } finally {
+      raw.close();
+    }
+  });
+
   it("refuses and rolls back a restore whose chain breaks where the backup recorded it intact (an edited backup file)", async () => {
     const store = await SqliteStore.create(sourcePath);
     await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success", message: "approved by alice" });

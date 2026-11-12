@@ -175,12 +175,16 @@ function printUsageAndExit(code: number): never {
   process.exit(code);
 }
 
-/** The erasure tombstones of another backup file (--erasures-from); nothing else of it is read. */
-function readTombstonesFrom(file: string): Array<Record<string, unknown>> {
+/** The erasure tombstones of another backup file (--erasures-from) and the subject key they are keyed with; nothing else. */
+function readTombstonesFrom(file: string): { tombstones: Array<Record<string, unknown>>; keys: Array<Record<string, unknown>> } {
   const other = JSON.parse(fs.readFileSync(file, "utf8")) as { format?: string; tables?: Record<string, unknown> };
   if (other.format !== "ai-orchestrator-backup") throw new Error(`--erasures-from: ${file} is not a backup written by db:export`);
   const rows = other.tables?.erasure_tombstones;
-  return Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : [];
+  const keys = other.tables?.subject_ref_keys;
+  return {
+    tombstones: Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : [],
+    keys: Array.isArray(keys) ? (keys as Array<Record<string, unknown>>) : []
+  };
 }
 
 function loadKey(b64: string, label: string): Buffer {
@@ -256,9 +260,9 @@ async function main() {
       console.log("--source-master-key matches current SECRET_MASTER_KEY_BASE64; skipping re-encryption.");
     }
 
-    const carry = args.erasuresFrom ? readTombstonesFrom(path.resolve(args.erasuresFrom)) : [];
+    const other = args.erasuresFrom ? readTombstonesFrom(path.resolve(args.erasuresFrom)) : { tombstones: [], keys: [] };
     const report = await importDump(adapter, dump as BackupDump, {
-      erasures: { skip: args.skipErasures, masterKey: destKey, carry },
+      erasures: { skip: args.skipErasures, masterKey: destKey, carry: other.tombstones, carryKeys: other.keys },
       merge: args.merge,
       replace: args.replace,
       allowAuditChange: args.allowAuditChange,

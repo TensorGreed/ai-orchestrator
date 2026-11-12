@@ -7,7 +7,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { Workflow } from "@ai-orchestrator/shared";
-import { STAFF_AUTHORSHIP_COLUMNS, reapplyErasures, staffPseudonym, staffTombstoneId } from "../db/erasure.js";
+import { STAFF_AUTHORSHIP_COLUMNS, memorySessionTombstoneId, reapplyErasures, staffPseudonym, staffTombstoneId } from "../db/erasure.js";
 import type { Store } from "../db/store.js";
 import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, type TestStoreKind } from "../test-support/test-store.js";
 import { testSql } from "../test-support/test-sql.js";
@@ -252,6 +252,36 @@ for (const kind of kinds) {
       expect(await count(store, "erasure_tombstones", "kind = 'golden_run' AND row_id = 'rec-1'")).toBe(1);
     });
 
+    it("keeps the person's vault entries while any legal hold is active, and deletes them once it is released", async () => {
+      const { store, service, revealToken } = await setup();
+      await store.upsertWorkflow(WORKFLOW);
+      await store.upsertWorkflow({ ...WORKFLOW, id: "wf-elsewhere" } as Workflow);
+      await seedRun(store, service, "run-1", "CUST-777");
+      await seedVault(store);
+      // A hold elsewhere: it may keep a row (not found by this request) that holds the same token.
+      const hold = await store.placeLegalHold({
+        id: "h-else", name: "Else", reason: "r", matterRef: null, scopeType: "workflow", scopeId: "wf-elsewhere", endsAt: null, createdBy: null, createdAt: AT, items: []
+      });
+      const created = await service.create({ type: "delete", subjectKind: "end_user", value: "cust-777", scan: false, revealTokens: false }, ADMIN);
+      await settle(service);
+      await service.confirm(created.id, ADMIN);
+      await settle(service);
+      const deferred = (await service.get(created.id))!;
+      expect(deferred.status).toBe("deferred_by_hold");
+      expect(deferred.deletion).toMatchObject({ vaultTokensDeleted: 0, deferred: 1 });
+      expect(deferred.deletion!.deleted.run).toBe(1);
+      expect(await revealToken(TOKEN)).toBe("cust-777");
+
+      await store.releaseLegalHold({ id: hold.id, releasedBy: null, reason: "done", releasedAt: T0.toISOString() });
+      expect(await service.requeueDeferred()).toBe(1);
+      await settle(service);
+      const done = (await service.get(created.id))!;
+      expect(done.status).toBe("done");
+      expect(done.deletion).toMatchObject({ vaultTokensDeleted: 1, deferred: 0 });
+      expect(await revealToken(TOKEN)).toBeNull();
+      expect(await revealToken(OTHER_TOKEN)).toBe("someone-else");
+    });
+
     it("refuses revealTokens on a deletion, and confirming an export", async () => {
       const { service } = await setup();
       const exported = await service.create({ type: "export", subjectKind: "end_user", value: "cust-777", scan: false, revealTokens: false }, ADMIN);
@@ -419,6 +449,47 @@ for (const kind of kinds) {
       expect(await count(store, "guard_token_vault", "token = ?", TOKEN)).toBe(0);
       // Re-applying again changes nothing.
       expect((await reapplyErasures(sqlExecutor(store), await service.subjectKey())).rowsChanged).toBe(0);
+    });
+
+    it("a restore leaves sessions and accounts created after their erasure, held authorship rows, and the only admin", async () => {
+      const { store, sql, service } = await setup();
+      const key = await service.subjectKey();
+      const erasedAt = "2026-06-01T00:00:00.000Z";
+      const tomb = async (kind: string, rowId: string) =>
+        await sql.run("INSERT INTO erasure_tombstones (kind, row_id, request_id, erased_at) VALUES (?, ?, 'dsr-x', ?)", kind, rowId, erasedAt);
+      // A session erased in June: the restored row from May goes, a new conversation from July under the same id stays.
+      await tomb("memory_session", memorySessionTombstoneId(key, "ns-old", "s-1"));
+      await tomb("memory_session", memorySessionTombstoneId(key, "ns-new", "s-1"));
+      await sql.run("INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at) VALUES ('ns-old', 's-1', '[]', '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z')");
+      await sql.run("INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at) VALUES ('ns-new', 's-1', '[]', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')");
+      // Staff: one erased person re-hired in July (kept), one erased admin who is the only admin (kept), one erased
+      // builder (deleted, their unheld rows renamed, their held rows left).
+      for (const email of ["rehired@example.com", "only.admin@example.com", "gone@example.com"]) await tomb("staff", staffTombstoneId(key, email));
+      await store.saveUser({ id: "u-rehired", email: "rehired@example.com", passwordHash: "x", role: "builder" });
+      await sql.run("UPDATE users SET created_at = '2026-07-01T00:00:00.000Z' WHERE id = 'u-rehired'");
+      await store.saveUser({ id: "u-only", email: "only.admin@example.com", passwordHash: "x", role: "admin" });
+      await store.saveUser({ id: "u-gone", email: "gone@example.com", passwordHash: "x", role: "builder" });
+      await sql.run("UPDATE users SET created_at = '2026-01-01T00:00:00.000Z' WHERE id IN ('u-only', 'u-gone')");
+      await store.upsertWorkflow({ ...WORKFLOW, id: "wf-held" } as Workflow);
+      await store.upsertWorkflow({ ...WORKFLOW, id: "wf-free" } as Workflow);
+      await sql.run("INSERT INTO execution_history (id, workflow_id, status, started_at, triggered_by) VALUES ('r-held', 'wf-held', 'success', ?, 'gone@example.com')", AT);
+      await sql.run("INSERT INTO execution_history (id, workflow_id, status, started_at, triggered_by) VALUES ('r-free', 'wf-free', 'success', ?, 'gone@example.com')", AT);
+      await sql.run("INSERT INTO execution_history (id, workflow_id, status, started_at, triggered_by) VALUES ('r-rehired', 'wf-free', 'success', ?, 'rehired@example.com')", AT);
+      await store.placeLegalHold({
+        id: "h-1", name: "M", reason: "r", matterRef: null, scopeType: "workflow", scopeId: "wf-held", endsAt: null, createdBy: null, createdAt: AT, items: []
+      });
+
+      const report = await reapplyErasures(sqlExecutor(store), key);
+      expect(report.needKey).toBe(0);
+      expect((await sql.all<{ namespace: string }>("SELECT namespace FROM session_memory")).map((row) => row.namespace)).toEqual(["ns-new"]);
+      expect((await sql.all<{ id: string }>("SELECT id FROM users ORDER BY id")).map((row) => row.id)).toEqual(["u-only", "u-rehired"]);
+      expect(await sql.all("SELECT id, triggered_by FROM execution_history ORDER BY id")).toEqual([
+        { id: "r-free", triggered_by: staffPseudonym(staffTombstoneId(key, "gone@example.com")) },
+        { id: "r-held", triggered_by: "gone@example.com" },
+        { id: "r-rehired", triggered_by: "rehired@example.com" }
+      ]);
+      // The re-hired person, the newer session, the held row and the only admin.
+      expect(report.rowsKept).toBe(4);
     });
 
     it("prunes tombstones older than ERASURE_TOMBSTONE_RETENTION_DAYS on the sweep (0 keeps them)", async () => {
