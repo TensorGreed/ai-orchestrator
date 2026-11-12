@@ -1,5 +1,5 @@
 {
-  "$comment": "Which samples in samples/workflows/ become recipe pages under docs/recipes/. `pnpm --filter @ai-orchestrator/docs gen:recipes` (run by the docs build and dev server) writes them. Fields: sample (file name); slug (page name; never rename a published slug, GitHub Pages cannot redirect); title (<= 54 characters, the page title adds ' | L2M'); description (<= 155 characters); keys (none | model | services: what it needs to run); keysNote (one short line, e.g. 'No API key'); time (optional, e.g. '5 minutes'); tags (lower case, the filters on /recipes/); whatYouGet (one sentence); summary (Markdown paragraph: what it does and when to use it); makeItYours and makeItSafer (Markdown lists, optional; safety controls are optional features, say so); related (glossary slugs); docs (further reading inside the docs).",
+  "$comment": "Which samples in samples/workflows/ become recipe pages under docs/recipes/. `pnpm --filter @ai-orchestrator/docs gen:recipes` (run by the docs build and dev server) writes them. Fields: sample (file name); slug (page name; never rename a published slug, GitHub Pages cannot redirect); title (<= 54 characters, the page title adds ' | L2M'); description (<= 155 characters); keys (none | model | services: what it needs to run); keysNote (one short line, e.g. 'No API key'); time (optional, e.g. '5 minutes'); tags (lower case, the filters on /recipes/); whatYouGet (one sentence); summary (Markdown paragraph: what it does and when to use it); steps (optional Markdown strings, numbered after the download and import steps; replace the default 'run it as it is' steps); sections (optional [{ heading, body }] of hand-written Markdown after 'How it works': what a run really does, variants, limits); makeItYours and makeItSafer (Markdown lists, optional; safety controls are optional features, say so); related (glossary slugs); docs (further reading inside the docs).",
   "recipes": [
     {
       "sample": "mcp-agent-quickstart-flow.json",
@@ -9,17 +9,111 @@
       "keys": "none",
       "keysNote": "No API key",
       "time": "5 minutes",
-      "tags": ["agent", "mcp", "starter"],
+      "tags": [
+        "agent",
+        "mcp",
+        "starter"
+      ],
       "whatYouGet": "One agent with a chat model and two MCP tools, a clock and a calculator, that runs on a fresh install.",
-      "summary": "A manual trigger starts one Agent Orchestrator node, which can call two tools from the bundled mock MCP server: `get_current_time` and `calculator`. The chat model is the built-in echo provider, so the workflow imports and runs with no key. Echo is not a real model: it never asks for a tool, so a local run ends after one model call. To watch the full loop, with its tool calls, play the recorded run in the demo, or attach a real chat model.",
-      "makeItYours": "- Replace the echo chat model node with a real one (OpenAI, Anthropic, Ollama or any OpenAI-compatible endpoint) on the agent's `chat_model` port.\n- Replace the mock MCP tools with a server from your [MCP server registry](/product/mcp-server-registry), such as a filesystem or database server.\n- Write your own system prompt on the agent node, and raise `maxIterations` only if the task needs more steps.",
-      "makeItSafer": "- Deny or allow tools per role with [MCP tool policy](/product/mcp-tool-policy).\n- Require a person's approval before write tools run: see [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Cap model spend with a [budget](/product/budgets).",
-      "related": ["agent-loop", "tool-calling", "ai-agent", "mcp-tool"],
+      "summary": "A manual trigger starts one Agent Orchestrator node. Its chat model is the built-in echo provider, and its tools come from the mock MCP server that runs inside L2M: `get_current_time` and `calculator`. Nothing needs a key, a network connection or a separate server. Echo is not a real model: it repeats the prompt back and never asks for a tool, so a local run makes one model call and ends. That proves the wiring works. To see the agent call tools, attach a real chat model.",
+      "steps": [
+        "Click **Run** in the editor, or call the run API with your own question. The API takes an API key from **Settings › Account › API Keys**:\n\n   ```bash\n   curl -X POST http://localhost:4000/api/workflows/wf-mcp-agent-quickstart/execute \\\n     -H \"Authorization: Bearer $L2M_API_KEY\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"user_prompt\": \"What is 2340 * 0.17?\"}'\n   ```",
+        "Open the run in the execution history and click the **Agent** node to read its trace.",
+        "Then change one thing at a time (see below)."
+      ],
+      "sections": [
+        {
+          "heading": "What a run does",
+          "body": "We imported the file into a fresh install and ran it with the question above. The run succeeded in well under a second:\n\n- The **Agent** made one model call. The model was offered the two tools as `mock-mcp__get_current_time` and `mock-mcp__calculator`; L2M also adds a short note to the system prompt about its built-in `session_cache_list`, `session_cache_get` and `agent_clarify` tools.\n- Echo answered `Echo: What is 2340 * 0.17?`. The agent stopped after 1 iteration with `stopReason: \"final_answer\"`, and the **Output** node returned that text as `result`.\n- The two MCP Tool nodes are marked as used by the agent: they supplied the tool definitions. No tool ran, because echo asked for none.\n\nAn empty question fails the run: the agent's user prompt template is <span v-pre>`{{user_prompt}}`</span>, and with nothing in it the Agent stops with \"Agent Orchestrator user prompt is empty after template rendering\"."
+        },
+        {
+          "heading": "See the loop with tool calls",
+          "body": "The demo's copy of this workflow plays an echo run too, so it shows no tool calls either. The demo's **Support agent** workflow plays a run recorded with a real model, in which the agent calls a knowledge-base tool once and a calculator tool twice before it answers: <a href=\"/demo/?mode=editor&amp;workflowId=wf-demo-support-agent&amp;demoRun=recorded\" target=\"_self\">open it in the demo</a>."
+        }
+      ],
+      "makeItYours": "- Replace the echo chat model node with a real one (OpenAI, Anthropic, Ollama or any OpenAI-compatible endpoint) on the agent's `chat_model` port. A model that supports tool calling can then call the clock and the calculator.\n- Replace the mock MCP tools with a server from your [MCP server registry](/product/mcp-server-registry), such as a filesystem or database server.\n- Write your own system prompt on the agent node, and raise `maxIterations` (4 in the sample) only if the task needs more steps.",
+      "makeItSafer": "- `calculator` has no read-only annotation, so L2M counts it as a write tool. Turn on the workflow's **No write tools** setting and it is blocked for the agent, while the clock stays. See [MCP tool policy](/product/mcp-tool-policy#no-write-tools).\n- Require a person's approval before write tools run: see [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Cap model spend with a [budget](/product/budgets).",
+      "related": [
+        "ai-agent",
+        "agent-loop",
+        "tool-calling",
+        "mcp-tool"
+      ],
       "docs": [
-        { "text": "Build your first MCP agent in 5 minutes", "link": "/getting-started/build-your-first-mcp-agent" },
-        { "text": "What is an AI agent?", "link": "/learn/agents/what-is-an-ai-agent" },
-        { "text": "Agent loop", "link": "/runtime/agent-loop" },
-        { "text": "Pattern library", "link": "/patterns/" }
+        {
+          "text": "Build your first MCP agent in 5 minutes",
+          "link": "/getting-started/build-your-first-mcp-agent"
+        },
+        {
+          "text": "What is an AI agent?",
+          "link": "/learn/agents/what-is-an-ai-agent"
+        },
+        {
+          "text": "Agent loop",
+          "link": "/runtime/agent-loop"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "agentic-mcp-flow.json",
+      "slug": "webhook-agent-with-memory",
+      "title": "Webhook to AI agent with memory and MCP tools",
+      "description": "Trigger an agent from a webhook, give it session memory and MCP tools, and secure the webhook with a bearer token or HMAC signature.",
+      "keys": "model",
+      "keysNote": "A model: local Ollama or a provider key",
+      "tags": [
+        "agent",
+        "mcp",
+        "webhook",
+        "memory"
+      ],
+      "whatYouGet": "An agent behind a webhook URL, with per-session memory and two MCP tools, that any app can call with a question and a session id.",
+      "summary": "A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `user_prompt` and `session_id` from the request body to an Agent Orchestrator. The agent has a chat model, a **Simple Memory** node keyed by the session id, and two tools from the mock MCP server built into L2M. As shipped, the chat model points at a local Ollama server (`http://localhost:11434/v1`, model `qwen2.5:7b`), so you need that model, or you point the node at another one. As shipped, the webhook also has no authentication: secure it before you expose it.",
+      "steps": [
+        "Open the chat model node and point it at a model you have: pull `qwen2.5:7b` into Ollama, type another model name, or switch the provider. Save.",
+        "Send a request:\n\n   ```bash\n   curl -X POST http://localhost:4000/webhook/agent-demo \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"system_prompt\": \"You are a helpful assistant.\", \"user_prompt\": \"What is 12 * 7?\", \"session_id\": \"demo-2\"}'\n   ```",
+        "Send a second request with the same `session_id` and a follow-up question. The agent now sees the first exchange.",
+        "Before anyone else can reach the URL, secure it (see below)."
+      ],
+      "sections": [
+        {
+          "heading": "What a run does",
+          "body": "We ran the sample on a fresh install. Two things are worth knowing before you call it from an app.\n\n**A model error still returns 200.** With no `qwen2.5:7b` in the local Ollama, the request returned HTTP 200 with `{\"output\":{\"result\":\"Provider ollama request failed (404): ... model 'qwen2.5:7b' not found ...\"}}`. The run is recorded as a success; the Agent node's `stopReason` is `error`. If an app gets text like that back, open the run and look at the Agent node.\n\n**Memory, checked with the echo model.** To test the webhook and memory without a model, we set the chat model to the built-in echo provider. Two requests with `session_id: \"demo-2\"` returned `Echo: What is 12 * 7?` and then `Echo: And what time is it in Toronto?`. The second run's agent messages held the first question and answer before the new question: that is the memory. Echo never calls tools, so this check says nothing about tool use; a model that supports tool calling can call `get_current_time` and `calculator`.\n\nMemory keeps the last 20 messages of a session (`maxMessages`) and, with **Persist Tool Messages** off, leaves tool results out of it. The tools' connection names an HTTP endpoint (`http://127.0.0.1:7001/mcp`), but the `mock-mcp` server runs inside L2M: nothing has to listen on that port."
+        },
+        {
+          "heading": "Secure the webhook",
+          "body": "With no auth mode set, anyone who can reach your L2M can call the agent and spend your model budget. On the Webhook Input node:\n\n- **Bearer token.** Set the auth mode to `bearer_token`, the auth header name to `authorization`, and pick a stored secret that holds the token. Callers then send `Authorization: Bearer <token>`. We checked: without the header the call gets `401 {\"error\":\"Unauthorized webhook request\"}`; with it, the agent answers.\n- **HMAC signature.** For callers that can sign requests, `hmac_sha256` checks a hex HMAC-SHA256 of `timestamp + \".\" + raw body`, sent with a timestamp header. Requests outside the replay window (300 seconds by default) and repeated signatures are rejected.\n- **Idempotency.** Turn it on so a retried request with the same `Idempotency-Key` returns the first result instead of running the agent again; the same key with a different body gets `409`.\n- **Allowed addresses.** List the IPs or CIDR ranges that may call the trigger.\n\nSee [Secure webhooks](/security/secure-webhooks) for the signing format and error codes."
+        }
+      ],
+      "makeItYours": "- Switch the chat model to OpenAI, Anthropic, Gemini or any OpenAI-compatible endpoint, with its key stored as a [secret](/security/secrets).\n- Replace the mock tools with a server from your [MCP server registry](/product/mcp-server-registry).\n- Raise `maxMessages` on the memory node for longer conversations, or lower it to keep prompts small.",
+      "makeItSafer": "- The sample takes `system_prompt` from the request, so any caller can rewrite the agent's instructions. Write the system prompt on the agent node instead.\n- Require approval before write tools: with **Ask before write tools** on, the agent pauses before `calculator` (it has no read-only annotation). See [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Cap what callers can spend with a workflow [budget](/product/budgets).",
+      "related": [
+        "ai-agent",
+        "agent-memory",
+        "human-in-the-loop",
+        "mcp-tool"
+      ],
+      "docs": [
+        {
+          "text": "Secure webhooks",
+          "link": "/security/secure-webhooks"
+        },
+        {
+          "text": "Agent loop: session tool cache",
+          "link": "/runtime/agent-loop#session-tool-cache-multi-turn-reuse"
+        },
+        {
+          "text": "Human approval for agent tool calls",
+          "link": "/guides/human-approval-for-agent-tool-calls"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
       ]
     },
     {
@@ -29,15 +123,163 @@
       "description": "A supervisor agent hands work to a researcher and a calculator worker, each with its own tools. Imports and runs with no API key.",
       "keys": "none",
       "keysNote": "No API key",
-      "tags": ["agent", "mcp", "multi-agent"],
+      "tags": [
+        "agent",
+        "mcp",
+        "multi-agent"
+      ],
       "whatYouGet": "A Supervisor agent with two worker agents, each with its own chat model and MCP tools, that runs on a fresh install.",
-      "summary": "A Supervisor node coordinates two worker agents. The researcher has an MCP knowledge-base lookup tool; the computer has a calculator and a clock. The Supervisor sees each worker as one tool and decides which to call for each step, and each worker runs its own agent loop. Every agent uses the built-in echo provider and the bundled mock MCP server, so it runs with no API key. Echo never asks for a tool, so the Supervisor answers on its first turn and hands nothing off; attach a real chat model to see it delegate.",
-      "makeItYours": "- Give each worker its own real chat model on its `chat_model` port: a small, cheap model often does for a narrow worker.\n- Swap a worker's mock tools for your own MCP servers.\n- Add a third worker on the Supervisor's `worker` port when a new kind of task appears, rather than giving one agent every tool.",
+      "summary": "A Supervisor node coordinates two worker agents. The researcher has an MCP knowledge-base lookup tool; the computer has a calculator and a clock. The Supervisor sees each worker as one tool and decides which to call for each step, and each worker runs its own agent loop. Every agent uses the built-in echo provider and the mock MCP server built into L2M, so it runs with no API key. Echo never asks for a tool, so a local run shows the wiring, not the delegation: the Supervisor answers on its first turn and hands nothing off. Attach a real chat model to see it delegate.",
+      "makeItYours": "- Give each worker its own real chat model on its `chat_model` port: a small, cheap model often does for a narrow worker, while the Supervisor needs one that plans well.\n- Swap a worker's mock tools for your own MCP servers.\n- Add a third worker on the Supervisor's `worker` port when a new kind of task appears, rather than giving one agent every tool. Each worker adds a tool to the Supervisor's list and model calls to each run, so add one only for a distinct job.",
       "makeItSafer": "- Keep write tools on one worker only, and require approval for them: see [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Record a good run as a [golden run](/product/golden-runs) and replay it after each change.",
-      "related": ["agent-loop", "tool-calling", "supervisor-agent", "worker-agent"],
+      "related": [
+        "supervisor-agent",
+        "worker-agent",
+        "ai-agent",
+        "agent-loop",
+        "tool-calling"
+      ],
       "docs": [
-        { "text": "Agent loop: attachment ports", "link": "/runtime/agent-loop#attachment-ports" },
-        { "text": "Pattern library", "link": "/patterns/" }
+        {
+          "text": "Agent loop: attachment ports",
+          "link": "/runtime/agent-loop#attachment-ports"
+        },
+        {
+          "text": "Golden runs and replay",
+          "link": "/product/golden-runs"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ],
+      "steps": [
+        "Click **Run** in the editor, or call the run API with a question for the team (as in the [zero-key agent recipe](/recipes/zero-key-mcp-agent), with the workflow id `wf-supervisor-worker-swarm`).",
+        "Open the run and click the **Supervisor** node to read its trace.",
+        "Then change one thing at a time (see below)."
+      ],
+      "sections": [
+        {
+          "heading": "What a run does",
+          "body": "We ran the sample on a fresh install with \"What is 17% of 2340, and what does MCP stand for?\":\n\n- The **Supervisor** made one model call and stopped after 1 iteration with `stopReason: \"final_answer\"`. Echo answered `Supervisor: What is 17% of 2340, and what does MCP stand for?`.\n- Both workers, their chat models and their tools are marked **skipped** (`attachment_only_node`). Workers are not steps in the run: they run only when the Supervisor calls them, and echo never did.\n\nThe Supervisor is offered one tool per worker, named `delegate_to_` plus the worker's name with every character other than letters, digits, `_` and `-` turned into `_`: here `delegate_to_Worker__Researcher` and `delegate_to_Worker__Computer`. Each tool's description starts with \"Delegate task to\" and the worker's name, followed by the start of the worker's system prompt as a hint. Name workers so the Supervisor's model can tell them apart; two workers with the same name make the run fail."
+        },
+        {
+          "heading": "See delegation in a recorded run",
+          "body": "The demo's **Research swarm** workflow is the same pattern with a researcher and an analyst, recorded with a real model. In its run the Supervisor calls `delegate_to_researcher`, then `delegate_to_analyst`, then writes the team summary: three iterations. <a href=\"/demo/?mode=editor&amp;workflowId=wf-demo-research-swarm&amp;demoRun=recorded\" target=\"_self\">Play it in the demo</a>."
+        }
+      ]
+    },
+    {
+      "sample": "workflow-as-mcp-tool-flow.json",
+      "slug": "workflow-as-mcp-tool",
+      "title": "Serve an L2M workflow as an MCP tool",
+      "description": "Turn a whole workflow into one MCP tool that agents and IDE clients can call, then serve it from a toolset with its own client token on the MCP gateway.",
+      "keys": "none",
+      "keysNote": "No API key",
+      "tags": [
+        "mcp",
+        "gateway",
+        "agent"
+      ],
+      "whatYouGet": "A workflow that any MCP client can list and call as one tool, `answer_from_kb`, through L2M's MCP gateway.",
+      "summary": "An **Expose as MCP Tool** trigger turns the workflow into a tool named `answer_from_kb`, with one required argument, `question`. Inside, an agent with the echo model and the mock `lookup_kb` tool answers it. Put the workflow in a toolset on the [MCP gateway](/product/mcp-gateway) and any MCP client holding a client token can list the tool and call it; each call runs the whole workflow. It runs with no API key. With echo, the answer is the question repeated back.",
+      "steps": [
+        "In the sidebar, open **MCP → Toolsets**, create a toolset and add the workflow. Its endpoint is `/mcp/<slug>` (we named ours `kb-helper`).",
+        "Open **MCP → Clients**, create a client for that toolset and copy its token. It is shown once.",
+        "Call the tool with curl (below), or paste the client's configuration snippet into your MCP client."
+      ],
+      "sections": [
+        {
+          "heading": "Call it with curl",
+          "body": "The gateway speaks MCP over Streamable HTTP. With the client token in `TOKEN` and the session id from step 1 in `SESSION`:\n\n```bash\n# 1. Open a session. The response carries an Mcp-Session-Id header.\ncurl -i http://localhost:4000/mcp/kb-helper \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Accept: application/json, text/event-stream\" \\\n  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"curl\",\"version\":\"1\"}}}'\n\n# 2. List the tools, then call one, in that session.\ncurl http://localhost:4000/mcp/kb-helper \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Accept: application/json, text/event-stream\" \\\n  -H \"Mcp-Session-Id: $SESSION\" \\\n  -H \"MCP-Protocol-Version: 2025-11-25\" \\\n  -d '{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_from_kb\",\"arguments\":{\"question\":\"What is MCP?\"}}}'\n\n# 3. End the session.\ncurl -X DELETE http://localhost:4000/mcp/kb-helper \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Mcp-Session-Id: $SESSION\"\n```\n\nWhat came back on our install:\n\n- `initialize`: HTTP 200 with an `mcp-session-id` header and `{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"l2m-kb-helper\",\"title\":\"KB helper\",...}}`.\n- `tools/list`: one tool, `answer_from_kb`, with the description and input schema from the trigger.\n- `tools/call`: `content` with the workflow output as JSON text, the same object as `structuredContent` (`{\"result\":\"Echo: What is MCP?\"}`), and the run's id in `_meta.executionId`.\n- `DELETE`: `204 No Content`.\n\nEach call is a full run, listed in the execution history with the trigger type `mcp_gateway`. The gateway speaks MCP protocol versions 2025-11-25, 2025-06-18 and 2025-03-26. An MCP client library or app does these steps for you."
+        },
+        {
+          "heading": "The sample's legacy routes are public",
+          "body": "The trigger also has a `path` (`kb-helper`) and `authMode: \"public\"`, which serve the older REST routes `GET /api/mcp-server/kb-helper/manifest` and `POST /api/mcp-server/kb-helper/invoke`. On our install both answered without any credentials, and `invoke` ran the workflow. They are not MCP, so MCP clients do not need them: set the trigger's auth mode to `bearer` with a stored secret, or remove the `path`, before you deploy. See [Expose a workflow as an MCP tool](/runtime/workflow-as-mcp-tool#legacy-rest-routes)."
+        }
+      ],
+      "makeItYours": "- Change `toolName`, `toolDescription` and `inputSchema` on the trigger. The description is what other agents' models read to decide when to call your tool, so make it specific.\n- Replace the agent's echo model with a real one, or replace the agent with a retrieval step and an LLM call, as in the [RAG knowledge base recipe](/recipes/rag-knowledge-base).\n- Call it from another L2M instance: register `https://<l2m-host>/mcp/<slug>` there with the `http_mcp` adapter and the client token as a stored secret.",
+      "makeItSafer": "- Give each client only the toolsets it needs, the lowest role that works, and an expiry.\n- Add [tool policy](/product/mcp-tool-policy) rules scoped to the client or the toolset, including require-approval rules.\n- Cap each client with a [budget](/product/budgets) scoped to **MCP client** and a rate limit on the client.",
+      "related": [
+        "mcp-server",
+        "mcp-gateway",
+        "mcp-tool",
+        "model-context-protocol"
+      ],
+      "docs": [
+        {
+          "text": "Expose a workflow as an MCP tool",
+          "link": "/runtime/workflow-as-mcp-tool"
+        },
+        {
+          "text": "MCP gateway",
+          "link": "/product/mcp-gateway"
+        },
+        {
+          "text": "Run a self-hosted MCP gateway",
+          "link": "/guides/self-hosted-mcp-gateway"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "rag-knowledge-base-flow.json",
+      "slug": "rag-knowledge-base",
+      "title": "RAG with a built-in knowledge base, no vector DB",
+      "description": "Ingest documents into L2M's built-in knowledge base and answer questions from them, with no external vector database and no API key to start.",
+      "keys": "none",
+      "keysNote": "No API key to start",
+      "time": "10 minutes",
+      "tags": [
+        "rag",
+        "knowledge-base",
+        "starter"
+      ],
+      "whatYouGet": "A question-answering workflow that retrieves from a knowledge base stored in L2M's own database, with no vector database and no API key.",
+      "summary": "A **Question** node holds the question. **RAG Retrieve** searches a built-in knowledge base for the three nearest chunks, a **Prompt Template** puts them into a grounded prompt, and an **LLM** node answers. The sample uses `token-embedder`, a hash-based demo embedder that needs no key (its search quality is poor), and the echo model. Echo returns the prompt it was given, which is useful here: the answer shows exactly what a real model would read. Swap both for real ones to get real answers.",
+      "steps": [
+        "Create a knowledge base with the `token-embedder` and add a document, under **KB** in the sidebar or with the API (below). Copy its id.",
+        "Open the **RAG Retrieve (KB)** node and replace `<your-kb-id>` with that id. Save.",
+        "Run it, then change the question on the **Question** node and run it again."
+      ],
+      "sections": [
+        {
+          "heading": "Create a knowledge base with the API",
+          "body": "```bash\n# Create a knowledge base (admin). The response holds its id: kb_...\ncurl -X POST http://localhost:4000/api/knowledge-bases \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"name\": \"Helpdesk FAQ\", \"embedderId\": \"token-embedder\", \"embedderConfig\": {}}'\n\n# Load, chunk, embed and store a Markdown file in one call.\ncurl -X POST http://localhost:4000/api/knowledge-bases/$KB_ID/upload \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"filename\": \"helpdesk-faq.md\", \"sourceId\": \"helpdesk-faq-v1\",\n       \"content\": \"# Helpdesk FAQ\\n\\n## Reset your password\\nTo reset your password, open the sign-in page, choose Forgot password, and enter your work email. The reset link is valid for 30 minutes.\\n\\n## Change your billing plan\\nAdmins can change the billing plan under Settings, then Billing. Changes apply from the next invoice.\\n\\n## Export your data\\nGo to Settings, then Data, and choose Export. You get a ZIP file with one CSV per table.\",\n       \"chunking\": {\"strategy\": \"recursive\", \"chunkSize\": 300, \"chunkOverlap\": 0}}'\n```\n\nOn our install the upload answered `{\"sourceId\":\"helpdesk-faq-v1\",\"documentsLoaded\":1,\"chunksInserted\":2,\"dimensions\":64}`. The embedder you create the knowledge base with must match the `embedderId` on the RAG Retrieve node, or the question and the chunks are not compared in the same space."
+        },
+        {
+          "heading": "What a run does",
+          "body": "We ran the sample on a fresh install, against a knowledge base holding a short helpdesk FAQ (a password-reset section, a billing section and a data-export section, stored as 2 chunks):\n\n- **RAG Retrieve** returned both chunks, the password-reset chunk first (similarity 0.375, against 0.131 for the other), each with its `chunkId`, `sourceId` and score.\n- **Grounded Prompt** numbered them `[1]` and `[2]` under \"Context:\" and added the question.\n- **LLM** (echo) returned that whole prompt, prefixed with `Echo: `, and **Output** returned it as `result`.\n\nTwo things to know:\n\n- **A missing id fails quietly.** Run the sample without replacing `<your-kb-id>` and it still succeeds: retrieval returns no documents and the prompt's context is empty. If answers look ungrounded, check the retrieve node's `documents` first.\n- **The template asks for chunk ids, but the context shows numbers.** The prompt says \"Cite the chunkId for every claim\" while the context lists `[1]`, `[2]`. For citations that resolve to their sources, use the `citationInstructions` the retrieve node emits and the citation tools in [Knowledge bases](/nodes/knowledge-bases#citations-phase-9-4)."
+        },
+        {
+          "heading": "Variant: retrieve from a connector",
+          "body": "[`rag-flow.json`](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-flow.json) loads documents from a **Connector Source** (Google Drive) on every run and retrieves from them in memory, with no knowledge base. As shipped it calls a local Ollama model (`llama3.1`). We ran it with the echo model and no Google credentials: the connector ran in demo-fallback mode and returned five built-in sample documents, and retrieval put the three closest to \"How does MCP fit into an AI workflow builder?\" into the prompt. Use a knowledge base when the documents should be ingested once and kept; use a connector for small sets that change between runs."
+        }
+      ],
+      "makeItYours": "- Use a real embedder (for example `openai-embedder`, with its key as a [secret](/security/secrets)) for the knowledge base and the same `embedderId` on the node. A knowledge base keeps the vector size of its first chunks, so start a new one when you change embedders.\n- Replace the echo model with a real one on the **LLM** node.\n- Set `searchMode` to `hybrid` to add keyword (BM25) matches to vector search, and add a **Rerank** node for better ordering. See [hybrid search](/nodes/knowledge-bases#hybrid-search-phase-9-3).",
+      "makeItSafer": "- Retrieved documents are outside content: a document can carry instructions for the model. [Content rules](/product/content-rules#outside-content-at-the-model-boundary) can check each retrieved document before it reaches the model.\n- Cap model spend with a [budget](/product/budgets) once you switch to a paid model.",
+      "related": [
+        "rag",
+        "vector-store",
+        "hybrid-search",
+        "grounding"
+      ],
+      "docs": [
+        {
+          "text": "Knowledge bases",
+          "link": "/nodes/knowledge-bases"
+        },
+        {
+          "text": "Vector stores",
+          "link": "/nodes/vector-stores"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
       ]
     }
   ]
