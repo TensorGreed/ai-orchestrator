@@ -33,7 +33,7 @@ A **Question** node holds the question. **RAG Retrieve** searches a built-in kno
 
 1. Download <a href="/docs/recipes/files/rag-knowledge-base-flow.json" download>rag-knowledge-base-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-knowledge-base-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. Create a knowledge base with the `token-embedder` and add a document, under **KB** in the sidebar or with the API (below). Copy its id.
+3. Create a knowledge base with the `token-embedder` and add a document, under **Knowledge** in the sidebar or with the API (below). Copy its id.
 4. Open the **RAG Retrieve (KB)** node and replace `<your-kb-id>` with that id. Save.
 5. Run it, then change the question on the **Question** node and run it again.
 

@@ -66,7 +66,8 @@ curl -i http://localhost:4000/mcp/kb-helper \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 
-# 2. List the tools, then call one, in that session.
+# 2. Call the tool in that session. (List them first with the same request and
+#    "method":"tools/list", "params":{}.)
 curl http://localhost:4000/mcp/kb-helper \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \

@@ -12,7 +12,7 @@ guide: [/learn/security/prompt-injection, /learn/security/mcp-security-risks]
 
 **Prompt injection in which the attacker's instructions hide in content the model reads while doing its job, such as a web page, an email, a document or a tool result.**
 
-The attacker never talks to the model. They plant text where the model will find it, and wait. Greshake and colleagues named the problem in 2023: retrieving data into a prompt can "blur the line between data and instructions", and lets attackers "remotely (without a direct interface) exploit LLM-integrated applications", including control over "how and if other APIs are called".
+The attacker never talks to the model. They plant text where the model will find it, and wait. Greshake and colleagues named the problem in 2023: LLM-integrated applications "blur the line between data and instructions", so attackers can "remotely (without a direct interface) exploit LLM-integrated applications", and prompts the application retrieves can control "how and if other APIs are called".
 
 ## Why agents are exposed
 

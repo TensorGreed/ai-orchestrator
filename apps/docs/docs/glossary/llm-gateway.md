@@ -31,7 +31,7 @@ An LLM gateway governs model calls: prompts in, completions out. An <Term id="mc
 
 ## In L2M
 
-The optional [AI gateway](/product/ai-gateway) serves an OpenAI-compatible API at `/v1`: routes map public model names to providers, clients use L2M client tokens, and budgets, rate limits, [model allowlists](/security/model-allowlists) and content rules apply. With no route set up, it stays off.
+The optional [AI gateway](/product/ai-gateway) serves an OpenAI-compatible API at `/v1`: routes map public model names to providers, clients use L2M client tokens, and budgets, rate limits, [model allowlists](/security/model-allowlists) and [content rules](/product/ai-gateway#content-rules) apply. With no route set up, it stays off.
 
 ## Further reading
 

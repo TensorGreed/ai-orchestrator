@@ -12,7 +12,7 @@ guide: [/learn/security/mcp-security-risks]
 
 **An attack that hides instructions for the model in a tool's description, schema or results, so the agent follows them while the user sees only a harmless tool.**
 
-A model reads a tool's whole definition to decide how to use it, and it reads every result the tool returns. Both are text from the server, and the model cannot reliably tell a description from an instruction. The OWASP MCP Security Cheat Sheet describes tool poisoning as "malicious instructions hidden in tool descriptions, parameter schemas, or return values that manipulate the LLM's behavior." It is a form of <Term id="indirect-prompt-injection">indirect prompt injection</Term> aimed at the tool layer.
+A model reads a tool's whole definition to decide how to use it, and it reads every result the tool returns. Both are text from the server, and the model cannot reliably tell a description from an instruction. The OWASP MCP Security Cheat Sheet describes tool poisoning as "Malicious instructions hidden in tool descriptions, parameter schemas, or return values that manipulate the LLM's behavior." It is a form of <Term id="indirect-prompt-injection">indirect prompt injection</Term> aimed at the tool layer.
 
 ## Example
 

@@ -12,7 +12,7 @@ guide: [/learn/agents/too-many-tools, /learn/agents/agent-memory, /learn/agents/
 
 **The most text, counted in tokens, that a model can take into account in one call: system prompt, conversation, tool definitions and tool results, plus the answer it writes.**
 
-A model has no memory between calls. Everything it should know for this call has to be sent again, and it all has to fit. Provider documentation lists what counts: the system prompt, every message including tool results, the tool definitions, and the output. Send more than fits and the request fails.
+A model has no memory between calls. Everything it should know for this call has to be sent again, and it all has to fit. Provider documentation lists what counts: the system prompt, every message including tool results, the tool definitions, and the output. Send more input than fits and the request fails.
 
 ## Why agents run out of it
 

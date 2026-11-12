@@ -65,9 +65,9 @@ A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `
 
 ## What a run does
 
-We ran the sample on a fresh install. Two things are worth knowing before you call it from an app.
+Two things are worth knowing before you call it from an app.
 
-**A model error still returns 200.** With no `qwen2.5:7b` in the local Ollama, the request returned HTTP 200 with `{"output":{"result":"Provider ollama request failed (404): ... model 'qwen2.5:7b' not found ..."}}`. The run is recorded as a success; the Agent node's `stopReason` is `error`. If an app gets text like that back, open the run and look at the Agent node.
+**A model error comes back as the answer.** If the chat model call fails (the model is not pulled, the server is down, the key is wrong), the agent does not fail the run. It returns the error message as its answer, such as `Provider ollama request failed (404): ...`, with `stopReason: "error"`, and the webhook replies with that text in `output.result`. If an app gets text like that back, open the run and look at the Agent node.
 
 **Memory, checked with the echo model.** To test the webhook and memory without a model, we set the chat model to the built-in echo provider. Two requests with `session_id: "demo-2"` returned `Echo: What is 12 * 7?` and then `Echo: And what time is it in Toronto?`. The second run's agent messages held the first question and answer before the new question: that is the memory. Echo never calls tools, so this check says nothing about tool use; a model that supports tool calling can call `get_current_time` and `calculator`.
 
@@ -79,7 +79,7 @@ With no auth mode set, anyone who can reach your L2M can call the agent and spen
 
 - **Bearer token.** Set the auth mode to `bearer_token`, the auth header name to `authorization`, and pick a stored secret that holds the token. Callers then send `Authorization: Bearer <token>`. We checked: without the header the call gets `401 {"error":"Unauthorized webhook request"}`; with it, the agent answers.
 - **HMAC signature.** For callers that can sign requests, `hmac_sha256` checks a hex HMAC-SHA256 of `timestamp + "." + raw body`, sent with a timestamp header. Requests outside the replay window (300 seconds by default) and repeated signatures are rejected.
-- **Idempotency.** Turn it on so a retried request with the same `Idempotency-Key` returns the first result instead of running the agent again; the same key with a different body gets `409`.
+- **Idempotency.** Turn it on so a retried request with the same `Idempotency-Key` returns the first result instead of running the agent again; the same key with a different body gets `409`. Once it is on, every request must send the header, or it gets `400`.
 - **Allowed addresses.** List the IPs or CIDR ranges that may call the trigger.
 
 See [Secure webhooks](/security/secure-webhooks) for the signing format and error codes.

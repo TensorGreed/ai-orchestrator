@@ -42,7 +42,7 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     slug: "pkce",
     term: "PKCE",
     topic: "mcp",
-    definition: "Proof Key for Code Exchange: the client sends a hash of a one-time secret with the authorization request and the secret itself when it redeems the code, so a stolen code is useless. MCP clients must use it."
+    definition: "Proof Key for Code Exchange: the client sends a hash (S256) of a one-time secret with the authorization request and the secret itself when it redeems the code, so a stolen code is useless. MCP clients must use it."
   },
   {
     slug: "delegated-credentials",
