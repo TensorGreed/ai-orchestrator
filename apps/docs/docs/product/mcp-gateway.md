@@ -1,4 +1,5 @@
 ---
+title: "MCP gateway: serve workflows and tools to MCP clients"
 description: "L2M as an MCP server: serve workflows and tools to MCP clients through toolsets with per-client tokens, tool policy, budgets and optional rate limits."
 ---
 

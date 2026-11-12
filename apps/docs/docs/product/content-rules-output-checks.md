@@ -1,4 +1,5 @@
 ---
+title: "Output checks: schema, topics, safety and grounding"
 description: "Output checks in content rules: answer schema, topics, content safety and grounding in sources, where they run, their options and their limits."
 ---
 

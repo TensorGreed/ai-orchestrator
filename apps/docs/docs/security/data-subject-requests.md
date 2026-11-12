@@ -1,3 +1,8 @@
+---
+title: "Data-subject requests: find and export a person's data"
+description: "Answer a data-subject request: find what L2M stores about one person by identifier and export it as a zip downloaded once. Optional; off until used."
+---
+
 # Data-subject requests
 
 When someone asks what you hold about them, an admin (or a user with the `data_subject:manage` permission) makes a

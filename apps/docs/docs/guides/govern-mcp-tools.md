@@ -1,5 +1,5 @@
 ---
-title: "Govern MCP tools: allow and deny rules, write tools, telemetry"
+title: "Govern MCP tools: allow and deny rules, telemetry"
 description: "A step-by-step guide to MCP tool governance in L2M: classify tools, write allow and deny rules, gate write tools after untrusted content, watch calls."
 ---
 

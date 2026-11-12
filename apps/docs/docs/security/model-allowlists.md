@@ -1,4 +1,5 @@
 ---
+title: "Model allowlists: limit which models L2M may call"
 description: "Limit which LLM and embedding models L2M may call, for the whole deployment or one project, with builder warnings, audited refusals and replay reports."
 ---
 

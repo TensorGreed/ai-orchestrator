@@ -1,5 +1,6 @@
 ---
-description: "The L2M connector SDK: what a connector adapter implements (config and auth schemas, testConnection, fetchData), the built-in connectors, and how to add a new one."
+title: "Connector SDK: build or use data connectors"
+description: "The L2M connector SDK: what a connector adapter implements (config and auth schemas, testConnection, fetchData), the built-in connectors, and adding one."
 ---
 
 # Connector SDK

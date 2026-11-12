@@ -1,5 +1,5 @@
 ---
-title: "Test MCP servers in CI: cassettes, snapshot mocks and breaking changes"
+title: "Test MCP servers in CI: cassettes and snapshot mocks"
 description: "Make MCP-dependent agents testable: record MCP calls as cassettes, run a snapshot mock server, and fail CI on breaking schema changes with l2m mcp check."
 ---
 

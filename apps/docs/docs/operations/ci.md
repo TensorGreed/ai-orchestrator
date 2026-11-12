@@ -1,4 +1,5 @@
 ---
+title: "CI pipeline: GitHub Actions gates and local commands"
 description: "The L2M GitHub Actions pipeline: install, lint, test and build gates on pull requests and main, and the local commands that match each CI step."
 ---
 

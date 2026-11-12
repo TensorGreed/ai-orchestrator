@@ -1,4 +1,5 @@
 ---
+title: "Content rules engine: how content is inspected"
 description: "The content rules engine inspects content flowing between users, models and tools, channel by channel, decides what to do with it and records why."
 ---
 

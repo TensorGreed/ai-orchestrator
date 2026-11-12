@@ -1,4 +1,5 @@
 ---
+title: "LLM nodes: config fields and defaults"
 description: "Reference for the 15 nodes in the L2M LLM category, with every config field and default. Chat-completion model adapters and prompt-template helpers."
 ---
 

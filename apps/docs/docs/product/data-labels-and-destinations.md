@@ -1,5 +1,6 @@
 ---
-description: "Track where each step's data came from and what it contains, sort models, servers and URLs into destination classes, and block, redact or require approval in L2M."
+title: "Data labels and destinations: control where data goes"
+description: "Track where each step's data came from and what it contains, sort models, servers and URLs into destination classes, and block, redact or require approval."
 ---
 
 # Data labels and destinations

@@ -1,5 +1,6 @@
 ---
-description: "The L2M provider SDK: the LLM adapter contract (generation, streaming, tool calls), the built-in OpenAI, OpenAI-compatible, Azure OpenAI, Gemini and Ollama providers, and adding one."
+title: "Provider SDK: LLM adapters and adding your own"
+description: "The L2M provider SDK: the LLM adapter contract (generation, streaming, tool calls), built-in OpenAI, Azure OpenAI, Gemini and Ollama providers, adding one."
 ---
 
 # Provider SDK

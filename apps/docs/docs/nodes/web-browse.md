@@ -1,5 +1,6 @@
 ---
-description: "The L2M Web Browse node drives headless Chromium through Playwright to load a page, run its JavaScript and extract HTML, text, screenshots, metadata, links and images."
+title: "Web Browse node: read JavaScript pages with Chromium"
+description: "The L2M Web Browse node drives headless Chromium through Playwright to load a page, run its JavaScript, extract HTML, text, screenshots, links, images."
 # Render `{{...}}` literally — they're workflow-template markers, not Vue interpolations.
 ---
 

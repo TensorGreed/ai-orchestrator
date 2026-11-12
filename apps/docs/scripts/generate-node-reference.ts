@@ -43,9 +43,15 @@ const CATEGORY_BLURB: Record<NodeCategory, string> = {
   Output: "Terminal nodes that shape the workflow's response payload."
 };
 
-/** YAML frontmatter with the page's meta description (a JSON string is valid YAML). */
-function frontmatter(description: string): string[] {
-  return ["---", `description: ${JSON.stringify(description)}`, "---", ""];
+/** YAML frontmatter with the page's title and meta description (a JSON string is valid YAML). */
+function frontmatter(title: string, description: string): string[] {
+  return ["---", `title: ${JSON.stringify(title)}`, `description: ${JSON.stringify(description)}`, "---", ""];
+}
+
+/** A meta description of at most 155 characters: the lead, plus the detail when it still fits. */
+function metaDescription(lead: string, detail: string): string {
+  const full = `${lead} ${detail}`;
+  return full.length <= 155 ? full : lead;
 }
 
 function slugify(category: NodeCategory): string {
@@ -137,7 +143,10 @@ function renderCategoryPage(category: NodeCategory, nodes: NodeDefinition[]): st
   const sorted = [...nodes].sort((a, b) => a.type.localeCompare(b.type));
   const count = `${sorted.length} node${sorted.length === 1 ? "" : "s"}`;
   const header = [
-    ...frontmatter(`Reference for the ${count} in the L2M ${category} category, with every config field and default. ${CATEGORY_BLURB[category]}`),
+    ...frontmatter(
+      `${category} nodes: config fields and defaults`,
+      metaDescription(`Reference for the ${count} in the L2M ${category} category, with every config field and default.`, CATEGORY_BLURB[category])
+    ),
     "<!--",
     "  Generated from packages/shared/src/definitions.ts.",
     "  DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`",
@@ -159,6 +168,7 @@ function renderCategoryPage(category: NodeCategory, nodes: NodeDefinition[]): st
 function renderIndexPage(byCategory: Map<NodeCategory, NodeDefinition[]>): string {
   const lines: string[] = [
     ...frontmatter(
+      "Node reference: every L2M node type and config field",
       `Reference for all ${nodeDefinitions.length} L2M node types across ${byCategory.size} categories, generated from the node definitions: every config field and default value.`
     ),
     "<!--",

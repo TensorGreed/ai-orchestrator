@@ -1,5 +1,6 @@
 ---
-description: "L2M environment variables: the required secret master key, local defaults, bootstrap admin, single sign-on, rate limits, MCP registry probes and provider fallbacks."
+title: "Environment variables: required and optional settings"
+description: "L2M environment variables: the required master key, local defaults, bootstrap admin, single sign-on, rate limits, MCP registry probes, provider fallbacks."
 ---
 
 # Environment

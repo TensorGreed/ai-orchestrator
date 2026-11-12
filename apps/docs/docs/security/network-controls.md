@@ -1,5 +1,6 @@
 ---
-description: "Limit L2M by client address per scope (UI, API, webhooks, MCP gateway, metrics), roll out in report mode, keep break-glass, and pin MCP client certificates."
+title: "Network controls: limit access by client address"
+description: "Limit L2M by client address per scope (UI, API, webhooks, MCP gateway, metrics), roll out in report mode, keep break-glass, pin MCP client certificates."
 ---
 
 # Network controls

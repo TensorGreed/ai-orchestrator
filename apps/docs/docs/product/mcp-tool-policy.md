@@ -1,4 +1,5 @@
 ---
+title: "MCP tool policy: allow, deny or require approval"
 description: "MCP tool policy rules in L2M: allow, deny or require approval by role, server, tool, arguments and data labels, with shadow mode and gateway retries."
 ---
 

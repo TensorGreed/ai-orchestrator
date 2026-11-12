@@ -1,4 +1,5 @@
 ---
+title: "Cluster operations: run several instances on Postgres"
 description: "Run several L2M instances on one Postgres database: cross-instance cancel, shared sign-in and rate limits, the registry, leader jobs and troubleshooting."
 ---
 

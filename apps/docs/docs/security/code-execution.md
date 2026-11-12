@@ -1,5 +1,6 @@
 ---
-description: "What L2M code nodes and template expressions can and cannot reach: expressions sandboxed in QuickJS on WebAssembly, JavaScript and Python code nodes, and host Python."
+title: "Code execution: sandboxes for expressions and code"
+description: "What L2M code nodes and template expressions can reach: expressions sandboxed in QuickJS on WebAssembly, JavaScript and Python code nodes, and host Python."
 ---
 
 # Code execution and expressions

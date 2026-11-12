@@ -1,5 +1,6 @@
 ---
-description: "Reference for the 44 nodes in the L2M Utility category, with every config field and default. DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait."
+title: "Utility nodes: config fields and defaults"
+description: "Reference for the 44 nodes in the L2M Utility category, with every config field and default."
 ---
 
 <!--

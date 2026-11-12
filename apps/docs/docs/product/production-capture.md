@@ -1,4 +1,5 @@
 ---
+title: "Production capture: turn real runs into golden sets"
 description: "Record a masked sample of an L2M workflow's real production runs into a Captured runs inbox and promote the useful ones into a golden set in one click."
 ---
 

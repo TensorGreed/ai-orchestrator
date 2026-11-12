@@ -1,4 +1,5 @@
 ---
+title: "Golden sets: regression suites, replay jobs, scorers"
 description: "Golden sets are regression suites for an L2M workflow: replay jobs run every golden run against a candidate version, score each case and report what broke."
 ---
 

@@ -1,5 +1,6 @@
 ---
-description: "Get MCP servers into L2M: import existing MCP client config files, keep an approved server catalog with pinned versions, and try any tool in the Playground."
+title: "MCP onboarding: import configs, keep a catalog"
+description: "Get MCP servers into L2M: import MCP client config files, keep an approved server catalog with pinned versions, and try any tool in the Playground."
 ---
 
 # MCP onboarding and catalog
