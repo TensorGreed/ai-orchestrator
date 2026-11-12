@@ -83,7 +83,7 @@ describeStoreContract("store contract: data-subject rows", (ctx) => {
     expect(await store.countSubjectRows("cassette")).toBe(0);
   });
 
-  it("deleting a run takes its tool calls, guard events and usage rows; a second delete finds nothing", async () => {
+  it("deleting a run takes its tool calls and rule events and clears its usage rows; a second delete finds nothing", async () => {
     const store = ctx.store();
     await store.saveExecutionHistory({ id: "run-1", workflowId: "wf", status: "success", startedAt: new Date().toISOString(), triggerType: "replay" });
     await store.insertGuardEvents([
@@ -94,7 +94,7 @@ describeStoreContract("store contract: data-subject rows", (ctx) => {
         skippedDetectors: [], createdAt: new Date().toISOString()
       }
     ]);
-    expect(await store.deleteSubjectRow("execution", "run-1")).toEqual({ deleted: true, cascaded: [] });
+    expect(await store.deleteSubjectRow("execution", "run-1")).toEqual({ deleted: true, cascaded: [], usageCleared: 0 });
     expect(await store.listGuardEventsForExecution("run-1")).toEqual([]);
     expect(await store.deleteSubjectRow("execution", "run-1")).toEqual({ deleted: false, cascaded: [] });
     expect(await store.deleteSubjectRow("eval_result", "missing")).toEqual({ deleted: false, cascaded: [] });

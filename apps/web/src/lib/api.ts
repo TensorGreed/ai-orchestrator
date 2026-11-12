@@ -3916,6 +3916,14 @@ export async function createSubjectRequest(payload: Partial<SubjectRequestCreate
   return apiRequest<SubjectRequestView>("/api/data-protection/requests", { method: "POST", body: JSON.stringify(payload) });
 }
 
+/**
+ * 13.3 — confirms a deletion request whose preview is ready (admin). It then runs in the background. Asks for a recent
+ * MFA check when step-up is on.
+ */
+export async function confirmSubjectDeletion(id: string) {
+  return apiRequest<SubjectRequestView>(`/api/data-protection/requests/${encodeURIComponent(id)}/confirm`, { method: "POST", body: JSON.stringify({}) });
+}
+
 /** 13.3 — how subject references resolve on a workflow's latest runs (values masked). */
 export async function previewSubjectRefs(payload: { workflowId: string; subjectRefs: string[] }) {
   return apiRequest<SubjectRefPreviewView>("/api/data-protection/subject-refs/preview", { method: "POST", body: JSON.stringify(payload) });

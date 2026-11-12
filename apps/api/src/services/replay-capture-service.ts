@@ -987,8 +987,9 @@ export class ReplayCaptureService {
    * side) is skipped unless its target says `confirmPossible`. `beforeDelete` gets every row
    * about to be deleted before the first one is (the caller writes the
    * intent audit row; if it throws, nothing is deleted). A golden run takes
-   * its golden-set cases and their results; a run takes its tool-call,
-   * guard-event and usage rows. `beforeRowDelete` runs before each row's
+   * its golden-set cases and their results; a run takes its tool-call and
+   * rule-event rows (its usage rows stay, with the person cleared). Each
+   * deleted row leaves an erasure tombstone. `beforeRowDelete` runs before each row's
    * delete and its result after it (the release gate audits admitted cases
    * taken and marks jobs whose results went stale).
    */
@@ -1044,11 +1045,15 @@ export class ReplayCaptureService {
       // Already removed with a golden run deleted before it (a case or a result named as a target too).
       if (gone.has(`${target.kind}:${target.id}`)) continue;
       const afterDelete = (await hooks.beforeRowDelete?.({ kind: target.kind, id: target.id })) ?? null;
-      const outcome = await store.deleteSubjectRow(target.kind, target.id);
+      // 13.3 — every deleted row leaves an erasure tombstone, so a restore of an older backup deletes it again.
+      const outcome = await store.deleteSubjectRow(target.kind, target.id, { requestId: null, erasedAt: new Date().toISOString() });
       if (outcome.deleted) await afterDelete?.();
       if (outcome.heldBy && outcome.heldBy.length > 0) {
         // 13.3 — a legal hold outranks erasure (GDPR Art. 17(3)(e)): the row stays and is reported as held.
         skipped.push({ kind: target.kind, id: target.id, reason: "held" });
+      } else if (outcome.busy) {
+        // 13.3 — a run still in flight would be written back by its executor: it is left; delete it once it finishes.
+        skipped.push({ kind: target.kind, id: target.id, reason: "running" });
       } else if (outcome.deleted) {
         gone.add(`${target.kind}:${target.id}`);
         deleted[target.kind] += 1;
@@ -1172,7 +1177,7 @@ export const FIND_SUBJECT_COVERED = [
   "Golden runs and captured runs (replay_recordings): input, node outputs, run facts, MCP cassette, model tape, memory seed, workflow snapshot, notes",
   "Golden-set cases (eval_fixtures): input and expected output, including hand-written cases and copied inputs",
   "Replay, replay-job, gate and eval results (eval_results): output, error and diff",
-  `Runs made from golden runs and cases (execution_history with trigger ${SUBJECT_EXECUTION_TRIGGERS.join(", ")}): input, output, node results, custom data, error; deleting one also deletes its tool-call, rule-event and usage rows`,
+  `Runs made from golden runs and cases (execution_history with trigger ${SUBJECT_EXECUTION_TRIGGERS.join(", ")}): input, output, node results, custom data, error; deleting one also deletes its tool-call and rule-event rows, approvals, cassettes and queue jobs, and keeps its usage rows with the person cleared`,
   `MCP cassettes recorded by those runs (mcp_cassettes with source ${SUBJECT_CASSETTE_SOURCES.join(", ")})`
 ];
 

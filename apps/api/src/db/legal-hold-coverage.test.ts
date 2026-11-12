@@ -32,6 +32,7 @@ const CALLER_CHECKED: Record<string, string> = {
   "database.ts:deleteEvalFixtureSync": "deleteEvalFixture and updateReleaseGateCases refuse first; deleteSubjectRowSync runs after deleteSubjectRow's check",
   "database.ts:deleteMcpCassetteSync": "deleteMcpCassette refuses first",
   "database.ts:deleteSubjectRowSync": "deleteSubjectRow checks the row first",
+  "postgres/data-labels.ts:deleteSubjectRowWith": "deleteSubjectRow checks the row first (under the shared legal-hold lock)",
   "database.ts:deleteEvalFixturesForRecordingSync": "deleteEvalFixturesForRecording refuses first; inside deleteReplayRecordingSync and deleteSubjectRowSync after their checks",
   "database.ts:deleteReplayRecordingSync": "deleteReplayRecording refuses first; capture eviction picks unheld ones",
   "postgres/prune.ts:deleteUnlockedInBatches": "its callers pass a where that leaves held rows out"
@@ -133,7 +134,9 @@ const NOT_HOLDABLE: Record<string, string> = {
   deleteAuditExportDestination: "configuration",
   deleteVariable: "configuration",
   deleteNotificationConfig: "configuration",
-  deleteBudget: "configuration"
+  deleteBudget: "configuration",
+  deleteGuardVaultTokens: "token vault entries (a deletion leaves out the tokens a held row holds)",
+  pruneErasureTombstones: "erasure tombstones (ids of rows already erased)"
 };
 
 const HOLDABLE = new Set<string>(HOLDABLE_TABLES);

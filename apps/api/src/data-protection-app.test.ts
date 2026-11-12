@@ -208,6 +208,141 @@ describe("data-subject requests in the app", () => {
     expect((await call(context, "GET", `/api/data-protection/requests/${id}`, admin)).json<SubjectRequestView>().export?.available).toBe(true);
   });
 
+  it("deletes after a confirmed preview; a hold defers the run until its release re-queues the deletion; usage totals unchanged", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    await context.store.upsertWorkflow(workflow("wf-del", ["{{input.input.customerId}}"]));
+    const run = await call(context, "POST", "/api/workflows/wf-del/execute", builder, { input: { customerId: CUSTOMER } });
+    expect(run.statusCode, run.body).toBe(200);
+    const executionId = run.json<{ executionId: string }>().executionId;
+    const usage = async () => (await testSql(context.store).all<{ n: number | string }>("SELECT COUNT(*) AS n FROM usage_events"))[0]!.n;
+    const usageBefore = Number(await usage());
+
+    // A hold on the workflow keeps its runs.
+    const hold = await context.app.inject({
+      method: "POST",
+      url: "/api/legal-holds",
+      headers: { cookie: admin },
+      payload: { name: "Matter", reason: "Litigation", scopeType: "workflow", scopeId: "wf-del" }
+    });
+    expect(hold.statusCode, hold.body).toBe(201);
+    const holdId = hold.json<{ hold?: { id: string }; id?: string }>().hold?.id ?? hold.json<{ id: string }>().id;
+
+    // revealTokens is for exports only.
+    expect((await call(context, "POST", "/api/data-protection/requests", admin, { type: "delete", value: CUSTOMER, scan: false, revealTokens: true })).statusCode).toBe(400);
+    const created = await call(context, "POST", "/api/data-protection/requests", admin, { type: "delete", value: CUSTOMER, scan: false });
+    expect(created.statusCode, created.body).toBe(201);
+    const id = created.json<SubjectRequestView>().id;
+    const ready = await waitFor(context, admin, id, "ready");
+    expect(ready).toMatchObject({ type: "delete", counts: { run: 1 }, export: null });
+    // Nothing is deleted before the confirmation; builders cannot confirm; an export cannot be downloaded.
+    expect(await context.store.getExecutionHistory(executionId)).not.toBeNull();
+    expect((await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, builder, {})).statusCode).toBe(403);
+    expect((await call(context, "GET", `/api/data-protection/requests/${id}/export`, admin)).statusCode).toBe(409);
+
+    const confirmed = await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, admin, {});
+    expect(confirmed.statusCode, confirmed.body).toBe(200);
+    expect((await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, admin, {})).statusCode).toBe(409);
+    const deferred = await waitFor(context, admin, id, "deferred_by_hold");
+    expect(deferred.deletion).toMatchObject({ deferred: 1 });
+    expect(await context.store.getExecutionHistory(executionId)).not.toBeNull();
+
+    const released = await context.app.inject({ method: "POST", url: `/api/legal-holds/${holdId}/release`, headers: { cookie: admin }, payload: { reason: "Settled" } });
+    expect(released.statusCode, released.body).toBe(200);
+    const done = await waitFor(context, admin, id, "done");
+    expect(done.deletion!.deleted).toMatchObject({ run: 1 });
+    expect(await context.store.getExecutionHistory(executionId)).toBeNull();
+    expect(Number(await usage())).toBe(usageBefore);
+
+    const audit = await testSql(context.store).all<{ event_type: string }>("SELECT event_type FROM audit_logs WHERE event_type LIKE 'data_subject.%' ORDER BY created_at");
+    expect(audit.map((row) => row.event_type)).toEqual(
+      expect.arrayContaining([
+        "data_subject.deletion_ready",
+        "data_subject.deletion_confirmed",
+        "data_subject.deletion_deferred",
+        "data_subject.deletion_requeued",
+        "data_subject.deleted"
+      ])
+    );
+    expect(await dataSubjectText(context)).not.toContain(CUSTOMER.toLowerCase());
+  });
+
+  it("asks for a recent MFA check before confirming a deletion when step-up is on; refuses erasing your own account", async () => {
+    const context = await createTestContext({ STEP_UP_MAX_AGE_MINUTES: "15" });
+    const admin = await login(context, "admin");
+    const created = await call(context, "POST", "/api/data-protection/requests", admin, { type: "delete", value: CUSTOMER, scan: false });
+    const id = created.json<SubjectRequestView>().id;
+    await waitFor(context, admin, id, "ready");
+    const confirm = await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, admin, {});
+    expect(confirm.statusCode).toBe(403);
+    expect(confirm.json()).toMatchObject({ code: "step_up_required", stepUp: { action: "subject_request.delete" } });
+    expect((await call(context, "GET", `/api/data-protection/requests/${id}`, admin)).json<SubjectRequestView>().status).toBe("ready");
+  });
+
+  it("a staff erasure of your own account is refused at confirmation", async () => {
+    const context = await createTestContext();
+    const email = `self-${crypto.randomUUID().slice(0, 6)}@example.com`;
+    await context.authService.register({ email, password: "Self-Pass-123!", role: "admin" });
+    await login(context, "admin");
+    const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password: "Self-Pass-123!" } });
+    const self = String((Array.isArray(response.headers["set-cookie"]) ? response.headers["set-cookie"] : [response.headers["set-cookie"]]).find((value) => value?.startsWith(`${context.config.SESSION_COOKIE_NAME}=`))).split(";")[0]!;
+    const created = await call(context, "POST", "/api/data-protection/requests", self, { type: "delete", subjectKind: "staff", value: email });
+    expect(created.statusCode, created.body).toBe(201);
+    const id = created.json<SubjectRequestView>().id;
+    const ready = await waitFor(context, self, id, "ready");
+    expect(ready.staffPreview).toMatchObject({ userFound: true });
+    const refused = await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, self, {});
+    expect(refused.statusCode).toBe(409);
+    expect(refused.body).toContain("own account");
+    expect(await context.store.getUserByEmail(email)).not.toBeNull();
+  });
+
+  it("only an admin may confirm a staff erasure of an existing account; it is audited as user.delete without the email", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const privacyCookie = await login(context, "builder");
+    const privacy = (await context.store.listUsers()).find((user) => user.role === "builder")!;
+    await context.store.upsertCustomRole({ id: "privacy", projectId: null, name: "Privacy", description: null, permissions: ["data_subject:manage"], createdBy: null });
+    await context.store.upsertProjectRole({ userId: privacy.id, projectId: "default", role: "custom", customRoleId: "privacy" });
+    const target = `target-${crypto.randomUUID().slice(0, 6)}@example.com`;
+    await context.authService.register({ email: target, password: "Target-Pass-123!", role: "admin" });
+    const targetId = (await context.store.getUserByEmail(target))!.id;
+
+    const made = await call(context, "POST", "/api/data-protection/requests", privacyCookie, { type: "delete", subjectKind: "staff", value: target });
+    expect(made.statusCode, made.body).toBe(201);
+    const id = made.json<SubjectRequestView>().id;
+    await waitFor(context, privacyCookie, id, "ready");
+    // The privacy role may make and see the request, but not delete an account with it.
+    const refused = await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, privacyCookie, {});
+    expect(refused.statusCode).toBe(403);
+    expect(refused.body).toContain("Only an admin");
+    expect(await context.store.getUserByEmail(target)).not.toBeNull();
+
+    const confirmed = await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, admin, {});
+    expect(confirmed.statusCode, confirmed.body).toBe(200);
+    await waitFor(context, admin, id, "done");
+    expect(await context.store.getUserByEmail(target)).toBeNull();
+    const rows = await testSql(context.store).all<{ resource_id: string; metadata_json: string }>(
+      "SELECT resource_id, metadata_json FROM audit_logs WHERE event_type = 'user.delete'"
+    );
+    expect(rows.map((row) => row.resource_id)).toEqual([targetId]);
+    expect(rows[0]!.metadata_json).toContain("data_subject_erasure");
+    expect(rows[0]!.metadata_json).not.toContain(target);
+  });
+
+  it("asks for a recent MFA check before a staff erasure of an existing account", async () => {
+    const context = await createTestContext({ STEP_UP_MAX_AGE_MINUTES: "15" });
+    const admin = await login(context, "admin");
+    const target = `target-${crypto.randomUUID().slice(0, 6)}@example.com`;
+    await context.authService.register({ email: target, password: "Target-Pass-123!", role: "builder" });
+    const id = (await call(context, "POST", "/api/data-protection/requests", admin, { type: "delete", subjectKind: "staff", value: target })).json<SubjectRequestView>().id;
+    await waitFor(context, admin, id, "ready");
+    const confirm = await call(context, "POST", `/api/data-protection/requests/${id}/confirm`, admin, {});
+    expect(confirm.statusCode).toBe(403);
+    expect(confirm.json()).toMatchObject({ code: "step_up_required" });
+  });
+
   it("a deployment-wide custom role with data_subject:manage may make requests; a project role may not, and only an admin hands it out", async () => {
     const context = await createTestContext();
     const builderCookie = await login(context, "builder");

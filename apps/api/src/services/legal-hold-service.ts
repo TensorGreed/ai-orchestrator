@@ -48,6 +48,8 @@ export interface LegalHoldServiceOptions {
   findSubject?: (query: ReplayFindSubjectQuery) => Promise<ReplayFindSubjectResult>;
   now?: () => Date;
   logger?: { warn(fields: Record<string, unknown>, message: string): void };
+  /** Called after a hold is released: data-subject deletions it deferred are re-queued. Its failure is logged only. */
+  onReleased?: (hold: LegalHoldView) => Promise<unknown>;
 }
 
 /** What `GET /api/legal-holds/status` answers: held or not, and by which holds (names only for hold managers). */
@@ -161,7 +163,14 @@ export class LegalHoldService {
     const hold = await this.options.store.releaseLegalHold({ id, releasedBy: actor.email, reason, releasedAt: this.now().toISOString() });
     if (!hold) return null;
     const changed = hold.status === "released" && hold.releasedAt !== before.releasedAt;
-    if (changed) await this.record("release", hold, {});
+    if (changed) {
+      await this.record("release", hold, {});
+      try {
+        await this.options.onReleased?.(hold);
+      } catch (error) {
+        this.options.logger?.warn({ holdId: hold.id, error: error instanceof Error ? error.message : String(error) }, "Could not re-queue deletions the hold deferred");
+      }
+    }
     return { hold, changed };
   }
 
