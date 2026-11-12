@@ -49,7 +49,7 @@ Two rules matter more than the table.
 
 A <Term id="golden-set">golden set</Term> groups the cases for one workflow ([PR #47](https://github.com/TensorGreed/ai-orchestrator/pull/47)). A replay job runs every case against a candidate and scores it. By default a case is scored on its status and on JSON equality with the golden output; other scorers check a JSON schema, text similarity, the tool-call sequence, a cost budget, or ask a model to judge.
 
-Live models vary from run to run. Two features from [PR #54](https://github.com/TensorGreed/ai-orchestrator/pull/54) handle that: recorded runs now also keep their model calls as a tape, and jobs can answer model calls from that tape, which tests a change to the logic around the model with no model drift at all, and jobs can repeat each case up to five times and aggregate the results.
+Live models vary from run to run. [PR #54](https://github.com/TensorGreed/ai-orchestrator/pull/54) added two answers. First, recorded runs now keep their model calls as a tape, and a job can answer model calls from it. That tests a change to the logic around the model with no model drift. Second, a job can repeat each case up to five times and aggregate the results.
 
 This matches how the field describes it. Anthropic's guide to agent evals calls these regression evals, which "should have a nearly 100% pass rate" and "protect against backsliding", as distinct from capability evals that start low.
 

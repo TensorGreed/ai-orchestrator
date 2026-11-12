@@ -1,6 +1,6 @@
 ---
 title: "Retention, legal holds and data-subject requests"
-description: "What L2M now keeps and for how long, how per-project retention purges run, how holds block deletes, and how an admin answers a data-subject request."
+description: "What L2M now keeps and for how long, how purges and per-project retention work, how holds block deletes, and how to answer a data-subject request."
 date: 2026-11-12
 author: "The L2M team"
 related: [data-retention, legal-hold, data-subject-request, right-to-erasure, subject-reference]
@@ -52,7 +52,7 @@ Retention deletes; sometimes you must not. A <Term id="legal-hold">legal hold</T
 
 - retention purges leave held rows out, and the first purge after the release deletes those already past their retention;
 - deleting a held workflow, project, golden set or golden run is refused with `409 legal_hold`, and a held workflow cannot be moved to another project;
-- an agent's stored memory under a hold only grows; nothing is trimmed.
+- an agent's stored conversation under a hold only grows (session artifacts can still be replaced under their key).
 
 A hold never changes who may read the data. Placing and releasing a hold are audited, need a fresh MFA check when step-up is on, and a release needs a signed-in person and a reason. A released hold stays listed, so the record is complete.
 
@@ -71,7 +71,7 @@ How it behaves:
 - **Strict matching.** Whole values only. A phone number with no country code in the search or in the data is only a *possible match*, left out of the export and counted in the manifest.
 - **The value never lands in a log.** Not in the audit log, logs, API answers or error messages. While the lookup runs, it is kept sealed with the master key and erased when the export is ready.
 - **Coverage.** The search reads runs, paused runs, approval requests, agent memory sessions and artifacts, cassettes, and evaluation data. The manifest names much of what it does not read: logs and metrics, the audit log, tool-call telemetry and rule events (they hold summaries and masked evidence only), usage rows, knowledge bases, backups, and anything sent to model providers or MCP servers. Queue jobs, gateway approval requests, the session tool cache and `/v1` request metadata are not searched either, and the manifest does not list them yet.
-- **Staff requests.** For an L2M user, the export also includes their account, SSO identities, roles, API key metadata (never the key), and their own audit entries.
+- **Staff requests.** For an L2M user, the export also includes their account, SSO identities, project roles, API key metadata (never the key), and their own audit entries.
 
 ## Deleting a person's data today
 
@@ -84,12 +84,12 @@ Retention, holds and deletes do not reach backups already taken. Rotate backups 
 ## What it does not do
 
 - There is no erasure request: a data-subject request exports, and per-person deletion covers only golden and captured runs and the evaluation data made from them.
-- It does not search logs, metrics, the audit log, tool-call telemetry, rule events, usage rows, queue jobs, gateway approvals, the session tool cache, `/v1` request metadata, knowledge bases or backups.
+- It does not search logs, metrics, the audit log (a staff export lists only the person's own entries), tool-call telemetry, rule events, usage rows, queue jobs, gateway approvals, the session tool cache, `/v1` request metadata, knowledge bases or backups.
 - Holds stop deletion inside L2M only. They do not stop a database administrator, and they do not stop retention in the systems your logs and backups go to.
 - It does not decide your policy. How long to keep data, and when a request may be refused, are questions for your legal team. This post is not legal advice.
 
-## Read more
+## Further reading
 
 - [Data retention](/operations/data-retention), [Legal holds](/operations/legal-hold), [Data-subject requests](/security/data-subject-requests), [Production capture: data-subject lookup](/product/production-capture#data-subject-lookup)
-- [GDPR Article 17: right to erasure](https://gdpr-info.eu/art-17-gdpr/) and [Article 15: right of access](https://gdpr-info.eu/art-15-gdpr/) (gdpr-info.eu, reproducing Regulation (EU) 2016/679)
+- [GDPR Article 17: right to erasure](https://gdpr-info.eu/art-17-gdpr/) and [Article 15: right of access](https://gdpr-info.eu/art-15-gdpr/) and [Article 12: time limits](https://gdpr-info.eu/art-12-gdpr/) (gdpr-info.eu, reproducing Regulation (EU) 2016/679)
 - Pull requests: [#174 retention service](https://github.com/TensorGreed/ai-orchestrator/pull/174), [#176 per-project retention](https://github.com/TensorGreed/ai-orchestrator/pull/176), [#177 legal holds](https://github.com/TensorGreed/ai-orchestrator/pull/177), [#178 data-subject requests](https://github.com/TensorGreed/ai-orchestrator/pull/178) (GitHub)

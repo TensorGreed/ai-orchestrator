@@ -130,7 +130,7 @@ Self-hosting moves work to your team:
 
 ## In L2M
 
-[L2M](/why) is open source (MIT) and runs only on your infrastructure: there is no hosted edition, and the product sends no analytics. Two things do load from the internet by default: the studio's web fonts (Google Fonts) and the API reference page at `/api/docs` (Swagger UI from a public CDN). Know both before you lock down outbound traffic. Everything below beyond the defaults is optional.
+[L2M](/why) is open source (MIT) and runs only on your infrastructure: there is no hosted edition, and the product sends no analytics. Two things do load from the internet by default: the studio's web fonts (Google Fonts) and the API reference page at `/api/docs` (Swagger UI from a public CDN). Know both before you lock down outbound traffic. Beyond the defaults, everything below is optional.
 
 - **Install.** Run from source with Node.js and pnpm ([Quickstart](/getting-started/quickstart)), with the Docker Compose files in the repository, or with the Helm chart in `ops/helm`. The API and web images are published to GHCR for `linux/amd64` and `linux/arm64`.
 - **Database.** SQLite by default with nothing to configure; [Postgres](/operations/postgres) with `DB_TYPE=postgres`, and `db:copy` to move data across.

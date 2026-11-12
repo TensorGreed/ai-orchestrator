@@ -9,7 +9,7 @@ socialCard: true
 
 # Least privilege for MCP tools, learned from real calls
 
-Allowing an agent to use an MCP server usually means allowing every tool on it, with any arguments. On 30 October 2026 we merged three changes that narrow that down in L2M: tool rules that read a call's arguments, a summary of each call's arguments that is safe to keep, and a way to test a rule, or ask for suggested rules, against the last 7 or 30 days of real calls before anything is enforced. This post explains the gap they close and how they fit together.
+Allowing an agent to use an MCP server usually means allowing every tool on it, with any arguments. On 30 October 2026 we merged three changes that narrow that down in L2M: tool rules that read a call's arguments, a summary of each call's arguments that is safe to keep, and a way to test a rule against the last 7 or 30 days of real calls, or ask for rules suggested from the last 30, before anything is enforced. This post explains the gap they close and how they fit together.
 
 ## The gap between "allowed server" and "allowed call"
 
@@ -66,11 +66,11 @@ Suggestions only tighten: one that would loosen an existing deny or approval rul
 - It does not keep raw arguments, so an example call shows its summary, never its values.
 - Rules are optional. With none, every call is allowed, as before.
 
-## Read more
+## Further reading
 
 - Guides: [Least privilege from real runs](/guides/least-privilege-from-real-runs), [Govern MCP tools](/guides/govern-mcp-tools)
 - Reference: [MCP tool policy](/product/mcp-tool-policy), [MCP tool-call telemetry](/product/mcp-tool-call-telemetry)
 - [OWASP MCP Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/MCP_Security_Cheat_Sheet.html) (owasp.org)
 - [MCP specification 2025-11-25: Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) (modelcontextprotocol.io)
-- [MCP Security Best Practices](https://modelcontextprotocol.io/specification/latest/basic/security_best_practices) (modelcontextprotocol.io): scope minimisation
+- [MCP Security Best Practices](https://modelcontextprotocol.io/docs/2025-11-25/tutorials/security/security_best_practices) (modelcontextprotocol.io): scope minimisation
 - [CHANGELOG](https://github.com/TensorGreed/ai-orchestrator/blob/main/CHANGELOG.md) (GitHub)

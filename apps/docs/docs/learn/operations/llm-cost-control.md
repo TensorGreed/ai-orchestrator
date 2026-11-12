@@ -112,7 +112,7 @@ Cost figures come from a price table: price per million input tokens, per millio
 
 ## Try it in L2M
 
-Import the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent), set its agent's `maxIterations`, then add a small token budget for its workflow under **Settings → FinOps**. Run it and open the agent node's **Trace** tab to see the tokens it counted. The recipe uses the built-in echo provider, which never asks for tools and only reports rough token counts, so attach a real chat model to see the loop spend across several calls.
+Import the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) and add a small token budget for its workflow under **Settings → FinOps**. Run it and open the agent node's **Trace** tab to see the tokens it counted. The recipe uses the built-in echo provider, which never asks for tools and only reports rough token counts. Attach a real chat model and set a low `maxIterations` to watch the loop spend across several calls and stop at the limit.
 
 ## Further reading
 
