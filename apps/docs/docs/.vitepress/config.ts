@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
 import { firstPublished, hasIndex, pageExists, pageSocialCard, pagesIn, readingMinutes, SRC_DIR, text } from "./site/content.js";
 import { FEED_PATH, writeFeed } from "./site/feed.js";
+import { INDEX_ENTRIES } from "./site/glossary-entries.js";
 import { breadcrumbsOf, defaultFolderLabel, docsUrl, hubSectionOf, pageKindOf, type Crumb } from "./site/sections.js";
 import { pageHeadTags, type HubPageData } from "./site/seo.js";
 import { blogPosts, blogSidebar, glossarySidebar, learnSidebar, recipesSidebar } from "./site/sidebars.js";
@@ -97,7 +98,8 @@ export default defineConfig({
       delete pageData.frontmatter.about;
     }
     if (Array.isArray(fmIn.related) && !pageData.relativePath.startsWith("glossary/")) {
-      const absent = fmIn.related.map(String).filter((slug) => !pageExists(`/glossary/${slug}`));
+      const indexOnly = new Set(INDEX_ENTRIES.map((entry) => entry.slug));
+      const absent = fmIn.related.map(String).filter((slug) => !pageExists(`/glossary/${slug}`) && !indexOnly.has(slug));
       if (absent.length > 0) console.warn(`[glossary] ${pageData.relativePath}: related terms not written yet (skipped): ${absent.join(", ")}`);
     }
     // Breadcrumbs use the short label (sidebar title, term, section or track name), not the SEO title.

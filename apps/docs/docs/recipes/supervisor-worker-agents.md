@@ -8,7 +8,7 @@ nodeCount: 11
 sample: "supervisor-worker-swarm-flow.json"
 demo: "wf-supervisor-worker-swarm"
 demoRecorded: false
-related: ["agent-loop","tool-calling","supervisor-agent","worker-agent"]
+related: ["supervisor-agent","worker-agent","ai-agent","agent-loop","tool-calling"]
 ---
 
 <!--
@@ -22,7 +22,7 @@ related: ["agent-loop","tool-calling","supervisor-agent","worker-agent"]
 
 **Needs:** No API key · **Nodes:** 11
 
-A Supervisor node coordinates two worker agents. The researcher has an MCP knowledge-base lookup tool; the computer has a calculator and a clock. The Supervisor sees each worker as one tool and decides which to call for each step, and each worker runs its own agent loop. Every agent uses the built-in echo provider and the bundled mock MCP server, so it runs with no API key. Echo never asks for a tool, so the Supervisor answers on its first turn and hands nothing off; attach a real chat model to see it delegate.
+A Supervisor node coordinates two worker agents. The researcher has an MCP knowledge-base lookup tool; the computer has a calculator and a clock. The Supervisor sees each worker as one tool and decides which to call for each step, and each worker runs its own agent loop. Every agent uses the built-in echo provider and the mock MCP server built into L2M, so it runs with no API key. Echo never asks for a tool, so a local run shows the wiring, not the delegation: the Supervisor answers on its first turn and hands nothing off. Attach a real chat model to see it delegate.
 
 <div class="recipe-actions">
   <a class="hub-button" href="/docs/recipes/files/supervisor-worker-swarm-flow.json" download>Download the workflow JSON</a>
@@ -33,8 +33,9 @@ A Supervisor node coordinates two worker agents. The researcher has an MCP knowl
 
 1. Download <a href="/docs/recipes/files/supervisor-worker-swarm-flow.json" download>supervisor-worker-swarm-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/supervisor-worker-swarm-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. Run it as it is and open the run to see each step.
-4. Then change one thing at a time (see below).
+3. Click **Run** in the editor, or call the run API with a question for the team (as in the [zero-key agent recipe](/recipes/zero-key-mcp-agent), with the workflow id `wf-supervisor-worker-swarm`).
+4. Open the run and click the **Supervisor** node to read its trace.
+5. Then change one thing at a time (see below).
 
 ## How it works
 
@@ -59,11 +60,24 @@ A Supervisor node coordinates two worker agents. The researcher has an MCP knowl
 
 6 node types. Each type links to its config fields in the [node reference](/nodes/reference/).
 
+## What a run does
+
+We ran the sample on a fresh install with "What is 17% of 2340, and what does MCP stand for?":
+
+- The **Supervisor** made one model call and stopped after 1 iteration with `stopReason: "final_answer"`. Echo answered `Supervisor: What is 17% of 2340, and what does MCP stand for?`.
+- Both workers, their chat models and their tools are marked **skipped** (`attachment_only_node`). Workers are not steps in the run: they run only when the Supervisor calls them, and echo never did.
+
+The Supervisor is offered one tool per worker, named `delegate_to_` plus the worker's name with every character other than letters, digits, `_` and `-` turned into `_`: here `delegate_to_Worker__Researcher` and `delegate_to_Worker__Computer`. Each tool's description starts with "Delegate task to" and the worker's name, followed by the start of the worker's system prompt as a hint. Name workers so the Supervisor's model can tell them apart; two workers with the same name make the run fail.
+
+## See delegation in a recorded run
+
+The demo's **Research swarm** workflow is the same pattern with a researcher and an analyst, recorded with a real model. In its run the Supervisor calls `delegate_to_researcher`, then `delegate_to_analyst`, then writes the team summary: three iterations. <a href="/demo/?mode=editor&amp;workflowId=wf-demo-research-swarm&amp;demoRun=recorded" target="_self">Play it in the demo</a>.
+
 ## Make it yours
 
-- Give each worker its own real chat model on its `chat_model` port: a small, cheap model often does for a narrow worker.
+- Give each worker its own real chat model on its `chat_model` port: a small, cheap model often does for a narrow worker, while the Supervisor needs one that plans well.
 - Swap a worker's mock tools for your own MCP servers.
-- Add a third worker on the Supervisor's `worker` port when a new kind of task appears, rather than giving one agent every tool.
+- Add a third worker on the Supervisor's `worker` port when a new kind of task appears, rather than giving one agent every tool. Each worker adds a tool to the Supervisor's list and model calls to each run, so add one only for a distinct job.
 
 ## Make it safer
 
@@ -75,4 +89,5 @@ These controls are optional; the recipe runs without them.
 ## Further reading
 
 - [Agent loop: attachment ports](/runtime/agent-loop#attachment-ports)
+- [Golden runs and replay](/product/golden-runs)
 - [Pattern library](/patterns/)

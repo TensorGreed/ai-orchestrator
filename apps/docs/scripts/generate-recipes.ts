@@ -44,6 +44,10 @@ export interface RecipeConfig {
   tags: string[];
   whatYouGet: string;
   summary: string;
+  /** Markdown steps after "download" and "import"; default: run it as it is, then change one thing at a time. */
+  steps?: string[];
+  /** Hand-written sections after "How it works", in order: what really happens on a run, variants, limits. */
+  sections?: Array<{ heading: string; body: string }>;
   makeItYours?: string;
   makeItSafer?: string;
   related?: string[];
@@ -274,8 +278,9 @@ export function renderRecipe(recipe: RecipeConfig, workflow: Workflow, demo: Dem
     "",
     `1. Download <a href="${download}" download>${recipe.sample}</a>, or take it from the [samples folder on GitHub](${GITHUB_SAMPLES}${recipe.sample}).`,
     "2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).",
-    "3. Run it as it is and open the run to see each step.",
-    "4. Then change one thing at a time (see below).",
+    ...(recipe.steps && recipe.steps.length > 0
+      ? recipe.steps.map((step, index) => `${index + 3}. ${step}`)
+      : ["3. Run it as it is and open the run to see each step.", "4. Then change one thing at a time (see below)."]),
     "",
     "## How it works",
     "",
@@ -295,6 +300,7 @@ export function renderRecipe(recipe: RecipeConfig, workflow: Workflow, demo: Dem
     `${types.length} node types. Each type links to its config fields in the [node reference](/nodes/reference/).`,
     ""
   ];
+  for (const section of recipe.sections ?? []) lines.push(`## ${section.heading}`, "", section.body, "");
   if (recipe.makeItYours) lines.push("## Make it yours", "", recipe.makeItYours, "");
   if (recipe.makeItSafer) lines.push("## Make it safer", "", "These controls are optional; the recipe runs without them.", "", recipe.makeItSafer, "");
   if (recipe.docs && recipe.docs.length > 0) {
