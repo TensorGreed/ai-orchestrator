@@ -17,29 +17,46 @@ function write(root: string, file: string, content: string) {
   fs.writeFileSync(path.join(root, file), content);
 }
 
-/** A page head the search-engine checks accept. */
-function page(title: string, canonical: string, extraHead = "") {
-  return `<!doctype html><html lang="en"><head><title>${title}</title><meta name="description" content="About ${title}." /><link rel="canonical" href="${canonical}" />${extraHead}</head><body><h1>${title}</h1></body></html>`;
+/** A breadcrumb trail as JSON-LD: [name, url] pairs. */
+function crumbs(...items: Array<[string, string]>) {
+  const list = items.map(([name, item], index) => ({ "@type": "ListItem", position: index + 1, name, item }));
+  return `<script type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org", "@graph": [{ "@type": "BreadcrumbList", itemListElement: list }] })}</script>`;
+}
+
+/** A page the search-engine checks accept. */
+function page(title: string, canonical: string, extraHead = "", body = "") {
+  return `<!doctype html><html lang="en"><head><title>${title}</title><meta name="description" content="About ${title}." /><link rel="canonical" href="${canonical}" />${extraHead}</head><body><h1 id="top">${title}</h1>${body}</body></html>`;
 }
 
 const jsonLd = '<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","name":"L2M"}]}</script>';
+const docsCrumb = crumbs(["Docs", "https://lsquarem.com/docs/"]);
 
 function repo(options: { demo?: "built" | "broken" | "missing"; cname?: boolean; docsSitemap?: boolean } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-pages-"));
   roots.push(root);
   write(root, "docs/index.html", page("L2M", "https://lsquarem.com/", jsonLd));
-  write(root, "docs/integrations.html", page("L2M integrations", "https://lsquarem.com/integrations.html"));
+  write(root, "docs/integrations.html", page("L2M integrations", "https://lsquarem.com/integrations.html", crumbs(["L2M", "https://lsquarem.com/"], ["Integrations", "https://lsquarem.com/integrations.html"])));
   write(root, "docs/404.html", '<html lang="en"><head><title>Not found</title><meta name="robots" content="noindex" /></head></html>');
   write(root, "docs/robots.txt", "User-agent: *\nAllow: /\n\nSitemap: https://lsquarem.com/sitemap.xml\n");
   if (options.cname !== false) write(root, "docs/CNAME", "lsquarem.com\n");
-  write(root, "apps/docs/docs/.vitepress/dist/index.html", page("L2M documentation", "https://lsquarem.com/docs/"));
-  write(root, "apps/docs/docs/.vitepress/dist/guide/start.html", page("Start | L2M", "https://lsquarem.com/docs/guide/start"));
+  write(root, "apps/docs/docs/.vitepress/dist/index.html", page("L2M documentation", "https://lsquarem.com/docs/", docsCrumb, '<a href="/docs/guide/start">Start</a> <a href="/docs/learn/">Learn</a>'));
+  write(root, "apps/docs/docs/.vitepress/dist/guide/start.html", page("Start | L2M", "https://lsquarem.com/docs/guide/start", crumbs(["Docs", "https://lsquarem.com/docs/"], ["Start", "https://lsquarem.com/docs/guide/start"])));
+  write(
+    root,
+    "apps/docs/docs/.vitepress/dist/learn/index.html",
+    page("Learn | L2M", "https://lsquarem.com/docs/learn/", crumbs(["Docs", "https://lsquarem.com/docs/"], ["Learn", "https://lsquarem.com/docs/learn/"]), '<a href="/docs/learn/basics/loop#top">The loop</a>')
+  );
+  write(
+    root,
+    "apps/docs/docs/.vitepress/dist/learn/basics/loop.html",
+    page("The loop | L2M", "https://lsquarem.com/docs/learn/basics/loop", crumbs(["Docs", "https://lsquarem.com/docs/"], ["Learn", "https://lsquarem.com/docs/learn/"], ["The loop", "https://lsquarem.com/docs/learn/basics/loop"]))
+  );
   write(root, "apps/docs/docs/.vitepress/dist/404.html", '<html lang="en"><head><title>404 | L2M</title><meta name="robots" content="noindex"></head></html>');
   if (options.docsSitemap !== false) {
     write(
       root,
       "apps/docs/docs/.vitepress/dist/sitemap.xml",
-      '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://lsquarem.com/docs/</loc></url><url><loc>https://lsquarem.com/docs/guide/start</loc></url></urlset>'
+      '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://lsquarem.com/docs/</loc><lastmod>2026-11-01T10:00:00.000Z</lastmod></url><url><loc>https://lsquarem.com/docs/guide/start</loc></url><url><loc>https://lsquarem.com/docs/learn/</loc></url><url><loc>https://lsquarem.com/docs/learn/basics/loop</loc></url></urlset>'
     );
   }
   if (options.demo === "built") {
@@ -50,8 +67,10 @@ function repo(options: { demo?: "built" | "broken" | "missing"; cname?: boolean;
   return root;
 }
 
-function checkSeo(site: string) {
-  const result = spawnSync(process.execPath, [checkScript, "--seo-only", "--site", site], { encoding: "utf8" });
+function checkSeo(site: string, baseline: { longTitles?: string[]; longDescriptions?: string[] } = {}) {
+  const baselineFile = path.join(site, "..", "seo-baseline.json");
+  fs.writeFileSync(baselineFile, JSON.stringify(baseline));
+  const result = spawnSync(process.execPath, [checkScript, "--seo-only", "--site", site, "--baseline", baselineFile], { encoding: "utf8" });
   return { status: result.status, output: `${result.stdout}${result.stderr}` };
 }
 
@@ -138,7 +157,16 @@ describe("the Pages site", () => {
     expect(run.status, run.output).toBe(0);
     const sitemap = fs.readFileSync(path.join(run.site, "sitemap.xml"), "utf8");
     const urls = [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map((match) => match[1]);
-    expect(urls).toEqual(["https://lsquarem.com/", "https://lsquarem.com/integrations.html", "https://lsquarem.com/docs/", "https://lsquarem.com/docs/guide/start"]);
+    expect(urls).toEqual([
+      "https://lsquarem.com/",
+      "https://lsquarem.com/integrations.html",
+      "https://lsquarem.com/docs/",
+      "https://lsquarem.com/docs/guide/start",
+      "https://lsquarem.com/docs/learn/",
+      "https://lsquarem.com/docs/learn/basics/loop"
+    ]);
+    // A docs page keeps the lastmod VitePress gave it.
+    expect(sitemap).toContain("<url><loc>https://lsquarem.com/docs/</loc><lastmod>2026-11-01T10:00:00.000Z</lastmod></url>");
     expect(fs.existsSync(path.join(run.site, "docs/sitemap.xml"))).toBe(false);
     expect(fs.existsSync(path.join(run.site, "robots.txt"))).toBe(true);
   });
@@ -220,5 +248,91 @@ describe("the search-engine checks on the assembled site", () => {
     const missing = site();
     edit(missing, "index.html", (html) => html.replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/, ""));
     expect(checkSeo(missing).output).toContain("the landing (/) has no JSON-LD");
+  });
+
+  it("fail on a title over 60 or a description over 155 characters, unless the page is on the baseline, and on a stale baseline entry", () => {
+    const long = site();
+    edit(long, "docs/guide/start.html", (html) => html.replace("<title>Start | L2M</title>", `<title>${"A very long title ".repeat(4)}| L2M</title>`).replace('content="About Start | L2M."', `content="${"word ".repeat(40)}"`));
+    const run = checkSeo(long);
+    expect(run.status).toBe(1);
+    expect(run.output).toContain("/docs/guide/start.html: the title is 77 characters (at most 60)");
+    expect(run.output).toContain("/docs/guide/start.html: the description is 199 characters (at most 155)");
+    const allowed = checkSeo(long, { longTitles: ["/docs/guide/start.html"], longDescriptions: ["/docs/guide/start.html"] });
+    expect(allowed.status, allowed.output).toBe(0);
+    expect(allowed.output).toContain("listed in scripts/pages-seo-baseline.json");
+    const stale = checkSeo(site(), { longTitles: ["/docs/guide/start.html"] });
+    expect(stale.status).toBe(1);
+    expect(stale.output).toContain("no longer too long (or gone): remove the entry");
+  });
+
+  it("fail on a broken internal link, a missing fragment or a section index linked without its slash", () => {
+    for (const [ref, message] of [
+      ["/docs/guide/missing", "/docs/guide/missing has no page or file"],
+      ["/docs/guide/start#nowhere", "names a fragment that is not on docs/guide/start.html"],
+      ["/docs/learn", "leaves out the trailing slash of a section index"],
+      ["https://lsquarem.com/nope.html", "https://lsquarem.com/nope.html has no page or file"]
+    ] as const) {
+      const target = site();
+      edit(target, "integrations.html", (html) => html.replace("</body>", `<a href="${ref}">x</a></body>`));
+      const run = checkSeo(target);
+      expect(run.status, ref).toBe(1);
+      expect(run.output).toContain(message);
+    }
+  });
+
+  it("fail when a knowledge-hub page is linked from nowhere but the nav", () => {
+    const target = site();
+    edit(target, "docs/learn/index.html", (html) => html.replace('<a href="/docs/learn/basics/loop#top">The loop</a>', ""));
+    const run = checkSeo(target);
+    expect(run.status).toBe(1);
+    expect(run.output).toContain("/docs/learn/basics/loop.html is an orphan");
+  });
+
+  it("fail when a page's JSON-LD does not parse, has no BreadcrumbList, or a breadcrumb points off the site", () => {
+    const broken = site();
+    edit(broken, "docs/guide/start.html", (html) => html.replace('"@graph"', '"@graph" oops'));
+    expect(checkSeo(broken).output).toContain("/docs/guide/start.html: JSON-LD block 1 does not parse");
+    const noCrumbs = site();
+    edit(noCrumbs, "docs/guide/start.html", (html) => html.replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/, ""));
+    expect(checkSeo(noCrumbs).output).toContain("/docs/guide/start.html: no JSON-LD");
+    const wrongType = site();
+    edit(wrongType, "docs/guide/start.html", (html) => html.replace('"BreadcrumbList"', '"WebPage"'));
+    expect(checkSeo(wrongType).output).toContain("/docs/guide/start.html: no BreadcrumbList in its JSON-LD");
+    const offSite = site();
+    edit(offSite, "docs/guide/start.html", (html) => html.replace('"item":"https://lsquarem.com/docs/guide/start"', '"item":"https://example.org/start"'));
+    expect(checkSeo(offSite).output).toContain("breadcrumb 2 points at https://example.org/start, which is not a page of the site");
+  });
+
+  it("fail on a banned word in visible text, but not in code", () => {
+    // The competing tool's name is built from its letters, so it never sits in the repository.
+    const competitor = ["n", "8", "n"].join("");
+    const words: Array<[string, string]> = [
+      [competitor, "the competing workflow tool's name"],
+      ["Guard", "Guard"],
+      ["DLP", "DLP"]
+    ];
+    for (const [word, label] of words) {
+      const target = site();
+      edit(target, "docs/guide/start.html", (html) => html.replace("</body>", `<p>Compare it with ${word} today.</p></body>`));
+      const run = checkSeo(target);
+      expect(run.status, word).toBe(1);
+      expect(run.output).toContain(`shows the banned word "${label}"`);
+    }
+    const inAlt = site();
+    edit(inAlt, "docs/guide/start.html", (html) => html.replace("</body>", '<img src="/docs/guide/start" alt="the DLP screen"></body>'));
+    expect(checkSeo(inAlt).output).toContain('shows the banned word "DLP"');
+    const inCode = site();
+    edit(inCode, "docs/guide/start.html", (html) => html.replace("</body>", `<p>Set <code>GUARD_MODE</code> and map <code>${competitor}-nodes-base.webhook</code>.</p><pre><code>Guard DLP</code></pre><p>Safeguards and guardrails are fine.</p></body>`));
+    const run = checkSeo(inCode);
+    expect(run.status, run.output).toBe(0);
+  });
+
+  it("fail when a sitemap URL is not the page's canonical form, or the blog has no feed", () => {
+    const target = site();
+    edit(target, "sitemap.xml", (xml) => xml.replace("https://lsquarem.com/docs/guide/start<", "https://lsquarem.com/docs/guide/start.html<"));
+    expect(checkSeo(target).output).toContain("sitemap lists https://lsquarem.com/docs/guide/start.html, but the page's canonical is https://lsquarem.com/docs/guide/start");
+    const blog = site();
+    write(blog, "docs/blog/index.html", page("Blog | L2M", "https://lsquarem.com/docs/blog/", crumbs(["Docs", "https://lsquarem.com/docs/"], ["Blog", "https://lsquarem.com/docs/blog/"])));
+    expect(checkSeo(blog).output).toContain("the blog has no feed at /docs/blog/feed.xml");
   });
 });

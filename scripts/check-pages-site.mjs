@@ -13,7 +13,7 @@
 //
 //   pnpm docs:build && pnpm --filter @ai-orchestrator/web build:demo
 //   node scripts/assemble-pages-site.mjs
-//   node scripts/check-pages-site.mjs [--site <dir>] [--port <n>] [--seo-only]
+//   node scripts/check-pages-site.mjs [--site <dir>] [--port <n>] [--seo-only] [--baseline <json>]
 //   (needs a Playwright Chromium: `pnpm exec playwright install chromium`, or CHROMIUM_EXECUTABLE_PATH;
 //   `--seo-only` runs the static checks alone and needs no browser)
 //
@@ -44,7 +44,8 @@ if (!existsSync(path.join(site, "index.html")) || !existsSync(path.join(site, "d
 }
 
 console.log("Search engines");
-const seo = await checkSeo(site);
+const baselineFile = option("--baseline", undefined);
+const seo = await checkSeo(site, baselineFile ? { baselineFile } : {});
 for (const message of seo.passes) console.log(`  ✓ ${message}`);
 for (const message of seo.warnings) console.log(`  ! ${message}`);
 for (const message of seo.failures) console.log(`  ✗ ${message}`);

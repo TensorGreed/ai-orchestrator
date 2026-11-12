@@ -18,7 +18,11 @@
 //   - every internal link and asset (relative, root-relative or https://lsquarem.com/) on every
 //     page of the landing and the docs resolves the way GitHub Pages serves it, and every #fragment
 //     names an id on the target page;
-//   - the docs blog has its Atom feed at /docs/blog/feed.xml;
+//   - links to a section index end in "/" (without it GitHub Pages answers with a redirect);
+//   - every page under /docs/learn/, /docs/glossary/, /docs/recipes/ and /docs/blog/ is linked from
+//     the content of another page (an orphan reached only from the nav or sidebar fails);
+//   - each sitemap URL is its page's canonical URL;
+//   - the docs blog has its Atom feed at /docs/blog/feed.xml, and every post it links is in the sitemap;
 //   - no page shows a banned word (see BANNED_WORDS: the old names of content rules and data rules,
 //     an external key manager's vendor name, and a competing workflow tool's name) in its visible text, title, description or
 //     alt/aria-label/title attributes. Code is exempt: text inside <code>, <pre>, <kbd>, <samp>,
@@ -167,6 +171,19 @@ function references(html) {
   return refs.map((ref) => ref.trim()).filter((ref) => ref !== "" && ref !== "#");
 }
 
+/**
+ * The part of a page that counts for inbound links: a docs page's content area (#VPContent) up to
+ * the doc footer (edit link, last-updated date, previous / next pager), without the breadcrumbs,
+ * since those only repeat the sidebar and the nav; a landing page's whole body.
+ */
+export function contentOf(web, html) {
+  if (!web.startsWith("docs/")) return html;
+  const start = html.indexOf('id="VPContent"');
+  if (start < 0) return html;
+  const ends = ['class="VPDocFooter', "<script"].map((marker) => html.indexOf(marker, start)).filter((index) => index > start);
+  return html.slice(start, ends.length > 0 ? Math.min(...ends) : undefined).replace(/<nav\b[^>]*class="[^"]*hub-breadcrumbs[\s\S]*?<\/nav>/g, "");
+}
+
 const idCache = new Map();
 async function idsOf(file) {
   if (!idCache.has(file)) {
@@ -178,9 +195,9 @@ async function idsOf(file) {
   return idCache.get(file);
 }
 
-async function readBaseline() {
-  if (!existsSync(BASELINE_FILE)) return { title: new Set(), description: new Set() };
-  const data = JSON.parse(await fs.readFile(BASELINE_FILE, "utf8"));
+async function readBaseline(file = BASELINE_FILE) {
+  if (!existsSync(file)) return { title: new Set(), description: new Set() };
+  const data = JSON.parse(await fs.readFile(file, "utf8"));
   return { title: new Set(data.longTitles ?? []), description: new Set(data.longDescriptions ?? []) };
 }
 
@@ -193,7 +210,7 @@ export async function checkSeo(site, options = {}) {
   const fail = (message) => failures.push(message);
   const pass = (message) => passes.push(message);
   const warn = (message) => warnings.push(message);
-  const baseline = options.baseline ?? (await readBaseline());
+  const baseline = options.baseline ?? (await readBaseline(options.baselineFile));
 
   // robots.txt
   const robotsFile = path.join(site, "robots.txt");
@@ -208,6 +225,7 @@ export async function checkSeo(site, options = {}) {
 
   // Every page: metadata on indexable ones, links and banned words on all of them.
   const indexable = new Map();
+  const canonicals = new Map();
   const titles = new Map();
   const descriptions = new Map();
   const seenLong = { title: new Set(), description: new Set() };
@@ -233,6 +251,7 @@ export async function checkSeo(site, options = {}) {
     if (path.basename(web) === "404.html" || head.robots.includes("noindex")) continue;
     const addresses = addressesOf(file);
     indexable.set(web, addresses);
+    canonicals.set(web, head.canonical);
     if (!head.lang) fail(`${where}: <html> has no lang`);
     if (!head.title) fail(`${where}: no <title>`);
     if (!head.description) fail(`${where}: no meta description`);
@@ -300,9 +319,11 @@ export async function checkSeo(site, options = {}) {
   if (jsonLdPages > 0) pass(`JSON-LD parses on ${jsonLdPages} pages, with a BreadcrumbList on all but the landing`);
   if (warnings.length > 0) pass(`${warnings.length} long title(s) or description(s) are on the baseline (warnings)`);
 
-  // Internal links and assets, with fragments.
+  // Internal links and assets, with fragments; links in the canonical form; inbound links for orphans.
+  const inbound = new Map();
   for (const { web, html } of pages) {
     const base = addressesOf(web).at(-1);
+    const contentLinks = new Set(references(contentOf(web, html)));
     for (const ref of new Set(references(html))) {
       if (/^(mailto|tel|javascript|data|blob):/i.test(ref)) continue;
       let url;
@@ -319,6 +340,9 @@ export async function checkSeo(site, options = {}) {
         brokenLinks.push(`/${web}: ${ref} has no page or file`);
         continue;
       }
+      if (file.endsWith(`${path.sep}index.html`) && !url.pathname.endsWith("/") && !url.pathname.endsWith(".html")) {
+        brokenLinks.push(`/${web}: ${ref} leaves out the trailing slash of a section index (GitHub Pages answers it with a redirect); link ${url.pathname}/`);
+      }
       if (url.hash.length > 1 && file.endsWith(".html")) {
         let fragment;
         try {
@@ -328,10 +352,21 @@ export async function checkSeo(site, options = {}) {
         }
         if (!(await idsOf(file)).has(fragment)) brokenLinks.push(`/${web}: ${ref} names a fragment that is not on ${path.relative(site, file)}`);
       }
+      const target = path.relative(site, file).split(path.sep).join("/");
+      if (target !== web && file.endsWith(".html") && contentLinks.has(ref)) {
+        if (!inbound.has(target)) inbound.set(target, new Set());
+        inbound.get(target).add(web);
+      }
     }
   }
   for (const message of brokenLinks) fail(`broken link: ${message}`);
   pass(`${linkCount} internal links and assets checked on ${pages.length} pages`);
+
+  // Orphans: every page of the knowledge hub is linked from the content of another page, not only
+  // from the nav and sidebar.
+  const hubPages = [...indexable.keys()].filter((web) => /^docs\/(learn|glossary|recipes|blog)\//.test(web));
+  for (const web of hubPages) if (!inbound.has(web)) fail(`/${web} is an orphan: no other page links to it from its content (nav and sidebar do not count)`);
+  if (hubPages.length > 0) pass(`${hubPages.length} knowledge-hub pages checked for inbound links`);
 
   // The blog's feed.
   const feed = path.join(site, "docs", "blog", "feed.xml");
@@ -365,9 +400,16 @@ export async function checkSeo(site, options = {}) {
       }
       const web = path.relative(site, file).split(path.sep).join("/");
       if (!indexable.has(web)) fail(`sitemap lists a page that is not indexable: ${url}`);
+      else if (canonicals.get(web) && canonicals.get(web) !== url) fail(`sitemap lists ${url}, but the page's canonical is ${canonicals.get(web)}`);
       listed.add(web);
     }
     for (const web of indexable.keys()) if (!listed.has(web)) fail(`/${web} is indexable but not in sitemap.xml`);
+    if (existsSync(feed)) {
+      const inSitemap = new Set(urls);
+      for (const [, href] of (await fs.readFile(feed, "utf8")).matchAll(/<entry>[\s\S]*?<link[^>]*href="([^"]+)"[\s\S]*?<\/entry>/g)) {
+        if (!inSitemap.has(decode(href))) fail(`the feed links ${decode(href)}, which is not in sitemap.xml`);
+      }
+    }
     pass(`sitemap.xml lists ${urls.length} URLs`);
   }
 
