@@ -244,7 +244,7 @@ export async function completeSubjectRequest(ctx: PgContext, id: string, patch: 
 export async function listOverdueSubjectRequests(ctx: PgContext, at: string, limit: number): Promise<SubjectRequestRecord[]> {
   const rows = await ctx.query<Row>(
     `SELECT ${SUBJECT_REQUEST_COLUMNS} FROM subject_requests
-     WHERE status IN ('searching', 'ready') AND due_notified_at IS NULL AND due_at < $1 ORDER BY due_at, id COLLATE "C" LIMIT $2`,
+     WHERE status IN ('searching', 'ready', 'running') AND due_notified_at IS NULL AND due_at < $1 ORDER BY due_at, id COLLATE "C" LIMIT $2`,
     [at, Math.max(1, Math.min(500, Math.floor(limit)))]
   );
   return rows.map(mapSubjectRequestRow);
@@ -253,7 +253,7 @@ export async function listOverdueSubjectRequests(ctx: PgContext, at: string, lim
 export async function expireReadySubjectRequestsWithoutExport(ctx: PgContext, at: string): Promise<string[]> {
   const rows = await ctx.query<{ id: string }>(
     `UPDATE subject_requests r SET status = 'expired', updated_at = $1
-     WHERE r.status = 'ready' AND NOT EXISTS (SELECT 1 FROM subject_exports e WHERE e.request_id = r.id) RETURNING r.id`,
+     WHERE r.type = 'export' AND r.status = 'ready' AND NOT EXISTS (SELECT 1 FROM subject_exports e WHERE e.request_id = r.id) RETURNING r.id`,
     [at]
   );
   return rows.map((row) => String(row.id));

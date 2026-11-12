@@ -5,6 +5,7 @@
  *   GET  /api/data-protection/requests                 requests, newest first (managers)
  *   GET  /api/data-protection/requests/:id             one request with its progress (managers)
  *   GET  /api/data-protection/requests/:id/export      the export zip, once (managers; step-up)
+ *   POST /api/data-protection/requests/:id/confirm     confirm a deletion request after its preview (managers; step-up)
  *   POST /api/data-protection/subject-refs/preview     how subject references resolve on a workflow's latest runs (workflow editors)
  *
  * Managers: admins, and members through a deployment-wide custom role granting `data_subject:manage`.
@@ -14,7 +15,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { subjectRefPreviewSchema, subjectRequestCreateSchema } from "@ai-orchestrator/shared";
+import { subjectRefPreviewSchema, subjectRequestConfirmSchema, subjectRequestCreateSchema } from "@ai-orchestrator/shared";
 import type { Store } from "./db/store.js";
 import type { RunAccess } from "./run-access.js";
 import type { AuditEventInput } from "./services/audit-service.js";
@@ -32,7 +33,9 @@ export interface DataProtectionRoutesDeps {
   /** False when the master key is missing: references and requests need it. */
   available: boolean;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
-  requireStepUp: (request: FastifyRequest, reply: FastifyReply, action: StepUpAction) => Promise<boolean>;
+  requireStepUp: (request: FastifyRequest, reply: FastifyReply, action: StepUpAction, targetUserId?: string) => Promise<boolean>;
+  /** The account a staff erasure would delete, or null. */
+  staffAccount: (email: string) => Promise<{ id: string } | null>;
   /** `data_subject:manage` (deployment-wide). */
   canManage: (user: SafeUser) => Promise<boolean>;
   runAccess: RunAccess;
@@ -152,6 +155,47 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
           metadata: { requestId: request.params.id, reason: error.message }
         });
       }
+      return fail(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/data-protection/requests/:id/confirm", async (request, reply) => {
+    const user = await manager(request, reply);
+    if (!user) return reply;
+    if (!deps.available) return unavailable(reply);
+    // A staff erasure deletes the person's account: only an admin may confirm it, with the user.delete step-up for that
+    // account too (it refuses a service-account key acting on a person, as DELETE /api/users/:id does).
+    const staffEmail = await requests.staffTarget(request.params.id);
+    const account = staffEmail ? await deps.staffAccount(staffEmail) : null;
+    if (account && user.role !== "admin") {
+      reply.code(403);
+      return { error: "Only an admin can erase a staff member who has an account (it deletes the account)." };
+    }
+    if (!(await requireStepUp(request, reply, "subject_request.delete"))) return reply;
+    if (account && !(await requireStepUp(request, reply, "user.delete", account.id))) return reply;
+    const parsed = subjectRequestConfirmSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: quietIssue(parsed.error) };
+    }
+    try {
+      // The intent row, before any row is deleted: the request, what its preview counted and who confirmed it.
+      return await requests.confirm(request.params.id, { id: user.id, email: user.email }, async (confirmed) => {
+        await deps.audit(request, user, {
+          eventType: "data_subject.deletion_confirmed",
+          category: "data_protection",
+          action: "delete",
+          resourceType: "subject_request",
+          resourceId: confirmed.id,
+          metadata: {
+            requestId: confirmed.id,
+            subjectKind: confirmed.subjectKind,
+            counts: confirmed.counts,
+            ...(confirmed.staffPreview ? { staffPreview: confirmed.staffPreview } : {})
+          }
+        });
+      });
+    } catch (error) {
       return fail(reply, error);
     }
   });

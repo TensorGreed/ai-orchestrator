@@ -133,8 +133,10 @@ deletes usage events older than a year; remove it or set `0` to keep them
 
 `SUBJECT_REQUEST_DUE_DAYS` (30, 1 to 365) sets when a data-subject request is due; one notice goes out once it is
 overdue. `SUBJECT_EXPORT_TTL_HOURS` (72, 1 to 720) sets how long its export can be downloaded, and
-`SUBJECT_EXPORT_MAX_BYTES` (200 MB, 1 MB to 512 MB) how many bytes of rows one export holds. See
-[Data-subject requests](../security/data-subject-requests.md).
+`SUBJECT_EXPORT_MAX_BYTES` (200 MB, 1 MB to 512 MB) how many bytes of rows one export holds. An unconfirmed deletion
+preview also expires after `SUBJECT_EXPORT_TTL_HOURS`. `ERASURE_TOMBSTONE_RETENTION_DAYS` (400, 0 keeps them) sets how
+long the records of what a deletion erased are kept, so `db:import` and `db:copy` re-apply them after a restore; keep it
+longer than your oldest backup. See [Data-subject requests](../security/data-subject-requests.md).
 
 ## MCP server registry probes (optional)
 

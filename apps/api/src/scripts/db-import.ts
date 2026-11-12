@@ -25,6 +25,12 @@
  * (the first line, trimmed), so it never appears in the process list or the
  * shell history.
  *
+ * 13.3 — erasures: after loading, every erasure tombstone is re-applied (the backup's, the destination's own from
+ * before a --replace, and those of --erasures-from <newer-backup.json>), so rows a data-subject deletion removed after
+ * the backup was written are deleted again; it prints "re-applied N erasures". Tombstones that name agent memory or a
+ * staff member need the subject key, opened with SECRET_MASTER_KEY_BASE64. --skip-erasures restores without re-applying
+ * them, only together with --i-understand, and the next API start audits it.
+ *
  * The whole restore is one transaction. When the backup records its audit
  * chain's verdict (db:export writes it), the restored chain is verified
  * before committing and must give the same verdict, except rows that become
@@ -39,6 +45,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ImportRefusal, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
 import { readKeyFile, reencryptRows, tablesTheKeyCannotOpen } from "./db-reencrypt.js";
+import { ErasureKeyMissing } from "./erasure-restore.js";
 
 interface Args {
   in: string;
@@ -49,6 +56,9 @@ interface Args {
   allowAuditChange: boolean;
   allowKeyMismatch: boolean;
   allowReplaceHeld: boolean;
+  skipErasures: boolean;
+  iUnderstand: boolean;
+  erasuresFrom: string | null;
 }
 
 type DumpFile = Omit<BackupDump, "format" | "formatVersion"> & { format: string; formatVersion: number };
@@ -62,6 +72,9 @@ function parseArgs(argv: string[]): Args {
   let allowAuditChange = false;
   let allowKeyMismatch = false;
   let allowReplaceHeld = false;
+  let skipErasures = false;
+  let iUnderstand = false;
+  let erasuresFrom: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     // pnpm passes the `--` that separates its own options from the script's (pnpm --filter … db:export -- --out x).
@@ -90,6 +103,14 @@ function parseArgs(argv: string[]): Args {
       allowKeyMismatch = true;
     } else if (arg === "--allow-replace-held") {
       allowReplaceHeld = true;
+    } else if (arg === "--skip-erasures") {
+      skipErasures = true;
+    } else if (arg === "--i-understand") {
+      iUnderstand = true;
+    } else if (arg === "--erasures-from") {
+      const next = argv[++i];
+      if (next === undefined) throw new Error("--erasures-from requires a backup file");
+      erasuresFrom = next;
     } else if (arg === "--help" || arg === "-h") {
       printUsageAndExit(0);
     } else {
@@ -98,7 +119,14 @@ function parseArgs(argv: string[]): Args {
   }
   if (!inPath) throw new Error("--in <file.json> is required");
   if (merge && replace) throw new Error("--merge and --replace together: choose one.");
-  return { in: inPath, yes, sourceMasterKey, merge, replace, allowAuditChange, allowKeyMismatch, allowReplaceHeld };
+  if (skipErasures && !iUnderstand) {
+    throw new ImportRefusal(
+      "--skip-erasures restores data that data-subject deletions removed after the backup was written. Pass --i-understand " +
+        "with it to go ahead (the next API start records it in the audit log). Nothing was changed."
+    );
+  }
+  if (skipErasures && erasuresFrom) throw new Error("--skip-erasures and --erasures-from together: choose one.");
+  return { in: inPath, yes, sourceMasterKey, merge, replace, allowAuditChange, allowKeyMismatch, allowReplaceHeld, skipErasures, iUnderstand, erasuresFrom };
 }
 
 function printUsageAndExit(code: number): never {
@@ -123,6 +151,11 @@ function printUsageAndExit(code: number): never {
       "                             one the backup recorded (both are printed, then a WARNING).",
       "  --allow-replace-held       With --replace, go ahead although the destination has active legal holds",
       "                             (their data and the holds are deleted). Keep a copy of the destination first.",
+      "  --erasures-from <file.json> Also re-apply the erasure tombstones of another (newer) backup, for a",
+      "                             restore into an empty database of a backup older than the last erasures.",
+      "  --skip-erasures            Do not re-apply erasures (data-subject deletions made after the backup was",
+      "                             written come back). Refused without --i-understand; audited at the next start.",
+      "  --i-understand             Confirms --skip-erasures.",
       "  --allow-key-mismatch       Restore even though SECRET_MASTER_KEY_BASE64 cannot open the backup's",
       "                             secrets (without --source-master-key); they stay unreadable.",
       "                             The check opens the backup's first secrets and mfa_secrets rows only:",
@@ -130,7 +163,8 @@ function printUsageAndExit(code: number): never {
       "  --help, -h                 Show this message.",
       "",
       "By default the destination must be empty (no exported row); one that holds data is",
-      "refused, and --replace replaces it with exactly the backup. The restore is one",
+      "refused, and --replace replaces it with exactly the backup. Erasure tombstones are re-applied",
+      "after the load (\"re-applied N erasures\"). The restore is one",
       "transaction: it rolls back if any table fails, or if the restored audit chain",
       "does not give the verdict the backup recorded. Exit codes: 0 restored, 2 refused",
       "(nothing written), 1 failed (rolled back). The destination",
@@ -139,6 +173,18 @@ function printUsageAndExit(code: number): never {
     ].join("\n")
   );
   process.exit(code);
+}
+
+/** The erasure tombstones of another backup file (--erasures-from) and the subject key they are keyed with; nothing else. */
+function readTombstonesFrom(file: string): { tombstones: Array<Record<string, unknown>>; keys: Array<Record<string, unknown>> } {
+  const other = JSON.parse(fs.readFileSync(file, "utf8")) as { format?: string; tables?: Record<string, unknown> };
+  if (other.format !== "ai-orchestrator-backup") throw new Error(`--erasures-from: ${file} is not a backup written by db:export`);
+  const rows = other.tables?.erasure_tombstones;
+  const keys = other.tables?.subject_ref_keys;
+  return {
+    tombstones: Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : [],
+    keys: Array.isArray(keys) ? (keys as Array<Record<string, unknown>>) : []
+  };
 }
 
 function loadKey(b64: string, label: string): Buffer {
@@ -214,7 +260,9 @@ async function main() {
       console.log("--source-master-key matches current SECRET_MASTER_KEY_BASE64; skipping re-encryption.");
     }
 
+    const other = args.erasuresFrom ? readTombstonesFrom(path.resolve(args.erasuresFrom)) : { tombstones: [], keys: [] };
     const report = await importDump(adapter, dump as BackupDump, {
+      erasures: { skip: args.skipErasures, masterKey: destKey, carry: other.tombstones, carryKeys: other.keys },
       merge: args.merge,
       replace: args.replace,
       allowAuditChange: args.allowAuditChange,
@@ -237,7 +285,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  if (err instanceof ImportRefusal) {
+  if (err instanceof ImportRefusal || err instanceof ErasureKeyMissing) {
     console.error(`Refused: ${err.message}`);
     process.exit(2);
   }

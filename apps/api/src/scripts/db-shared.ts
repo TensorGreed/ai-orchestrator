@@ -33,6 +33,8 @@ import {
   verifyPostgresAuditChainByCursor,
   type AuditVerdictRecord
 } from "./audit-carry-over.js";
+import { reapplyAfterRestore, tombstoneRows, type RestoreErasuresReport } from "./erasure-restore.js";
+import { toPgPlaceholders } from "../db/legal-hold-sql.js";
 
 /** The rowid alias SqliteAdapter.selectAll reads beside `*` (no table has a column of that name). */
 const ROWID_KEY = "__backup_rowid";
@@ -63,6 +65,10 @@ export interface BackupAdapter {
   transaction<T>(fn: () => Promise<T>, options?: { readOnly?: boolean }): Promise<T>;
   /** The audit chain's verdict as this store's verifyAuditChain gives it (inside the transaction, when one is open). */
   verifyAuditChain(): Promise<AuditChainResult>;
+  /** 13.3 — `?`-placeholder SQL (inside the transaction, when one is open), for re-applying erasures. */
+  all(sql: string, params: unknown[]): Promise<Array<Record<string, unknown>>>;
+  /** Resolves with the number of rows changed. */
+  run(sql: string, params: unknown[]): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -186,7 +192,9 @@ export const EXPORTED_TABLES = [
   // (keyed hashes) and the requests (their trail; a value is sealed only while a lookup runs)
   "subject_ref_keys",
   "subject_refs",
-  "subject_requests"
+  "subject_requests",
+  // 13.3 (v69) — what data-subject deletions removed: db:import and db:copy re-apply them after a restore.
+  "erasure_tombstones"
 ] as const;
 
 /** Tables db:export leaves out on purpose, and why (the runbook lists them as safe to lose). */
@@ -349,6 +357,14 @@ class SqliteAdapter implements BackupAdapter {
     return verifyAuditRows(iterateSqliteAuditChainRows(this.db));
   }
 
+  async all(sql: string, params: unknown[]): Promise<Array<Record<string, unknown>>> {
+    return this.db.prepare(sql).all(...params.map(normalizeForSqlite)) as Array<Record<string, unknown>>;
+  }
+
+  async run(sql: string, params: unknown[]): Promise<number> {
+    return this.db.prepare(sql).run(...params.map(normalizeForSqlite)).changes;
+  }
+
   async close(): Promise<void> {
     this.db.close();
   }
@@ -504,6 +520,14 @@ class PostgresAdapter implements BackupAdapter {
     return Number(r.rows[0]?.n ?? 0);
   }
 
+  async all(sql: string, params: unknown[]): Promise<Array<Record<string, unknown>>> {
+    return (await this.q(toPgPlaceholders(sql), params)).rows as Array<Record<string, unknown>>;
+  }
+
+  async run(sql: string, params: unknown[]): Promise<number> {
+    return (await this.q(toPgPlaceholders(sql), params)).rowCount ?? 0;
+  }
+
   async verifyAuditChain(): Promise<AuditChainResult> {
     // A cursor needs a transaction: inside the caller's when one is open, else a read-only one of its own.
     if (this.client) return verifyPostgresAuditChainByCursor(this.client);
@@ -636,6 +660,18 @@ export interface ImportOptions {
    * default, rolled back). Both verdicts are logged and the report carries `audit.changedWarning`.
    */
   allowAuditChange?: boolean;
+  /**
+   * 13.3 — erasures: after the rows are loaded, every tombstone (the backup's, the destination's own from before a
+   * replace, and `carry`, e.g. read from a newer backup) is re-applied with the subject key opened by `masterKey`.
+   * `skip` re-applies nothing and leaves a marker the next API start audits.
+   */
+  erasures?: {
+    skip?: boolean;
+    masterKey?: Buffer | null;
+    carry?: ReadonlyArray<Record<string, unknown>>;
+    /** The subject_ref_keys rows of the backup the carried tombstones come from (they are keyed with its key). */
+    carryKeys?: ReadonlyArray<Record<string, unknown>>;
+  };
   /** Rows of a table as they go in (db:import re-encrypts secrets here); returns the rows and how many were changed. */
   prepare?: (table: string, rows: Record<string, unknown>[]) => { rows: Record<string, unknown>[]; touched: number };
   log?: (line: string) => void;
@@ -654,6 +690,8 @@ export interface ImportReport {
   totalInserted: number;
   totalTouched: number;
   tables: ImportTableReport[];
+  /** 13.3 — erasures re-applied after the load (tombstones carried in from the destination or another backup). */
+  erasures?: RestoreErasuresReport & { carried: number };
   /** The restored chain's verdict (when audit_logs was restored), and the rows that became unverifiable as allowed. */
   audit?: {
     restored: AuditChainResult;
@@ -735,6 +773,10 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
     }
     // A merge into an audit log with no chained rows (the chain walks only those) restores the whole chain, so it is compared like a plain restore.
     const auditWasEmpty = !options.merge || !restoresAudit || (await adapter.countChainedAuditRows()) === 0;
+    // 13.3 — the destination's own tombstones survive a replace: an older backup must not bring back what was erased since.
+    const kept = options.merge ? [] : await readTombstones(adapter);
+    // Its subject key too: the kept tombstones of memory and staff are keyed with it.
+    const keptKeys = options.merge ? [] : await readSubjectKeys(adapter);
     if (!options.merge) {
       // Every exported table, so nothing of what the destination held survives next to the backup (and rows a
       // migration seeded are replaced by the backup's), and the destination's sessions. Reverse order, so a later
@@ -779,6 +821,14 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
       tables.push({ table, action: "restored", rows: prepared.length });
       log(`  ${table}: restored, ${prepared.length} rows${touched > 0 ? ` (${touched} re-encrypted)` : ""}`);
     }
+    const erasures = await restoreErasures(
+      adapter,
+      [...kept, ...(options.erasures?.carry ?? [])],
+      [...keptKeys, ...(options.erasures?.carryKeys ?? [])],
+      options,
+      log,
+      warn
+    );
     if (notInBackup.length > 0) {
       warn(
         `Note: the backup does not hold ${notInBackup.length} table(s) this build exports (${notInBackup.slice(0, 8).join(", ")}` +
@@ -786,7 +836,7 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
           (options.merge ? "They were left as they were." : "They are empty now.")
       );
     }
-    if (!restoresAudit) return { totalInserted, totalTouched, tables };
+    if (!restoresAudit) return { totalInserted, totalTouched, erasures, tables };
 
     const restored = await adapter.verifyAuditChain();
     if (!dump.auditVerdict) {
@@ -794,14 +844,14 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
         `Note: this backup does not record its audit-chain verdict (written by an older db:export), so the restored chain ` +
           `is not compared with it. Restored audit chain: ${verdictText(restored)}.`
       );
-      return { totalInserted, totalTouched, tables, audit: { restored, becameUnverifiable: [] } };
+      return { totalInserted, totalTouched, erasures, tables, audit: { restored, becameUnverifiable: [] } };
     }
     if (!auditWasEmpty) {
       log(
         `Note: --merge keeps the audit rows already in the database, so the audit verdict was not compared with the ` +
           `backup's (${verdictText(auditVerdictFromRecord(dump.auditVerdict))}). Restored audit chain: ${verdictText(restored)}.`
       );
-      return { totalInserted, totalTouched, tables, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable: [] } };
+      return { totalInserted, totalTouched, erasures, tables, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable: [] } };
     }
     const recorded = auditVerdictFromRecord(dump.auditVerdict);
     const { problems, becameUnverifiable } = restoredAuditProblems(recorded, restored, explainedAuditRows(dump.tables.audit_logs ?? []));
@@ -811,7 +861,7 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
         `before (backup) ${verdictText(recorded)}, after (restored) ${verdictText(restored)}; ${problems.join("; ")}. ` +
         `Treat the chain as unproven and keep the backup file as the record.`;
       log(`Audit chain before (backup): ${verdictText(recorded)}. After (restored): ${verdictText(restored)}.`);
-      return { totalInserted, totalTouched, tables, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable, changedWarning } };
+      return { totalInserted, totalTouched, erasures, tables, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable, changedWarning } };
     }
     if (problems.length > 0) {
       throw new AuditVerdictMismatch(
@@ -828,8 +878,64 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
           `U+0000 and lone surrogates (which this store cannot keep) become U+FFFD. Keep the backup file as the record for them.`
       );
     }
-    return { totalInserted, totalTouched, tables, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable } };
+    return { totalInserted, totalTouched, erasures, tables, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable } };
   });
+}
+
+/** The destination's tombstones (none on a schema without the table). */
+async function readTombstones(adapter: BackupAdapter): Promise<Array<Record<string, unknown>>> {
+  try {
+    return await adapter.all("SELECT kind, row_id, request_id, erased_at FROM erasure_tombstones", []);
+  } catch (error) {
+    if (isMissingTableError(error)) return [];
+    throw error;
+  }
+}
+
+/** The destination's subject key rows (none on a schema without the table). */
+async function readSubjectKeys(adapter: BackupAdapter): Promise<Array<Record<string, unknown>>> {
+  try {
+    return await adapter.all("SELECT * FROM subject_ref_keys", []);
+  } catch (error) {
+    if (isMissingTableError(error)) return [];
+    throw error;
+  }
+}
+
+/**
+ * Adds the carried tombstones the restored table lacks, then re-applies them all (or records the skip). A backup
+ * written before the first data-subject request has no subject key: the destination's (or the carried backup's) is
+ * kept, so references and tombstones keyed with it keep matching. Carried tombstones keyed with another key are
+ * re-applied with that key as well.
+ */
+async function restoreErasures(
+  adapter: BackupAdapter,
+  carry: ReadonlyArray<Record<string, unknown>>,
+  carryKeys: ReadonlyArray<Record<string, unknown>>,
+  options: ImportOptions,
+  log: (line: string) => void,
+  warn: (line: string) => void
+): Promise<RestoreErasuresReport & { carried: number }> {
+  if (carryKeys.length > 0 && (await adapter.all("SELECT id FROM subject_ref_keys", [])).length === 0) {
+    const first = carryKeys.find((row) => row.id === "default") ?? carryKeys[0]!;
+    await adapter.insertRows("subject_ref_keys", [first]);
+    log("  subject_ref_keys: the backup holds none; the destination's subject key is kept");
+  }
+  const extraSealedKeys = carryKeys.map((row) => row.key_sealed).filter((value): value is string => typeof value === "string");
+  const present = new Set((await adapter.all("SELECT kind, row_id FROM erasure_tombstones", [])).map((row) => `${String(row.kind)}\u0000${String(row.row_id)}`));
+  const missing = tombstoneRows(carry).filter((row) => !present.has(`${row.kind}\u0000${row.row_id}`));
+  if (missing.length > 0) {
+    await adapter.insertRows("erasure_tombstones", missing);
+    log(`  erasure_tombstones: ${missing.length} kept from the destination or carried in (erased after the backup was written)`);
+  }
+  const report = await reapplyAfterRestore(adapter, {
+    skip: options.erasures?.skip,
+    masterKey: options.erasures?.masterKey ?? null,
+    extraSealedKeys,
+    log,
+    warn
+  });
+  return { ...report, carried: missing.length };
 }
 
 export async function openBackupAdapter(): Promise<BackupAdapter> {

@@ -1321,7 +1321,7 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
     for (const id of ids) expect(JSON.stringify(audit[0])).toContain(`recording:${id}`);
     expect(JSON.stringify(audit)).not.toContain(EMAIL);
 
-    // N11: a replay execution's tool-call, guard-event and usage rows go with it.
+    // N11: a replay execution's tool-call and rule-event rows go with it; 13.3: its usage rows stay, the person cleared.
     const recordingId = ids[1]!;
     const replayed = await call(context, "POST", `/api/replay/recordings/${recordingId}/replay`, builder.cookie, {});
     expect(replayed.statusCode, replayed.body).toBe(200);
@@ -1338,7 +1338,12 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
         executionId,
         now
       );
-      await sql.run("INSERT INTO usage_events (id, execution_id, workflow_id, status) VALUES (?, ?, 'wf-crash', 'success')", `ue-${executionId}`, executionId);
+      await sql.run(
+        "INSERT INTO usage_events (id, execution_id, workflow_id, status, user_id, user_email, total_tokens, cost_usd) VALUES (?, ?, 'wf-crash', 'success', 'u-1', ?, 40, 0.5)",
+        `ue-${executionId}`,
+        executionId,
+        EMAIL
+      );
     }
     const sideRows = async () => {
       const counts: number[] = [];
@@ -1349,12 +1354,22 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
       return counts;
     };
     expect((await sideRows()).every((count) => count >= 1)).toBe(true);
+    const usageBefore = (await sideRows())[2];
     const removed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
       value: EMAIL,
       targets: found.matches.map((match) => ({ kind: match.kind, id: match.id }))
     });
     expect(removed.statusCode, removed.body).toBe(200);
-    expect(await sideRows()).toEqual([0, 0, 0]);
+    expect(await sideRows()).toEqual([0, 0, usageBefore]);
+    const usage = await sql.all<{ id: string; user_id: string | null; user_email: string | null; total_tokens: number | string; cost_usd: number | string }>(
+      `SELECT id, user_id, user_email, total_tokens, cost_usd FROM usage_events WHERE execution_id IN (${executions.map(() => "?").join(", ")})`,
+      ...executions
+    );
+    expect(usage.every((row) => row.user_id === null && row.user_email === null)).toBe(true);
+    expect(usage.filter((row) => row.id.startsWith("ue-")).map((row) => [Number(row.total_tokens), Number(row.cost_usd)])).toEqual(executions.map(() => [40, 0.5]));
+    // Each deleted row left an erasure tombstone (ids only).
+    const tombstones = await sql.all<{ kind: string; row_id: string }>("SELECT kind, row_id FROM erasure_tombstones WHERE kind = 'run'");
+    expect(tombstones.map((row) => row.row_id).sort()).toEqual([...executions].sort());
     const trail = (await context.store.listAuditLogs({ pageSize: 200 })).items.filter((entry) => entry.eventType.startsWith("replay.find_subject.delete"));
     expect(trail.filter((entry) => entry.eventType === "replay.find_subject.delete_started")).toHaveLength(2);
     expect(trail.filter((entry) => entry.eventType === "replay.find_subject.deleted")).toHaveLength(1);
