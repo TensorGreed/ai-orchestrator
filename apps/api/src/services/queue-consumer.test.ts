@@ -83,7 +83,7 @@ describe("queue consumer", () => {
     const executionId = await queue.enqueue({ workflowId: "wf" });
     queue.start();
     await until(async () => (await store.getQueueDepth()).pending === 0 && (await store.getQueueDepth()).running === 0, "the job to complete");
-    expect(seen).toEqual([{ queueItemId: executionId, claimToken: null, signal: expect.any(AbortSignal), attempts: 0, pool: "default", leaseFresh: expect.any(Function), leaseLost: expect.any(Function) }]);
+    expect(seen).toEqual([{ queueItemId: executionId, claimToken: null, signal: expect.any(AbortSignal), attempts: 0, pool: "default", waitMs: expect.any(Number), leaseFresh: expect.any(Function), leaseLost: expect.any(Function) }]);
     expect(queue.leaseOptions()).toBeNull();
   });
 
