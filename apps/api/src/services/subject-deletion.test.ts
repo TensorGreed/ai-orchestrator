@@ -376,7 +376,7 @@ for (const kind of kinds) {
       expect(await service.recordRunRefs({ executionId: "run-1", workflow: WORKFLOW, run: { input: { customerId: "CUST-777" }, sessionId: "sess-run-1" } })).toBe(0);
       expect(await count(store, "subject_refs", "row_id = 'run-1'")).toBe(0);
 
-      // Rows the executor wrote after the erasure (a history row raced in under the guard, a tool call, the usage user,
+      // Rows the executor wrote after the erasure (a history row that raced the write check, a tool call, the usage user,
       // a recording captured from it): the sweep deletes them again, and keeps none of the person.
       const sql = testSql(store);
       const late = new Date(T0.getTime() + 60_000).toISOString();
@@ -447,6 +447,41 @@ for (const kind of kinds) {
       expect(held.status).toBe("deferred_by_hold");
       expect(held.deletion).toMatchObject({ deferred: 1, waitingForRuns: 0 });
       expect(await count(store, "execution_history", "id = 'run-1'")).toBe(1);
+    });
+
+    it("the scrub of erased runs leaves a run in flight, a held run and a held late recording", async () => {
+      const { store, sql } = await setup();
+      for (const id of [WORKFLOW.id, "wf-held", "wf-rec-held"]) await store.upsertWorkflow({ ...WORKFLOW, id } as Workflow);
+      const erasedAt = T0.toISOString();
+      const later = new Date(T0.getTime() + 60_000).toISOString();
+      for (const id of ["run-a", "run-b", "run-c"]) {
+        await sql.run("INSERT INTO erasure_tombstones (kind, row_id, request_id, erased_at) VALUES ('run', ?, 'dsr-s', ?)", id, erasedAt);
+      }
+      // run-a still running (in flight), run-b in a held workflow; run-c free, with a recording in a held workflow.
+      await sql.run("INSERT INTO execution_history (id, workflow_id, status, started_at) VALUES ('run-a', ?, 'running', ?)", WORKFLOW.id, AT);
+      await sql.run("INSERT INTO execution_history (id, workflow_id, status, started_at) VALUES ('run-b', 'wf-held', 'success', ?)", AT);
+      for (const id of ["run-a", "run-b", "run-c"]) {
+        await sql.run(
+          "INSERT INTO mcp_tool_calls (id, execution_id, workflow_id, node_id, adapter_id, tool_name, started_at, ok) VALUES (?, ?, ?, 'n', 'mock-mcp', 'lookup', ?, 1)",
+          `tc-${id}`, id, id === "run-b" ? "wf-held" : WORKFLOW.id, AT
+        );
+      }
+      await sql.run(
+        `INSERT INTO replay_recordings (id, workflow_id, name, source_status, workflow_hash, captured_workflow_json, node_outputs_json, facts_json, capabilities_json, bytes, created_at, status, captured_at, source_execution_id)
+         VALUES ('rec-c', 'wf-rec-held', 'Capture', 'success', 'h', '{}', '{}', '{}', '{}', 2, ?, 'candidate', ?, 'run-c')`,
+        later, later
+      );
+      for (const [id, scope] of [["h-run", "wf-held"], ["h-rec", "wf-rec-held"]] as const) {
+        await store.placeLegalHold({ id, name: "M", reason: "r", matterRef: null, scopeType: "workflow", scopeId: scope, endsAt: null, createdBy: null, createdAt: AT, items: [] });
+      }
+      expect(await store.scrubErasedRuns(new Date(T0.getTime() - 3_600_000).toISOString(), 100)).toBeGreaterThan(0);
+      expect((await sql.all<{ id: string }>("SELECT id FROM execution_history ORDER BY id")).map((row) => row.id)).toEqual(["run-a", "run-b"]);
+      expect((await sql.all<{ id: string }>("SELECT id FROM mcp_tool_calls ORDER BY id")).map((row) => row.id)).toEqual(["tc-run-a", "tc-run-b"]);
+      expect(await count(store, "replay_recordings", "id = 'rec-c'")).toBe(1);
+      // Outside the window nothing is touched.
+      await sql.run("INSERT INTO mcp_tool_calls (id, execution_id, workflow_id, node_id, adapter_id, tool_name, started_at, ok) VALUES ('tc-c2', 'run-c', ?, 'n', 'mock-mcp', 'lookup', ?, 1)", WORKFLOW.id, AT);
+      expect(await store.scrubErasedRuns(new Date(T0.getTime() + 60_000).toISOString(), 100)).toBe(0);
+      expect(await count(store, "mcp_tool_calls", "id = 'tc-c2'")).toBe(1);
     });
 
     it("treats a resuming run and a run with an open queue job as in flight", async () => {

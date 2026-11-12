@@ -18,6 +18,7 @@ import {
   deletionTombstones,
   idErasureStatements,
   isRunKind,
+  lateRecordingsFrom,
   memoryArtifactErasureStatements,
   memorySessionErasureStatements,
   runErasureStatements,
@@ -14989,7 +14990,7 @@ export class SqliteStore implements Store {
         for (const target of subjectRowHoldTargets("production_execution", id)) if (this.legalHoldsOnSync(target).length > 0) return 0;
         let rows = this.runErasureSync(idErasureStatements("run", id) ?? []);
         const erasure = { requestId: tombstone.request_id === null ? null : toString(tombstone.request_id), erasedAt: toString(tombstone.erased_at) };
-        for (const recording of this.queryAll<{ id: string }>(LATE_RECORDINGS_SQL, [id, erasure.erasedAt])) {
+        for (const recording of this.queryAll<{ id: string }>(LATE_RECORDINGS_SQL, [id, lateRecordingsFrom(erasure.erasedAt)])) {
           const recordingId = toString(recording.id);
           if (subjectRowHoldTargets("recording", recordingId).some((target) => this.legalHoldsOnSync(target).length > 0)) continue;
           const outcome = this.deleteSubjectRowSync("recording", recordingId);
@@ -14998,7 +14999,10 @@ export class SqliteStore implements Store {
         }
         return rows;
       });
+      // One run at a time: the API keeps answering between them.
+      await yieldToEventLoop();
     }
+    if (changed > 0) this.persist();
     return changed;
   }
 

@@ -25,6 +25,7 @@ import {
   holdsOnAny,
   idErasureStatements,
   isRunKind,
+  lateRecordingsFrom,
   memoryArtifactErasureStatements,
   memorySessionErasureStatements,
   runErasureStatements,
@@ -136,9 +137,7 @@ export async function deleteSubjectRow(ctx: PgContext, kind: SubjectDeleteKind, 
     // already blocked on the history row can still insert it again once this commits (its tombstone check ran before);
     // the sweep's scrubErasedRuns deletes such late rows.
     if (isRunKind(kind)) {
-      await client.query(`SELECT 1 FROM execution_history WHERE id = $1 FOR UPDATE`, [id]);
-      await client.query(`SELECT 1 FROM workflow_executions WHERE id = $1 FOR UPDATE`, [id]);
-      await client.query(`SELECT 1 FROM execution_queue WHERE execution_id = $1 FOR UPDATE`, [id]);
+      await lockRunRows(client, id);
       for (const sql of RUN_ACTIVE_CHECKS) {
         if (((await client.query(toPgPlaceholders(sql), [id])).rowCount ?? 0) > 0) return { deleted: false, cascaded: [], busy: true };
       }
@@ -147,6 +146,17 @@ export async function deleteSubjectRow(ctx: PgContext, kind: SubjectDeleteKind, 
     if (erasure) await writeErasureTombstonesWith(client, deletionTombstones(kind, id, outcome, erasure));
     return outcome;
   });
+}
+
+/**
+ * 13.3 — locks a run's rows whatever their status, in the queue's lock order (queue rows, then the history row, then
+ * the paused state; see withQueueClaim and the reaper), so a claim cannot slip in between the in-flight check and the
+ * delete, and no deadlock with an executor or the reaper.
+ */
+async function lockRunRows(client: PoolClient, id: string): Promise<void> {
+  await client.query(`SELECT 1 FROM execution_queue WHERE execution_id = $1 ORDER BY id FOR UPDATE`, [id]);
+  await client.query(`SELECT 1 FROM execution_history WHERE id = $1 FOR UPDATE`, [id]);
+  await client.query(`SELECT 1 FROM workflow_executions WHERE id = $1 FOR UPDATE`, [id]);
 }
 
 /** 13.3 — see Store.scrubErasedRuns (one transaction per run, under the shared legal-hold lock, as deleteSubjectRow). */
@@ -161,15 +171,13 @@ export async function scrubErasedRuns(ctx: PgContext, since: string, limit: numb
     const erasedAt = tombstone.erased_at instanceof Date ? tombstone.erased_at.toISOString() : String(tombstone.erased_at);
     changed += await ctx.withTransaction(async (client) => {
       await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
-      await client.query(`SELECT 1 FROM execution_history WHERE id = $1 FOR UPDATE`, [id]);
-      await client.query(`SELECT 1 FROM workflow_executions WHERE id = $1 FOR UPDATE`, [id]);
-      await client.query(`SELECT 1 FROM execution_queue WHERE execution_id = $1 FOR UPDATE`, [id]);
+      await lockRunRows(client, id);
       for (const sql of RUN_ACTIVE_CHECKS) if (((await client.query(toPgPlaceholders(sql), [id])).rowCount ?? 0) > 0) return 0;
       const held = await holdsOnAny(subjectRowHoldTargets("production_execution", id), async (target) => await legalHoldsOnWith(client, target));
       if (held.length > 0) return 0;
       let rows = await runStatements(client, idErasureStatements("run", id) ?? []);
       const erasure = { requestId: tombstone.request_id === null ? null : String(tombstone.request_id), erasedAt };
-      for (const recordingId of await ids(client, toPgPlaceholders(LATE_RECORDINGS_SQL), [id, erasedAt])) {
+      for (const recordingId of await ids(client, toPgPlaceholders(LATE_RECORDINGS_SQL), [id, lateRecordingsFrom(erasedAt)])) {
         const recordingHeld = await holdsOnAny(subjectRowHoldTargets("recording", recordingId), async (target) => await legalHoldsOnWith(client, target));
         if (recordingHeld.length > 0) continue;
         const outcome = await deleteSubjectRowWith(client, "recording", recordingId);

@@ -139,7 +139,7 @@ The deletion then runs in the background on the leader, resumes after a restart,
 search again before deleting it (a row that no longer holds the value is skipped). A run still in progress (running,
 queued, resuming, or with an open queue job) is not deleted under its executor: the request shows **Partly deleted:
 waiting for runs to finish** and deletes it on a later pass once it has finished. Once a run is erased, its executor
-cannot write its history back, and for a day after the erasure the background sweep deletes again anything written
+cannot write its history back, and for two hours after the erasure the background sweep deletes again anything written
 for it late (tool calls, rule events, the user on usage rows, a recording captured from it), for example by a canceled
 run that was still stopping.
 

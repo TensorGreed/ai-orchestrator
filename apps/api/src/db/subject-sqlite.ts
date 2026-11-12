@@ -96,6 +96,9 @@ export function ensureErasureSchema(db: BetterSqlite3Database): void {
       PRIMARY KEY (kind, row_id)
     );
     CREATE INDEX IF NOT EXISTS idx_erasure_tombstones_erased ON erasure_tombstones(erased_at);
+    -- A run's erasure (and the sweep's scrub of late rows) finds its usage rows and queue jobs by execution id.
+    CREATE INDEX IF NOT EXISTS idx_usage_events_execution ON usage_events(execution_id);
+    CREATE INDEX IF NOT EXISTS idx_execution_queue_execution ON execution_queue(execution_id);
   `);
 }
 

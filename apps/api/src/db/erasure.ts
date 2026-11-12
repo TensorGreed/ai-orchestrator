@@ -112,15 +112,29 @@ export const RUN_ACTIVE_CHECKS = [
   "SELECT 1 AS busy FROM execution_queue WHERE execution_id = ? AND status IN ('pending', 'running')"
 ] as const;
 
-/** Run tombstones erased within this window are scrubbed again on each sweep (rows a finishing executor wrote late). */
-export const ERASED_RUN_SCRUB_HOURS = 24;
+/**
+ * Run tombstones erased within this window are scrubbed again on each sweep (rows a finishing executor wrote late: a
+ * canceled run stops within seconds). At most SCRUB_RUNS_PER_SWEEP per sweep, newest first.
+ */
+export const ERASED_RUN_SCRUB_HOURS = 2;
+export const SCRUB_RUNS_PER_SWEEP = 1000;
 
-/** Recent run tombstones, oldest first (the sweep's scrub). */
+/** Recent run tombstones, newest first (the sweep's scrub). */
 export const RECENT_RUN_TOMBSTONES_SQL =
-  "SELECT row_id, request_id, erased_at FROM erasure_tombstones WHERE kind = 'run' AND erased_at >= ? ORDER BY erased_at, row_id LIMIT ?";
+  "SELECT row_id, request_id, erased_at FROM erasure_tombstones WHERE kind = 'run' AND erased_at >= ? ORDER BY erased_at DESC, row_id LIMIT ?";
 
-/** Recordings captured from a run after it was erased. */
+/**
+ * Recordings captured from a run around or after its erasure: a capture's created_at is set before its save checks the
+ * run, and instances' clocks differ, so the window starts LATE_RECORDING_MARGIN_MS before the erasure.
+ */
 export const LATE_RECORDINGS_SQL = "SELECT id FROM replay_recordings WHERE source_execution_id = ? AND created_at >= ?";
+export const LATE_RECORDING_MARGIN_MS = 10 * 60_000;
+
+/** The earliest created_at of a recording the scrub deletes for a run erased at `erasedAt`. */
+export function lateRecordingsFrom(erasedAt: string): string {
+  const at = Date.parse(erasedAt);
+  return Number.isFinite(at) ? new Date(at - LATE_RECORDING_MARGIN_MS).toISOString() : erasedAt;
+}
 
 /** The subject row kinds that are runs. */
 export function isRunKind(kind: SubjectDeleteKind): boolean {

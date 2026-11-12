@@ -71,6 +71,7 @@ import {
 import { yieldToEventLoop } from "../db/retention-tables.js";
 import {
   ERASED_RUN_SCRUB_HOURS,
+  SCRUB_RUNS_PER_SWEEP,
   memoryArtifactTombstoneId,
   memorySessionTombstoneId,
   staffEmails,
@@ -925,7 +926,7 @@ export class SubjectRequestService {
     try {
       // What an executor wrote for a run after its erasure (a canceled run still stopping, or a write racing the delete).
       const since = new Date(now.getTime() - ERASED_RUN_SCRUB_HOURS * HOUR_MS).toISOString();
-      const scrubbed = await store.scrubErasedRuns(since, TOMBSTONES_PER_SWEEP);
+      const scrubbed = await store.scrubErasedRuns(since, SCRUB_RUNS_PER_SWEEP);
       if (scrubbed > 0) this.options.logger?.info({ rows: scrubbed }, "Deleted rows written for erased runs after their erasure");
     } catch (error) {
       this.options.logger?.warn({ error: this.message(error) }, "Could not delete rows written for erased runs after their erasure");
