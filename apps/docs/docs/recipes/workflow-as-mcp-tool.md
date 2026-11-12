@@ -33,8 +33,8 @@ An **Expose as MCP Tool** trigger turns the workflow into a tool named `answer_f
 
 1. Download <a href="/docs/recipes/files/workflow-as-mcp-tool-flow.json" download>workflow-as-mcp-tool-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/workflow-as-mcp-tool-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. In the sidebar, open **MCP → Toolsets**, create a toolset and add the workflow. Its endpoint is `/mcp/<slug>` (we named ours `kb-helper`).
-4. Open **MCP → Clients**, create a client for that toolset and copy its token. It is shown once.
+3. As an admin, open **MCP → Toolsets** in the sidebar, create a toolset and add the workflow. Its endpoint is `/mcp/<slug>` (we named ours `kb-helper`).
+4. Open **MCP → Clients**, create a client for that toolset (admin; you may be asked to confirm your identity again) and copy its token. It is shown once.
 5. Call the tool with curl (below), or paste the client's configuration snippet into your MCP client.
 
 ## How it works
@@ -56,15 +56,25 @@ An **Expose as MCP Tool** trigger turns the workflow into a tool named `answer_f
 
 ## Call it with curl
 
-The gateway speaks MCP over Streamable HTTP. With the client token in `TOKEN` and the session id from step 1 in `SESSION`:
+The gateway speaks MCP over Streamable HTTP. Put the client token in `TOKEN` (`export TOKEN=l2m_mcp_...`), then run these in order:
 
 ```bash
-# 1. Open a session. The response carries an Mcp-Session-Id header.
-curl -i http://localhost:4000/mcp/kb-helper \
+# 1. Open a session and keep the Mcp-Session-Id header the server sends back.
+SESSION=$(curl -si http://localhost:4000/mcp/kb-helper \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
+  | awk 'tolower($1)=="mcp-session-id:" {print $2}' | tr -d '\r')
+
+# Tell the server the client is ready, as the MCP spec asks.
+curl http://localhost:4000/mcp/kb-helper \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SESSION" \
+  -H "MCP-Protocol-Version: 2025-11-25" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
 # 2. Call the tool in that session. (List them first with the same request and
 #    "method":"tools/list", "params":{}.)

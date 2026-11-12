@@ -33,7 +33,7 @@ A **Question** node holds the question. **RAG Retrieve** searches a built-in kno
 
 1. Download <a href="/docs/recipes/files/rag-knowledge-base-flow.json" download>rag-knowledge-base-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-knowledge-base-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. Create a knowledge base with the `token-embedder` and add a document, under **Knowledge** in the sidebar or with the API (below). Copy its id.
+3. As an admin, create a knowledge base with the `token-embedder` and add a document, under **Knowledge** in the sidebar or with the API (below). Get its id (`kb_...`) from the create response or from `GET /api/knowledge-bases`; the Knowledge page does not show it.
 4. Open the **RAG Retrieve (KB)** node and replace `<your-kb-id>` with that id. Save.
 5. Run it, then change the question on the **Question** node and run it again.
 
@@ -57,12 +57,16 @@ A **Question** node holds the question. **RAG Retrieve** searches a built-in kno
 ## Create a knowledge base with the API
 
 ```bash
-# Create a knowledge base (admin). The response holds its id: kb_...
+# An admin's API key, from Settings › Account › API Keys.
+export L2M_API_KEY=ao_...
+
+# Create a knowledge base. The response holds its id: kb_...
 curl -X POST http://localhost:4000/api/knowledge-bases \
   -H "Authorization: Bearer $L2M_API_KEY" -H "Content-Type: application/json" \
   -d '{"name": "Helpdesk FAQ", "embedderId": "token-embedder", "embedderConfig": {}}'
 
 # Load, chunk, embed and store a Markdown file in one call.
+export KB_ID=kb_...   # the id from the response above
 curl -X POST http://localhost:4000/api/knowledge-bases/$KB_ID/upload \
   -H "Authorization: Bearer $L2M_API_KEY" -H "Content-Type: application/json" \
   -d '{"filename": "helpdesk-faq.md", "sourceId": "helpdesk-faq-v1",

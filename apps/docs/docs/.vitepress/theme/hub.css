@@ -592,6 +592,9 @@
 
 .hub-term-card:target {
   border-color: var(--vp-c-brand-1);
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 2px;
+  background: var(--vp-c-brand-soft);
 }
 
 .hub-term-docs {
@@ -602,9 +605,6 @@
   white-space: nowrap;
 }
 
-.hub-term-docs::after {
-  content: " →";
-}
 
 /* Recipes: filters */
 

@@ -33,7 +33,7 @@ A <Term id="jailbreak">jailbreak</Term> targets the model's own safety rules ("t
 
 ## In L2M
 
-L2M's content rules check prompts, tool arguments and tool results for known injection patterns ([content rules engine](/product/content-rules-engine)). Limit the damage with [tool policy](/product/mcp-tool-policy) and [approvals](/product/approvals) before risky calls.
+L2M's content rules can check prompts, tool arguments and tool results for known injection patterns ([content rules engine](/product/content-rules-engine)). Limit the damage with [tool policy](/product/mcp-tool-policy) and [approvals](/product/approvals) before risky calls.
 
 ## Further reading
 

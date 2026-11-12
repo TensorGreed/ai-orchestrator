@@ -23,7 +23,7 @@ onBeforeUnmount(() => {
   if (typeof document !== "undefined") document.removeEventListener("keydown", onEscape);
 });
 if (import.meta.env.SSR && !terms.some((item) => item.slug === props.id)) {
-  console.warn(`[glossary] <Term id="${props.id}"> names no glossary/${props.id}.md; it renders as plain text`);
+  console.warn(`[glossary] <Term id="${props.id}"> names no glossary term (no page and no index entry); it renders as plain text`);
 }
 </script>
 

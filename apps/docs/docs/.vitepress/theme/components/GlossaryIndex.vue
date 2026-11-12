@@ -54,7 +54,7 @@ const toggle = (topic: string | null) => {
         </dt>
         <dd>
           {{ term.definition }}
-          <a v-if="term.docs" class="hub-term-docs" :href="withBase(term.docs)">In L2M<span class="visually-hidden">: {{ term.term }}</span></a>
+          <a v-if="term.docs" class="hub-term-docs" :href="withBase(term.docs)">In L2M<span class="visually-hidden">: {{ term.term }}</span><span aria-hidden="true"> →</span></a>
         </dd>
       </div>
     </dl>

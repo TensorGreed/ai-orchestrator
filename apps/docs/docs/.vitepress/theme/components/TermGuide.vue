@@ -19,7 +19,7 @@ const guide = computed(() => {
 </script>
 
 <template>
-  <aside v-if="guide" class="hub-term-guide" aria-label="Guide">
+  <aside v-if="guide" class="hub-term-guide" aria-label="Guide that explains this term">
     <p class="hub-term-guide-label">Explained in depth</p>
     <a class="hub-term-guide-link" :href="withBase(guide.path)">{{ guide.title }}</a>
     <p class="hub-term-guide-desc">{{ guide.description }}</p>

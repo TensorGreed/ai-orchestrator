@@ -18,6 +18,55 @@ export interface IndexEntry {
 export const INDEX_ENTRIES: IndexEntry[] = [
   // MCP
   {
+    slug: "mcp-host",
+    term: "MCP host",
+    topic: "mcp",
+    definition: "The AI application, such as a chat app, an IDE or an agent runtime, that creates MCP clients, connects them to servers and decides what the model may use.",
+    docs: "/runtime/agent-loop"
+  },
+  {
+    slug: "mcp-resource",
+    term: "MCP resource",
+    topic: "mcp",
+    definition: "Data an MCP server shares by URI, such as a file or a record, for the application to read. Unlike a tool, the model does not call it.",
+    docs: "/product/mcp-server-registry#resources-and-prompts"
+  },
+  {
+    slug: "mcp-prompt",
+    term: "MCP prompt",
+    topic: "mcp",
+    definition: "A reusable message template an MCP server offers, with named arguments, for a person or application to pick, rather than for the model to call.",
+    docs: "/product/mcp-server-registry#resources-and-prompts"
+  },
+  {
+    slug: "mcp-session",
+    term: "MCP session",
+    topic: "mcp",
+    definition: "Over Streamable HTTP, the state that ties a client's requests together: the server returns an Mcp-Session-Id when the client initializes, and the client sends it with every later request.",
+    docs: "/product/mcp-gateway"
+  },
+  {
+    slug: "structured-tool-output",
+    term: "Structured tool output",
+    topic: "mcp",
+    definition: "A tool result returned as JSON in structuredContent, besides the text content. A tool that declares an outputSchema must return results that match it.",
+    docs: "/product/mcp-server-registry#structured-output"
+  },
+  {
+    slug: "elicitation",
+    term: "Elicitation (MCP)",
+    topic: "mcp",
+    definition: "An MCP server pausing a tool call to ask the person for input, through the client, with a message and a simple form schema.",
+    docs: "/product/mcp-server-registry#elicitation-a-server-asks-the-person-a-question"
+  },
+  {
+    slug: "sampling",
+    term: "Sampling (MCP)",
+    topic: "mcp",
+    definition: "An MCP server asking the client to run a model call on its behalf, so a tool can use the client's model without its own API key.",
+    docs: "/product/mcp-server-registry#sampling-a-server-asks-the-model-for-a-completion"
+  },
+  {
     slug: "write-tool",
     term: "Write tool",
     topic: "mcp",
@@ -53,6 +102,27 @@ export const INDEX_ENTRIES: IndexEntry[] = [
   },
   // Agents and retrieval
   {
+    slug: "worker-agent",
+    term: "Worker agent",
+    topic: "agents",
+    definition: "A specialist agent, with its own model, tools and instructions, that a supervisor agent calls like a tool for one part of a task.",
+    docs: "/runtime/agent-loop#attachment-ports"
+  },
+  {
+    slug: "max-iterations",
+    term: "Max iterations",
+    topic: "agents",
+    definition: "The most rounds of model call and tool calls an agent may take in one run. When it is reached, the agent stops instead of looping on.",
+    docs: "/troubleshooting/common-issues#agent-hits-max-iterations"
+  },
+  {
+    slug: "workflow-dag",
+    term: "Workflow DAG",
+    topic: "agents",
+    definition: "A workflow drawn as a directed acyclic graph: steps joined by edges that never loop back, run in the order their inputs allow.",
+    docs: "/product/workflow-editor"
+  },
+  {
     slug: "token-llm",
     term: "Token (LLM)",
     topic: "agents",
@@ -73,6 +143,33 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     docs: "/runtime/agent-loop#session-tool-cache-multi-turn-reuse"
   },
   // Security
+  {
+    slug: "tool-shadowing",
+    term: "Tool shadowing",
+    topic: "security",
+    definition: "One MCP server's tool descriptions changing how an agent uses another server's tools, for example by telling it to copy data into every email it sends.",
+    docs: "/runtime/agent-loop#tool-names-the-model-sees"
+  },
+  {
+    slug: "jailbreak",
+    term: "Jailbreak",
+    topic: "security",
+    definition: "Input written to make a model ignore its safety rules. OWASP treats it as a form of prompt injection; prompt injection more broadly hijacks an application's instructions."
+  },
+  {
+    slug: "data-exfiltration",
+    term: "Data exfiltration",
+    topic: "security",
+    definition: "Data leaving a system without permission. Through an agent it can leave in a tool call, a link, an image URL or a webhook the model was steered to use.",
+    docs: "/product/data-labels-and-destinations"
+  },
+  {
+    slug: "ssrf",
+    term: "SSRF",
+    topic: "security",
+    definition: "Server-side request forgery: making a server fetch a URL the attacker chose, such as an internal service or a cloud metadata address, from inside the network.",
+    docs: "/security/outbound-url-checks"
+  },
   {
     slug: "unbounded-consumption",
     term: "Unbounded consumption",
@@ -132,6 +229,12 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     docs: "/product/mcp-tool-policy#shadow-mode"
   },
   // Testing
+  {
+    slug: "pass-at-k",
+    term: "pass@k and pass^k",
+    topic: "testing",
+    definition: "Two ways to score k tries of the same test: pass@k is the chance that at least one try succeeds, pass^k the chance that all k succeed."
+  },
   {
     slug: "regression-eval",
     term: "Regression eval",
