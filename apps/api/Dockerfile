@@ -49,6 +49,7 @@ COPY packages/agent-runtime/package.json packages/agent-runtime/
 COPY packages/workflow-engine/package.json packages/workflow-engine/
 COPY packages/guard-sdk/package.json packages/guard-sdk/
 COPY packages/community-sdk/package.json packages/community-sdk/
+COPY packages/otel/package.json packages/otel/
 
 FROM toolchain AS deps
 RUN pnpm install --frozen-lockfile

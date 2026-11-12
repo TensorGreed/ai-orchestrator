@@ -205,7 +205,11 @@ import { registerBreakGlassRoutes } from "./break-glass-routes.js";
 import { createSharedRateLimitStore, SHARED_RATE_LIMIT_BUCKET, type SharedRateLimitBucket } from "./services/shared-rate-limit-store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
-import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
+import { TracingService } from "./services/tracing-service";
+import type { SpanProcessor } from "@ai-orchestrator/otel";
+import { resolveTelemetrySettings } from "./telemetry/settings.js";
+import { loadTelemetry, type Telemetry } from "./telemetry/load.js";
+import { installHandlerContext, installHttpServerSpans, traceLogMixin } from "./telemetry/http-tracing.js";
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
@@ -275,7 +279,7 @@ import { ReplayRunError, ReplayService } from "./services/replay-service.js";
 import { buildRunFacts } from "./services/run-facts.js";
 import { createReplaySandbox, type ReplaySandbox } from "./services/replay-sandbox.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
-import { environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
+import { SecretScrubber, environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
@@ -349,6 +353,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
+import { McpClientService } from "./services/mcp-client-service.js";
 import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
 import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
@@ -1440,6 +1445,10 @@ export interface CreateAppOptions {
   lifecycle?: AppLifecycle;
   /** 12.6b — the /v1 AI gateway's model allowlist check (every model is allowed when unset). */
   aiGatewayCheckModel?: AiGatewayModelCheck;
+  /** Extra OpenTelemetry span processors while tracing is on (tests collect spans in memory). */
+  telemetrySpanProcessors?: readonly SpanProcessor[];
+  /** Register the process-wide OpenTelemetry globals while tracing is on (default true; tests turn it off). */
+  telemetryRegisterGlobals?: boolean;
 }
 
 /** What provisionSsoUser needs to link or create the local user of an SSO login. */
@@ -1523,9 +1532,28 @@ export async function createApp(
   //   via request.log carries the ID under `reqId` and `grep reqId=<id>` works.
   // The X-Request-ID response header is set in the onSend hook below so
   // clients (and curl --include) see the same ID their request carried.
+  //
+  // OpenTelemetry is loaded first, and only when tracing is configured (telemetry/load.ts): the log mixin, the
+  // handler context and the HTTP span hooks below exist only then. With tracing off nothing from the SDK is imported.
+  const telemetrySettings = resolveTelemetrySettings(config);
+  const telemetry: Telemetry = await loadTelemetry(telemetrySettings, {
+    scrub: (() => {
+      if (!telemetrySettings.enabled) return undefined;
+      const scrubber = new SecretScrubber([
+        ...environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
+        ...Object.values(telemetrySettings.headers)
+      ]);
+      return (text: string) => scrubber.text(text);
+    })(),
+    ...(options.telemetrySpanProcessors ? { spanProcessors: options.telemetrySpanProcessors } : {}),
+    ...(options.telemetryRegisterGlobals === false ? { registerGlobals: false } : {})
+  });
+  const telemetryRuntime = telemetry.runtime;
   const app = Fastify({
     logger: {
       level: config.LOG_LEVEL,
+      // Log lines written inside a span carry its trace_id/span_id (only while tracing is on).
+      ...(telemetryRuntime ? { mixin: traceLogMixin(telemetryRuntime) } : {}),
       // Phase 13.2 — request logs never carry an auth callback's one-time `code` or `state` (see url-redaction.ts).
       serializers: {
         req: (req: FastifyRequest) => ({
@@ -1545,6 +1573,15 @@ export async function createApp(
     requestIdHeader: "x-request-id",
     genReqId: () => nanoid()
   });
+  for (const warning of telemetrySettings.warnings) app.log.warn(warning);
+  if (telemetryRuntime) {
+    // Registered first, so it runs last on close: spans ended by other close hooks are still flushed (5 s cap).
+    app.addHook("onClose", async () => {
+      await telemetryRuntime.shutdown();
+    });
+    // Before any route is added: every handler then runs in its request's server span (when one was started).
+    if (telemetrySettings.httpServerSpans) installHandlerContext(app, telemetryRuntime);
+  }
   // 12.6 — model allowlists. Every model call goes through this seam: each run, gateway sampling call, provider test,
   // eval judge call and knowledge-base request gets a registry (and an embedding check) for its project.
   // `providerRegistry` itself applies the deployment's list to anything called through it directly.
@@ -4794,49 +4831,23 @@ export async function createApp(
     sloSuccessTarget: config.METRICS_SLO_SUCCESS_TARGET,
     sloP95LatencyMs: config.METRICS_SLO_P95_LATENCY_MS
   });
-  // Phase 8.1 — OpenTelemetry-grade observability.
-  // Endpoint resolution, in priority order:
-  //   1. OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (per-signal override, OTel spec)
-  //   2. OTEL_EXPORTER_OTLP_ENDPOINT + "/v1/traces" (combined endpoint)
-  //   3. legacy TRACING_ENDPOINT (kept for back-compat with existing deploys)
-  // Tracing is enabled if any of those is set OR TRACING_ENABLED=true.
-  const otlpHeaders = parseKeyValueList(config.OTEL_EXPORTER_OTLP_HEADERS);
-  const otelTracesEndpoint =
-    config.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||
-    (config.OTEL_EXPORTER_OTLP_ENDPOINT
-      ? config.OTEL_EXPORTER_OTLP_ENDPOINT.replace(/\/+$/, "") + "/v1/traces"
-      : undefined) ||
-    config.TRACING_ENDPOINT;
-  const otelMetricsEndpoint =
-    config.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT ||
-    (config.OTEL_EXPORTER_OTLP_ENDPOINT
-      ? config.OTEL_EXPORTER_OTLP_ENDPOINT.replace(/\/+$/, "") + "/v1/metrics"
-      : undefined);
-  const otelServiceName = config.OTEL_SERVICE_NAME || config.TRACING_SERVICE_NAME;
-  const baseResourceAttributes: Record<string, string> = {
-    "service.name": otelServiceName,
-    ...(config.OTEL_SERVICE_VERSION ? { "service.version": config.OTEL_SERVICE_VERSION } : {}),
-    ...(config.OTEL_DEPLOYMENT_ENVIRONMENT
-      ? { "deployment.environment": config.OTEL_DEPLOYMENT_ENVIRONMENT }
-      : {}),
-    ...parseKeyValueList(config.OTEL_RESOURCE_ATTRIBUTES)
-  };
+  // OpenTelemetry (see telemetry/settings.ts for endpoint resolution: the per-signal endpoint, else the combined one
+  // plus /v1/<signal>, else the legacy TRACING_ENDPOINT). The service is a thin view over the runtime loaded above,
+  // and is off (and imports nothing) while tracing is.
   const tracingService = new TracingService({
-    enabled: config.TRACING_ENABLED || Boolean(otelTracesEndpoint),
-    endpoint: otelTracesEndpoint,
-    serviceName: otelServiceName,
-    resourceAttributes: baseResourceAttributes,
-    otlpHeaders
+    runtime: telemetryRuntime,
+    tracesEndpoint: telemetrySettings.tracesEndpoint,
+    resourceAttributes: telemetrySettings.resourceAttributes
   });
 
   let otlpMetricsExporter: OtlpMetricsExporter | null = null;
-  if (config.OTEL_METRICS_ENABLED && otelMetricsEndpoint) {
+  if (telemetrySettings.metricsEndpoint) {
     otlpMetricsExporter = new OtlpMetricsExporter(metricsService, {
-      endpoint: otelMetricsEndpoint,
-      resourceAttributes: baseResourceAttributes,
-      headers: otlpHeaders,
+      endpoint: telemetrySettings.metricsEndpoint,
+      resourceAttributes: telemetrySettings.resourceAttributes,
+      headers: telemetrySettings.headers,
       intervalMs: config.OTEL_METRICS_PUSH_INTERVAL_MS,
-      serviceName: otelServiceName
+      serviceName: telemetrySettings.serviceName
     });
     otlpMetricsExporter.setLogger({
       warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
@@ -6587,48 +6598,26 @@ export async function createApp(
     metricsService.recordHttpRequest(request.method, reply.statusCode, elapsed);
   });
 
-  // Phase 8.1 — HTTP server spans + W3C trace-context propagation.
-  // We open an OTel SERVER span at onRequest time and end it onResponse so
-  // every request shows up in the trace UI alongside per-execution/per-node
-  // spans. If the client passes a `traceparent` header we adopt its trace ID
-  // to keep the trace continuous across our boundary; otherwise we mint a
-  // fresh one. Skipped for /health and /metrics so they don't drown out
-  // useful spans.
-  if (config.OTEL_HTTP_SERVER_SPANS) {
-    const spanByReqId = new Map<string, ReturnType<typeof tracingService.startSpan>>();
-    const skipPaths = new Set(["/health", "/ready", "/metrics"]);
-    app.addHook("onRequest", async (request) => {
-      if (skipPaths.has(request.url.split("?")[0] ?? "")) return;
-      const headers = request.headers;
-      const incoming = parseTraceparent(
-        typeof headers["traceparent"] === "string" ? (headers["traceparent"] as string) : undefined
-      );
-      const span = tracingService.startSpan({
-        operationName: `${request.method} ${request.routeOptions?.url ?? redactSensitiveUrl(request.url)}`,
-        kind: "server",
-        traceId: incoming?.traceId,
-        parentSpanId: incoming?.parentSpanId,
-        attributes: {
-          "http.method": request.method,
-          "http.target": redactSensitiveUrl(request.url),
-          "http.route": request.routeOptions?.url ?? redactSensitiveUrl(request.url),
-          "http.scheme": request.protocol,
-          "net.peer.ip": request.ip ?? "",
-          "request.id": request.id ?? ""
+  // HTTP server spans (stable HTTP conventions), only while tracing is on: no hooks at all while it is off. An inbound
+  // `traceparent` continues its trace only for an authenticated caller or a trusted proxy (L2M_OTEL_TRUST_INBOUND);
+  // anyone else's request starts a new trace that links to it, so an outside caller can neither force sampling nor
+  // join an internal trace. /health, /ready and /metrics get no span.
+  if (telemetryRuntime && telemetrySettings.httpServerSpans) {
+    const traceClientService = new McpClientService(store);
+    installHttpServerSpans(app, telemetryRuntime, {
+      trustInbound: telemetrySettings.trustInbound,
+      trustedProxies: telemetrySettings.trustedProxies,
+      // A check only: it records no sign-in context and no session activity (the handler resolves the caller itself).
+      isAuthenticated: async (request) => {
+        const bearer = extractBearerToken(request.headers);
+        if (bearer) {
+          if (await apiKeyService.verify(bearer)) return true;
+          if ((await traceClientService.verify(bearer)).ok) return true;
         }
-      });
-      spanByReqId.set(request.id, span);
-      // Make the span discoverable to downstream code (e.g. workflow execution)
-      // via request.requestContext-like accessor — Fastify has request.diagnosticsChannel
-      // but for simplicity we attach to request directly.
-      (request as unknown as { otelSpan?: typeof span }).otelSpan = span;
-    });
-    app.addHook("onResponse", async (request, reply) => {
-      const span = spanByReqId.get(request.id);
-      if (!span) return;
-      spanByReqId.delete(request.id);
-      tracingService.setAttribute(span, "http.status_code", reply.statusCode);
-      tracingService.endSpan(span, reply.statusCode >= 500 ? "error" : "ok");
+        const sessionId = getSessionIdFromRequest(request);
+        if (!sessionId) return false;
+        return (await authService.resolveSession(sessionId, undefined, { background: true })).ok;
+      }
     });
   }
 
@@ -6673,12 +6662,19 @@ export async function createApp(
       metrics: metricsService.getSnapshot(),
       tracing: {
         enabled: tracingService.isEnabled(),
-        tracesEndpoint: otelTracesEndpoint ?? null,
-        resourceAttributes: tracingService.getResourceAttributes()
+        tracesEndpoint: tracingService.getTracesEndpoint(),
+        resourceAttributes: tracingService.getResourceAttributes(),
+        // Settings only; header values are never shown.
+        protocol: tracingService.isEnabled() && telemetrySettings.tracesEndpoint ? telemetrySettings.protocol : null,
+        exportHeaderNames: Object.keys(telemetrySettings.headers),
+        sampler: telemetrySettings.sampler.name,
+        httpServerSpans: tracingService.isEnabled() && telemetrySettings.httpServerSpans,
+        trustInbound: telemetrySettings.trustInbound,
+        spanDetail: telemetrySettings.spanDetail
       },
       otlpMetrics: {
         enabled: otlpMetricsExporter !== null,
-        endpoint: otelMetricsEndpoint ?? null,
+        endpoint: telemetrySettings.metricsEndpoint,
         intervalMs: otlpMetricsExporter ? config.OTEL_METRICS_PUSH_INTERVAL_MS : null
       }
     };
