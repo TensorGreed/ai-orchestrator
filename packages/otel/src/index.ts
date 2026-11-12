@@ -15,6 +15,7 @@ export {
   type MetricsRecorder,
   type MetricsSnapshotSource
 } from "./metrics.js";
+export { registerGenAiMetrics, GEN_AI_DURATION_BUCKETS, GEN_AI_TOKEN_BUCKETS, type GenAiMetricsOptions, type GenAiMetricsRecorder } from "./genai-metrics.js";
 export { startHttpServerSpan, type HttpServerSpan, type HttpServerSpanInput, type InboundTraceUse } from "./http-server.js";
 export { RecentSpansProcessor, toRecentSpan, type RecentSpan } from "./recent-spans.js";
 export {

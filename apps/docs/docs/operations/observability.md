@@ -21,8 +21,9 @@ Traces and OTLP metrics go to any OTLP-compatible backend, or to an [OpenTelemet
 
 - **One SERVER span per HTTP request**, named `{method} {route}` (for example `POST /api/workflows/:id/execute`), with the stable HTTP attribute names listed [below](#http-server-spans). `/health`, `/ready` and `/metrics` get no span.
 - **Workflow runs, nodes, agents and tool calls**: one `invoke_workflow` span per run, one span per node that ran, `invoke_agent` per Agent or Supervisor loop and `execute_tool` per tool call the model made. See [run spans](#run-spans).
-- Model calls, MCP calls and queue workers are **not recorded yet**.
-- L2M does **not** send `traceparent` on its outbound calls yet, so a trace stops at L2M.
+- **Model calls**: one `chat {model}` or `embeddings {model}` CLIENT span per call to a model provider, from a run, the `/v1` AI gateway or anywhere else, with token usage. See [model spans](#model-spans).
+- MCP calls and queue workers are **not recorded yet**.
+- L2M does **not** send `traceparent` to model providers unless `L2M_OTEL_PROPAGATE_TO_PROVIDERS=true`.
 
 ## Quickstart: send traces to a collector
 
@@ -77,6 +78,8 @@ The metric names are the ones L2M has always pushed, as cumulative sums (counter
 | `ao.workflow.execution.duration` (unit `s`, attribute `l2m.execution.status`) | Histogram, new |
 | `ao.http.request.duration` (unit `s`, attributes `http.request.method`, `http.response.status_class`) | Histogram, new |
 | `l2m_otel_spans_dropped_total` (attribute `reason=export_failed`) | Sum, new; counted while spans are exported, and visible only with a metrics endpoint |
+| `gen_ai.client.operation.duration` (s) and `gen_ai.client.token.usage` ({token}) | Histograms, new: the [GenAI metrics](#genai-and-cost-metrics) |
+| `l2m.gen_ai.cost` (USD) | Sum, new: priced model spend |
 
 Differences from the previous push: the default encoding is `http/protobuf` (set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` for the old one), the instrumentation scope stays `ai-orchestrator`, and values are exported from the same counters the Prometheus `/metrics` page reads, which are unchanged. The percentile gauges are kept for one release and then removed; the histograms replace them. With `METRICS_ENABLED=false` the counters stay at zero and the histograms get no observations. Spans lost when the queue is full, or still being exported when a shutdown times out, are not counted: only those lost to a failed export.
 
@@ -185,6 +188,41 @@ POST /api/workflows/:id/execute         SERVER
 
 Spans carry ids and timings, not content: prompts, tool arguments and results stay in L2M's execution history. Use `l2m.execution.id` to go from a trace to the run in L2M.
 
+## Model spans
+
+While tracing is on, every call L2M makes to a model provider gets a CLIENT span: `chat {model}` for a chat call and `embeddings {model}` for an embeddings call. The spans come from one place in front of the provider adapters, so every caller is covered once: LLM Call nodes, agent loops, the `/v1` AI gateway, content rule checks that call a model, evals and gateway sampling. The embedders of RAG and knowledge-base nodes call their providers directly and get no span yet. In a run, a call sits under its node's span, or under `invoke_agent` (or its turn, at verbose detail) for an agent loop.
+
+```
+POST /v1/chat/completions               SERVER  l2m.gateway.* attributes
+└─ chat {model}                         CLIENT  one per model call
+```
+
+| Span | Attributes |
+|---|---|
+| `chat` | `gen_ai.operation.name`, `gen_ai.provider.name`, `l2m.provider.id`, `gen_ai.request.model`, `gen_ai.request.stream`, `gen_ai.request.temperature`, `gen_ai.request.max_tokens`, `gen_ai.response.model`, `gen_ai.response.id`, `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `server.address`, `server.port`, `l2m.retry.count`, `l2m.stream.closed_early` |
+| `embeddings` | the same request and usage attributes, plus `gen_ai.embeddings.dimension.count` |
+
+- **Providers.** `gen_ai.provider.name` uses the well-known values: `openai` (also for OpenAI-compatible servers, whose L2M id stays in `l2m.provider.id`), `azure.ai.openai`, `anthropic`, `gcp.gemini` and `ollama`. `server.address` is the provider's host, never its URL.
+- **Streams.** A streamed answer's span stays open until the stream ends, and takes the usage and finish reason from its last chunks. When the reader stops early (the caller hung up, content rules cut the answer), the span ends then with `l2m.stream.closed_early`.
+- **Failures and refusals.** A failed call sets the span status to ERROR with its type as `error.type` (the L2M error category, such as `timeout` or `model_not_allowed`, else the error's class), never the provider's error text. A call the model allowlist refuses gets a span with `error.type=model_not_allowed`, though nothing was sent; it is left out of the metrics.
+- **No content.** Prompts, answers, tool definitions and tool arguments are never recorded on these spans.
+- **`/v1` requests.** The gateway puts its ids and outcome on the request's HTTP span: `l2m.gateway.request.id` (the id of the request's usage row), `l2m.gateway.route_set.id`, `l2m.gateway.route.alias`, `l2m.gateway.client.id`, `l2m.gateway.status` (the usage row's status, or the refusal: `rate_limited`, `budget_blocked`, `model_not_allowed`) and `l2m.content_rules.outcome` (`blocked` or `rewritten`). A refused request has no `chat` span: no model was called.
+- **Propagation.** L2M does not send `traceparent` to model providers by default: their endpoints are outside your trace domain. `L2M_OTEL_PROPAGATE_TO_PROVIDERS=true` adds it (and `tracestate`) to each provider request, for a provider or proxy you run yourself.
+
+## GenAI and cost metrics
+
+With metrics exported (`OTEL_METRICS_ENABLED=true` and a metrics endpoint; tracing need not be on), every model call also feeds the GenAI client metrics, and priced spend feeds a counter:
+
+| Name | Kind | Attributes |
+|---|---|---|
+| `gen_ai.client.operation.duration` | Histogram, s | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `server.address`, `server.port`, `error.type` on failures |
+| `gen_ai.client.token.usage` | Histogram, {token} | the same, plus `gen_ai.token.type` (`input` or `output`); only counts the provider reported |
+| `l2m.gen_ai.cost` | Sum, USD | `gen_ai.provider.name`, `gen_ai.request.model`, `l2m.project.id`, `l2m.usage.source` (`run` or `ai_gateway`) |
+
+- **Cost is not priced twice.** `l2m.gen_ai.cost` is added where L2M already prices usage: when a run's usage event is written and when a `/v1` request's usage row is written, with the same pricing table. Those rows stay the record for spend, budgets and FinOps; the metric is an operational mirror that a collector may sample or drop. Unpriced models add nothing.
+- **No per-run ids on metrics.** Execution, workflow, node, session and client ids are on spans only.
+- **Newer names.** The GenAI conventions are still experimental, and their newer, unreleased text renames these metrics. `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` switches to those names: chat calls report `gen_ai.client.inference.duration`, the counters `gen_ai.client.inference.usage.input_tokens`, `.output_tokens` and `.cache_read.input_tokens` (with `gen_ai.token.modality=unknown`, since providers report totals) and the histograms `gen_ai.client.inference.operation.input_tokens` and `.output_tokens`; embeddings calls report `gen_ai.client.embeddings.duration` and `gen_ai.client.embeddings.operation.input_tokens`. These names may change again before that text is released. The cost counter is the same in both modes.
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -207,7 +245,7 @@ Spans carry ids and timings, not content: prompts, tool arguments and results st
 | `OTEL_BSP_EXPORT_TIMEOUT` | `30000` | Milliseconds one batch export may take. |
 | `OTEL_BSP_MAX_QUEUE_SIZE` | `2048` | Spans waiting for export; more are dropped. |
 | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | `512` | Spans per export (at most the queue size). |
-| `OTEL_SEMCONV_STABILITY_OPT_IN` | empty | Comma list, read for the GenAI conventions as they are added. |
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | empty | Comma list. `gen_ai_latest_experimental` switches the GenAI metrics to the conventions' newer, unreleased names. |
 | `OTEL_HTTP_SERVER_SPANS` | `true` | One SERVER span per request while tracing is on. |
 | `OTEL_METRICS_ENABLED` | `false` | Push metrics over OTLP. |
 | `OTEL_METRICS_PUSH_INTERVAL_MS` | `60000` | Metrics push interval. |
@@ -215,7 +253,7 @@ Spans carry ids and timings, not content: prompts, tool arguments and results st
 | `L2M_OTEL_TRUSTED_PROXIES` | empty | Connections whose trace context is always continued. |
 | `L2M_OTEL_SPAN_DETAIL` | `standard` | `verbose` adds one span per agent turn (`l2m.agent.iteration`). |
 | `L2M_OTEL_NAMES` | `names` | `ids` keeps workflow, node and agent names out of spans. |
-| `L2M_OTEL_PROPAGATE_TO_PROVIDERS` | `false` | Reserved for outbound propagation to model providers. |
+| `L2M_OTEL_PROPAGATE_TO_PROVIDERS` | `false` | Send `traceparent` (and `tracestate`) to model providers. |
 | `L2M_OTEL_PROPAGATE_TO_MCP` | `true` | Reserved for outbound propagation to MCP servers. |
 
 The standard `OTEL_*` values are read only while they are used, so values meant for other tools sharing the environment never stop L2M. While tracing is on, an unsupported value (a sampler, propagator, protocol or number L2M cannot use) falls back to its default with a warning at start-up. Only these stop the API at start-up, with a message naming the setting: an endpoint L2M is about to use that is not an absolute `http://` or `https://` URL, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` with a traces endpoint set, and a bad `L2M_OTEL_*` value (such as a trusted-proxy entry that is not an IP address or CIDR range).

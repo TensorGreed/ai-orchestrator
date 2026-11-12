@@ -111,6 +111,8 @@ export interface ModelAllowlistServiceOptions {
   logger?: (message: string, metadata?: Record<string, unknown>) => void;
   /** How often the snapshot is re-read in the background (default 2000 ms). */
   refreshMs?: number;
+  /** Wraps each allowlist view (model-call spans and metrics); absent: the views are returned as they are. */
+  instrumentRegistry?: (registry: ProviderRegistry) => ProviderRegistry;
 }
 
 interface Snapshot {
@@ -334,7 +336,8 @@ export class ModelAllowlistService {
 
   /** `base` with every call checked for `scope`. */
   registry(base: ProviderRegistry, scope: ModelAllowlistScope): ProviderRegistry {
-    return createGatedProviderRegistry(base, this.gate(scope));
+    const gated = createGatedProviderRegistry(base, this.gate(scope));
+    return this.options.instrumentRegistry ? this.options.instrumentRegistry(gated) : gated;
   }
 
   /**
