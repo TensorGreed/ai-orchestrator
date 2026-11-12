@@ -571,7 +571,7 @@ async function postRpc(
         const scopeChallenge = readInsufficientScopeChallenge(response.status, wwwAuthenticate);
         if (scopeChallenge) {
           throw new McpInsufficientScopeError(
-            `MCP server refused ${method}: the OAuth token lacks the scope it needs${scopeChallenge.scope ? ` (${safeText(scopeChallenge.scope, 300)})` : ""}. Reconnect the server to grant it; the new authorization asks for this scope together with the scopes already granted.`,
+            `MCP server refused ${method}: the access token lacks the scope it needs${scopeChallenge.scope ? ` (${safeText(scopeChallenge.scope, 300)})` : ""}. For an OAuth server, reconnect it to grant the scope (the new authorization asks for it together with the scopes already granted); otherwise use a token with that scope.`,
             scopeChallenge.scope,
             scopeChallenge.resourceMetadata
           );
