@@ -164,7 +164,7 @@ Clients:
 - `POST /api/mcp/clients/:id/rotate` (admin; `{ graceHours?: 0-168 }`, default 24 → `{ client, token }`, the new token once; the old token works until `client.previousExpiresAt`; `409 inactive`, `rotation_pending` (an old token is still in its window: rotate with `graceHours: 0`), `rotation_conflict`; step-up; audited as `mcp_client.rotated`)
 - `GET /api/mcp/clients/:id/budgets` (builder; every budget that applies to the client, its own, its toolsets' projects' and the global ones, each labelled by scope, with what it counted this period and whether it refuses the client's calls now)
 - `GET /api/mcp/clients/:id/usage?window=24h|7d|30d` (builder)
-- `GET /api/mcp/clients/:id/sessions` (builder): the client's open sessions on the answering instance, with the labels each collected on a toolset that tracks outside content per session
+- `GET /api/mcp/clients/:id/sessions` (builder): the client's open sessions on the answering instance, with the labels each collected on a toolset that tracks outside content per session and its `protocolVersion`; and `callers`, the client's stateless MCP `2026-07-28` callers (toolset, `userId`, `protocolVersion` and `clientInfo` when the answering instance served it recently, `lastSeenAt`, `expiresAt`, `tracked`, `labels`, `raisedAt`, `guard`), from every instance. `callersUnavailable: true` when the stored labels could not be read and only the answering instance's callers are listed
 
 Legacy workflow tool routes (configured on the `mcp_server_trigger` node):
 

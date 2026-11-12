@@ -21,11 +21,12 @@
  * counts against the same cap as sessions, which evicts idle legacy sessions
  * first and an idle principal state that holds outside content last.
  *
- * Limits: a caller's legacy sessions and its principal state keep separate
- * marks (a new session always starts clean, as before), and a principal
- * state that is evicted at the cap, idles out or ends starts clean when the
- * caller comes back. Sharing the mark across eras and instances is a later
- * step.
+ * The principal state's label mark is a local view only: on a toolset that
+ * tracks outside content, the mark that decides is stored in the database
+ * (v71, `mcp_gateway_label_marks`), keyed the same way and shared by every
+ * instance, so it survives eviction, the idle sweep of this instance and a
+ * call answered by another instance (mcp-gateway-routes.ts). A caller's legacy
+ * sessions keep their own marks (a new session always starts clean, as before).
  */
 
 import crypto from "node:crypto";
@@ -65,6 +66,13 @@ export interface GatewaySession {
   era: "legacy" | "modern";
   /** Modern only: the caller the state belongs to (client credential, toolset and the user its token acts for). */
   principalScope?: string;
+  /** Modern only: the user its token acts for, or '' (the third part of its stored label mark's key). */
+  markScopeKey?: string;
+  /**
+   * Modern only: when this instance last noted in the stored mark that a result went back while the toolset did not
+   * track (at most once per half idle window).
+   */
+  unobservedNotedAt?: number;
   clientId: string;
   toolsetId: string;
   /** A legacy session's negotiated version; a principal state's version of its latest request. */
@@ -248,6 +256,7 @@ export class GatewaySessionManager {
   private newState(input: {
     era: GatewaySession["era"];
     principalScope?: string;
+    markScopeKey?: string;
     clientId: string;
     toolsetId: string;
     protocolVersion: GatewaySession["protocolVersion"];
@@ -258,6 +267,7 @@ export class GatewaySessionManager {
       id: crypto.randomUUID(),
       era: input.era,
       ...(input.principalScope !== undefined ? { principalScope: input.principalScope } : {}),
+      ...(input.markScopeKey !== undefined ? { markScopeKey: input.markScopeKey } : {}),
       clientId: input.clientId,
       toolsetId: input.toolsetId,
       protocolVersion: input.protocolVersion,
@@ -292,6 +302,8 @@ export class GatewaySessionManager {
    */
   async principal(input: {
     principalScope: string;
+    /** The user the caller's token acts for, or ''. */
+    markScopeKey?: string;
     clientId: string;
     toolsetId: string;
     protocolVersion: McpModernGatewayVersion;
