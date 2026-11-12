@@ -22,7 +22,8 @@ Traces and OTLP metrics go to any OTLP-compatible backend, or to an [OpenTelemet
 - **One SERVER span per HTTP request**, named `{method} {route}` (for example `POST /api/workflows/:id/execute`), with the stable HTTP attribute names listed [below](#http-server-spans). `/health`, `/ready` and `/metrics` get no span.
 - **Workflow runs, nodes, agents and tool calls**: one `invoke_workflow` span per run, one span per node that ran, `invoke_agent` per Agent or Supervisor loop and `execute_tool` per tool call the model made. See [run spans](#run-spans).
 - **Model calls**: one `chat {model}` or `embeddings {model}` CLIENT span per call to a model provider, from a run, the `/v1` AI gateway or anywhere else, with token usage. See [model spans](#model-spans).
-- MCP calls and queue workers are **not recorded yet**.
+- **Queue jobs and approval resumes**: a worker's job continues the trace of whoever enqueued it, on any instance, and a resume after an approval links back to the node that paused. See [queues, clusters and approvals](#queues-clusters-and-approvals).
+- MCP calls are **not recorded yet**.
 - L2M does **not** send `traceparent` to model providers unless `L2M_OTEL_PROPAGATE_TO_PROVIDERS=true`.
 
 ## Quickstart: send traces to a collector
@@ -174,7 +175,7 @@ POST /api/workflows/:id/execute         SERVER
 
 - **Nodes.** Only nodes the run reached get a span; a node answered from pinned data gets one too, with no children. Skipped nodes (a branch not taken, a disconnected node) and nodes on an agent's attachment ports (chat model, memory, tools, workers) get none: they are not steps of the workflow, and their work shows up inside the agent's spans. A Loop node's body nodes are children of the Loop node's span, one per pass, with `l2m.node.loop_index`.
 - **Outcomes, not errors.** `l2m.run.status` and `l2m.node.status` hold the result (`success`, `error`, `canceled`, `waiting_approval`, ...). Only a failed run or node sets the span status to ERROR, with the L2M error category as `error.type` (the error text stays in the run's history); a canceled run and an approval pause are not errors. A node that failed but let the run continue is ERROR while its run is not. When a run is stopped or times out, the node, Loop pass or tool call that was in flight can show as ERROR while the run is `canceled`.
-- **Resumed runs.** A run resumed after an approval is traced as a new run; the decided Human Approval node itself gets no span in it.
+- **Resumed runs.** A run resumed after an approval is traced as a new run, linked to the node that paused ([below](#queues-clusters-and-approvals)); the decided Human Approval node itself gets no span in it.
 - **Tool calls.** `l2m.tool.outcome` is `ok`, `error`, `blocked` or `paused`. A call that content rules or a tool policy blocked is an outcome, not an error (a node that fails because content rules blocked it is an error of that node); `l2m.content_rules.outcome` (`blocked`, `rewritten`, `paused`) says what content rules did. A failed call records its error type only, never the tool's error text. `gen_ai.tool.type` is `extension` for an MCP server's tool and `function` for one that runs in L2M (a worker, a workflow tool, a built-in or internal tool, with `l2m.tool.internal` for the internal ones).
 - **Names.** Workflow, node and agent names appear in span names and attributes. `L2M_OTEL_NAMES=ids` uses ids instead.
 
@@ -222,6 +223,24 @@ With metrics exported (`OTEL_METRICS_ENABLED=true` and a metrics endpoint; traci
 - **Cost is not priced twice.** `l2m.gen_ai.cost` is added where L2M already prices usage: when a run's usage event is written and when a `/v1` request's usage row is written, with the same pricing table. Those rows stay the record for spend, budgets and FinOps; the metric is an operational mirror that a collector may sample or drop. Unpriced models add nothing.
 - **No per-run ids on metrics.** Execution, workflow, node, session and client ids are on spans only.
 - **Newer names.** The GenAI conventions are still experimental, and their newer, unreleased text renames these metrics. `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` switches to those names: chat calls report `gen_ai.client.inference.duration`, the counters `gen_ai.client.inference.usage.input_tokens`, `.output_tokens` and `.cache_read.input_tokens` (with `gen_ai.token.modality=unknown`, since providers report totals) and the histograms `gen_ai.client.inference.operation.input_tokens` and `.output_tokens`; embeddings calls report `gen_ai.client.embeddings.duration` and `gen_ai.client.embeddings.operation.input_tokens`. These names may change again before that text is released. The cost counter is the same in both modes.
+
+## Queues, clusters and approvals
+
+The trace follows work that leaves the request, with no database change: the context is a few characters in JSON that is stored anyway.
+
+```
+POST /api/workflows/:id/enqueue         SERVER      (any instance)
+└─ process l2m.queue                    CONSUMER    (the worker, on any instance)
+   └─ invoke_workflow {workflow name}   the run, as above
+```
+
+- **Queued runs.** When a job is enqueued while a span is active (the request, the run that started an async child workflow, a dispatched run in `EXECUTION_DISPATCH=queue`), its payload carries that span's `traceparent` (and `tracestate`) as `traceContext`. The worker opens a `process l2m.queue` CONSUMER span under it and runs the job inside, so the run, its nodes and its tools are in the same trace, whichever instance claimed the job. With `L2M_OTEL_SPAN_DETAIL=verbose` a `send l2m.queue` PRODUCER span sits between them. The consumer span carries `messaging.system=l2m`, `messaging.destination.name` (the worker pool), `messaging.message.id` (the queue item id), `l2m.execution.id`, `l2m.queue.attempt` and `l2m.queue.wait_ms` (the time between the job being due and being claimed).
+- **Retries and reaped jobs.** Each attempt is its own consumer span under the same parent, so a job that a lost worker's lease expired shows both attempts.  A job that throws (a missing workflow, a refused user) ends its span as an error with the error type.
+- **Cluster hand-offs.** Run events relayed between instances (the result a dispatching instance waits for) carry no trace context: they are not work, and the spans on each side are already joined through the job.
+- **Approvals.** When a run pauses for a decision, the state L2M stores holds the `traceparent` of the node that paused. The resumed run, hours or days later and on any instance, is a **new** `invoke_workflow` span whose parent is whatever started the resume (the approver's request, or the queue job it became) and which has a **span link** to the paused node. It is a link, not a parent, because the two runs are separate pieces of work. A resume with nothing stored (a pause from before tracing was on) has no link. MCP elicitations hold the run in place, so they stay inside the run's own spans.
+- **Schedules and triggers** start a new trace for every fire, even though their timers were created inside a request.
+- **Jobs from before.** A job without a context (tracing was off where it was enqueued, or an older instance enqueued it) starts a new trace. An older worker ignores the field.
+- **Off means off.** While tracing is off nothing is added to a payload or to a paused run's state.
 
 ## Settings
 

@@ -246,6 +246,12 @@ export interface RunInstrumentation {
   inject(carrier: TraceCarrier, target: TraceInjectTarget): boolean;
   /** Runs `fn` with the remote span in `carrier` as the parent; a missing or malformed carrier leaves the context as it is. */
   withParent<T>(carrier: TraceCarrier | null | undefined, fn: () => T): T;
+  /**
+   * Runs `fn` with no active span, so what it starts is a new trace root. Timers and queue polls inherit the context of
+   * whatever created them (a request that saved a schedule); a schedule fire, a trigger event or a queue job starts here
+   * instead of inside that request's trace.
+   */
+  withNewTrace<T>(fn: () => T): T;
   /** The active span's ids, or null when there is none (or tracing is off). */
   activeTraceIds(): TraceIds | null;
 }
@@ -286,6 +292,7 @@ export const NOOP_RUN_INSTRUMENTATION: RunInstrumentation = Object.freeze({
   annotate: () => undefined,
   inject: () => false,
   withParent: <T>(_carrier: TraceCarrier | null | undefined, fn: () => T): T => fn(),
+  withNewTrace: <T>(fn: () => T): T => fn(),
   activeTraceIds: () => null
 });
 
@@ -311,4 +318,21 @@ export function parseTraceparentHeader(value: string | null | undefined): { trac
   if (version === "00" && text.length !== 55) return null;
   if (/^0+$/.test(traceId) || /^0+$/.test(spanId)) return null;
   return { traceId, spanId, sampled: (parseInt(flags, 16) & 0x01) === 1, traceFlags: flags };
+}
+
+/** The longest `tracestate` kept from stored or queued data (the W3C limit is 512 characters). */
+const MAX_TRACESTATE_LENGTH = 512;
+
+/**
+ * Reads a trace carrier out of stored JSON (a queue payload, a paused run's state): only a valid `traceparent` and a
+ * bounded `tracestate` are kept, so a hand-edited row can never put anything else on a span link or a parent.
+ */
+export function readTraceCarrier(value: unknown): TraceCarrier | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { traceparent, tracestate } = value as { traceparent?: unknown; tracestate?: unknown };
+  if (typeof traceparent !== "string" || !parseTraceparentHeader(traceparent)) return undefined;
+  return {
+    traceparent,
+    ...(typeof tracestate === "string" && tracestate.length > 0 && tracestate.length <= MAX_TRACESTATE_LENGTH ? { tracestate } : {})
+  };
 }

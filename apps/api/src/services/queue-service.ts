@@ -5,6 +5,7 @@ import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, type LostJobOutcome } from "../
 import type { ApprovalResumeJob } from "./approval-service.js";
 import type { Store } from "../db/store.js";
 import type { DispatchedRunSpec } from "./run-dispatch.js";
+import type { RunInstrumentation, TraceCarrier } from "@ai-orchestrator/shared";
 
 /**
  * Phase 13.1 — the payload `workflowId` of a dispatched job. An instance older than queue dispatch ignores `dispatch`
@@ -37,6 +38,11 @@ export interface QueuedExecutionPayload {
    * Only consumers that advertise queue-dispatch-v1 are sent such jobs.
    */
   dispatch?: DispatchedRunSpec;
+  /**
+   * The trace context (`traceparent`, `tracestate`) of whoever enqueued the job, written only while tracing is on. The
+   * worker's job span continues that trace, on this instance or any other. An older worker ignores the field.
+   */
+  traceContext?: TraceCarrier;
 }
 
 export interface QueueServiceConfig {
@@ -91,6 +97,8 @@ export interface QueueJobContext {
   /** Attempts already counted before this one. */
   attempts: number;
   pool: string;
+  /** How long the job waited between being due and being claimed (ms); null when that is not known. */
+  waitMs?: number | null;
   /**
    * Cluster mode: whether this worker can still count on its lease (renewed recently enough). When it cannot, the job
    * is stopped here (the signal aborts) and false is returned; call it before a step with side effects starts.
@@ -164,6 +172,16 @@ export class QueueProducer {
   private readonly store: Store;
   private readonly maxPending: number;
   private readonly pendingCounts = new Map<string, { count: number; readAtMs: number }>();
+  private tracing: { instrumentation: RunInstrumentation; verbose: boolean } | null = null;
+
+  /**
+   * Turns on trace propagation: every job added while a span is active carries its context in the payload JSON (no
+   * column), and, with `verbose`, is added under a `send` span. Never called while tracing is off, so payloads then
+   * hold nothing extra.
+   */
+  setTracing(tracing: { instrumentation: RunInstrumentation; verbose: boolean } | null): void {
+    this.tracing = tracing?.instrumentation.enabled ? tracing : null;
+  }
 
   constructor(store: Store, options: { maxPending?: number } = {}) {
     this.store = store;
@@ -186,19 +204,27 @@ export class QueueProducer {
    */
   async add(payload: EnqueueInput, options: { enforceBackpressure?: boolean; dedupeWindowMs?: number } = {}): Promise<{ executionId: string; added: boolean }> {
     const executionId = payload.executionId ?? randomUUID();
-    const { priority, executionId: _id, queueItemId, maxAttempts, pool: requestedPool, ...rest } = payload;
+    // A caller never supplies the trace context: it is written below, from the active span, or not at all.
+    const { priority, executionId: _id, queueItemId, maxAttempts, pool: requestedPool, traceContext: _callerTrace, ...rest } = payload;
     const pool = requestedPool ?? DEFAULT_QUEUE_POOL;
     if (!QUEUE_POOL_PATTERN.test(pool)) {
       throw new Error(`Invalid queue pool "${pool.slice(0, 64)}": letters, digits, _ or - (at most 63).`);
     }
     if (options.enforceBackpressure) await this.checkBackpressure(pool);
 
-    const added = await this.store.enqueueExecution({
+    const itemId = queueItemId ?? executionId;
+    const tracing = this.tracing;
+    const write = async (traceContext: TraceCarrier | undefined) => await this.store.enqueueExecution({
       // A resume reuses its run's execution id, so its queue item needs its own id.
-      id: queueItemId ?? executionId,
+      id: itemId,
       workflowId: rest.workflowId,
       workflowName: undefined,
-      payload: { executionId, ...rest, ...(rest.dispatch !== undefined ? { workflowId: DISPATCHED_PAYLOAD_WORKFLOW_ID } : {}) } as Record<string, unknown>,
+      payload: {
+        executionId,
+        ...rest,
+        ...(rest.dispatch !== undefined ? { workflowId: DISPATCHED_PAYLOAD_WORKFLOW_ID } : {}),
+        ...(traceContext ? { traceContext } : {})
+      } as Record<string, unknown>,
       priority: priority ?? 0,
       maxAttempts: maxAttempts ?? 3,
       ...(pool !== DEFAULT_QUEUE_POOL ? { pool } : {}),
@@ -206,10 +232,35 @@ export class QueueProducer {
         ? { replaceFinishedBefore: new Date(Date.now() - options.dedupeWindowMs).toISOString() }
         : {})
     });
+    const added = tracing ? await this.writeTraced(tracing, { pool, itemId, write }) : await write(undefined);
     const cached = this.pendingCounts.get(pool);
     if (cached && added) cached.count += 1;
 
     return { executionId, added };
+  }
+
+  /**
+   * Writes the job with the active span's context in its payload. With the verbose span detail the write runs under a
+   * `send` span, so the worker's job span becomes that span's child.
+   */
+  private async writeTraced(
+    tracing: { instrumentation: RunInstrumentation; verbose: boolean },
+    job: { pool: string; itemId: string; write: (traceContext: TraceCarrier | undefined) => Promise<boolean> }
+  ): Promise<boolean> {
+    const { instrumentation } = tracing;
+    const send = async (): Promise<boolean> => {
+      const carrier: TraceCarrier = {};
+      return await job.write(instrumentation.inject(carrier, "queue") ? carrier : undefined);
+    };
+    if (!tracing.verbose) return await send();
+    return await instrumentation.span(
+      {
+        name: "send l2m.queue",
+        kind: "producer",
+        attributes: { "messaging.system": "l2m", "messaging.destination.name": job.pool, "messaging.operation.type": "send", "messaging.message.id": job.itemId }
+      },
+      send
+    );
   }
 
   /** Throws QueueFullError when `pool` already holds QUEUE_MAX_PENDING pending jobs (never with no limit set). */
@@ -787,6 +838,7 @@ export class QueueConsumer {
     // A leased claim measured its wait in database time; an unleased one (one process) measures it here.
     const dueAtMs = item.scheduledAt ? Date.parse(item.scheduledAt) : Number.NaN;
     const waitMs = item.waitMs ?? (Number.isFinite(dueAtMs) ? Math.max(0, Date.now() - dueAtMs) : null);
+    if (waitMs !== null) item.waitMs = waitMs;
     this.observer.onClaimed?.({ id: item.id, pool: item.pool ?? DEFAULT_QUEUE_POOL, waitMs });
     job.settled = this.executeItem(item, job);
   }
@@ -811,6 +863,7 @@ export class QueueConsumer {
           signal: job.controller.signal,
           attempts: item.attempts,
           pool: item.pool ?? DEFAULT_QUEUE_POOL,
+          waitMs: item.waitMs ?? null,
           leaseFresh: () => this.leaseFresh(job),
           leaseLost: (detail) => this.stopJob(job, "lost", new QueueLeaseLostAbort(detail))
         });

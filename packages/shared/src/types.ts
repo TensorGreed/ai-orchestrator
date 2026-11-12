@@ -582,6 +582,11 @@ export interface WorkflowExecutionState {
    */
   guardRunSource?: "eval";
   /**
+   * The trace context (W3C `traceparent`, `tracestate`) of the node that paused the run, written only while tracing is
+   * on. The resumed run's span links back to it; it is a link, not a parent. Written and read only by the API.
+   */
+  traceContext?: Record<string, string>;
+  /**
    * The user the run's budgets are matched against (who started it), so the sub-workflows of the resumed part are
    * checked against that user's budgets, not the approver's. Written and read only by the API.
    */

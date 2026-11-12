@@ -267,6 +267,22 @@ describe("propagation", () => {
     expect(byName("root").parentSpanContext).toBeUndefined();
   });
 
+  it("withNewTrace drops the active span, so what runs inside starts a new root", async () => {
+    const { inst, byName } = setup();
+    await inst.span({ name: "request" }, async () => {
+      await inst.withNewTrace(() => inst.span({ name: "fresh" }, async () => undefined));
+      expect(inst.activeTraceIds()).not.toBeNull();
+    });
+    expect(byName("fresh").parentSpanContext).toBeUndefined();
+    expect(byName("fresh").spanContext().traceId).not.toBe(byName("request").spanContext().traceId);
+    // A carrier still parents it inside withNewTrace (what a queue job does).
+    const carrier = { traceparent: `00-${INBOUND_TRACE}-${INBOUND_SPAN}-01` };
+    await inst.span({ name: "request2" }, async () => {
+      await inst.withNewTrace(() => inst.withParent(carrier, () => inst.span({ name: "job" }, async () => undefined)));
+    });
+    expect(byName("job").parentSpanContext?.spanId).toBe(INBOUND_SPAN);
+  });
+
   it("propagates nothing outward with OTEL_PROPAGATORS=none, but keeps L2M's own hand-offs", async () => {
     const { inst, byName } = setup({ propagators: ["none"] });
     const queued: Record<string, string> = {};

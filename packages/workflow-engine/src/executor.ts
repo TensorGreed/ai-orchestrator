@@ -10177,7 +10177,8 @@ async function executeWorkflowRun(
     } catch (error) {
       // Phase 12.1 — approval hand-off: the node asked for a person's decision.
       if (isApprovalHandoffSignal(error) && !dependencies.abortSignal?.aborted) {
-        return await pauseForApproval({
+        // Entered under the node's span, so the pause's trace context (the resume links to it) is this node's.
+        return await nodeSpan.enter(() => pauseForApproval({
           node,
           index,
           nodeInput,
@@ -10190,7 +10191,7 @@ async function executeWorkflowRun(
           labelScope,
           checkUsage: nodeCheckUsage,
           ...(error.shown ? { shown: error.shown } : {})
-        });
+        }));
       }
       // The execution timeout fires while a node runs: that node failed, it was not canceled.
       if (isExecutionTimeoutAbort(dependencies.abortSignal)) {

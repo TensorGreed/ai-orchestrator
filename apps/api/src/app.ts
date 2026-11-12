@@ -74,7 +74,7 @@ import {
   WorkflowError,
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
-import { BUDGET_SCOPE_TYPES, isBudgetScopeType, type BudgetScopeType } from "@ai-orchestrator/shared";
+import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, type BudgetScopeType } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
 import {
@@ -213,6 +213,7 @@ import type { MetricReader, SpanProcessor } from "@ai-orchestrator/otel";
 import { resolveTelemetrySettings } from "./telemetry/settings.js";
 import { loadTelemetry, type Telemetry } from "./telemetry/load.js";
 import { createModelTelemetry } from "./telemetry/model-telemetry.js";
+import { pausedTraceContext, traceQueueJob } from "./telemetry/queue-tracing.js";
 import { installHandlerContext, installHttpServerSpans, traceLogMixin } from "./telemetry/http-tracing.js";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
@@ -1998,6 +1999,8 @@ export async function createApp(
   const queueSettings = resolveQueueSettings(config, { clusterMode: queueClusterMode });
   // The producer exists on every instance (any WORKER_MODE), so an api replica accepts /enqueue for the workers.
   const queueProducer = queueService?.producer ?? new QueueProducer(store, { maxPending: queueSettings.maxPending });
+  // Jobs carry the enqueuer's trace context in their payload JSON while tracing is on (no column, nothing when off).
+  if (telemetry.enabled) queueProducer.setTracing({ instrumentation: telemetry.instrumentation, verbose: telemetrySettings.spanDetail === "verbose" });
   // Phase 13.1 — where runs execute (EXECUTION_DISPATCH): inline (default) here, or queue (cluster mode only) on the
   // queue's workers with this instance relaying events and results (services/run-dispatch.ts).
   const executionDispatch = resolveExecutionDispatch(config, { clusterMode });
@@ -2300,7 +2303,8 @@ export async function createApp(
         projectId: input.workflow.projectId ?? DEFAULT_PROJECT_ID,
         ...(input.triggerType ? { triggerType: input.triggerType } : {}),
         runMode: input.runMode ?? "workflow",
-        replay: Boolean(input.replay)
+        replay: Boolean(input.replay),
+        ...(input.traceLinks && input.traceLinks.length > 0 ? { links: input.traceLinks } : {})
       },
       async (span) => {
         const result = await runWorkflowExecutionInScope(input);
@@ -2526,6 +2530,7 @@ export async function createApp(
           persistPausedExecution: input.replay ? undefined : async (paused) => {
             // Phase 13.1 — a queued run in cluster mode pauses only while its claim holds the queue item.
             const queueFence = queueRunFences.get(paused.executionId)?.fence;
+            const pausedTrace = pausedTraceContext(runInstrumentation);
             const pausedHere = await store.saveWorkflowExecutionState({
               id: paused.executionId,
               workflowId: paused.workflowId,
@@ -2543,6 +2548,8 @@ export async function createApp(
                 ...paused.state,
                 ...(channel === "production" ? { releaseChannel: "production" as const, releaseVersion } : {}),
                 ...(input.gatewayGuard ? { gatewayGuard: input.gatewayGuard } : {}),
+                // The pausing node's trace context: the resumed run's span links back to it (tracing on only).
+                ...(pausedTrace ? { traceContext: pausedTrace } : {}),
                 // 12.6 — and its client and toolset, so the resumed part's usage is charged to them.
                 ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {}),
                 // 12.7 — an eval run's resumed part still records its Content rules verdicts as eval traffic.
@@ -4089,7 +4096,8 @@ export async function createApp(
   if (schedulerService) {
     // A scheduler test double that only fires schedules has no loader.
     schedulerService.setWorkflowLoader?.(async (workflowId) => await productionWorkflow(workflowId));
-    schedulerService.setExecutionHandler((input) => executeScheduledWorkflow(input));
+    // A schedule fire is its own trace: the timer would otherwise inherit the context of the request that saved it.
+    schedulerService.setExecutionHandler((input) => runInstrumentation.withNewTrace(() => executeScheduledWorkflow(input)));
     app.addHook("onClose", async () => {
       schedulerService.stop();
     });
@@ -4166,7 +4174,7 @@ export async function createApp(
 
   if (triggerService) {
     triggerService.setWorkflowLoader(async (workflowId) => await productionWorkflow(workflowId));
-    triggerService.setExecutionHandler(async (payload) => executeTriggeredWorkflow(payload));
+    triggerService.setExecutionHandler(async (payload) => await runInstrumentation.withNewTrace(() => executeTriggeredWorkflow(payload)));
     triggerService.setSecretResolver((ref) => secretService.resolveSecret(ref));
     triggerService.setOutboundGuard(outboundGuard, nodeDnsResolver);
     app.addHook("onClose", async () => {
@@ -5385,6 +5393,8 @@ export async function createApp(
           executionId: job.executionId,
           triggerType: "approval_resume",
           triggeredBy: actedBy,
+          // The resumed run is its own span, linked (not parented) to the node that paused, hours or days earlier.
+          ...(readTraceCarrier(state.traceContext) ? { traceLinks: [readTraceCarrier(state.traceContext)!] } : {}),
           resumeState: { ...state, workflow: resumeWorkflow },
           approvalDecision,
           // The run resumes on the version it started with (the paused state's workflow), on its channel.
@@ -15085,7 +15095,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   };
 
   if (queueService) {
-    queueService.setHandler(async (payload, context) => {
+    queueService.setHandler(async (payload, context) => await traceQueueJob(runInstrumentation, payload, context, async () => {
       // Phase 13.1 — the run a job executes is the queue's (see queueConsumedRuns), keyed on the payload's execution
       // id. Marked before the run is registered as active, so it never records an owner row and the self-fence never
       // stops it: the queue's lease, heartbeat and reaper own it.
@@ -15117,7 +15127,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         releaseActiveExecution(payload.executionId, controller);
         queueConsumedRuns.delete(queueOwnedExecutionId);
       }
-    });
+    }));
 
     if (queueClusterMode) {
       queueService.enableLeases({
