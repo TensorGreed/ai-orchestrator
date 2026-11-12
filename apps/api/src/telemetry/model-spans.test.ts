@@ -479,6 +479,9 @@ describe("/v1 model spans and metrics", () => {
     const tokens = metrics.get("gen_ai.client.token.usage")!;
     expect(tokens.find((point) => point.attributes["gen_ai.token.type"] === "input")?.attributes).toMatchObject({ "gen_ai.provider.name": "openai", "gen_ai.request.model": "up-model" });
     expect(metrics.get("gen_ai.client.operation.duration")).toHaveLength(1);
+    // Observed once, though two instrumented layers saw the call.
+    expect((metrics.get("gen_ai.client.operation.duration")![0]!.value as { count: number }).count).toBe(1);
+    expect(tokens.map((point) => (point.value as { count: number }).count)).toEqual([1, 1]);
     // Priced where the usage row is written: 7 tokens at a dollar each.
     expect(metrics.get("l2m.gen_ai.cost")![0]).toMatchObject({ attributes: { "l2m.usage.source": "ai_gateway", "l2m.project.id": "default" }, value: requestRow!.costUsd });
     expect(requestRow!.costUsd).toBe(7);
@@ -537,6 +540,19 @@ describe("/v1 model spans and metrics", () => {
     noContent(fixture.spans.getFinishedSpans());
     const duration = (await fixture.metrics()).get("gen_ai.client.operation.duration")!;
     expect(duration.some((point) => typeof point.attributes["error.type"] === "string")).toBe(true);
+  });
+
+  it("adds no cost when the usage row could not be written (the row is the record)", async () => {
+    const fixture = await setup();
+    const gw = await gateway(fixture);
+    fixture.store.insertAiGatewayRequest = async () => {
+      throw new Error("disk full");
+    };
+    expect((await v1(fixture, gw.token, "/v1/chat/completions", { model: "gpt-test", messages: [{ role: "user", content: "hi" }] })).status).toBe(200);
+    await serverSpanOf(fixture, "/v1/chat/completions");
+    const metrics = await fixture.metrics();
+    expect(metrics.get("gen_ai.client.operation.duration")?.length).toBe(1);
+    expect(metrics.get("l2m.gen_ai.cost") ?? []).toHaveLength(0);
   });
 
   it("marks a budget refusal on the request's span, with no model call", async () => {
@@ -626,8 +642,9 @@ describe("tracing off", () => {
       const byName = await fixture.metrics();
       return byName.get("l2m.gen_ai.cost")?.length ? byName : null;
     }, "the metrics");
-    expect(metrics.get("gen_ai.client.token.usage")?.length).toBe(2);
-    expect(metrics.get("gen_ai.client.operation.duration")?.length).toBe(1);
+    expect(metrics.get("gen_ai.client.token.usage")?.map((point) => (point.value as { count: number }).count)).toEqual([1, 1]);
+    // With no spans to mark, the context marker alone keeps the two layers from counting the call twice.
+    expect((metrics.get("gen_ai.client.operation.duration")?.[0]?.value as { count: number }).count).toBe(1);
     expect(fixture.spans.getFinishedSpans()).toHaveLength(0);
   });
 

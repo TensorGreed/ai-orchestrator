@@ -1,7 +1,8 @@
 /**
  * Child-process probe for telemetry-off.test.ts. Run with `node --import tsx <this file> '<env JSON>'`: it records every
- * module the process resolves, builds the API with the given settings, serves a few requests (with a `traceparent`), runs a workflow with a model call,
- * closes it, and prints the OpenTelemetry modules that were loaded as one JSON line.
+ * module the process resolves, builds the API with the given settings, serves a few requests (with a `traceparent`),
+ * runs a workflow with a model call (the echo provider), closes it, and prints the OpenTelemetry modules that were
+ * loaded as one JSON line.
  */
 import { registerHooks } from "node:module";
 import fs from "node:fs";

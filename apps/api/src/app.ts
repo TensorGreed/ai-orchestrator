@@ -1459,7 +1459,10 @@ export interface CreateAppOptions {
   telemetrySpanProcessors?: readonly SpanProcessor[];
   /** Register the process-wide OpenTelemetry globals while tracing is on (default true; tests turn it off). */
   telemetryRegisterGlobals?: boolean;
-  /** Extra OpenTelemetry metric readers (tests collect metrics in memory); they also turn the GenAI metrics on. */
+  /**
+   * Extra OpenTelemetry metric readers (tests collect metrics in memory); they also turn the GenAI metrics on. Used only
+   * where a meter provider is built: while tracing is on or with a metrics endpoint.
+   */
   telemetryMetricReaders?: readonly MetricReader[];
 }
 

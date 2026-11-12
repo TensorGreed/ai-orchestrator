@@ -264,6 +264,30 @@ describe("instrumented provider registry", () => {
     expect(observed[0]).toMatchObject({ errorType: "llm_provider_error", stream: true });
   });
 
+  it("passes a reader's throw() on to the provider stream and records it as a failure", async () => {
+    const { instrument, spans } = recorder();
+    const scripted = new Scripted();
+    const registry = createInstrumentedProviderRegistry(registryWith(scripted), { instrument });
+    const stream = registry.get("scripted").generateStream!(request(), context);
+    await stream.next();
+    const stop = Object.assign(new Error("reader gave up"), { category: "canceled" });
+    await expect(stream.throw(stop)).rejects.toBe(stop);
+    expect(scripted.closed).toBe(true);
+    expect(spans[0]).toMatchObject({ ended: true, errors: [{ error: "", type: "canceled" }] });
+    expect(spans[0]!.attributes["l2m.stream.closed_early"]).toBeUndefined();
+  });
+
+  it("keeps an allowlist refusal out of the metrics (nothing was sent)", async () => {
+    const { instrument } = recorder();
+    const observed: ModelCallObservation[] = [];
+    const gated = createGatedProviderRegistry(registryWith(new Scripted()), (call) => {
+      throw new ModelNotAllowedError("no", { providerId: call.providerId, model: call.model, refusedBy: "deployment" });
+    });
+    const registry = createInstrumentedProviderRegistry(gated, { instrument, observe: (o) => observed.push(o) });
+    await expect(registry.get("scripted").generate(request(), context)).rejects.toBeInstanceOf(ModelNotAllowedError);
+    expect(observed).toEqual([]);
+  });
+
   it("adds trace headers only when propagation to providers is on, and counts retries", async () => {
     const off = recorder();
     const scripted = new Scripted();

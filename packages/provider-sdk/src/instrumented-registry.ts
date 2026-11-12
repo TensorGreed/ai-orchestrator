@@ -1,4 +1,5 @@
 import {
+  ErrorCategory,
   NOOP_INSTRUMENTATION_SPAN,
   SPAN_OUTCOME_ATTRIBUTES as ATTR,
   effectiveModelName,
@@ -30,7 +31,11 @@ import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderE
  * call and marks the context it passes on, so the layers below pass it through and each call is recorded once. The
  * outermost layer also sees calls the allowlist refuses (`error.type=model_not_allowed`), which never reach a provider.
  *
- * A stream's span stays open until the stream ends: read to the end, failed, or closed early by its reader.
+ * A stream's span stays open until the stream ends: read to the end, failed, or closed early by its reader. Callers must
+ * read a stream to its end or close it (`for await` does; a manual reader calls `return()`), as with any provider stream.
+ *
+ * A call the model allowlist refuses gets its span but is not reported to the metrics: nothing was sent, and a refusal
+ * would read as a very fast provider call in the duration histogram.
  */
 
 export interface ModelCallInstrumentationOptions {
@@ -40,6 +45,9 @@ export interface ModelCallInstrumentationOptions {
   /** Clock in milliseconds (tests). */
   now?: () => number;
 }
+
+/** The error type of a call the model allowlist refused (nothing reached the provider). */
+const MODEL_NOT_ALLOWED: string = ErrorCategory.MODEL_NOT_ALLOWED;
 
 const INSTRUMENTED = Symbol.for("l2m.provider-sdk.model-call-instrumented");
 
@@ -153,7 +161,7 @@ class ModelCallRecorder {
 
   private observe(description: CallDescription, observation: Omit<ModelCallObservation, "providerId" | "requestModel" | "serverAddress" | "serverPort">): void {
     const observe = this.options.observe;
-    if (!observe) return;
+    if (!observe || observation.errorType === MODEL_NOT_ALLOWED) return;
     try {
       observe({
         ...observation,
@@ -241,7 +249,19 @@ class ModelCallRecorder {
         const chunk = result.value;
         if (chunk.type === "usage") usage = chunk.usage;
         else if (chunk.type === "finish") finishReason = chunk.reason;
-        yield chunk;
+        try {
+          yield chunk;
+        } catch (error) {
+          // The reader threw into the stream (`throw()`): pass it on to the provider stream, as `yield*` would.
+          failure = { error };
+          innerDone = true;
+          try {
+            await iterator!.throw?.(error);
+          } catch {
+            // The provider stream rethrew it (or failed to close); the reader's error is the one that goes on.
+          }
+          throw error;
+        }
         try {
           result = await iterator!.next();
         } catch (error) {
@@ -254,11 +274,12 @@ class ModelCallRecorder {
     } finally {
       const closedEarly = !innerDone;
       if (closedEarly && iterator) {
-        // The reader stopped (a break, a closed connection): close the provider stream too, as `yield*` would.
+        // The reader stopped (a break, a closed connection): close the provider stream too, as `yield*` would. An error
+        // while closing it is not passed on: the reader already chose to stop, and what it read stands.
         try {
           await iterator.return?.();
         } catch {
-          // The stream is being abandoned; a failure to close it changes nothing for the reader.
+          // Abandoned on purpose; see above.
         }
       }
       const counts = reportedUsage(usage);
