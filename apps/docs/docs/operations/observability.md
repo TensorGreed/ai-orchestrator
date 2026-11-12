@@ -76,7 +76,7 @@ The metric names are the ones L2M has always pushed, as cumulative sums (counter
 | `ao.http.request.duration` (unit `s`, attributes `http.request.method`, `http.response.status_class`) | Histogram, new |
 | `l2m_otel_spans_dropped_total` (attribute `reason=export_failed`) | Sum, new; only while spans are exported |
 
-Differences from the previous push: the default encoding is `http/protobuf` (set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` for the old one), the instrumentation scope is `l2m` (it was `ai-orchestrator`), and values are exported from the same counters the Prometheus `/metrics` page reads, which are unchanged. The percentile gauges are kept for one release and then removed; the histograms replace them. With `METRICS_ENABLED=false` the counters stay at zero and the histograms get no observations. Spans lost when the queue is full are not counted, only those lost to a failed export.
+Differences from the previous push: the default encoding is `http/protobuf` (set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` for the old one), the instrumentation scope stays `ai-orchestrator`, and values are exported from the same counters the Prometheus `/metrics` page reads, which are unchanged. The percentile gauges are kept for one release and then removed; the histograms replace them. With `METRICS_ENABLED=false` the counters stay at zero and the histograms get no observations. Spans lost when the queue is full are not counted, only those lost to a failed export.
 
 ## Export
 

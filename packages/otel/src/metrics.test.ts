@@ -9,6 +9,7 @@ import {
   HISTOGRAM_METRIC_NAMES,
   InMemoryMetricExporter,
   LEGACY_METRIC_NAMES,
+  METRICS_SCOPE,
   PeriodicExportingMetricReader,
   registerL2mMetrics,
   type MetricsPipeline,
@@ -76,6 +77,9 @@ describe("L2M metrics through the SDK meter", () => {
       "ao.uptime.seconds"
     ]);
     const value = (name: string) => byName.get(name)!.dataPoints[0]!.value;
+    expect(METRICS_SCOPE).toBe("ai-orchestrator");
+    const scopes = exporter.getMetrics().flatMap((resourceMetrics) => resourceMetrics.scopeMetrics.map((scope) => scope.scope.name));
+    expect(new Set(scopes)).toEqual(new Set(["ai-orchestrator"]));
     expect(value("ao.http.requests.total")).toBe(7);
     expect(value("ao.workflow.executions.failure.total")).toBe(1);
     expect(value("ao.workflow.executions.active")).toBe(2);

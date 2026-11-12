@@ -4,7 +4,10 @@ import { OTLPMetricExporter as OTLPProtoMetricExporter } from "@opentelemetry/ex
 import { defaultResource, resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import { MeterProvider, PeriodicExportingMetricReader, type MetricReader } from "@opentelemetry/sdk-metrics";
 import type { OtlpMetricExportOptions } from "./options.js";
-import { INSTRUMENTATION_SCOPE, SEMCONV_SCHEMA_URL } from "./semconv.js";
+import { SEMCONV_SCHEMA_URL } from "./semconv.js";
+
+/** The scope metrics have always been pushed under; kept so existing dashboards and queries do not change. */
+export const METRICS_SCOPE = "ai-orchestrator";
 
 /** How long a metrics flush or shutdown waits for the collector. */
 const METRICS_TIMEOUT_MS = 5000;
@@ -160,7 +163,7 @@ export class MetricsPipeline {
       );
     }
     this.provider = new MeterProvider({ resource, readers });
-    this.meter = this.provider.getMeter(INSTRUMENTATION_SCOPE, undefined, { schemaUrl: SEMCONV_SCHEMA_URL });
+    this.meter = this.provider.getMeter(METRICS_SCOPE, undefined, { schemaUrl: SEMCONV_SCHEMA_URL });
   }
 
   forceFlush(timeoutMs = METRICS_TIMEOUT_MS): Promise<void> {

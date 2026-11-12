@@ -9,6 +9,7 @@ export {
   registerL2mMetrics,
   HISTOGRAM_METRIC_NAMES,
   LEGACY_METRIC_NAMES,
+  METRICS_SCOPE,
   MetricsPipeline,
   type MetricsPipelineOptions,
   type MetricsRecorder,
