@@ -10,6 +10,15 @@
  *
  * In-flight requests are tracked per session so `notifications/cancelled`
  * can abort them.
+ *
+ * MCP 2026-07-28 has no sessions: a modern request carries everything it
+ * needs. The gateway still keeps per-caller state for modern calls (upstream
+ * stdio servers, the read-only audit sampling, content-rule block counts and
+ * the 12.2 label mark), in a principal state keyed by the caller's client
+ * credential and toolset (and the user its token acts for). The caller cannot
+ * reset it: it is never named in a request, it lives as long as a session
+ * would (idle expiry, revoke, toolset removal, the cap, shutdown) and it
+ * counts against the same cap as sessions.
  */
 
 import crypto from "node:crypto";
@@ -24,6 +33,9 @@ import {
 } from "@ai-orchestrator/shared";
 import type { McpProtocolVersion } from "./mcp-gateway-protocol.js";
 
+/** A modern protocol version (2026-07-28 and later); modern callers have principal states, not sessions. */
+export type McpModernGatewayVersion = string;
+
 export interface GatewayInFlight {
   controller: AbortController;
   /** Workflow execution the request started, when it runs a workflow tool. */
@@ -34,9 +46,17 @@ export interface GatewayInFlight {
 
 export interface GatewaySession {
   id: string;
+  /**
+   * `legacy`: opened by `initialize`, named by `Mcp-Session-Id`. `modern`: the principal state of 2026-07-28 callers,
+   * found by `principalScope` only and never by id (a client can never name it in a request).
+   */
+  era: "legacy" | "modern";
+  /** Modern only: the caller the state belongs to (client credential, toolset and the user its token acts for). */
+  principalScope?: string;
   clientId: string;
   toolsetId: string;
-  protocolVersion: McpProtocolVersion;
+  /** A legacy session's negotiated version; a principal state's version of its latest request. */
+  protocolVersion: McpProtocolVersion | McpModernGatewayVersion;
   clientInfo: { name?: string; version?: string };
   createdAt: number;
   lastSeenAt: number;
@@ -162,8 +182,15 @@ export class GatewaySessionLimitError extends Error {
   }
 }
 
+/** The principal scope of a modern caller: who it is, never anything from its request beyond the credential. */
+export function gatewayPrincipalScope(input: { clientId: string; toolsetId: string; userId?: string | null }): string {
+  return `client:${input.clientId}/toolset:${input.toolsetId}${input.userId ? `/user:${input.userId}` : ""}`;
+}
+
 export class GatewaySessionManager {
   private readonly sessions = new Map<string, GatewaySession>();
+  /** Principal scope → id of its state in `sessions`. */
+  private readonly principals = new Map<string, string>();
   private sweepTimer: NodeJS.Timeout | null = null;
   private readonly now: () => number;
 
@@ -185,37 +212,92 @@ export class GatewaySessionManager {
     return this.sessions.size;
   }
 
-  async create(input: {
+  /** Room for one more session or principal state: the least recently used idle one is closed past the cap. */
+  private async makeRoom(): Promise<void> {
+    if (this.sessions.size < this.options.maxSessions) return;
+    const idle = [...this.sessions.values()]
+      .filter((session) => session.inFlight.size === 0)
+      .sort((a, b) => a.lastSeenAt - b.lastSeenAt)[0];
+    if (!idle) throw new GatewaySessionLimitError(this.options.maxSessions);
+    await this.end(idle.id, "evicted");
+  }
+
+  private newState(input: {
+    era: GatewaySession["era"];
+    principalScope?: string;
     clientId: string;
     toolsetId: string;
-    protocolVersion: McpProtocolVersion;
+    protocolVersion: GatewaySession["protocolVersion"];
     clientInfo: { name?: string; version?: string };
-  }): Promise<GatewaySession> {
-    if (this.sessions.size >= this.options.maxSessions) {
-      const idle = [...this.sessions.values()]
-        .filter((session) => session.inFlight.size === 0)
-        .sort((a, b) => a.lastSeenAt - b.lastSeenAt)[0];
-      if (!idle) throw new GatewaySessionLimitError(this.options.maxSessions);
-      await this.end(idle.id, "evicted");
-    }
+  }): GatewaySession {
     const now = this.now();
-    const session: GatewaySession = {
+    return {
       id: crypto.randomUUID(),
+      era: input.era,
+      ...(input.principalScope !== undefined ? { principalScope: input.principalScope } : {}),
       clientId: input.clientId,
       toolsetId: input.toolsetId,
       protocolVersion: input.protocolVersion,
       clientInfo: input.clientInfo,
       createdAt: now,
       lastSeenAt: now,
-      initialized: false,
+      initialized: input.era === "modern",
       mcpContext: this.options.createContext(),
       inFlight: new Map(),
       auditedReadOnlyTools: new Set(),
       labels: emptySessionLabelMark(),
       guard: { blocks: 0, lastBlock: null }
     };
+  }
+
+  async create(input: {
+    clientId: string;
+    toolsetId: string;
+    protocolVersion: McpProtocolVersion;
+    clientInfo: { name?: string; version?: string };
+  }): Promise<GatewaySession> {
+    await this.makeRoom();
+    const session = this.newState({ era: "legacy", ...input });
     this.sessions.set(session.id, session);
     return session;
+  }
+
+  /**
+   * The principal state of a modern caller, created on its first request (`created: true`) and touched on every
+   * later one, which also records the version and client info of the latest request (display only). Counts against
+   * the same cap as sessions; throws `GatewaySessionLimitError` when it is reached and nothing is idle.
+   */
+  async principal(input: {
+    principalScope: string;
+    clientId: string;
+    toolsetId: string;
+    protocolVersion: McpModernGatewayVersion;
+    clientInfo: { name?: string; version?: string };
+  }): Promise<{ state: GatewaySession; created: boolean }> {
+    const existing = this.principalState(input.principalScope);
+    if (existing) {
+      existing.protocolVersion = input.protocolVersion;
+      if (input.clientInfo.name !== undefined || input.clientInfo.version !== undefined) existing.clientInfo = input.clientInfo;
+      this.touch(existing);
+      return { state: existing, created: false };
+    }
+    await this.makeRoom();
+    // Another request of the same caller may have created it while the cap made room.
+    const raced = this.principalState(input.principalScope);
+    if (raced) {
+      this.touch(raced);
+      return { state: raced, created: false };
+    }
+    const state = this.newState({ era: "modern", ...input });
+    this.sessions.set(state.id, state);
+    this.principals.set(input.principalScope, state.id);
+    return { state, created: true };
+  }
+
+  /** The principal state of a modern caller, when it has one. */
+  principalState(principalScope: string): GatewaySession | undefined {
+    const id = this.principals.get(principalScope);
+    return id === undefined ? undefined : this.sessions.get(id);
   }
 
   count(predicate: (session: GatewaySession) => boolean): number {
@@ -226,8 +308,10 @@ export class GatewaySessionManager {
     return total;
   }
 
+  /** A legacy session by its `Mcp-Session-Id`. Principal states are never returned: no request can name one. */
   get(id: string): GatewaySession | undefined {
-    return this.sessions.get(id);
+    const session = this.sessions.get(id);
+    return session?.era === "legacy" ? session : undefined;
   }
 
   /** The open sessions a predicate selects, oldest first. */
@@ -244,6 +328,7 @@ export class GatewaySessionManager {
     const session = this.sessions.get(id);
     if (!session) return false;
     this.sessions.delete(id);
+    if (session.principalScope !== undefined && this.principals.get(session.principalScope) === id) this.principals.delete(session.principalScope);
     for (const entry of session.inFlight.values()) {
       entry.controller.abort(`MCP session ended (${reason})`);
     }

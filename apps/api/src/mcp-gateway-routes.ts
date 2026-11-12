@@ -15,6 +15,7 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
+  headerLookupFrom,
   policyDecisionRecord,
   secretValuesForScrub,
   type MCPExecutionContext,
@@ -119,12 +120,27 @@ function isRuntimeRefusal(kind: string | undefined): kind is McpRuntimeRejection
   return kind === "rate_limited" || kind === "concurrency_limited" || kind === "circuit_open";
 }
 import {
+  DEFAULT_MCP_GATEWAY_LIST_TTL_MS,
+  MODERN_GATEWAY_METHODS,
+  gatewayDiscoverResult,
+  gatewayServerInfo,
+  gatewaySupportedVersions,
+  isModernGatewayMessage,
+  modernizeGatewayResponse,
+  sortToolsByName,
+  stripDescriptorHeaderAnnotations,
+  validateModernGatewayMessage,
+  type GatewayModernMode
+} from "./services/mcp-gateway-modern.js";
+import {
   GatewaySessionLimitError,
   GatewaySessionManager,
+  gatewayPrincipalScope,
   noteSessionGuardBlock,
   raiseSessionLabels,
   sessionCallLabels,
   sessionLabelsView,
+  type GatewayInFlight,
   type GatewaySession
 } from "./services/mcp-gateway-sessions.js";
 import { McpClientService, capRole, resolveMcpClientSubject, roleRank } from "./services/mcp-client-service.js";
@@ -297,6 +313,21 @@ export interface McpGatewayDeps {
    * that pins certificates is refused, and client address lists are checked in enforce mode.
    */
   network?: NetworkControls;
+  /**
+   * 13.1 — the instances share a database (Postgres with HA_ENABLED=true). MCP 2026-07-28 callers are then not served
+   * on toolsets that track outside content per session: their label mark would stay on one instance.
+   */
+  clusterMode?: boolean;
+}
+
+/**
+ * MCP 2026-07-28 — what a modern call adds to the dispatch: a key for its in-flight entry that is unique to its HTTP
+ * request (modern callers share one principal state, and two of their conversations may reuse a JSON-RPC id), and
+ * the signal that the caller closed the connection, which cancels the call.
+ */
+interface ModernCallScope {
+  inFlightKey: string;
+  disconnect: AbortSignal;
 }
 
 /** 12.6 — the Guard stack a gateway call runs under, when a toolset or client binding applies. */
@@ -390,6 +421,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   const clientService = new McpClientService(store);
   const allowedOrigins = gatewayAllowedOrigins(config);
   const approvalWindowMs = config.MCP_GATEWAY_APPROVAL_WINDOW_MS ?? DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS;
+  // MCP 2026-07-28 — modern callers are served only when switched on (D2: off by default).
+  const modernMode: GatewayModernMode = config.MCP_GATEWAY_MODERN_PROTOCOL === "on" ? "on" : "off";
+  const listTtlMs = config.MCP_GATEWAY_LIST_TTL_MS ?? DEFAULT_MCP_GATEWAY_LIST_TTL_MS;
   // Phase 12.4 — a safe summary of each call's arguments and the client's role on its telemetry row (unless switched off).
   const summarizeArguments = createToolArgumentSummarizer({
     enabled: toolArgumentSummariesEnabled(config),
@@ -417,6 +451,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     },
     onEnded: async (session, reason) => {
       limitAuditedAt.delete(session.id);
+      // Principal states of modern callers are not sessions: no session_started, so no session_ended either.
+      if (session.era === "modern") return;
       const client = await store.getMcpClient(session.clientId);
       const toolset = await store.getMcpToolset(session.toolsetId);
       await deps.auditRaw({
@@ -442,6 +478,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   /** 12.6 — when each session's last rate-limit or budget refusal was audited (at most once a minute per session). */
   const limitAuditedAt = new Map<string, number>();
   const LIMIT_AUDIT_EVERY_MS = 60_000;
+  /**
+   * Who a call came from in audit metadata: a legacy session's id, or a modern caller's principal scope and the
+   * version of its request (modern callers have no session).
+   */
+  const scopeMetadata = (session: GatewaySession): Record<string, unknown> =>
+    session.era === "modern" ? { principalScope: session.principalScope, protocolVersion: session.protocolVersion } : { sessionId: session.id };
   const auditLimitRefusal = async (
     session: GatewaySession,
     auth: AuthenticatedClient,
@@ -462,7 +504,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       resourceType: "mcp_toolset",
       resourceId: toolset.id,
       projectId: toolset.projectId,
-      metadata: { clientId: auth.client.id, sessionId: session.id, ...metadata }
+      metadata: { clientId: auth.client.id, ...scopeMetadata(session), ...metadata }
     });
   };
 
@@ -585,7 +627,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         readOnly: input.readOnly,
         clientId: input.auth.client.id,
         role: input.auth.subject.role,
-        sessionId: input.session.id,
+        ...scopeMetadata(input.session),
         durationMs: input.durationMs,
         ...input.details
       }
@@ -609,7 +651,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       resourceType: "mcp_toolset",
       resourceId: toolset.id,
       projectId: toolset.projectId,
-      metadata: { sessionId: session.id, clientId: auth.client.id, tool, reason, labels: sessionLabelsView(session.labels) }
+      metadata: { ...scopeMetadata(session), clientId: auth.client.id, tool, reason, labels: sessionLabelsView(session.labels) }
     });
   };
 
@@ -728,7 +770,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         channel,
         clientId: scope.auth.client.id,
         role: scope.auth.subject.role,
-        sessionId: scope.session.id,
+        ...scopeMetadata(scope.session),
         executionId: scope.callExecutionId,
         categories: verdict.categories,
         profiles: verdict.profiles,
@@ -1240,7 +1282,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       upstreamTool: tool.toolName,
       clientId: auth.client.id,
       role: auth.subject.role,
-      sessionId: session.id
+      ...scopeMetadata(session)
     };
     if (!decision.allowed) {
       const record = policyDecisionRecord(decision.policy, undefined, labelRecord);
@@ -1456,10 +1498,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     auth: AuthenticatedClient,
     toolset: McpToolset,
     request: JsonRpcRequest,
-    emit: Emit
+    emit: Emit,
+    modern?: ModernCallScope
   ): Promise<JsonRpcResponse | typeof SUPPRESSED> => {
     const effective = effectiveGatewayRateLimit(auth.client, toolset);
-    if (!effective) return await handleLimitedToolsCall(session, auth, toolset, request, emit);
+    if (!effective) return await handleLimitedToolsCall(session, auth, toolset, request, emit, modern);
     const admitted = await limiter.acquire(effective.key, effective.limit);
     if (!admitted.ok) {
       await auditLimitRefusal(session, auth, toolset, "mcp_gateway.rate_limited", {
@@ -1475,7 +1518,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       });
     }
     try {
-      return await handleLimitedToolsCall(session, auth, toolset, request, emit);
+      return await handleLimitedToolsCall(session, auth, toolset, request, emit, modern);
     } finally {
       admitted.release();
     }
@@ -1486,7 +1529,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     auth: AuthenticatedClient,
     toolset: McpToolset,
     request: JsonRpcRequest,
-    emit: Emit
+    emit: Emit,
+    modern?: ModernCallScope
   ): Promise<JsonRpcResponse | typeof SUPPRESSED> => {
     const params = asRecord(request.params);
     if (typeof params.name !== "string" || !params.name) {
@@ -1519,7 +1563,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           upstreamTool: hidden.toolName,
           clientId: auth.client.id,
           role: auth.subject.role,
-          sessionId: session.id,
+          ...scopeMetadata(session),
           ...(hidden.ruleId ? { ruleId: hidden.ruleId } : {})
         }
       });
@@ -1600,9 +1644,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       });
     };
 
-    const key = requestKey(request.id);
+    // MCP 2026-07-28 — the caller closed the connection before the call started: nothing is sent, and an approval the
+    // call used is given back (as for a call refused before it reached the server).
+    if (modern?.disconnect.aborted) {
+      if (usedApprovalId) await store.restoreMcpGatewayApproval(usedApprovalId);
+      return SUPPRESSED;
+    }
+    const key = modern ? modern.inFlightKey : requestKey(request.id);
     const controller = new AbortController();
-    session.inFlight.set(key, {
+    const entry: GatewayInFlight = {
       controller,
       ...(tool.kind === "workflow" ? { executionId } : {}),
       onCancel: async (reason) => {
@@ -1613,7 +1663,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           await mcpRegistry.closeSessions(session.mcpContext);
         }
       }
-    });
+    };
+    session.inFlight.set(key, entry);
+    // MCP 2026-07-28 — on HTTP, closing the response stream is the cancellation: same effect as notifications/cancelled.
+    const onDisconnect = () => void cancelInFlight(entry, "The client closed the connection.");
+    modern?.disconnect.addEventListener("abort", onDisconnect, { once: true });
     try {
       const result =
         tool.kind === "workflow"
@@ -1646,6 +1700,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
       return rpcResult(request.id, result);
     } finally {
+      modern?.disconnect.removeEventListener("abort", onDisconnect);
       session.inFlight.delete(key);
       sessions.touch(session);
     }
@@ -1656,9 +1711,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     auth: AuthenticatedClient,
     toolset: McpToolset,
     request: JsonRpcRequest,
-    emit: Emit
+    emit: Emit,
+    modern?: ModernCallScope
   ): Promise<JsonRpcResponse | typeof SUPPRESSED> => {
     try {
+      if (modern) return await dispatchModern(session, auth, toolset, request, emit, modern);
       switch (request.method) {
         case "ping":
           return rpcResult(request.id, {});
@@ -1686,6 +1743,55 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
   };
 
+  /**
+   * MCP 2026-07-28 — a modern request's method (validation already passed; `server/discover` is answered before any
+   * state is looked up): `tools/list` (sorted by name, with cache hints and no `x-mcp-header` annotations) and
+   * `tools/call`. Results and errors are made modern by
+   * the caller (`modernizeGatewayResponse`).
+   */
+  const dispatchModern = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    request: JsonRpcRequest,
+    emit: Emit,
+    modern: ModernCallScope
+  ): Promise<JsonRpcResponse | typeof SUPPRESSED> => {
+    switch (request.method) {
+      case "tools/list": {
+        const params = asRecord(request.params);
+        const offset = params.cursor === undefined ? 0 : decodeCursor(params.cursor);
+        if (offset === null) return rpcError(request.id, JSON_RPC_ERRORS.invalidParams, "Invalid cursor.");
+        const catalog = await catalogFor(toolset, auth.subject.role, auth.client.id);
+        const ordered = sortToolsByName(catalog.tools);
+        const page = ordered.slice(offset, offset + TOOLS_PAGE_SIZE);
+        const next = offset + TOOLS_PAGE_SIZE < ordered.length ? encodeCursor(offset + TOOLS_PAGE_SIZE) : undefined;
+        const tools: Record<string, unknown>[] = [];
+        for (const tool of page) {
+          const descriptor = stripDescriptorHeaderAnnotations(toMcpToolDescriptor(tool));
+          if (descriptor) tools.push(descriptor);
+          else app.log.warn({ toolsetId: toolset.id, tool: tool.name }, "MCP gateway left a tool out of a modern tools/list: its input schema is too deep");
+        }
+        return rpcResult(request.id, { tools, ...(next ? { nextCursor: next } : {}), ttlMs: listTtlMs, cacheScope: "private" });
+      }
+      case "tools/call":
+        return await handleToolsCall(session, auth, toolset, request, emit, modern);
+      default:
+        return rpcError(request.id, JSON_RPC_ERRORS.methodNotFound, `Method not found: ${request.method}`);
+    }
+  };
+
+  /** Abort an in-flight call and run its cleanup (cancel the run, stop the servers); a second cancel does nothing. */
+  const cancelInFlight = async (entry: GatewayInFlight, reason: string) => {
+    if (entry.controller.signal.aborted) return;
+    entry.controller.abort(reason);
+    try {
+      await entry.onCancel?.(reason);
+    } catch (error) {
+      app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "MCP gateway cancellation cleanup failed");
+    }
+  };
+
   const handleNotification = async (session: GatewaySession, notification: JsonRpcNotification) => {
     if (notification.method === "notifications/initialized") {
       session.initialized = true;
@@ -1698,12 +1804,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       const entry = session.inFlight.get(requestKey(requestId));
       if (!entry || entry.controller.signal.aborted) return;
       const reason = typeof params.reason === "string" && params.reason.trim() ? params.reason.trim() : "Cancelled by the MCP client.";
-      entry.controller.abort(reason);
-      try {
-        await entry.onCancel?.(reason);
-      } catch (error) {
-        app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "MCP gateway cancellation cleanup failed");
-      }
+      await cancelInFlight(entry, reason);
     }
   };
 
@@ -1771,6 +1872,160 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     reply.raw.write(`event: message\ndata: ${JSON.stringify(payload)}\n\n`);
   };
 
+  /** Headers set by hooks (CORS, security headers): they are not flushed for a hijacked reply. */
+  const hookHeadersOf = (reply: FastifyReply): Record<string, string | number | string[]> => {
+    const headers: Record<string, string | number | string[]> = {};
+    for (const [name, value] of Object.entries(reply.getHeaders())) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+
+  /** The legacy answer to a request without a session: dual-era clients read it as "legacy server" and fall back. */
+  const SESSION_REQUIRED_MESSAGE = "Mcp-Session-Id header is required; send initialize first.";
+
+  /**
+   * MCP 2026-07-28 — one modern request (MCP_GATEWAY_MODERN_PROTOCOL=on): validated, then served statelessly. No
+   * session is opened, read or echoed (an `Mcp-Session-Id` header is ignored); `tools/list` and `tools/call` run with
+   * the caller's principal state. Closing the connection cancels the call.
+   */
+  const handleModernPost = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    parsed: unknown,
+    accept: string | undefined
+  ) => {
+    const serverInfo = gatewayServerInfo(toolset, SERVER_VERSION);
+    const validated = validateModernGatewayMessage(parsed, headerLookupFrom(request.headers), modernMode);
+    if (!validated.ok) {
+      reply.code(validated.status).header("content-type", "application/json").send(modernizeGatewayResponse(validated.response, serverInfo));
+      return;
+    }
+    if (validated.kind === "notification") {
+      // No client notification is defined over HTTP for modern versions (cancel = close the connection): ignored.
+      reply.code(202).send();
+      return;
+    }
+    const message = validated.message;
+    if (!MODERN_GATEWAY_METHODS.has(message.method)) {
+      reply
+        .code(404)
+        .header("content-type", "application/json")
+        .send(rpcError(message.id, JSON_RPC_ERRORS.methodNotFound, `Method not found: ${message.method.slice(0, 100)}`));
+      return;
+    }
+    if (message.method === "server/discover") {
+      reply
+        .code(200)
+        .header("content-type", "application/json")
+        .send(modernizeGatewayResponse(rpcResult(message.id, gatewayDiscoverResult({ toolset, mode: modernMode, ttlMs: listTtlMs })), serverInfo));
+      return;
+    }
+    // The caller's principal state.
+    let state: GatewaySession;
+    {
+      const principalScope = gatewayPrincipalScope({ clientId: auth.client.id, toolsetId: toolset.id, userId: auth.subject.userId ?? null });
+      try {
+        const found = await sessions.principal({
+          principalScope,
+          clientId: auth.client.id,
+          toolsetId: toolset.id,
+          protocolVersion: validated.protocolVersion,
+          clientInfo: validated.clientInfo
+        });
+        state = found.state;
+        if (found.created) {
+          // First modern request of this caller in an idle window (the counterpart of session_started).
+          await deps.auditRaw({
+            category: "system",
+            eventType: "mcp_gateway.caller_seen",
+            action: "create",
+            outcome: "success",
+            actor: { type: "api_key", email: auth.client.name, ipAddress: request.ip ?? null },
+            resourceType: "mcp_toolset",
+            resourceId: toolset.id,
+            projectId: toolset.projectId,
+            metadata: {
+              principalScope,
+              clientId: auth.client.id,
+              role: auth.subject.role,
+              protocolVersion: validated.protocolVersion,
+              clientInfo: found.state.clientInfo
+            }
+          });
+        }
+      } catch (error) {
+        if (error instanceof GatewaySessionLimitError) {
+          reply
+            .code(503)
+            .header("retry-after", "30")
+            .header("content-type", "application/json")
+            .send(
+              modernizeGatewayResponse(
+                rpcError(message.id, JSON_RPC_ERRORS.retryLater, error.message, { reason: "gateway_capacity", retryAfterMs: 30_000, retryAfterSeconds: 30 }),
+                serverInfo
+              )
+            );
+          return;
+        }
+        throw error;
+      }
+    }
+
+    // Closing the connection before the response is complete cancels the request (not a finished response).
+    const disconnect = new AbortController();
+    const onClose = () => {
+      if (!reply.raw.writableFinished) disconnect.abort();
+    };
+    reply.raw.on("close", onClose);
+    // Gone already (while its state was looked up): the call is cancelled before it starts.
+    if (reply.raw.destroyed && !reply.raw.writableFinished) disconnect.abort();
+    const scope: ModernCallScope = { inFlightKey: `modern:${crypto.randomUUID()}`, disconnect: disconnect.signal };
+    const run = async (emit: Emit) => await dispatch(state, auth, toolset, message, emit, scope);
+
+    const meta = asRecord(asRecord(message.params)._meta);
+    const wantsStream = acceptAllows(accept, "text/event-stream") && (typeof meta.progressToken === "string" || typeof meta.progressToken === "number");
+    if (wantsStream) {
+      const hookHeaders = hookHeadersOf(reply);
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        ...hookHeaders,
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        // Reverse proxies must not buffer the stream (progress would arrive late).
+        "x-accel-buffering": "no",
+        "x-request-id": request.id
+      });
+      const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS);
+      try {
+        const response = await run((notification) => {
+          if (!disconnect.signal.aborted) writeSse(reply, notification);
+        });
+        if (response !== SUPPRESSED && !disconnect.signal.aborted) writeSse(reply, modernizeGatewayResponse(response, serverInfo));
+      } finally {
+        stopHeartbeat();
+        reply.raw.off("close", onClose);
+        if (!reply.raw.writableEnded) reply.raw.end();
+      }
+      return;
+    }
+    let response: JsonRpcResponse | typeof SUPPRESSED;
+    try {
+      response = await run(() => undefined);
+    } finally {
+      reply.raw.off("close", onClose);
+    }
+    reply
+      .code(200)
+      .header("content-type", "application/json")
+      .send(
+        modernizeGatewayResponse(response === SUPPRESSED ? rpcError(message.id, JSON_RPC_ERRORS.requestCancelled, "Request cancelled.") : response, serverInfo)
+      );
+  };
+
   // ---------------------------------------------------------------------------
   // Routes
   // ---------------------------------------------------------------------------
@@ -1790,6 +2045,34 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       if (!acceptAllows(accept, "application/json") && !acceptAllows(accept, "text/event-stream")) {
         httpError(reply, 406, "Accept must allow application/json or text/event-stream.");
         return reply;
+      }
+      // MCP 2026-07-28 — a modern request (a single message with the protocol version in its _meta) is served
+      // statelessly when modern mode is on. Anything else, and everything when it is off, takes the session path below
+      // exactly as before (a modern request then gets the "session required" answer, so dual-era clients fall back).
+      if (modernMode === "on") {
+        let early: unknown;
+        let earlyParsed = false;
+        try {
+          early = JSON.parse(typeof request.body === "string" ? request.body : "");
+          earlyParsed = true;
+        } catch {
+          // Not JSON: the session path answers with its parse error.
+        }
+        if (earlyParsed && isModernGatewayMessage(early)) {
+          if (deps.clusterMode && toolset.trackSessionLabels) {
+            // Until the label mark is shared across instances, a toolset that tracks outside content per session serves
+            // only session-based callers in cluster mode. This answer is not a modern error, so a client that speaks
+            // both versions falls back to initialize and a session.
+            httpError(
+              reply,
+              400,
+              `${SESSION_REQUIRED_MESSAGE} Toolset '${toolset.slug}' tracks outside content per session, so in cluster mode it serves only session-based clients.`
+            );
+            return reply;
+          }
+          await handleModernPost(request, reply, auth, toolset, early, accept);
+          return reply;
+        }
       }
       const versionHeader = headerValue(request, "mcp-protocol-version");
       if (versionHeader !== undefined && !isSupportedProtocolVersion(versionHeader)) {
@@ -1835,7 +2118,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
 
       if (!sessionHeader) {
-        httpError(reply, 400, "Mcp-Session-Id header is required; send initialize first.");
+        httpError(reply, 400, SESSION_REQUIRED_MESSAGE);
         return reply;
       }
       const session = sessions.get(sessionHeader);
@@ -1874,10 +2157,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
 
       if (wantsStream) {
         // Headers set by hooks (CORS, security headers) are not flushed for a hijacked reply.
-        const hookHeaders: Record<string, string | number | string[]> = {};
-        for (const [name, value] of Object.entries(reply.getHeaders())) {
-          if (value !== undefined) hookHeaders[name] = value;
-        }
+        const hookHeaders = hookHeadersOf(reply);
         reply.hijack();
         reply.raw.writeHead(200, {
           ...hookHeaders,
@@ -1972,7 +2252,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         const server = servers.get(member.serverId);
         return { ...member, label: server?.name ?? member.serverId, missing: !server };
       }),
-      activeSessions: sessions.count((session) => session.toolsetId === toolset.id)
+      activeSessions: sessions.count((session) => session.era === "legacy" && session.toolsetId === toolset.id)
     };
   };
 
@@ -2054,7 +2334,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       metadata: {
         slug: toolset.slug,
         trackSessionLabels: toolset.trackSessionLabels,
-        openSessions: sessions.count((session) => session.toolsetId === toolset.id)
+        openSessions: sessions.count((session) => session.era === "legacy" && session.toolsetId === toolset.id)
       }
     });
   };
@@ -2074,12 +2354,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const pageRequest = pageRequestFromQuery(request.query);
     if (pageRequest) {
       const page = pageOfById(await store.listMcpToolsets(), pageRequest, (toolset) => `${toolset.name.toLowerCase()}\u0000${toolset.slug}`);
-      return { ...page, items: await mapAsync(page.items, toolsetView), gatewayBaseUrl, protocolVersions: MCP_SUPPORTED_PROTOCOL_VERSIONS };
+      return { ...page, items: await mapAsync(page.items, toolsetView), gatewayBaseUrl, protocolVersions: gatewaySupportedVersions(modernMode) };
     }
     return {
       toolsets: await mapAsync(await store.listMcpToolsets(), toolsetView),
       gatewayBaseUrl,
-      protocolVersions: MCP_SUPPORTED_PROTOCOL_VERSIONS
+      protocolVersions: gatewaySupportedVersions(modernMode)
     };
   });
 
@@ -2278,7 +2558,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     ...client,
     status: clientStatus(client),
     effectiveRole: (await resolveMcpClientSubject(store, client)).role,
-    activeSessions: sessions.count((session) => session.clientId === client.id),
+    activeSessions: sessions.count((session) => session.era === "legacy" && session.clientId === client.id),
     usage: usage ? { calls: usage.calls, errors: usage.errors, lastCalledAt: usage.lastCalledAt } : { calls: 0, errors: 0, lastCalledAt: null }
   });
 
@@ -2640,7 +2920,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       reply.code(404);
       return { error: "Client not found" };
     }
-    const open = sessions.list((session) => session.clientId === client.id);
+    const open = sessions.list((session) => session.era === "legacy" && session.clientId === client.id);
     const toolsets = new Map<string, McpToolset | null>();
     for (const toolsetId of new Set(open.map((session) => session.toolsetId))) toolsets.set(toolsetId, await store.getMcpToolset(toolsetId));
     const views: McpGatewaySessionView[] = open.map((session) => {
