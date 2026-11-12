@@ -33,6 +33,21 @@ describe("off means off", () => {
     expect(result.otelModules).toEqual([]);
   }, 150_000);
 
+  it("loads none with a metrics endpoint set but OTEL_METRICS_ENABLED unset", async () => {
+    const result = await loadedOtelModules({ OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://127.0.0.1:9/v1/metrics" });
+    expect(result.otelModules).toEqual([]);
+  }, 150_000);
+
+  it("loads none with OTEL_METRICS_ENABLED=true but no endpoint", async () => {
+    const result = await loadedOtelModules({ OTEL_METRICS_ENABLED: "true" });
+    expect(result.otelModules).toEqual([]);
+  }, 150_000);
+
+  it("loads them for a metrics endpoint alone (metrics on, tracing off)", async () => {
+    const result = await loadedOtelModules({ OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://127.0.0.1:9/v1/metrics", OTEL_METRICS_ENABLED: "true" });
+    expect(result.otelModules.some((url) => url.includes("@opentelemetry/sdk-metrics"))).toBe(true);
+  }, 150_000);
+
   it("does load them once tracing is on (the probe sees them)", async () => {
     const result = await loadedOtelModules({ TRACING_ENABLED: "true" });
     expect(result.otelModules.some((url) => url.includes("/packages/otel/"))).toBe(true);

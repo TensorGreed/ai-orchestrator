@@ -211,7 +211,6 @@ import type { SpanProcessor } from "@ai-orchestrator/otel";
 import { resolveTelemetrySettings } from "./telemetry/settings.js";
 import { loadTelemetry, type Telemetry } from "./telemetry/load.js";
 import { installHandlerContext, installHttpServerSpans, traceLogMixin } from "./telemetry/http-tracing.js";
-import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
 import { SubWorkflowSpendTracker, usageUserOf, withinBudgetCheckTime, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
@@ -1591,6 +1590,13 @@ export async function createApp(
     options.lifecycle?.setExitFlush(() => telemetryRuntime.forceFlush());
     // Before any route is added: every handler then runs in its request's server span (when one was started).
     if (telemetrySettings.httpServerSpans) installHandlerContext(app, telemetryRuntime);
+  } else if (telemetry.metrics) {
+    // Metrics without tracing: only the meter provider runs. It exports once more on close and before a signal exits.
+    const metricsPipeline = telemetry.metrics;
+    app.addHook("onClose", async () => {
+      await metricsPipeline.shutdown();
+    });
+    options.lifecycle?.setExitFlush(() => metricsPipeline.forceFlush());
   }
   // 12.6 — model allowlists. Every model call goes through this seam: each run, gateway sampling call, provider test,
   // eval judge call and knowledge-base request gets a registry (and an embedding check) for its project.
@@ -4869,22 +4875,11 @@ export async function createApp(
     resourceAttributes: telemetrySettings.resourceAttributes
   });
 
-  let otlpMetricsExporter: OtlpMetricsExporter | null = null;
-  if (telemetrySettings.metricsEndpoint) {
-    otlpMetricsExporter = new OtlpMetricsExporter(metricsService, {
-      endpoint: telemetrySettings.metricsEndpoint,
-      resourceAttributes: telemetrySettings.resourceAttributes,
-      headers: telemetrySettings.headers,
-      intervalMs: config.OTEL_METRICS_PUSH_INTERVAL_MS,
-      serviceName: telemetrySettings.serviceName
-    });
-    otlpMetricsExporter.setLogger({
-      warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
-    });
-    otlpMetricsExporter.start();
-    app.addHook("onClose", async () => {
-      await otlpMetricsExporter?.stop();
-    });
+  // OTLP metrics (OTEL_METRICS_ENABLED with a metrics endpoint): the `ao.*` instruments are registered on the SDK
+  // meter, and the duration histograms get their observations from MetricsService.
+  if (telemetry.metrics && telemetrySettings.metricsEndpoint) {
+    const { registerL2mMetrics } = await import("@ai-orchestrator/otel");
+    metricsService.attachOtelRecorder(registerL2mMetrics(telemetry.metrics.meter, metricsService));
   }
   secretService.attachExternalSecrets(externalSecretsService);
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
@@ -6708,9 +6703,9 @@ export async function createApp(
         spanDetail: telemetrySettings.spanDetail
       },
       otlpMetrics: {
-        enabled: otlpMetricsExporter !== null,
+        enabled: telemetry.metrics !== null && telemetrySettings.metricsEndpoint !== null,
         endpoint: telemetrySettings.metricsEndpoint,
-        intervalMs: otlpMetricsExporter ? config.OTEL_METRICS_PUSH_INTERVAL_MS : null
+        intervalMs: telemetry.metrics && telemetrySettings.metricsEndpoint ? telemetrySettings.metricsIntervalMs : null
       }
     };
   });
