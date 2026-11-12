@@ -223,6 +223,15 @@ describe("runMrtrRequest", () => {
 });
 
 describe("answerInputRequest refusals", () => {
+  it("keeps input response keys that shadow Object.prototype names as own keys in the retry", async () => {
+    const server = scripted([
+      JSON.parse('{"resultType":"input_required","inputRequests":{"constructor":{"method":"elicitation/create","params":' + JSON.stringify(elicitParams) + '}}}'),
+      { resultType: "complete" }
+    ]);
+    await runMrtrRequest("tools/call", { name: "t" }, server.send, options({}));
+    expect(JSON.stringify(server.calls[1])).toBe('{"name":"t","inputResponses":{"constructor":{"action":"decline"}}}');
+  });
+
   it("refuses roots/list and unknown methods: L2M declares no roots", async () => {
     const error = await answerInputRequest("r", { method: "roots/list" }, options({})).catch((caught) => caught);
     expect(error).toBeInstanceOf(McpInputRequestError);

@@ -28,8 +28,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const SENTINEL_PREFIX = "=?base64?";
 const SENTINEL_SUFFIX = "?=";
-/** Printable ASCII and space: what a header value may carry without encoding. */
+/** Printable ASCII and space: what L2M sends without encoding. */
 const PLAIN_HEADER_VALUE = /^[\x20-\x7e]*$/;
+/** What a received plain header value may contain: printable ASCII, space and horizontal tab (RFC 9110). */
+const RECEIVED_HEADER_VALUE = /^[\t\x20-\x7e]*$/;
+
+/** Strip surrounding spaces and tabs in linear time. */
+function trimHeaderWhitespace(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && (value[start] === " " || value[start] === "\t")) start += 1;
+  while (end > start && (value[end - 1] === " " || value[end - 1] === "\t")) end -= 1;
+  return value.slice(start, end);
+}
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function looksLikeSentinel(value: string): boolean {
@@ -56,9 +67,9 @@ export type DecodedMcpHeaderValue = { ok: true; value: string; encoded: boolean 
  * Header parsers strip surrounding whitespace, so it is ignored here.
  */
 export function decodeMcpHeaderValue(raw: string): DecodedMcpHeaderValue {
-  const value = raw.replace(/^[ \t]+|[ \t]+$/g, "");
+  const value = trimHeaderWhitespace(raw);
   if (!looksLikeSentinel(value)) {
-    if (!PLAIN_HEADER_VALUE.test(value)) return { ok: false, reason: "contains characters that are not allowed in a header value" };
+    if (!RECEIVED_HEADER_VALUE.test(value)) return { ok: false, reason: "contains characters that are not allowed in a header value" };
     return { ok: true, value, encoded: false };
   }
   const payload = value.slice(SENTINEL_PREFIX.length, value.length - SENTINEL_SUFFIX.length);
@@ -117,6 +128,22 @@ const DATA_KEYWORDS = new Set(["const", "enum", "default", "examples"]);
 /** Keywords whose value maps names to schemas: the names are not keywords. */
 const SCHEMA_MAP_KEYWORDS = new Set(["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]);
 const ALLOWED_HEADER_TYPES = new Set(["string", "integer", "boolean"]);
+/** Schemas nested deeper than this are refused rather than walked. */
+export const MAX_MCP_SCHEMA_DEPTH = 64;
+
+/** Server-supplied text in a message: quoted and shortened, so it cannot forge log lines. */
+function quoted(value: unknown, max = 80): string {
+  const text = typeof value === "string" ? value : String(value);
+  return JSON.stringify(text.length > max ? `${text.slice(0, max)}...` : text);
+}
+
+/** A schema too deeply nested to process. */
+export class McpSchemaTooDeepError extends Error {
+  constructor() {
+    super(`The schema is nested more than ${MAX_MCP_SCHEMA_DEPTH} levels deep.`);
+    this.name = "McpSchemaTooDeepError";
+  }
+}
 
 /** The single primitive type of an annotated property; `null` may be listed alongside it. */
 function headerPropertyType(schema: Record<string, unknown>): McpParamHeaderSpec["type"] | undefined {
@@ -149,16 +176,20 @@ export function analyzeMcpHeaderAnnotations(inputSchema: unknown): McpHeaderAnno
   const seen = new Map<string, string>();
   let failure: string | undefined;
 
-  const visit = (node: unknown, position: SchemaPosition): void => {
+  const visit = (node: unknown, position: SchemaPosition, depth: number): void => {
     if (failure) return;
+    if (depth > MAX_MCP_SCHEMA_DEPTH) {
+      failure = `the inputSchema is nested more than ${MAX_MCP_SCHEMA_DEPTH} levels deep`;
+      return;
+    }
     if (Array.isArray(node)) {
-      node.forEach((entry, index) => visit(entry, { reachable: null, where: `${position.where}[${index}]` }));
+      node.forEach((entry, index) => visit(entry, { reachable: null, where: `${position.where}[${index}]` }, depth + 1));
       return;
     }
     if (!isRecord(node)) return;
-    if (MCP_HEADER_ANNOTATION in node) {
+    if (Object.hasOwn(node, MCP_HEADER_ANNOTATION)) {
       const annotation = node[MCP_HEADER_ANNOTATION];
-      const where = position.where || "the schema root";
+      const where = position.where ? quoted(position.where, 200) : "the schema root";
       if (!position.reachable || position.reachable.length === 0) {
         failure = `${MCP_HEADER_ANNOTATION} at ${where} is not on a property reachable through 'properties' alone`;
         return;
@@ -168,18 +199,18 @@ export function analyzeMcpHeaderAnnotations(inputSchema: unknown): McpHeaderAnno
         return;
       }
       if (!HTTP_TOKEN.test(annotation)) {
-        failure = `${MCP_HEADER_ANNOTATION} '${annotation}' at ${where} is not a valid HTTP header name token`;
+        failure = `${MCP_HEADER_ANNOTATION} ${quoted(annotation)} at ${where} is not a valid HTTP header name token`;
         return;
       }
       const type = headerPropertyType(node);
       if (!type) {
-        failure = `${MCP_HEADER_ANNOTATION} '${annotation}' at ${where} must be on a string, integer or boolean property`;
+        failure = `${MCP_HEADER_ANNOTATION} ${quoted(annotation)} at ${where} must be on a string, integer or boolean property`;
         return;
       }
       const folded = annotation.toLowerCase();
       const previous = seen.get(folded);
       if (previous !== undefined) {
-        failure = `${MCP_HEADER_ANNOTATION} '${annotation}' at ${where} repeats '${previous}' (names are compared ignoring case)`;
+        failure = `${MCP_HEADER_ANNOTATION} ${quoted(annotation)} at ${where} repeats ${quoted(previous)} (names are compared ignoring case)`;
         return;
       }
       seen.set(folded, annotation);
@@ -190,44 +221,53 @@ export function analyzeMcpHeaderAnnotations(inputSchema: unknown): McpHeaderAnno
       if (SCHEMA_MAP_KEYWORDS.has(keyword) && isRecord(value)) {
         for (const [name, child] of Object.entries(value)) {
           const reachable = keyword === "properties" && position.reachable ? [...position.reachable, name] : null;
-          visit(child, { reachable, where: `${position.where}/${keyword}/${name}` });
+          visit(child, { reachable, where: `${position.where}/${keyword}/${name}` }, depth + 1);
         }
         continue;
       }
-      visit(value, { reachable: null, where: `${position.where}/${keyword}` });
+      visit(value, { reachable: null, where: `${position.where}/${keyword}` }, depth + 1);
     }
   };
 
-  if (isRecord(inputSchema)) visit(inputSchema, { reachable: [], where: "" });
+  if (isRecord(inputSchema)) visit(inputSchema, { reachable: [], where: "" }, 0);
   return failure ? { ok: false, reason: failure } : { ok: true, headers };
+}
+
+/** Set an own property, even one called `__proto__`. */
+function defineOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
 /**
  * Remove every `x-mcp-header` annotation from a schema (a deep copy; the
  * input is not modified). Property names and instance data that happen to
- * be called `x-mcp-header` are kept.
+ * be called `x-mcp-header` are kept. Throws `McpSchemaTooDeepError` past
+ * `MAX_MCP_SCHEMA_DEPTH`, so an annotation can never survive by hiding deep.
  */
 export function stripMcpHeaderAnnotations<T>(schema: T): T {
-  const strip = (node: unknown, inData: boolean): unknown => {
-    if (Array.isArray(node)) return node.map((entry) => strip(entry, inData));
+  const strip = (node: unknown, inData: boolean, depth: number): unknown => {
+    if (depth > MAX_MCP_SCHEMA_DEPTH) throw new McpSchemaTooDeepError();
+    if (Array.isArray(node)) return node.map((entry) => strip(entry, inData, depth + 1));
     if (!isRecord(node)) return node;
     const out: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(node)) {
       if (inData) {
-        out[key] = strip(value, true);
+        defineOwn(out, key, strip(value, true, depth + 1));
       } else if (key === MCP_HEADER_ANNOTATION) {
         continue;
       } else if (DATA_KEYWORDS.has(key)) {
-        out[key] = strip(value, true);
+        defineOwn(out, key, strip(value, true, depth + 1));
       } else if (SCHEMA_MAP_KEYWORDS.has(key) && isRecord(value)) {
-        out[key] = Object.fromEntries(Object.entries(value).map(([name, child]) => [name, strip(child, false)]));
+        const map: Record<string, unknown> = {};
+        for (const [name, child] of Object.entries(value)) defineOwn(map, name, strip(child, false, depth + 2));
+        defineOwn(out, key, map);
       } else {
-        out[key] = strip(value, false);
+        defineOwn(out, key, strip(value, false, depth + 1));
       }
     }
     return out;
   };
-  return strip(schema, false) as T;
+  return strip(schema, false, 0) as T;
 }
 
 /** An argument cannot be carried in its `Mcp-Param-*` header (wrong type, or an integer beyond the safe range). */
@@ -253,23 +293,28 @@ function valueAtPath(args: unknown, path: string[]): unknown {
 /** The text form of a header value: strings as is, integers in decimal, booleans as `true`/`false`. */
 function headerText(spec: McpParamHeaderSpec, value: unknown): string {
   const header = `${MCP_HEADER_PARAM_PREFIX}${spec.name}`;
-  if (typeof value === "string") return value;
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new McpHeaderValueError(`The value for ${header} is not a finite number.`, header);
-    if (spec.type === "integer" && !Number.isSafeInteger(value)) {
-      throw new McpHeaderValueError(`The value for ${header} is outside the safe integer range.`, header);
-    }
-    return Object.is(value, -0) ? "0" : String(value);
+  switch (spec.type) {
+    case "string":
+      if (typeof value === "string") return value;
+      throw new McpHeaderValueError(`The value for ${header} must be a string.`, header);
+    case "boolean":
+      if (typeof value === "boolean") return value ? "true" : "false";
+      throw new McpHeaderValueError(`The value for ${header} must be true or false.`, header);
+    case "integer":
+      if (typeof value !== "number" || !Number.isInteger(value)) {
+        throw new McpHeaderValueError(`The value for ${header} must be an integer.`, header);
+      }
+      if (!Number.isSafeInteger(value)) throw new McpHeaderValueError(`The value for ${header} is outside the safe integer range.`, header);
+      return Object.is(value, -0) ? "0" : String(value);
   }
-  throw new McpHeaderValueError(`The value for ${header} must be a string, integer or boolean.`, header);
 }
 
 /**
  * The `Mcp-Param-*` headers for one call: the value at each annotated
  * property's exact path, encoded. A missing or `null` value leaves its
- * header out. Throws `McpHeaderValueError` for a value that cannot be
- * mirrored (an object, an array, a non-finite number, an unsafe integer).
+ * header out. Throws `McpHeaderValueError` for a value whose type differs
+ * from the declared one or that a header cannot carry (an unsafe integer);
+ * such a call would fail the server's argument check anyway.
  */
 export function buildMcpParamHeaders(specs: readonly McpParamHeaderSpec[], args: unknown): Record<string, string> {
   const headers: Record<string, string> = {};
@@ -306,11 +351,14 @@ function mismatch(message: string): McpHeaderMismatch {
   return { code: MCP_ERROR_HEADER_MISMATCH, message: `Header mismatch: ${message}` };
 }
 
+const INTEGER_HEADER_TEXT = /^-?\d{1,20}(?:\.0{1,20})?$/;
+
 function headerMatchesBody(spec: McpParamHeaderSpec, decoded: string, body: unknown): boolean {
   if (spec.type === "integer") {
-    if (typeof body !== "number" || decoded.trim() === "") return false;
-    const parsed = Number(decoded);
-    return Number.isFinite(parsed) && parsed === body;
+    // Decimal digits only (a trailing `.0` is allowed, as in the spec's `42.0`): no hex, exponents, signs or spaces
+    // that a router reading the header might interpret differently from the body.
+    if (typeof body !== "number" || !INTEGER_HEADER_TEXT.test(decoded)) return false;
+    return Number(decoded) === body;
   }
   if (spec.type === "boolean") return typeof body === "boolean" && decoded === (body ? "true" : "false");
   return typeof body === "string" && decoded === body;
@@ -362,4 +410,35 @@ export function verifyMcpRequestHeaders(
     if (!headerMatchesBody(spec, decoded.value, body)) return mismatch(`${header} header does not match the argument`);
   }
   return null;
+}
+
+/** A tool left out of a modern HTTP server's tool list because of its `x-mcp-header` annotations. */
+export interface McpHeaderToolRejection {
+  name: string;
+  reason: string;
+}
+
+/**
+ * Apply the `x-mcp-header` rules to a `tools/list` page from a Streamable
+ * HTTP server: tools with invalid annotations are left out (the
+ * specification requires it, so one bad tool never blocks the others),
+ * and the header specs of the kept tools are returned by tool name. Callers
+ * log each rejection with its reason.
+ */
+export function partitionToolsByHeaderAnnotations<T extends { name: string; inputSchema?: unknown }>(
+  tools: readonly T[]
+): { kept: T[]; headersByTool: Map<string, McpParamHeaderSpec[]>; rejected: McpHeaderToolRejection[] } {
+  const kept: T[] = [];
+  const headersByTool = new Map<string, McpParamHeaderSpec[]>();
+  const rejected: McpHeaderToolRejection[] = [];
+  for (const tool of tools) {
+    const analysis = analyzeMcpHeaderAnnotations(tool.inputSchema);
+    if (!analysis.ok) {
+      rejected.push({ name: tool.name, reason: analysis.reason });
+      continue;
+    }
+    kept.push(tool);
+    if (analysis.headers.length > 0) headersByTool.set(tool.name, analysis.headers);
+  }
+  return { kept, headersByTool, rejected };
 }

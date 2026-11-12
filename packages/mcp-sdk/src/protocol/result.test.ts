@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { McpInvalidResultError, classifyMcpResult } from "./result";
+import { McpInvalidResultError, classifyMcpResult, withModernResultFields } from "./result";
 
 describe("classifyMcpResult", () => {
   it("treats an absent resultType (legacy servers) as complete", () => {
@@ -62,5 +62,23 @@ describe("classifyMcpResult", () => {
     for (const method of ["tools/list", "server/discover", "resources/list"]) {
       expect(() => classifyMcpResult(method, { resultType: "input_required", requestState: "s" })).toThrow(/only tools\/call/);
     }
+  });
+});
+
+describe("withModernResultFields", () => {
+  it("adds resultType and serverInfo without dropping existing _meta", () => {
+    const original = { content: [], _meta: { traceparent: "t" } };
+    expect(withModernResultFields(original, { name: "L2M", version: "1" })).toEqual({
+      content: [],
+      resultType: "complete",
+      _meta: { traceparent: "t", "io.modelcontextprotocol/serverInfo": { name: "L2M", version: "1" } }
+    });
+    expect(original).toEqual({ content: [], _meta: { traceparent: "t" } });
+    expect(withModernResultFields({ resultType: "input_required", requestState: "s" })).toEqual({ resultType: "input_required", requestState: "s" });
+  });
+
+  it("refuses a __proto__ input request key", () => {
+    const raw = JSON.parse('{"resultType":"input_required","inputRequests":{"__proto__":{"method":"roots/list"}}}') as unknown;
+    expect(() => classifyMcpResult("tools/call", raw)).toThrow(/not allowed/);
   });
 });

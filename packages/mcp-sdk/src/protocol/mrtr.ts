@@ -79,6 +79,7 @@ export class McpMrtrRoundLimitError extends Error {
 export class McpMrtrCanceledError extends Error {
   constructor(message: string) {
     super(message);
+    // The adapters' cancel error has this name; `classifyMcpError` maps it to "canceled", so both report alike.
     this.name = "McpRequestCanceledError";
   }
 }
@@ -114,7 +115,11 @@ export interface McpMrtrOptions {
   clientCapabilities?: Record<string, unknown>;
   /** Default `DEFAULT_MRTR_MAX_ROUNDS`. */
   maxRounds?: number;
-  /** Epoch milliseconds after which no further round starts (the node's own timeout). */
+  /**
+   * Epoch milliseconds after which no further round starts (the node's own
+   * timeout). It does not interrupt a handler that is waiting for a person;
+   * the run's abort signal and the handler's own deadline do that.
+   */
   deadlineAt?: number;
   /** Called once per `input_required` answer, before its input requests are handled. */
   onRound?: (info: McpMrtrRoundInfo) => void;
@@ -194,7 +199,7 @@ export async function answerInputRequest(key: string, request: McpInputRequest, 
       }
     }
     default:
-      return fail("undeclared", `The server asked for ${request.method}, which this client does not support.`, JSON_RPC_METHOD_NOT_FOUND);
+      return fail("undeclared", `The server asked for ${JSON.stringify(request.method.slice(0, 80))}, which this client does not support.`, JSON_RPC_METHOD_NOT_FOUND);
   }
 }
 
@@ -247,7 +252,7 @@ export async function runMrtrRequest(
     });
     const inputResponses: Record<string, unknown> = {};
     for (const [key, request] of entries) {
-      inputResponses[key] = await answerInputRequest(key, request, options);
+      Object.defineProperty(inputResponses, key, { value: await answerInputRequest(key, request, options), enumerable: true, writable: true, configurable: true });
     }
     throwIfCanceled(options.context.signal);
     next = {

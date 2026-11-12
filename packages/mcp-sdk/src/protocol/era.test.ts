@@ -7,7 +7,11 @@ import {
   classifyHttpEraResponse,
   classifyStdioEraProbe,
   httpEraCacheKey,
+  headerMismatchError,
   initializeRejectionIsModern,
+  missingRequestMetaError,
+  missingRequiredClientCapabilityError,
+  unsupportedProtocolVersionError,
   isSupportedModernVersion,
   parseDiscoverResult,
   parseMcpClientProtocolMode,
@@ -89,6 +93,8 @@ describe("modern error recognition", () => {
 describe("HTTP era detection", () => {
   it("treats 2xx and recognised modern errors as modern", () => {
     expect(classifyHttpEraResponse(200, "")).toEqual({ era: "modern" });
+    expect(classifyHttpEraResponse(200, JSON.stringify({ jsonrpc: "2.0", id: 1, result: { resultType: "complete" } }))).toEqual({ era: "modern" });
+    expect(classifyHttpEraResponse(200, "data: {}\n\n")).toEqual({ era: "modern" });
     expect(classifyHttpEraResponse(400, rpcError(-32022, unsupported))).toMatchObject({ era: "modern", error: { kind: "unsupported_version" } });
     expect(classifyHttpEraResponse(400, rpcError(-32020))).toMatchObject({ era: "modern", error: { kind: "header_mismatch" } });
     expect(classifyHttpEraResponse(400, rpcError(-32021, { requiredCapabilities: { sampling: {} } }))).toMatchObject({
@@ -107,6 +113,12 @@ describe("HTTP era detection", () => {
     expect(classifyHttpEraResponse(404, rpcError(-32001))).toEqual({ era: "legacy" });
     expect(classifyHttpEraResponse(405, "")).toEqual({ era: "legacy" });
     expect(classifyHttpEraResponse(406, rpcError(-32022, unsupported))).toEqual({ era: "legacy" });
+  });
+
+  it("does not take a 2xx carrying a non-modern JSON-RPC error (a stateless legacy server) as modern", () => {
+    expect(classifyHttpEraResponse(200, rpcError(-32601))).toEqual({ era: "unknown" });
+    expect(classifyHttpEraResponse(200, rpcError(-32600))).toEqual({ era: "unknown" });
+    expect(classifyHttpEraResponse(200, rpcError(-32022, unsupported))).toMatchObject({ era: "modern", error: { kind: "unsupported_version" } });
   });
 
   it("does not decide the era from credential, rate-limit or server errors", () => {
@@ -179,6 +191,9 @@ describe("server capabilities", () => {
     });
     expect(normalizeServerCapabilities({ tools: {}, extensions: { bad: 1 } })).toEqual({ tools: {} });
     expect(normalizeServerCapabilities({ tools: {}, extensions: [] })).toEqual({ tools: {} });
+    expect(normalizeServerCapabilities({ extensions: { "com.example/big": { blob: "x".repeat(5000) }, "com.example/ok": {} } })).toEqual({
+      extensions: { "com.example/ok": {} }
+    });
   });
 });
 
@@ -204,7 +219,11 @@ describe("era cache", () => {
   });
 
   it("keys HTTP servers by origin and path, stdio servers by a hash of the launch plan", () => {
-    expect(httpEraCacheKey("https://Example.com:443/mcp?token=abc#x")).toBe("http:https://example.com/mcp");
+    expect(httpEraCacheKey("https://Example.com:443/mcp#x")).toBe("http:https://example.com/mcp");
+    const withQuery = httpEraCacheKey("https://example.com/mcp?token=abc");
+    expect(withQuery).toMatch(/^http:https:\/\/example\.com\/mcp\?[0-9a-f]{32}$/);
+    expect(withQuery).not.toContain("abc");
+    expect(httpEraCacheKey("https://example.com/mcp?server=b")).not.toBe(httpEraCacheKey("https://example.com/mcp?server=a"));
     expect(httpEraCacheKey("https://example.com/other")).not.toBe(httpEraCacheKey("https://example.com/mcp"));
     const plan = { command: "npx", args: ["server"], env: { API_KEY: "s3cret" } };
     const key = stdioEraCacheKey(plan);
@@ -212,5 +231,21 @@ describe("era cache", () => {
     expect(key).not.toContain("s3cret");
     expect(stdioEraCacheKey({ env: { API_KEY: "s3cret" }, args: ["server"], command: "npx" })).toBe(key);
     expect(stdioEraCacheKey({ ...plan, args: ["other"] })).not.toBe(key);
+  });
+});
+
+describe("modern error bodies (server side)", () => {
+  it("builds the spec errors so a dual-era client recognises them", () => {
+    const unsupportedBody = unsupportedProtocolVersionError("1900-01-01", ["2026-07-28", "2025-11-25"]);
+    expect(unsupportedBody).toEqual({ code: -32022, message: "Unsupported protocol version", data: { supported: ["2026-07-28", "2025-11-25"], requested: "1900-01-01" } });
+    const body = (error: unknown) => JSON.stringify({ jsonrpc: "2.0", id: 1, error });
+    expect(classifyHttpEraResponse(400, body(unsupportedBody))).toMatchObject({ era: "modern", error: { kind: "unsupported_version", supported: ["2026-07-28", "2025-11-25"] } });
+    expect(classifyHttpEraResponse(400, body(missingRequiredClientCapabilityError({ elicitation: {} })))).toMatchObject({
+      era: "modern",
+      error: { kind: "missing_client_capability", requiredCapabilities: { elicitation: {} } }
+    });
+    expect(classifyHttpEraResponse(400, body(headerMismatchError("Header mismatch: x")))).toMatchObject({ era: "modern", error: { kind: "header_mismatch" } });
+    expect(missingRequestMetaError(["io.modelcontextprotocol/clientCapabilities"])).toMatchObject({ code: -32602 });
+    expect(unsupportedProtocolVersionError(7, [])).toMatchObject({ data: { requested: "7" } });
   });
 });

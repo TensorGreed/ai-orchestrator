@@ -91,7 +91,8 @@ export function normalizeServerCapabilities(raw: unknown): McpServerCapabilities
     // MCP 2026-07-28 — extension identifiers with their settings objects; entries that are not objects are dropped.
     const extensions: Record<string, Record<string, unknown>> = {};
     for (const [id, settings] of Object.entries(record.extensions).slice(0, 50)) {
-      if (id.length <= 200 && isRecord(settings)) extensions[id] = settings;
+      // Settings are kept only while small: they end up in the stored catalog and in cassettes.
+      if (id.length <= 200 && id !== "__proto__" && isRecord(settings) && JSON.stringify(settings).length <= 4096) extensions[id] = settings;
     }
     if (Object.keys(extensions).length > 0) out.extensions = extensions;
   }

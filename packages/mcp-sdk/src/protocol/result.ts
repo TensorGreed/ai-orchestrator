@@ -1,4 +1,4 @@
-import { isMrtrMethod } from "./constants";
+import { MCP_META_SERVER_INFO, isMrtrMethod } from "./constants";
 
 /**
  * MCP 2026-07-28 — `resultType`. Every modern result says what it is:
@@ -43,18 +43,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseInputRequired(method: string, result: Record<string, unknown>): McpInputRequiredResult {
   if (!isMrtrMethod(method)) {
-    throw new McpInvalidResultError(`The server answered ${method} with input_required, which only tools/call, resources/read and prompts/get allow.`);
+    throw new McpInvalidResultError(`The server answered ${JSON.stringify(method.slice(0, 80))} with input_required, which only tools/call, resources/read and prompts/get allow.`);
   }
   const inputRequests: Record<string, McpInputRequest> = {};
   if (result.inputRequests !== undefined) {
     if (!isRecord(result.inputRequests)) throw new McpInvalidResultError("input_required result has an inputRequests that is not an object.");
     for (const [key, raw] of Object.entries(result.inputRequests)) {
       if (!isRecord(raw) || typeof raw.method !== "string" || !raw.method) {
-        throw new McpInvalidResultError(`input_required result has an input request '${key}' without a method.`);
+        throw new McpInvalidResultError(`input_required result has an input request ${JSON.stringify(key.slice(0, 80))} without a method.`);
       }
       if (raw.params !== undefined && !isRecord(raw.params)) {
-        throw new McpInvalidResultError(`input_required result has an input request '${key}' whose params are not an object.`);
+        throw new McpInvalidResultError(`input_required result has an input request ${JSON.stringify(key.slice(0, 80))} whose params are not an object.`);
       }
+      if (key === "__proto__") throw new McpInvalidResultError("input_required result has an input request key that is not allowed.");
       inputRequests[key] = { method: raw.method, ...(raw.params !== undefined ? { params: raw.params as Record<string, unknown> } : {}) };
     }
   }
@@ -83,4 +84,22 @@ export function classifyMcpResult(method: string, result: unknown): ClassifiedMc
   if (type === MCP_RESULT_TYPE_INPUT_REQUIRED) return { resultType: "input_required", inputRequired: parseInputRequired(method, result) };
   const shown = typeof type === "string" ? `'${type.slice(0, 64)}'` : `of type ${Array.isArray(type) ? "array" : typeof type}`;
   throw new McpInvalidResultError(`The server's ${method} result has resultType ${shown}, which this client does not support.`);
+}
+
+/**
+ * A result as a modern server sends it: `resultType: "complete"` unless the
+ * result already names one, and `serverInfo` merged into its `_meta`
+ * (existing `_meta` keys are kept). The input is not modified.
+ */
+export function withModernResultFields(
+  result: Record<string, unknown>,
+  serverInfo?: { name: string; version: string; [key: string]: unknown }
+): Record<string, unknown> {
+  const meta = isRecord(result._meta) ? { ...result._meta } : undefined;
+  const nextMeta = serverInfo ? { ...(meta ?? {}), [MCP_META_SERVER_INFO]: serverInfo } : meta;
+  return {
+    ...result,
+    resultType: typeof result.resultType === "string" ? result.resultType : MCP_RESULT_TYPE_COMPLETE,
+    ...(nextMeta ? { _meta: nextMeta } : {})
+  };
 }

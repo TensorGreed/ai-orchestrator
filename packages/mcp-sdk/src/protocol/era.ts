@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { McpClientProtocolMode, McpProtocolEra, McpServerCapabilities } from "@ai-orchestrator/shared";
-import { JSON_RPC_METHOD_NOT_FOUND, normalizeServerCapabilities } from "../client-features";
+import { JSON_RPC_INVALID_PARAMS, JSON_RPC_METHOD_NOT_FOUND, normalizeServerCapabilities } from "../client-features";
 import {
   MCP_ERROR_HEADER_MISMATCH,
   MCP_ERROR_MISSING_REQUIRED_CLIENT_CAPABILITY,
@@ -127,6 +127,41 @@ export function parseMcpModernError(error: unknown): McpModernProtocolError | nu
   }
 }
 
+/** A JSON-RPC error object as an MCP response carries it. */
+export interface McpJsonRpcErrorObject {
+  code: number;
+  message: string;
+  data?: unknown;
+}
+
+/** -32022 for a request whose version the server does not speak (answer with HTTP 400). */
+export function unsupportedProtocolVersionError(requested: unknown, supported: readonly string[]): McpJsonRpcErrorObject {
+  return {
+    code: MCP_ERROR_UNSUPPORTED_PROTOCOL_VERSION,
+    message: "Unsupported protocol version",
+    data: { supported: [...supported], requested: typeof requested === "string" ? requested.slice(0, 64) : String(requested).slice(0, 64) }
+  };
+}
+
+/** -32021 when a request needs client capabilities it did not declare (answer with HTTP 400). */
+export function missingRequiredClientCapabilityError(requiredCapabilities: Record<string, unknown>, message?: string): McpJsonRpcErrorObject {
+  return {
+    code: MCP_ERROR_MISSING_REQUIRED_CLIENT_CAPABILITY,
+    message: message ?? `Missing required client capability: ${Object.keys(requiredCapabilities).join(", ")}`,
+    data: { requiredCapabilities }
+  };
+}
+
+/** -32020 for headers that do not match the body or are missing (answer with HTTP 400). */
+export function headerMismatchError(message: string): McpJsonRpcErrorObject {
+  return { code: MCP_ERROR_HEADER_MISMATCH, message };
+}
+
+/** -32602 for a modern request whose required `_meta` keys are missing (answer with HTTP 400). */
+export function missingRequestMetaError(missing: readonly string[]): McpJsonRpcErrorObject {
+  return { code: JSON_RPC_INVALID_PARAMS, message: `Invalid params: _meta is missing ${missing.join(", ")}`, data: { missing: [...missing] } };
+}
+
 /** The `error` member of a JSON-RPC response body, or null when the body is not one. */
 function jsonRpcErrorOf(bodyText: string): Record<string, unknown> | null {
   if (!bodyText.trim()) return null;
@@ -151,14 +186,22 @@ export type McpHttpEraVerdict =
 const ERA_NEUTRAL_STATUSES = new Set([401, 403, 407, 408, 429]);
 
 /**
- * Classify the HTTP answer to a modern request. 2xx is modern. 400 with a
+ * Classify the HTTP answer to a modern request. 2xx is modern, unless the
+ * body is a JSON-RPC error that is not a recognised modern one (a stateless
+ * legacy server can answer an unknown method with HTTP 200): that is
+ * unknown, and the caller should not cache an era from it. 400 with a
  * recognised modern error, or 404 with a JSON-RPC -32601 body (a modern
  * server that does not implement the method), is modern. Other 4xx answers
  * are legacy, except those about credentials, timeouts and rate limits;
  * those and 5xx are unknown.
  */
 export function classifyHttpEraResponse(status: number, bodyText: string): McpHttpEraVerdict {
-  if (status >= 200 && status < 300) return { era: "modern" };
+  if (status >= 200 && status < 300) {
+    const error = jsonRpcErrorOf(bodyText);
+    if (!error) return { era: "modern" };
+    const modern = parseMcpModernError(error);
+    return modern ? { era: "modern", error: modern } : { era: "unknown" };
+  }
   if (status >= 500 || ERA_NEUTRAL_STATUSES.has(status)) return { era: "unknown" };
   if (status < 400) return { era: "unknown" };
   const error = jsonRpcErrorOf(bodyText);
@@ -225,6 +268,7 @@ export interface McpDiscoverResult {
 /** A `server/discover` result, or null when `raw` is not one (no `supportedVersions` list). */
 export function parseDiscoverResult(raw: unknown): McpDiscoverResult | null {
   if (!isRecord(raw) || !Array.isArray(raw.supportedVersions)) return null;
+  // A discover answer with another resultType is not a discover result; for the stdio probe that means legacy.
   if (raw.resultType !== undefined && raw.resultType !== "complete") return null;
   const supportedVersions = raw.supportedVersions.filter((entry): entry is string => typeof entry === "string");
   const meta = isRecord(raw._meta) ? raw._meta : {};
@@ -307,11 +351,16 @@ export class McpEraCache {
   }
 }
 
-/** Era cache key of an HTTP server: the endpoint's origin and path (query and fragment ignored). */
+/**
+ * Era cache key of an HTTP server: the endpoint's origin, path and query
+ * (some hosts select the server by a query parameter). The fragment is
+ * ignored. The query is hashed so tokens in it never sit in the key.
+ */
 export function httpEraCacheKey(endpoint: string): string {
   try {
     const url = new URL(endpoint);
-    return `http:${url.origin}${url.pathname}`;
+    const query = url.search ? `?${createHash("sha256").update(url.search, "utf-8").digest("hex").slice(0, 32)}` : "";
+    return `http:${url.origin}${url.pathname}${query}`;
   } catch {
     return `http:${endpoint}`;
   }

@@ -2,7 +2,10 @@ import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 import {
+  MAX_MCP_SCHEMA_DEPTH,
   McpHeaderValueError,
+  McpSchemaTooDeepError,
+  partitionToolsByHeaderAnnotations,
   analyzeMcpHeaderAnnotations,
   buildMcpParamHeaders,
   buildMcpStandardHeaders,
@@ -14,6 +17,7 @@ import {
   type McpParamHeaderSpec
 } from "./headers";
 import { modernRequestMetaFor, withRequestMeta } from "./meta";
+import { classifyMcpError } from "../errors";
 
 describe("header value encoding", () => {
   it("matches the spec's encoding table", () => {
@@ -102,7 +106,7 @@ describe("x-mcp-header annotations", () => {
     [
       "duplicate ignoring case",
       { properties: { a: { type: "string", "x-mcp-header": "Region" }, b: { type: "string", "x-mcp-header": "REGION" } } },
-      /repeats 'Region'/
+      /repeats "Region"/
     ],
     ["on the root", { type: "object", "x-mcp-header": "Root", properties: {} }, /reachable/],
     ["through items", { properties: { list: { type: "array", items: { type: "string", "x-mcp-header": "A" } } } }, /reachable/],
@@ -171,9 +175,15 @@ describe("Mcp-Param headers", () => {
 
   it("refuses values a header cannot carry", () => {
     expect(() => buildMcpParamHeaders(specs, { limits: { max: 2 ** 53 } })).toThrow(McpHeaderValueError);
-    expect(() => buildMcpParamHeaders(specs, { limits: { max: Number.NaN } })).toThrow(/finite/);
-    expect(() => buildMcpParamHeaders(specs, { region: { nested: true } })).toThrow(/string, integer or boolean/);
+    expect(() => buildMcpParamHeaders(specs, { limits: { max: Number.NaN } })).toThrow(/must be an integer/);
+    expect(() => buildMcpParamHeaders(specs, { limits: { max: 1.5 } })).toThrow(/must be an integer/);
+    expect(() => buildMcpParamHeaders(specs, { limits: { max: "42" } })).toThrow(/must be an integer/);
+    expect(() => buildMcpParamHeaders(specs, { region: { nested: true } })).toThrow(/must be a string/);
+    expect(() => buildMcpParamHeaders(specs, { region: 5 })).toThrow(/must be a string/);
     expect(() => buildMcpParamHeaders(specs, { region: ["a"] })).toThrow(McpHeaderValueError);
+    expect(() => buildMcpParamHeaders(specs, { dry: "true" })).toThrow(/true or false/);
+    expect(classifyMcpError(new McpHeaderValueError("x", "Mcp-Param-X"))).toBe("invalid_arguments");
+    expect(buildMcpParamHeaders(specs, { limits: { max: -0 } })).toEqual({ "Mcp-Param-Max": "0" });
   });
 });
 
@@ -210,6 +220,10 @@ describe("verifyMcpRequestHeaders", () => {
     ["param missing while body has it", { ...good, "mcp-param-region": undefined }, /Mcp-Param-Region header is required/],
     ["param differs", { ...good, "mcp-param-region": "eu-west1" }, /Mcp-Param-Region header does not match/],
     ["integer differs", { ...good, "mcp-param-n": "43" }, /Mcp-Param-N header does not match/],
+    ["integer in hex", { ...good, "mcp-param-n": "0x2A" }, /Mcp-Param-N header does not match/],
+    ["integer with exponent", { ...good, "mcp-param-n": "4.2e1" }, /Mcp-Param-N header does not match/],
+    ["integer with plus sign", { ...good, "mcp-param-n": "+42" }, /Mcp-Param-N header does not match/],
+    ["integer with inner space", { ...good, "mcp-param-n": "4 2" }, /Mcp-Param-N header does not match/],
     ["param set without a body value", { ...good, "mcp-param-absent": "x" }, /Mcp-Param-Absent header is set/],
     ["repeated header", { ...good, "mcp-name": ["execute_sql", "x"] }, /contains characters/]
   ];
@@ -260,5 +274,49 @@ describe("verifyMcpRequestHeaders", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
     expect(seen).toBeNull();
+  });
+});
+
+describe("review hardening", () => {
+  it("trims header whitespace in linear time and accepts tabs inside plain values", () => {
+    const hostile = `a${" \t".repeat(8000)}x`;
+    const started = performance.now();
+    expect(decodeMcpHeaderValue(hostile).ok).toBe(true);
+    expect(performance.now() - started).toBeLessThan(50);
+    expect(decodeMcpHeaderValue("\t a\tb \t")).toEqual({ ok: true, value: "a\tb", encoded: false });
+  });
+
+  it("refuses schemas nested beyond the depth cap instead of overflowing the stack", () => {
+    let deep: Record<string, unknown> = { type: "string" };
+    for (let i = 0; i < 10_000; i += 1) deep = { type: "object", properties: { a: deep } };
+    const analysis = analyzeMcpHeaderAnnotations(deep);
+    expect(analysis).toEqual({ ok: false, reason: expect.stringMatching(new RegExp(`more than ${MAX_MCP_SCHEMA_DEPTH} levels`)) });
+    expect(() => stripMcpHeaderAnnotations(deep)).toThrow(McpSchemaTooDeepError);
+    let shallow: Record<string, unknown> = { type: "string", "x-mcp-header": "Deep" };
+    for (let i = 0; i < 20; i += 1) shallow = { type: "object", properties: { a: shallow } };
+    expect(analyzeMcpHeaderAnnotations(shallow)).toMatchObject({ ok: true, headers: [{ name: "Deep", path: Array(20).fill("a") }] });
+  });
+
+  it("keeps __proto__ property names when stripping and quotes server text in reasons", () => {
+    const schema = JSON.parse('{"type":"object","properties":{"__proto__":{"type":"string","x-mcp-header":"P"}}}') as Record<string, unknown>;
+    const stripped = stripMcpHeaderAnnotations(schema) as { properties: Record<string, unknown> };
+    expect(Object.hasOwn(stripped.properties, "__proto__")).toBe(true);
+    expect(JSON.stringify(stripped)).toBe('{"type":"object","properties":{"__proto__":{"type":"string"}}}');
+    const analysis = analyzeMcpHeaderAnnotations({ properties: { "a\nFAKE LOG LINE": { type: "string", "x-mcp-header": "Bad Name\r\n" } } });
+    expect(analysis.ok).toBe(false);
+    if (!analysis.ok) expect(analysis.reason).not.toMatch(/[\r\n]/);
+  });
+
+  it("partitions a tool list: invalid annotations drop only that tool", () => {
+    const tools = [
+      { name: "ok", inputSchema: { type: "object", properties: { region: { type: "string", "x-mcp-header": "Region" } } } },
+      { name: "plain", inputSchema: { type: "object", properties: {} } },
+      { name: "bad", inputSchema: { type: "object", properties: { n: { type: "number", "x-mcp-header": "N" } } } },
+      { name: "none" }
+    ];
+    const { kept, headersByTool, rejected } = partitionToolsByHeaderAnnotations(tools);
+    expect(kept.map((tool) => tool.name)).toEqual(["ok", "plain", "none"]);
+    expect([...headersByTool.entries()]).toEqual([["ok", [{ name: "Region", path: ["region"], type: "string" }]]]);
+    expect(rejected).toEqual([{ name: "bad", reason: expect.stringMatching(/string, integer or boolean/) }]);
   });
 });
