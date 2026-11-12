@@ -422,8 +422,8 @@ const envSchema = z.object({
    */
   MCP_CLIENT_LEGACY_SAFE_REISSUE: booleanFromEnv.default(true),
   /**
-   * MCP 2026-07-28 — how long a stdio server whose protocol is Auto gets to answer the `server/discover` probe
-   * before L2M opens it with `initialize` instead (milliseconds; never longer than the server's own timeout).
+   * MCP 2026-07-28 — how long a server (stdio or HTTP) whose protocol is Auto gets to answer the `server/discover`
+   * probe before L2M opens it with `initialize` instead (milliseconds; never longer than the server's own timeout).
    */
   MCP_CLIENT_ERA_PROBE_TIMEOUT_MS: z.coerce.number().int().min(500).max(60_000).default(5_000),
   /**

@@ -164,8 +164,11 @@ interface RequestTimer {
 }
 
 const SESSION_TTL_MS = 5 * 60 * 1000;
-/** Longest an `auto` connection waits for its `server/discover` probe before going on with `initialize`. */
-const ERA_PROBE_TIMEOUT_MS = 10_000;
+/**
+ * Longest an `auto` connection waits for its `server/discover` probe before going on with `initialize`, unless
+ * `HttpMcpProtocolOptions.probeTimeoutMs` says otherwise (the API passes MCP_CLIENT_ERA_PROBE_TIMEOUT_MS).
+ */
+export const DEFAULT_HTTP_ERA_PROBE_TIMEOUT_MS = 10_000;
 /** Servers whose tool annotations the adapter remembers across sessions, for the safe re-issue rule. */
 const MAX_REMEMBERED_TOOL_LISTS = 500;
 const SESSION_CACHE_PREFIX = "http_mcp_session:";
@@ -736,6 +739,11 @@ export interface HttpMcpProtocolOptions {
    * servers always follow the safe rule.
    */
   legacySafeReissue?: boolean;
+  /**
+   * Longest an `auto` connection waits for its `server/discover` probe before going on with `initialize`, in
+   * milliseconds; never longer than the server's own timeout. Default `DEFAULT_HTTP_ERA_PROBE_TIMEOUT_MS`.
+   */
+  probeTimeoutMs?: number;
   /** Observed eras by endpoint, shared across runs. Defaults to one cache per adapter. */
   eraCache?: McpEraCache;
   /** Where warnings go (tools left out for invalid `x-mcp-header` annotations). Default `console.warn`. */
@@ -918,6 +926,12 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
     }
   }
 
+  /** The `server/discover` probe's own cap (the server's timeout still applies when it is shorter). */
+  private probeTimeoutMs(): number {
+    const configured = this.protocol.probeTimeoutMs;
+    return typeof configured === "number" && Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : DEFAULT_HTTP_ERA_PROBE_TIMEOUT_MS;
+  }
+
   private async withSessionOnce<T>(
     config: MCPServerConfig,
     context: MCPExecutionContext,
@@ -1078,7 +1092,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
             ...buildMcpStandardHeaders(session.protocolVersion as string, "server/discover", params),
             ...traceContextHeaders(carrier)
           }),
-          Math.min(session.timeoutMs, ERA_PROBE_TIMEOUT_MS),
+          Math.min(session.timeoutMs, this.probeTimeoutMs()),
           { ...(context.signal ? { signal: context.signal } : {}), maxRetries: 0 }
         );
         const discover = parseDiscoverResult(response.result);

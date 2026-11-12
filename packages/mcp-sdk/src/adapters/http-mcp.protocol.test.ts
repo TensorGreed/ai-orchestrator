@@ -319,6 +319,20 @@ describe("auto mode", () => {
     }
   });
 
+  it("waits for the probe only as long as probeTimeoutMs (MCP_CLIENT_ERA_PROBE_TIMEOUT_MS) says", async () => {
+    const legacyHandler = legacyServer();
+    const { endpoint, seen } = await startServer((rpc, headers, all) => (rpc.method === "server/discover" ? { hang: true } : legacyHandler(rpc, headers, all)));
+    const adapter = new HttpMCPServerAdapter({ protocol: { probeTimeoutMs: 300 } });
+    // The server's own timeout is far longer: the probe's cap decides.
+    const config = configFor(endpoint, { protocolMode: "auto", timeoutMs: 30_000 });
+    const started = Date.now();
+    expect(await adapter.invokeTool("lookup", {}, config, contextOf())).toMatchObject({ ok: true, output: "legacy" });
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(280);
+    expect(elapsed).toBeLessThan(5_000);
+    expect(methods(seen).slice(0, 2)).toEqual(["server/discover", "initialize"]);
+  });
+
   it("caches legacy when server/discover is answered with method not found at HTTP 200", async () => {
     const legacyHandler = legacyServer();
     const { endpoint, seen } = await startServer((rpc, headers, all) =>

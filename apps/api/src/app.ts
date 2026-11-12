@@ -1877,11 +1877,13 @@ export async function createApp(
     runtimeGuard: mcpRuntimeGuard,
     // Phase 6.4 — built-in tools reach the outside only through the outbound URL checks.
     builtInTools: { fetch: (url, init) => guardedFetch(url, init, { config: outboundGuard, resolver: nodeDnsResolver }) },
-    // MCP 2026-07-28 — protocol era default, input round limit and the safe re-issue rule of the HTTP client.
+    // MCP 2026-07-28 — protocol era default, input round limit, the safe re-issue rule and the wait for the
+    // server/discover probe of the HTTP client.
     httpProtocol: {
       defaultMode: config.MCP_CLIENT_PROTOCOL_DEFAULT,
       mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
-      legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE
+      legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE,
+      probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS
     },
     // MCP 2026-07-28 — the same settings for stdio servers, plus the wait for their server/discover probe.
     stdioProtocol: {
