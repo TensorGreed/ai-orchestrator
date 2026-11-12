@@ -7,6 +7,8 @@ description: "Approval gates in L2M pause a run until a person decides: who may 
 
 An **Approval Gate** pauses a run until a person decides. You choose who may decide, what happens when nobody does, and which values the approver may change before the run goes on. Every request and decision is audited, recorded in the run's signed manifest and sent through your notification channels.
 
+Concepts: <Term id="human-in-the-loop">human in the loop</Term>.
+
 The paused run is saved like any other approval pause, so it survives restarts. Nothing leaves your deployment.
 
 ## The Approval Gate node

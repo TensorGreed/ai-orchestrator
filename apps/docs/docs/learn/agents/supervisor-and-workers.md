@@ -104,7 +104,7 @@ More agents mean more places for a change to break something. The supervisor mig
 - **Keep a known-good run.** Record a run's MCP calls and save it as a [golden run](/product/golden-runs). After a prompt or model change, replay against it: MCP calls are answered from the recording, so the replay has no live side effects, and you see what changed in the output, the tool calls and the cost.
 - **Gate releases on it.** A [release gate](/product/release-gate) can require replays to pass before a new version is published. See [CI for AI agents](/guides/ci-for-ai-agents).
 
-These testing features are optional. A supervisor workflow runs without any of them.
+[Regression testing AI agents](/learn/testing/regression-testing-agents) explains golden runs and replay in more depth. These testing features are optional. A supervisor workflow runs without any of them.
 
 ## The pattern in L2M
 
@@ -113,7 +113,7 @@ These testing features are optional. A supervisor workflow runs without any of t
 - A worker runs with its own chat model, tools, memory and `maxIterations`, and its user prompt is the `task_prompt` the supervisor wrote.
 - [Tool policy](/product/mcp-tool-policy) and approvals apply inside workers too. If a worker's tool call waits for a person's [approval](/product/approvals), the supervisor's run pauses with it.
 
-## Try it
+## Try it in L2M
 
 **Watch it in your browser.** The demo link on this page opens the research team in the studio and plays the recorded run above, worker by worker.
 

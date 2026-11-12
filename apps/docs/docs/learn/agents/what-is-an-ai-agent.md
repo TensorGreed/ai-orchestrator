@@ -99,7 +99,7 @@ Every iteration, model call and tool call shows on the run's trace. Governance i
 
 When one agent has too many jobs, split it: a supervisor agent can hand parts of the task to worker agents, each with its own model and tools. See [supervisor and worker agents](/learn/agents/supervisor-and-workers).
 
-## Try it
+## Try it in L2M
 
 **Watch the loop in your browser.** The live demo's support agent has a knowledge-base tool and a calculator on a small MCP server. Its recorded run shows the same pattern as the worked example, with a knowledge-base lookup first: a calculator call that fails, a retry that works, then the answer. It was recorded with a scripted stand-in model, so no key is needed to replay it; the stand-in's retry is scripted, where a real model would decide it on its own.
 

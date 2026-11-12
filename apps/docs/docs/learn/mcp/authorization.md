@@ -86,6 +86,8 @@ If an MCP server calls other APIs, it acts as an OAuth client toward them, with 
 
 The confused deputy problem is the related attack on MCP proxy servers. A proxy that uses one static client id at a third-party API, and also lets MCP clients register dynamically, can be tricked into sending an authorization code to an attacker when the third party remembers an earlier consent. The fix in the security best practices is consent per client at the proxy, exact redirect URI matching, and a single-use `state` that is set only after consent.
 
+Authorization is one of several MCP risks. [MCP security risks](/learn/security/mcp-security-risks) covers the others, such as tool poisoning and server-side request forgery, and what L2M does about each.
+
 ## Scopes and step-up
 
 Scopes say what a token may do, such as `files:read` or `files:write`. The specification asks for the least privilege that works:

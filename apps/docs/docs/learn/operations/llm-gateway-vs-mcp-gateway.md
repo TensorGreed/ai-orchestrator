@@ -10,7 +10,7 @@ socialCard: true
 
 # LLM gateway vs MCP gateway
 
-An <Term id="llm-gateway">LLM gateway</Term> (often called an AI gateway) sits between your applications and the model providers: it decides which model a caller may use, with which key, how often and at what cost. An <Term id="mcp-gateway">MCP gateway</Term> sits between AI agents and the tools they call over the <Term id="model-context-protocol">Model Context Protocol</Term>: it decides which tools a client may see and call, with which arguments, and records each call. One governs what the model is asked; the other governs what the agent does.
+An <Term id="llm-gateway">LLM gateway</Term> (often called an AI gateway) sits between your applications and the model providers: it decides which model a caller may use, with which key, how often and at what cost. An <Term id="mcp-gateway">MCP gateway</Term> sits between AI agents and the tools they call over the <Term id="model-context-protocol">Model Context Protocol</Term>: it decides which tools a client may see and call, with which arguments, and records each call. One governs what the model is asked; the other governs what the agent does. If MCP is new to you, start with [what MCP is](/learn/mcp/what-is-mcp).
 
 ## Two kinds of traffic
 

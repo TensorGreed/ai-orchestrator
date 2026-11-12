@@ -103,4 +103,4 @@ Every budget that applies to a client (its own, its toolsets' projects', the dep
 
 - [MCP gateway: budgets and rate limits](./mcp-gateway.md#budgets-and-rate-limits)
 - [MCP tool-call telemetry](./mcp-tool-call-telemetry.md)
-- Concepts: [Controlling LLM and agent costs](../learn/operations/llm-cost-control)
+- Concepts: [Controlling LLM and agent costs](../learn/operations/llm-cost-control), [budget](../glossary/budget) (glossary)

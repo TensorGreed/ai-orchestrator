@@ -79,7 +79,7 @@ A gate is only as strong as its cases. On an enforced gate, a builder could make
 - Hand-written cases without a golden run are skipped by replay jobs; run them with an eval run instead.
 - It is not on by default. Without golden sets and a gate, workflows save and run as before.
 
-## Try it
+## Try it in L2M
 
 Open the FAQ answerer in the [live demo](https://lsquarem.com/demo/?mode=editor&workflowId=wf-demo-faq-release){target="_self"} to watch a release gate block a change, with no sign-up. To set it up on your own deployment, follow [CI for AI agents](/guides/ci-for-ai-agents). The reference pages are [Golden runs and replay](/product/golden-runs), [Golden sets, replay jobs and scorers](/product/golden-sets), [Replay in CI and the release gate](/product/replay-and-release-gate) and [Release gate and publish](/product/release-gate).
 

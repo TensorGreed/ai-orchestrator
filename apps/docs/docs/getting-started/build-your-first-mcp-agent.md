@@ -129,6 +129,8 @@ The `mock-mcp` adapter is in-process and ships with a few demo tools (`get_curre
 
 That's the whole loop: visual workflow + agent runtime + MCP tool calls. See [the MCP integration page](/extensions/mcp) for transport options and best practices, and [agent loop](/runtime/agent-loop) for the iteration semantics.
 
+Next steps: the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) walks through this workflow node by node and lists ways to extend it, and the glossary defines an [MCP tool](/glossary/mcp-tool).
+
 ## What if it didn't work
 
 - Browser shows "blank page" or "API unreachable" → make sure both the API (`pnpm --filter @ai-orchestrator/api dev`) and Web (`pnpm --filter @ai-orchestrator/web dev`) processes are running. `pnpm dev` runs both, but your terminal needs to stay open.

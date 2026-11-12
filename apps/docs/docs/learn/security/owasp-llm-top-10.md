@@ -119,7 +119,7 @@ Each entry below has four parts: what OWASP means, what it looks like in an agen
 
 **A control.** Limit iterations, time, tokens and spend per run, per user and per client; rate-limit public entry points.
 
-**In L2M.** Optional [budgets](/product/budgets#scopes) cap spend or tokens per project, workflow, user or gateway client and either warn or block. Gateway clients and registered servers can have rate limits. Agent nodes have an iteration limit and runs have an execution timeout.
+**In L2M.** Optional [budgets](/product/budgets#scopes) cap spend or tokens per project, workflow, user or gateway client and either warn or block. Gateway clients and registered servers can have rate limits. Agent nodes have an iteration limit and runs have an execution timeout. [Controlling LLM and agent costs](/learn/operations/llm-cost-control) goes through these caps in detail.
 
 ## The agentic list (2026)
 

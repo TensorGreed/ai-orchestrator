@@ -7,6 +7,8 @@ description: "The content rules engine inspects content flowing between users, m
 
 The content rules engine checks AI traffic. It inspects what flows between users, models and tools, decides what to do with it, and records why. The engine lives in `@ai-orchestrator/guard-sdk` as a standalone library: it knows nothing about workflows, nodes or HTTP, and it never makes a network call of its own.
 
+Concepts: [Prompt injection](/learn/security/prompt-injection) and [the OWASP Top 10 for LLM apps](/learn/security/owasp-llm-top-10) explain the attacks these checks address.
+
 This page describes the engine. [Content rules in workflows](./content-rules.md) covers the Content Rules node, the agent rules port, stored rule sets and bindings, the protection port and rule events. What is still to come is listed under [Not yet available](#not-yet-available).
 
 ## Concepts

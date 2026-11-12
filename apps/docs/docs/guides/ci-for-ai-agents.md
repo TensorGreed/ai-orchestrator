@@ -101,4 +101,5 @@ pnpm l2m release publish "$WORKFLOW_ID" --version 12 --run "$(jq -r .id job.json
 - Reference: [Golden runs and replay](../product/golden-runs.md), [Golden sets, replay jobs and scorers](../product/golden-sets.md), [Release gate and publish](../product/release-gate.md), [Replay in CI and the release gate](../product/replay-and-release-gate.md)
 - Guides: [Test MCP servers in CI](./test-mcp-servers-in-ci.md), [Human approval for agent tool calls](./human-approval-for-agent-tool-calls.md)
 - Watch a release gate block a change in the [live demo](https://lsquarem.com/demo/?mode=editor&workflowId=wf-demo-faq-release){target="_self"}
+- Concepts: [Regression testing AI agents](../learn/testing/regression-testing-agents), [AI agent evals](../learn/testing/agent-evals)
 - Background: [CI for agents: golden runs, replay and a release gate](../blog/ci-for-agents-replay-and-release-gate) (blog)

@@ -7,6 +7,8 @@ description: "Expose any L2M workflow as a Model Context Protocol tool with the 
 
 The `mcp_server_trigger` node ("Expose as MCP Tool") turns any L2M workflow into a Model Context Protocol tool that other agents can call. The agent doesn't know, and doesn't need to know, that the tool it's calling is a multi-node workflow with its own LLMs, retrieval, branching and side effects.
 
+Concepts: an <Term id="mcp-server">MCP server</Term> is what this trigger turns a workflow into. The [workflow as an MCP tool recipe](/recipes/workflow-as-mcp-tool) builds one end to end.
+
 This is the **agent → workflow → agent** composition pattern, and it's why L2M is MCP-native rather than only an MCP client.
 
 ## Why this matters

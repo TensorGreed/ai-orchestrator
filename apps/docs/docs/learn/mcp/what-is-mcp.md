@@ -132,7 +132,7 @@ On protocol versions: the gateway speaks 2025-11-25, 2025-06-18 and 2025-03-26, 
 
 The gaps listed above are covered by optional L2M features: [tool policy](/product/mcp-tool-policy) to allow, deny or require approval per tool, [approvals](/product/approvals) before write tools, and [tool-call telemetry](/product/mcp-tool-call-telemetry). A simple workflow needs none of them.
 
-## Try it
+## Try it in L2M
 
 The live demo has a support agent with two MCP tools on a small HTTP server: a knowledge-base lookup and a calculator. Its recorded run shows the full exchange: one `lookup_kb` call, then a calculator call that fails with `isError: true` because the model passed words instead of digits, then a retry with `49*12*12` that works. The run was recorded with a scripted stand-in model, so the demo needs no key.
 
