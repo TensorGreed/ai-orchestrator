@@ -22,7 +22,7 @@ related: ["agent-loop","tool-calling","ai-agent","mcp-tool"]
 
 **Needs:** No API key · **Time:** 5 minutes · **Nodes:** 6
 
-A manual trigger starts one Agent Orchestrator node, which can call two tools from the bundled mock MCP server: `get_current_time` and `calculator`. The chat model is the built-in echo provider, so the workflow imports and runs with no key. Echo is not a real model: it never asks for a tool, so a local run ends after one model call. To watch the full loop, with its tool calls, play the recorded run in the demo, or attach a real chat model.
+A manual trigger starts one Agent Orchestrator node, which can call two tools from the bundled mock MCP server: `get_current_time` and `calculator`. The chat model is the built-in echo provider, so the workflow imports and runs with no key. Echo is not a real model: it never asks for a tool, so a local run ends after one model call. The demo's recorded run of this workflow shows the same single call. To watch the full loop with tool calls, open the [support agent in the live demo](https://lsquarem.com/demo/?mode=editor&workflowId=wf-demo-support-agent&demoRun=recorded), recorded with a scripted stand-in model, or attach a real chat model.
 
 <div class="recipe-actions">
   <a class="hub-button" href="/docs/recipes/files/mcp-agent-quickstart-flow.json" download>Download the workflow JSON</a>

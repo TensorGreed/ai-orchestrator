@@ -121,7 +121,9 @@ When a run is cancelled or a call times out (the connection's `timeoutMs`, and t
 
 ## OAuth for remote servers
 
-HTTP servers that use OAuth 2.1 can be connected once per registry entry. The connection belongs to the server, not to a user: every workflow that uses the entry calls it with the same token.
+For how the MCP authorization flow works in general, see [MCP authorization](/learn/mcp/authorization).
+
+HTTP servers that use OAuth 2.1 can be connected once per registry entry. By default the connection belongs to the server, not to a user (see [Delegated credentials](#delegated-credentials) for per-user connections): every workflow that uses the entry calls it with the same token.
 
 1. Register the server with auth type **OAuth**. Optionally enter a client id (and pick its client secret from the Secrets store) if you registered L2M with the authorization server yourself; leave it empty to let L2M register itself. An optional scope overrides the scope the server asks for.
 2. Press **Connect** on the server page. L2M calls the server without a token and reads its `401` challenge, then fetches the protected resource metadata (RFC 9728) and the authorization server's metadata (RFC 8414, or OpenID Connect discovery). Without a client id it registers itself with dynamic client registration (RFC 7591) as a public client.
