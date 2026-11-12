@@ -24,7 +24,7 @@ if (import.meta.env.SSR) {
     <h2 class="hub-related-title">{{ heading }}</h2>
     <ul>
       <li v-for="term in items" :key="term.slug">
-        <a :href="withBase(`/glossary/${term.slug}`)">{{ term.term }}</a>
+        <a :href="withBase(term.href)">{{ term.term }}</a>
         <span class="hub-related-def">{{ term.definition }}</span>
       </li>
     </ul>

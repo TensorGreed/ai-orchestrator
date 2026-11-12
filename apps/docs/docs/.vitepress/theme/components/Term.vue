@@ -29,7 +29,7 @@ if (import.meta.env.SSR && !terms.some((item) => item.slug === props.id)) {
 
 <template>
   <span v-if="term" class="hub-term" :class="{ 'is-dismissed': dismissed }" @mouseenter="hoverStart" @mouseleave="hoverEnd" @keydown.esc="dismissed = true">
-    <a class="hub-term-link" :href="withBase(`/glossary/${term.slug}`)" :aria-describedby="tipId" @blur="dismissed = false"><slot>{{ term.term }}</slot></a>
+    <a class="hub-term-link" :href="withBase(term.href)" :aria-describedby="tipId" @blur="dismissed = false"><slot>{{ term.term }}</slot></a>
     <span :id="tipId" class="hub-term-tip" role="tooltip"><strong>{{ term.term }}:</strong> {{ term.definition }}</span>
   </span>
   <span v-else><slot /></span>
