@@ -425,3 +425,99 @@ describe("stdio client: trace context in _meta", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// stdio, MCP 2026-07-28: trace context goes through the same `_meta` merge as the protocol keys
+// ---------------------------------------------------------------------------
+
+/** A modern-only stdio server: answers server/discover and asks for one elicitation round on `confirm`. */
+const MODERN_META_SERVER = `
+process.stdin.setEncoding('utf-8');
+let buf = '';
+const seen = [];
+const send = (m) => process.stdout.write(JSON.stringify(m) + '\\n');
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let nl;
+  while ((nl = buf.indexOf('\\n')) >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (!line) continue;
+    const req = JSON.parse(line);
+    if (req.id === undefined || req.method === undefined) continue;
+    seen.push({ id: req.id, method: req.method, meta: (req.params && req.params._meta) || null });
+    if (req.method === 'initialize') { send({ jsonrpc: '2.0', id: req.id, error: { code: -32022, message: 'Unsupported protocol version', data: { supported: ['2026-07-28'] } } }); continue; }
+    if (req.method === 'server/discover') { send({ jsonrpc: '2.0', id: req.id, result: { resultType: 'complete', supportedVersions: ['2026-07-28'], capabilities: { tools: {} } } }); continue; }
+    if (req.method === 'tools/list') { send({ jsonrpc: '2.0', id: req.id, result: { resultType: 'complete', tools: [{ name: 'confirm', inputSchema: { type: 'object' } }] } }); continue; }
+    if (req.method === 'tools/call' && !req.params.inputResponses) {
+      send({ jsonrpc: '2.0', id: req.id, result: { resultType: 'input_required', requestState: 's1', inputRequests: { q: { method: 'elicitation/create', params: { message: 'Sure?', requestedSchema: { type: 'object', properties: { yes: { type: 'boolean' } } } } } } } });
+      continue;
+    }
+    send({ jsonrpc: '2.0', id: req.id, result: { resultType: 'complete', structuredContent: { seen }, content: [] } });
+  }
+});
+`;
+
+describe("stdio client, MCP 2026-07-28: trace context in _meta", () => {
+  const modernConfig = (mode: "auto" | "modern"): MCPServerConfig => ({
+    serverId: "stdio_mcp",
+    registryServerId: "srv_stdio",
+    connection: { command: process.execPath, args: ["-e", MODERN_META_SERVER], timeoutMs: 5000, protocolMode: mode }
+  });
+  type Seen = { id: number; method: string; meta: Record<string, unknown> | null };
+
+  it("merges the protocol keys and trace context into one _meta, and each later input round is a child span", async () => {
+    const trace = new RecordingInstrumentation();
+    const registry = createDefaultMCPRegistry({ instrument: trace });
+    const config = modernConfig("modern");
+    const context = contextOf({ onElicitation: async () => ({ action: "accept", content: { yes: true } }) });
+    const adapter = registry.get("stdio_mcp");
+    try {
+      const out = await adapter.invokeTool("confirm", {}, config, context);
+      expect(out).toMatchObject({ ok: true });
+      const seen = (out.structured as { seen: Seen[] }).seen;
+      const [outer, round2] = trace.named("tools/call confirm");
+      expect(round2!.parent).toBe(outer);
+      expect(round2!.info).toMatchObject({ method: "tools/call", target: "confirm", side: "client", round: 2, serverId: "srv_stdio" });
+      expect(outer!.attributes["l2m.mcp.rounds"]).toBe(2);
+      expect(outer!.attributes["mcp.protocol.version"]).toBe("2026-07-28");
+      const calls = seen.filter((entry) => entry.method === "tools/call");
+      expect(calls).toHaveLength(2);
+      expect(calls.map((entry) => entry.meta!.traceparent)).toEqual([traceparentOf(outer!), traceparentOf(round2!)]);
+      for (const call of calls) {
+        expect(inspectRequestMeta({ _meta: call.meta })).toMatchObject({ era: "modern", protocolVersion: "2026-07-28" });
+        expect(call.meta![MCP_META_CLIENT_CAPABILITIES]).toBeDefined();
+      }
+      expect(round2!.attributes["jsonrpc.request.id"]).toBe(String(calls[1]!.id));
+      expect(seen.some((entry) => entry.method === "initialize")).toBe(false);
+    } finally {
+      await adapter.closeSessions?.(context);
+    }
+  });
+
+  it("auto: the server/discover probe carries trace context too, and an opted-out server gets none", async () => {
+    const trace = new RecordingInstrumentation();
+    const registry = createDefaultMCPRegistry({ instrument: trace });
+    const adapter = registry.get("stdio_mcp");
+    const context = contextOf({ onElicitation: async () => ({ action: "accept", content: { yes: true } }) });
+    try {
+      const out = await adapter.invokeTool("confirm", {}, modernConfig("auto"), context);
+      const seen = (out.structured as { seen: Seen[] }).seen;
+      const probe = seen.find((entry) => entry.method === "server/discover")!;
+      expect(probe.meta!.traceparent).toBe(traceparentOf(trace.named("tools/call confirm")[0]!));
+      expect(probe.meta![MCP_META_PROTOCOL_VERSION]).toBe("2026-07-28");
+
+      const optedOut = modernConfig("auto");
+      optedOut.connection = { ...optedOut.connection, propagateTraceContext: false, cwd: process.cwd() };
+      const quiet = await adapter.invokeTool("confirm", {}, optedOut, context);
+      const quietSeen = (quiet.structured as { seen: Seen[] }).seen;
+      expect(quietSeen.length).toBeGreaterThan(0);
+      for (const entry of quietSeen) {
+        expect(entry.meta).not.toBeNull();
+        expect(entry.meta).not.toHaveProperty("traceparent");
+      }
+    } finally {
+      await adapter.closeSessions?.(context);
+    }
+  });
+});

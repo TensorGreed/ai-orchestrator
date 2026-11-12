@@ -562,6 +562,21 @@ describe("McpServersPage", () => {
       expect(savedConnection()).toEqual({ ...original, command: "uvxx" });
     });
 
+    it("turns off trace context for a local command server and keeps its other fields", async () => {
+      const user = userEvent.setup();
+      const original = { command: "uvx", args: ["srv"], env: { A: "b" }, protocolMode: "auto" };
+      const form = await openEdit(user, original);
+      const toggle = within(form).getByLabelText("Send trace context");
+      expect(toggle).toBeChecked();
+      await user.click(toggle);
+      expect(JSON.parse(json(form))).toEqual({ ...original, propagateTraceContext: false });
+      await user.type(within(form).getByLabelText("Command"), "x");
+      expect(JSON.parse(json(form))).toEqual({ ...original, command: "uvxx", propagateTraceContext: false });
+      await user.click(within(form).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalled());
+      expect(savedConnection()).toEqual({ ...original, command: "uvxx", propagateTraceContext: false });
+    });
+
     it("marks an empty endpoint invalid and focuses it", async () => {
       const user = userEvent.setup();
       const form = await openForm(user);

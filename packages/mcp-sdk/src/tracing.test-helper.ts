@@ -44,6 +44,7 @@ export class RecordingInstrumentation implements RunInstrumentation {
   startIteration = NOOP_RUN_INSTRUMENTATION.startIteration;
   startToolCall = NOOP_RUN_INSTRUMENTATION.startToolCall;
   withParent = NOOP_RUN_INSTRUMENTATION.withParent;
+  withNewTrace = NOOP_RUN_INSTRUMENTATION.withNewTrace;
   activeTraceIds = NOOP_RUN_INSTRUMENTATION.activeTraceIds;
 
   async mcpRequest<T>(info: McpRequestSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {
