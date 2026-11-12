@@ -297,13 +297,39 @@ describe("auto mode", () => {
   });
 
   it("does not cache an era from a server error, and still reports the server's own error", async () => {
-    const { endpoint, seen } = await startServer((rpc) => (rpc.method === "server/discover" ? { status: 403, text: "forbidden" } : legacyServer()(rpc, {}, [])));
+    const { endpoint, seen } = await startServer((rpc) => (rpc.method === "server/discover" || rpc.method === "initialize" ? { status: 403, text: "forbidden here" } : ok(rpc, {})));
     const adapter = new HttpMCPServerAdapter();
     const config = configFor(endpoint, { protocolMode: "auto" });
     const result = await adapter.invokeTool("lookup", {}, config, contextOf());
-    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ ok: false, errorKind: "transport" });
+    expect(result.error).toBe("MCP HTTP 403: forbidden here");
     expect(adapter.observedProtocol(config)).toBeUndefined();
-    expect(methods(seen)).toContain("initialize");
+    expect(methods(seen).slice(0, 2)).toEqual(["server/discover", "initialize"]);
+  });
+
+  it("goes on with initialize when the probe gets no answer in time or an empty one, without caching", async () => {
+    for (const probeReply of [{ hang: true } as Reply, { status: 202, text: "" } as Reply]) {
+      const legacyHandler = legacyServer();
+      const { endpoint, seen } = await startServer((rpc, headers, all) => (rpc.method === "server/discover" ? probeReply : legacyHandler(rpc, headers, all)));
+      const adapter = new HttpMCPServerAdapter();
+      const config = configFor(endpoint, { protocolMode: "auto", timeoutMs: 1000 });
+      expect(await adapter.invokeTool("lookup", {}, config, contextOf())).toMatchObject({ ok: true, output: "legacy" });
+      expect(methods(seen).slice(0, 2)).toEqual(["server/discover", "initialize"]);
+      expect(adapter.observedProtocol(config)).toBeUndefined();
+    }
+  });
+
+  it("caches legacy when server/discover is answered with method not found at HTTP 200", async () => {
+    const legacyHandler = legacyServer();
+    const { endpoint, seen } = await startServer((rpc, headers, all) =>
+      rpc.method === "server/discover" ? rpcError(rpc, -32601, "Method not found") : legacyHandler(rpc, headers, all)
+    );
+    const adapter = new HttpMCPServerAdapter();
+    const config = configFor(endpoint, { protocolMode: "auto" });
+    await adapter.invokeTool("lookup", {}, config, contextOf());
+    seen.length = 0;
+    await adapter.invokeTool("lookup", {}, config, contextOf());
+    expect(methods(seen)).not.toContain("server/discover");
   });
 
   it("falls back to initialize when a cached modern server starts answering like a legacy one", async () => {
@@ -403,6 +429,24 @@ describe("modern mode", () => {
     expect(seen[1].headers["mcp-param-region"]).toBeUndefined();
     expect(seen[3].headers["mcp-param-region"]).toBe("us");
     expect(seen[3].rpc.id).not.toBe(seen[1].rpc.id);
+  });
+
+  it("reports a 4xx JSON-RPC error on a proven modern connection as the server's error, without switching era", async () => {
+    let calls = 0;
+    const { endpoint, seen } = await startServer(
+      modernServer((rpc) => {
+        calls += 1;
+        return calls === 1 ? rpcError(rpc, -32603, "Internal hiccup", undefined, 400) : rpcError(rpc, -32602, "Invalid arguments: q", undefined, 400);
+      })
+    );
+    const adapter = new HttpMCPServerAdapter();
+    const config = configFor(endpoint, { protocolMode: "auto" });
+    const context = contextOf();
+    const first = await adapter.invokeTool("lookup", {}, config, context);
+    expect(first).toMatchObject({ ok: false, errorKind: "protocol", error: "Internal hiccup" });
+    const second = await adapter.invokeTool("lookup", {}, config, context);
+    expect(second).toMatchObject({ ok: false, errorKind: "invalid_arguments", error: "Invalid arguments: q" });
+    expect(methods(seen)).not.toContain("initialize");
   });
 
   it("fails with an actionable error against a legacy server", async () => {
@@ -584,6 +628,38 @@ describe("re-issuing after a broken connection (D13)", () => {
     expect(result.error).toMatch(/may or may not have run/);
     expect(toolCalls(seen)).toHaveLength(1);
   });
+
+  it("modern: a gateway error (502) on a write is an unknown outcome; a busy answer (503) on a read is retried with a new id", async () => {
+    const write = await startServer(brokenOnce("modern", { status: 502, text: "bad gateway" }));
+    const adapter = new HttpMCPServerAdapter();
+    const writeResult = await adapter.invokeTool("write_row", {}, configFor(write.endpoint, { protocolMode: "modern" }), contextOf());
+    expect(writeResult).toMatchObject({ ok: false, errorKind: "outcome_unknown" });
+    expect(toolCalls(write.seen)).toHaveLength(1);
+
+    const read = await startServer(brokenOnce("modern", { status: 503, text: "busy" }));
+    expect(await adapter.invokeTool("lookup", {}, configFor(read.endpoint, { protocolMode: "modern" }), contextOf())).toMatchObject({ ok: true });
+    const calls = toolCalls(read.seen);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].rpc.id).not.toBe(calls[0].rpc.id);
+  });
+
+  it("legacy: remembers which tools are read-only across sessions, so a new run's call is still sent again", async () => {
+    const { endpoint, seen } = await startServer(brokenOnce("legacy", { destroy: true }));
+    const adapter = new HttpMCPServerAdapter();
+    const config = configFor(endpoint);
+    await adapter.discoverTools(config, contextOf());
+    expect(await adapter.invokeTool("lookup", {}, config, contextOf())).toMatchObject({ ok: true, output: "ran" });
+    expect(toolCalls(seen)).toHaveLength(2);
+  });
+
+  it("legacy: with the rule off, a timed-out write is sent again exactly as before", async () => {
+    const { endpoint, seen } = await startServer(legacyServer((rpc) => (rpc.method === "tools/call" ? { hang: true } : { status: 202, text: "" })));
+    const adapter = new HttpMCPServerAdapter({ protocol: { legacySafeReissue: false } });
+    const result = await adapter.invokeTool("write_row", {}, configFor(endpoint), contextOf({ callTimeoutMs: 100 }));
+    expect(result).toMatchObject({ ok: false, errorKind: "timeout" });
+    // Three attempts, then three more on a fresh session.
+    expect(toolCalls(seen)).toHaveLength(6);
+  }, 20_000);
 
   it("legacy: a write is not sent again after the connection drops (safe re-issue on by default)", async () => {
     const { endpoint, seen } = await startServer(brokenOnce("legacy", { destroy: true }));
