@@ -22,6 +22,7 @@ import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
+import { McpOAuthService } from "./services/mcp-oauth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
@@ -607,6 +608,41 @@ describe("MCP OAuth connect flow", () => {
     const later = await connect(context, admin, serverId);
     expect(new URL(later.authorizationUrl).searchParams.get("scope")).toBe("tools:read");
     for (const secret of issuedSecrets) expect(seenBodies.some((body) => body.includes(secret))).toBe(false);
+  });
+
+  it("keeps both a token refresh and a scope note that overlap on one instance", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    await connect(context, admin, serverId);
+    // A second service on the same store, whose token requests take a while: a scope note arrives mid-refresh.
+    let tokenRequestStarted!: () => void;
+    const tokenRequestSeen = new Promise<void>((resolve) => {
+      tokenRequestStarted = resolve;
+    });
+    const slowTokenFetch: typeof fetch = async (input, init) => {
+      if (String(input instanceof Request ? input.url : input).includes("/token")) {
+        tokenRequestStarted();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      return await fetch(input, init);
+    };
+    const service = new McpOAuthService(context.store, new SecretService(context.store, context.config.SECRET_MASTER_KEY_BASE64), {
+      redirectUri: `${REDIRECT_BASE}/api/mcp/oauth/callback`,
+      stateTtlMs: 60_000,
+      refreshSkewMs: 60_000,
+      fetchImpl: slowTokenFetch
+    });
+    const refreshed = service.getAccessToken(serverId, { forceRefresh: true });
+    await tokenRequestSeen;
+    await Promise.all([refreshed, service.noteInsufficientScope(serverId, "tools:admin")]);
+
+    // The rotated refresh token was kept (the next refresh works) and so was the challenged scope.
+    fake.validAccessTokens.clear();
+    const probe = await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin);
+    expect(probe.json<{ probe: { ok: boolean } }>().probe.ok).toBe(true);
+    const stepped = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+    expect(new URL(stepped.json<{ authorizationUrl: string }>().authorizationUrl).searchParams.get("scope")).toContain("tools:admin");
   });
 
   it("rejects expired states and callbacks from another session", async () => {

@@ -356,6 +356,8 @@ export function createClusterRefreshLock(
 export class McpOAuthService implements McpOAuthTokenProvider {
   private readonly pending: ChallengeStore;
   private readonly refreshing = new Map<string, Promise<string>>();
+  /** The last writer queued for each token key on this instance (see underRefreshLock). */
+  private readonly localLocks = new Map<string, Promise<void>>();
 
   constructor(
     private readonly store: Store,
@@ -955,9 +957,23 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     await this.store.upsertMcpOAuthConnection({ ...row, state: "expired", lastError: message.slice(0, 500) });
   }
 
-  /** Runs `fn` under the cluster-wide refresh lock for `key` when there is one (cluster mode), else directly. */
+  /**
+   * Runs `fn` after the other writers of `key`'s token on this instance (a refresh, a scope note), and under the
+   * cluster-wide refresh lock for `key` when there is one (cluster mode). Each reads the stored secret inside, so
+   * neither writes back a copy the other already replaced.
+   */
   private async underRefreshLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    return this.options.refreshLock ? await this.options.refreshLock(key, fn) : await fn();
+    const previous = this.localLocks.get(key) ?? Promise.resolve();
+    const run = previous.then(async () => (this.options.refreshLock ? await this.options.refreshLock(key, fn) : await fn()));
+    const settled = run.then(
+      () => undefined,
+      () => undefined
+    );
+    this.localLocks.set(key, settled);
+    void settled.then(() => {
+      if (this.localLocks.get(key) === settled) this.localLocks.delete(key);
+    });
+    return await run;
   }
 
   /**
