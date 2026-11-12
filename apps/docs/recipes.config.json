@@ -90,7 +90,7 @@
         }
       ],
       "makeItYours": "- Switch the chat model to OpenAI, Anthropic, Gemini or any OpenAI-compatible endpoint, with its key stored as a [secret](/security/secrets).\n- Replace the mock tools with a server from your [MCP server registry](/product/mcp-server-registry).\n- Raise `maxMessages` on the memory node for longer conversations, or lower it to keep prompts small.",
-      "makeItSafer": "- The sample takes `system_prompt` from the request, so any caller can rewrite the agent's instructions. Write the system prompt on the agent node instead.\n- Require approval before write tools: with **Ask before write tools** on, the agent pauses before every tool call, `get_current_time` included, until an admin marks a tool read-only on the MCP servers page. This gate ignores the server's own read-only annotation. See [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Cap what callers can spend with a workflow [budget](/product/budgets).",
+      "makeItSafer": "- The sample takes `system_prompt` from the request, so any caller can rewrite the agent's instructions. Write the system prompt on the agent node instead.\n- Require approval before write tools: with **Ask before write tools** on, the agent pauses before both `calculator` and `get_current_time`. This gate ignores the server's own read-only annotation and trusts only an admin's read-only mark on a registered server; the sample's inline mock tools are not registered, so both always pause. See [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Cap what callers can spend with a workflow [budget](/product/budgets).",
       "related": [
         "ai-agent",
         "human-in-the-loop",

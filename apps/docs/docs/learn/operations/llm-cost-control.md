@@ -102,7 +102,7 @@ Cost figures come from a price table: price per million input tokens, per millio
 
 ## In L2M
 
-[Budgets](/product/budgets) are optional; with none set, nothing is checked. Admins set them under **Settings → FinOps**, with the scopes global, project, workflow, user and MCP client, a limit in USD or tokens, a day, week or month period in UTC, and the action warn or block. Warn alerts at 80% by default and at the cap, and can post to a notify webhook.
+[Budgets](/product/budgets) are optional; with none set, nothing is checked. Admins set them under **Settings → Cost & quality → FinOps**, with the scopes global, project, workflow, user and MCP client, a limit in USD or tokens, a day, week or month period in UTC, and the action warn or block. Warn alerts at 80% by default and at the cap, and can post to a notify webhook.
 
 - A used-up block budget stops a run before it starts, whatever trigger started it. Editor runs, the API and webhooks get `HTTP 402` with `error: "budget_exceeded"` and a `Retry-After` header; schedules and polling triggers record one failed run naming the budget. Eval runs, tape-only replays, approval resumes and error workflows are not refused, but their spend still counts. [MCP gateway](/product/mcp-gateway#budgets-and-rate-limits) calls get JSON-RPC error `-32032`, and the [/v1 AI gateway](/product/ai-gateway#budgets-and-rate-limits) answers `429` with code `insufficient_quota`.
 - A model call whose provider reports no usage is counted with an estimate of about three bytes of text per token, which leans high, and is marked `usageEstimated` on the node's trace.
@@ -112,7 +112,7 @@ Cost figures come from a price table: price per million input tokens, per millio
 
 ## Try it in L2M
 
-Import the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) and add a small token budget for its workflow under **Settings → FinOps**. Run it and open the agent node's **Trace** tab to see the tokens it counted. The recipe uses the built-in echo provider, which never asks for tools and only reports rough token counts. Attach a real chat model and set a low `maxIterations` to watch the loop spend across several calls and stop at the limit.
+Import the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) and add a small token budget for its workflow under **Settings → Cost & quality → FinOps**. Run it and open the agent node's **Trace** tab to see the tokens it counted. The recipe uses the built-in echo provider, which never asks for tools and only reports rough token counts. Attach a real chat model and set a low `maxIterations` to watch the loop spend across several calls and stop at the limit.
 
 ## Further reading
 

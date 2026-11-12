@@ -15,7 +15,7 @@ track: agents
 <section class="hub-section" aria-labelledby="agents-track-notes-title">
   <h2 id="agents-track-notes-title" class="hub-section-title">Before and after</h2>
   <p class="hub-card-text"><strong>Prerequisites:</strong> none. The first guide in <a href="/docs/learn/mcp/">MCP fundamentals</a> explains where an agent's tools come from.</p>
-  <p class="hub-card-text"><strong>After this track:</strong> import a working agent from the <a href="/docs/recipes/">recipes</a>, or read the <a href="/docs/runtime/agent-loop">agent loop reference</a> for every setting.</p>
+  <p class="hub-card-text"><strong>After this track:</strong> <a href="/docs/learn/security/prompt-injection">Prompt injection</a> starts the agent security track. To build one, import a working agent from the <a href="/docs/recipes/">recipes</a>, or read the <a href="/docs/runtime/agent-loop">agent loop reference</a> for every setting.</p>
 </section>
 
 </div>

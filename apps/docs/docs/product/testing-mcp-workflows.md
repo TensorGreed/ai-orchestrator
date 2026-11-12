@@ -139,7 +139,7 @@ The `l2m` command lives in `packages/cli`. From a checkout, run it with `pnpm l2
 
 ### Against your L2M deployment
 
-Create an API key for a builder (Settings → API keys), then:
+Create an API key for a builder (Settings → Account → API Keys), then:
 
 ```bash
 export L2M_API_URL=https://l2m.internal.example
