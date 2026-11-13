@@ -8,7 +8,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteStore } from "./database.js";
-import { MIGRATIONS, missingMigrationVersions } from "./migrations.js";
+import { MIGRATIONS, missingMigrationVersions, rollbackMigrations } from "./migrations.js";
 import { RETIRED_MIGRATION_VERSIONS } from "./migration-versions.test-helper.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "../test-support/test-store.js";
 
@@ -25,6 +25,24 @@ describe("migration v72 (run trace id)", () => {
     // A database at v71 without v70 has nothing missing.
     const atMain = versions.filter((version) => version <= 71);
     expect(missingMigrationVersions(atMain)).toEqual([]);
+  });
+});
+
+describe("rolling back past the retired v70", () => {
+  it("records the next defined version below, never 70", async () => {
+    let current = 72;
+    const recorded: number[] = [];
+    const result = await rollbackMigrations(
+      async () => undefined,
+      async () => current,
+      async (version) => {
+        recorded.push(version);
+        current = version;
+      },
+      70
+    );
+    expect(result.rolledBack).toEqual([72, 71]);
+    expect(recorded).toEqual([71, 69]);
   });
 });
 

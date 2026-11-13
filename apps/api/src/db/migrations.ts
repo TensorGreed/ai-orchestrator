@@ -3016,7 +3016,8 @@ export async function rollbackMigrations(
   const rolledBack: number[] = [];
   for (const migration of toRollBack) {
     await runSql(migration.down);
-    const newVersion = migration.version - 1;
+    // The next defined version below: versions can be retired (never used), and none may be recorded.
+    const newVersion = Math.max(0, ...MIGRATIONS.filter((m) => m.version < migration.version).map((m) => m.version));
     await setVersion(newVersion);
     rolledBack.push(migration.version);
     if (newVersion <= targetVersion) break;
