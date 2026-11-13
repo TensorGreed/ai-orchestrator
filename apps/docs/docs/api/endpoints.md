@@ -40,6 +40,7 @@ the envelope `GET /api/executions` uses:
 - `GET /api/auth/oidc/callback?code=&state=` (IdP redirect target; redirects to the web app)
 - `POST /api/auth/login/mfa` (`{ challenge?, code }`; after an SSO login that needs the TOTP step the challenge comes from the HttpOnly `l2m_sso_mfa` cookie; see [MFA on SSO](../security/auth-rbac.md#mfa-on-sso))
 - `POST /api/auth/saml/callback` (IdP HTTP-POST binding form post → redirect to the web app; JSON → JSON; see [SAML single sign-on](../security/auth-rbac.md#saml-single-sign-on))
+- `POST /api/auth/ldap/login` (`{ email, password }` → `{ user, expiresAt, provisioned }` with the session cookie, or `{ mfaChallenge, expiresInSeconds }` for a user with an authenticator; `401` for an unknown user or a wrong password, `503` while LDAP is off or not configured; see [LDAP sign-in](../security/auth-rbac.md#ldap-sign-in))
 - `POST /api/auth/invite/lookup` (public; `{ token }` → `{ email, role, expiresAt }`; `404` for a used, expired or unknown link; see [User invites](../security/auth-rbac.md#user-invites))
 - `POST /api/auth/invite/accept` (public; `{ token, password }` with a password of 8 characters or more → `{ ok, email }`; the invite is used up and the page signs in with the password next; `404` as above; audited as `user.invite.accept`)
 - `POST /api/auth/api-keys/:id/rotate` (builder, your own key; `{ graceHours?: 0-168 }`, default 24 → `{ key, record, previous }`, the new key once; the old key works until `previous.expiresAt`; `409 already_rotated` / `inactive`; step-up; audited as `api_key.rotate`; see [Rotating keys](../security/service-accounts.md#rotating-keys))
@@ -264,6 +265,17 @@ Red-team benchmarks of content rules (see [Content rules benchmark](../product/c
 - `GET /api/guard/benchmarks/:id` (viewer; `{ benchmark, report }`)
 
 Rule set writes and binding changes are audited as `guard.profile.created`, `guard.profile.updated`, `guard.profile.deleted`, `guard.profile.imported` and `guard.binding.updated`.
+
+## Audit log
+
+See [Audit log](../security/audit-log.md). All admin-only.
+
+- `GET /api/audit?category=&eventType=&outcome=&actorUserId=&resourceType=&resourceId=&projectId=&from=&to=&page=&pageSize=` (`{ items, total, page, pageSize }`, newest first; `pageSize` 50 by default, at most 500)
+- `GET /api/audit/export` (the same filters; a CSV file; audited as `audit.export`)
+- `GET /api/audit-log/verify-chain` (`{ ok, rowsChecked, firstBrokenAt?, unverifiable? }`)
+- `GET /api/audit-export/destinations`; `POST /api/audit-export/destinations` (`{ name, kind: "http" | "file", config, intervalSeconds?, enabled? }`), `PUT /api/audit-export/destinations/:id`, `DELETE /api/audit-export/destinations/:id` (changes need step-up and are audited)
+- `POST /api/audit-export/destinations/:id/run` (sends the next batch now; `409` while another instance exports it), `GET /api/audit-export/destinations/:id/runs?limit=`
+- `GET /api/log-streams`; `POST /api/log-streams` (`{ name, type: "syslog" | "webhook" | "sentry", config, categories?, minLevel?, enabled? }`), `PUT /api/log-streams/:id`, `DELETE /api/log-streams/:id` (changes need step-up and are audited); `POST /api/log-streams/:id/test`; `GET /api/log-streams/:id/events` (the last 100 deliveries)
 
 ## Audit bundles
 

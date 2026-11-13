@@ -174,7 +174,7 @@ The `signature` on the manifest response is an Ed25519 signature over the canoni
 
 ## Run audit events and restarts
 
-Run actions a person starts are written to the audit log (category `execution`, resource type `workflow`, `metadata.executionId` set):
+Run actions a person starts are written to the [audit log](./audit-log.md) (category `execution`, resource type `workflow`, `metadata.executionId` set):
 
 | Event | When |
 | --- | --- |

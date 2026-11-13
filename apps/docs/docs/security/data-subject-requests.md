@@ -86,7 +86,7 @@ matches are left out of the export and counted in its manifest (`possibleMatches
 | Runs (input, output, node results, custom data, error) | yes | yes |
 | Paused runs | | yes |
 | Approval requests | | yes |
-| Agent memory sessions and artifacts | yes (`session_id`) | yes |
+| Agent memory sessions and artifacts | yes (`session_id`) | yes (messages and artifacts; not the session's cached tool results) |
 | MCP cassettes | | yes |
 | Golden and captured runs, golden-set cases, eval and replay results | | yes |
 
@@ -155,7 +155,8 @@ run that was still stopping.
 | A run | The run, its paused state, tool-call telemetry, rule events, MCP cassettes, approval requests, elicitations, queue jobs (and dead letters), and its subject references. |
 | Usage of a deleted run | **Kept**, with `user_id` and `user_email` cleared: tokens and cost stay, so totals, budgets and spend reports do not change. |
 | Approval request, paused run, MCP cassette | The row. |
-| Agent memory session or artifact | The row. |
+| Agent memory session | The session's messages, its artifacts, its cached tool results (the session tool cache) and its subject references. |
+| Agent memory artifact | The artifact. |
 | Golden or captured run, golden-set case, eval or replay result | The row, as the data-subject lookup deletes it. Release-gate jobs whose evidence it removed are marked stale. |
 | Reversible tokens | The vault entries of tokens that appear in the deleted rows and stand for **this person's** value. A later reveal of such a token finds nothing. Tokens of other people's values stay. While any legal hold is active the entries wait (the same token may stand in a held row the request did not find) and are deleted when the hold is released. |
 

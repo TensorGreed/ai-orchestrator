@@ -291,6 +291,7 @@ export default defineConfig({
           { text: "Service Accounts + API Keys", link: "/security/service-accounts" },
           { text: "Secrets", link: "/security/secrets" },
           { text: "Secure Webhooks", link: "/security/secure-webhooks" },
+          { text: "Audit Log", link: "/security/audit-log" },
           { text: "Audit Bundles", link: "/security/audit-bundles" },
           { text: "Code Execution", link: "/security/code-execution" },
           { text: "Outbound URL checks", link: "/security/outbound-url-checks" },
