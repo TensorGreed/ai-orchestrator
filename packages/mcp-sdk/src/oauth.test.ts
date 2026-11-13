@@ -3,9 +3,12 @@ import {
   McpOAuthError,
   assertSecureOAuthUrl,
   discoverAuthorizationServer,
+  discoverProtectedResource,
   isLoopbackHost,
   oauthApplicationType,
+  readInsufficientScopeChallenge,
   registerOAuthClient,
+  unionOAuthScopes,
   validateAuthorizationResponseIssuer,
   type FetchLike
 } from "./oauth";
@@ -154,5 +157,107 @@ describe("dynamic client registration: application_type", () => {
     await expect(
       registerOAuthClient("https://as.example.com/register", { redirectUri: "https://l2m.example.com/cb" }, { fetchImpl })
     ).rejects.toThrow(/Dynamic client registration failed: native clients need loopback redirects/);
+  });
+});
+
+describe("discoverProtectedResource: the 401 challenge probe", () => {
+  const endpoint = "https://mcp.example.com/mcp";
+  const prm = { resource: endpoint, authorization_servers: [ISSUER], scopes_supported: ["profile"] };
+  const challenge = `Bearer scope="mcp:basic", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"`;
+
+  /** A server whose MCP endpoint answers each probe with `answer(body, headers)`; metadata is served at its URL. */
+  function server(answer: (body: Record<string, unknown>, headers: Record<string, string>) => Response, posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }>): FetchLike {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === endpoint && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const headers = Object.fromEntries(Object.entries((init.headers ?? {}) as Record<string, string>).map(([key, value]) => [key.toLowerCase(), value]));
+        posts.push({ body, headers });
+        return answer(body, headers);
+      }
+      if (url.includes("/.well-known/oauth-protected-resource")) return jsonResponse(200, prm);
+      return jsonResponse(404, {});
+    }) as FetchLike;
+  }
+
+  it("keeps the legacy initialize probe alone when it is challenged", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(() => new Response("", { status: 401, headers: { "www-authenticate": challenge } }), posts);
+    const found = await discoverProtectedResource(endpoint, { fetchImpl });
+    expect(found.scopeHint).toBe("mcp:basic");
+    expect(posts.map((post) => post.body.method)).toEqual(["initialize"]);
+    expect(posts[0]!.headers["mcp-protocol-version"]).toBeUndefined();
+  });
+
+  it("asks with a modern server/discover when a modern-only server answers initialize with 400", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(
+      (body) =>
+        body.method === "initialize"
+          ? jsonResponse(400, { jsonrpc: "2.0", id: body.id, error: { code: -32602, message: "Invalid params: _meta is missing" } })
+          : new Response("", { status: 401, headers: { "www-authenticate": challenge } }),
+      posts
+    );
+    const found = await discoverProtectedResource(endpoint, { fetchImpl, headers: { "x-tenant": "t1" } });
+    expect(found.scopeHint).toBe("mcp:basic");
+    expect(found.resourceMetadataUrl).toBe("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
+    expect(posts.map((post) => post.body.method)).toEqual(["initialize", "server/discover"]);
+    const discover = posts[1]!;
+    expect(discover.headers).toMatchObject({ "mcp-protocol-version": "2026-07-28", "mcp-method": "server/discover", "x-tenant": "t1" });
+    expect((discover.body.params as { _meta: Record<string, unknown> })._meta).toMatchObject({
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {}
+    });
+  });
+
+  it("asks with server/discover when initialize is let through without a token", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(
+      (body) => (body.method === "initialize" ? jsonResponse(200, { jsonrpc: "2.0", id: body.id, result: {} }) : new Response("", { status: 401, headers: { "www-authenticate": challenge } })),
+      posts
+    );
+    expect((await discoverProtectedResource(endpoint, { fetchImpl })).scopeHint).toBe("mcp:basic");
+  });
+
+  it("falls back to the well-known URLs when neither probe is challenged", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(() => jsonResponse(400, {}), posts);
+    const found = await discoverProtectedResource(endpoint, { fetchImpl });
+    expect(found.scopeHint).toBeUndefined();
+    expect(found.resourceMetadataUrl).toBe("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
+    expect(posts).toHaveLength(2);
+  });
+
+  it("sends no second probe when the first got no answer at all", async () => {
+    const posts: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+    const fetchImpl = server(() => {
+      throw new TypeError("fetch failed");
+    }, posts);
+    const found = await discoverProtectedResource(endpoint, { fetchImpl });
+    expect(found.resourceMetadataUrl).toBe("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
+    expect(posts.map((post) => post.body.method)).toEqual(["initialize"]);
+  });
+});
+
+describe("step-up: insufficient_scope challenges and the scope union", () => {
+  it("reads a 403 insufficient_scope Bearer challenge and nothing else", () => {
+    const header = 'Bearer error="insufficient_scope", scope="files:write files:read", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"';
+    expect(readInsufficientScopeChallenge(403, header)).toEqual({
+      scope: "files:write files:read",
+      resourceMetadata: "https://mcp.example.com/.well-known/oauth-protected-resource"
+    });
+    expect(readInsufficientScopeChallenge(403, 'Bearer error="insufficient_scope"')).toEqual({});
+    expect(readInsufficientScopeChallenge(401, header)).toBeNull();
+    expect(readInsufficientScopeChallenge(403, 'Bearer error="invalid_token", scope="x"')).toBeNull();
+    expect(readInsufficientScopeChallenge(403, null)).toBeNull();
+    expect(readInsufficientScopeChallenge(403, 'Basic realm="x"')).toBeNull();
+  });
+
+  it("unions scopes in first-seen order, drops malformed tokens and caps the count", () => {
+    expect(unionOAuthScopes("mcp:basic", "mcp:write mcp:basic", undefined, null)).toBe("mcp:basic mcp:write");
+    expect(unionOAuthScopes(undefined, "  ")).toBeUndefined();
+    expect(unionOAuthScopes('a "b" c\\d e')).toBe("a e");
+    const many = Array.from({ length: 100 }, (_, index) => `s${index}`).join(" ");
+    expect(unionOAuthScopes(many)!.split(" ")).toHaveLength(64);
   });
 });

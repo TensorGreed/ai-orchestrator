@@ -17,7 +17,7 @@ import type {
   TraceCarrier
 } from "@ai-orchestrator/shared";
 import { MCP_OUTCOME_ATTRIBUTES } from "@ai-orchestrator/shared";
-import type { MCPExecutionContext, MCPServerAdapter, McpReadResourceOptions, McpServerRequestOrigin } from "../types";
+import type { MCPExecutionContext, MCPServerAdapter, McpReadResourceOptions, McpServerRequestOrigin, McpToolReadOnlyOverride } from "../types";
 import {
   McpJsonRpcError,
   McpMissingClientCapabilityError,
@@ -52,7 +52,7 @@ import {
   toProgressEvent,
   type ParsedProgress
 } from "../progress";
-import { effectiveToolHints } from "../tool-policy";
+import { readOnlyOverrideFor, toolReissueSafe } from "../tool-policy";
 import {
   DEFAULT_MRTR_MAX_ROUNDS,
   MCP_CLIENT_MODERN_PROTOCOL_VERSION,
@@ -180,6 +180,11 @@ export interface StdioMcpProtocolOptions {
    * request timeout. `modern` connections wait the full request timeout.
    */
   probeTimeoutMs?: number;
+  /**
+   * An admin's read-only mark per registry tool (tool policy). It decides the safe re-issue rule before the
+   * server's annotations do. Unset: annotations only.
+   */
+  toolReadOnlyOverride?: McpToolReadOnlyOverride;
   /** Observed eras by launch plan, shared across runs. Defaults to one cache per adapter. */
   eraCache?: McpEraCache;
 }
@@ -1118,6 +1123,16 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
    */
   async closeSessions(context: MCPExecutionContext): Promise<void> {
     const cache = this.getCache(context);
+    const starts = [...(this.starting.get(cache)?.values() ?? [])];
+    // The cached sessions are told to stop right away (before anything is awaited).
+    const closing = this.closeCachedSessions(context, cache);
+    if (starts.length === 0) return await closing;
+    // A session still starting is closed once it has started, not left cached after the others are gone.
+    await Promise.all(starts.map((start) => start.catch(() => undefined)));
+    await Promise.all([closing, this.closeCachedSessions(context, cache)]);
+  }
+
+  private async closeCachedSessions(context: MCPExecutionContext, cache: Map<string, StdioSession>): Promise<void> {
     const exits: Array<Promise<void>> = [];
     const closing: StdioSession[] = [];
     const reason = context.signal?.aborted ? cancelReason(context.signal) : "MCP session closed.";
@@ -1317,6 +1332,23 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     }
   }
 
+  /** Session starts under way, per session cache and key, so concurrent first calls share one process. */
+  private readonly starting = new WeakMap<Map<string, StdioSession>, Map<string, Promise<StdioSession>>>();
+
+  private startingFor(cache: Map<string, StdioSession>): Map<string, Promise<StdioSession>> {
+    let starting = this.starting.get(cache);
+    if (!starting) {
+      starting = new Map();
+      this.starting.set(cache, starting);
+    }
+    return starting;
+  }
+
+  /**
+   * The server's session in this context. Concurrent callers share one start: a caller that finds a start under
+   * way waits for it instead of spawning a second process (whose session would replace the first in the cache and
+   * leave the first process running). `forceNew` waits for a start under way, then replaces whatever is cached.
+   */
   private async getOrCreateSession(
     config: MCPServerConfig,
     context: MCPExecutionContext,
@@ -1324,6 +1356,26 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   ): Promise<StdioSession> {
     const cache = this.getCache(context);
     const key = buildSessionKey(config);
+    const starting = this.startingFor(cache);
+
+    // A start cancelled by its own caller's signal is not this caller's failure: it then starts the server itself.
+    let cancelledStart: Promise<StdioSession> | undefined;
+    for (;;) {
+      const underWay = starting.get(key);
+      if (!underWay || underWay === cancelledStart) break;
+      if (!options?.forceNew) {
+        try {
+          const session = await underWay;
+          session.context = context;
+          return session;
+        } catch (error) {
+          if (!(error instanceof McpRequestCanceledError) || context.signal?.aborted) throw error;
+          cancelledStart = underWay;
+          continue;
+        }
+      }
+      await underWay.catch(() => undefined);
+    }
 
     if (options?.forceNew) {
       const existing = cache.get(key);
@@ -1339,9 +1391,16 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       }
     }
 
-    const session = await this.createSession(config, context, options?.forceLegacy ? { forceLegacy: true } : undefined);
-    cache.set(key, session);
-    return session;
+    const start = this.createSession(config, context, options?.forceLegacy ? { forceLegacy: true } : undefined).then((session) => {
+      cache.set(key, session);
+      return session;
+    });
+    starting.set(key, start);
+    try {
+      return await start;
+    } finally {
+      if (starting.get(key) === start) starting.delete(key);
+    }
   }
 
   /**
@@ -1737,13 +1796,11 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   }
 
   /** D13 — whether a tool call may be sent again after the process died: read-only or idempotent tools only. */
-  private toolReissueSafe(session: StdioSession, toolName: string, config: MCPServerConfig): boolean {
+  private async toolReissueSafe(session: StdioSession, toolName: string, config: MCPServerConfig): Promise<boolean> {
     const annotations =
       (session.toolAnnotations ?? this.rememberedAnnotations.get(session.sessionKey))?.get(toolName) ??
       config.manualTools?.find((tool) => tool.name === toolName)?.annotations;
-    if (!annotations) return false;
-    const hints = effectiveToolHints(annotations);
-    return hints.readOnly || hints.idempotent;
+    return toolReissueSafe(annotations, await readOnlyOverrideFor(this.protocol.toolReadOnlyOverride, config.registryServerId, toolName));
   }
 
   /** Whether the safe re-issue rule applies to this session (always for modern; legacy unless turned off). */
@@ -1780,7 +1837,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
           if (
             firstError instanceof McpStdioConnectionLostError &&
             this.safeReissueApplies(session) &&
-            !this.toolReissueSafe(session, toolName, config)
+            !(await this.toolReissueSafe(session, toolName, config))
           ) {
             throw new McpOutcomeUnknownError(
               `MCP stdio tool '${toolName}' got no answer: ${firstError.message} It was not sent again because the tool is not marked read-only or idempotent, so it may or may not have run.`

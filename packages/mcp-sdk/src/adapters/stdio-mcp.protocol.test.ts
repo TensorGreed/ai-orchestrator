@@ -537,6 +537,31 @@ describe("re-issue after the server process died (D13)", () => {
     expect(callsOf(log, "crash")).toBe(2);
   });
 
+  it("lets an admin's read-only mark in tool policy decide before the server's annotations", async () => {
+    const marks: Record<string, boolean> = { crash: true, crash_ro: false };
+    const asked: string[] = [];
+    const toolReadOnlyOverride = (serverId: string, toolName: string) => {
+      asked.push(`${serverId}/${toolName}`);
+      return marks[toolName] ?? null;
+    };
+    for (const era of ["legacy", "modern"] as const) {
+      const marked = fixture(era, era);
+      const adapter = adapterWith({ toolReadOnlyOverride });
+      const config = { ...marked.config, registryServerId: "reg-1" };
+      // Unannotated, but marked read-only by an admin: sent again on a new process.
+      expect(await adapter.invokeTool("crash", {}, config, run(adapter)), era).toMatchObject({ ok: true, output: "survived" });
+      expect(callsOf(marked.log, "crash")).toBe(2);
+      // Annotated read-only by the server, marked not read-only by an admin: not sent again (a fresh server crashes once).
+      const unmarked = fixture(era, era);
+      const roConfig = { ...unmarked.config, registryServerId: "reg-1" };
+      const context = run(adapter);
+      await adapter.discoverTools(roConfig, context);
+      expect(await adapter.invokeTool("crash_ro", {}, roConfig, context), era).toMatchObject({ ok: false, errorKind: "outcome_unknown" });
+      expect(callsOf(unmarked.log, "crash_ro")).toBe(1);
+    }
+    expect(asked).toContain("reg-1/crash");
+  });
+
   it("always follows the safe rule for 2026-07-28 servers", async () => {
     const { config, log } = fixture("modern", "modern");
     const adapter = adapterWith({ legacySafeReissue: false });

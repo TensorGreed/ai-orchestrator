@@ -11,5 +11,3 @@ client:
   - sse-retry
   # Warning only: see client-2026-07-28.
   - auth/basic-cimd
-  # No scope step-up after a 403 insufficient_scope answer (see client-2026-07-28).
-  - auth/scope-step-up

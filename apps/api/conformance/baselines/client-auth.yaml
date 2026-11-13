@@ -3,5 +3,3 @@
 client:
   # Warning only: no client-ID metadata document is used.
   - auth/basic-cimd
-  # No scope step-up after a 403 insufficient_scope answer.
-  - auth/scope-step-up

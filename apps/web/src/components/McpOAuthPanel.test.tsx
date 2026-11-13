@@ -76,3 +76,18 @@ describe("McpOAuthPanel issuer binding", () => {
     expect(screen.queryByText("Client id bound to")).not.toBeInTheDocument();
   });
 });
+
+describe("McpOAuthPanel scope step-up notice", () => {
+  it("shows a connected server's missing scope as a status note, and errors only as errors", async () => {
+    const note = "The server refused an operation because the connection lacks OAuth scope (tools:admin). Reconnect it to grant the scope; the existing scope is kept.";
+    vi.mocked(api.fetchMcpServerOAuth).mockResolvedValue({ status: status({ lastError: note }) });
+    render(<McpOAuthPanel serverId="mcp_1" isAdmin />);
+    expect(await screen.findByRole("status")).toHaveTextContent("tools:admin");
+    cleanup();
+
+    vi.mocked(api.fetchMcpServerOAuth).mockResolvedValue({ status: status() });
+    render(<McpOAuthPanel serverId="mcp_1" isAdmin />);
+    expect(await screen.findByText("Authorization server")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+});

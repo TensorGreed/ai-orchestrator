@@ -340,6 +340,7 @@ import type { McpCassetteRecord, McpCassetteSource } from "@ai-orchestrator/shar
 import {
   evaluateToolForContext,
   manualReadOnlyFor,
+  createReadOnlyMarkLookup,
   markMcpTools,
   resolveMcpToolPolicySubject
 } from "./services/mcp-tool-policy";
@@ -1871,24 +1872,30 @@ export async function createApp(
       });
     }
   });
+  // An admin's read-only mark in tool policy decides whether the MCP clients may send a call again (D13).
+  const readOnlyMarks = createReadOnlyMarkLookup(async (registryServerId) => await store.listMcpToolClassifications(registryServerId));
   const mcpRegistry = createDefaultMCPRegistry({
     oauth: mcpOAuthService,
     sandbox: mcpSandboxLauncher,
     runtimeGuard: mcpRuntimeGuard,
     // Phase 6.4 — built-in tools reach the outside only through the outbound URL checks.
     builtInTools: { fetch: (url, init) => guardedFetch(url, init, { config: outboundGuard, resolver: nodeDnsResolver }) },
-    // MCP 2026-07-28 — protocol era default, input round limit and the safe re-issue rule of the HTTP client.
+    // MCP 2026-07-28 — protocol era default, input round limit, the safe re-issue rule and the wait for the
+    // server/discover probe of the HTTP client.
     httpProtocol: {
       defaultMode: config.MCP_CLIENT_PROTOCOL_DEFAULT,
       mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
-      legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE
+      legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE,
+      probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS,
+      toolReadOnlyOverride: readOnlyMarks.lookup
     },
     // MCP 2026-07-28 — the same settings for stdio servers, plus the wait for their server/discover probe.
     stdioProtocol: {
       defaultMode: config.MCP_CLIENT_PROTOCOL_DEFAULT,
       mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
       legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE,
-      probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS
+      probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS,
+      toolReadOnlyOverride: readOnlyMarks.lookup
     },
     // Tracing (only while it is on): a CLIENT span per MCP operation, and trace context sent to MCP servers in
     // `_meta` and HTTP headers unless L2M_OTEL_PROPAGATE_TO_MCP=false or the server's connection opts out.
@@ -14474,6 +14481,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         readOnly: parsed.data.readOnly,
         setBy: user.email
       });
+      readOnlyMarks.invalidate(server.id);
       await recordPolicyAudit(
         user,
         parsed.data.readOnly === null ? "mcp_policy.classification_cleared" : "mcp_policy.classification_set",

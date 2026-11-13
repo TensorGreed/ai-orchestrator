@@ -9,8 +9,11 @@
  * The harness drives the real `HttpMCPServerAdapter` the way a run does: version 2026-07-28 or later uses protocol
  * mode `modern` (no initialize handshake, per-request `_meta`), earlier versions use `legacy` (initialize handshake).
  * For the `auth/*` scenarios it first runs the OAuth authorization-code flow with the building blocks of `oauth.ts`
- * (a re-implementation of the connect flow, so the adapter's own 401 refresh path is not exercised) and then connects
- * with the access token. Any failed request makes the process exit 1, except in scenarios that expect client errors.
+ * (a re-implementation of the connect flow) and then connects through the adapter's OAuth path: the adapter takes
+ * the access token from the harness's token provider and reports 403 `insufficient_scope` challenges to it, as it
+ * does to the API's (where a person then reconnects the server). After a challenge the harness authorizes again with
+ * the union of the scope it asked for and the challenged scope and sends the request again, at most twice per run.
+ * Any failed request makes the process exit 1, except in scenarios that expect client errors.
  *
  *   tsx src/bin/conformance-client.ts <server-url>
  */
@@ -23,10 +26,12 @@ import {
   discoverMcpOAuth,
   exchangeAuthorizationCode,
   registerOAuthClient,
+  unionOAuthScopes,
   validateAuthorizationResponseIssuer,
+  type McpOAuthDiscovery,
   type OAuthClientRegistration
 } from "../oauth";
-import type { MCPExecutionContext } from "../types";
+import type { McpOAuthTokenProvider, MCPExecutionContext } from "../types";
 
 const MODERN_VERSION = "2026-07-28";
 /** Scenarios that call a tool the client must refuse, so a failed call is part of the expected behaviour. */
@@ -84,8 +89,16 @@ async function acceptWithDefaults(request: McpElicitationRequest): Promise<McpEl
   return { action: "accept", content } as McpElicitationResult;
 }
 
-/** Authorization-code flow with PKCE against the scenario's authorization server; returns an access token. */
-async function authorize(url: string, context: Record<string, unknown>): Promise<string> {
+/** What one authorization produced; a step-up reuses the discovery and the client registration. */
+interface Authorization {
+  accessToken: string;
+  scope?: string;
+  discovery: McpOAuthDiscovery;
+  registration: OAuthClientRegistration;
+}
+
+/** Discovery and client registration (pre-registered from the scenario context, else dynamic). */
+async function prepareAuthorization(url: string, context: Record<string, unknown>): Promise<Pick<Authorization, "discovery" | "registration" | "scope">> {
   const discovery = await discoverMcpOAuth(url);
   const scope =
     discovery.scopeHint ??
@@ -107,6 +120,12 @@ async function authorize(url: string, context: Record<string, unknown>): Promise
   } else {
     throw new Error("The authorization server offers no registration endpoint and the scenario gave no client.");
   }
+  return { discovery, registration, ...(scope ? { scope } : {}) };
+}
+
+/** Authorization-code flow with PKCE against the scenario's authorization server, asking for `scope`. */
+async function authorize(prepared: Pick<Authorization, "discovery" | "registration" | "scope">): Promise<Authorization> {
+  const { discovery, registration, scope } = prepared;
   const pkce = createPkcePair();
   const state = createOAuthState();
   const authorizationUrl = buildAuthorizationUrl({
@@ -140,8 +159,11 @@ async function authorize(url: string, context: Record<string, unknown>): Promise
     redirectUri: REDIRECT_URI,
     resource: discovery.resource
   });
-  return tokens.accessToken;
+  return { accessToken: tokens.accessToken, discovery, registration, ...(scope ? { scope } : {}) };
 }
+
+/** At most this many step-up authorizations per run (the specification asks for a retry limit). */
+const MAX_STEP_UPS = 2;
 
 async function main(): Promise<void> {
   const url = process.argv[process.argv.length - 1];
@@ -152,25 +174,65 @@ async function main(): Promise<void> {
   const modern = version >= MODERN_VERSION;
 
   const connection: Record<string, unknown> = { endpoint: url, protocolMode: modern ? "modern" : "legacy", timeoutMs: 20_000 };
+  let authorization: Authorization | undefined;
+  /** Scopes the server challenged (403 insufficient_scope) since the last authorization, as the adapter reported them. */
+  let challenged: { scope?: string } | undefined;
+  const tokenProvider: McpOAuthTokenProvider = {
+    getAccessToken: async () => {
+      if (!authorization) throw new Error("Not authorized.");
+      return authorization.accessToken;
+    },
+    noteInsufficientScope: async (_serverId, scope) => {
+      challenged = { scope: unionOAuthScopes(challenged?.scope, scope) };
+    }
+  };
   if (scenario.startsWith("auth/")) {
-    connection.authType = "bearer";
-    connection.bearerToken = await authorize(url, context);
+    authorization = await authorize(await prepareAuthorization(url, context));
+    // The adapter's OAuth path: tokens from the provider, scope challenges reported to it.
+    connection.authType = "oauth";
   } else {
     connection.authType = "none";
   }
 
-  const config: MCPServerConfig = { serverId: "conformance", label: "conformance", connection };
+  const config: MCPServerConfig = { serverId: "conformance", registryServerId: "conformance", label: "conformance", connection };
   const runtimeState = new Map<string, unknown>();
   const ctx: MCPExecutionContext = {
     resolveSecret: async () => undefined,
     runtimeState,
     onElicitation: acceptWithDefaults
   };
-  const adapter = new HttpMCPServerAdapter({ protocol: { defaultMode: modern ? "modern" : "legacy" } });
+  // A new adapter after a step-up, so no connection keeps the old token in its headers.
+  const newAdapter = () => new HttpMCPServerAdapter({ oauth: tokenProvider, protocol: { defaultMode: modern ? "modern" : "legacy" } });
+  let adapter = newAdapter();
   const failures: string[] = [];
+  let stepUps = 0;
+  /**
+   * Runs `operation`. When the adapter reported a scope challenge during it, authorizes again with the union of the
+   * scope asked for before and the challenged scope (step-up), then runs it once more.
+   */
+  const withStepUp = async <T>(operation: () => Promise<T>): Promise<T> => {
+    for (;;) {
+      challenged = undefined;
+      let outcome: { value: T } | { error: unknown };
+      try {
+        outcome = { value: await operation() };
+      } catch (error) {
+        outcome = { error };
+      }
+      const challenge = challenged as { scope?: string } | undefined;
+      if (!challenge || !authorization || stepUps >= MAX_STEP_UPS) {
+        if ("error" in outcome) throw outcome.error;
+        return outcome.value;
+      }
+      stepUps += 1;
+      authorization = await authorize({ ...authorization, scope: unionOAuthScopes(authorization.scope, challenge.scope) });
+      await adapter.closeSessions?.(ctx);
+      adapter = newAdapter();
+    }
+  };
   const attempt = async (label: string, run: () => Promise<unknown>): Promise<void> => {
     try {
-      await run();
+      await withStepUp(run);
     } catch (error) {
       failures.push(label);
       process.stderr.write(`${label}: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -178,7 +240,7 @@ async function main(): Promise<void> {
   };
 
   try {
-    const tools = await adapter.discoverTools(config, ctx);
+    const tools = await withStepUp(() => adapter.discoverTools(config, ctx));
     const planned = Array.isArray(context.toolCalls) ? (context.toolCalls as ToolCallPlan[]) : null;
     const calls: ToolCallPlan[] = planned
       ? planned

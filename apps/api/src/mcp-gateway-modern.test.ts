@@ -402,6 +402,10 @@ describe("modern mode on", () => {
       id: 9,
       error: { code: -32022, message: "Unsupported protocol version", data: { supported: ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"], requested: "2027-01-01" } }
     });
+    // The modern version in the header over an unknown version in _meta: the header does not match the body, -32020.
+    const mismatch = await send({ _meta: modernMeta({ "io.modelcontextprotocol/protocolVersion": "v999.0.0" }) }, modernHeaders("tools/list"));
+    expect(mismatch.statusCode).toBe(400);
+    expect(mismatch.json()).toMatchObject({ id: 9, error: { code: -32020 } });
     // A legacy version named in modern _meta is not served without initialize either.
     const legacyInMeta = await send({ _meta: modernMeta({ "io.modelcontextprotocol/protocolVersion": "2025-11-25" }) }, { ...modernHeaders("tools/list"), "mcp-protocol-version": "2025-11-25" });
     expect(legacyInMeta.json().error.code).toBe(-32022);
@@ -426,6 +430,15 @@ describe("modern mode on", () => {
     expect(encodedName.statusCode).toBe(200);
     expect(encodedName.json().result.structuredContent).toMatchObject({ result: 2 });
 
+    // A modern version in the header but no _meta (or no version in it): -32602 with the request's id, not the
+    // legacy "unsupported version" answer with id null.
+    for (const params of [undefined, {}, { _meta: { "io.modelcontextprotocol/clientCapabilities": {} } }]) {
+      const bare = await rpc(fixture, { jsonrpc: "2.0", id: 101, method: "server/discover", ...(params ? { params } : {}) }, modernHeaders("server/discover"));
+      expect(bare.statusCode).toBe(400);
+      expect(bare.json()).toMatchObject({ jsonrpc: "2.0", id: 101, error: { code: -32602 } });
+      expect(bare.json().error.data.missing).toContain("io.modelcontextprotocol/protocolVersion");
+    }
+
     // Capabilities missing: -32602 naming the key.
     const noCapabilities = await send({ _meta: { "io.modelcontextprotocol/protocolVersion": MODERN } }, modernHeaders("tools/list"));
     expect(noCapabilities.statusCode).toBe(400);
@@ -437,6 +450,17 @@ describe("modern mode on", () => {
       expect(response.statusCode, method).toBe(404);
       expect(response.json().error.code).toBe(-32601);
     }
+
+    // initialize sent as a modern request (modern header and _meta): a method 2026-07-28 removed, so 404 with -32601
+    // and the request's id, and no session.
+    const modernInit = await send({ protocolVersion: MODERN, capabilities: {}, clientInfo: { name: "x", version: "1" }, _meta: modernMeta() }, modernHeaders("initialize"), "initialize");
+    expect(modernInit.statusCode).toBe(404);
+    expect(modernInit.json()).toMatchObject({ jsonrpc: "2.0", id: 9, error: { code: -32601 } });
+    expect(modernInit.headers["mcp-session-id"]).toBeUndefined();
+    // ...also with legacy-shaped params and no _meta: the removed method comes first, not the missing keys.
+    const bareInit = await send({ protocolVersion: MODERN, capabilities: {}, clientInfo: { name: "x", version: "1" } }, modernHeaders("initialize"), "initialize");
+    expect(bareInit.statusCode).toBe(404);
+    expect(bareInit.json()).toMatchObject({ jsonrpc: "2.0", id: 9, error: { code: -32601 } });
 
     // Only the one valid call created the caller's state; refused requests never do.
     expect(await auditEvents(fixture.context.store, "mcp_gateway.caller_seen")).toHaveLength(1);

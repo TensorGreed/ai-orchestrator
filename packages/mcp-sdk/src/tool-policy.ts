@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { McpToolReadOnlyOverride } from "./types";
 import {
   MCP_ADAPTERS_WITHOUT_NETWORK,
   mcpServerDestinationRef,
@@ -151,6 +152,32 @@ export function effectiveToolHints(
     idempotent: readOnly ? true : annotations?.idempotentHint === true,
     openWorld: typeof openWorld === "boolean" ? openWorld : annotations?.openWorldHint !== false
   };
+}
+
+/** The admin's mark for `toolName`, or null when there is no lookup, no registry id, no mark, or the lookup failed. */
+export async function readOnlyOverrideFor(
+  lookup: McpToolReadOnlyOverride | undefined,
+  registryServerId: string | undefined,
+  toolName: string
+): Promise<boolean | null> {
+  if (!lookup || !registryServerId) return null;
+  try {
+    const value = await lookup(registryServerId, toolName);
+    return typeof value === "boolean" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * MCP 2026-07-28 (decision D13) — whether a tool call may be sent again when no answer arrived: read-only or
+ * idempotent tools only. An admin's read-only mark in tool policy (`manualReadOnly`) wins over the server's
+ * annotations, as it does for policy rules; a tool with neither counts as unsafe.
+ */
+export function toolReissueSafe(annotations: McpToolAnnotations | null | undefined, manualReadOnly?: boolean | null): boolean {
+  if (!annotations && typeof manualReadOnly !== "boolean") return false;
+  const hints = effectiveToolHints(annotations, manualReadOnly);
+  return hints.readOnly || hints.idempotent;
 }
 
 /**

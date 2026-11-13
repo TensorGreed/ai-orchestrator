@@ -319,6 +319,20 @@ describe("auto mode", () => {
     }
   });
 
+  it("waits for the probe only as long as probeTimeoutMs (MCP_CLIENT_ERA_PROBE_TIMEOUT_MS) says", async () => {
+    const legacyHandler = legacyServer();
+    const { endpoint, seen } = await startServer((rpc, headers, all) => (rpc.method === "server/discover" ? { hang: true } : legacyHandler(rpc, headers, all)));
+    const adapter = new HttpMCPServerAdapter({ protocol: { probeTimeoutMs: 300 } });
+    // The server's own timeout is far longer: the probe's cap decides.
+    const config = configFor(endpoint, { protocolMode: "auto", timeoutMs: 30_000 });
+    const started = Date.now();
+    expect(await adapter.invokeTool("lookup", {}, config, contextOf())).toMatchObject({ ok: true, output: "legacy" });
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(280);
+    expect(elapsed).toBeLessThan(5_000);
+    expect(methods(seen).slice(0, 2)).toEqual(["server/discover", "initialize"]);
+  });
+
   it("caches legacy when server/discover is answered with method not found at HTTP 200", async () => {
     const legacyHandler = legacyServer();
     const { endpoint, seen } = await startServer((rpc, headers, all) =>
@@ -690,6 +704,41 @@ describe("re-issuing after a broken connection (D13)", () => {
     await adapter.discoverTools(config, context);
     expect(await adapter.invokeTool("write_row", {}, config, context)).toMatchObject({ ok: true, output: "ran" });
     expect(toolCalls(seen)).toHaveLength(2);
+  });
+
+  it("an admin's read-only mark in tool policy decides re-issue before the server's annotations", async () => {
+    const asked: Array<[string, string]> = [];
+    const marks: Record<string, boolean> = { write_row: true, lookup: false };
+    const toolReadOnlyOverride = (serverId: string, toolName: string) => {
+      asked.push([serverId, toolName]);
+      return marks[toolName] ?? null;
+    };
+    for (const era of ["modern", "legacy"] as const) {
+      // Marked read-only by an admin: sent again although the server gives no hints.
+      const write = await startServer(brokenOnce(era, era === "modern" ? { sse: [] } : { destroy: true }));
+      const adapter = new HttpMCPServerAdapter({ protocol: { toolReadOnlyOverride } });
+      const config = { ...configFor(write.endpoint, { protocolMode: era }), registryServerId: "reg-1" };
+      const context = contextOf();
+      if (era === "legacy") await adapter.discoverTools(config, context);
+      expect(await adapter.invokeTool("write_row", {}, config, context), era).toMatchObject({ ok: true, output: "ran" });
+      expect(toolCalls(write.seen)).toHaveLength(2);
+
+      // Marked not read-only: an outcome_unknown failure although the server says read-only.
+      const read = await startServer(brokenOnce(era, era === "modern" ? { sse: [] } : { destroy: true }));
+      const readConfig = { ...configFor(read.endpoint, { protocolMode: era }), registryServerId: "reg-1" };
+      if (era === "legacy") await adapter.discoverTools(readConfig, context);
+      expect(await adapter.invokeTool("lookup", {}, readConfig, context), era).toMatchObject({ ok: false, errorKind: "outcome_unknown" });
+      expect(toolCalls(read.seen)).toHaveLength(1);
+    }
+    expect(asked).toContainEqual(["reg-1", "write_row"]);
+    // A lookup that fails counts as no mark; inline servers (no registry id) are never looked up.
+    const failing = await startServer(brokenOnce("modern", { sse: [] }));
+    const adapter = new HttpMCPServerAdapter({ protocol: { toolReadOnlyOverride: () => Promise.reject(new Error("store down")) } });
+    expect(await adapter.invokeTool("lookup", {}, { ...configFor(failing.endpoint, { protocolMode: "modern" }), registryServerId: "reg-1" }, contextOf())).toMatchObject({ ok: true });
+    asked.length = 0;
+    const inline = await startServer(brokenOnce("modern", { sse: [] }));
+    await new HttpMCPServerAdapter({ protocol: { toolReadOnlyOverride } }).invokeTool("write_row", {}, configFor(inline.endpoint, { protocolMode: "modern" }), contextOf());
+    expect(asked).toEqual([]);
   });
 
   it("legacy: a timed-out write is not sent again, and the server is told to stop", async () => {
