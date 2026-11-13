@@ -32,6 +32,7 @@ import {
 } from "./services/mcp-tool-telemetry.js";
 import type { Store } from "./db/store.js";
 import { mapAsync } from "./async-array.js";
+import { seesOthersElicitations } from "./services/mcp-elicitation-service.js";
 
 export interface McpControlPlaneDeps {
   app: FastifyInstance;
@@ -641,7 +642,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
       .slice(0, 5);
 
     const visibleElicitation = (record: { createdBy: string | null }) =>
-      user.role === "admin" || user.role === "operator" || !record.createdBy || record.createdBy === user.id;
+      seesOthersElicitations(user.role) || !record.createdBy || record.createdBy === user.id;
     const openQuestions = (await store.listMcpElicitations({ status: "pending", limit: 500 })).filter(visibleElicitation);
 
     const clientUsage = new Map((await store.summarizeMcpClientUsage(since)).map((row) => [row.clientId, row]));

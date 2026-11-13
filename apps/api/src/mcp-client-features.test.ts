@@ -391,6 +391,7 @@ describe("elicitation", () => {
     const builder = await login(context, "builder");
     const other = await login(context, "builder", "other");
     const operator = await login(context, "operator");
+    const viewer = await login(context, "viewer");
     const serverId = await registerMockServer(context, admin.cookie);
     await call(context, "POST", "/api/workflows", builder.cookie, askWorkflow("wf-ask", serverId));
 
@@ -402,11 +403,13 @@ describe("elicitation", () => {
     expect(pending).toMatchObject({ workflowId: "wf-ask", nodeId: "tool", toolName: "ask_user", message: "Which region?", serverName: "Mock", registryServerId: serverId, createdBy: builder.id, triggerType: "manual_stream" });
     expect(pending.requestedSchema.properties.answer).toMatchObject({ type: "string", enum: ["eu", "us"] });
 
-    // Another builder cannot see or answer it (it reads as missing); a viewer-level list shows only your own.
-    expect((await call(context, "GET", "/api/mcp/elicitations", other.cookie)).json<{ items: unknown[] }>().items).toHaveLength(0);
-    expect((await call(context, "POST", `/api/mcp/elicitations/${pending.id}/answer`, other.cookie, { action: "accept", content: { answer: "eu" } })).statusCode).toBe(404);
-    // Operators see it, and the owner sees it.
+    // A viewer cannot see or answer it (it reads as missing): below operator, a list shows only your own.
+    expect((await call(context, "GET", "/api/mcp/elicitations", viewer.cookie)).json<{ items: unknown[] }>().items).toHaveLength(0);
+    expect((await call(context, "POST", `/api/mcp/elicitations/${pending.id}/answer`, viewer.cookie, { action: "accept", content: { answer: "eu" } })).statusCode).toBe(404);
+    // Operator and above by rank see it (operators, other builders, admins), and the owner sees it.
     expect((await call(context, "GET", "/api/mcp/elicitations", operator.cookie)).json<{ items: McpElicitationView[] }>().items[0].id).toBe(pending.id);
+    expect((await call(context, "GET", "/api/mcp/elicitations", other.cookie)).json<{ items: McpElicitationView[] }>().items[0].id).toBe(pending.id);
+    expect((await call(context, "GET", `/api/mcp/elicitations/${pending.id}`, other.cookie)).statusCode).toBe(200);
     expect((await call(context, "GET", `/api/mcp/elicitations?executionId=${pending.executionId}`, builder.cookie)).json<{ items: McpElicitationView[] }>().items).toHaveLength(1);
     // Validation: unknown choice, bad payload.
     const invalid = await call(context, "POST", `/api/mcp/elicitations/${pending.id}/answer`, builder.cookie, { action: "accept", content: { answer: "mars" } });
@@ -444,6 +447,7 @@ describe("elicitation", () => {
     const builder = await login(context, "builder");
     const other = await login(context, "builder", "other");
     const operator = await login(context, "operator");
+    const viewer = await login(context, "viewer");
     const serverId = await registerMockServer(context, admin.cookie);
     await call(context, "POST", "/api/workflows", builder.cookie, askWorkflow("wf-follow-ask", serverId));
     const stream = call(context, "POST", "/api/workflows/wf-follow-ask/execute/stream", builder.cookie, { input: {} });
@@ -473,17 +477,19 @@ describe("elicitation", () => {
         })()
       };
     };
+    const viewerStream = (await follow(viewer.cookie)).rest;
     const otherStream = (await follow(other.cookie)).rest;
     const operatorStream = (await follow(operator.cookie)).rest;
     const ownerStream = (await follow(builder.cookie)).rest;
     expect((await call(context, "POST", `/api/mcp/elicitations/${pending.id}/answer`, builder.cookie, { action: "accept", content: { answer: "eu" } })).statusCode).toBe(200);
     expect((await stream).statusCode).toBe(200);
 
-    const [otherBody, operatorBody, ownerBody] = await Promise.all([otherStream, operatorStream, ownerStream]);
-    // The other builder reads the run but not the request: no elicitation event, the rest of the stream as usual.
-    expect(sseFrames(otherBody, "mcp_elicitation")).toEqual([]);
-    expect(sseFrames(otherBody, "result")[0]).toMatchObject({ status: "success" });
-    for (const body of [operatorBody, ownerBody]) {
+    const [viewerBody, otherBody, operatorBody, ownerBody] = await Promise.all([viewerStream, otherStream, operatorStream, ownerStream]);
+    // The viewer reads the run but not the request: no elicitation event, the rest of the stream as usual.
+    expect(sseFrames(viewerBody, "mcp_elicitation")).toEqual([]);
+    expect(sseFrames(viewerBody, "result")[0]).toMatchObject({ status: "success" });
+    // Operator and above by rank (another builder too) see it, as the owner does.
+    for (const body of [otherBody, operatorBody, ownerBody]) {
       expect(sseFrames(body, "mcp_elicitation").map((event) => event.phase)).toEqual(["settled"]);
       expect(sseFrames(body, "result")[0]).toMatchObject({ status: "success" });
     }

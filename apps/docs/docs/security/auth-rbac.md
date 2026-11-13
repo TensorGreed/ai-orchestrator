@@ -92,7 +92,7 @@ needs a role also accepts every role above it.
 |---|---|---|
 | `viewer` | People who watch | Read workflows, runs and approvals in the projects they can read. |
 | `operator` | People who run and supervise | What a viewer can do, plus queue runs, cancel runs, decide approvals and answer MCP servers' questions. Cannot edit workflows or run them directly. |
-| `builder` | People who build | What an operator can do (except answer MCP questions from other people's runs), plus create, edit, run and delete workflows, manage secrets, variables, projects and evals. |
+| `builder` | People who build | What an operator can do, plus create, edit, run and delete workflows, manage secrets, variables, projects and evals. |
 | `admin` | People who run the deployment | Everything, including users, roles, SSO, the MCP registry, policy and gateway, retention and the audit log. |
 
 ## Access model summary
@@ -111,9 +111,9 @@ needs a role also accepts every role above it.
     (see [Approvals](../product/approvals.md)). Release requests in the same inbox need `workflow:publish`, which
     operators do not have. A gate that lists the `viewer` role or a viewer by name lets that viewer decide too.
   - see and answer an MCP server's question (elicitation) from a run someone else started (see
-    [Elicitation](../product/mcp-server-registry.md#elicitation-a-server-asks-the-person-a-question)). Only operators
-    and admins can do this; viewers and builders see and answer only the questions of runs they started (and of queued
-    runs).
+    [Elicitation](../product/mcp-server-registry.md#elicitation-a-server-asks-the-person-a-question)). Operator and
+    above by rank (operators, builders and admins) can do this; viewers see and answer only the questions of runs they
+    started (and of queued runs).
   - connect and disconnect their own account on MCP servers that use each user's own credentials (**My connections**,
     see [Delegated credentials](../product/mcp-server-registry.md#delegated-credentials))
 
@@ -223,7 +223,7 @@ on top of the global role:
 | Save or delete a golden run / replay one | `workflow:write` / `workflow:execute` |
 | Read or search a knowledge base / ingest into one | `workflow:read` / `workflow:write` in the KB's project |
 | Read MCP cassettes (list, detail, export) | `workflow:read` on the recorded workflow |
-| Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`; a request from a run someone else started is shown only to that person and operators, except for queued runs, whose requests anyone who can read the workflow sees) |
+| Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`; a request from a run someone else started is shown only to that person and to operator and above (operators, builders, admins), except for queued runs, whose requests anyone who can read the workflow sees) |
 | Eval datasets and fixtures: list or read / create, add, delete | `workflow:read` / `workflow:write` in the dataset's project |
 | Compat webhook API (`/api/webhooks/execute`, `/stream`) | `workflow:execute` on the selected workflow |
 | Create a template from a workflow / use a template | `workflow:write` on the source / `workflow:write` in the target project |
