@@ -342,7 +342,8 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     slug: "audit-log",
     term: "Audit log",
     topic: "operations",
-    definition: "A record of who did what and when, such as changes to settings, rules and secrets, kept so that actions can be checked later."
+    definition: "A record of who did what and when, such as changes to settings, rules and secrets, kept so that actions can be checked later.",
+    docs: "/security/audit-log"
   },
   {
     slug: "signed-run-manifest",

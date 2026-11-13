@@ -34,6 +34,8 @@ the same optional allow-lists (`SAML_ALLOWED_EMAIL_DOMAINS`,
 `SAML_ALLOWED_GROUPS`), an optional `SAML_IDP_ISSUER` pin and an optional
 `SAML_REQUIRE_IN_RESPONSE_TO` (SP-initiated sign-in only, against login CSRF);
 see [SAML single sign-on](../security/auth-rbac.md#saml-single-sign-on).
+LDAP needs `LDAP_ENABLED=true`, `LDAP_URL`, `LDAP_BASE_DN` and the optional
+`ldapts` package; see [LDAP sign-in](../security/auth-rbac.md#ldap-sign-in).
 
 `SSO_MFA` (`off` by default, `idp` or `idp_or_local`) requires MFA on OIDC and
 SAML logins, from the IdP or the local TOTP step; `SSO_MFA_OIDC_AMR`,
@@ -118,6 +120,12 @@ Address allowlists per scope (`NETWORK_ALLOW_UI`, `NETWORK_ALLOW_API`, `NETWORK_
 gateway (`MCP_GATEWAY_CLIENT_CERT_HEADER`, `MCP_GATEWAY_CLIENT_CERT_PROXIES`). All unset by default, so every scope is
 open. They are checked against the client address above, and refused with `TRUST_PROXY=true`. See
 [Network controls](../security/network-controls.md).
+
+## Audit log (optional)
+
+The audit log is on by default (`AUDIT_LOG_ENABLED=true`). `AUDIT_EXPORT_ENABLED=true` sends it to export destinations
+on their schedule (`AUDIT_EXPORT_CHECK_INTERVAL_MS`, `AUDIT_EXPORT_BATCH_SIZE`, `AUDIT_EXPORT_FILE_ROOT`), and the
+`LOG_STREAM_*` settings tune the live log streams. See [Audit log](../security/audit-log.md).
 
 ## Data retention (optional)
 

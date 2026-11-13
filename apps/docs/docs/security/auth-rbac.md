@@ -85,10 +85,15 @@ longer than it are signed out on their next request; users sign in again. Loweri
 
 ## Roles
 
-- `admin`
-- `builder`
-- `operator`
-- `viewer`
+Every user has one global role. The roles are ranked `viewer` < `operator` < `builder` < `admin`, and a route that
+needs a role also accepts every role above it.
+
+| Role | For | In short |
+|---|---|---|
+| `viewer` | People who watch | Read workflows, runs and approvals in the projects they can read. |
+| `operator` | People who run and supervise | What a viewer can do, plus queue runs, cancel runs, decide approvals and answer MCP servers' questions. Cannot edit workflows or run them directly. |
+| `builder` | People who build | What an operator can do (except answer MCP questions from other people's runs), plus create, edit, run and delete workflows, manage secrets, variables, projects and evals. |
+| `admin` | People who run the deployment | Everything, including users, roles, SSO, the MCP registry, policy and gateway, retention and the audit log. |
 
 ## Access model summary
 
@@ -96,6 +101,29 @@ longer than it are signed out on their next request; users sign in again. Loweri
 - Workflow create/update/delete: `builder`, `admin`
 - Execute workflow/webhook API trigger: `builder`, `admin`
 - Secrets list/create: `builder`, `admin`
+- What an `operator` can do beyond a viewer:
+  - put a run on the queue (`POST /api/workflows/:id/enqueue`; see [Queue and workers](../operations/queue-and-workers.md))
+    and see the queue depth and the dead-letter queue (`GET /api/queue/depth`, `GET /api/queue/dlq`). These routes
+    exist only where a queue runs. Direct runs (`/execute`, `/execute/stream`, retry, replay and the compat webhook
+    API) need `builder`.
+  - cancel a running or paused run (`POST /api/executions/:id/cancel`)
+  - decide approval-gate requests: a gate that lists no approver roles or users accepts any operator, builder or admin
+    (see [Approvals](../product/approvals.md)). Release requests in the same inbox need `workflow:publish`, which
+    operators do not have. A gate that lists the `viewer` role or a viewer by name lets that viewer decide too.
+  - see and answer an MCP server's question (elicitation) from a run someone else started (see
+    [Elicitation](../product/mcp-server-registry.md#elicitation-a-server-asks-the-person-a-question)). Only operators
+    and admins can do this; viewers and builders see and answer only the questions of runs they started (and of queued
+    runs).
+  - connect and disconnect their own account on MCP servers that use each user's own credentials (**My connections**,
+    see [Delegated credentials](../product/mcp-server-registry.md#delegated-credentials))
+
+  Queuing, cancelling, deciding and answering also need `workflow:execute` in the workflow's project (see
+  [Project access](#project-access)); My connections needs it in the MCP server's project. The queue depth needs only
+  the role, and the dead-letter list shows only workflows you can read.
+  In `role` isolation an operator without a membership gets `workflow:read`, `workflow:execute` and `secret:use`
+  there, so a run they start or resume can use the project's secrets, but they cannot list or create secrets.
+  Like viewers, operators reading a run that answered an outside caller may see its step data hidden by
+  [content rules](../product/content-rules.md); builders and admins see it.
 - User registration (`POST /api/auth/register`):
   - the first user is the bootstrap admin
   - with `AUTH_ALLOW_PUBLIC_REGISTER=false` (the default) only an `admin`, signed in or with an API key, creates
@@ -629,6 +657,65 @@ API checks these settings at startup when SAML is on.
   switching accounts if the earlier session must end at once. (A JSON client
   that sends the cookie has it revoked, as with OIDC.)
 
+## LDAP sign-in
+
+L2M can check a user's email and password against an LDAP directory, such as Active Directory or OpenLDAP. LDAP
+sign-in is off by default and is an API route only: the Studio's login page has no LDAP form, so use it from your
+own login page, a script or a client that calls `POST /api/auth/ldap/login`.
+
+### Settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LDAP_ENABLED` | `false` | Turns the route on. |
+| `LDAP_URL` | unset | The directory, for example `ldaps://ldap.example.com:636`. Required. |
+| `LDAP_BIND_DN` | unset | The account L2M binds as to search for the user. Unset: the search runs without binding first (anonymous). |
+| `LDAP_BIND_PASSWORD` | unset | That account's password. |
+| `LDAP_BASE_DN` | unset | Where the user search starts, for example `ou=people,dc=example,dc=com`. Required. |
+| `LDAP_USER_FILTER` | `(mail={{email}})` | The search filter. `{{email}}` is replaced with the email the user typed. |
+| `LDAP_GROUPS_ATTRIBUTE` | `memberOf` | The attribute of the user's entry that holds their groups, used by [group-to-role mappings](#group-to-role-mappings). |
+
+The LDAP client is an optional package that is not installed by default. Add it to the API before you turn LDAP on:
+
+```bash
+pnpm --filter @ai-orchestrator/api add ldapts
+```
+
+In a container, add it to the image you build. Without it, or without `LDAP_URL` and `LDAP_BASE_DN`, the route
+answers `503` with `LDAP not configured: ...`; with `LDAP_ENABLED=false` it answers `503` as well.
+
+Use an `ldaps://` URL so passwords do not cross the network in clear text. The server's certificate is checked against
+the CAs Node trusts; for a private CA set `NODE_EXTRA_CA_CERTS` on the API.
+
+### How a sign-in works
+
+`POST /api/auth/ldap/login` with `{ "email": "...", "password": "..." }`:
+
+1. L2M binds as `LDAP_BIND_DN` (when set) and searches below `LDAP_BASE_DN`, in the whole subtree, with
+   `LDAP_USER_FILTER`. The first entry found is the user. No entry: `401` "User not found in LDAP directory".
+2. It binds again as that entry's DN with the password the user gave. A wrong password: `401`.
+3. The account is found by the entry's `mail` attribute (else the email the user typed). An L2M user with that email
+   is signed in; otherwise a new user is created. An existing account is linked by email alone, so connect only a
+   directory whose users cannot set their own `mail` value.
+4. [Group mappings](#group-to-role-mappings) for provider `ldap` apply to the groups in `LDAP_GROUPS_ATTRIBUTE`: a
+   mapping without a project sets the global role (raising it, never lowering it), and one with a project adds a
+   project membership. A new user with no matching mapping is a `viewer`. When several of the user's groups map to a global role, the first
+   group listed in the entry wins.
+5. The answer is `{ user, expiresAt, provisioned }` with the session cookie set, as for a password login. The session
+   is recorded with method `ldap`.
+
+A user who has an authenticator set up gets `{ mfaChallenge, expiresInSeconds }` instead, and finishes at
+`POST /api/auth/login/mfa`; the account and its group mappings change only once the code passes. A role listed in
+`MFA_REQUIRED_ROLES` without an authenticator gets a session that can only set one up (see
+[MFA required per role](#mfa-required-per-role)). `SSO_MFA` does not apply to LDAP.
+
+Without `email` or `password` the route answers `400`. Any other failure answers `401` with the reason in the message:
+an unknown user, a wrong password, a directory that cannot be reached, a certificate error or a wrong `LDAP_BIND_DN`
+password. Service accounts cannot sign in through LDAP. The route counts against the sign-in rate limit
+(`RATE_LIMIT_AUTH_MAX`). The code step is audited as `user.login.mfa_challenge` with `method: "ldap"`, and a wrong
+code as `mfa.code_failed`; other LDAP sign-ins, successful or refused, are not written to the audit log, so use the
+session list (method `ldap`) and the directory's own logs to follow them.
+
 ## MFA on SSO
 
 `SSO_MFA` decides whether an OIDC or SAML login must show multi-factor
@@ -877,6 +964,9 @@ If the only admin loses their authenticator and backup codes:
 - `GET /api/auth/oidc/callback` (IdP redirect target)
 - `GET /api/auth/saml/login` (redirects to the SAML IdP)
 - `POST /api/auth/saml/callback` (IdP form post, or JSON)
+- `POST /api/auth/ldap/login` (`{ email, password }`; see [LDAP sign-in](#ldap-sign-in))
+- `GET /api/auth/sso/mappings`, `POST /api/auth/sso/mappings`, `DELETE /api/auth/sso/mappings/:id` (admin; group-to-role
+  mappings for `saml`, `ldap` and `oidc`)
 - `POST /api/users/invite` (admin; `{ email, role?, expiresInHours? }`)
 - `POST /api/auth/invite/lookup` (public; `{ token }`)
 - `POST /api/auth/invite/accept` (public; `{ token, password }`)
