@@ -77,6 +77,8 @@ export interface TelemetrySettings {
   contentCapture: ContentCaptureSetting;
   /** Longest captured content attribute (L2M_OTEL_CONTENT_MAX_CHARS). */
   contentMaxChars: number;
+  /** `/v1` gateway requests capture content too (L2M_OTEL_CAPTURE_GATEWAY_CONTENT); false while capture is off. */
+  gatewayContentCapture: boolean;
   /** Start-up warnings (deprecated settings in use). */
   warnings: string[];
 }
@@ -311,6 +313,7 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
     trustedProxies,
     contentCapture,
     contentMaxChars: config.L2M_OTEL_CONTENT_MAX_CHARS ?? DEFAULT_CONTENT_MAX_CHARS,
+    gatewayContentCapture: contentCapture !== "NO_CONTENT" && config.L2M_OTEL_CAPTURE_GATEWAY_CONTENT === true,
     warnings
   };
 }

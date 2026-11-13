@@ -1649,10 +1649,14 @@ export async function createApp(
   for (const warning of telemetrySettings.warnings) app.log.warn(warning);
   // Reported by /api/observability; NO_CONTENT unless tracing is on and content is captured.
   const contentCaptureMode = telemetryRuntime?.contentCapture ?? "NO_CONTENT";
+  // /v1 gateway requests capture content only with their own opt-in on top of the general switch.
+  const gatewayContentCapture = contentCaptureMode !== "NO_CONTENT" && telemetrySettings.gatewayContentCapture;
   if (contentCaptureMode !== "NO_CONTENT") {
     app.log.warn(
-      { contentCapture: contentCaptureMode, maxChars: contentMaxChars },
-      "OpenTelemetry content capture is on: prompts, answers and tool arguments and results are exported after secret removal and content-rule masking"
+      { contentCapture: contentCaptureMode, maxChars: contentMaxChars, gatewayContent: gatewayContentCapture },
+      gatewayContentCapture
+        ? "OpenTelemetry content capture is on for workflow runs and /v1 gateway requests: prompts, answers and tool arguments and results are exported after secret removal and content-rule masking"
+        : "OpenTelemetry content capture is on for workflow runs (not /v1 gateway requests): prompts, answers and tool arguments and results are exported after secret removal and content-rule masking"
     );
     app.addHook("onReady", async () => {
       try {
@@ -1663,7 +1667,7 @@ export async function createApp(
           outcome: "success",
           actor: { type: "system" },
           resourceType: "telemetry",
-          metadata: { mode: contentCaptureMode, maxChars: contentMaxChars }
+          metadata: { mode: contentCaptureMode, maxChars: contentMaxChars, gatewayContent: gatewayContentCapture }
         });
       } catch (error) {
         app.log.warn({ err: error }, "Could not record the content capture audit event");
@@ -6870,7 +6874,8 @@ export async function createApp(
         trustInbound: telemetrySettings.trustInbound,
         spanDetail: telemetrySettings.spanDetail,
         contentCapture: contentCaptureMode,
-        contentMaxChars: contentCaptureMode === "NO_CONTENT" ? null : contentMaxChars
+        contentMaxChars: contentCaptureMode === "NO_CONTENT" ? null : contentMaxChars,
+        gatewayContentCapture
       },
       otlpMetrics: {
         enabled: telemetry.metrics !== null && telemetrySettings.metricsEndpoint !== null,
@@ -12446,6 +12451,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     priceRequest: (providerId, model, inputTokens, outputTokens, cachedInputTokens) =>
       usageService.estimateAiGatewayCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
     ...(modelTelemetry.active ? { instrument: modelTelemetry.instrumentation, recordCost: (observation: ModelCostObservation) => modelTelemetry.recordCost(observation) } : {}),
+    captureContent: gatewayContentCapture,
     checkModel:
       options.aiGatewayCheckModel ??
       (async (scope, call) =>

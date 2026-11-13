@@ -280,7 +280,7 @@ The older `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is read when the 
 | `execute_tool {tool}` | `gen_ai.tool.call.arguments` (as sent, after content rules and tool policy), `gen_ai.tool.call.result` (as the model sees it) |
 | `tools/call {tool}` (MCP CLIENT) | `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, for an MCP Tool node's call. An agent's call is recorded once, on its `execute_tool` span, as the agent kept it after its labels and content rules. |
 
-**Where.** Content is captured for workflow runs (their LLM Call nodes, agent loops and MCP Tool nodes, sub-workflows included) and for `/v1` AI gateway requests. Everything else records none, even with capture on: MCP gateway proxying, a tool tried from the server registry, eval and replay judges, MCP sampling, and provider connection tests.
+**Where.** Content is captured for workflow runs (their LLM Call nodes, agent loops and MCP Tool nodes, sub-workflows included). `/v1` AI gateway requests capture it only when `L2M_OTEL_CAPTURE_GATEWAY_CONTENT=true` is set as well: their prompts come from outside applications and the gateway has no sensitive marking of its own, so masking is all that protects them. Everything else records none, even with capture on: MCP gateway proxying, a tool tried from the server registry, eval and replay judges, MCP sampling, and provider connection tests.
 
 Images are named by type only, never copied. Not captured: embedding inputs, retrieval queries, memory records, error text from a provider or tool, and anything on run, node, agent or MCP gateway SERVER spans. A model call's content is recorded as it went to and came from the provider, including an answer that content rules then blocked or rewrote (cleaned as below). Earlier tool errors and content rule notices the model is shown are part of the next call's input messages.
 
@@ -304,7 +304,7 @@ Images are named by type only, never copied. Not captured: embedding inputs, ret
 
 `l2m_otel_content_dropped_total` (by `reason`) counts these on the metrics endpoint.
 
-**Visibility.** Start-up logs a warning and writes a `telemetry.content_capture_enabled` audit event while capture is on, and `GET /api/observability` reports `contentCapture` and `contentMaxChars`. Content capture is never on for a deployment that does not set the variable, and it changes nothing while tracing is off.
+**Visibility.** Start-up logs a warning and writes a `telemetry.content_capture_enabled` audit event while capture is on (both say whether `/v1` requests are included, as `gatewayContent`), and `GET /api/observability` reports `contentCapture`, `contentMaxChars` and `gatewayContentCapture`. Content capture is never on for a deployment that does not set the variable, and it changes nothing while tracing is off.
 
 ## Queues, clusters and approvals
 
@@ -358,6 +358,7 @@ POST /api/workflows/:id/enqueue         SERVER      (any instance)
 | `L2M_OTEL_PROPAGATE_TO_MCP` | `true` | Send trace context to MCP servers (`_meta` and HTTP headers). A server can opt out in its connection settings. |
 | `OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT` | `NO_CONTENT` | `SPAN_ONLY`, `EVENT_ONLY` or `SPAN_AND_EVENT` record masked content. See [Content capture](#content-capture). |
 | `L2M_OTEL_CONTENT_MAX_CHARS` | `8192` | Longest captured content attribute (256 to 1048576). |
+| `L2M_OTEL_CAPTURE_GATEWAY_CONTENT` | `false` | `true` also captures content for `/v1` AI gateway requests, while content capture is on. Workflow runs do not depend on it. |
 
 The standard `OTEL_*` values are read only while they are used, so values meant for other tools sharing the environment never stop L2M. While tracing is on, an unsupported value (a sampler, propagator, protocol or number L2M cannot use) falls back to its default with a warning at start-up. Only these stop the API at start-up, with a message naming the setting: an endpoint L2M is about to use that is not an absolute `http://` or `https://` URL, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` with a traces endpoint set, and a bad `L2M_OTEL_*` value (such as a trusted-proxy entry that is not an IP address or CIDR range).
 

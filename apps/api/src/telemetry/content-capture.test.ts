@@ -430,6 +430,27 @@ async function until<T>(read: () => T | Promise<T>, what: string, timeoutMs = 10
   }
 }
 
+/** Sends one `/v1` chat request with personal data and every seeded secret in it; returns its `chat` span. */
+async function gatewayChat(fixture: Fixture) {
+  const upstream = await startUpstream();
+  cleanups.push(upstream.close);
+  await fixture.secretService.createSecret({ name: "plain", provider: "openai", value: STORED_SECRET, projectId: "default" });
+  const { secretId } = await fixture.secretService.createSecret({ name: "upstream", provider: "openai_compatible", value: UPSTREAM_KEY, projectId: "default" });
+  const set = await api<{ id: string }>(fixture, "POST", "/api/ai-gateway/route-sets", { name: "Apps", projectId: "default" });
+  expect((await api(fixture, "POST", `/api/ai-gateway/route-sets/${set.body.id}/routes`, { alias: "gpt-test", providerId: "openai_compatible", model: "up-model", baseUrl: upstream.baseUrl, secretRef: { secretId } })).status).toBe(201);
+  const client = await api<{ client: { id: string }; token: string }>(fixture, "POST", "/api/mcp/clients", { name: "App", toolsetIds: [], role: "builder" });
+  expect((await api(fixture, "PUT", `/api/ai-gateway/clients/${client.body.client.id}/grants`, { routeSetIds: [set.body.id] })).status).toBe(200);
+
+  const prompt = `Mail ${EMAIL} SSN ${SSN}; keys ${STORED_SECRET} ${UPSTREAM_KEY} ${ENV_SECRET} ${HEADER_SECRET}`;
+  const response = await fetch(`${fixture.base}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${client.body.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ model: "gpt-test", messages: [{ role: "system", content: "Be brief." }, { role: "user", content: prompt }] })
+  });
+  expect(response.status).toBe(200);
+  return await until(() => fixture.spans.getFinishedSpans().find((span) => span.name === "chat up-model"), "the chat span");
+}
+
 describe("content capture in the API", () => {
   it("reports NO_CONTENT and records no audit event by default", async () => {
     const fixture = await appFixture({ TRACING_ENABLED: "true" });
@@ -441,41 +462,54 @@ describe("content capture in the API", () => {
   });
 
   it("reports the mode, records the audit event and masks /v1 content with the deployment's stored and environment secrets", async () => {
-    const fixture = await appFixture({ TRACING_ENABLED: "true", OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "span_only", L2M_OTEL_CONTENT_MAX_CHARS: "4096" });
-    const observability = await api<{ tracing: { contentCapture: string; contentMaxChars: number } }>(fixture, "GET", "/api/observability");
-    expect(observability.body.tracing).toMatchObject({ contentCapture: "SPAN_ONLY", contentMaxChars: 4096 });
+    const fixture = await appFixture({
+      TRACING_ENABLED: "true",
+      OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "span_only",
+      L2M_OTEL_CONTENT_MAX_CHARS: "4096",
+      L2M_OTEL_CAPTURE_GATEWAY_CONTENT: "true"
+    });
+    const observability = await api<{ tracing: { contentCapture: string; contentMaxChars: number; gatewayContentCapture: boolean } }>(fixture, "GET", "/api/observability");
+    expect(observability.body.tracing).toMatchObject({ contentCapture: "SPAN_ONLY", contentMaxChars: 4096, gatewayContentCapture: true });
     const audit = await until(async () => {
       const listed = await api<{ items: Array<{ eventType: string; metadata: unknown }> }>(fixture, "GET", "/api/audit?eventType=telemetry.content_capture_enabled");
       return listed.body.items?.length ? listed.body.items : null;
     }, "the audit event");
-    expect(audit[0]!.metadata).toMatchObject({ mode: "SPAN_ONLY", maxChars: 4096 });
+    expect(audit[0]!.metadata).toMatchObject({ mode: "SPAN_ONLY", maxChars: 4096, gatewayContent: true });
 
-    const upstream = await startUpstream();
-    cleanups.push(upstream.close);
-    await fixture.secretService.createSecret({ name: "plain", provider: "openai", value: STORED_SECRET, projectId: "default" });
-    const { secretId } = await fixture.secretService.createSecret({ name: "upstream", provider: "openai_compatible", value: UPSTREAM_KEY, projectId: "default" });
-    const set = await api<{ id: string }>(fixture, "POST", "/api/ai-gateway/route-sets", { name: "Apps", projectId: "default" });
-    expect((await api(fixture, "POST", `/api/ai-gateway/route-sets/${set.body.id}/routes`, { alias: "gpt-test", providerId: "openai_compatible", model: "up-model", baseUrl: upstream.baseUrl, secretRef: { secretId } })).status).toBe(201);
-    const client = await api<{ client: { id: string }; token: string }>(fixture, "POST", "/api/mcp/clients", { name: "App", toolsetIds: [], role: "builder" });
-    expect((await api(fixture, "PUT", `/api/ai-gateway/clients/${client.body.client.id}/grants`, { routeSetIds: [set.body.id] })).status).toBe(200);
-
-    const prompt = `Mail ${EMAIL} SSN ${SSN}; keys ${STORED_SECRET} ${UPSTREAM_KEY} ${ENV_SECRET} ${HEADER_SECRET}`;
-    const response = await fetch(`${fixture.base}/v1/chat/completions`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${client.body.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ model: "gpt-test", messages: [{ role: "system", content: "Be brief." }, { role: "user", content: prompt }] })
-    });
-    expect(response.status).toBe(200);
-    const chat = await until(() => fixture.spans.getFinishedSpans().find((span) => span.name === "chat up-model"), "the chat span");
+    const chat = await gatewayChat(fixture);
     expect(chat.attributes["gen_ai.system_instructions"]).toBe('[{"type":"text","content":"Be brief."}]');
     const input = String(chat.attributes["gen_ai.input.messages"]);
     expect(input).toContain("Mail ");
     expect(input).toContain("[REDACTED]");
+    expect(input).not.toContain(EMAIL);
     expect(String(chat.attributes["gen_ai.output.messages"])).toContain("You said: Be brief. Mail ");
     const all = await until(async () => {
       await fixture.app.close();
       return fixture.spans.getFinishedSpans();
     }, "all spans");
+    expectClean(all);
+  });
+
+  it("records no /v1 content with only the general switch on", async () => {
+    const fixture = await appFixture({ TRACING_ENABLED: "true", OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "SPAN_AND_EVENT" });
+    const observability = await api<{ tracing: { contentCapture: string; gatewayContentCapture: boolean } }>(fixture, "GET", "/api/observability");
+    expect(observability.body.tracing).toMatchObject({ contentCapture: "SPAN_AND_EVENT", gatewayContentCapture: false });
+    const audit = await until(async () => {
+      const listed = await api<{ items: Array<{ eventType: string; metadata: unknown }> }>(fixture, "GET", "/api/audit?eventType=telemetry.content_capture_enabled");
+      return listed.body.items?.length ? listed.body.items : null;
+    }, "the audit event");
+    expect(audit[0]!.metadata).toMatchObject({ mode: "SPAN_AND_EVENT", gatewayContent: false });
+
+    const chat = await gatewayChat(fixture);
+    expect(contentOf(chat)).toEqual([]);
+    expect(chat.events).toEqual([]);
+    expect(chat.attributes[CONTENT_DROPPED_ATTRIBUTE]).toBeUndefined();
+    const all = await until(async () => {
+      await fixture.app.close();
+      return fixture.spans.getFinishedSpans();
+    }, "all spans");
+    expect(all.filter((span) => contentOf(span).length > 0)).toEqual([]);
+    expect(JSON.stringify(all.map((span) => span.attributes))).not.toContain(EMAIL);
     expectClean(all);
   });
 

@@ -701,6 +701,11 @@ const envSchema = z.object({
   OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: z.string().optional(),
   /** Longest captured content attribute, in characters (256 to 1048576). Default 8192. */
   L2M_OTEL_CONTENT_MAX_CHARS: blankAsUndefined(z.coerce.number().int().min(256).max(1_048_576).optional()),
+  /**
+   * `/v1` AI gateway requests capture content only when this is true as well as the switch above (default false).
+   * Workflow runs are not affected by it.
+   */
+  L2M_OTEL_CAPTURE_GATEWAY_CONTENT: optionalBooleanFromEnv,
 
   // Phase 8.2 — FinOps cost rollups.
   // JSON object overlaying `services/usage-service.ts` DEFAULT_PRICING. Same

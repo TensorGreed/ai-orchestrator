@@ -256,6 +256,17 @@ describe("content capture settings", () => {
     expect(warnings).toHaveLength(1);
   });
 
+  it("captures /v1 gateway content only with L2M_OTEL_CAPTURE_GATEWAY_CONTENT on top of the general switch", () => {
+    expect(settings().gatewayContentCapture).toBe(false);
+    expect(settings({ TRACING_ENABLED: "true", OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "SPAN_ONLY" }).gatewayContentCapture).toBe(false);
+    expect(settings({ TRACING_ENABLED: "true", L2M_OTEL_CAPTURE_GATEWAY_CONTENT: "true" }).gatewayContentCapture).toBe(false);
+    expect(settings({ L2M_OTEL_CAPTURE_GATEWAY_CONTENT: "true", OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "SPAN_ONLY" }).gatewayContentCapture).toBe(false);
+    expect(
+      settings({ TRACING_ENABLED: "true", OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "SPAN_ONLY", L2M_OTEL_CAPTURE_GATEWAY_CONTENT: "true" }).gatewayContentCapture
+    ).toBe(true);
+    expect(() => settings({ L2M_OTEL_CAPTURE_GATEWAY_CONTENT: "sometimes" })).toThrow();
+  });
+
   it("validates L2M_OTEL_CONTENT_MAX_CHARS", () => {
     expect(settings({ L2M_OTEL_CONTENT_MAX_CHARS: "2048" }).contentMaxChars).toBe(2048);
     expect(settings({ L2M_OTEL_CONTENT_MAX_CHARS: "" }).contentMaxChars).toBe(8192);

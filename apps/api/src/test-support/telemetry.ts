@@ -28,6 +28,7 @@ export function testTelemetrySettings(overrides: Partial<TelemetrySettings> = {}
     trustedProxies: [],
     contentCapture: "NO_CONTENT",
     contentMaxChars: 8192,
+    gatewayContentCapture: false,
     warnings: [],
     ...overrides
   };
