@@ -36,6 +36,22 @@ describe("isModernGatewayMessage", () => {
     expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, result: {} })).toBe(false);
     expect(isModernGatewayMessage("text")).toBe(false);
   });
+
+  it("is modern for a single message sent with a modern MCP-Protocol-Version header, even without _meta", () => {
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, "2026-07-28")).toBe(true);
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }, " 2026-07-28 ")).toBe(true);
+    // Legacy versions in the header keep the session path.
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, "2025-11-25")).toBe(false);
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, undefined)).toBe(false);
+    // Batches never.
+    expect(isModernGatewayMessage([{ jsonrpc: "2.0", id: 1, method: "tools/list" }], "2026-07-28")).toBe(false);
+  });
+
+  it("treats initialize as modern only with a modern MCP-Protocol-Version header", () => {
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: { _meta: META } }, "2026-07-28")).toBe(true);
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: { _meta: META } }, undefined)).toBe(false);
+    expect(isModernGatewayMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } }, "2025-11-25")).toBe(false);
+  });
 });
 
 describe("validateModernGatewayMessage", () => {
@@ -60,6 +76,32 @@ describe("validateModernGatewayMessage", () => {
     // A version key of the wrong type: -32602 before anything else.
     const wrongType = validate({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { "io.modelcontextprotocol/protocolVersion": 7 } } }, {});
     expect(wrongType).toMatchObject({ ok: false, status: 400, response: { error: { code: -32602 } } });
+  });
+
+  it("answers a header version that differs from the _meta version with -32020, before -32022", () => {
+    // Supported header, unknown body version: a mismatch, not an unsupported version.
+    const unknownBody = validate(
+      { jsonrpc: "2.0", id: 302, method: "server/discover", params: { _meta: { ...META, "io.modelcontextprotocol/protocolVersion": "v999.0.0" } } },
+      { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover" }
+    );
+    expect(unknownBody).toMatchObject({ ok: false, status: 400, response: { id: 302, error: { code: -32020 } } });
+    // Both naming the same unknown version: -32022 with the supported list.
+    const unknownBoth = validate(
+      { jsonrpc: "2.0", id: 301, method: "server/discover", params: { _meta: { ...META, "io.modelcontextprotocol/protocolVersion": "v999.0.0" } } },
+      { "MCP-Protocol-Version": "v999.0.0", "Mcp-Method": "server/discover" }
+    );
+    expect(unknownBoth).toMatchObject({ ok: false, status: 400, response: { id: 301, error: { code: -32022, data: { requested: "v999.0.0" } } } });
+  });
+
+  it("answers a header-modern request without the _meta keys with -32602 and its id", () => {
+    const bare = validate({ jsonrpc: "2.0", id: 101, method: "server/discover" });
+    expect(bare).toMatchObject({
+      ok: false,
+      status: 400,
+      response: { id: 101, error: { code: -32602, data: { missing: ["io.modelcontextprotocol/protocolVersion", "io.modelcontextprotocol/clientCapabilities"] } } }
+    });
+    const noVersion = validate({ jsonrpc: "2.0", id: "r-2", method: "server/discover", params: { _meta: { "io.modelcontextprotocol/clientCapabilities": {} } } });
+    expect(noVersion).toMatchObject({ ok: false, status: 400, response: { id: "r-2", error: { code: -32602, data: { missing: ["io.modelcontextprotocol/protocolVersion"] } } } });
   });
 
   it("rejects invalid JSON-RPC and accepts notifications without further checks", () => {
@@ -179,5 +221,35 @@ describe("configuration", () => {
         "MCP_GATEWAY_CLIENT_CERT_HEADER"
       );
     }
+  });
+});
+
+describe("subscriptions/listen helpers", () => {
+  it("checks the shape of the notifications filter only", async () => {
+    const { listenFilterError } = await import("./mcp-gateway-modern.js");
+    expect(listenFilterError(undefined)).toBeNull();
+    expect(listenFilterError({})).toBeNull();
+    expect(listenFilterError({ notifications: {} })).toBeNull();
+    expect(listenFilterError({ notifications: { toolsListChanged: true, promptsListChanged: false, resourceSubscriptions: ["file:///a"], extra: 1 } })).toBeNull();
+    expect(listenFilterError({ notifications: "all" })).toMatch(/object/);
+    expect(listenFilterError({ notifications: { resourcesListChanged: 1 } })).toMatch(/resourcesListChanged/);
+    expect(listenFilterError({ notifications: { resourceSubscriptions: "file:///a" } })).toMatch(/array of strings/);
+  });
+
+  it("builds the acknowledgment and the graceful end with the subscription id", async () => {
+    const { subscriptionsAcknowledged, subscriptionsComplete } = await import("./mcp-gateway-modern.js");
+    expect(subscriptionsAcknowledged("a")).toEqual({
+      jsonrpc: "2.0",
+      method: "notifications/subscriptions/acknowledged",
+      params: { _meta: { "io.modelcontextprotocol/subscriptionId": "a" }, notifications: {} }
+    });
+    expect(subscriptionsComplete(3, { name: "l2m-x", version: "1" })).toEqual({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        resultType: "complete",
+        _meta: { "io.modelcontextprotocol/subscriptionId": 3, "io.modelcontextprotocol/serverInfo": { name: "l2m-x", version: "1" } }
+      }
+    });
   });
 });

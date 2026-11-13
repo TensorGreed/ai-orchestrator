@@ -3,6 +3,7 @@ import net from "node:net";
 import { z } from "zod";
 import { parseSessionPolicy } from "./services/session-policy.js";
 import { resolveTelemetrySettings } from "./telemetry/settings.js";
+import { traceUrlTemplateProblem } from "./telemetry/trace-url.js";
 import {
   NETWORK_SCOPES,
   NETWORK_SCOPE_ENV,
@@ -319,6 +320,16 @@ const envSchema = z.object({
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
     z.coerce.number().int().min(0).max(86_400_000).optional()
   ),
+  /** MCP 2026-07-28 — a `subscriptions/listen` stream ends gracefully after this many ms (clients reconnect). Unset or empty = 600000. */
+  MCP_GATEWAY_LISTEN_MAX_MS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(1000).max(86_400_000).optional()
+  ),
+  /** MCP 2026-07-28 — open `subscriptions/listen` streams per client on one instance. Unset or empty = 4. */
+  MCP_GATEWAY_LISTEN_MAX_PER_CLIENT: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(1).max(1000).optional()
+  ),
   /** Base URL clients reach this instance at, used for the endpoint URLs shown in the UI. Empty = the browser's origin. */
   MCP_GATEWAY_PUBLIC_URL: z
     .string()
@@ -422,8 +433,8 @@ const envSchema = z.object({
    */
   MCP_CLIENT_LEGACY_SAFE_REISSUE: booleanFromEnv.default(true),
   /**
-   * MCP 2026-07-28 — how long a stdio server whose protocol is Auto gets to answer the `server/discover` probe
-   * before L2M opens it with `initialize` instead (milliseconds; never longer than the server's own timeout).
+   * MCP 2026-07-28 — how long a server (stdio or HTTP) whose protocol is Auto gets to answer the `server/discover`
+   * probe before L2M opens it with `initialize` instead (milliseconds; never longer than the server's own timeout).
    */
   MCP_CLIENT_ERA_PROBE_TIMEOUT_MS: z.coerce.number().int().min(500).max(60_000).default(5_000),
   /**
@@ -691,6 +702,35 @@ const envSchema = z.object({
   L2M_OTEL_TRUST_INBOUND: blankAsUndefined(z.enum(["authenticated", "all", "none"]).optional()),
   /** Comma list of addresses or CIDR ranges (the connecting socket) whose inbound `traceparent` is always trusted. */
   L2M_OTEL_TRUSTED_PROXIES: z.string().optional(),
+  /**
+   * Optional link from a run to its trace in your trace backend: an absolute http(s) URL containing `{traceId}`.
+   * Off by default; the run page shows an "Open trace" link only when it is set and the run has a trace id.
+   */
+  L2M_OTEL_TRACE_URL_TEMPLATE: blankAsUndefined(
+    z
+      .string()
+      .trim()
+      .superRefine((value, ctx) => {
+        const problem = traceUrlTemplateProblem(value);
+        if (problem) ctx.addIssue({ code: "custom", message: `L2M_OTEL_TRACE_URL_TEMPLATE ${problem}` });
+      })
+      .optional()
+  ),
+  /**
+   * Content capture on GenAI spans: NO_CONTENT (default), SPAN_ONLY, EVENT_ONLY or SPAN_AND_EVENT. When on, prompts,
+   * answers and tool arguments and results are secret-scrubbed, masked by content rules and truncated before export,
+   * and never exported for sensitive work. Read only while tracing is on; an unknown value means NO_CONTENT.
+   */
+  OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: z.string().optional(),
+  /** Older name for the same switch (`true` = SPAN_ONLY); the variable above wins when both are set. */
+  OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: z.string().optional(),
+  /** Longest captured content attribute, in characters (256 to 1048576). Default 8192. */
+  L2M_OTEL_CONTENT_MAX_CHARS: blankAsUndefined(z.coerce.number().int().min(256).max(1_048_576).optional()),
+  /**
+   * `/v1` AI gateway requests capture content only when this is true as well as the switch above (default false).
+   * Workflow runs are not affected by it.
+   */
+  L2M_OTEL_CAPTURE_GATEWAY_CONTENT: optionalBooleanFromEnv,
 
   // Phase 8.2 — FinOps cost rollups.
   // JSON object overlaying `services/usage-service.ts` DEFAULT_PRICING. Same

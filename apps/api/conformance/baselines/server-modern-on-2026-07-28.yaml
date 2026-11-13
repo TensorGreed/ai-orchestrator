@@ -3,7 +3,7 @@
 # delete its entry then. A scenario counts as failing when any of its checks fails or warns.
 # Conformance package 0.2.0-alpha.12, scenarios of the spec revision the run name carries.
 server:
-  # REAL GATEWAY GAPS (found by this suite, to be fixed in the gateway): (1) a request with MCP-Protocol-Version 2026-07-28 but no or incomplete per-request _meta takes the legacy path and is answered -32000 'Unsupported MCP-Protocol-Version' with id null (expected -32602 and the request id); (2) 'initialize' with modern headers is answered 400/-32000 (expected 404/-32601); (3) a header/_meta version mismatch is answered -32022 (expected -32020 HeaderMismatch). The rest of the scenario's failures are diagnostic fixture tools (test_missing_capability, test_streaming_elicitation, test_logging_tool) the gateway does not serve and subscriptions/listen, which is not served.
+  # Only diagnostic fixture tools the gateway does not serve remain (test_missing_capability, test_streaming_elicitation, test_logging_tool: reported 'Not testable'). The subscriptions/listen acknowledgment and subscription id checks pass (the tools and prompts list-changed checks are skipped: the gateway declares no listChanged). The _meta (-32602 with the id), modern initialize (404/-32601) and header/_meta version mismatch (-32020) checks pass.
   - server-stateless
   # The gateway serves tools only: this method is answered with -32601 (resources, prompts and completion are not part of the gateway).
   - completion-complete

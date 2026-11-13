@@ -2909,6 +2909,18 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_mcp_gateway_label_marks_expires;
       DROP TABLE IF EXISTS mcp_gateway_label_marks;
     `
+  },
+  {
+    version: 72,
+    description: "OpenTelemetry — the trace id of a run's span, so a run can be found in a trace backend",
+    // Nullable and unindexed: NULL for runs made while tracing was off (the default), and a run is looked up by its id,
+    // never by trace id. Deleted with the row, so run retention and erasure need no extra step.
+    up: `
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS trace_id TEXT;
+    `,
+    down: `
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS trace_id;
+    `
   }
 ];
 
@@ -3004,7 +3016,8 @@ export async function rollbackMigrations(
   const rolledBack: number[] = [];
   for (const migration of toRollBack) {
     await runSql(migration.down);
-    const newVersion = migration.version - 1;
+    // The next defined version below: versions can be retired (never used), and none may be recorded.
+    const newVersion = Math.max(0, ...MIGRATIONS.filter((m) => m.version < migration.version).map((m) => m.version));
     await setVersion(newVersion);
     rolledBack.push(migration.version);
     if (newVersion <= targetVersion) break;

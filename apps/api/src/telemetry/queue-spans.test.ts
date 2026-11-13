@@ -214,6 +214,8 @@ describe("queued runs continue the trace of the request that enqueued them", () 
     // The payload carries the context and nothing else new.
     expect(context.payloads).toHaveLength(1);
     expect(context.payloads[0]!.traceContext).toEqual({ traceparent: `00-${REQUEST_TRACE}-${request.spanContext().spanId}-01` });
+    // v72 — the run's history row records the trace the queue carried it into.
+    await until(async () => (await context.store.getExecutionHistory(executionId))?.traceId === REQUEST_TRACE, "the queued run's trace id");
   });
 
   it("puts a producer span between them at the verbose detail", async () => {
@@ -340,6 +342,8 @@ describe("an approval resume links back to the node that paused", () => {
     expect(resumed!.links).toHaveLength(1);
     expect(resumed!.links[0]!.context).toMatchObject({ traceId: REQUEST_TRACE, spanId: gateNode.spanContext().spanId });
     expect(resumed!.attributes["l2m.trigger.type"]).toBe("approval_resume");
+    // v72 — the paused run recorded the first trace; the queued resume, a new trace, replaces it with its own.
+    await until(async () => (await context.store.getExecutionHistory(executionId))?.traceId === "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "the resume's trace id");
   });
 
   it("links an inline resume (no queue) the same way", async () => {

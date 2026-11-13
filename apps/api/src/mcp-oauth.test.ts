@@ -22,6 +22,7 @@ import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
+import { McpOAuthService } from "./services/mcp-oauth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
@@ -56,7 +57,10 @@ const fake = {
   metadataIssuer: undefined as string | undefined,
   /** Adjusts the redirect back to L2M after consent (adds `iss`, turns it into an error response, ...). */
   shapeRedirect: null as ((redirect: URL) => void) | null,
+  /** When set, the MCP endpoint refuses every request but initialize with 403 insufficient_scope naming this scope. */
+  insufficientScope: null as string | null,
   reset() {
+    this.insufficientScope = null;
     this.authorizationServers = null;
     this.metadataExtra = {};
     this.metadataIssuer = undefined;
@@ -226,6 +230,14 @@ async function handleFake(request: IncomingMessage, response: ServerResponse) {
       return;
     }
     const rpc = JSON.parse(body || "{}") as { id?: unknown; method?: string; params?: Record<string, unknown> };
+    if (fake.insufficientScope && rpc.id !== undefined && rpc.method !== "initialize") {
+      response.writeHead(403, {
+        "content-type": "application/json",
+        "www-authenticate": `Bearer error="insufficient_scope", scope="${fake.insufficientScope}", resource_metadata="${fake.base}/.well-known/oauth-protected-resource/mcp"`
+      });
+      response.end(JSON.stringify({ error: "insufficient_scope" }));
+      return;
+    }
     if (rpc.id === undefined) {
       response.writeHead(202);
       response.end();
@@ -564,6 +576,73 @@ describe("MCP OAuth connect flow", () => {
     const failing = await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin);
     expect(failing.json<{ probe: { ok: boolean; error: string } }>().probe).toMatchObject({ ok: false, error: expect.stringMatching(/Token refresh failed/) });
     expect(await oauthStatus(context, admin, serverId)).toMatchObject({ state: "error", lastError: expect.stringMatching(/refresh token is not valid/) });
+  });
+
+  it("steps up after 403 insufficient_scope: the next connect asks for the granted and the challenged scopes", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    const first = await connect(context, admin, serverId);
+    expect(new URL(first.authorizationUrl).searchParams.get("scope")).toBe("tools:read");
+
+    fake.insufficientScope = "tools:admin";
+    const refused = await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin);
+    expect(refused.json<{ probe: { ok: boolean; error: string } }>().probe).toMatchObject({ ok: false, error: expect.stringContaining("tools:admin") });
+    // Refused for scope, so no token refresh and no second request.
+    expect(fake.tokenRequests.filter((params) => params.get("grant_type") === "refresh_token")).toHaveLength(0);
+    const status = await oauthStatus(context, admin, serverId);
+    expect(status).toMatchObject({ state: "connected", lastError: expect.stringContaining("tools:admin") });
+    const audit = await context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 });
+    expect(audit.items.filter((item) => item.eventType === "mcp_server.oauth_scope_challenged")).toHaveLength(1);
+    // The same challenge again writes nothing new.
+    await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin);
+    const again = await context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 });
+    expect(again.items.filter((item) => item.eventType === "mcp_server.oauth_scope_challenged")).toHaveLength(1);
+
+    // Reconnect: the union of the granted scope, the selected scope and the challenged one.
+    fake.insufficientScope = null;
+    const stepped = await connect(context, admin, serverId);
+    expect(new URL(stepped.authorizationUrl).searchParams.get("scope")).toBe("tools:read tools:write tools:admin");
+    expect(await oauthStatus(context, admin, serverId)).toMatchObject({ state: "connected", lastError: null });
+    // The new token starts without a pending step-up.
+    const later = await connect(context, admin, serverId);
+    expect(new URL(later.authorizationUrl).searchParams.get("scope")).toBe("tools:read");
+    for (const secret of issuedSecrets) expect(seenBodies.some((body) => body.includes(secret))).toBe(false);
+  });
+
+  it("keeps both a token refresh and a scope note that overlap on one instance", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerOAuthServer(context, admin);
+    await connect(context, admin, serverId);
+    // A second service on the same store, whose token requests take a while: a scope note arrives mid-refresh.
+    let tokenRequestStarted!: () => void;
+    const tokenRequestSeen = new Promise<void>((resolve) => {
+      tokenRequestStarted = resolve;
+    });
+    const slowTokenFetch: typeof fetch = async (input, init) => {
+      if (String(input instanceof Request ? input.url : input).includes("/token")) {
+        tokenRequestStarted();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      return await fetch(input, init);
+    };
+    const service = new McpOAuthService(context.store, new SecretService(context.store, context.config.SECRET_MASTER_KEY_BASE64), {
+      redirectUri: `${REDIRECT_BASE}/api/mcp/oauth/callback`,
+      stateTtlMs: 60_000,
+      refreshSkewMs: 60_000,
+      fetchImpl: slowTokenFetch
+    });
+    const refreshed = service.getAccessToken(serverId, { forceRefresh: true });
+    await tokenRequestSeen;
+    await Promise.all([refreshed, service.noteInsufficientScope(serverId, "tools:admin")]);
+
+    // The rotated refresh token was kept (the next refresh works) and so was the challenged scope.
+    fake.validAccessTokens.clear();
+    const probe = await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin);
+    expect(probe.json<{ probe: { ok: boolean } }>().probe.ok).toBe(true);
+    const stepped = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+    expect(new URL(stepped.json<{ authorizationUrl: string }>().authorizationUrl).searchParams.get("scope")).toContain("tools:admin");
   });
 
   it("rejects expired states and callbacks from another session", async () => {

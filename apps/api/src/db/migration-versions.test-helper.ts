@@ -8,11 +8,19 @@
  * migration to main's highest version + 1 (a one-line change of its `version`) and empties this set; a branch never
  * merges with a version at or below main's highest. Postgres refuses to start on a database that recorded a version
  * above one it never applied (MigrationGapError), so a mistake is loud rather than a silently skipped migration.
- * Reserved now: v70 (OpenTelemetry lane O9), while v71 (gateway label marks) is on its own branch.
+ * Reserved now: none.
  */
-const RESERVED_UNTIL_MERGED = new Set<number>([70]);
+const RESERVED_UNTIL_MERGED = new Set<number>([]);
+
+/**
+ * Versions no migration will ever use. v70 was reserved for the run trace id, which merged after v71 had shipped and
+ * so took v72 under the rule above; reusing 70 later would put a migration below versions databases already recorded.
+ */
+export const RETIRED_MIGRATION_VERSIONS: ReadonlySet<number> = new Set<number>([70]);
 
 export function contiguousMigrationVersions(versions: readonly number[]): number[] {
   const max = Math.max(0, ...versions);
-  return Array.from({ length: max }, (_, index) => index + 1).filter((version) => !RESERVED_UNTIL_MERGED.has(version) || versions.includes(version));
+  return Array.from({ length: max }, (_, index) => index + 1).filter(
+    (version) => !RETIRED_MIGRATION_VERSIONS.has(version) && (!RESERVED_UNTIL_MERGED.has(version) || versions.includes(version))
+  );
 }

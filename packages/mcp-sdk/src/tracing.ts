@@ -150,6 +150,19 @@ function recordToolResult(span: InstrumentationSpan, result: MCPToolResult): voi
   span.recordError(null, { type: kind === "tool" ? "tool_error" : kind });
 }
 
+/**
+ * Hands a tool call's arguments or result to the span when it captures content (off by default; the span's
+ * implementation masks content before export). A failed call's error text is never handed over.
+ */
+function captureToolContent(span: InstrumentationSpan, kind: "tool_call_arguments" | "tool_call_result", value: unknown): void {
+  if (span.capturesContent !== true || !span.addContent || value === undefined) return;
+  try {
+    span.addContent(kind, value);
+  } catch {
+    // Content capture never fails a tool call.
+  }
+}
+
 const INSTRUMENTED = Symbol.for("l2m.mcpInstrumentedAdapter");
 
 /** Transport facts for the span, by adapter id: HTTP servers are `tcp`/`http` with their host, stdio is `pipe`. */
@@ -206,8 +219,12 @@ export function instrumentMcpAdapter<T extends MCPServerAdapter>(adapter: T, ins
         };
         return instrument.mcpRequest(info, async (span) => {
           try {
+            if (property === "invokeTool") captureToolContent(span, "tool_call_arguments", args[1]);
             const result: unknown = await (value as (...callArgs: unknown[]) => Promise<unknown>).apply(target, args);
-            if (property === "invokeTool" && result && typeof result === "object") recordToolResult(span, result as MCPToolResult);
+            if (property === "invokeTool" && result && typeof result === "object") {
+              recordToolResult(span, result as MCPToolResult);
+              if ((result as MCPToolResult).ok) captureToolContent(span, "tool_call_result", (result as MCPToolResult).output);
+            }
             return result;
           } catch (error) {
             recordMcpFailure(span, error);

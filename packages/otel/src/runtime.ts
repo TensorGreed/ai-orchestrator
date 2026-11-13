@@ -16,6 +16,7 @@ import {
   type SpanProcessor
 } from "@opentelemetry/sdk-trace";
 import type { TraceIds } from "@ai-orchestrator/shared";
+import { ContentCaptureProcessor, ContentPipeline } from "./content.js";
 import { MetricsPipeline } from "./metrics.js";
 import { startHttpServerSpan, type HttpServerSpan, type HttpServerSpanInput } from "./http-server.js";
 import { OtelRunInstrumentation } from "./instrumentation.js";
@@ -84,6 +85,8 @@ export class OtelRuntime {
   readonly resource: Resource;
   readonly meter: Meter;
   readonly semconvLatestGenAi: boolean;
+  /** The content capture mode, or null while content is not captured. */
+  readonly contentCapture: "SPAN_ONLY" | "EVENT_ONLY" | "SPAN_AND_EVENT" | null;
   private readonly tracerProvider: TracerProvider;
   readonly metrics: MetricsPipeline;
   private readonly contextManager: AsyncLocalStorageContextManager;
@@ -113,11 +116,23 @@ export class OtelRuntime {
         })
       );
     }
+    // Content capture: every processor (export, recent spans, tests) sees a span only after its content was masked.
+    const content = options.content
+      ? new ContentPipeline(
+          options.content,
+          scrub,
+          this.meter.createCounter("l2m_otel_content_dropped_total", {
+            description: "Spans exported without the content captured for them, by reason",
+            unit: "{span}"
+          })
+        )
+      : undefined;
+    this.contentCapture = content ? options.content!.mode : null;
     this.tracerProvider = new TracerProvider({
       resource: this.resource,
       sampler: buildSampler(options.sampler.name, options.sampler.ratio),
       spanLimits: { attributeValueLengthLimit: options.attributeValueLengthLimit },
-      spanProcessors: processors
+      spanProcessors: content ? [new ContentCaptureProcessor(content, processors)] : processors
     });
     this.contextManager = new AsyncLocalStorageContextManager();
     this.contextManager.enable();
@@ -130,7 +145,8 @@ export class OtelRuntime {
       internalPropagator: new W3CTraceContextPropagator(),
       options,
       scrub,
-      meter: this.meter
+      meter: this.meter,
+      ...(content ? { content } : {})
     });
     this.semconvLatestGenAi = options.semconvOptIn.includes("gen_ai_latest_experimental");
 

@@ -20,6 +20,30 @@ export type TraceSampler = (typeof OTEL_TRACES_SAMPLERS)[number];
 export type TracePropagator = "tracecontext" | "baggage" | "none";
 export type InboundTrust = NonNullable<AppConfig["L2M_OTEL_TRUST_INBOUND"]>;
 
+/** OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT values. */
+export const CONTENT_CAPTURE_SETTINGS = ["NO_CONTENT", "SPAN_ONLY", "EVENT_ONLY", "SPAN_AND_EVENT"] as const;
+export type ContentCaptureSetting = (typeof CONTENT_CAPTURE_SETTINGS)[number];
+export const DEFAULT_CONTENT_MAX_CHARS = 8192;
+
+/**
+ * The content capture switch: OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT, else the older
+ * OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT (which also takes `true` / `false`). Case does not matter; any other
+ * value means NO_CONTENT, with a warning.
+ */
+export function parseContentCapture(primary: string | undefined, legacy: string | undefined, warnings: string[] = []): ContentCaptureSetting {
+  const read = (name: string, raw: string, booleans: boolean): ContentCaptureSetting => {
+    const value = raw.trim().toUpperCase();
+    if ((CONTENT_CAPTURE_SETTINGS as readonly string[]).includes(value)) return value as ContentCaptureSetting;
+    if (booleans && value === "TRUE") return "SPAN_ONLY";
+    if (booleans && value === "FALSE") return "NO_CONTENT";
+    warnings.push(`${name}=${raw.trim()} is not supported (NO_CONTENT, SPAN_ONLY, EVENT_ONLY, SPAN_AND_EVENT); no content is captured`);
+    return "NO_CONTENT";
+  };
+  if (primary && primary.trim()) return read("OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT", primary, false);
+  if (legacy && legacy.trim()) return read("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", legacy, true);
+  return "NO_CONTENT";
+}
+
 export interface TelemetrySettings {
   /** True when traces are recorded: an OTLP traces endpoint or TRACING_ENABLED, and OTEL_SDK_DISABLED is not set. */
   enabled: boolean;
@@ -49,6 +73,12 @@ export interface TelemetrySettings {
   trustInbound: InboundTrust;
   /** Canonical ranges from L2M_OTEL_TRUSTED_PROXIES. */
   trustedProxies: string[];
+  /** Content capture on GenAI spans; NO_CONTENT (the default) while tracing is off. */
+  contentCapture: ContentCaptureSetting;
+  /** Longest captured content attribute (L2M_OTEL_CONTENT_MAX_CHARS). */
+  contentMaxChars: number;
+  /** `/v1` gateway requests capture content too (L2M_OTEL_CAPTURE_GATEWAY_CONTENT); false while capture is off. */
+  gatewayContentCapture: boolean;
   /** Start-up warnings (deprecated settings in use). */
   warnings: string[];
 }
@@ -69,6 +99,31 @@ export function parseOtelKeyValueList(value: string | undefined): Record<string,
     if (key && entry) out[key] = entry;
   }
   return out;
+}
+
+/**
+ * The secret values an OTLP header list holds, for scrubbers: each value, and for `<scheme> <credential>` values the
+ * credential alone (and a Basic credential's decoded `user:password` and password), since the credential can appear
+ * without its scheme.
+ */
+export function headerSecretValues(headers: Record<string, string>): string[] {
+  const values = new Set<string>();
+  for (const value of Object.values(headers)) {
+    if (!value) continue;
+    values.add(value);
+    const scheme = /^([A-Za-z][A-Za-z0-9_-]*)\s+(\S.*)$/.exec(value.trim());
+    if (!scheme) continue;
+    const credential = scheme[2]!.trim();
+    values.add(credential);
+    if (scheme[1]!.toLowerCase() === "basic") {
+      const decoded = Buffer.from(credential, "base64").toString("utf8");
+      if (decoded.includes(":")) {
+        values.add(decoded);
+        values.add(decoded.slice(decoded.indexOf(":") + 1));
+      }
+    }
+  }
+  return [...values];
 }
 
 function decodePercent(text: string): string {
@@ -222,6 +277,9 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
   // OTEL_SERVICE_NAME wins over a service.name in OTEL_RESOURCE_ATTRIBUTES, as the specification says.
   if (config.OTEL_SERVICE_NAME) resourceAttributes["service.name"] = config.OTEL_SERVICE_NAME;
 
+  const contentCapture = enabled
+    ? parseContentCapture(config.OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT, config.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT, used)
+    : "NO_CONTENT";
   const maxQueueSize = positiveInt("OTEL_BSP_MAX_QUEUE_SIZE", config.OTEL_BSP_MAX_QUEUE_SIZE, 2048, used);
   return {
     enabled,
@@ -253,6 +311,9 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
     httpServerSpans: config.OTEL_HTTP_SERVER_SPANS !== false,
     trustInbound: config.L2M_OTEL_TRUST_INBOUND ?? "authenticated",
     trustedProxies,
+    contentCapture,
+    contentMaxChars: config.L2M_OTEL_CONTENT_MAX_CHARS ?? DEFAULT_CONTENT_MAX_CHARS,
+    gatewayContentCapture: contentCapture !== "NO_CONTENT" && config.L2M_OTEL_CAPTURE_GATEWAY_CONTENT === true,
     warnings
   };
 }

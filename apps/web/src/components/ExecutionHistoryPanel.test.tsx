@@ -77,6 +77,47 @@ function makeProps(overrides: Partial<Parameters<typeof ExecutionHistoryPanel>[0
 }
 
 describe("ExecutionHistoryPanel", () => {
+  describe("trace id", () => {
+    const expandedProps = (detail: ExecutionHistoryDetail) =>
+      makeProps({
+        executionHistoryTotal: 1,
+        executionHistoryItems: [makeSummary({ status: "success" })],
+        expandedExecutionIds: ["ex-1"],
+        executionDetailById: { "ex-1": detail }
+      });
+    const baseDetail = (extra: Partial<ExecutionHistoryDetail>): ExecutionHistoryDetail => ({
+      ...makeSummary({ status: "success" }),
+      input: {},
+      output: null,
+      nodeResults: [],
+      ...extra
+    });
+
+    it("offers Copy trace id, and the link when the server sent one, only for a run with a trace id", async () => {
+      const user = userEvent.setup();
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      const traceId = "0123456789abcdef0123456789abcdef";
+      render(<ExecutionHistoryPanel {...expandedProps(baseDetail({ traceId, traceUrl: `https://traces.example.com/trace/${traceId}` }))} />);
+      expect(screen.getByText(traceId)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Copy trace id" }));
+      expect(writeText).toHaveBeenCalledWith(traceId);
+      expect(screen.getByRole("link", { name: "Open trace" })).toHaveAttribute("href", `https://traces.example.com/trace/${traceId}`);
+    });
+
+    it("shows no link without a URL template", () => {
+      render(<ExecutionHistoryPanel {...expandedProps(baseDetail({ traceId: "0123456789abcdef0123456789abcdef" }))} />);
+      expect(screen.getByRole("button", { name: "Copy trace id" })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Open trace" })).toBeNull();
+    });
+
+    it.each([{ traceId: null }, {}])("shows nothing for a run without a trace id (%j)", (extra) => {
+      render(<ExecutionHistoryPanel {...expandedProps(baseDetail(extra))} />);
+      expect(screen.queryByRole("button", { name: "Copy trace id" })).toBeNull();
+      expect(screen.queryByText("Trace id")).toBeNull();
+    });
+  });
+
   it("shows empty state when no executions are present", () => {
     render(<ExecutionHistoryPanel {...makeProps()} />);
     expect(screen.getByText("No executions yet. Run a workflow from the editor to populate history.")).toBeInTheDocument();

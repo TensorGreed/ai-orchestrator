@@ -47,7 +47,37 @@ export class SecretService {
     this.externalSecrets = service;
   }
 
+  private readonly valueListeners = new Set<(values: string[]) => void>();
+
+  /**
+   * Calls `listener` with every secret value this service stores or reads from now on (as `valuesForScrubbing` expands
+   * it), so a scrubber that must not miss a new or rotated value can add it at once. Values are held in memory only.
+   * Returns the function that removes the listener.
+   */
+  onSecretValue(listener: (values: string[]) => void): () => void {
+    this.valueListeners.add(listener);
+    return () => {
+      this.valueListeners.delete(listener);
+    };
+  }
+
+  private noteValue(plaintext: string): void {
+    if (this.valueListeners.size === 0) return;
+    const values = new Set<string>();
+    addScrubValue(values, plaintext);
+    if (values.size === 0) return;
+    const list = [...values];
+    for (const listener of this.valueListeners) {
+      try {
+        listener(list);
+      } catch {
+        // A listener never affects reading or storing a secret.
+      }
+    }
+  }
+
   private encrypt(plaintext: string): EncryptedSecret {
+    this.noteValue(plaintext);
     const iv = crypto.randomBytes(12);
     const cipher = crypto.createCipheriv("aes-256-gcm", this.key, iv);
     const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
@@ -73,7 +103,9 @@ export class SecretService {
       decipher.final()
     ]);
 
-    return decrypted.toString("utf8");
+    const plaintext = decrypted.toString("utf8");
+    this.noteValue(plaintext);
+    return plaintext;
   }
 
   /**

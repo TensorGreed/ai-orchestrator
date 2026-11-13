@@ -1,5 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import { MCP_CLIENT_PROTOCOL_VERSION } from "./progress";
+import {
+  MCP_CLIENT_INFO,
+  MCP_CLIENT_MODERN_PROTOCOL_VERSION,
+  MCP_META_CLIENT_CAPABILITIES,
+  MCP_META_CLIENT_INFO,
+  MCP_META_PROTOCOL_VERSION
+} from "./protocol/constants";
+import { buildMcpStandardHeaders } from "./protocol/headers";
 
 /**
  * Phase 10.5 — OAuth 2.1 client for remote MCP servers, following the MCP
@@ -139,6 +147,56 @@ export function parseWwwAuthenticate(header: string | null | undefined): Record<
   return params;
 }
 
+/** What a 403 `insufficient_scope` challenge (RFC 6750 section 3.1) asks for. */
+export interface McpInsufficientScopeChallenge {
+  /** The scopes the server needs for the refused operation, space separated (only well-formed scope tokens). */
+  scope?: string;
+  /** The protected resource metadata URL the challenge names. */
+  resourceMetadata?: string;
+}
+
+/** RFC 6749 section 3.3 scope-token characters. */
+const SCOPE_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]{1,200}$/;
+/** At most this many scope tokens are kept from server-supplied or stored scope strings. */
+const MAX_SCOPE_TOKENS = 64;
+
+function scopeTokens(value: string | null | undefined): string[] {
+  if (typeof value !== "string") return [];
+  return value.split(/\s+/).filter((token) => SCOPE_TOKEN.test(token));
+}
+
+/**
+ * MCP authorization, scope challenge handling: a 403 whose `WWW-Authenticate` Bearer challenge says
+ * `error="insufficient_scope"` means the token is valid but lacks scope for this operation. Anything else (another
+ * status, another error, no challenge) is not one.
+ */
+export function readInsufficientScopeChallenge(status: number, header: string | null | undefined): McpInsufficientScopeChallenge | null {
+  if (status !== 403) return null;
+  const params = parseWwwAuthenticate(header);
+  if (!params || params.error !== "insufficient_scope") return null;
+  const scope = unionOAuthScopes(params.scope);
+  return {
+    ...(scope ? { scope } : {}),
+    ...(params.resource_metadata ? { resourceMetadata: params.resource_metadata.slice(0, 2000) } : {})
+  };
+}
+
+/**
+ * The step-up scope set: the union of the given scope strings in first-seen order (MCP 2026-07-28 step-up
+ * authorization: previously requested scopes plus the challenged ones). Malformed tokens are dropped; undefined when
+ * nothing is left.
+ */
+export function unionOAuthScopes(...scopes: Array<string | null | undefined>): string | undefined {
+  const seen = new Set<string>();
+  for (const value of scopes) {
+    for (const token of scopeTokens(value)) {
+      if (seen.size >= MAX_SCOPE_TOKENS) break;
+      seen.add(token);
+    }
+  }
+  return seen.size > 0 ? [...seen].join(" ") : undefined;
+}
+
 async function fetchWithTimeout(fetchImpl: FetchLike, input: string, init: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -190,6 +248,38 @@ export function authorizationServerMetadataUrls(issuer: string): string[] {
 }
 
 /**
+ * The unauthenticated requests that ask an MCP endpoint for its 401 challenge, in order: the legacy `initialize`
+ * (unchanged from earlier releases), then a 2026-07-28 `server/discover` with the modern headers and `_meta`. A
+ * modern-only server may answer `initialize` with 400 instead of 401 (it is not a 2026-07-28 method), and some
+ * servers let `initialize` through without a token; both challenge the modern request. The second probe is sent only
+ * when the first did not get a 401.
+ */
+function oauthProbeRequests(): Array<{ headers: Record<string, string>; body: Record<string, unknown> }> {
+  const modernParams = {
+    _meta: {
+      [MCP_META_PROTOCOL_VERSION]: MCP_CLIENT_MODERN_PROTOCOL_VERSION,
+      [MCP_META_CLIENT_CAPABILITIES]: {},
+      [MCP_META_CLIENT_INFO]: { ...MCP_CLIENT_INFO }
+    }
+  };
+  return [
+    {
+      headers: {},
+      body: {
+        jsonrpc: "2.0",
+        id: "l2m-oauth-probe",
+        method: "initialize",
+        params: { protocolVersion: MCP_CLIENT_PROTOCOL_VERSION, capabilities: {}, clientInfo: { ...MCP_CLIENT_INFO } }
+      }
+    },
+    {
+      headers: buildMcpStandardHeaders(MCP_CLIENT_MODERN_PROTOCOL_VERSION, "server/discover", modernParams),
+      body: { jsonrpc: "2.0", id: "l2m-oauth-probe-discover", method: "server/discover", params: modernParams }
+    }
+  ];
+}
+
+/**
  * Ask the MCP endpoint, without credentials, where its metadata lives. A 401
  * challenge with `resource_metadata` wins; otherwise the well-known URLs are
  * tried. Extra headers (the server's configured custom headers) are sent so
@@ -201,23 +291,27 @@ export async function discoverProtectedResource(
 ): Promise<{ resourceMetadataUrl: string; metadata: ProtectedResourceMetadata; scopeHint?: string }> {
   const fetchImpl = options.fetchImpl ?? fetch;
   let challenge: Record<string, string> | null = null;
-  try {
-    const probe = await fetchWithTimeout(fetchImpl, endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(options.headers ?? {}) },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "l2m-oauth-probe",
-        method: "initialize",
-        params: { protocolVersion: MCP_CLIENT_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "ai-orchestrator", version: "0.1.0" } }
-      })
-    });
-    await probe.text().catch(() => "");
-    if (probe.status === 401) {
-      challenge = parseWwwAuthenticate(probe.headers.get("www-authenticate"));
+  for (const request of oauthProbeRequests()) {
+    try {
+      const probe = await fetchWithTimeout(fetchImpl, endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...request.headers,
+          ...(options.headers ?? {})
+        },
+        body: JSON.stringify(request.body)
+      });
+      await probe.text().catch(() => "");
+      if (probe.status === 401) {
+        challenge = parseWwwAuthenticate(probe.headers.get("www-authenticate"));
+        break;
+      }
+    } catch {
+      // No answer at all (unreachable, timed out): a second probe would wait as long again. Go to the well-known URLs.
+      break;
     }
-  } catch {
-    // Fall back to the well-known URLs.
   }
 
   const candidates = challenge?.resource_metadata

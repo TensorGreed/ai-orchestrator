@@ -210,7 +210,7 @@ import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService } from "./services/tracing-service";
 import type { MetricReader, SpanProcessor } from "@ai-orchestrator/otel";
-import { resolveTelemetrySettings } from "./telemetry/settings.js";
+import { headerSecretValues, resolveTelemetrySettings } from "./telemetry/settings.js";
 import { loadTelemetry, type Telemetry } from "./telemetry/load.js";
 import { createModelTelemetry } from "./telemetry/model-telemetry.js";
 import { pausedTraceContext, traceQueueJob } from "./telemetry/queue-tracing.js";
@@ -284,6 +284,8 @@ import { buildRunFacts } from "./services/run-facts.js";
 import { createReplaySandbox, type ReplaySandbox } from "./services/replay-sandbox.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
 import { SecretScrubber, environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
+import type { GuardDictionary } from "@ai-orchestrator/guard-sdk";
+import { OtelContentMasker, deriveOtelContentSurrogateKey, environmentUrlSecrets } from "./telemetry/content-masker.js";
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
@@ -340,6 +342,7 @@ import type { McpCassetteRecord, McpCassetteSource } from "@ai-orchestrator/shar
 import {
   evaluateToolForContext,
   manualReadOnlyFor,
+  createReadOnlyMarkLookup,
   markMcpTools,
   resolveMcpToolPolicySubject
 } from "./services/mcp-tool-policy";
@@ -1552,12 +1555,61 @@ export async function createApp(
   // OpenTelemetry is loaded first, and only when tracing is configured (telemetry/load.ts): the log mixin, the
   // handler context and the HTTP span hooks below exist only then. With tracing off nothing from the SDK is imported.
   const telemetrySettings = resolveTelemetrySettings(config);
+  // Content capture on GenAI spans (off by default): prompts, answers and tool arguments and results are secret-scrubbed,
+  // masked by content rules and truncated before export (telemetry/content-masker.ts). It needs the master key for its
+  // surrogate key; without one nothing is captured.
+  const contentMasterKey = Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64");
+  let contentCapture = telemetrySettings.contentCapture;
+  if (contentCapture !== "NO_CONTENT" && contentMasterKey.length !== 32) {
+    telemetrySettings.warnings.push(
+      "OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT needs SECRET_MASTER_KEY_BASE64 (32 bytes) to mask content; no content is captured"
+    );
+    contentCapture = "NO_CONTENT";
+  }
+  const otelContentMasker =
+    contentCapture === "NO_CONTENT"
+      ? null
+      : new OtelContentMasker({
+          key: deriveOtelContentSurrogateKey(contentMasterKey),
+          storedSecretValues: () => secretService.valuesForScrubbing(),
+          otherSecretValues: () => [
+            ...environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
+            ...environmentUrlSecrets(process.env),
+            ...headerSecretValues(telemetrySettings.headers)
+          ],
+          // Every content-rule profile's dictionaries: content leaves the deployment, so every custom class is masked.
+          dictionaries: async () => {
+            const dictionaries: GuardDictionary[] = [];
+            for (const profile of await guardService.listProfiles()) {
+              dictionaries.push(...((await guardService.loadProfile(profile.id))?.profile.dictionaries ?? []));
+            }
+            return dictionaries;
+          },
+          redact: (value) => {
+            const redacted = secretService.redact(value);
+            return typeof redacted === "string" ? redacted : value;
+          }
+        });
+  // Exported content is no longer than any other attribute value the exporter sends.
+  const contentMaxChars = Math.min(telemetrySettings.contentMaxChars, telemetrySettings.attributeValueLengthLimit);
+  if (otelContentMasker) secretService.onSecretValue((values) => otelContentMasker.addSecretValues(values));
   const telemetry: Telemetry = await loadTelemetry(telemetrySettings, {
+    ...(otelContentMasker && contentCapture !== "NO_CONTENT"
+      ? {
+          content: {
+            mode: contentCapture,
+            maxChars: contentMaxChars,
+            // Content is copied and masked whole before it is cut, so how much is taken in is bounded too.
+            maxInputChars: Math.min(1024 * 1024, Math.max(64 * 1024, 8 * contentMaxChars)),
+            masker: otelContentMasker.mask
+          }
+        }
+      : {}),
     scrub: (() => {
       if (!telemetrySettings.enabled) return undefined;
       const scrubber = new SecretScrubber([
         ...environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
-        ...Object.values(telemetrySettings.headers)
+        ...headerSecretValues(telemetrySettings.headers)
       ]);
       return (text: string) => scrubber.text(text);
     })(),
@@ -1596,6 +1648,33 @@ export async function createApp(
     genReqId: () => nanoid()
   });
   for (const warning of telemetrySettings.warnings) app.log.warn(warning);
+  // Reported by /api/observability; NO_CONTENT unless tracing is on and content is captured.
+  const contentCaptureMode = telemetryRuntime?.contentCapture ?? "NO_CONTENT";
+  // /v1 gateway requests capture content only with their own opt-in on top of the general switch.
+  const gatewayContentCapture = contentCaptureMode !== "NO_CONTENT" && telemetrySettings.gatewayContentCapture;
+  if (contentCaptureMode !== "NO_CONTENT") {
+    app.log.warn(
+      { contentCapture: contentCaptureMode, maxChars: contentMaxChars, gatewayContent: gatewayContentCapture },
+      gatewayContentCapture
+        ? "OpenTelemetry content capture is on for workflow runs and /v1 gateway requests: prompts, answers and tool arguments and results are exported after secret removal and content-rule masking"
+        : "OpenTelemetry content capture is on for workflow runs (not /v1 gateway requests): prompts, answers and tool arguments and results are exported after secret removal and content-rule masking"
+    );
+    app.addHook("onReady", async () => {
+      try {
+        await auditService.record({
+          category: "system",
+          eventType: "telemetry.content_capture_enabled",
+          action: "update",
+          outcome: "success",
+          actor: { type: "system" },
+          resourceType: "telemetry",
+          metadata: { mode: contentCaptureMode, maxChars: contentMaxChars, gatewayContent: gatewayContentCapture }
+        });
+      } catch (error) {
+        app.log.warn({ err: error }, "Could not record the content capture audit event");
+      }
+    });
+  }
   if (telemetryRuntime) {
     // Registered first, so it runs last on close: spans ended by other close hooks are still flushed (5 s cap).
     app.addHook("onClose", async () => {
@@ -1871,24 +1950,30 @@ export async function createApp(
       });
     }
   });
+  // An admin's read-only mark in tool policy decides whether the MCP clients may send a call again (D13).
+  const readOnlyMarks = createReadOnlyMarkLookup(async (registryServerId) => await store.listMcpToolClassifications(registryServerId));
   const mcpRegistry = createDefaultMCPRegistry({
     oauth: mcpOAuthService,
     sandbox: mcpSandboxLauncher,
     runtimeGuard: mcpRuntimeGuard,
     // Phase 6.4 — built-in tools reach the outside only through the outbound URL checks.
     builtInTools: { fetch: (url, init) => guardedFetch(url, init, { config: outboundGuard, resolver: nodeDnsResolver }) },
-    // MCP 2026-07-28 — protocol era default, input round limit and the safe re-issue rule of the HTTP client.
+    // MCP 2026-07-28 — protocol era default, input round limit, the safe re-issue rule and the wait for the
+    // server/discover probe of the HTTP client.
     httpProtocol: {
       defaultMode: config.MCP_CLIENT_PROTOCOL_DEFAULT,
       mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
-      legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE
+      legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE,
+      probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS,
+      toolReadOnlyOverride: readOnlyMarks.lookup
     },
     // MCP 2026-07-28 — the same settings for stdio servers, plus the wait for their server/discover probe.
     stdioProtocol: {
       defaultMode: config.MCP_CLIENT_PROTOCOL_DEFAULT,
       mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
       legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE,
-      probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS
+      probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS,
+      toolReadOnlyOverride: readOnlyMarks.lookup
     },
     // Tracing (only while it is on): a CLIENT span per MCP operation, and trace context sent to MCP servers in
     // `_meta` and HTTP headers unless L2M_OTEL_PROPAGATE_TO_MCP=false or the server's connection opts out.
@@ -2192,16 +2277,40 @@ export async function createApp(
     entry.job.leaseLost(`${what} was refused`);
   };
 
-  const persistExecutionHistoryRecord = async (
-    record: ExecutionHistoryRecord,
-    meta: {
-      phase: "progress" | "final";
-      executionId: string;
-      workflowId: string;
-      triggerType?: string;
-      status: string;
+  // v72 — the trace id of each in-flight run's span (only while tracing is on). Bounded: a run whose history is never
+  // persisted must not grow it forever. `stored` is set once the id is on the run's history row.
+  const runTraceIds = new Map<string, { traceId: string; stored: boolean }>();
+  const storeRunTraceId = async (executionId: string, phase: "progress" | "final") => {
+    const entry = runTraceIds.get(executionId);
+    if (!entry) return;
+    if (phase === "final") runTraceIds.delete(executionId);
+    if (entry.stored) return;
+    try {
+      // A queued run in cluster mode writes under its claim's fence, like its history writes: a worker whose claim was
+      // taken back must not overwrite the new owner's trace id.
+      const fence = queueRunFences.get(executionId)?.fence;
+      entry.stored = await store.setExecutionTraceId(executionId, entry.traceId, fence ? { fence } : {});
+    } catch (error) {
+      app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record the trace id of a run");
     }
-  ): Promise<boolean> => {
+  };
+
+  type PersistExecutionHistoryMeta = {
+    phase: "progress" | "final";
+    executionId: string;
+    workflowId: string;
+    triggerType?: string;
+    status: string;
+  };
+  // A final write ends the run's bookkeeping whatever its outcome (stored, refused, aborted or failed).
+  const persistExecutionHistoryRecord = async (record: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
+    try {
+      return await persistExecutionHistoryRecordUnsettled(record, meta);
+    } finally {
+      if (meta.phase === "final") runTraceIds.delete(meta.executionId);
+    }
+  };
+  const persistExecutionHistoryRecordUnsettled = async (record: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
     if (meta.phase === "final") await progressWrites.settle(meta.executionId);
     const active = activeExecutions.get(meta.executionId);
     // A stopped run keeps the canceled record the cancel route wrote. A
@@ -2240,6 +2349,7 @@ export async function createApp(
         }
         return false;
       }
+      await storeRunTraceId(meta.executionId, meta.phase);
       if (meta.phase === "final") {
         handOffCapture(meta.executionId);
         retentionService?.nudge();
@@ -2310,6 +2420,11 @@ export async function createApp(
         ...(input.traceLinks && input.traceLinks.length > 0 ? { links: input.traceLinks } : {})
       },
       async (span) => {
+        if (input.executionId && span.recording && span.traceId) {
+          runTraceIds.delete(input.executionId);
+          if (runTraceIds.size >= 5_000) runTraceIds.delete(runTraceIds.keys().next().value!);
+          runTraceIds.set(input.executionId, { traceId: span.traceId, stored: false });
+        }
         const result = await runWorkflowExecutionInScope(input);
         describeRunResult(span, result);
         return result;
@@ -2956,6 +3071,7 @@ export async function createApp(
     if (input.result.status === "waiting_approval") {
       // The resumed run is recorded apart: what the children spent so far is recorded now.
       await subWorkflowSpend.take(input.executionId)?.closeDetached();
+      await storeRunTraceId(input.executionId, "final");
       app.log.info(
         {
           executionId: input.executionId,
@@ -6794,7 +6910,10 @@ export async function createApp(
         sampler: telemetrySettings.sampler.name,
         httpServerSpans: tracingService.isEnabled() && telemetrySettings.httpServerSpans,
         trustInbound: telemetrySettings.trustInbound,
-        spanDetail: telemetrySettings.spanDetail
+        spanDetail: telemetrySettings.spanDetail,
+        contentCapture: contentCaptureMode,
+        contentMaxChars: contentCaptureMode === "NO_CONTENT" ? null : contentMaxChars,
+        gatewayContentCapture
       },
       otlpMetrics: {
         enabled: telemetry.metrics !== null && telemetrySettings.metricsEndpoint !== null,
@@ -12370,6 +12489,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     priceRequest: (providerId, model, inputTokens, outputTokens, cachedInputTokens) =>
       usageService.estimateAiGatewayCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
     ...(modelTelemetry.active ? { instrument: modelTelemetry.instrumentation, recordCost: (observation: ModelCostObservation) => modelTelemetry.recordCost(observation) } : {}),
+    captureContent: gatewayContentCapture,
     checkModel:
       options.aiGatewayCheckModel ??
       (async (scope, call) =>
@@ -14443,6 +14563,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         readOnly: parsed.data.readOnly,
         setBy: user.email
       });
+      readOnlyMarks.invalidate(server.id);
       await recordPolicyAudit(
         user,
         parsed.data.readOnly === null ? "mcp_policy.classification_cleared" : "mcp_policy.classification_set",

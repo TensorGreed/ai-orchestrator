@@ -9,10 +9,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { InMemorySpanExporter, type ReadableSpan, type SpanProcessor } from "@ai-orchestrator/otel";
-import type { McpClient, McpToolset } from "@ai-orchestrator/shared";
+import { CONTENT_ATTRIBUTES, type McpClient, type McpToolset } from "@ai-orchestrator/shared";
 import { gatewayToolName, slugifyServerName } from "@ai-orchestrator/mcp-sdk";
 import { createApp } from "../app.js";
-import { gatewayMethodName, traceCarrierFromMeta, traceGatewayRequest } from "./mcp-gateway-tracing.js";
+import { GATEWAY_CALLER_GONE, gatewayMethodName, traceCarrierFromMeta, traceGatewayRequest } from "./mcp-gateway-tracing.js";
 import type { InstrumentationSpan, RunInstrumentation } from "@ai-orchestrator/shared";
 import { parseConfig } from "../config.js";
 import type { Store } from "../db/store.js";
@@ -60,6 +60,7 @@ interface Fixture {
   toolset: McpToolset;
   client: McpClient;
   token: string;
+  cookie: string;
 }
 
 const fixtures: Fixture[] = [];
@@ -130,7 +131,7 @@ async function setup(env: Record<string, string>): Promise<Fixture> {
   });
   const client = await post<{ client: McpClient; token: string }>("/api/mcp/clients", { name: "Traced IDE", toolsetIds: [toolset.toolset.id], role: "builder" });
   exporter.reset();
-  const fixture = { app, store, tempDir, exporter, toolset: toolset.toolset, client: client.client, token: client.token };
+  const fixture = { app, store, tempDir, exporter, toolset: toolset.toolset, client: client.client, token: client.token, cookie };
   fixtures.push(fixture);
   return fixture;
 }
@@ -281,6 +282,31 @@ describe("MCP gateway SERVER spans and upstream CLIENT spans", () => {
     expect(server!.attributes).toMatchObject({ "mcp.method.name": "server/discover", "mcp.protocol.version": MODERN, "jsonrpc.request.id": "9" });
   });
 
+  it("modern: subscriptions/listen gets a SERVER span that ends with the acknowledgment, and a refusal records its code", async () => {
+    const fixture = await setup({ TRACING_ENABLED: "true", MCP_GATEWAY_LISTEN_MAX_MS: "1000" });
+    const listen = (id: number, accept: string) =>
+      rpc(fixture, { jsonrpc: "2.0", id, method: "subscriptions/listen", params: { _meta: modernMeta({ traceparent: CALLER_TRACEPARENT }) } }, { ...modernHeaders("subscriptions/listen"), accept });
+    const startedAt = Date.now();
+    const streamed = await listen(11, "application/json, text/event-stream");
+    expect(streamed.statusCode).toBe(200);
+    expect(streamed.body).toContain("notifications/subscriptions/acknowledged");
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
+    const [span] = spansNamed(fixture, "subscriptions/listen", SPAN_KIND_SERVER);
+    expect(span!.parentSpanContext?.spanId).toBe(CALLER_SPAN);
+    expect(span!.attributes).toMatchObject({ "mcp.method.name": "subscriptions/listen", "mcp.protocol.version": MODERN, "jsonrpc.request.id": "11" });
+    expect(span!.status.code).not.toBe(2);
+    // Ended when the stream was acknowledged, not when it closed a second later.
+    const durationMs = span!.duration[0] * 1000 + span!.duration[1] / 1e6;
+    expect(durationMs).toBeLessThan(900);
+
+    fixture.exporter.reset();
+    const refused = await listen(12, "application/json");
+    expect(refused.statusCode).toBe(406);
+    const [refusal] = spansNamed(fixture, "subscriptions/listen", SPAN_KIND_SERVER);
+    expect(refusal!.attributes).toMatchObject({ "jsonrpc.request.id": "12", "error.type": String(refused.json().error.code) });
+    expect(refusal!.status.code).toBe(2);
+  });
+
   it("does not send trace context to a server that opted out", async () => {
     const fixture = await setup({ TRACING_ENABLED: "true" });
     const servers = await fixture.store.listMcpServers();
@@ -290,6 +316,41 @@ describe("MCP gateway SERVER spans and upstream CLIENT spans", () => {
     const response = await rpc(fixture, { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: TOOL, arguments: {} } }, { "mcp-session-id": sessionId });
     expect(upstreamMeta(response.json())).toBeNull();
     expect(spansNamed(fixture, "tools/call echo_meta", SPAN_KIND_CLIENT)).toHaveLength(1);
+  });
+});
+
+describe("content capture on", () => {
+  it("records no arguments, results or listen content on the gateway's spans or the upstream calls they make", async () => {
+    const fixture = await setup({ TRACING_ENABLED: "true", OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: "SPAN_AND_EVENT", MCP_GATEWAY_LISTEN_MAX_MS: "1000" });
+    const secretArgument = "content-capture-probe-7f3a";
+    const observability = await fixture.app.inject({ method: "GET", url: "/api/observability", headers: { cookie: fixture.cookie } });
+    expect(observability.json()).toMatchObject({ tracing: { contentCapture: "SPAN_AND_EVENT" } });
+    const sessionId = await openSession(fixture);
+    const legacy = await rpc(fixture, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: TOOL, arguments: { q: secretArgument } } }, { "mcp-session-id": sessionId });
+    expect(legacy.statusCode).toBe(200);
+    const modern = await rpc(
+      fixture,
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: TOOL, arguments: { q: secretArgument }, _meta: modernMeta() } },
+      modernHeaders("tools/call", TOOL)
+    );
+    expect(modern.statusCode).toBe(200);
+    const listen = await rpc(
+      fixture,
+      { jsonrpc: "2.0", id: 4, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: modernMeta() } },
+      modernHeaders("subscriptions/listen")
+    );
+    expect(listen.body).toContain("notifications/subscriptions/acknowledged");
+
+    const spans = fixture.exporter.getFinishedSpans();
+    expect(spansNamed(fixture, "subscriptions/listen", SPAN_KIND_SERVER)).toHaveLength(1);
+    expect(spans.filter((span) => span.name === `tools/call ${TOOL}` && span.kind === SPAN_KIND_SERVER)).toHaveLength(2);
+    expect(spans.filter((span) => span.name === "tools/call echo_meta" && span.kind === SPAN_KIND_CLIENT)).toHaveLength(2);
+    const contentKeys = new Set(Object.values(CONTENT_ATTRIBUTES));
+    for (const span of spans) {
+      expect(Object.keys(span.attributes).filter((key) => contentKeys.has(key)), span.name).toEqual([]);
+      for (const event of span.events) expect(Object.keys(event.attributes ?? {}).filter((key) => contentKeys.has(key)), span.name).toEqual([]);
+    }
+    expect(JSON.stringify(spans.map((span) => [span.attributes, span.events]))).not.toContain(secretArgument);
   });
 });
 
@@ -312,6 +373,7 @@ describe("gateway span helpers", () => {
   it("names only the methods MCP defines; anything else is _OTHER", () => {
     expect(gatewayMethodName("tools/call")).toBe("tools/call");
     expect(gatewayMethodName("server/discover")).toBe("server/discover");
+    expect(gatewayMethodName("subscriptions/listen")).toBe("subscriptions/listen");
     expect(gatewayMethodName("x".repeat(500))).toBe("_OTHER");
   });
 
@@ -332,5 +394,22 @@ describe("gateway span helpers", () => {
     await expect(traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => { throw new Error("secret request text"); })).rejects.toThrow("secret request text");
     await expect(traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => { throw new TypeError("more text"); })).rejects.toThrow();
     expect(recorded).toEqual([{ error: null, type: "_OTHER" }, { error: null, type: "TypeError" }]);
+  });
+
+  it("records a listen whose caller hung up before the stream opened as caller_gone, with no error and no status", async () => {
+    const calls: Array<[string, unknown]> = [];
+    const span = {
+      recordError: (...args: unknown[]) => calls.push(["recordError", args]),
+      setAttributes: (attributes: Record<string, unknown>) => calls.push(["setAttributes", attributes]),
+      setStatus: (...args: unknown[]) => calls.push(["setStatus", args])
+    } as unknown as InstrumentationSpan;
+    const instrumentation = { enabled: true, mcpRequest: async (_info: unknown, fn: (s: InstrumentationSpan) => Promise<unknown>) => await fn(span) } as unknown as RunInstrumentation;
+    const facts = { method: "subscriptions/listen", params: {}, era: "modern" as const, toolsetId: "t", clientId: "c" };
+    expect(await traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => GATEWAY_CALLER_GONE)).toBe(GATEWAY_CALLER_GONE);
+    expect(calls).toEqual([["setAttributes", { "l2m.mcp.listen.outcome": "caller_gone" }]]);
+    // An opened stream (undefined) records nothing.
+    calls.length = 0;
+    await traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => undefined);
+    expect(calls).toEqual([]);
   });
 });

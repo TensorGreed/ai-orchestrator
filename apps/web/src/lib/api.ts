@@ -1319,6 +1319,10 @@ export interface ExecutionHistoryDetail extends ExecutionHistorySummary {
   input: unknown;
   output: unknown;
   nodeResults: unknown;
+  /** The trace id of the run's span; null or absent when the run was made with tracing off. */
+  traceId?: string | null;
+  /** A link to the run's trace in the operator's backend (L2M_OTEL_TRACE_URL_TEMPLATE); absent unless set. */
+  traceUrl?: string;
 }
 
 export async function fetchExecutions(input?: {

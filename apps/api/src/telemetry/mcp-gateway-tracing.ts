@@ -37,7 +37,8 @@ const KNOWN_METHODS: ReadonlySet<string> = new Set([
   "prompts/list",
   "prompts/get",
   "completion/complete",
-  "logging/setLevel"
+  "logging/setLevel",
+  "subscriptions/listen"
 ]);
 
 export function gatewayMethodName(method: string): string {
@@ -93,10 +94,21 @@ export function gatewaySpanInfo(facts: GatewayRequestFacts, trustInbound: Inboun
 }
 
 /**
+ * What a gateway handler returns in place of a response when the caller hung up before anything was sent (a
+ * `subscriptions/listen` request whose connection closed during admission). Recorded as an outcome, not an error.
+ */
+export const GATEWAY_CALLER_GONE = Object.freeze({ gatewayOutcome: "caller_gone" as const });
+
+/**
  * The outcome of a JSON-RPC response on its span: a JSON-RPC error's code (`error.type` and `rpc.response.status_code`),
  * or `tool_error` for a tool result with `isError`. Never the message or the content.
  */
 export function recordGatewayOutcome(span: InstrumentationSpan, response: unknown): void {
+  if (response === GATEWAY_CALLER_GONE) {
+    // The status stays unset: neither a success nor an error of the gateway.
+    span.setAttributes({ [MCP_OUTCOME_ATTRIBUTES.LISTEN_OUTCOME]: "caller_gone" });
+    return;
+  }
   if (!isRecord(response)) return;
   if (isRecord(response.error) && typeof response.error.code === "number") {
     const code = String(response.error.code);

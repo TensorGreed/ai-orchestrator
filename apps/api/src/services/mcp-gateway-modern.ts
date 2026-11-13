@@ -3,8 +3,9 @@
  * modern clients next to legacy ones on the same endpoint (a "dual-era
  * server"), kept out of the routes file.
  *
- * A request is modern exactly when it is a single JSON-RPC message (not a
- * batch, not `initialize`) whose `params._meta` carries
+ * A request is modern when it is a single JSON-RPC message sent with a
+ * modern `MCP-Protocol-Version` header, or a single message (not
+ * `initialize`) whose `params._meta` carries
  * `io.modelcontextprotocol/protocolVersion`. Everything else follows the
  * legacy session path unchanged. Modern requests are only served when
  * MCP_GATEWAY_MODERN_PROTOCOL is `on`; with it `off` (the default) they get
@@ -21,6 +22,8 @@ import {
   inspectRequestMeta,
   isMcpSpecReservedErrorCode,
   missingRequestMetaError,
+  headerMismatchError,
+  MCP_HEADER_PROTOCOL_VERSION,
   stripMcpHeaderAnnotations,
   unsupportedProtocolVersionError,
   verifyMcpRequestHeaders,
@@ -35,6 +38,7 @@ import {
   JSON_RPC_ERRORS,
   classifyMessage,
   rpcError,
+  rpcResult,
   type JsonRpcNotification,
   type JsonRpcRequest,
   type JsonRpcResponse
@@ -46,7 +50,7 @@ export type GatewayModernMode = "off" | "on";
 export const DEFAULT_MCP_GATEWAY_LIST_TTL_MS = 60_000;
 
 /** The methods a modern caller can use on a toolset. Anything else is 404 with -32601. */
-export const MODERN_GATEWAY_METHODS: ReadonlySet<string> = new Set(["server/discover", "tools/list", "tools/call"]);
+export const MODERN_GATEWAY_METHODS: ReadonlySet<string> = new Set(["server/discover", "tools/list", "tools/call", "subscriptions/listen"]);
 
 /**
  * The versions the gateway speaks, newest first: the modern ones (served per request) followed by the legacy ones
@@ -60,12 +64,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Whether an `MCP-Protocol-Version` header value names a modern (per-request metadata) version. */
+export function isModernProtocolVersionHeader(value: string | undefined): boolean {
+  return value !== undefined && (MCP_MODERN_PROTOCOL_VERSIONS as readonly string[]).includes(value.trim());
+}
+
 /**
- * Whether a parsed body is a modern request: one message with a method other than `initialize` whose `_meta` has the
- * protocol version key (even a malformed value: that is answered with -32602, not with the legacy session error).
+ * Whether a parsed body is a modern request: one message sent with a modern `MCP-Protocol-Version` header, or one
+ * message with a method other than `initialize` whose `_meta` has the protocol version key (even a malformed value:
+ * that is answered with -32602, not with the legacy session error). A header-modern message without the `_meta` keys
+ * is a malformed modern request (-32602 with its id), not a request without a session, and a header-modern
+ * `initialize` asks for a method 2026-07-28 removed (404 with -32601): legacy clients never send a modern version in
+ * that header. An `initialize` without it opens a legacy session, whatever its `_meta` holds.
  */
-export function isModernGatewayMessage(parsed: unknown): boolean {
-  if (!isRecord(parsed) || typeof parsed.method !== "string" || parsed.method === "initialize") return false;
+export function isModernGatewayMessage(parsed: unknown, versionHeader?: string): boolean {
+  if (!isRecord(parsed) || typeof parsed.method !== "string") return false;
+  if (isModernProtocolVersionHeader(versionHeader)) return true;
+  if (parsed.method === "initialize") return false;
   return inspectRequestMeta(parsed.params).era === "modern";
 }
 
@@ -88,7 +103,8 @@ function clientInfoOf(info: McpImplementationInfo | undefined): { name?: string;
 
 /**
  * Validate a modern message in the order the specification implies: a well-formed JSON-RPC message; a protocol
- * version in `_meta` (else -32602); a version the gateway serves statelessly (else -32022 listing every version it
+ * version in `_meta` (else -32602); an `MCP-Protocol-Version` header, when sent, equal to it (else -32020); a version
+ * the gateway serves statelessly (else -32022 listing every version it
  * speaks, so a client can pick a legacy one and `initialize`); `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name`
  * headers present and equal to the body (else -32020); the other required `_meta` keys (else -32602). Each failure is
  * HTTP 400. Notifications need none of this: the specification defines no client notification over HTTP for modern
@@ -106,11 +122,25 @@ export function validateModernGatewayMessage(parsed: unknown, headers: McpHeader
   const message = classified.message;
   const meta = inspectRequestMeta(message.params);
   if (meta.era !== "modern") {
-    // Callers check `isModernGatewayMessage` first; this keeps the function total.
-    return { ok: false, status: 400, response: rpcErrorFrom(message.id, missingRequestMetaError([MCP_META_PROTOCOL_VERSION])) };
+    // `initialize` with a modern header and legacy params: 2026-07-28 removed the method, whatever `_meta` holds.
+    if (message.method === "initialize") {
+      return { ok: false, status: 404, response: rpcError(message.id, JSON_RPC_ERRORS.methodNotFound, "Method not found: initialize") };
+    }
+    // A modern version in the header but no protocol version in `_meta`: a malformed modern request (-32602).
+    const present = isRecord(message.params) && isRecord(message.params._meta) ? message.params._meta : {};
+    const missing = isRecord(present[MCP_META_CLIENT_CAPABILITIES])
+      ? [MCP_META_PROTOCOL_VERSION]
+      : [MCP_META_PROTOCOL_VERSION, MCP_META_CLIENT_CAPABILITIES];
+    return { ok: false, status: 400, response: rpcErrorFrom(message.id, missingRequestMetaError(missing)) };
   }
   if (meta.missing.includes(MCP_META_PROTOCOL_VERSION) || meta.protocolVersion === undefined) {
     return { ok: false, status: 400, response: rpcErrorFrom(message.id, missingRequestMetaError(meta.missing)) };
+  }
+  // The header must name the version `_meta` names: a mismatch is -32020, whatever either version is (checked before
+  // -32022, so a supported header over an unknown body version is a mismatch, not an unsupported version).
+  const versionHeader = headers(MCP_HEADER_PROTOCOL_VERSION);
+  if (versionHeader !== undefined && versionHeader.trim() !== meta.protocolVersion) {
+    return { ok: false, status: 400, response: rpcErrorFrom(message.id, headerMismatchError(`${MCP_HEADER_PROTOCOL_VERSION} header does not match the protocol version in _meta`)) };
   }
   if (!(MCP_MODERN_PROTOCOL_VERSIONS as readonly string[]).includes(meta.protocolVersion)) {
     return { ok: false, status: 400, response: rpcErrorFrom(message.id, unsupportedProtocolVersionError(meta.protocolVersion, gatewaySupportedVersions(mode))) };
@@ -173,6 +203,53 @@ export function gatewayDiscoverResult(input: {
     ...(input.toolset.description ? { instructions: input.toolset.description } : {}),
     ...gatewayCacheHints(input.ttlMs)
   };
+}
+
+/** `_meta` key that ties every message of a subscription stream to its `subscriptions/listen` request id. */
+export const MCP_META_SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId";
+
+/** `MCP_GATEWAY_LISTEN_MAX_MS` default: a listen stream ends gracefully after this long (clients reconnect). */
+export const DEFAULT_MCP_GATEWAY_LISTEN_MAX_MS = 600_000;
+/** `MCP_GATEWAY_LISTEN_MAX_PER_CLIENT` default: open listen streams per client on one instance. */
+export const DEFAULT_MCP_GATEWAY_LISTEN_MAX_PER_CLIENT = 4;
+
+const LISTEN_BOOLEAN_FILTERS = ["toolsListChanged", "promptsListChanged", "resourcesListChanged"] as const;
+
+/**
+ * The `notifications` filter of a `subscriptions/listen` request, checked for shape only: an object (or absent)
+ * whose known fields have the types the specification gives. Unknown fields are ignored. The gateway honours none of
+ * it today (it serves tools only and its tool list does not announce changes), so the acknowledgment is empty.
+ * Returns an error message, or null when the filter is well formed.
+ */
+export function listenFilterError(params: unknown): string | null {
+  const filter = isRecord(params) ? params.notifications : undefined;
+  if (filter === undefined) return null;
+  if (!isRecord(filter)) return "notifications must be an object.";
+  for (const field of LISTEN_BOOLEAN_FILTERS) {
+    if (filter[field] !== undefined && typeof filter[field] !== "boolean") return `notifications.${field} must be a boolean.`;
+  }
+  const uris = filter.resourceSubscriptions;
+  if (uris !== undefined && (!Array.isArray(uris) || uris.some((uri) => typeof uri !== "string"))) {
+    return "notifications.resourceSubscriptions must be an array of strings.";
+  }
+  return null;
+}
+
+/** First message of a listen stream: the subset the gateway honours (none: it declares `tools.listChanged: false`). */
+export function subscriptionsAcknowledged(subscriptionId: JsonRpcRequest["id"]): JsonRpcNotification {
+  return {
+    jsonrpc: "2.0",
+    method: "notifications/subscriptions/acknowledged",
+    params: { _meta: { [MCP_META_SUBSCRIPTION_ID]: subscriptionId }, notifications: {} }
+  };
+}
+
+/** Graceful end of a listen stream: the successful response to the `subscriptions/listen` request. */
+export function subscriptionsComplete(
+  subscriptionId: JsonRpcRequest["id"],
+  serverInfo: { name: string; version: string; title?: string }
+): JsonRpcResponse {
+  return modernizeGatewayResponse(rpcResult(subscriptionId, { _meta: { [MCP_META_SUBSCRIPTION_ID]: subscriptionId } }), serverInfo);
 }
 
 /** Tools in a deterministic order for modern callers (by exposed name), as the specification asks of list results. */

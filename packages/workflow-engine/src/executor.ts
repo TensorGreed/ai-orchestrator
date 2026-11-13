@@ -45,6 +45,7 @@ import {
   azureStorageSecretAddressConfig,
   connectorAddressInSecret,
   declaresSensitiveOutput,
+  labelsMarkSensitive,
   destinationHostOfSetting,
   inputProvenance,
   withImpliedSensitive,
@@ -1496,7 +1497,8 @@ function declaresSensitive(node: Pick<WorkflowNode, "config">, dependencies: Pic
  */
 async function declaresSensitiveSource(
   node: Pick<WorkflowNode, "type" | "config">,
-  dependencies: Pick<WorkflowExecutionDependencies, "sensitiveSecretIds" | "resolveRegisteredMcpServer">
+  dependencies: Pick<WorkflowExecutionDependencies, "sensitiveSecretIds" | "resolveRegisteredMcpServer">,
+  unresolvedIsSensitive = false
 ): Promise<boolean> {
   if (declaresSensitive(node, dependencies)) return true;
   const secretIds = dependencies.sensitiveSecretIds;
@@ -1507,8 +1509,9 @@ async function declaresSensitiveSource(
     const registered = await dependencies.resolveRegisteredMcpServer(registryServerId);
     return referencesSecretIn({ secretRef: registered.secretRef, connection: registered.connection }, secretIds);
   } catch {
-    // A server that cannot be resolved fails the node when it runs; nothing to declare here.
-    return false;
+    // A server that cannot be resolved fails the node when it runs; nothing to declare here, unless the caller must
+    // fail closed (content capture: the lookup may work when the node runs).
+    return unresolvedIsSensitive;
   }
 }
 
@@ -1525,10 +1528,11 @@ export async function workflowDeclaresSensitiveSource(
   nodes: ReadonlyArray<Pick<WorkflowNode, "type" | "config">>,
   dependencies: Pick<WorkflowExecutionDependencies, "sensitiveSecretIds" | "resolveRegisteredMcpServer" | "loadWorkflow">,
   visited: Set<string> = new Set(),
-  depth = 0
+  depth = 0,
+  unresolvedIsSensitive = false
 ): Promise<boolean> {
   for (const node of nodes) {
-    if (await declaresSensitiveSource(node, dependencies)) return true;
+    if (await declaresSensitiveSource(node, dependencies, unresolvedIsSensitive)) return true;
   }
   for (const node of nodes) {
     if (node.type !== "execute_workflow" && node.type !== "workflow_tool") continue;
@@ -1543,7 +1547,7 @@ export async function workflowDeclaresSensitiveSource(
       return true;
     }
     if (!child) return true;
-    if (await workflowDeclaresSensitiveSource(child.nodes, dependencies, visited, depth + 1)) return true;
+    if (await workflowDeclaresSensitiveSource(child.nodes, dependencies, visited, depth + 1, unresolvedIsSensitive)) return true;
   }
   return false;
 }
@@ -8765,7 +8769,9 @@ export async function executeWorkflow(
     const redactor = new RevealRedactor();
     const redacting = redactingDependencies(dependencies, redactor);
     const recorder = createNodeActivityRecorder(redacting.onNodeActivity);
-    const result = await executeWorkflowRun(request, { ...redacting, activityRecorder: recorder, revealRedactor: redactor });
+    const result = await runWithContentExclusion(request.resumeState?.workflow ?? request.workflow, dependencies, redactor, () =>
+      executeWorkflowRun(request, { ...redacting, activityRecorder: recorder, revealRedactor: redactor })
+    );
     attachNodeActivity(result.nodeResults, recorder);
     const redacted = redactor.redact(result);
     if (redactor.active) {
@@ -8787,6 +8793,33 @@ export async function executeWorkflow(
     });
   };
   return owner ? runWithSandboxOwner(`workflow:${owner}`, run) : run();
+}
+
+/**
+ * Content capture (OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT, off by default): the run's spans export no content while
+ * the work is sensitive. That is the whole run when any node of it, or of a sub-workflow it calls, declares a sensitive
+ * source (checked once, failing closed), the rest of the run once a Reveal node revealed something, and any call made
+ * while the running node's input labels say sensitive (tracked runs). With capture off this only calls `fn`.
+ */
+async function runWithContentExclusion<T>(
+  workflow: Pick<Workflow, "nodes"> | undefined,
+  dependencies: WorkflowExecutionDependencies,
+  redactor: RevealRedactor,
+  fn: () => Promise<T>
+): Promise<T> {
+  const instrument = dependencies.instrument;
+  if (instrument?.capturesContent !== true || !instrument.withContentExclusion) return await fn();
+  let declared = true;
+  try {
+    declared = await workflowDeclaresSensitiveSource(workflow?.nodes ?? [], dependencies, new Set(), 0, true);
+  } catch {
+    declared = true;
+  }
+  return await instrument.withContentExclusion(() => {
+    if (declared || redactor.active) return true;
+    const scope = currentLabelScope();
+    return scope ? labelsMarkSensitive(scope.inputLabels()) : false;
+  }, fn);
 }
 
 /** Marks a result whose run revealed values: a symbol key, so it survives object spreads but never serialises. */

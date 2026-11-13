@@ -209,6 +209,12 @@ export function McpOAuthPanel({ serverId, isAdmin }: { serverId: string; isAdmin
 
       {error && <div className="settings-error">{error}</div>}
       {status?.lastError && status.state === "error" && <div className="settings-error">{status.lastError}</div>}
+      {/* A connected server that refused an operation for lack of scope: Connect again asks for it (step-up). */}
+      {status?.lastError && status.state === "connected" && (
+        <div className="settings-help" role="status">
+          {status.lastError}
+        </div>
+      )}
 
       {status && (
         <dl className="mcp-oauth-facts">

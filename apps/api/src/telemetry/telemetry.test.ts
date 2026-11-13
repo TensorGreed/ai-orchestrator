@@ -355,3 +355,106 @@ describe("run spans and node metrics through the API", () => {
     expect(await nodeCount(context)).toBe(3);
   });
 });
+
+describe("trace id on runs (v72)", () => {
+  const runnable = {
+    id: "wf-otel-trace-id",
+    name: "Trace id run",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: [
+      { id: "in", type: "webhook_input", name: "In", position: { x: 0, y: 0 }, config: {} },
+      { id: "out", type: "output", name: "Out", position: { x: 200, y: 0 }, config: {} }
+    ],
+    edges: [{ id: "e1", source: "in", target: "out" }]
+  };
+  const TEMPLATE = "https://traces.example.com/trace/{traceId}";
+
+  async function runAndRead(env: Record<string, string>) {
+    const context = await start(env);
+    await context.store.upsertWorkflow(runnable as never);
+    const cookie = await signIn(context);
+    const response = await context.app.inject({ method: "POST", url: "/api/workflows/wf-otel-trace-id/execute", headers: { cookie }, payload: {} });
+    expect(response.statusCode, response.body).toBe(200);
+    const executionId = response.json<{ executionId: string }>().executionId;
+    const detail = await context.app.inject({ method: "GET", url: `/api/executions/${executionId}`, headers: { cookie } });
+    expect(detail.statusCode, detail.body).toBe(200);
+    return { context, executionId, detail: detail.json<Record<string, unknown>>() };
+  }
+
+  it("stores the run span's trace id and returns it on run detail, with no link by default", async () => {
+    const { context, detail } = await runAndRead(TRACING);
+    const runSpan = context.exporter.getFinishedSpans().find((span) => span.name === "invoke_workflow Trace id run")!;
+    expect(detail.traceId).toBe(runSpan.spanContext().traceId);
+    expect(detail.traceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(detail).not.toHaveProperty("traceUrl");
+  });
+
+  it("adds a trace link when L2M_OTEL_TRACE_URL_TEMPLATE is set", async () => {
+    const { detail } = await runAndRead({ ...TRACING, L2M_OTEL_TRACE_URL_TEMPLATE: TEMPLATE });
+    expect(detail.traceUrl).toBe(`https://traces.example.com/trace/${String(detail.traceId)}`);
+  });
+
+  it("stores no trace id while tracing is off, and shows no link even with a template", async () => {
+    const { detail } = await runAndRead({ L2M_OTEL_TRACE_URL_TEMPLATE: TEMPLATE });
+    expect(detail.traceId).toBeNull();
+    expect(detail).not.toHaveProperty("traceUrl");
+  });
+
+  it("a run resumed after an approval keeps the latest trace id (the resume's span)", async () => {
+    const context = await start(TRACING);
+    const gated = {
+      id: "wf-otel-gated",
+      name: "Gated trace run",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "in", type: "webhook_input", name: "In", position: { x: 0, y: 0 }, config: {} },
+        { id: "gate", type: "approval_gate", name: "Gate", position: { x: 200, y: 0 }, config: { message: "Go?", approverRoles: ["admin"] } },
+        { id: "out", type: "output", name: "Out", position: { x: 400, y: 0 }, config: {} },
+        { id: "no", type: "output", name: "No", position: { x: 400, y: 200 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "in", target: "gate" },
+        { id: "e2", source: "gate", sourceHandle: "approved", target: "out" },
+        { id: "e3", source: "gate", sourceHandle: "rejected", target: "no" }
+      ]
+    };
+    await context.store.upsertWorkflow(gated as never);
+    const cookie = await signIn(context);
+    const first = await context.app.inject({ method: "POST", url: "/api/workflows/wf-otel-gated/execute", headers: { cookie }, payload: {} });
+    expect(first.statusCode, first.body).toBe(200);
+    const executionId = first.json<{ executionId: string; status: string }>().executionId;
+    expect(first.json<{ status: string }>().status).toBe("waiting_approval");
+    const paused = (await context.store.getExecutionHistory(executionId))?.traceId;
+    expect(paused).toMatch(/^[0-9a-f]{32}$/);
+
+    // The gate refuses the person who started the run, so a second admin decides.
+    await new AuthService(context.store, 24).register({ email: "otel-approver@example.com", password: "otel-approver-password", role: "admin" });
+    const login = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email: "otel-approver@example.com", password: "otel-approver-password" } });
+    const approverCookie = String([login.headers["set-cookie"]].flat().find((value) => typeof value === "string" && value.startsWith("ao_session=")) ?? "").split(";")[0]!;
+    const approved = await context.app.inject({ method: "POST", url: `/api/approvals/${executionId}/approve`, headers: { cookie: approverCookie }, payload: {} });
+    expect(approved.statusCode, approved.body).toBe(200);
+    const resumed = (await context.store.getExecutionHistory(executionId))?.traceId;
+    expect(resumed).toMatch(/^[0-9a-f]{32}$/);
+    expect(resumed).not.toBe(paused);
+    const runSpans = context.exporter.getFinishedSpans().filter((span) => span.name === "invoke_workflow Gated trace run");
+    expect(runSpans.map((span) => span.spanContext().traceId)).toContain(resumed);
+  });
+
+  it("cancelling a traced-run-less history row (never progressed) still works and shows no trace id", async () => {
+    const context = await start(TRACING);
+    await context.store.upsertWorkflow(runnable as never);
+    const cookie = await signIn(context);
+    await context.store.saveExecutionHistory({ id: "run-early-cancel", workflowId: "wf-otel-trace-id", status: "running", startedAt: new Date().toISOString() });
+    const canceled = await context.app.inject({ method: "POST", url: "/api/executions/run-early-cancel/cancel", headers: { cookie }, payload: {} });
+    expect(canceled.statusCode, canceled.body).toBe(200);
+    const detail = await context.app.inject({ method: "GET", url: "/api/executions/run-early-cancel", headers: { cookie } });
+    expect(detail.json()).toMatchObject({ status: "canceled", traceId: null });
+  });
+
+  it("refuses a template without {traceId} or a non-http URL", () => {
+    expect(() => parseConfig({ SECRET_MASTER_KEY_BASE64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", L2M_OTEL_TRACE_URL_TEMPLATE: "https://t.example.com/" })).toThrow(/L2M_OTEL_TRACE_URL_TEMPLATE/);
+    expect(() => parseConfig({ SECRET_MASTER_KEY_BASE64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", L2M_OTEL_TRACE_URL_TEMPLATE: "javascript:alert('{traceId}')" })).toThrow(/L2M_OTEL_TRACE_URL_TEMPLATE/);
+  });
+});

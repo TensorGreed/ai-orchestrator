@@ -5,7 +5,7 @@
  * Only type imports from the otel package appear in this file: they are erased at compile time, so the module
  * graph of an API with tracing off never reaches `@opentelemetry/*` (telemetry-off.test.ts checks this).
  */
-import type { MetricReader, MetricsPipeline, OtelRuntime, SpanProcessor } from "@ai-orchestrator/otel";
+import type { ContentCaptureOptions, MetricReader, MetricsPipeline, OtelRuntime, SpanProcessor } from "@ai-orchestrator/otel";
 import { NOOP_RUN_INSTRUMENTATION, type RunInstrumentation } from "@ai-orchestrator/shared";
 import type { TelemetrySettings } from "./settings.js";
 
@@ -32,6 +32,8 @@ export interface LoadTelemetryOptions {
   registerGlobals?: boolean;
   /** Extra metric readers (tests collect metrics in memory with these); used wherever a meter provider is built. */
   metricReaders?: readonly MetricReader[];
+  /** Content capture with its masker; absent: no content is captured. Used only while tracing is on. */
+  content?: ContentCaptureOptions;
 }
 
 export async function loadTelemetry(settings: TelemetrySettings, options: LoadTelemetryOptions = {}): Promise<Telemetry> {
@@ -75,6 +77,7 @@ export async function loadTelemetry(settings: TelemetrySettings, options: LoadTe
     metricsExport,
     recentSpanLimit: RECENT_SPAN_LIMIT,
     ...(options.scrub ? { scrub: options.scrub } : {}),
+    ...(options.content ? { content: options.content } : {}),
     ...(options.spanProcessors ? { spanProcessors: options.spanProcessors } : {}),
     ...(options.metricReaders ? { metricReaders: options.metricReaders } : {}),
     ...(options.registerGlobals === false ? { registerGlobals: false } : {})

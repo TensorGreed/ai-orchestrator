@@ -45,6 +45,24 @@ export class McpMissingClientCapabilityError extends McpJsonRpcError {
   }
 }
 
+/**
+ * The server refused a request with 403 and an `insufficient_scope` Bearer challenge: the OAuth token is valid but
+ * lacks scope for this operation. Not retried; a new authorization with the union of the granted and the challenged
+ * scopes is needed (step-up), which needs the person who connected the server.
+ */
+export class McpInsufficientScopeError extends Error {
+  constructor(
+    message: string,
+    /** The scopes the server asked for, space separated, when its challenge named any. */
+    readonly requiredScope?: string,
+    /** The protected resource metadata URL from the challenge. */
+    readonly resourceMetadata?: string
+  ) {
+    super(message);
+    this.name = "McpInsufficientScopeError";
+  }
+}
+
 /** A request ran past its timeout. */
 export class McpTimeoutError extends Error {
   constructor(message: string) {
@@ -94,7 +112,7 @@ export function isServerFailureKind(kind: McpToolErrorKind | undefined): boolean
 /** Classify an error an adapter caught while calling a tool. */
 export function classifyMcpError(error: unknown, signal?: AbortSignal): McpToolErrorKind {
   if (error instanceof McpSandboxPolicyError) return "sandbox";
-  if (error instanceof McpDelegatedCredentialError) return "credentials";
+  if (error instanceof McpDelegatedCredentialError || error instanceof McpInsufficientScopeError) return "credentials";
   if (error instanceof McpTimeoutError) return "timeout";
   if (error instanceof McpOutcomeUnknownError) return "outcome_unknown";
   // MCP 2026-07-28 -32021 from a modern server: the call needs a client capability it did not declare (no model

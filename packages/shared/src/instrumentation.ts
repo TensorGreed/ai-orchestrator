@@ -4,7 +4,8 @@
  * API passes that implementation in only when tracing is configured; everywhere else the no-op below is used, which
  * calls the wrapped function and allocates nothing.
  *
- * Callers pass ids and low-cardinality facts only (never prompts, tool arguments, results, headers or secrets). Each
+ * Callers pass ids and low-cardinality facts only (never headers or secrets, and prompts, tool arguments and results only
+ * through `addContent`, which the implementation masks and accepts only while content capture is on). Each
  * wrapper runs `fn` with the new span as the active one, so spans started inside it (a model call inside an agent
  * turn, an MCP request inside a tool call) become its children.
  */
@@ -49,7 +50,40 @@ export interface InstrumentationSpan {
   keepOpen(): void;
   /** Ends the span. Idempotent. Wrapped calls end their span when `fn` settles unless `keepOpen()` was called. */
   end(): void;
+  /**
+   * True only while the deployment captures content (OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT) and this span records.
+   * Callers build content for `addContent` only then, so nothing is built while capture is off. Absent means false.
+   */
+  readonly capturesContent?: boolean;
+  /**
+   * Hands the implementation content for this span (messages, tool arguments, a tool result). It is never set as it
+   * is: the implementation drops it for sensitive work, and otherwise removes secrets, masks it with content rules and
+   * truncates it before the span is exported, dropping it on any failure. A no-op unless `capturesContent`.
+   */
+  addContent?(kind: InstrumentationContentKind, value: unknown): void;
 }
+
+/** What content a span can carry when capture is on (the GenAI conventions' opt-in content attributes). */
+export type InstrumentationContentKind =
+  | "system_instructions"
+  | "input_messages"
+  | "output_messages"
+  | "tool_definitions"
+  | "tool_call_arguments"
+  | "tool_call_result";
+
+/** The attribute each kind of content is exported under (semantic conventions v1.41.0). */
+export const CONTENT_ATTRIBUTES: Readonly<Record<InstrumentationContentKind, string>> = Object.freeze({
+  system_instructions: "gen_ai.system_instructions",
+  input_messages: "gen_ai.input.messages",
+  output_messages: "gen_ai.output.messages",
+  tool_definitions: "gen_ai.tool.definitions",
+  tool_call_arguments: "gen_ai.tool.call.arguments",
+  tool_call_result: "gen_ai.tool.call.result"
+});
+
+/** Set instead of content when content was withheld: `sensitive`, `masking_failed`, `timeout`, `backpressure`, ... */
+export const CONTENT_DROPPED_ATTRIBUTE = "l2m.content.dropped";
 
 export interface RunSpanInfo {
   /** The run's execution id; a sub-workflow's child run has none of its own (its span is a child of the caller's). */
@@ -149,7 +183,9 @@ export const MCP_OUTCOME_ATTRIBUTES = Object.freeze({
   SESSION_ID: "mcp.session.id",
   PROTOCOL_VERSION: "mcp.protocol.version",
   JSONRPC_REQUEST_ID: "jsonrpc.request.id",
-  ROUNDS: "l2m.mcp.rounds"
+  ROUNDS: "l2m.mcp.rounds",
+  /** A gateway `subscriptions/listen` request that did not become a stream: `caller_gone` (it hung up during admission). */
+  LISTEN_OUTCOME: "l2m.mcp.listen.outcome"
 } as const);
 
 /**
@@ -283,6 +319,15 @@ export interface RunInstrumentation {
   withNewTrace<T>(fn: () => T): T;
   /** The active span's ids, or null when there is none (or tracing is off). */
   activeTraceIds(): TraceIds | null;
+  /** True while content capture is on (see `InstrumentationSpan.capturesContent`). Absent means false. */
+  readonly capturesContent?: boolean;
+  /**
+   * Runs `fn` with `isSensitive` checked for every span started inside it (and their children): while it returns true,
+   * or if it throws, those spans export no content. Callers whose work can hold sensitive data (a run with a
+   * sensitive-labelled node, an agent loop that read a sensitive result) wrap it in this. Checks nest: an outer one
+   * still applies inside an inner one.
+   */
+  withContentExclusion?<T>(isSensitive: () => boolean, fn: () => T): T;
 }
 
 const NOOP_SPAN: InstrumentationSpan = Object.freeze({
@@ -292,7 +337,9 @@ const NOOP_SPAN: InstrumentationSpan = Object.freeze({
   setAttributes: () => undefined,
   recordError: () => undefined,
   keepOpen: () => undefined,
-  end: () => undefined
+  end: () => undefined,
+  capturesContent: false,
+  addContent: () => undefined
 });
 
 const NOOP_SCOPED_SPAN: ScopedInstrumentationSpan = Object.freeze({
@@ -322,7 +369,9 @@ export const NOOP_RUN_INSTRUMENTATION: RunInstrumentation = Object.freeze({
   inject: () => false,
   withParent: <T>(_carrier: TraceCarrier | null | undefined, fn: () => T): T => fn(),
   withNewTrace: <T>(fn: () => T): T => fn(),
-  activeTraceIds: () => null
+  activeTraceIds: () => null,
+  capturesContent: false,
+  withContentExclusion: <T>(_isSensitive: () => boolean, fn: () => T): T => fn()
 });
 
 /** The no-op span, for callers that need one outside a wrapper. */

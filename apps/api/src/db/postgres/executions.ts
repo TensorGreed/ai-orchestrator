@@ -272,6 +272,7 @@ export async function getExecutionHistory(ctx: PgContext, id: string): Promise<{
   customData: unknown;
   error: string | null;
   createdAt: string;
+  traceId: string | null;
 } | null> {
   const row = await ctx.queryOne<{
     id: string;
@@ -289,8 +290,9 @@ export async function getExecutionHistory(ctx: PgContext, id: string): Promise<{
     custom_data_json: string | null;
     error: string | null;
     created_at: string;
+    trace_id: string | null;
   }>(
-    `SELECT id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error, created_at
+    `SELECT id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error, created_at, trace_id
        FROM execution_history WHERE id = $1`,
     [id]
   );
@@ -310,7 +312,8 @@ export async function getExecutionHistory(ctx: PgContext, id: string): Promise<{
     nodeResults: parseJsonSafe(row.node_results_json),
     customData: parseJsonSafe(row.custom_data_json),
     error: row.error ? toStr(row.error) : null,
-    createdAt: toStr(row.created_at)
+    createdAt: toStr(row.created_at),
+    traceId: row.trace_id ? toStr(row.trace_id) : null
   };
 }
 
