@@ -42,7 +42,7 @@ The split between SDK packages, the execution engine, and the Fastify app is del
 
 2. **SDK packages** — each exposes `createDefault<X>Registry()` which is the extension seam. New integrations register here and are then consumed by the runtime.
    - [packages/provider-sdk](packages/provider-sdk/src/) — LLM adapters (`openai`, `openai-compatible`, `azure-openai`, `anthropic`, `gemini`, `ollama`). Also houses `resilient-fetch.ts` (retry/backoff) and `tool-arg-parser.ts`.
-   - [packages/mcp-sdk](packages/mcp-sdk/src/) — MCP server adapters (`http-mcp`, `mock-mcp`). `tool-resolution.ts` is used for prompt-aware tool shortlisting.
+   - [packages/mcp-sdk](packages/mcp-sdk/src/) — MCP server adapters (`http-mcp`, `mock-mcp`). `tool-resolution.ts` discovers and resolves an agent's tools (allowed-tool filters, access policy, exposed-name disambiguation); it does not shortlist.
    - [packages/connector-sdk](packages/connector-sdk/src/) — data connectors (google-drive, sql, nosql, qdrant, azure-*). Used by RAG + connector nodes.
 
 3. **`packages/agent-runtime`** — implements the tool-calling agent loop. Consumes a provider registry, MCP registry, memory, and a session tool cache. Loop: resolve prompts → discover tools → call model with tools → execute tool calls → append tool messages → repeat until final answer or `maxIterations`. Supports zero/one/many tool calls per iteration and Supervisor→worker delegation (workers are exposed to the parent as synthetic tools). Automatically injects `session_cache_list` / `session_cache_get` internal tools when a `session_id` is present.
@@ -65,7 +65,7 @@ Agent Orchestrator / Supervisor nodes expose attachment ports that are **not** w
 
 - `chat_model` (required) → `LLM Call` / `Azure OpenAI Chat Model` node. Provider config lives on the attached node.
 - `memory` → `Simple Memory` node (SQLite `session_memory` keyed by namespace + session_id).
-- `tool` (0..N) → `MCP Tool` nodes. Discovered tools are compacted + shortlisted by prompt relevance in all-tools mode.
+- `tool` (0..N) → `MCP Tool` nodes. Discovered tools are always compacted (descriptions and schemas shortened) in `packages/agent-runtime/src/default-agent-runtime.ts`. The prompt-relevance keyword shortlist there runs only when no MCP Tool or Workflow Tool node is attached (the executor sets `bypassToolFiltering` otherwise), so in practice it applies to tools from an agent's legacy inline `mcpServers` config; Supervisor worker tools are pinned and never shortlisted.
 - `worker` (Supervisor only, 0..N) → other Agent/Supervisor nodes exposed as synthetic tools to the parent.
 
 When editing the engine or runtime, preserve this distinction: linear-DAG edges vs attachment edges.

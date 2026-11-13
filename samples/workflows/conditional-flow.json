@@ -4,7 +4,7 @@
   "workflow": {
     "id": "wf-conditional",
     "name": "Conditional Branching Flow",
-    "description": "Webhook Input -> LLM Call -> IF Node (check for error) -> [true: Error Output] / [false: Success Output]",
+    "description": "Webhook Input -> LLM Call -> IF Node (answer present?) -> [true: Success Output] / [false: Error Output]",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [

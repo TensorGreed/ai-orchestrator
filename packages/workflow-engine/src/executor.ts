@@ -7276,6 +7276,8 @@ async function executeNodeHandler(
             sessionId,
             memory,
             bypassToolFiltering: attachedToolServerConfigs.length + workflowToolConfigs.length > 0,
+            // Workers come from the worker port, not from MCP discovery: the model is always offered every one.
+            ...(workerTools.length > 0 ? { pinnedToolNames: workerTools.map((worker) => worker.name) } : {}),
             images: images.length > 0 ? images : undefined,
             // Phase 6.4 — the agent's Think toggle (off unless set).
             ...(config.thinkTool === true ? { thinkTool: true } : {})

@@ -182,6 +182,7 @@ for (const kind of kinds) {
       expect(done.status).toBe("done");
       expect(done.deletion).toMatchObject({ confirmedBy: ADMIN.email, usageRowsCleared: 1, vaultTokensDeleted: 1, deferred: 0 });
       expect(done.deletion!.deleted.run).toBe(1);
+      expect(done.deletion!.notCovered).toEqual(expect.arrayContaining([expect.stringContaining("Signed run manifests")]));
 
       // The run and what it took are gone; the other person's are not.
       expect(await count(store, "execution_history", "id = 'run-1'")).toBe(0);
