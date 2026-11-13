@@ -7,6 +7,8 @@ description: "MCP tool policy rules in L2M: allow, deny or require approval by r
 
 Tool policy decides which MCP tools agents and MCP Tool nodes may use. It has three parts:
 
+Concepts: [Least privilege for AI agents](/learn/security/least-privilege-for-agents), [MCP tool annotations](/learn/mcp/tool-annotations) and <Term id="excessive-agency">excessive agency</Term>.
+
 - **Rules.** Admins write allow, deny and require-approval rules scoped by project, role, server and tool name, and optionally by the call's arguments, the run's data labels, the workflow, the gateway client or the gateway toolset. A rule can run in shadow mode first.
 - **Read-only classification.** Every tool is either read-only or a write tool, taken from an admin override or from the server's own annotations.
 - **No write tools.** A per-workflow switch that blocks every write tool in that workflow.

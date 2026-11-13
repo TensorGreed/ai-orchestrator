@@ -4,15 +4,15 @@ term: "MCP server"
 topic: mcp
 definition: "A program that offers tools, resources or prompts to AI applications over the Model Context Protocol, locally over stdio or remotely over HTTP."
 description: "An MCP server exposes tools, resources and prompts to AI apps over stdio or HTTP. Examples, local vs remote servers, and the risks of running one."
-related: [model-context-protocol, mcp-tool, tool-poisoning]
+related: [model-context-protocol, mcp-tool, mcp-client, stdio-transport, streamable-http, tool-poisoning]
 guide: [/learn/mcp/hosts-clients-servers, /learn/mcp/what-is-mcp]
 ---
 
 # MCP server
 
-**A program that offers tools, resources or prompts to AI applications over the Model Context Protocol, locally over stdio or remotely over HTTP.**
+**A program that offers tools, resources or prompts to AI applications over the Model Context Protocol, locally over <Term id="stdio-transport">stdio</Term> or remotely over HTTP.**
 
-A server wraps one system, such as a file system, a database, a ticket tracker or a search API, and describes what it offers in a form any MCP client understands. The client asks for the list (`tools/list`, `resources/list`, `prompts/list`) and then calls or reads what it needs.
+A server wraps one system, such as a file system, a database, a ticket tracker or a search API, and describes what it offers in a form any <Term id="mcp-client">MCP client</Term> understands. The client asks for the list (`tools/list`, `resources/list`, `prompts/list`) and then calls or reads what it needs.
 
 ## Local and remote servers
 

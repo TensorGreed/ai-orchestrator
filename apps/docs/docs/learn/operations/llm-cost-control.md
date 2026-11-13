@@ -38,7 +38,7 @@ The usual causes of a surprise bill:
 The cheapest control is inside the run itself:
 
 - **An iteration limit.** Every agent should have a <Term id="max-iterations">maximum number of iterations</Term>. When it is reached, the agent stops asking the model and returns what it has, even if the task is not finished. Pick it from the task: a lookup needs two or three; research may need ten.
-- **Fewer tools per agent.** Attach the tools a task needs, not every tool a server has. Split a large agent into a supervisor and focused workers if one agent needs too many.
+- **Fewer tools per agent.** Attach the tools a task needs, not every tool a server has. Split a large agent into a <Term id="supervisor-agent">supervisor</Term> and focused workers if one agent needs too many.
 - **Shorter tool results.** Trim results before they go back to the model: fields the task does not need, long lists, raw HTML.
 
 None of these needs a budget, and all of them make the per-run cost predictable enough to budget for.
@@ -102,9 +102,9 @@ Cost figures come from a price table: price per million input tokens, per millio
 
 ## In L2M
 
-[Budgets](/product/budgets) are optional; with none set, nothing is checked. Admins set them under **Settings → Cost & quality → FinOps**, with the scopes global, project, workflow, user and MCP client, a limit in USD or tokens, a day, week or month period in UTC, and the action warn or block. Warn alerts at 80% by default and at the cap, and can post to a notify webhook.
+[Budgets](/product/budgets) are optional; with none set, nothing is checked. Admins set them under **Settings → Cost & quality → FinOps**, with the scopes global, project, workflow, user and <Term id="mcp-client">MCP client</Term>, a limit in USD or tokens, a day, week or month period in UTC, and the action warn or block. Warn alerts at 80% by default and at the cap, and can post to a notify webhook.
 
-- A used-up block budget stops a run before it starts, whatever trigger started it. Editor runs, the API and webhooks get `HTTP 402` with `error: "budget_exceeded"` and a `Retry-After` header; schedules and polling triggers record one failed run naming the budget. Eval runs, tape-only replays, approval resumes and error workflows are not refused, but their spend still counts. [MCP gateway](/product/mcp-gateway#budgets-and-rate-limits) calls get JSON-RPC error `-32032`, and the [/v1 AI gateway](/product/ai-gateway#budgets-and-rate-limits) answers `429` with code `insufficient_quota`.
+- A used-up block budget stops a run before it starts, whatever trigger started it. Editor runs, the API and webhooks get `HTTP 402` with `error: "budget_exceeded"` and a `Retry-After` header; schedules and polling triggers record one failed run naming the budget. Eval runs, tape-only <Term id="replay">replays</Term>, approval resumes and error workflows are not refused, but their spend still counts. [MCP gateway](/product/mcp-gateway#budgets-and-rate-limits) calls get JSON-RPC error `-32032`, and the [/v1 AI gateway](/product/ai-gateway#budgets-and-rate-limits) answers `429` with code `insufficient_quota`.
 - A model call whose provider reports no usage is counted with an estimate of about three bytes of text per token, which leans high, and is marked `usageEstimated` on the node's trace.
 - Costs come from a built-in price table; `LLM_PRICING_OVERRIDES_JSON` adds models or sets your own rates. A model without a price counts its tokens at no cost; Azure OpenAI workflow runs are unpriced this way, so give them a token budget.
 - The Agent Orchestrator node's `maxIterations` caps the loop: at the limit the agent returns the last text the model wrote, or "Agent stopped after reaching iteration limit.", and the workflow goes on. Its tool payload settings (`toolMessageMaxChars` and the `toolPayloadMax*` limits) shorten tool results before they reach the model.

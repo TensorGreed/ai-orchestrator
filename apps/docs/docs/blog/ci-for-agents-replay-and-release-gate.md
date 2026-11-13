@@ -3,7 +3,7 @@ title: "CI for agents: golden runs, replay and a release gate"
 description: "How L2M tests an agent change before it ships: save known-good runs, replay changes against recordings in CI, and publish only the version that passed."
 date: 2026-11-12
 author: "The L2M team"
-related: [golden-run]
+related: [golden-run, replay, golden-set, release-gate]
 demo: wf-demo-faq-release
 demoRecorded: true
 socialCard: true
@@ -29,7 +29,7 @@ Writing good cases by hand is slow, so [production capture](/product/production-
 
 ## Replay: run what is safe, answer the rest from the recording
 
-Replay runs a candidate version of the workflow on a golden run's input. Each node is handled by its class:
+<Term id="replay">Replay</Term> runs a candidate version of the workflow on a golden run's input. Each node is handled by its class:
 
 | Node | In a replay |
 | --- | --- |
@@ -43,11 +43,11 @@ Two rules matter more than the table.
 
 **Inconclusive is not a pass.** If the candidate makes an MCP call the cassette cannot answer, reaches a node the golden run never saw, or changed a code node, the case is inconclusive. We could have let those through as "probably fine". We did not, because a replay that proved nothing must not look like one that passed.
 
-**Nothing is written.** Replays do not write session memory, knowledge bases or the tool cache, and they do not fire error workflows or notifications. By default the only live traffic is the model calls, and their spend still counts toward [budgets](/product/budgets). A job can also let named read-only nodes and read-only MCP tools call live; such a job never counts as release proof.
+**Nothing is written.** Replays do not write <Term id="agent-memory">session memory</Term>, knowledge bases or the tool cache, and they do not fire error workflows or notifications. By default the only live traffic is the model calls, and their spend still counts toward [budgets](/product/budgets). A job can also let named read-only nodes and read-only MCP tools call live; such a job never counts as release proof.
 
 ## Golden sets, scorers and replay jobs
 
-A golden set groups the cases for one workflow ([PR #47](https://github.com/TensorGreed/ai-orchestrator/pull/47)). A replay job runs every case against a candidate and scores it. By default a case is scored on its status and on JSON equality with the golden output; other scorers check a JSON schema, text similarity, the tool-call sequence, a cost budget, or ask a model to judge.
+A <Term id="golden-set">golden set</Term> groups the cases for one workflow ([PR #47](https://github.com/TensorGreed/ai-orchestrator/pull/47)). A replay job runs every case against a candidate and scores it. By default a case is scored on its status and on JSON equality with the golden output; other scorers check a JSON schema, text similarity, the tool-call sequence, a cost budget, or ask a model to judge.
 
 Live models vary from run to run. [PR #54](https://github.com/TensorGreed/ai-orchestrator/pull/54) added two answers. First, recorded runs now keep their model calls as a tape, and a job can answer model calls from it. That tests a change to the logic around the model with no model drift. Second, a job can repeat each case up to five times and aggregate the results.
 
@@ -81,7 +81,7 @@ A gate is only as strong as its cases. On an enforced gate, a builder could make
 
 ## Try it in L2M
 
-Open the FAQ answerer in the [live demo](https://lsquarem.com/demo/?mode=editor&workflowId=wf-demo-faq-release){target="_self"} to watch a release gate block a change, with no sign-up. To set it up on your own deployment, follow [CI for AI agents](/guides/ci-for-ai-agents). The reference pages are [Golden runs and replay](/product/golden-runs), [Golden sets, replay jobs and scorers](/product/golden-sets), [Replay in CI and the release gate](/product/replay-and-release-gate) and [Release gate and publish](/product/release-gate).
+Open the FAQ answerer in the [live demo](https://lsquarem.com/demo/?mode=editor&workflowId=wf-demo-faq-release){target="_self"} to watch a <Term id="release-gate">release gate</Term> block a change, with no sign-up. To set it up on your own deployment, follow [CI for AI agents](/guides/ci-for-ai-agents). The reference pages are [Golden runs and replay](/product/golden-runs), [Golden sets, replay jobs and scorers](/product/golden-sets), [Replay in CI and the release gate](/product/replay-and-release-gate) and [Release gate and publish](/product/release-gate).
 
 ## Further reading
 

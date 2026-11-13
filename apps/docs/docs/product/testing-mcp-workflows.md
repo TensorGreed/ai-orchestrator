@@ -7,6 +7,8 @@ description: "Keep MCP-dependent L2M workflows testable: record and replay MCP c
 
 MCP servers change, go down and return different answers from one run to the next. L2M gives you three tools to keep workflows that depend on them testable:
 
+Concepts: [Testing agents that call MCP tools](/learn/testing/testing-mcp-tools), <Term id="cassette">cassette</Term> and <Term id="snapshot-mock">snapshot mock</Term>.
+
 - **Record and replay**: capture every MCP call a run makes as a *cassette*, then run the workflow or an eval again with the calls answered from it.
 - **Snapshot mock servers**: a stub MCP server generated from a server's accepted schema snapshot, inside L2M or as a standalone stdio process.
 - **`l2m mcp check`**: a CI command that fails when a server has a breaking schema change, cannot be reached, or a workflow depends on a tool that policy blocks.

@@ -5,6 +5,8 @@ description: "Authentication and access control in L2M: session cookies, admin, 
 
 # Authentication and RBAC
 
+Concepts: [Identity for AI platforms](/learn/operations/identity-for-ai-platforms) explains how people, automation and MCP clients sign in and what each may do.
+
 ## Session model
 
 - Every sign-in (password, the MFA step, OIDC, SAML, LDAP) creates a persisted session record in the database

@@ -97,11 +97,11 @@ What the runtime does at each edge of the loop:
 
 Every iteration, model call and tool call shows on the run's trace. Governance is optional and off until you set it up: [tool policy](/product/mcp-tool-policy), [approval before write tools](/guides/human-approval-for-agent-tool-calls) and [budgets](/product/budgets).
 
-When one agent has too many jobs, split it: a supervisor agent can hand parts of the task to worker agents, each with its own model and tools. See [supervisor and worker agents](/learn/agents/supervisor-and-workers).
+When one agent has too many jobs, split it: a <Term id="supervisor-agent">supervisor agent</Term> can hand parts of the task to worker agents, each with its own model and tools. See [supervisor and worker agents](/learn/agents/supervisor-and-workers).
 
 ## Try it in L2M
 
-**Watch the loop in your browser.** The live demo's support agent has a knowledge-base tool and a calculator on a small MCP server. Its recorded run shows the same pattern as the worked example, with a knowledge-base lookup first: a calculator call that fails, a retry that works, then the answer. It was recorded with a scripted stand-in model, so no key is needed to replay it; the stand-in's retry is scripted, where a real model would decide it on its own.
+**Watch the loop in your browser.** The live demo's support agent has a knowledge-base tool and a calculator on a small MCP server. Its recorded run shows the same pattern as the worked example, with a knowledge-base lookup first: a calculator call that fails, a retry that works, then the answer. It was recorded with a scripted stand-in model, so no key is needed to <Term id="replay">replay</Term> it; the stand-in's retry is scripted, where a real model would decide it on its own.
 
 **Run one locally with no API key.** The [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) is a ready workflow: one agent, two MCP tools from a bundled mock MCP server, and the built-in echo provider as its model. Echo is not a real model: it repeats the prompt and never asks for a tool, so a local run ends after one model call. That proves the wiring works. Attach a real chat model to run the loop yourself.
 

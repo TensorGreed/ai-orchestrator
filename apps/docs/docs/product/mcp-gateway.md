@@ -245,4 +245,4 @@ Admin for writes, builder for reads. See the [endpoint reference](../api/endpoin
 - [Expose a workflow as an MCP tool](../runtime/workflow-as-mcp-tool)
 - [MCP server registry](./mcp-server-registry)
 - [MCP tool policy](./mcp-tool-policy)
-- Concepts: [LLM gateway vs MCP gateway](../learn/operations/llm-gateway-vs-mcp-gateway), [MCP gateway](../glossary/mcp-gateway) (glossary)
+- Concepts: [LLM gateway vs MCP gateway](../learn/operations/llm-gateway-vs-mcp-gateway), [MCP transports](../learn/mcp/transports), [MCP gateway](../glossary/mcp-gateway), [toolset](../glossary/toolset) and [token passthrough](../glossary/token-passthrough) (glossary)

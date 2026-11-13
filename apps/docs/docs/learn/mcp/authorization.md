@@ -4,7 +4,7 @@ sidebarTitle: "MCP authorization"
 description: "How a remote MCP server asks for OAuth: the 401 challenge, resource metadata, PKCE, the resource parameter, and why tokens must never be passed through."
 level: intermediate
 about: oauth-2-1
-related: [oauth-2-1, pkce, delegated-credentials]
+related: [oauth-2-1, pkce, token-passthrough, confused-deputy, delegated-credentials]
 socialCard: true
 ---
 
@@ -18,7 +18,7 @@ This guide follows the flow in the 2025-11-25 specification, the revision before
 
 Authorization is optional in MCP. The specification says what to do when you use it:
 
-- **HTTP servers** (Streamable HTTP) SHOULD follow the MCP authorization specification.
+- **HTTP servers** (<Term id="streamable-http">Streamable HTTP</Term>) SHOULD follow the MCP authorization specification.
 - **stdio servers** SHOULD NOT. A local server started by the client takes its credentials from the environment, such as an API key in an environment variable.
 - **Other transports** must follow the security practices of their own protocol.
 
@@ -80,11 +80,11 @@ On the server side, the rule is short: an MCP server must check that every token
 Two mistakes break that rule:
 
 - **No audience check.** A server that accepts any valid token from the identity provider will also accept a token that was issued for a different service. A token stolen from one place now works in another.
-- **Token passthrough.** A server that forwards the client's token to a downstream API, instead of getting its own, is the anti-pattern the specification forbids outright. The downstream API sees a request it cannot attribute, its rate limits can be bypassed and its audit trail can point at the wrong caller, and a stolen token can use the MCP server as a proxy.
+- **<Term id="token-passthrough">Token passthrough</Term>.** A server that forwards the client's token to a downstream API, instead of getting its own, is the anti-pattern the specification forbids outright. The downstream API sees a request it cannot attribute, its rate limits can be bypassed and its audit trail can point at the wrong caller, and a stolen token can use the MCP server as a proxy.
 
 If an MCP server calls other APIs, it acts as an OAuth client toward them, with separate tokens from those APIs' authorization servers.
 
-The confused deputy problem is the related attack on MCP proxy servers. A proxy that uses one static client id at a third-party API, and also lets MCP clients register dynamically, can be tricked into sending an authorization code to an attacker when the third party remembers an earlier consent. The fix in the security best practices is consent per client at the proxy, exact redirect URI matching, and a single-use `state` that is set only after consent.
+The <Term id="confused-deputy">confused deputy</Term> problem is the related attack on MCP proxy servers. A proxy that uses one static client id at a third-party API, and also lets MCP clients register dynamically, can be tricked into sending an authorization code to an attacker when the third party remembers an earlier consent. The fix in the security best practices is consent per client at the proxy, exact redirect URI matching, and a single-use `state` that is set only after consent.
 
 Authorization is one of several MCP risks. [MCP security risks](/learn/security/mcp-security-risks) covers the others, such as tool poisoning and server-side request forgery, and what L2M does about each.
 
@@ -124,7 +124,7 @@ By default a server has one shared connection. For an OAuth server, an admin can
 
 **As a server (the [MCP gateway](/product/mcp-gateway)).** Clients that call L2M use a bearer token per client, created in the studio, shown once and stored as a hash. The gateway calls upstream servers with the credential the registry holds for each server (for a per-user server, the connection of the client's owner), never with the client's token, so there is no passthrough.
 
-L2M's protocol support today is 2025-11-25, 2025-06-18 and 2025-03-26 on the gateway; as a client it asks servers for 2025-06-18. It does not yet check the `iss` parameter or perform step-up on a `403`. Support for 2026-07-28 is being built.
+As a client, L2M also applies the 2026-07-28 additions described above: it checks the `iss` parameter of the authorization response against the issuer it expected, refuses a response without `iss` when the authorization server promised one, and after a `403` `insufficient_scope` answer asks for the union of the old and the challenged scopes on the next connect ([OAuth for remote servers](/product/mcp-server-registry#oauth-for-remote-servers)). By default the gateway speaks protocol versions 2025-11-25, 2025-06-18 and 2025-03-26, and the client asks servers for 2025-06-18; 2026-07-28 is opt-in on both sides.
 
 ## Checklist
 

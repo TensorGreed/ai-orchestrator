@@ -4,7 +4,7 @@ term: "Eval"
 topic: testing
 definition: "A test for an AI system: give it an input, run it, and apply grading logic to the result to decide whether it succeeded."
 description: "An eval is a test for an AI system: an input, a run, and grading logic. Capability vs regression evals and the graders they use."
-related: [grader, regression-eval, golden-run, llm-as-judge, pass-at-k]
+related: [grader, regression-eval, golden-set, golden-run, llm-as-judge, pass-at-k]
 guide: [/learn/testing/agent-evals]
 ---
 
@@ -35,7 +35,7 @@ An eval is not a benchmark score. Public benchmarks compare models on someone el
 
 ## In L2M
 
-[Golden sets](/product/golden-sets) are regression suites built from real runs: a replay job runs every case against a candidate version and scores it with scorers such as `status`, `json_equal`, `tool_sequence`, `budget` and `llm_judge`.
+[Golden sets](/product/golden-sets) are regression suites built from real runs: a <Term id="replay">replay</Term> job runs every case against a candidate version and scores it with scorers such as `status`, `json_equal`, `tool_sequence`, `budget` and `llm_judge`.
 
 ## Further reading
 

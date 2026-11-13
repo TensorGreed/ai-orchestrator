@@ -2,7 +2,7 @@
 layout: page
 sidebar: false
 title: "AI agent security: prompt injection to MCP risks"
-description: "Guides to securing AI agents: prompt injection, the OWASP Top 10 for LLM apps, MCP security risks, and the controls that limit what an agent can do."
+description: "Guides to securing AI agents: prompt injection, the OWASP Top 10 for LLM apps, the lethal trifecta, MCP security risks and least privilege."
 track: security
 ---
 
