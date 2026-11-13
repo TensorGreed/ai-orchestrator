@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { Store } from "./db/store.js";
@@ -213,6 +214,50 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       expect(outcome.error).toContain("must live under");
     });
 
+    it("rejects a sibling of the root that shares its prefix, and symlinks that leave the root", async () => {
+      const safeRoot = path.join(tempDir, "safe");
+      const outside = path.join(tempDir, "outside");
+      fs.mkdirSync(safeRoot, { recursive: true });
+      fs.mkdirSync(outside, { recursive: true });
+      fs.symlinkSync(outside, path.join(safeRoot, "link-dir"));
+      fs.writeFileSync(path.join(outside, "target.ndjson"), "");
+      fs.symlinkSync(path.join(outside, "target.ndjson"), path.join(safeRoot, "link-file.ndjson"));
+      const cases: Array<[string, string, RegExp]> = [
+        ["axd_sibling", path.join(`${safeRoot}-x`, "audit.ndjson"), /must live under/],
+        ["axd_root", safeRoot, /must live under/],
+        ["axd_dotdot", path.join(safeRoot, "..", "outside", "a.ndjson"), /must live under/],
+        ["axd_link_dir", path.join(safeRoot, "link-dir", "nested", "a.ndjson"), /through a symlink/],
+        ["axd_link_file", path.join(safeRoot, "link-file.ndjson"), /symlink/]
+      ];
+      for (const [id, filePath] of cases) {
+        await store.createAuditExportDestination({ id, name: id, kind: "file", config: { path: filePath } });
+      }
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      const exporter = new AuditExportService(store, { batchSize: 100, safeFsRoot: safeRoot });
+      for (const [id, , error] of cases) {
+        const outcome = await exporter.runDestination(id);
+        expect(outcome.status, id).toBe("failure");
+        expect(outcome.error, id).toMatch(error);
+      }
+      expect(fs.existsSync(path.join(`${safeRoot}-x`, "audit.ndjson"))).toBe(false);
+      expect(fs.existsSync(path.join(outside, "nested"))).toBe(false);
+      expect(fs.readFileSync(path.join(outside, "target.ndjson"), "utf8")).toBe("");
+
+      // A path inside the root, in a directory that does not exist yet, still works.
+      await store.createAuditExportDestination({ id: "axd_ok", name: "ok", kind: "file", config: { path: path.join(safeRoot, "a", "b", "audit.ndjson") } });
+      expect((await exporter.runDestination("axd_ok")).status).toBe("success");
+      expect(fs.readFileSync(path.join(safeRoot, "a", "b", "audit.ndjson"), "utf8")).toContain('"eventType":"login"');
+    });
+
+    it("createDestination refuses a file path outside the root before storing it", async () => {
+      const safeRoot = path.join(tempDir, "safe");
+      const exporter = new AuditExportService(store, { safeFsRoot: safeRoot });
+      await expect(
+        exporter.createDestination({ id: "axd_x", name: "x", kind: "file", config: { path: path.join(`${safeRoot}-x`, "a.ndjson") } })
+      ).rejects.toThrow(/must live under/);
+      expect(await store.getAuditExportDestination("axd_x")).toBeNull();
+    });
+
     it("records a run row even when the destination is empty", async () => {
       await store.createAuditExportDestination({
         id: "axd_empty",
@@ -246,6 +291,84 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       // Cursor should NOT advance on failure
       const dest = (await store.getAuditExportDestination("axd_bad_url"))!;
       expect(dest.lastExportId).toBeNull();
+    });
+  });
+
+  describe("draining a backlog", () => {
+    async function writeRows(count: number): Promise<string[]> {
+      const ids: string[] = [];
+      for (let i = 0; i < count; i += 1) {
+        const entry = await audit.record({ category: "system", eventType: `e${i}`, action: "x", outcome: "success" });
+        ids.push(entry!.id);
+      }
+      return ids;
+    }
+
+    it("ships more than one batch per run, in order, and a destination left behind runs again on the next tick", async () => {
+      const filePath = path.join(tempDir, "backlog.ndjson");
+      // A long interval: only being behind makes the second and third ticks run.
+      await store.createAuditExportDestination({ id: "axd_backlog", name: "file", kind: "file", config: { path: filePath }, intervalSeconds: 86_400 });
+      const ids = await writeRows(23);
+      const exporter = new AuditExportService(store, { batchSize: 4, maxBatchesPerRun: 3, safeFsRoot: tempDir });
+
+      const first = await exporter.runDestination("axd_backlog");
+      expect(first).toMatchObject({ status: "success", rowsExported: 12, firstId: ids[0], lastId: ids[11] });
+      expect((await store.listAuditExportRuns("axd_backlog")).map((run) => run.rowsExported)).toEqual([4, 4, 4]);
+
+      await exporter.tick();
+      expect((await store.getAuditExportDestination("axd_backlog"))!.lastExportId).toBe(ids[22]);
+      // Caught up: the next tick waits for the interval again.
+      await exporter.tick();
+      expect(await store.listAuditExportRuns("axd_backlog", 100)).toHaveLength(6);
+
+      const shipped = fs.readFileSync(filePath, "utf8").trim().split("\n").map((line) => (JSON.parse(line) as { id: string }).id);
+      expect(shipped).toEqual(ids);
+    });
+
+    it("stops at the first failed batch and resumes from the last delivered one (at least once, in order)", async () => {
+      const received: string[][] = [];
+      let fail = false;
+      const server = http.createServer((request, response) => {
+        let body = "";
+        request.on("data", (chunk) => (body += chunk));
+        request.on("end", () => {
+          if (fail) {
+            response.statusCode = 503;
+            response.end("busy");
+            return;
+          }
+          received.push(body.trim().split("\n").map((line) => (JSON.parse(line) as { id: string }).id));
+          if (received.length === 2) fail = true;
+          response.end("ok");
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/ingest`;
+        await store.createAuditExportDestination({ id: "axd_flaky", name: "flaky", kind: "http", config: { url }, intervalSeconds: 0 });
+        const ids = await writeRows(10);
+        const exporter = new AuditExportService(store, { batchSize: 3, safeFsRoot: tempDir });
+
+        const first = await exporter.runDestination("axd_flaky");
+        expect(first).toMatchObject({ status: "partial", rowsExported: 6, lastId: ids[5], error: expect.stringContaining("HTTP 503") });
+        expect((await store.getAuditExportDestination("axd_flaky"))!.lastExportId).toBe(ids[5]);
+
+        fail = false;
+        await exporter.runDestination("axd_flaky");
+        expect(received.flat()).toEqual(ids);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it("an idle destination's empty check counts as its last run, so it waits its interval", async () => {
+      await store.createAuditExportDestination({ id: "axd_idle", name: "idle", kind: "file", config: { path: path.join(tempDir, "idle.ndjson") }, intervalSeconds: 3600 });
+      const exporter = new AuditExportService(store, { batchSize: 10, safeFsRoot: tempDir });
+      await exporter.tick();
+      await exporter.tick();
+      await exporter.tick();
+      expect(await store.listAuditExportRuns("axd_idle")).toHaveLength(1);
+      expect((await store.getAuditExportDestination("axd_idle"))!.lastExportAt).toEqual(expect.any(String));
     });
   });
 });

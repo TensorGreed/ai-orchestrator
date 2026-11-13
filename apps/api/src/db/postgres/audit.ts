@@ -19,7 +19,15 @@ import { type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { AuditExportCursorMovedError } from "../store-errors.js";
-import { auditEntryHash, GENESIS_HASH, verifyAuditRows, wellFormedAuditEntry, wellFormedAuditText } from "../audit-chain.js";
+import { randomUUID } from "node:crypto";
+import {
+  auditEntryHash,
+  auditRetentionCheckpointEntry,
+  GENESIS_HASH,
+  verifyAuditRows,
+  wellFormedAuditEntry,
+  wellFormedAuditText
+} from "../audit-chain.js";
 
 export const ADVISORY_LOCK_CLASS_AUDIT = 0x4c324f;
 const AUDIT_LOCK_CHAIN = 1;
@@ -48,68 +56,73 @@ async function advisoryXactLock(client: PoolClient, key: number): Promise<void> 
 // ---------------------------------------------------------------------------
 
 export async function writeAuditLog(ctx: PgContext, input: Parameters<Store["writeAuditLog"]>[0]): Promise<void> {
+  await ctx.withTransaction(async (client) => {
+    await advisoryXactLock(client, AUDIT_LOCK_CHAIN);
+    await appendAuditRow(client, input);
+  });
+}
+
+/** Appends one row to the chain. The caller holds the chain lock (AUDIT_LOCK_CHAIN) inside its transaction. */
+async function appendAuditRow(client: PoolClient, input: Parameters<Store["writeAuditLog"]>[0]): Promise<void> {
   // Text as the database stores it (lone surrogates and U+0000 → U+FFFD), so the hash covers exactly what is stored.
   const entry = wellFormedAuditEntry(input);
   const metadataJson = wellFormedAuditText(entry.metadata === undefined ? null : JSON.stringify(entry.metadata));
-  await ctx.withTransaction(async (client) => {
-    await advisoryXactLock(client, AUDIT_LOCK_CHAIN);
-    // Stored to the millisecond, so the hash (over the millisecond ISO string every read returns) covers created_at
-    // exactly, and verify can treat any sub-millisecond part as an edit.
-    const stamp = await client.query<{ iso: string }>(
-      `SELECT date_trunc('milliseconds', $1::timestamptz) AS iso`,
-      [entry.createdAt ?? new Date().toISOString()]
-    );
-    const createdAt = toStr(stamp.rows[0]?.iso);
-    const last = await client.query<{ entry_hash: string | null }>(
-      `SELECT entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL ORDER BY seq DESC LIMIT 1`
-    );
-    const prevHash = last.rows[0]?.entry_hash ? toStr(last.rows[0].entry_hash) : GENESIS_HASH;
-    const entryHash = auditEntryHash(prevHash, {
-      id: entry.id,
-      createdAt,
-      eventType: entry.eventType,
-      category: entry.category,
-      action: entry.action,
-      outcome: entry.outcome,
-      actorUserId: entry.actorUserId ?? null,
-      actorEmail: entry.actorEmail ?? null,
-      actorType: entry.actorType ?? "user",
-      resourceType: entry.resourceType ?? null,
-      resourceId: entry.resourceId ?? null,
-      projectId: entry.projectId ?? null,
-      ipAddress: entry.ipAddress ?? null,
-      userAgent: entry.userAgent ?? null,
-      metadataJson,
-      message: entry.message ?? null
-    });
-    await client.query(
-      `INSERT INTO audit_logs
-         (id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
-          resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message, created_at,
-          prev_hash, entry_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::timestamptz, $17, $18)`,
-      [
-        entry.id,
-        entry.eventType,
-        entry.category,
-        entry.action,
-        entry.outcome,
-        entry.actorUserId ?? null,
-        entry.actorEmail ?? null,
-        entry.actorType ?? "user",
-        entry.resourceType ?? null,
-        entry.resourceId ?? null,
-        entry.projectId ?? null,
-        entry.ipAddress ?? null,
-        entry.userAgent ?? null,
-        metadataJson,
-        entry.message ?? null,
-        createdAt,
-        prevHash,
-        entryHash
-      ]
-    );
+  // Stored to the millisecond, so the hash (over the millisecond ISO string every read returns) covers created_at
+  // exactly, and verify can treat any sub-millisecond part as an edit.
+  const stamp = await client.query<{ iso: string }>(
+    `SELECT date_trunc('milliseconds', $1::timestamptz) AS iso`,
+    [entry.createdAt ?? new Date().toISOString()]
+  );
+  const createdAt = toStr(stamp.rows[0]?.iso);
+  const last = await client.query<{ entry_hash: string | null }>(
+    `SELECT entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL ORDER BY seq DESC LIMIT 1`
+  );
+  const prevHash = last.rows[0]?.entry_hash ? toStr(last.rows[0].entry_hash) : GENESIS_HASH;
+  const entryHash = auditEntryHash(prevHash, {
+    id: entry.id,
+    createdAt,
+    eventType: entry.eventType,
+    category: entry.category,
+    action: entry.action,
+    outcome: entry.outcome,
+    actorUserId: entry.actorUserId ?? null,
+    actorEmail: entry.actorEmail ?? null,
+    actorType: entry.actorType ?? "user",
+    resourceType: entry.resourceType ?? null,
+    resourceId: entry.resourceId ?? null,
+    projectId: entry.projectId ?? null,
+    ipAddress: entry.ipAddress ?? null,
+    userAgent: entry.userAgent ?? null,
+    metadataJson,
+    message: entry.message ?? null
   });
+  await client.query(
+    `INSERT INTO audit_logs
+       (id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
+        resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message, created_at,
+        prev_hash, entry_hash)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::timestamptz, $17, $18)`,
+    [
+      entry.id,
+      entry.eventType,
+      entry.category,
+      entry.action,
+      entry.outcome,
+      entry.actorUserId ?? null,
+      entry.actorEmail ?? null,
+      entry.actorType ?? "user",
+      entry.resourceType ?? null,
+      entry.resourceId ?? null,
+      entry.projectId ?? null,
+      entry.ipAddress ?? null,
+      entry.userAgent ?? null,
+      metadataJson,
+      entry.message ?? null,
+      createdAt,
+      prevHash,
+      entryHash
+    ]
+  );
 }
 
 /** The chain rule (lone-surrogate rows, unverifiable rows) is in ../audit-chain.ts, shared with SQLite. */
@@ -210,8 +223,42 @@ export async function listAuditLogs(ctx: PgContext, filter: Parameters<Store["li
 export async function pruneAuditLogs(ctx: PgContext, options: { before: string }): Promise<number> {
   // Phase 11.1 — cached run manifests older than the audit-log retention whose execution history is gone.
   await pruneExecutionManifests(ctx, options);
-  const result = await ctx.pool.query(`DELETE FROM audit_logs WHERE created_at < $1`, [options.before]);
-  return result.rowCount ?? 0;
+  // Only a prefix of the chain (seq order) up to the first row inside the retention, so no gap opens in the middle; the
+  // checkpoint appended with it, under the chain lock, anchors the rows left (audit-chain.ts, "Retention").
+  return await ctx.withTransaction(async (client) => {
+    await advisoryXactLock(client, AUDIT_LOCK_CHAIN);
+    const boundary = await client.query<{ seq: string }>(
+      `SELECT seq FROM audit_logs WHERE created_at >= $1::timestamptz ORDER BY seq ASC LIMIT 1`,
+      [options.before]
+    );
+    const last = boundary.rows[0]
+      ? (BigInt(toStr(boundary.rows[0].seq)) - 1n).toString()
+      : toStr((await client.query<{ seq: string | null }>(`SELECT MAX(seq) AS seq FROM audit_logs`)).rows[0]?.seq ?? "0");
+    const lastPruned = await client.query<{ id: string; entry_hash: string }>(
+      `SELECT id, entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL AND seq <= $1::bigint ORDER BY seq DESC LIMIT 1`,
+      [last]
+    );
+    const pruned = lastPruned.rows[0];
+    if (pruned) {
+      // Appended before the delete, so it links to the chain's last row even when the prune deletes every other row.
+      const checkpointId = `aud_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+      const firstRetained = await client.query<{ id: string }>(
+        `SELECT id FROM audit_logs WHERE entry_hash IS NOT NULL AND seq > $1::bigint ORDER BY seq ASC LIMIT 1`,
+        [last]
+      );
+      const deleting = await client.query<{ count: string }>(`SELECT COUNT(*) AS count FROM audit_logs WHERE seq <= $1::bigint`, [last]);
+      await appendAuditRow(client, auditRetentionCheckpointEntry(checkpointId, {
+        anchorHash: toStr(pruned.entry_hash),
+        firstRetainedId: firstRetained.rows[0] ? toStr(firstRetained.rows[0].id) : checkpointId,
+        lastPrunedId: toStr(pruned.id),
+        before: options.before,
+        deleted: toNum(deleting.rows[0]?.count)
+      }));
+    }
+    const removed = await client.query(`DELETE FROM audit_logs WHERE seq <= $1::bigint`, [last]);
+    const deleted = removed.rowCount ?? 0;
+    return deleted;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +566,14 @@ export async function recordAuditExportRun(ctx: PgContext, input: Parameters<Sto
         // The transaction rolls back: no run row, no cursor change.
         if (exists.rows.length > 0) throw new AuditExportCursorMovedError(input.destinationId, input.cursorFrom ?? null);
       }
+    } else if (input.status === "success") {
+      // Nothing to send: the check counts as the destination's last run, so an idle one waits its interval again.
+      await client.query(
+        `UPDATE audit_export_destinations
+         SET last_export_at = $1, last_status = $2, last_error = NULL, updated_at = $3
+         WHERE id = $4`,
+        [input.completedAt, input.status, new Date().toISOString(), input.destinationId]
+      );
     } else if (input.status === "failure") {
       await client.query(
         `UPDATE audit_export_destinations

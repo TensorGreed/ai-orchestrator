@@ -647,8 +647,10 @@ const envSchema = z.object({
   AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),
   /**
    * File-kind audit export sinks must write under this root. Defaults to
-   * the API data dir so writes are container-local. Path traversal outside
-   * this root is rejected at delivery time.
+   * the API data dir so writes are container-local. A path outside this
+   * root (a sibling sharing its prefix included) is refused when the
+   * destination is saved and again at delivery, where a directory or file
+   * symlink that leads outside it is refused too.
    */
   AUDIT_EXPORT_FILE_ROOT: z.string().default("apps/api/data"),
 

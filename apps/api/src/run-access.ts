@@ -22,6 +22,7 @@
 import { DEFAULT_PROJECT_ID, type Workflow } from "@ai-orchestrator/shared";
 import type { SafeUser } from "./services/auth-service.js";
 import { filterAsync } from "./async-array.js";
+import { seesOthersElicitations } from "./services/mcp-elicitation-service.js";
 
 export type RunPermission = "workflow:read" | "workflow:write" | "workflow:execute" | "workflow:delete" | "workflow:publish";
 
@@ -71,7 +72,8 @@ const forbidden = (permission: RunPermission): RunAccessDenial => ({ ok: false, 
 
 /**
  * Who sees an MCP elicitation (the elicitation API and a run's event streams): like approvals, users who can read the
- * run's workflow, and of those only admins, operators and the user who started the run (anyone when nobody did).
+ * run's workflow, and of those only operator and above (by rank: operators, builders, admins) and the user who started
+ * the run (anyone when nobody did).
  */
 export async function elicitationVisibleTo(
   runAccess: RunAccess,
@@ -79,7 +81,7 @@ export async function elicitationVisibleTo(
   record: { createdBy: string | null; workflowId: string }
 ): Promise<boolean> {
   return (
-    (user.role === "admin" || user.role === "operator" || !record.createdBy || record.createdBy === user.id) &&
+    (seesOthersElicitations(user.role) || !record.createdBy || record.createdBy === user.id) &&
     (await runAccess.workflow(user, record.workflowId, "workflow:read")).ok
   );
 }

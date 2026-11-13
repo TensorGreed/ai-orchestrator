@@ -170,6 +170,7 @@ import {
   auditEntryHash,
   type AuditChainResult,
   GENESIS_HASH,
+  auditRetentionCheckpointEntry,
   verifySqliteAuditChain,
   wellFormedAuditEntry,
   wellFormedAuditText
@@ -8998,6 +8999,11 @@ export class SqliteStore implements Store {
     message?: string | null;
     createdAt?: string;
   }): Promise<void> {
+    this.writeAuditLogSync(input);
+    this.persist();
+  }
+
+  private writeAuditLogSync(input: Parameters<SqliteStore["writeAuditLog"]>[0]): void {
     // Text as the database stores it (lone surrogates and U+0000 → U+FFFD), so the hash covers exactly what is stored.
     const entry = wellFormedAuditEntry(input);
     const createdAt = entry.createdAt ?? new Date().toISOString();
@@ -9052,7 +9058,6 @@ export class SqliteStore implements Store {
         entryHash
       ]
     );
-    this.persist();
   }
 
   private getLastAuditEntryHash(): string | null {
@@ -9228,14 +9233,42 @@ export class SqliteStore implements Store {
   async pruneAuditLogs(options: { before: string }): Promise<number> {
     // Phase 11.1 — cached run manifests older than the audit-log retention whose execution history is gone.
     this.pruneExecutionManifestsSync(options);
-    const existing = this.queryOne<{ count: number }>(
-      `SELECT COUNT(*) as count FROM audit_logs WHERE created_at < ?`,
-      [options.before]
-    );
-    const count = existing ? toNumber(existing.count) : 0;
-    if (count === 0) return 0;
-    this.exec(`DELETE FROM audit_logs WHERE created_at < ?`, [options.before]);
-    this.persist();
+    // Only a prefix of the chain (rowid order) up to the first row inside the retention, so no gap opens in the middle;
+    // the checkpoint appended with it anchors the rows left (audit-chain.ts, "Retention").
+    const count = this.transaction(() => {
+      const boundary = this.queryOne<{ rid: number }>(
+        `SELECT rowid AS rid FROM audit_logs WHERE created_at >= ? ORDER BY rowid ASC LIMIT 1`,
+        [options.before]
+      );
+      const last = boundary
+        ? toNumber(boundary.rid) - 1
+        : toNumber(this.queryOne<{ rid: number | null }>(`SELECT MAX(rowid) AS rid FROM audit_logs`)?.rid ?? 0);
+      const existing = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM audit_logs WHERE rowid <= ?`, [last]);
+      const deleted = existing ? toNumber(existing.count) : 0;
+      if (deleted === 0) return 0;
+      const lastPruned = this.queryOne<{ id: string; entry_hash: string }>(
+        `SELECT id, entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL AND rowid <= ? ORDER BY rowid DESC LIMIT 1`,
+        [last]
+      );
+      if (lastPruned) {
+        // Appended before the delete, so it links to the chain's last row even when the prune deletes every other row.
+        const checkpointId = `aud_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+        const firstRetained = this.queryOne<{ id: string }>(
+          `SELECT id FROM audit_logs WHERE entry_hash IS NOT NULL AND rowid > ? ORDER BY rowid ASC LIMIT 1`,
+          [last]
+        );
+        this.writeAuditLogSync(auditRetentionCheckpointEntry(checkpointId, {
+          anchorHash: toString(lastPruned.entry_hash),
+          firstRetainedId: firstRetained ? toString(firstRetained.id) : checkpointId,
+          lastPrunedId: toString(lastPruned.id),
+          before: options.before,
+          deleted
+        }));
+      }
+      this.exec(`DELETE FROM audit_logs WHERE rowid <= ?`, [last]);
+      return deleted;
+    });
+    if (count > 0) this.persist();
     return count;
   }
 
@@ -12460,6 +12493,14 @@ export class SqliteStore implements Store {
          SET last_export_id = ?, last_export_at = ?, last_status = ?, last_error = NULL, updated_at = ?
          WHERE id = ?`,
         [input.lastId, input.completedAt, input.status, new Date().toISOString(), input.destinationId]
+      );
+    } else if (input.status === "success") {
+      // Nothing to send: the check counts as the destination's last run, so an idle one waits its interval again.
+      this.exec(
+        `UPDATE audit_export_destinations
+         SET last_export_at = ?, last_status = ?, last_error = NULL, updated_at = ?
+         WHERE id = ?`,
+        [input.completedAt, input.status, new Date().toISOString(), input.destinationId]
       );
     } else if (input.status === "failure") {
       this.exec(

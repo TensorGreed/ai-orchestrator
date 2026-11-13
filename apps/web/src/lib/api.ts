@@ -2563,6 +2563,8 @@ export interface AuditChainStatus {
   ok: boolean;
   rowsChecked: number;
   firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
+  /** The chain starts after rows retention deleted: its first row and prev hash, matched by this retention checkpoint. */
+  anchor?: { firstId: string; prevHash: string; checkpointId: string };
   /**
    * Rows whose content cannot be checked (a row written before audit text was normalised, or an edit); `ok` is false
    * while present. `position` (1-based walk index), `prevHash` and `entryHash` place the row in the chain; `id` and

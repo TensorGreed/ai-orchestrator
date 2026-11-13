@@ -72,6 +72,7 @@ the order it was written and answers:
 | `ok` | `true` when every entry checked out. |
 | `rowsChecked` | Entries verified. |
 | `firstBrokenAt` | The first entry whose link or hash does not match: `{ id, createdAt, expected, stored }`. The walk stops there. |
+| `anchor` | Present when retention deleted the oldest entries: `{ firstId, prevHash, checkpointId }`, the first entry left, the hash it points back to and the retention checkpoint that records it (below). |
 | `unverifiable` | Entries written by an older release whose stored text cannot be checked exactly, with their position in the chain and the reason. `ok` is `false` while there are any; compare those rows with a backup or an export. |
 
 A broken link means a row was deleted, inserted, reordered or changed after it was written. Restore from a backup or
@@ -81,9 +82,18 @@ compare with an exported copy to find what changed. The portable backup (`db:exp
 The check covers what is in the database. Someone who can write to the database could rebuild the whole chain after
 an edit, so keep a copy outside it as well, through an export destination (below).
 
-**Retention and the chain.** Entries older than `AUDIT_LOG_RETENTION_DAYS` are deleted. The first entry left after a
-purge still points at the deleted entry before it, and the check reports the chain as broken at that entry. Keep the
-exported copy as the long-term record, or set `AUDIT_LOG_RETENTION_DAYS=0` to keep every entry.
+**Retention and the chain.** Entries older than `AUDIT_LOG_RETENTION_DAYS` are deleted, oldest first in the order
+they were written, up to the first entry inside the retention, so no gap opens in the middle of the chain. Each purge
+that deletes entries appends a retention checkpoint (`audit.retention_checkpoint`, category `system`, actor `system`)
+whose metadata records the hash of the last deleted entry (`anchorHash`), the first entry left (`firstRetainedId`),
+the cut-off and the count. The check starts from the first entry left and passes only if the latest checkpoint names
+exactly that entry and that hash and is plausible: the first entry left is not older than the cut-off, the cut-off is at
+least a day before the checkpoint, and the checkpoint is not dated in the future. Editing any entry kept (the checkpoint
+included) still fails. The chain is an unkeyed hash, so it shows order and content, not who wrote an entry: someone
+with write access to the database could delete recent entries from the start and append a checkpoint of their own.
+Compare with the exported copy or a signed audit bundle to rule that out. A chain purged by an older release, before checkpoints, reports as broken at its first entry
+until the next purge that deletes entries writes one. Keep the exported copy as the long-term record, or set
+`AUDIT_LOG_RETENTION_DAYS=0` to keep every entry.
 
 ## Shipping the log out
 
@@ -100,7 +110,7 @@ de-duplicate on `id`.
 | Kind | Config | Delivery |
 |---|---|---|
 | `http` | `url`, optional `headers` (for example an ingestion token) and `method` (default `POST`) | The batch as the request body, `content-type: application/x-ndjson`. Any answer other than 2xx is a failure. |
-| `file` | `path` | Appends the batch to the file, which must be under `AUDIT_EXPORT_FILE_ROOT`. Point a log shipper at it. |
+| `file` | `path` | Appends the batch to the file, which must be inside `AUDIT_EXPORT_FILE_ROOT` (checked when the destination is saved and at each delivery; a symlink that leads outside the root, or a file that is a symlink, is refused). Point a log shipper at it. |
 
 Create them under **Settings → Audit Log → Export destinations**, or with the API:
 
@@ -111,17 +121,27 @@ curl -s -X POST http://localhost:4000/api/audit-export/destinations \
 ```
 
 - **Scheduled runs** need `AUDIT_EXPORT_ENABLED=true`. Every `AUDIT_EXPORT_CHECK_INTERVAL_MS` (60 s) L2M runs each
-  enabled destination whose `intervalSeconds` (default 3600) has passed since its last successful batch. In a cluster
-  only the leader runs them, and a destination is never exported by two instances at once.
-- **One batch per run.** A run sends at most `AUDIT_EXPORT_BATCH_SIZE` entries (500). If the deployment writes more
-  entries per interval than that, the destination falls behind: shorten `intervalSeconds` or raise the batch size.
-- **Run now** (`POST /api/audit-export/destinations/:id/run`) sends the next batch at once, with or without
-  `AUDIT_EXPORT_ENABLED`; `409` while another instance is exporting it. `GET /api/audit-export/destinations/:id/runs`
+  enabled destination whose `intervalSeconds` (default 3600) has passed since its last successful run (a run with
+  nothing to send counts, so an idle destination is checked once per interval). In a cluster only the leader runs
+  them, and a destination is never exported by two instances at once.
+- **A run drains the backlog.** It sends batches of at most `AUDIT_EXPORT_BATCH_SIZE` entries (500) one after another,
+  in order, moving the cursor after each delivered batch, until a batch comes back short (caught up), a batch fails
+  (sent again, from the same entry, at the next scheduled run), 20 batches were sent, or the run has taken
+  `AUDIT_EXPORT_CHECK_INTERVAL_MS`. A destination stopped by those bounds with more to send runs again at the next
+  check instead of waiting for its interval, so it catches up at up to 20 batches a minute.
+- **Run now** (`POST /api/audit-export/destinations/:id/run`) runs the destination at once, with the same bounds,
+  with or without `AUDIT_EXPORT_ENABLED` (its `status` is `partial` when a later batch failed after earlier ones were
+  delivered); `409` while another instance is exporting it. `GET /api/audit-export/destinations/:id/runs`
   lists the latest runs with their status, row count and error.
-- **Header values** are stored with the destination as you enter them, not in the secret store, and are shown to admins
-  who list destinations. Use a token that can only write logs, and rotate it if the database or a backup leaks.
+- **Header values** are sealed with the master key (`SECRET_MASTER_KEY_BASE64`) when they are saved, and every answer
+  shows them as `__secret__` (the header names stay visible). To change a destination's config with `PUT`, send the
+  headers to keep as `"__secret__"` and the ones to change with their new values. Values that an older release stored
+  in plain text are sealed when the API starts. `db:import --source-master-key` re-seals them like other secrets.
 
-Destination changes are audited as `audit_export.destination.created`, `.updated` and `.deleted`.
+Destination changes are audited as `audit_export.destination.created`, `.updated` and `.deleted`. The entry records
+which fields changed, the config's keys, the URL's host and the header names, never a header value or the full URL.
+Releases before this one wrote the whole `PUT` body into the `.updated` entry, header values included, and an audit
+entry cannot be edited without breaking the chain: if a token was ever changed with `PUT`, rotate it.
 
 ### Log streams (each event as it happens)
 
@@ -130,14 +150,16 @@ A log stream sends audit events soon after they are written, to `syslog` (RFC 54
 limited to some categories and to a minimum level: failures are `error`, denials `warn`, everything else `info`.
 
 Create them under **Settings → Log Streams** or with `POST /api/log-streams`; **Test** sends one event, and the
-delivery history of the last `LOG_STREAM_EVENT_RETENTION_DAYS` (14) is listed per stream. The webhook's HMAC secret and
-the Sentry DSN are stored encrypted with the master key and shown masked.
+delivery history of the last `LOG_STREAM_EVENT_RETENTION_DAYS` (14) is listed per stream. A stream's config is stored
+encrypted with the master key. The webhook's HMAC secret, its header values and the Sentry DSN are shown as
+`__secret__`; an update that sends `__secret__` back keeps the stored value.
 
 Log streams are a live feed, not a guaranteed copy: events wait in memory (at most `LOG_STREAM_BUFFER_SIZE`, the
 oldest dropped first), are tried `LOG_STREAM_RETRY_MAX_ATTEMPTS` times, and are lost if the process stops before they
-are sent. Some events are written to the audit log only and never reach log streams, among them changes to MCP
-servers, knowledge bases, budgets and export destinations. Use an export destination when every entry must arrive. Log streams still receive events when
-`AUDIT_LOG_ENABLED=false`.
+are sent. Every audit event goes to the log streams, once, whichever feature records it (MCP servers, knowledge bases,
+budgets and export destinations included), and so do the retention checkpoint and run outcomes (`execution.success`,
+`execution.error`, with the error redacted and cut to 2,000 characters). Use an export destination when every
+entry must arrive. Log streams still receive events when `AUDIT_LOG_ENABLED=false`.
 
 ## Settings
 
@@ -148,7 +170,7 @@ servers, knowledge bases, budgets and export destinations. Use an export destina
 | `AUDIT_LOG_PRUNE_INTERVAL_MS` | `3600000` | How often old entries are deleted (on the leader). |
 | `AUDIT_EXPORT_ENABLED` | `false` | Run export destinations on their schedule. |
 | `AUDIT_EXPORT_CHECK_INTERVAL_MS` | `60000` | How often destinations are checked. |
-| `AUDIT_EXPORT_BATCH_SIZE` | `500` | Most entries one run sends. |
+| `AUDIT_EXPORT_BATCH_SIZE` | `500` | Most entries one batch sends (a run sends up to 20 batches). |
 | `AUDIT_EXPORT_FILE_ROOT` | `apps/api/data` | Directory `file` destinations must write under (relative to the API's working directory). |
 | `LOG_STREAM_ENABLED` | `true` | Send events to log streams. |
 | `LOG_STREAM_FLUSH_INTERVAL_MS` | `2000` | How often waiting events are sent. |

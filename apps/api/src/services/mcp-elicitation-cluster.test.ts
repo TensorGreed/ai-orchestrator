@@ -81,7 +81,7 @@ describe("MCP elicitations across instances", () => {
 
     // Validation happens where the answer lands.
     await expect(b.answer(pending.id, { action: "accept", content: { region: "mars" } }, owner)).rejects.toMatchObject({ statusCode: 400 });
-    await expect(b.answer(pending.id, { action: "accept", content: { region: "eu" } }, { userId: "someone", email: "s@example.com", role: "builder" })).rejects.toMatchObject({ statusCode: 403 });
+    await expect(b.answer(pending.id, { action: "accept", content: { region: "eu" } }, { userId: "someone", email: "s@example.com", role: "viewer" })).rejects.toMatchObject({ statusCode: 403 });
 
     const settled = await b.answer(pending.id, { action: "accept", content: { region: "eu" } }, owner);
     expect(settled).toMatchObject({ id: pending.id, status: "accepted", answeredBy: owner.email });

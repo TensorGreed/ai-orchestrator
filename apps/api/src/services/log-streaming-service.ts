@@ -100,6 +100,10 @@ const SECRET_FIELDS_BY_TYPE: Record<string, string[]> = {
 
 const SECRET_PLACEHOLDER = "__secret__";
 
+function isHeaderRecord(value: unknown): value is Record<string, string> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.values(value as object).every((item) => typeof item === "string");
+}
+
 export interface LogStreamingOptions {
   enabled?: boolean;
   flushIntervalMs?: number;
@@ -257,6 +261,21 @@ export class LogStreamingService {
           else delete incoming[field];
         }
       }
+      // Header values are masked on read too: a placeholder keeps the stored value of the header of the same name.
+      if (incoming.headers && typeof incoming.headers === "object" && !Array.isArray(incoming.headers)) {
+        const stored = isHeaderRecord(currentConfig.headers) ? currentConfig.headers : {};
+        const headers: Record<string, unknown> = {};
+        for (const [name, value] of Object.entries(incoming.headers as Record<string, unknown>)) {
+          if (value !== SECRET_PLACEHOLDER) {
+            headers[name] = value;
+            continue;
+          }
+          const kept = Object.entries(stored).find(([key]) => key.toLowerCase() === name.toLowerCase());
+          if (!kept) throw new Error(`webhook header '${name}' has no stored value to keep; send the value`);
+          headers[name] = kept[1];
+        }
+        incoming.headers = headers;
+      }
       this.validateConfig(existing.type, incoming);
       mergedConfig = incoming;
     }
@@ -413,6 +432,12 @@ export class LogStreamingService {
       if (typeof config.url !== "string" || !/^https?:\/\//.test(config.url)) {
         throw new Error("webhook destination requires http(s) 'url'");
       }
+      if (config.headers !== undefined && !isHeaderRecord(config.headers)) {
+        throw new Error("webhook 'headers' must be an object of strings");
+      }
+      if (isHeaderRecord(config.headers) && Object.values(config.headers).includes(SECRET_PLACEHOLDER)) {
+        throw new Error(`webhook header values cannot be '${SECRET_PLACEHOLDER}' on a new destination; send the value`);
+      }
     } else if (type === "sentry") {
       if (typeof config.dsn !== "string" || !/^https?:\/\//.test(config.dsn)) {
         throw new Error("sentry destination requires a valid 'dsn'");
@@ -517,6 +542,10 @@ export class LogStreamingService {
       const secretFields = SECRET_FIELDS_BY_TYPE[record.type] ?? [];
       for (const field of secretFields) {
         if (config[field] !== undefined) config[field] = SECRET_PLACEHOLDER;
+      }
+      // A webhook header can carry a token: its name is shown, its value never.
+      if (config.headers && typeof config.headers === "object" && !Array.isArray(config.headers)) {
+        config.headers = Object.fromEntries(Object.keys(config.headers).map((name) => [name, SECRET_PLACEHOLDER]));
       }
     }
     return {

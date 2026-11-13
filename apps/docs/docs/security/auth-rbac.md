@@ -92,7 +92,7 @@ needs a role also accepts every role above it.
 |---|---|---|
 | `viewer` | People who watch | Read workflows, runs and approvals in the projects they can read. |
 | `operator` | People who run and supervise | What a viewer can do, plus queue runs, cancel runs, decide approvals and answer MCP servers' questions. Cannot edit workflows or run them directly. |
-| `builder` | People who build | What an operator can do (except answer MCP questions from other people's runs), plus create, edit, run and delete workflows, manage secrets, variables, projects and evals. |
+| `builder` | People who build | What an operator can do, plus create, edit, run and delete workflows, manage secrets, variables, projects and evals. |
 | `admin` | People who run the deployment | Everything, including users, roles, SSO, the MCP registry, policy and gateway, retention and the audit log. |
 
 ## Access model summary
@@ -111,9 +111,9 @@ needs a role also accepts every role above it.
     (see [Approvals](../product/approvals.md)). Release requests in the same inbox need `workflow:publish`, which
     operators do not have. A gate that lists the `viewer` role or a viewer by name lets that viewer decide too.
   - see and answer an MCP server's question (elicitation) from a run someone else started (see
-    [Elicitation](../product/mcp-server-registry.md#elicitation-a-server-asks-the-person-a-question)). Only operators
-    and admins can do this; viewers and builders see and answer only the questions of runs they started (and of queued
-    runs).
+    [Elicitation](../product/mcp-server-registry.md#elicitation-a-server-asks-the-person-a-question)). Operator and
+    above by rank (operators, builders and admins) can do this; viewers see and answer only the questions of runs they
+    started (and of queued runs).
   - connect and disconnect their own account on MCP servers that use each user's own credentials (**My connections**,
     see [Delegated credentials](../product/mcp-server-registry.md#delegated-credentials))
 
@@ -223,7 +223,7 @@ on top of the global role:
 | Save or delete a golden run / replay one | `workflow:write` / `workflow:execute` |
 | Read or search a knowledge base / ingest into one | `workflow:read` / `workflow:write` in the KB's project |
 | Read MCP cassettes (list, detail, export) | `workflow:read` on the recorded workflow |
-| Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`; a request from a run someone else started is shown only to that person and operators, except for queued runs, whose requests anyone who can read the workflow sees) |
+| Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`; a request from a run someone else started is shown only to that person and to operator and above (operators, builders, admins), except for queued runs, whose requests anyone who can read the workflow sees) |
 | Eval datasets and fixtures: list or read / create, add, delete | `workflow:read` / `workflow:write` in the dataset's project |
 | Compat webhook API (`/api/webhooks/execute`, `/stream`) | `workflow:execute` on the selected workflow |
 | Create a template from a workflow / use a template | `workflow:write` on the source / `workflow:write` in the target project |
@@ -672,7 +672,7 @@ own login page, a script or a client that calls `POST /api/auth/ldap/login`.
 | `LDAP_BIND_DN` | unset | The account L2M binds as to search for the user. Unset: the search runs without binding first (anonymous). |
 | `LDAP_BIND_PASSWORD` | unset | That account's password. |
 | `LDAP_BASE_DN` | unset | Where the user search starts, for example `ou=people,dc=example,dc=com`. Required. |
-| `LDAP_USER_FILTER` | `(mail={{email}})` | The search filter. `{{email}}` is replaced with the email the user typed. |
+| `LDAP_USER_FILTER` | `(mail={{email}})` | The search filter. `{{email}}` is replaced with the email the user typed, escaped as RFC 4515 requires (`*`, `(`, `)`, `\` and NUL become `\2a`, `\28`, `\29`, `\5c` and `\00`), so it is always matched literally. |
 | `LDAP_GROUPS_ATTRIBUTE` | `memberOf` | The attribute of the user's entry that holds their groups, used by [group-to-role mappings](#group-to-role-mappings). |
 
 The LDAP client is an optional package that is not installed by default. Add it to the API before you turn LDAP on:
@@ -681,8 +681,9 @@ The LDAP client is an optional package that is not installed by default. Add it 
 pnpm --filter @ai-orchestrator/api add ldapts
 ```
 
-In a container, add it to the image you build. Without it, or without `LDAP_URL` and `LDAP_BASE_DN`, the route
-answers `503` with `LDAP not configured: ...`; with `LDAP_ENABLED=false` it answers `503` as well.
+In a container, add it to the image you build. Without it, or without `LDAP_URL` and `LDAP_BASE_DN`, or with
+`LDAP_ENABLED=false`, the route answers `503` "LDAP sign-in is not available."; the reason (`LDAP not configured: ...`)
+is in the server log and the audit entry.
 
 Use an `ldaps://` URL so passwords do not cross the network in clear text. The server's certificate is checked against
 the CAs Node trusts; for a private CA set `NODE_EXTRA_CA_CERTS` on the API.
@@ -692,7 +693,7 @@ the CAs Node trusts; for a private CA set `NODE_EXTRA_CA_CERTS` on the API.
 `POST /api/auth/ldap/login` with `{ "email": "...", "password": "..." }`:
 
 1. L2M binds as `LDAP_BIND_DN` (when set) and searches below `LDAP_BASE_DN`, in the whole subtree, with
-   `LDAP_USER_FILTER`. The first entry found is the user. No entry: `401` "User not found in LDAP directory".
+   `LDAP_USER_FILTER`. The first entry found is the user. No entry: `401`.
 2. It binds again as that entry's DN with the password the user gave. A wrong password: `401`.
 3. The account is found by the entry's `mail` attribute (else the email the user typed). An L2M user with that email
    is signed in; otherwise a new user is created. An existing account is linked by email alone, so connect only a
@@ -709,12 +710,18 @@ A user who has an authenticator set up gets `{ mfaChallenge, expiresInSeconds }`
 `MFA_REQUIRED_ROLES` without an authenticator gets a session that can only set one up (see
 [MFA required per role](#mfa-required-per-role)). `SSO_MFA` does not apply to LDAP.
 
-Without `email` or `password` the route answers `400`. Any other failure answers `401` with the reason in the message:
-an unknown user, a wrong password, a directory that cannot be reached, a certificate error or a wrong `LDAP_BIND_DN`
-password. Service accounts cannot sign in through LDAP. The route counts against the sign-in rate limit
-(`RATE_LIMIT_AUTH_MAX`). The code step is audited as `user.login.mfa_challenge` with `method: "ldap"`, and a wrong
-code as `mfa.code_failed`; other LDAP sign-ins, successful or refused, are not written to the audit log, so use the
-session list (method `ldap`) and the directory's own logs to follow them.
+Without `email` or `password` the route answers `400`. Any other failure answers `401` "Invalid credentials", the same
+for every reason (an unknown user, a wrong password, a directory that cannot be reached, a certificate error, a wrong
+`LDAP_BIND_DN` password, or an account that cannot sign in), so the answer does not tell a caller whether an account
+exists. Service accounts cannot sign in through LDAP. The route counts against the sign-in rate limit
+(`RATE_LIMIT_AUTH_MAX`).
+
+Every LDAP sign-in is audited as `user.login` with `method: "ldap"`, like the other sign-in methods. A success records
+the user and `provisioned` (and `mfa: "local_totp"` after the code step, or `mfaEnrollmentRequired`); a refusal has
+outcome `failure`, the email typed, a `reason` (`user_not_found`, `invalid_credentials`, `directory_error`,
+`account_refused`, `ldap_unavailable`, or `mfa_invalid` for a wrong code) and the directory's message as `error`. The
+code step itself is audited as `user.login.mfa_challenge`, and a wrong code also as `mfa.code_failed`. The reason is
+also written to the server log.
 
 ## MFA on SSO
 

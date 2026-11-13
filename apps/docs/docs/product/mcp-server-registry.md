@@ -363,7 +363,7 @@ Servers can override the interval (at least 10 seconds) or opt out of scheduled 
 | Connect, refresh and disconnect OAuth | admin, from a signed-in browser session |
 | List a server's resources and prompts | builder and above |
 | Read a resource, fetch a prompt | builder and above, with permission to run workflows in the project |
-| Answer a server's question | the user whose run asked, or operator and above |
+| Answer a server's question | the user whose run asked, or operator and above (operators, builders and admins) |
 | Sampling settings | admin (edit the server) |
 | Sandbox, limits, breaker settings and credential mode | admin (edit the server) |
 | Reset a breaker, list and revoke users' connections | admin |

@@ -175,7 +175,7 @@ import {
   type StepUpAction
 } from "./services/mfa-policy.js";
 import type { LoginSession } from "./services/session-service.js";
-import { LdapService } from "./services/ldap-service";
+import { LdapAuthError, LdapService, type LdapProfile } from "./services/ldap-service";
 import {
   OIDC_FLOW_COOKIE_NAME,
   OIDC_FLOW_COOKIE_PATH,
@@ -221,7 +221,12 @@ import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
 import { SubWorkflowSpendTracker, usageUserOf, withinBudgetCheckTime, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
-import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
+import {
+  AuditExportBusyError,
+  AuditExportConfigError,
+  AuditExportService,
+  auditExportConfigSummary
+} from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
 import { McpElicitationService, toElicitationView } from "./services/mcp-elicitation-service.js";
 import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
@@ -1709,7 +1714,6 @@ export async function createApp(
   const modelAllowlistService = new ModelAllowlistService(store, {
     auditRaw: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
     // The outermost layer of each allowlist view records the model call, so a refused call has its span too.
@@ -1769,7 +1773,6 @@ export async function createApp(
     // Phase 12 coverage — a Reveal node's audit entry (the audit service is set up further down; runs start later).
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     }
   });
   await guardService.ensureBuiltIns();
@@ -3210,7 +3213,9 @@ export async function createApp(
         triggerType: input.triggerType,
         durationMs: toDurationMs(input.result.startedAt, input.result.completedAt),
         status: input.result.status,
-        error: input.result.error ?? null
+        // Redacted and cut short: the engine's error can quote tool output or a URL, and this entry also goes to the
+        // log streams.
+        error: input.result.error ? String(secretService.redact(String(input.result.error))).slice(0, 2000) : null
       }
     });
 
@@ -5232,6 +5237,7 @@ export async function createApp(
     budgetService.stop();
   });
   const auditExportService = new AuditExportService(store, {
+    sealer: secretService,
     checkIntervalMs: config.AUDIT_EXPORT_CHECK_INTERVAL_MS,
     batchSize: config.AUDIT_EXPORT_BATCH_SIZE,
     safeFsRoot: config.AUDIT_EXPORT_FILE_ROOT,
@@ -5247,6 +5253,12 @@ export async function createApp(
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
   });
+  // Header values stored in plain text by older releases are sealed with the master key now.
+  try {
+    await auditExportService.sealStoredHeaders();
+  } catch (err) {
+    app.log.warn({ reason: err instanceof Error ? err.message : String(err) }, "Could not seal stored audit export destination headers");
+  }
   if (config.AUDIT_EXPORT_ENABLED) {
     // Cluster mode starts it when this instance becomes the leader (and stops it when it steps down).
     if (!clusterMode) auditExportService.start();
@@ -5292,7 +5304,6 @@ export async function createApp(
     timeoutMs: config.MCP_ELICITATION_TIMEOUT_MS,
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     logger: {
       info: (msg, fields) => app.log.info(fields ?? {}, msg),
@@ -5358,6 +5369,9 @@ export async function createApp(
   app.addHook("onClose", async () => {
     await logStreamingService.stop();
   });
+  // Every audit event goes to the log streams through this one path (AuditService.record), whichever helper or
+  // service records it; nothing else dispatches audit events, so none is sent twice.
+  auditService.setStream(async (event) => await logStreamingService.dispatchAudit(event));
 
   // 13.3 — the retention service: leader-only, one instance at a time (its lease), batched, recorded. Captured runs and
   // rule simulations register their steps further down, once their services exist.
@@ -5373,7 +5387,6 @@ export async function createApp(
     metrics: metricsService,
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },
     redact: (text) => String(secretService.redact(text))
@@ -5709,7 +5722,6 @@ export async function createApp(
   const approvalService = new ApprovalService(store, {
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: (event) => notificationService.notify(event),
     dispatch: dispatchApprovalResume,
@@ -5767,7 +5779,6 @@ export async function createApp(
     readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: (event) => notificationService.notify(event),
     redact: (value) => String(secretService.redact(value)),
@@ -5789,7 +5800,6 @@ export async function createApp(
     readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: (event) => notificationService.notify(event),
     redact: (value) => String(secretService.redact(value)),
@@ -5911,7 +5921,6 @@ export async function createApp(
     const actor = buildActor(request, user, event.actor);
     const full = { ...event, actor };
     await auditService.record(full);
-    await logStreamingService.dispatchAudit(full);
   };
   // User-initiated run actions (not webhook/schedule runs). Cancel passes the run's workflow id.
   const auditRunAction = async (
@@ -6476,9 +6485,9 @@ export async function createApp(
   // admin:break-glass command), whatever the deployment. Its audit rows are written even with AUDIT_LOG_ENABLED=false:
   // a break-glass session is only acceptable because everything it does is recorded.
   const breakGlassAudit = new AuditService(store, { enabled: true });
+  breakGlassAudit.setStream(async (event) => await logStreamingService.dispatchAudit(event));
   const recordBreakGlassAudit = async (event: AuditEventInput) => {
     await breakGlassAudit.record(event);
-    await logStreamingService.dispatchAudit(event);
   };
   const breakGlassService = new BreakGlassService({
     store,
@@ -6772,7 +6781,6 @@ export async function createApp(
     config,
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: async (event) => await notificationService.notify(event),
     metrics: metricsService,
@@ -7319,7 +7327,7 @@ export async function createApp(
   app.get("/api/audit-export/destinations", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    return { destinations: await store.listAuditExportDestinations() };
+    return { destinations: await auditExportService.listDestinations() };
   });
 
   app.post<{ Body: unknown }>("/api/audit-export/destinations", async (request, reply) => {
@@ -7354,15 +7362,22 @@ export async function createApp(
       return { error: "file destination requires config.path" };
     }
     const id = `axdest_${crypto.randomUUID()}`;
-    await store.createAuditExportDestination({
-      id,
-      name: body.name.trim(),
-      kind: body.kind,
-      config: body.config,
-      intervalSeconds: body.intervalSeconds ?? 3600,
-      enabled: body.enabled !== false,
-      createdBy: user.email
-    });
+    let destination: Awaited<ReturnType<typeof auditExportService.createDestination>>;
+    try {
+      destination = await auditExportService.createDestination({
+        id,
+        name: body.name.trim(),
+        kind: body.kind,
+        config: body.config,
+        intervalSeconds: body.intervalSeconds ?? 3600,
+        enabled: body.enabled !== false,
+        createdBy: user.email
+      });
+    } catch (err) {
+      if (!(err instanceof AuditExportConfigError)) throw err;
+      reply.code(400);
+      return { error: err.message };
+    }
     await auditService.record({
       category: "system",
       eventType: "audit_export.destination.created",
@@ -7371,9 +7386,9 @@ export async function createApp(
       actor: { email: user.email, type: "user" },
       resourceType: "audit_export_destination",
       resourceId: id,
-      metadata: { kind: body.kind, intervalSeconds: body.intervalSeconds ?? 3600 }
+      metadata: { kind: body.kind, intervalSeconds: body.intervalSeconds ?? 3600, ...auditExportConfigSummary(body.config) }
     });
-    return { destination: await store.getAuditExportDestination(id) };
+    return { destination };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/audit-export/destinations/:id", async (request, reply) => {
@@ -7395,7 +7410,23 @@ export async function createApp(
       reply.code(400);
       return { error: "Empty update payload" };
     }
-    await store.updateAuditExportDestination(request.params.id, patch);
+    if (patch.config !== undefined && (!patch.config || typeof patch.config !== "object" || Array.isArray(patch.config))) {
+      reply.code(400);
+      return { error: "config must be an object" };
+    }
+    let destination: Awaited<ReturnType<typeof auditExportService.updateDestination>>;
+    try {
+      destination = await auditExportService.updateDestination(request.params.id, patch);
+    } catch (err) {
+      if (!(err instanceof AuditExportConfigError)) throw err;
+      reply.code(400);
+      return { error: err.message };
+    }
+    if (!destination) {
+      reply.code(404);
+      return { error: "Destination not found" };
+    }
+    // Which fields changed, never a config value: a header can hold an ingestion token and a URL a credential.
     await auditService.record({
       category: "system",
       eventType: "audit_export.destination.updated",
@@ -7404,9 +7435,15 @@ export async function createApp(
       actor: { email: user.email, type: "user" },
       resourceType: "audit_export_destination",
       resourceId: request.params.id,
-      metadata: { ...patch }
+      metadata: {
+        fields: Object.keys(patch).filter((key) => ["name", "config", "intervalSeconds", "enabled"].includes(key)).sort(),
+        ...(patch.name !== undefined ? { name: patch.name } : {}),
+        ...(patch.intervalSeconds !== undefined ? { intervalSeconds: patch.intervalSeconds } : {}),
+        ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+        ...(patch.config ? auditExportConfigSummary(patch.config) : {})
+      }
     });
-    return { destination: await store.getAuditExportDestination(request.params.id) };
+    return { destination };
   });
 
   app.delete<{ Params: { id: string } }>("/api/audit-export/destinations/:id", async (request, reply) => {
@@ -8362,6 +8399,17 @@ export async function createApp(
     if (lockedUntil) return mfaLockedAnswer(reply, lockedUntil);
     if (!await mfaService.verify(userId, code)) {
       await recordMfaFailure(request, null, userId, "sign_in");
+      if (challenge.ldap) {
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.login",
+          action: "login",
+          outcome: "failure",
+          metadata: { method: "ldap", reason: "mfa_invalid", identityKey: challenge.ldap.subject }
+        }).catch((auditError: unknown) => {
+          request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP MFA failure audit not recorded");
+        });
+      }
       if (challenge.sso) {
         await audit(request, null, {
           category: "auth",
@@ -8395,12 +8443,32 @@ export async function createApp(
     if (challenge.ldap) {
       // The LDAP sign-in passed its TOTP step: only now are the account and its group mappings updated.
       try {
-        const { user } = await provisionSsoUser(challenge.ldap);
+        const { user, created } = await provisionSsoUser(challenge.ldap);
         if (user.id !== userId) throw new Error("The LDAP account resolved to another user than the one that passed the code step");
         const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: true });
+        await audit(request, user, {
+          category: "auth",
+          eventType: "user.login",
+          action: "login",
+          resourceType: "user",
+          resourceId: user.id,
+          metadata: { method: "ldap", provisioned: created, mfa: "local_totp" }
+        }).catch((auditError: unknown) => {
+          request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP login audit not recorded");
+        });
         return { user, expiresAt };
       } catch (error) {
-        request.log.warn({ reason: error instanceof Error ? error.message : "unknown" }, "LDAP sign-in failed after the MFA step");
+        const detail = error instanceof Error ? error.message : "unknown";
+        request.log.warn({ reason: detail }, "LDAP sign-in failed after the MFA step");
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.login",
+          action: "login",
+          outcome: "failure",
+          metadata: { method: "ldap", reason: "account_refused", identityKey: challenge.ldap.subject, error: detail }
+        }).catch((auditError: unknown) => {
+          request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP login audit not recorded");
+        });
         reply.code(401);
         return { error: "Sign-in could not be completed. Try again." };
       }
@@ -9033,6 +9101,30 @@ export async function createApp(
   // Phase 5.1 — LDAP login
   // ---------------------------------------------------------------------------
 
+  /**
+   * A refused LDAP sign-in: the reason and the directory's message go to the server log and the audit entry, the
+   * caller gets one answer for every reason (unknown user, wrong password, a directory or account problem), so the
+   * route cannot be used to tell who has an account.
+   */
+  const refuseLdapSignIn = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    attempt: { email: string; reason: string; detail: string; status?: 401 | 503 }
+  ) => {
+    request.log.warn({ reason: attempt.reason, detail: attempt.detail }, "LDAP sign-in refused");
+    await audit(request, null, {
+      category: "auth",
+      eventType: "user.login",
+      action: "login",
+      outcome: "failure",
+      metadata: { method: "ldap", email: attempt.email, reason: attempt.reason, error: attempt.detail }
+    }).catch((auditError: unknown) => {
+      request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP login audit not recorded");
+    });
+    reply.code(attempt.status ?? 401);
+    return attempt.status === 503 ? { error: "LDAP sign-in is not available." } : { error: "Invalid credentials" };
+  };
+
   app.post<{ Body: unknown }>("/api/auth/ldap/login", async (request, reply) => {
     const body = asRecord(request.body);
     const email = typeof body.email === "string" ? body.email.trim() : "";
@@ -9041,8 +9133,18 @@ export async function createApp(
       reply.code(400);
       return { error: "email and password are required" };
     }
+    let profile: LdapProfile;
     try {
-      const profile = await ldapService.authenticate(email, password);
+      profile = await ldapService.authenticate(email, password);
+    } catch (error) {
+      const err = error as Error & { code?: string };
+      if (err.code === "CONFIGURATION_ERROR") {
+        return await refuseLdapSignIn(request, reply, { email, reason: "ldap_unavailable", detail: err.message, status: 503 });
+      }
+      const reason = error instanceof LdapAuthError ? error.reason : "directory_error";
+      return await refuseLdapSignIn(request, reply, { email, reason, detail: err instanceof Error ? err.message : String(error) });
+    }
+    try {
       const provision: SsoProvisionInput = {
         provider: "ldap",
         subject: profile.dn || profile.email,
@@ -9062,21 +9164,37 @@ export async function createApp(
           resourceType: "user",
           resourceId: existing.id,
           metadata: { method: "ldap", mfaChallengeIssued: true }
+        }).catch((auditError: unknown) => {
+          request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP challenge audit not recorded");
         });
         return { mfaChallenge: challengeId, expiresInSeconds: Math.floor(MFA_CHALLENGE_TTL_MS / 1000) };
       }
       const { user, created } = await provisionSsoUser(provision);
       const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: false });
+      const mfaEnrollmentRequired = mfaRequiredFor(mfaPolicy, user.role);
+      await audit(request, user, {
+        category: "auth",
+        eventType: "user.login",
+        action: "login",
+        resourceType: "user",
+        resourceId: user.id,
+        metadata: { method: "ldap", provisioned: created, ...(mfaEnrollmentRequired ? { mfaEnrollmentRequired: true } : {}) }
+      }).catch((auditError: unknown) => {
+        request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP login audit not recorded");
+      });
       return {
         user,
         expiresAt,
         provisioned: created,
-        ...(mfaRequiredFor(mfaPolicy, user.role) ? { mfaEnrollmentRequired: true } : {})
+        ...(mfaEnrollmentRequired ? { mfaEnrollmentRequired: true } : {})
       };
     } catch (error) {
-      const err = error as Error & { code?: string };
-      reply.code(err.code === "CONFIGURATION_ERROR" ? 503 : 401);
-      return { error: err.message };
+      // The directory accepted the password, but the account cannot sign in (a service account, a deleted link, ...).
+      return await refuseLdapSignIn(request, reply, {
+        email,
+        reason: "account_refused",
+        detail: error instanceof Error ? error.message : String(error)
+      });
     }
   });
 
@@ -12520,7 +12638,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     auditUser: async (request, user, event) => await audit(request, user, event),
     auditRaw: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     sensitiveSecretIds: async () => await sensitiveSecrets.ids(),
     guard: guardService,
@@ -12623,7 +12740,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     redact: (value) => String(secretService.redact(value)),
     auditRaw: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     guard: guardService,
     budgets: budgetService,
@@ -15059,14 +15175,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             metadata: { via: "data_subject_erasure", requestId }
           };
           await auditService.record(event);
-          await logStreamingService.dispatchAudit(event);
         }
         return deleted;
       }
     },
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: async (event) => await notificationService.notify(event),
     logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },

@@ -48,6 +48,16 @@ import type { Store } from "../db/store.js";
 import type { ClusterBus, ClusterMessage } from "./cluster-bus.js";
 import type { ChallengeSealer } from "./challenge-store.js";
 
+const ELICITATION_ROLE_RANK: Record<string, number> = { viewer: 1, operator: 2, builder: 3, admin: 4 };
+
+/**
+ * Whether a user of this role sees and may answer an MCP elicitation from a run someone else started: operator and
+ * above by rank (operator, builder, admin), as for the other operator actions. An unknown role does not.
+ */
+export function seesOthersElicitations(role: string): boolean {
+  return (ELICITATION_ROLE_RANK[role] ?? 0) >= ELICITATION_ROLE_RANK.operator!;
+}
+
 /** Trigger types where a person is in front of the run and can answer. */
 export const ATTENDED_TRIGGER_TYPES = new Set(["manual", "manual_stream", "manual_retry", "approval_resume"]);
 
@@ -405,8 +415,7 @@ export class McpElicitationService {
     if (record.status !== "pending") {
       throw new McpElicitationAnswerError(`This request was already ${record.status.replace("_", " ")}.`, 409);
     }
-    const privileged = actor.role === "admin" || actor.role === "operator";
-    if (!privileged && record.createdBy && record.createdBy !== actor.userId) {
+    if (!seesOthersElicitations(actor.role) && record.createdBy && record.createdBy !== actor.userId) {
       throw new McpElicitationAnswerError("Only the person who started the run, or an operator, can answer this request.", 403);
     }
     const entry = this.pending.get(id);
