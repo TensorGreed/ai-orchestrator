@@ -109,6 +109,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
 
   // app.ts: the draft by design.
   { file: "app.ts", match: "const workflow = store.getWorkflow(input.workflowId);", kind: "draft", why: "an eval run runs the draft" },
+  { file: "app.ts", match: "const workflow = store.getWorkflow(execution.workflowId);", kind: "not_run", why: "v74: content copied from a run checks its workflow's declared sensitive sources; nothing runs" },
   { file: "app.ts", match: "const current = store.getWorkflow(candidate.workflow.id);", kind: "draft", why: "a replay job's case: the candidate's current project" },
   { file: "execution-routes.ts", match: "const workflow = store.getWorkflow(source.workflowId);", kind: "draft", why: "executions replay (cassette) runs the draft" },
   { file: "app.ts", match: "const current = store.getWorkflow(pending.workflowId);", kind: "not_run", why: "an approval resume runs the paused snapshot; only its current project is read" },
