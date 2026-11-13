@@ -522,6 +522,7 @@ interface ExecutionHistoryRow {
   custom_data_json: string | null;
   error: string | null;
   created_at: string;
+  trace_id?: string | null;
 }
 
 interface WorkflowExecutionRow {
@@ -4490,6 +4491,8 @@ export class SqliteStore implements Store {
     ensureSubjectSchema(this.db);
     // 13.3 (v69) — erasure tombstones.
     ensureErasureSchema(this.db);
+    // v70 — the trace id of the run's span (NULL while tracing is off).
+    this.ensureColumn("execution_history", "trace_id", "TEXT");
     // MCP 2026-07-28 (v71) — label marks of stateless gateway callers.
     ensureLabelMarkSchema(this.db);
 
@@ -6195,6 +6198,7 @@ export class SqliteStore implements Store {
     customData: unknown;
     error: string | null;
     createdAt: string;
+    traceId: string | null;
   } | null> {
     return this.getExecutionHistorySync(id);
   }
@@ -6215,6 +6219,7 @@ export class SqliteStore implements Store {
     customData: unknown;
     error: string | null;
     createdAt: string;
+    traceId: string | null;
   } | null {
     const row = this.queryOne<ExecutionHistoryRow>(
       `SELECT
@@ -6232,7 +6237,8 @@ export class SqliteStore implements Store {
          node_results_json,
          custom_data_json,
          error,
-         created_at
+         created_at,
+         trace_id
        FROM execution_history
        WHERE id = ?`,
       [id]
@@ -6268,7 +6274,8 @@ export class SqliteStore implements Store {
       nodeResults: parseJson(row.node_results_json),
       customData: parseJson(row.custom_data_json),
       error: row.error ? toString(row.error) : null,
-      createdAt: toString(row.created_at)
+      createdAt: toString(row.created_at),
+      traceId: row.trace_id ? toString(row.trace_id) : null
     };
   }
 
@@ -9858,6 +9865,23 @@ export class SqliteStore implements Store {
   async setExecutionRelease(executionId: string, channel: "production" | "draft", version: number | null): Promise<void> {
     this.exec(`UPDATE execution_history SET release_channel = ?, release_version = ? WHERE id = ?`, [channel, version, executionId]);
     this.persist();
+  }
+
+  async setExecutionTraceId(executionId: string, traceId: string, options: { fence?: QueueClaimFence } = {}): Promise<boolean> {
+    const fence = options.fence;
+    const write = () => this.exec(`UPDATE execution_history SET trace_id = ? WHERE id = ?`, [traceId, executionId]);
+    if (fence) {
+      const written = this.db.transaction(() => {
+        if (!this.queueClaimHeldSync(fence)) return false;
+        write();
+        return true;
+      })();
+      if (written) this.persist();
+      return written;
+    }
+    write();
+    this.persist();
+    return true;
   }
 
   async getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {

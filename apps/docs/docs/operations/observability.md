@@ -277,6 +277,10 @@ POST /api/workflows/:id/enqueue         SERVER      (any instance)
 - **Jobs from before.** A job without a context (tracing was off where it was enqueued, or an older instance enqueued it) starts a new trace. An older worker ignores the field.
 - **Off means off.** While tracing is off nothing is added to a payload or to a paused run's state.
 
+## Trace id on runs
+
+While tracing is on, a run's history row stores the trace id of its run span (migration v70, SQLite and Postgres, nullable column). `GET /api/executions/:id` returns it as `traceId`; a run made while tracing was off has `traceId: null`, and nothing is stored or written for it. The run page shows **Copy trace id** for a run that has one. With `L2M_OTEL_TRACE_URL_TEMPLATE` set (for example `https://traces.example.com/trace/{traceId}`), the response also carries `traceUrl` and the run page shows an **Open trace** link. A run resumed after an approval is traced as a new run, so the stored id is the latest one. The column is removed with the run by retention and erasure, and the trace in your backend follows that backend's own retention.
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -307,6 +311,7 @@ POST /api/workflows/:id/enqueue         SERVER      (any instance)
 | `L2M_OTEL_TRUSTED_PROXIES` | empty | Connections whose trace context is always continued. |
 | `L2M_OTEL_SPAN_DETAIL` | `standard` | `verbose` adds one span per agent turn (`l2m.agent.iteration`). |
 | `L2M_OTEL_NAMES` | `names` | `ids` keeps workflow, node and agent names out of spans. |
+| `L2M_OTEL_TRACE_URL_TEMPLATE` | unset | An absolute http(s) URL containing `{traceId}`. The run page then links each traced run to it ("Open trace"). |
 | `L2M_OTEL_PROPAGATE_TO_PROVIDERS` | `false` | Send `traceparent` (and `tracestate`) to model providers. |
 | `L2M_OTEL_PROPAGATE_TO_MCP` | `true` | Send trace context to MCP servers (`_meta` and HTTP headers). A server can opt out in its connection settings. |
 

@@ -701,6 +701,9 @@ export class PostgresStore implements Store {
   async setExecutionRelease(...args: Parameters<Store["setExecutionRelease"]>): ReturnType<Store["setExecutionRelease"]> {
     return release.setExecutionRelease(this.ctx, ...args);
   }
+  async setExecutionTraceId(...args: Parameters<Store["setExecutionTraceId"]>): ReturnType<Store["setExecutionTraceId"]> {
+    return release.setExecutionTraceId(this.ctx, ...args);
+  }
   async getExecutionRelease(...args: Parameters<Store["getExecutionRelease"]>): ReturnType<Store["getExecutionRelease"]> {
     return release.getExecutionRelease(this.ctx, ...args);
   }

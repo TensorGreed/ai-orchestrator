@@ -251,6 +251,24 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect(await store.getExecutionHistory("f")).toMatchObject({ status: "success" });
   });
 
+  it("a fenced trace id write lands only while the claim holds the item (a stale worker cannot overwrite the new owner)", async () => {
+    const store = ctx.store();
+    const ID_OLD = "a".repeat(32);
+    const ID_NEW = "b".repeat(32);
+    await store.enqueueExecution({ id: "tr", workflowId: "wf", payload: { executionId: "tr" }, scheduledAt: past(1_000) });
+    const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    await history(store, "tr", "running");
+    expect(await store.setExecutionTraceId("tr", ID_OLD, { fence: { queueItemId: "tr", claimToken: "stale" } })).toBe(false);
+    expect((await store.getExecutionHistory("tr"))?.traceId).toBeNull();
+    expect(await store.setExecutionTraceId("tr", ID_OLD, { fence: { queueItemId: "tr", claimToken: claim!.claimToken } })).toBe(true);
+    await until(() => store.reapExpiredQueueLeases({ leaseMs: 1 }), "the reap");
+    const [next] = await store.claimQueueItems({ limit: 1, owner: "w2", pools: ["default"] });
+    expect(await store.setExecutionTraceId("tr", ID_NEW, { fence: { queueItemId: "tr", claimToken: next!.claimToken } })).toBe(true);
+    // The first worker comes back late: refused, the new owner's id stays.
+    expect(await store.setExecutionTraceId("tr", ID_OLD, { fence: { queueItemId: "tr", claimToken: claim!.claimToken } })).toBe(false);
+    expect((await store.getExecutionHistory("tr"))?.traceId).toBe(ID_NEW);
+  });
+
   it("listCanceledExecutionIds reports only canceled runs", async () => {
     const store = ctx.store();
     await history(store, "c1", "canceled");

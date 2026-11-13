@@ -42,6 +42,7 @@ import {
   retryAfterSeconds
 } from "./run-helpers.js";
 import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
+import { traceUrlFor } from "./telemetry/trace-url.js";
 import { maskRunEvent, maskRunNodeData, runViewHidesNodeData } from "./response-run-view.js";
 import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispatch.js";
 import { onceEachElicitationEvent, type RunEventName, type RunRelay } from "./services/run-event-relay.js";
@@ -479,7 +480,10 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const access = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
 
-    return runViewHidesNodeData(user.role, access.run.triggerType, await responseRulesExist()) ? maskRunNodeData(access.run) : access.run;
+    const view = runViewHidesNodeData(user.role, access.run.triggerType, await responseRulesExist()) ? maskRunNodeData(access.run) : access.run;
+    // v70 — a link to the run's trace, only when an operator set L2M_OTEL_TRACE_URL_TEMPLATE and the run has a trace id.
+    const traceUrl = traceUrlFor(config.L2M_OTEL_TRACE_URL_TEMPLATE, access.run.traceId);
+    return traceUrl ? { ...view, traceUrl } : view;
   });
 
   /**

@@ -17,7 +17,8 @@
  */
 import type { PoolClient } from "pg";
 import { GUARD_SIMULATION_JOB_DATASET_PREFIX, releaseGateRestrictsToAdmins } from "@ai-orchestrator/shared";
-import type { Store, ReleaseApprovalDecisionInput, ReleaseGateCasesChange, GateCaseDecisionRecordInput } from "../store.js";
+import { withQueueClaim } from "./executions.js";
+import type { Store, QueueClaimFence, ReleaseApprovalDecisionInput, ReleaseGateCasesChange, GateCaseDecisionRecordInput } from "../store.js";
 import { ReleaseGateEnforcedError } from "../store-errors.js";
 import type {
   ApprovalReadScope,
@@ -502,6 +503,17 @@ export async function getEvalRunSetSnapshot(ctx: PgContext, runId: string): Prom
 
 export async function setExecutionRelease(ctx: PgContext, executionId: string, channel: "production" | "draft", version: number | null): Promise<void> {
   await ctx.execute(`UPDATE execution_history SET release_channel = $1, release_version = $2 WHERE id = $3`, [channel, version, executionId]);
+}
+
+export async function setExecutionTraceId(ctx: PgContext, executionId: string, traceId: string, options: { fence?: QueueClaimFence } = {}): Promise<boolean> {
+  if (!options.fence) {
+    await ctx.execute(`UPDATE execution_history SET trace_id = $1 WHERE id = $2`, [traceId, executionId]);
+    return true;
+  }
+  return (await withQueueClaim(ctx, options.fence, async (client) => {
+    await client.query(`UPDATE execution_history SET trace_id = $1 WHERE id = $2`, [traceId, executionId]);
+    return true;
+  })) === true;
 }
 
 export async function getExecutionRelease(ctx: PgContext, executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {

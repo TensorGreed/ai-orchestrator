@@ -401,6 +401,7 @@ describe("run manifests", () => {
       customData: null,
       error: null,
       createdAt: now,
+      traceId: null,
       nodeResults: [
         {
           nodeId: "agent",

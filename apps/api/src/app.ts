@@ -2192,16 +2192,40 @@ export async function createApp(
     entry.job.leaseLost(`${what} was refused`);
   };
 
-  const persistExecutionHistoryRecord = async (
-    record: ExecutionHistoryRecord,
-    meta: {
-      phase: "progress" | "final";
-      executionId: string;
-      workflowId: string;
-      triggerType?: string;
-      status: string;
+  // v70 — the trace id of each in-flight run's span (only while tracing is on). Bounded: a run whose history is never
+  // persisted must not grow it forever. `stored` is set once the id is on the run's history row.
+  const runTraceIds = new Map<string, { traceId: string; stored: boolean }>();
+  const storeRunTraceId = async (executionId: string, phase: "progress" | "final") => {
+    const entry = runTraceIds.get(executionId);
+    if (!entry) return;
+    if (phase === "final") runTraceIds.delete(executionId);
+    if (entry.stored) return;
+    try {
+      // A queued run in cluster mode writes under its claim's fence, like its history writes: a worker whose claim was
+      // taken back must not overwrite the new owner's trace id.
+      const fence = queueRunFences.get(executionId)?.fence;
+      entry.stored = await store.setExecutionTraceId(executionId, entry.traceId, fence ? { fence } : {});
+    } catch (error) {
+      app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record the trace id of a run");
     }
-  ): Promise<boolean> => {
+  };
+
+  type PersistExecutionHistoryMeta = {
+    phase: "progress" | "final";
+    executionId: string;
+    workflowId: string;
+    triggerType?: string;
+    status: string;
+  };
+  // A final write ends the run's bookkeeping whatever its outcome (stored, refused, aborted or failed).
+  const persistExecutionHistoryRecord = async (record: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
+    try {
+      return await persistExecutionHistoryRecordUnsettled(record, meta);
+    } finally {
+      if (meta.phase === "final") runTraceIds.delete(meta.executionId);
+    }
+  };
+  const persistExecutionHistoryRecordUnsettled = async (record: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
     if (meta.phase === "final") await progressWrites.settle(meta.executionId);
     const active = activeExecutions.get(meta.executionId);
     // A stopped run keeps the canceled record the cancel route wrote. A
@@ -2240,6 +2264,7 @@ export async function createApp(
         }
         return false;
       }
+      await storeRunTraceId(meta.executionId, meta.phase);
       if (meta.phase === "final") {
         handOffCapture(meta.executionId);
         retentionService?.nudge();
@@ -2310,6 +2335,11 @@ export async function createApp(
         ...(input.traceLinks && input.traceLinks.length > 0 ? { links: input.traceLinks } : {})
       },
       async (span) => {
+        if (input.executionId && span.recording && span.traceId) {
+          runTraceIds.delete(input.executionId);
+          if (runTraceIds.size >= 5_000) runTraceIds.delete(runTraceIds.keys().next().value!);
+          runTraceIds.set(input.executionId, { traceId: span.traceId, stored: false });
+        }
         const result = await runWorkflowExecutionInScope(input);
         describeRunResult(span, result);
         return result;
@@ -2956,6 +2986,7 @@ export async function createApp(
     if (input.result.status === "waiting_approval") {
       // The resumed run is recorded apart: what the children spent so far is recorded now.
       await subWorkflowSpend.take(input.executionId)?.closeDetached();
+      await storeRunTraceId(input.executionId, "final");
       app.log.info(
         {
           executionId: input.executionId,
