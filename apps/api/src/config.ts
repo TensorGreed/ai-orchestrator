@@ -325,6 +325,14 @@ const envSchema = z.object({
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
     z.coerce.number().int().min(1000).max(86_400_000).optional()
   ),
+  /**
+   * MCP 2026-07-28 — while a `subscriptions/listen` stream asks for `toolsListChanged`, its tool list is re-checked this
+   * often (ms) as the fallback for change hints that were lost; 0 = hints only. Unset or empty = 30000.
+   */
+  MCP_GATEWAY_LISTEN_CHECK_MS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).max(86_400_000).optional()
+  ),
   /** MCP 2026-07-28 — open `subscriptions/listen` streams per client on one instance. Unset or empty = 4. */
   MCP_GATEWAY_LISTEN_MAX_PER_CLIENT: z.preprocess(
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),

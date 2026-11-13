@@ -199,7 +199,8 @@ export function gatewayDiscoverResult(input: {
 }): Record<string, unknown> {
   return {
     supportedVersions: gatewaySupportedVersions(input.mode),
-    capabilities: { tools: { listChanged: false } },
+    // G3b — the tool list announces changes on `subscriptions/listen` streams that ask for `toolsListChanged`.
+    capabilities: { tools: { listChanged: true } },
     ...(input.toolset.description ? { instructions: input.toolset.description } : {}),
     ...gatewayCacheHints(input.ttlMs)
   };
@@ -217,9 +218,9 @@ const LISTEN_BOOLEAN_FILTERS = ["toolsListChanged", "promptsListChanged", "resou
 
 /**
  * The `notifications` filter of a `subscriptions/listen` request, checked for shape only: an object (or absent)
- * whose known fields have the types the specification gives. Unknown fields are ignored. The gateway honours none of
- * it today (it serves tools only and its tool list does not announce changes), so the acknowledgment is empty.
- * Returns an error message, or null when the filter is well formed.
+ * whose known fields have the types the specification gives. Unknown fields are ignored. Of it, the gateway honours
+ * only `toolsListChanged` (it serves tools only; see listenHonouredFilter). Returns an error message, or null when the
+ * filter is well formed.
  */
 export function listenFilterError(params: unknown): string | null {
   const filter = isRecord(params) ? params.notifications : undefined;
@@ -235,12 +236,35 @@ export function listenFilterError(params: unknown): string | null {
   return null;
 }
 
-/** First message of a listen stream: the subset the gateway honours (none: it declares `tools.listChanged: false`). */
-export function subscriptionsAcknowledged(subscriptionId: JsonRpcRequest["id"]): JsonRpcNotification {
+/** The part of a listen filter the gateway honours. */
+export interface ListenHonouredFilter {
+  toolsListChanged?: true;
+}
+
+/**
+ * The subset of a (well-formed) listen filter the gateway agrees to honour: `toolsListChanged` when the client asked
+ * for it. Prompts, resources and resource subscriptions are left out: the gateway serves tools only.
+ */
+export function listenHonouredFilter(params: unknown): ListenHonouredFilter {
+  const filter = isRecord(params) && isRecord(params.notifications) ? params.notifications : {};
+  return filter.toolsListChanged === true ? { toolsListChanged: true } : {};
+}
+
+/** First message of a listen stream: the subset of the client's filter the gateway honours. */
+export function subscriptionsAcknowledged(subscriptionId: JsonRpcRequest["id"], honoured: ListenHonouredFilter = {}): JsonRpcNotification {
   return {
     jsonrpc: "2.0",
     method: "notifications/subscriptions/acknowledged",
-    params: { _meta: { [MCP_META_SUBSCRIPTION_ID]: subscriptionId }, notifications: {} }
+    params: { _meta: { [MCP_META_SUBSCRIPTION_ID]: subscriptionId }, notifications: { ...honoured } }
+  };
+}
+
+/** The toolset's tool list changed for this caller: sent on a listen stream that honours `toolsListChanged`. */
+export function toolsListChangedNotification(subscriptionId: JsonRpcRequest["id"]): JsonRpcNotification {
+  return {
+    jsonrpc: "2.0",
+    method: "notifications/tools/list_changed",
+    params: { _meta: { [MCP_META_SUBSCRIPTION_ID]: subscriptionId } }
   };
 }
 

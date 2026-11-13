@@ -128,8 +128,10 @@ import {
   DEFAULT_MCP_GATEWAY_LISTEN_MAX_MS,
   DEFAULT_MCP_GATEWAY_LISTEN_MAX_PER_CLIENT,
   listenFilterError,
+  listenHonouredFilter,
   subscriptionsAcknowledged,
   subscriptionsComplete,
+  toolsListChangedNotification,
   MODERN_GATEWAY_METHODS,
   gatewayDiscoverResult,
   gatewayServerInfo,
@@ -158,6 +160,16 @@ import { createMcpClientAdmission } from "./mcp-client-admission.js";
 import { parseTrustProxy } from "./config.js";
 import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } from "./services/mcp-tool-telemetry.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
+import type { ClusterBus } from "./services/cluster-bus.js";
+import {
+  DEFAULT_MCP_GATEWAY_LISTEN_CHECK_MS,
+  GATEWAY_TOOLS_CHANGED_MESSAGE,
+  GatewayListChangedHub,
+  isToolListMutation,
+  toolListFingerprint,
+  type ToolListScope,
+  type ToolListScopeState
+} from "./services/mcp-gateway-list-changed.js";
 import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
 import type { McpGatewayLabelMark, McpGatewayLabelMarkKey } from "./db/gateway-label-marks.js";
@@ -328,6 +340,11 @@ export interface McpGatewayDeps {
    * the request's `_meta` under the inbound trust rule. Absent: no spans.
    */
   tracing?: McpGatewayTracing;
+  /**
+   * G3b — hints that a toolset's tool list may have changed travel on this bus's `ctl` topic, so `subscriptions/listen`
+   * streams on every instance are told. Absent: hints stay in this process (the periodic check still runs).
+   */
+  clusterBus?: Pick<ClusterBus, "publish" | "subscribe" | "onResync">;
 }
 
 /** MCP 2026-07-28 (v71) — a stateless caller's stored label mark could not be read: its call is refused. */
@@ -2275,13 +2292,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   /** Listen streams open per client on this instance (the cap is MCP_GATEWAY_LISTEN_MAX_PER_CLIENT). */
   const listenCounts = new Map<string, number>();
 
+  const toolListChanges = createToolListChangeSignals();
+
   /**
-   * MCP 2026-07-28 `subscriptions/listen`, acknowledge-only: the gateway serves tools and its tool list does not
-   * announce changes, so the stream opens with an acknowledgment that honours nothing, then stays open with
-   * keep-alive comments until the client closes it, MCP_GATEWAY_LISTEN_MAX_MS passes or the server shuts down (the
-   * last two end with a `complete` result). A stream takes no principal state. It counts only against the per-client
-   * stream cap: not against the client's rate or concurrency limits, which cap `tools/call`. Returns, for the
-   * request's span, the refusal it sent, GATEWAY_CALLER_GONE when the caller hung up before the stream opened, or
+   * MCP 2026-07-28 `subscriptions/listen`: the stream opens with an acknowledgment of the subset of the filter the
+   * gateway honours (`toolsListChanged` only: it serves tools), then stays open with keep-alive comments until the
+   * client closes it, MCP_GATEWAY_LISTEN_MAX_MS passes or the server shuts down (the last two end with a `complete`
+   * result). With `toolsListChanged` it gets `notifications/tools/list_changed` when its caller's tool list changes
+   * (G3b, see services/mcp-gateway-list-changed.ts). A stream takes no principal state. It counts only against the
+   * per-client stream cap: not against the client's rate or concurrency limits, which cap `tools/call`. Returns, for
+   * the request's span, the refusal it sent, GATEWAY_CALLER_GONE when the caller hung up before the stream opened, or
    * undefined once the stream is open.
    */
   const handleModernListen = async (
@@ -2320,6 +2340,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       else listenCounts.set(clientKey, left);
     };
 
+    // G3b — the list the stream starts from, read before the acknowledgment so no change after it can be missed.
+    const watchScope: ToolListScope = { toolsetId: toolset.id, clientId: auth.client.id };
+    const opening = listenHonouredFilter(message.params).toolsListChanged ? await toolListChanges.opening(watchScope) : null;
+    const honoured = opening ? { toolsListChanged: true as const } : {};
+
     const hookHeaders = hookHeadersOf(reply);
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -2333,11 +2358,13 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     let ended = false;
     let timer: NodeJS.Timeout | undefined;
     let stopHeartbeat = () => undefined as void;
+    let unwatch = () => undefined as void;
     const cleanup = () => {
       if (ended) return;
       ended = true;
       clearTimeout(timer);
       stopHeartbeat();
+      unwatch();
       listenStreams.delete(finish);
       reply.raw.off("close", cleanup);
       unreserve();
@@ -2359,9 +2386,83 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => ended);
     timer = setTimeout(finish, listenMaxMs);
     timer.unref?.();
-    writeSse(reply, subscriptionsAcknowledged(message.id));
+    writeSse(reply, subscriptionsAcknowledged(message.id, honoured));
+    if (opening) {
+      unwatch = toolListChanges.watch(opening, {
+        scope: watchScope,
+        fingerprint: opening.fingerprint,
+        onChanged: () => {
+          if (!ended) writeSse(reply, toolsListChangedNotification(message.id));
+        },
+        onGone: finish
+      });
+    }
     return undefined;
   };
+
+  /**
+   * G3b — the tool list changes `subscriptions/listen` streams are told about (modern mode only; with it off no stream
+   * exists, no hook is added and nothing is published). A scope's list is read as `tools/list` builds it for that
+   * client, from the database; the client's role is resolved again, so a role change counts too. Successful admin
+   * changes through this instance hint at once (and on the bus, for streams on other instances).
+   */
+  function createToolListChangeSignals() {
+    const toolListState = async (scope: ToolListScope): Promise<ToolListScopeState> => {
+      const [toolset, client] = await Promise.all([store.getMcpToolset(scope.toolsetId), store.getMcpClient(scope.clientId)]);
+      const live =
+        toolset?.enabled &&
+        client &&
+        !client.revokedAt &&
+        !(client.expiresAt && Date.parse(client.expiresAt) <= Date.now()) &&
+        client.toolsetIds.includes(scope.toolsetId);
+      if (!toolset || !client || !live) return { kind: "gone" };
+      const subject = await resolveMcpClientSubject(store, client);
+      const catalog = await catalogFor(toolset, subject.role, client.id);
+      // The descriptors a modern `tools/list` serves, in its order (pages joined).
+      const descriptors = sortToolsByName(catalog.tools).flatMap((tool) => stripDescriptorHeaderAnnotations(toMcpToolDescriptor(tool)) ?? []);
+      return { kind: "list", fingerprint: toolListFingerprint(descriptors) };
+    };
+    const hub =
+      modernMode === "on"
+        ? new GatewayListChangedHub({
+            state: toolListState,
+            checkMs: config.MCP_GATEWAY_LISTEN_CHECK_MS ?? DEFAULT_MCP_GATEWAY_LISTEN_CHECK_MS,
+            ...(deps.clusterBus ? { bus: deps.clusterBus } : {}),
+            logger: { warn: (fields, text) => app.log.warn({ ...fields, ...(typeof fields.err === "string" ? { err: deps.redact(fields.err) } : {}) }, text) }
+          })
+        : null;
+    if (hub) {
+      app.addHook("onResponse", async (request, reply) => {
+        if (!isToolListMutation(request.method, request.routeOptions.url, reply.statusCode)) return;
+        hub.hint();
+        deps.clusterBus?.publish("ctl", { t: GATEWAY_TOOLS_CHANGED_MESSAGE }).catch((error: unknown) => {
+          app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Could not announce an MCP gateway tool list change");
+        });
+      });
+      app.addHook("onClose", async () => hub.stop());
+    }
+    return {
+      /** The list a stream opens with; null when it cannot be watched (modern mode off, or the read failed: then the acknowledgment leaves `toolsListChanged` out). */
+      opening: async (scope: ToolListScope): Promise<{ fingerprint: string; generation: number } | null> => {
+        if (!hub) return null;
+        const generation = hub.generation;
+        try {
+          const state = await toolListState(scope);
+          return state.kind === "list" ? { fingerprint: state.fingerprint, generation } : null;
+        } catch (error) {
+          app.log.warn({ toolsetId: scope.toolsetId, err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Could not read an MCP gateway tool list for a listen stream");
+          return null;
+        }
+      },
+      watch: (opening: { generation: number }, watcher: Parameters<GatewayListChangedHub["watch"]>[0]): (() => void) => {
+        if (!hub) return () => undefined;
+        const unwatch = hub.watch(watcher);
+        // A hint that arrived while the first list was read: check again now that the stream is watched.
+        if (hub.generation !== opening.generation) hub.hint();
+        return unwatch;
+      }
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // Routes

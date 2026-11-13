@@ -114,6 +114,8 @@ Workflow tools run as the workflow does for any trigger: the run is recorded in 
 
 stdio servers started for gateway calls belong to the client session that started them and are stopped when the session ends, idles out, or its client or toolset is revoked, disabled or deleted.
 
+**Tool list changes (MCP 2026-07-28).** With `MCP_GATEWAY_MODERN_PROTOCOL=on`, `server/discover` declares `tools.listChanged: true`, and a client can open a `subscriptions/listen` stream (`Accept: text/event-stream`) with `notifications: { toolsListChanged: true }`. The acknowledgment echoes `toolsListChanged: true` (prompts and resources are not served, so they are left out), and the stream then gets `notifications/tools/list_changed` whenever the list that client's `tools/list` returns changes: a toolset edit, a tool rule or classification that hides or shows a tool for the client's role, a workflow tool saved or published, or a member server's tools changing as its probes see them. Edits that leave the client's list as it was send nothing. Changes made on any instance reach streams on every instance over the cluster bus, and each stream's list is also re-checked every `MCP_GATEWAY_LISTEN_CHECK_MS` in case a message was lost. A stream whose client is revoked or no longer scoped to the toolset, or whose toolset is disabled or deleted, ends with a `complete` result. Streams count only against `MCP_GATEWAY_LISTEN_MAX_PER_CLIENT` and end after `MCP_GATEWAY_LISTEN_MAX_MS` (clients reconnect). Session-based clients are unchanged: `initialize` still declares `listChanged: false`.
+
 ### Outside content per session
 
 A gateway call has no workflow run around it, so on its own it carries no [data labels](./data-labels-and-destinations.md). On a toolset without tracking, a "data has label" condition never matches a gateway call, and a "data lacks label" condition on a deny or approval rule matches every one (it fails closed). Turn on **Track outside content per session** on a toolset to give its clients' calls labels.
@@ -234,6 +236,9 @@ Audit events:
 | `MCP_GATEWAY_SESSION_IDLE_MS` | `1800000` | Idle time before a session closes (minimum 10000). |
 | `MCP_GATEWAY_MAX_SESSIONS` | `500` | Open sessions across all clients. |
 | `MCP_GATEWAY_AUDIT_READ_ONLY_CALLS` | `first_per_session` | `all`, `first_per_session` or `none`. |
+| `MCP_GATEWAY_LISTEN_MAX_MS` | `600000` | MCP 2026-07-28: a `subscriptions/listen` stream ends with a `complete` result after this long. |
+| `MCP_GATEWAY_LISTEN_MAX_PER_CLIENT` | `4` | MCP 2026-07-28: open listen streams per client on one instance. |
+| `MCP_GATEWAY_LISTEN_CHECK_MS` | `30000` | MCP 2026-07-28: how often a stream that asked for `toolsListChanged` has its tool list re-checked, besides the change hints; `0` = hints only. |
 | `MCP_GATEWAY_APPROVAL_WINDOW_MS` | `900000` | How long after an approval the client can retry the identical call, once; also how long after a rejection the identical call is refused (10000 to 604800000). |
 
 ## API

@@ -114,7 +114,7 @@ async function login(context: TestContext): Promise<string> {
   return String([response.headers["set-cookie"]].flat().find((value) => String(value).startsWith(`${context.config.SESSION_COOKIE_NAME}=`))).split(";")[0]!;
 }
 
-async function api<T = Record<string, unknown>>(context: TestContext, cookie: string, method: "GET" | "POST" | "PUT" | "PATCH", url: string, payload?: unknown) {
+async function api<T = Record<string, unknown>>(context: TestContext, cookie: string, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: string, payload?: unknown) {
   const response = await context.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
   return { status: response.statusCode, body: (response.body ? response.json() : {}) as T };
 }
@@ -316,7 +316,7 @@ describe("modern mode on", () => {
     expect(response.json().result).toEqual({
       resultType: "complete",
       supportedVersions: ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"],
-      capabilities: { tools: { listChanged: false } },
+      capabilities: { tools: { listChanged: true } },
       instructions: "Everything the tests need",
       ttlMs: 45000,
       cacheScope: "private",
@@ -726,7 +726,7 @@ describe("modern mode on", () => {
   });
 });
 
-describe("MCP gateway subscriptions/listen (acknowledge-only)", () => {
+describe("MCP gateway subscriptions/listen", () => {
   const on = { MCP_GATEWAY_MODERN_PROTOCOL: "on", SSE_HEARTBEAT_INTERVAL_MS: "50" };
 
   /** Opens a listen stream over a real socket; `read` returns text received so far. */
@@ -767,7 +767,7 @@ describe("MCP gateway subscriptions/listen (acknowledge-only)", () => {
     return { response, controller, pump, read: () => text, messages };
   }
 
-  it("acknowledges with an empty honoured set, keeps the stream alive and ends when the client closes it", async () => {
+  it("acknowledges the honoured subset (toolsListChanged only), keeps the stream alive and ends when the client closes it", async () => {
     const fixture = await setup({ env: on });
     const stream = await listen(fixture, { id: 7 });
     expect(stream.response.status).toBe(200);
@@ -777,7 +777,7 @@ describe("MCP gateway subscriptions/listen (acknowledge-only)", () => {
     expect(stream.messages()[0]).toEqual({
       jsonrpc: "2.0",
       method: "notifications/subscriptions/acknowledged",
-      params: { _meta: { "io.modelcontextprotocol/subscriptionId": 7 }, notifications: {} }
+      params: { _meta: { "io.modelcontextprotocol/subscriptionId": 7 }, notifications: { toolsListChanged: true } }
     });
     // No state is created for a stream and no session header is returned.
     expect(stream.response.headers.get("mcp-session-id")).toBeNull();
@@ -901,5 +901,154 @@ describe("MCP gateway subscriptions/listen (acknowledge-only)", () => {
     const sessionId = await openSession(onFixture);
     const legacy = await rpc(onFixture, { jsonrpc: "2.0", id: 2, method: "subscriptions/listen", params: {} }, { "mcp-session-id": sessionId, "mcp-protocol-version": "2025-11-25" });
     expect(legacy.json().error.code).toBe(-32601);
+  });
+
+  describe("tools list changes (G3b)", () => {
+    const LIST_CHANGED = "notifications/tools/list_changed";
+    const changesOn = (stream: Awaited<ReturnType<typeof listen>>) => stream.messages().filter((message) => message.method === LIST_CHANGED);
+    const modernToolNames = async (fixture: Fixture) =>
+      ((await modern(fixture, "tools/list")).json().result.tools as Array<{ name: string }>).map((tool) => tool.name);
+    /** Long enough for a hint's debounced check (250 ms) to have run. */
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 700));
+    async function close(...streams: Array<Awaited<ReturnType<typeof listen>>>) {
+      for (const stream of streams) {
+        stream.controller.abort();
+        await stream.pump;
+      }
+    }
+
+    it("tells a stream when a toolset edit changes its tool list, and not for an edit that leaves the list alone", async () => {
+      // No periodic check: only the change hints can cause a notification here.
+      const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_CHECK_MS: "0" } });
+      const watching = await listen(fixture, { id: "s1" });
+      const silent = await listen(fixture, { id: "s2", params: { notifications: { promptsListChanged: true } } });
+      await waitFor(() => watching.messages().length === 1 && silent.messages().length === 1);
+      expect(silent.messages()[0]!.params.notifications).toEqual({});
+      expect(await modernToolNames(fixture)).toContain("slow_workflow");
+
+      // A description edit changes no tool.
+      expect((await api(fixture.context, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { description: "New words" })).status).toBe(200);
+      await settle();
+      expect(changesOn(watching)).toHaveLength(0);
+
+      const slowMember = fixture.toolset.members.find((member) => member.kind === "workflow" && member.workflowId === "wf-slow")!;
+      expect((await api(fixture.context, fixture.cookie, "DELETE", `/api/mcp/toolsets/${fixture.toolset.id}/members/${slowMember.id}`)).status).toBe(200);
+      await waitFor(() => changesOn(watching).length === 1);
+      expect(changesOn(watching)[0]).toEqual({ jsonrpc: "2.0", method: LIST_CHANGED, params: { _meta: { "io.modelcontextprotocol/subscriptionId": "s1" } } });
+      expect(await modernToolNames(fixture)).not.toContain("slow_workflow");
+      await settle();
+      expect(changesOn(watching)).toHaveLength(1);
+      // A stream that did not ask for toolsListChanged is never told.
+      expect(changesOn(silent)).toHaveLength(0);
+      await close(watching, silent);
+    });
+
+    it("tells a stream when a tool rule hides a tool for the client's role, not when it applies to another role", async () => {
+      const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_CHECK_MS: "0" } });
+      const stream = await listen(fixture, { id: 3 });
+      await waitFor(() => stream.messages().length === 1);
+      const deny = (roles: string[]) =>
+        api(fixture.context, fixture.cookie, "POST", "/api/mcp/policies", { name: `No calculator for ${roles.join(",")}`, effect: "deny", roles, serverId: fixture.mockServerId, toolPattern: "calculator" });
+      expect((await deny(["viewer"])).status).toBe(201);
+      await settle();
+      expect(changesOn(stream)).toHaveLength(0);
+      expect((await deny(["builder"])).status).toBe(201);
+      await waitFor(() => changesOn(stream).length === 1);
+      expect(await modernToolNames(fixture)).not.toContain("mock_tools__calculator");
+      await close(stream);
+    });
+
+    it("tells a stream when a workflow tool is saved through the API", async () => {
+      const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_CHECK_MS: "0" } });
+      const stream = await listen(fixture, { id: 4 });
+      await waitFor(() => stream.messages().length === 1);
+      const workflow = (await fixture.context.store.getWorkflow("wf-echo"))!;
+      const trigger = workflow.nodes.find((node) => node.id === "trigger")!;
+      const edited = { ...workflow, nodes: workflow.nodes.map((node) => (node === trigger ? { ...node, config: { ...node.config, toolName: "echo_renamed" } } : node)) };
+      const saved = await api(fixture.context, fixture.cookie, "PUT", "/api/workflows/wf-echo", edited);
+      expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+      await waitFor(() => changesOn(stream).length === 1);
+      expect(await modernToolNames(fixture)).toContain("echo_renamed");
+      await close(stream);
+    });
+
+    it("tells a stream when a background probe stores a new tool snapshot of a member server", async () => {
+      const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_CHECK_MS: "0", MCP_PROBE_INTERVAL_MS: "300" } });
+      const toolsFile = path.join(fixture.context.tempDir, "tools.json");
+      const script = `
+const fs = require('fs');
+const file = process.argv[1];
+process.stdin.setEncoding('utf-8');
+let buf = '';
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let nl;
+  while ((nl = buf.indexOf('\\n')) >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (!line) continue;
+    const req = JSON.parse(line);
+    if (req.id === undefined) continue;
+    const result = req.method === 'initialize'
+      ? { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'file-tools', version: '1' } }
+      : req.method === 'tools/list'
+        ? { tools: JSON.parse(fs.readFileSync(file, 'utf-8')).map((name) => ({ name, description: name, inputSchema: { type: 'object' } })) }
+        : {};
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }) + '\\n');
+  }
+});`;
+      fs.writeFileSync(toolsFile, JSON.stringify(["first"]));
+      const server = await api<{ server: { id: string } }>(fixture.context, fixture.cookie, "POST", "/api/mcp/servers", {
+        name: "File tools",
+        adapterId: "stdio_mcp",
+        probeEnabled: true,
+        connection: { command: process.execPath, args: ["-e", script, toolsFile], timeoutMs: 20000 }
+      });
+      expect(server.status).toBe(201);
+      expect((await api(fixture.context, fixture.cookie, "POST", `/api/mcp/servers/${server.body.server.id}/probe`)).status).toBe(200);
+      expect((await api(fixture.context, fixture.cookie, "POST", `/api/mcp/toolsets/${fixture.toolset.id}/members`, { kind: "server", serverId: server.body.server.id })).status).toBe(201);
+      await waitFor(async () => (await modernToolNames(fixture)).includes("file_tools__first"));
+
+      const stream = await listen(fixture, { id: 5 });
+      await waitFor(() => stream.messages().length === 1);
+      // Only the upstream server changes; the background probe sees it and announces the new snapshot.
+      fs.writeFileSync(toolsFile, JSON.stringify(["first", "second"]));
+      await waitFor(() => changesOn(stream).length >= 1, 15_000);
+      expect(await modernToolNames(fixture)).toContain("file_tools__second");
+      await close(stream);
+    });
+
+    it("falls back to the periodic check for a change nothing announced", async () => {
+      const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_CHECK_MS: "300" } });
+      const stream = await listen(fixture, { id: 6 });
+      await waitFor(() => stream.messages().length === 1);
+      // Written straight to the store: no API hook and no bus message.
+      await fixture.context.store.upsertWorkflow(workflowTool("wf-echo", "echo_direct"));
+      await waitFor(() => changesOn(stream).length === 1);
+      await settle();
+      expect(changesOn(stream)).toHaveLength(1);
+      await close(stream);
+    });
+
+    it("ends a watched stream gracefully when its client is revoked", async () => {
+      const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_CHECK_MS: "0" } });
+      const stream = await listen(fixture, { id: "gone" });
+      await waitFor(() => stream.messages().length === 1);
+      expect((await api(fixture.context, fixture.cookie, "POST", `/api/mcp/clients/${fixture.client.id}/revoke`)).status).toBe(200);
+      await stream.pump;
+      expect(stream.messages().at(-1)).toMatchObject({ id: "gone", result: { resultType: "complete" } });
+      expect(changesOn(stream)).toHaveLength(0);
+    });
+
+    it("leaves legacy sessions as they were: initialize still declares no listChanged", async () => {
+      const fixture = await setup({ env: on });
+      const response = await rpc(fixture, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "1" } }
+      });
+      expect(response.json().result.capabilities).toEqual({ tools: { listChanged: false } });
+    });
   });
 });
