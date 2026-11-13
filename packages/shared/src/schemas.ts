@@ -235,6 +235,7 @@ export const workflowSchema = z.object({
   createdAt: z.string().datetime().optional(),
   updatedAt: z.string().datetime().optional(),
   pinnedData: z.record(z.string(), z.unknown()).optional(),
+  pinnedDataSensitive: z.array(z.string().min(1)).optional(),
   tags: z.array(z.string().min(1).max(64)).optional(),
   projectId: z.string().min(1).optional(),
   folderId: z.string().min(1).optional(),
@@ -262,6 +263,11 @@ export const workflowExecuteRequestSchema = z.object({
   pinnedData: z.record(z.string(), z.unknown()).optional(),
   nodeOutputs: z.record(z.string(), z.unknown()).optional(),
   sourceExecutionId: z.string().optional(),
+  /**
+   * v74 — the run `nodeOutputs` were copied from (an editor's single-node run): when it was sensitive work, this run
+   * exports no content either and marks what it writes.
+   */
+  nodeOutputsExecutionId: z.string().min(1).max(200).optional(),
   sessionId: z.string().optional(),
   session_id: z.string().optional(),
   executionTimeoutMs: z.number().int().positive().optional(),

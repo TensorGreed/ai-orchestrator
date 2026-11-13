@@ -102,6 +102,7 @@ export function redactingSessionStores(dependencies: SessionStores, redactor: Re
             loadMessages: memoryStore.loadMessages.bind(memoryStore),
             ...(memoryStore.loadLabels ? { loadLabels: memoryStore.loadLabels.bind(memoryStore) } : {}),
             ...(memoryStore.loadSensitive ? { loadSensitive: memoryStore.loadSensitive.bind(memoryStore) } : {}),
+            ...(memoryStore.loadMessagesMarked ? { loadMessagesMarked: memoryStore.loadMessagesMarked.bind(memoryStore) } : {}),
             // The arguments as given (an absent options argument stays absent).
             saveMessages: async (...args: Parameters<typeof memoryStore.saveMessages>) =>
               await memoryStore.saveMessages(...([args[0], args[1], redactor.redact(args[2]), ...args.slice(3)] as Parameters<typeof memoryStore.saveMessages>))

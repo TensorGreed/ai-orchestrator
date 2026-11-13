@@ -150,6 +150,10 @@ Each retrieved document carries provenance metadata:
 
 Use these in downstream prompt templates to ask the LLM for source-cited answers (Phase 9.4 will make citations first-class).
 
+Chunks that a sensitive run adds through a workflow are marked `sensitive` (chunks added through the API are not), and a
+run that retrieves a marked chunk keeps its content out of OpenTelemetry content capture. See
+[Content copied from sensitive runs](../operations/opentelemetry.md#content-copied-from-sensitive-runs).
+
 ## Standalone search
 
 For testing without wrapping in a workflow:
@@ -165,10 +169,10 @@ Returns the top-K chunks with the same provenance metadata as the workflow path.
 
 ## Hybrid search (Phase 9.3)
 
-Built-in KBs index every chunk in a SQLite FTS5 table at insert time, so BM25 lexical search and dense vector search both target the same content. The `rag_retrieve` node accepts `searchMode`:
+Built-in KBs index every chunk for keyword search at insert time, so keyword search and dense vector search both target the same content. On SQLite the index is an FTS5 table ranked with BM25; on Postgres it is a `tsvector` column (`to_tsvector('english', content)`, GIN-indexed) ranked with `ts_rank_cd`. The mode is called `bm25` on both. The `rag_retrieve` node accepts `searchMode`:
 
 - `vector` (default) — cosine over dense embeddings only. Catches paraphrases and semantic similarity.
-- `bm25` — full-text search only. Catches exact-keyword matches, rare terms, identifiers, error codes.
+- `bm25` — keyword search only. Catches exact-keyword matches, rare terms, identifiers, error codes.
 - `hybrid` — fuses both via Reciprocal Rank Fusion (RRF). Industry-standard combiner — each ranker contributes `1 / (k + rank)` per doc; the sum across rankers is the final score. Great for catching both kinds of matches in one query.
 
 ```json
@@ -368,7 +372,8 @@ The shipped programmatic scorers use bag-of-tokens overlap with stopword filteri
 ## Tradeoffs
 
 - **Algorithm**: cosine similarity, computed in JavaScript. Fine up to ~10k chunks per KB. Larger fleets should use pgvector / Qdrant / Azure AI Search — `rag_retrieve` accepts those vector-store IDs unchanged.
-- **Storage**: vectors are stored as JSON arrays in SQLite. ~6 bytes/dimension on disk. For a 1536-d OpenAI model, that's ~10 KB per chunk.
-- **Concurrency**: writes serialize through the SqliteStore. Read-heavy workloads are unaffected.
+- **Storage**: vectors are stored as JSON arrays in a text column, on SQLite and on Postgres alike (the built-in KB does not use pgvector). ~6 bytes/dimension on disk. For a 1536-d OpenAI model, that's ~10 KB per chunk.
+- **Concurrency**: on SQLite, writes serialize through the SqliteStore. Read-heavy workloads are unaffected.
 - **No HNSW**: every query reads every vector for the KB. `sqlite-vec` is the obvious follow-up if linear scan becomes a bottleneck.
-- **BM25 (FTS5)**: indexed automatically on insert via SQL triggers. Re-indexing on bulk imports is free. Tokenizer is `porter unicode61` — handles English stemming and unicode word breaks; adjust the migration if you need a language-specific tokenizer.
+- **Keyword search**: indexed automatically on insert, with no re-indexing step. SQLite uses an FTS5 table kept in step by triggers (tokenizer `porter unicode61`, English stemming) and ranks with BM25. Postgres uses a generated `tsvector` column with the `english` configuration (stemming and English stop words) and ranks with `ts_rank_cd`, which ties more often than BM25. Both scale the scores to 0..1, best first, so rankings are close but not identical across the two databases.
+- **Query words**: the query is split into runs of `a`–`z` and `0`–`9` of two or more characters, lower-cased, and a chunk matches when it contains any of them. Other characters, including accented and non-Latin letters, split words, so keyword search suits English and identifiers; use `vector` mode for other languages.

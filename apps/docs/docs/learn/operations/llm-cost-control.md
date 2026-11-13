@@ -27,7 +27,7 @@ So the same question can cost very different amounts. A task that needs one tool
 The usual causes of a surprise bill:
 
 - **Loops that do not stop.** The model keeps asking for tools without converging.
-- **Long tool lists.** Fifty tool definitions on every call cost input tokens whether or not any is used.
+- **Long tool lists.** Fifty tool definitions on every call cost input tokens whether or not any is used ([keeping an agent's tool list small](/learn/agents/too-many-tools)).
 - **Large tool results.** A tool that returns a whole table puts all of it into every later call of the run.
 - **Retries.** A call that fails after the model has started answering may be billed, and the retry is billed again. A retry loop around a whole agent multiplies everything above.
 - **Hidden callers.** Evals with a model as judge, sub-workflows, and other teams' scripts on a shared key.

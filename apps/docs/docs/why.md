@@ -18,14 +18,14 @@ The [Model Context Protocol](https://modelcontextprotocol.io) is how an agent di
 What you get:
 
 - **Adapter registry.** Wire any MCP server in via the `MCP Tool` node. The `http_mcp` adapter speaks the streamable-HTTP transport; `mock-mcp` ships demo tools (`get_current_time`, `calculator`, `lookup_kb`) so you can build a flow before pointing at a real server. New transports plug into [`packages/mcp-sdk/src/`](https://github.com/TensorGreed/ai-orchestrator/tree/main/packages/mcp-sdk/src).
-- **Schema compaction & tool shortlisting.** When a server exposes many tools, the runtime compacts schemas before sending them to the model and shortlists tools by prompt relevance. This avoids context blowups and the "wrong tool picked from 30 similarly-named endpoints" problem.
+- **Schema compaction.** The runtime compacts every tool's description and schema before sending them to the model, so large servers cost fewer tokens. Every tool an MCP Tool node selects is sent, so to keep the list itself short, select the tools each agent needs; a keyword shortlist by prompt relevance applies only to an agent with no tool nodes, whose tools come from its inline `mcpServers` config, and a Supervisor's workers are always offered.
 - **Session tool cache.** Full tool outputs are cached outside the LLM prompt window in `session_tool_cache`. The model sees compact summaries and can fetch the full payload via auto-injected `session_cache_list` / `session_cache_get` tools when it needs detail. Multi-turn conversations stay grounded without re-calling expensive endpoints.
 - **Workflow → MCP-tool exposure.** The `mcp_server_trigger` node exposes any workflow as an MCP tool at `POST /api/mcp-server/:path/invoke` with a manifest at `GET /api/mcp-server/:path/manifest`. Other agents — including other L2M instances — can then call your workflow as a tool. This is an agent-composability story most visual workflow tools don't have. See [Expose a Workflow as an MCP Tool](/runtime/workflow-as-mcp-tool) for the recipe.
 - **Security on the boundary.** Secrets used by MCP adapters go through the same AES-256-GCM `SecretService` as everything else; never echoed in API responses.
 
 What this looks like in practice that competing tools generally don't:
 
-- A first-class MCP Client node with schema compaction and prompt-aware tool shortlisting (rather than a basic pass-through tool wrapper, or none at all).
+- A first-class MCP Client node with schema compaction and per-node tool selection (rather than a basic pass-through tool wrapper, or none at all).
 - The ability to expose a workflow back out as an MCP tool other agents invoke.
 - A session-scoped tool output cache that keeps multi-turn agents grounded without re-calling expensive endpoints.
 

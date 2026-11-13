@@ -895,6 +895,81 @@ describe("DefaultAgentRuntime", () => {
     expect(requestTools.some((t: { name: string }) => t.name === "agent_clarify")).toBe(true);
   });
 
+  it("always offers pinned tools and shortlists only the others by prompt relevance", async () => {
+    const providerRegistry = new ProviderRegistry();
+    const provider = new ToolCaptureProvider();
+    providerRegistry.register(provider);
+    const runtime = new DefaultAgentRuntime();
+
+    const mcpTools = Array.from({ length: 20 }, (_, index) => ({
+      serverId: "mock-mcp",
+      name: `mock-mcp__tool_${index}`,
+      description: index === 3 ? "Weather forecast lookup for a city" : `Tool ${index}`,
+      inputSchema: { type: "object" }
+    }));
+    const workerTools = ["delegate_to_Writer", "delegate_to_Critic"].map((name) => ({
+      serverId: `worker-${name}`,
+      name,
+      description: `Delegate task to ${name.slice("delegate_to_".length)}`,
+      inputSchema: { type: "object" }
+    }));
+    const allTools = [...mcpTools, ...workerTools];
+
+    await runtime.run(
+      {
+        provider: { providerId: "tool-capture", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "Weather forecast for Paris",
+        tools: allTools,
+        maxIterations: 1,
+        toolCallingEnabled: true,
+        pinnedToolNames: workerTools.map((tool) => tool.name)
+      },
+      {
+        tools: allTools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+        invokeTool: async () => ({ ok: true })
+      },
+      { providerRegistry, resolveSecret: async () => undefined }
+    );
+
+    const names = (provider.calls[0]?.tools ?? []).map((tool: { name: string }) => tool.name);
+    expect(names).toEqual(["agent_clarify", "mock-mcp__tool_3", "delegate_to_Writer", "delegate_to_Critic"]);
+  });
+
+  it("offers every pinned tool when no other tool is there to shortlist", async () => {
+    const providerRegistry = new ProviderRegistry();
+    const provider = new ToolCaptureProvider();
+    providerRegistry.register(provider);
+    const runtime = new DefaultAgentRuntime();
+
+    const workerTools = ["Researcher", "Writer", "Critic"].map((name) => ({
+      serverId: `worker-${name}`,
+      name: `delegate_to_${name}`,
+      description: `Delegate task to ${name}. Hint: ${name === "Researcher" ? "You research markets" : "You write"}`,
+      inputSchema: { type: "object" }
+    }));
+
+    await runtime.run(
+      {
+        provider: { providerId: "tool-capture", model: "fake-model" },
+        systemPrompt: "You coordinate",
+        userPrompt: "Research the quantum computing market",
+        tools: workerTools,
+        maxIterations: 1,
+        toolCallingEnabled: true,
+        pinnedToolNames: workerTools.map((tool) => tool.name)
+      },
+      {
+        tools: workerTools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+        invokeTool: async () => ({ ok: true })
+      },
+      { providerRegistry, resolveSecret: async () => undefined }
+    );
+
+    const names = (provider.calls[0]?.tools ?? []).map((tool: { name: string }) => tool.name);
+    expect(names).toEqual(["agent_clarify", "delegate_to_Researcher", "delegate_to_Writer", "delegate_to_Critic"]);
+  });
+
   it("defaults to tools agent type when agentType is not specified", async () => {
     const providerRegistry = new ProviderRegistry();
     const provider = new ToolCaptureProvider();

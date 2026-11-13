@@ -7,6 +7,7 @@
 import { expect, it } from "vitest";
 import type { Store } from "../store.js";
 import { describeStoreContract } from "../../test-support/test-store.js";
+import { testSql } from "../../test-support/test-sql.js";
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -92,7 +93,10 @@ describeStoreContract("store contract: audit", (ctx) => {
     await store.saveExecutionHistory({ id: "exec-kept", workflowId: "wf", status: "success", startedAt: "2001-01-01T00:00:00.000Z" });
     expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(1);
     expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(0);
-    expect((await store.listAuditLogs()).items.map((item) => item.id)).toEqual(["new"]);
+    // The prune appends a retention checkpoint (see the retention tests below).
+    // In the order written: the entry kept, then the checkpoint (both can share a millisecond).
+    const left = await store.listAuditLogsAfter({ afterId: null, limit: 10 });
+    expect(left.map((item) => [item.id, item.eventType])).toEqual([["new", "auth.login"], [left[1]!.id, "audit.retention_checkpoint"]]);
     expect(await store.getExecutionManifest("exec-gone")).toBeNull();
     expect(await store.getExecutionManifest("exec-kept")).not.toBeNull();
     await store.saveExecutionRunContext("exec-gone-2", {}, "2001-01-01T00:00:00.000Z");
@@ -121,12 +125,90 @@ describeStoreContract("store contract: audit", (ctx) => {
     const nextYear = new Date(after + 365 * 24 * 3600 * 1000).toISOString();
     expect((await store.listAuditLogs({ from: nextYear })).items.map((item) => item.id)).toEqual(["future"]);
     expect((await store.listAuditLogs({ to: nextYear })).items.map((item) => item.id)).toEqual(["n3", "n2", "n1"]);
-    expect(await store.pruneAuditLogs({ before: nextYear })).toBe(3);
-    expect((await store.listAuditLogs()).items.map((item) => item.id)).toEqual(["future"]);
-    // The next write links to the newest remaining row, the future one, and gets its own time.
+    // Retention deletes only the oldest rows in insertion order, up to the first row inside the retention, so the chain
+    // keeps no gap: the future row comes first, so nothing behind it goes.
+    expect(await store.pruneAuditLogs({ before: nextYear })).toBe(0);
+    expect((await store.listAuditLogs()).items.map((item) => item.id)).toEqual(["future", "n3", "n2", "n1"]);
+    // The next write links to the newest row and gets its own time.
     await store.writeAuditLog(entry("n4"));
-    expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 2 });
+    expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 5 });
     expect(Date.parse((await store.listAuditLogs()).items[1]!.createdAt)).toBeLessThan(Date.parse("2099-01-01T00:00:00.000Z") - 1000);
+  });
+
+  it("after retention the chain verifies from the first row left, anchored by the checkpoint the prune appends", async () => {
+    const store = ctx.store();
+    for (const [i, id] of ["o1", "o2", "o3"].entries()) {
+      await store.writeAuditLog(entry(id, { createdAt: `2001-01-0${i + 1}T00:00:00.000Z` }));
+    }
+    await store.writeAuditLog(entry("n1"));
+    await store.writeAuditLog(entry("n2"));
+    const lastPrunedHash = (await store.listAuditLogsAfter({ afterId: "o2", limit: 1 }))[0]!.entryHash;
+    expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(3);
+
+    const rows = await store.listAuditLogsAfter({ afterId: null, limit: 10 });
+    expect(rows.map((row) => row.eventType)).toEqual(["auth.login", "auth.login", "audit.retention_checkpoint"]);
+    const checkpoint = rows[2]!;
+    expect(checkpoint).toMatchObject({
+      category: "system",
+      actorType: "system",
+      metadata: { anchorHash: lastPrunedHash, firstRetainedId: "n1", lastPrunedId: "o3", before: "2020-01-01T00:00:00.000Z", deleted: 3 }
+    });
+    expect(await store.verifyAuditChain()).toEqual({
+      ok: true,
+      rowsChecked: 3,
+      anchor: { firstId: "n1", prevHash: lastPrunedHash, checkpointId: checkpoint.id }
+    });
+    await store.writeAuditLog(entry("n3"));
+    expect(await store.verifyAuditChain()).toMatchObject({ ok: true, rowsChecked: 4 });
+    // Nothing more to delete: no new checkpoint.
+    expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(0);
+    expect((await store.listAuditLogs({ eventType: "audit.retention_checkpoint" })).total).toBe(1);
+
+  });
+
+  it("a prune that deletes every row leaves its checkpoint as the only row, anchored to itself", async () => {
+    const store = ctx.store();
+    for (const id of ["o1", "o2"]) await store.writeAuditLog(entry(id, { createdAt: "2001-01-01T00:00:00.000Z" }));
+    expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(2);
+    const only = await store.listAuditLogsAfter({ afterId: null, limit: 10 });
+    expect(only).toHaveLength(1);
+    expect(only[0]!.metadata).toMatchObject({ firstRetainedId: only[0]!.id, lastPrunedId: "o2", deleted: 2 });
+    expect(await store.verifyAuditChain()).toMatchObject({ ok: true, rowsChecked: 1, anchor: { firstId: only[0]!.id, checkpointId: only[0]!.id } });
+  });
+
+  it("after retention a tampered row kept, a tampered checkpoint or more rows deleted from the start still fail", async () => {
+    const store = ctx.store();
+    const sql = testSql(store);
+    await store.writeAuditLog(entry("o1", { createdAt: "2001-01-01T00:00:00.000Z" }));
+    for (const id of ["n1", "n2", "n3"]) await store.writeAuditLog(entry(id, { message: id }));
+    expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(1);
+    expect(await store.verifyAuditChain()).toMatchObject({ ok: true, rowsChecked: 4 });
+
+    // An edit to a row kept fails at that row.
+    await sql.run(`UPDATE audit_logs SET message = 'edited' WHERE id = 'n2'`);
+    expect(await store.verifyAuditChain()).toMatchObject({ ok: false, firstBrokenAt: { id: "n2" } });
+    await sql.run(`UPDATE audit_logs SET message = 'n2' WHERE id = 'n2'`);
+    expect(await store.verifyAuditChain()).toMatchObject({ ok: true });
+
+    // Deleting the first row kept (outside a prune): no checkpoint names the new first row.
+    const n1 = (await store.listAuditLogsAfter({ afterId: null, limit: 1 }))[0]!;
+    await sql.run(`DELETE FROM audit_logs WHERE id = 'n1'`);
+    expect(await store.verifyAuditChain()).toEqual({
+      ok: false,
+      rowsChecked: 0,
+      firstBrokenAt: { id: "n2", createdAt: expect.any(String), expected: expect.stringMatching(/^[0-9a-f]{64}$/), stored: n1.entryHash }
+    });
+  });
+
+  it("after retention an edited checkpoint fails at the checkpoint", async () => {
+    const store = ctx.store();
+    const sql = testSql(store);
+    await store.writeAuditLog(entry("o1", { createdAt: "2001-01-01T00:00:00.000Z" }));
+    await store.writeAuditLog(entry("n1"));
+    expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(1);
+    await store.writeAuditLog(entry("n2"));
+    await sql.run(`UPDATE audit_logs SET metadata_json = replace(metadata_json, '"n1"', '"n2"') WHERE event_type = 'audit.retention_checkpoint'`);
+    expect(await store.verifyAuditChain()).toMatchObject({ ok: false, firstBrokenAt: { id: expect.stringMatching(/^aud_/) } });
   });
 
   it("log stream destinations: upsert keeps history and creator, dispatches count, delete removes events once", async () => {
@@ -248,12 +330,15 @@ describeStoreContract("store contract: audit", (ctx) => {
     expect(await store.getAuditExportDestination("x1")).toMatchObject({ lastExportId: "b", lastStatus: "failure", lastError: "unknown" });
     await store.recordAuditExportRun({ id: "r3", destinationId: "x1", startedAt: "2026-03-03T00:00:00.000Z", completedAt: "2026-03-03T00:00:01.000Z", status: "partial", rowsExported: 2, error: "half" });
     expect(await store.getAuditExportDestination("x1")).toMatchObject({ lastStatus: "failure", lastError: "unknown" });
+    // An empty successful check: the cursor stays, the check counts as the last run (an idle destination waits its interval).
+    await store.recordAuditExportRun({ id: "r4", destinationId: "x1", startedAt: "2026-03-04T00:00:00.000Z", completedAt: "2026-03-04T00:00:01.000Z", status: "success", rowsExported: 0 });
+    expect(await store.getAuditExportDestination("x1")).toMatchObject({ lastExportId: "b", lastExportAt: "2026-03-04T00:00:01.000Z", lastStatus: "success", lastError: null });
 
     const runs = await store.listAuditExportRuns("x1");
-    expect(runs.map((r) => r.id)).toEqual(["r3", "r2", "r1"]);
-    expect(runs[2]).toEqual({ id: "r1", destinationId: "x1", startedAt: "2026-03-01T00:00:00.000Z", completedAt: "2026-03-01T00:00:01.000Z", status: "success", rowsExported: 10, firstId: "a", lastId: "b", error: null });
-    expect(runs[0]).toMatchObject({ firstId: null, lastId: null, error: "half" });
-    expect((await store.listAuditExportRuns("x1", 0)).map((r) => r.id)).toEqual(["r3"]);
+    expect(runs.map((r) => r.id)).toEqual(["r4", "r3", "r2", "r1"]);
+    expect(runs[3]).toEqual({ id: "r1", destinationId: "x1", startedAt: "2026-03-01T00:00:00.000Z", completedAt: "2026-03-01T00:00:01.000Z", status: "success", rowsExported: 10, firstId: "a", lastId: "b", error: null });
+    expect(runs[1]).toMatchObject({ firstId: null, lastId: null, error: "half" });
+    expect((await store.listAuditExportRuns("x1", 0)).map((r) => r.id)).toEqual(["r4"]);
 
     expect(await store.deleteAuditExportDestination("x1")).toBe(true);
     expect(await store.deleteAuditExportDestination("x1")).toBe(true);

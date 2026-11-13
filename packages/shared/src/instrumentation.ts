@@ -95,6 +95,19 @@ export const CONTENT_DROPPED_ATTRIBUTE = "l2m.content.dropped";
 export const CONTENT_DROPPED_SENSITIVE_MEMORY = "sensitive_memory";
 
 /**
+ * v74 — the drop reason of a run that started from content of an earlier run that was sensitive work: an error
+ * workflow's input from such a run, pinned data copied from such a run, or node outputs copied from it (a retry, a
+ * single-node run). The rest of that run exports no content.
+ */
+export const CONTENT_DROPPED_SENSITIVE_RUN_DATA = "sensitive_run_data";
+
+/**
+ * v74 — the drop reason of a run that retrieved a knowledge base chunk written by sensitive work: the rest of that run
+ * exports no content.
+ */
+export const CONTENT_DROPPED_SENSITIVE_KNOWLEDGE = "sensitive_knowledge";
+
+/**
  * What a content exclusion check answers: false (not sensitive), true (sensitive, dropped as `sensitive`), or the drop
  * reason to record (lower-case letters and underscores, at most 40; anything else is recorded as `sensitive`).
  */

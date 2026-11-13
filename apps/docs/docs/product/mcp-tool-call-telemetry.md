@@ -7,6 +7,8 @@ description: "What L2M records for every MCP tool call: timings, errors, tokens 
 
 L2M records one telemetry row for every MCP tool call: calls a workflow makes (agent tool calls and MCP Tool nodes), calls MCP clients send through the [gateway](./mcp-gateway.md) and calls a builder makes from the playground. The [control plane](./mcp-control-plane.md) builds its call counts, error rates, latency, cost and recent calls from these rows.
 
+Concepts: [Keeping personal data and secrets out of AI prompts](/learn/security/sensitive-data-in-prompts) explains why the argument summary keeps only values that are safe by construction and hashes the rest, and [too many tools](/learn/agents/too-many-tools) shows how call counts help trim an agent's tools.
+
 ## What a row holds
 
 - the server, tool, node, workflow and execution the call belongs to, and where it came from (`workflow`, `gateway` or `playground`, plus the client for gateway calls);

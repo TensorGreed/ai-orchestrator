@@ -261,6 +261,12 @@ export interface Workflow {
   settings?: WorkflowSettings;
   /** Phase 4.3 debug tooling: saved node outputs keyed by node id. */
   pinnedData?: Record<string, unknown>;
+  /**
+   * v74 — ids of the nodes whose pinned data was copied from a run that was sensitive work for content capture. A run
+   * that uses one of these pins exports no content (`sensitive_run_data`) and marks what it writes. Set by the server
+   * when a pin is saved from a run; a save that keeps a pin's data unchanged keeps its mark.
+   */
+  pinnedDataSensitive?: string[];
   /** Phase 4.2 — tags/organization. All optional for backwards-compat. */
   tags?: string[];
   projectId?: string;
@@ -568,6 +574,11 @@ export interface WorkflowExecutionState {
    * on, so the resumed run's output labels say `sensitive` too. Written and read only by the engine.
    */
   sensitiveSessionReadMarked?: boolean;
+  /**
+   * v74 — why the run exports no content after such a read, when it is not `sensitive_memory`: `sensitive_run_data`
+   * (it started from a sensitive run's content) or `sensitive_knowledge`. Written and read only by the engine.
+   */
+  sensitiveSessionReadReason?: string;
   /**
    * Phase 15.4 — the release channel the run started on. A resumed
    * production run keeps calling the published versions of its
@@ -1044,6 +1055,11 @@ export interface AgentRunRequest {
   memory?: AgentMemoryConfig;
   toolOutputLimits?: AgentToolOutputLimits;
   bypassToolFiltering?: boolean;
+  /**
+   * Tool names the model is always offered. The prompt-relevance shortlist (used when `bypassToolFiltering` is off)
+   * only picks among the other tools, so a Supervisor's worker tools are never dropped from a run.
+   */
+  pinnedToolNames?: string[];
   images?: ChatMessageImage[];
   /** Phase 6.4 — offer the internal `think` tool (a scratchpad step; no policy, content rules or labels). Off unless set. */
   thinkTool?: boolean;
@@ -1496,6 +1512,8 @@ export interface WorkflowExecuteRequest {
   pinnedData?: Record<string, unknown>;
   nodeOutputs?: Record<string, unknown>;
   sourceExecutionId?: string;
+  /** v74 — the run `nodeOutputs` were copied from (see workflowExecuteRequestSchema). */
+  nodeOutputsExecutionId?: string;
   sessionId?: string;
   session_id?: string;
   executionTimeoutMs?: number;

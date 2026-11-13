@@ -198,6 +198,11 @@ export interface AgentSessionMemoryStore {
    * it exports no content from then on. Absent: never sensitive.
    */
   loadSensitive?(namespace: string, sessionId: string): Promise<boolean>;
+  /**
+   * The messages and `loadSensitive`'s answer for them, read together (one query on the SQLite and Postgres stores).
+   * A store that has it is read this way by the engine whether or not content capture is on. Absent: `loadMessages`.
+   */
+  loadMessagesMarked?(namespace: string, sessionId: string): Promise<{ messages: ChatMessage[]; sensitive: boolean }>;
 }
 
 export interface AgentSessionToolRecord {

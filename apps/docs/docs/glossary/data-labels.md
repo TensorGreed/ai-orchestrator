@@ -29,7 +29,7 @@ Labels do not detect attacks. They record origin and contents, and policies deci
 
 ## In L2M
 
-Every run works out where each step's data came from: `trusted`, `user` or `untrusted_external`. <Term id="mcp-tool-policy">Tool policy</Term> rules can test it (`label_present`). Optionally, a [content rules](/product/content-rules) rule set's **Track where data came from** switch also scans each step for data classes, adds `sensitive` when it finds any, and stores the labels with node results, memory and artifacts, so a later run that reads them still knows where the text came from ([data labels](/product/data-labels-and-destinations#data-labels)).
+Each run labels where every step's data came from (`trusted`, `user` or `untrusted_external`), and <Term id="mcp-tool-policy">tool policy</Term> rules can test those labels (`label_present`). Optionally, switching on **Track where data came from** in a [content rules](/product/content-rules) rule set adds a scan for data classes, which a `label_present sensitive` check counts as sensitive, and keeps the labels with stored node results, memory and artifacts, so a later run that tracks labels inherits them ([data labels](/product/data-labels-and-destinations#data-labels)).
 
 ## Further reading
 

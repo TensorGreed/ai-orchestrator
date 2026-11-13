@@ -40,6 +40,13 @@ interface KnowledgeBaseChunkRow {
   metadata_json: string | null;
   vector_json: string;
   created_at: string;
+  /** v74 — 1 when written by sensitive work. */
+  sensitive?: number | string | null;
+}
+
+/** v74 — `{ sensitive: true }` for a chunk written by sensitive work, else nothing. */
+function sensitiveField(value: unknown): { sensitive?: true } {
+  return Number(value ?? 0) === 1 ? { sensitive: true } : {};
 }
 
 const KB_COLUMNS = `id, name, description, project_id, embedder_id, embedder_config_json, dimensions, chunk_count, created_by, created_at, updated_at`;
@@ -73,7 +80,8 @@ function mapKnowledgeBaseChunk(row: KnowledgeBaseChunkRow): KnowledgeBaseChunkRe
     content: toStr(row.content),
     metadata: metadataOf(row.metadata_json),
     vector: parseJsonSafe(row.vector_json) as number[],
-    createdAt: toStr(row.created_at)
+    createdAt: toStr(row.created_at),
+    ...sensitiveField(row.sensitive)
   };
 }
 
@@ -157,8 +165,8 @@ export async function addKnowledgeBaseChunks(ctx: PgContext, input: Parameters<S
 
     const now = new Date().toISOString();
     await client.query(
-      `INSERT INTO knowledge_base_chunks (id, knowledge_base_id, source_id, chunk_index, content, metadata_json, vector_json, created_at)
-       SELECT c.id, $1, c.source_id, c.chunk_index, c.content, c.metadata_json, c.vector_json, $2::timestamptz
+      `INSERT INTO knowledge_base_chunks (id, knowledge_base_id, source_id, chunk_index, content, metadata_json, vector_json, created_at, sensitive)
+       SELECT c.id, $1, c.source_id, c.chunk_index, c.content, c.metadata_json, c.vector_json, $2::timestamptz, $9::integer
          FROM unnest($3::text[], $4::text[], $5::int[], $6::text[], $7::text[], $8::text[])
               WITH ORDINALITY AS c(id, source_id, chunk_index, content, metadata_json, vector_json, ord)
         ORDER BY c.ord`,
@@ -170,7 +178,8 @@ export async function addKnowledgeBaseChunks(ctx: PgContext, input: Parameters<S
         input.chunks.map((c) => c.chunkIndex),
         input.chunks.map((c) => c.content),
         input.chunks.map((c) => (c.metadata ? JSON.stringify(c.metadata) : null)),
-        input.chunks.map((c) => JSON.stringify(c.vector))
+        input.chunks.map((c) => JSON.stringify(c.vector)),
+        input.sensitive === true ? 1 : 0
       ]
     );
     await client.query(
@@ -188,7 +197,7 @@ export async function addKnowledgeBaseChunks(ctx: PgContext, input: Parameters<S
 /** Every chunk of a knowledge base, in insertion order (see the module note). */
 export async function listKnowledgeBaseChunks(ctx: PgContext, knowledgeBaseId: string): Promise<KnowledgeBaseChunkRecord[]> {
   const rows = await ctx.query<KnowledgeBaseChunkRow>(
-    `SELECT id, knowledge_base_id, source_id, chunk_index, content, metadata_json, vector_json, created_at
+    `SELECT id, knowledge_base_id, source_id, chunk_index, content, metadata_json, vector_json, created_at, sensitive
        FROM knowledge_base_chunks WHERE knowledge_base_id = $1 ORDER BY seq`,
     [knowledgeBaseId]
   );
@@ -215,6 +224,7 @@ export async function bm25SearchKnowledgeBase(ctx: PgContext, input: { knowledge
   content: string;
   metadata: Record<string, unknown> | null;
   score: number;
+  sensitive?: true;
 }>> {
   const websearch = buildWebsearchQuery(input.query);
   if (!websearch) return [];
@@ -226,8 +236,9 @@ export async function bm25SearchKnowledgeBase(ctx: PgContext, input: { knowledge
     content: string;
     metadata_json: string | null;
     raw_score: number;
+    sensitive: number | string | null;
   }>(
-    `SELECT c.id, c.source_id, c.chunk_index, c.content, c.metadata_json, ts_rank_cd(c.content_tsv, q.query) AS raw_score
+    `SELECT c.id, c.source_id, c.chunk_index, c.content, c.metadata_json, c.sensitive, ts_rank_cd(c.content_tsv, q.query) AS raw_score
        FROM knowledge_base_chunks c, websearch_to_tsquery('english', $1) AS q(query)
       WHERE c.knowledge_base_id = $2 AND c.content_tsv @@ q.query
       ORDER BY raw_score DESC, c.seq
@@ -247,7 +258,8 @@ export async function bm25SearchKnowledgeBase(ctx: PgContext, input: { knowledge
       chunkIndex: toNum(row.chunk_index),
       content: toStr(row.content),
       metadata: metadataOf(row.metadata_json),
-      score: 1
+      score: 1,
+      ...sensitiveField(row.sensitive)
     }));
   }
   const range = max - min;
@@ -257,7 +269,8 @@ export async function bm25SearchKnowledgeBase(ctx: PgContext, input: { knowledge
     chunkIndex: toNum(row.chunk_index),
     content: toStr(row.content),
     metadata: metadataOf(row.metadata_json),
-    score: (scores[index]! - min) / range
+    score: (scores[index]! - min) / range,
+    ...sensitiveField(row.sensitive)
   }));
 }
 

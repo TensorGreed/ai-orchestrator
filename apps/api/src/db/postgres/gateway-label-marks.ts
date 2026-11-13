@@ -6,9 +6,12 @@
  */
 import {
   LABEL_MARK_INSERT_EMPTY_SQL,
+  LABEL_MARK_PEEK_SQL,
   LABEL_MARK_TOUCH_SQL,
   LABEL_MARK_WRITE_SQL,
   labelMarkTouchParams,
+  labelMarkPeekParams,
+  convertLabelMarkQuietly,
   labelMarkLive,
   labelMarkUpdateParams,
   mapLabelMarkRow,
@@ -21,6 +24,7 @@ import type { PgContext } from "./context.js";
 const TOUCH_SQL = toPgPlaceholders(LABEL_MARK_TOUCH_SQL);
 const INSERT_EMPTY_SQL = toPgPlaceholders(LABEL_MARK_INSERT_EMPTY_SQL);
 const WRITE_SQL = toPgPlaceholders(LABEL_MARK_WRITE_SQL);
+const PEEK_SQL = toPgPlaceholders(LABEL_MARK_PEEK_SQL);
 
 export async function readMcpGatewayLabelMark(
   ctx: PgContext,
@@ -28,6 +32,25 @@ export async function readMcpGatewayLabelMark(
 ): ReturnType<Store["readMcpGatewayLabelMark"]> {
   const row = await ctx.queryOne<Record<string, unknown>>(TOUCH_SQL, labelMarkTouchParams(key, at));
   return row ? mapLabelMarkRow(row) : null;
+}
+
+export async function peekMcpGatewayLabelMark(
+  ctx: PgContext,
+  ...[key, now]: Parameters<Store["peekMcpGatewayLabelMark"]>
+): ReturnType<Store["peekMcpGatewayLabelMark"]> {
+  const row = await ctx.queryOne<Record<string, unknown>>(PEEK_SQL, labelMarkPeekParams(key, now));
+  const mark = row ? mapLabelMarkRow(row) : null;
+  if (!mark?.unobserved) return { mark, firstRaise: false };
+  return ctx.withTransaction(async (client) => {
+    // Locked read: another instance's raise may have converted the note (or its sweep deleted the row) meanwhile.
+    const result = await client.query<Record<string, unknown>>(`${PEEK_SQL} FOR UPDATE`, labelMarkPeekParams(key, now));
+    const lockedRow = result.rows[0];
+    const stored = lockedRow ? mapLabelMarkRow(lockedRow) : null;
+    if (!stored?.unobserved) return { mark: stored, firstRaise: false };
+    const { next, firstRaise } = convertLabelMarkQuietly(stored, now);
+    await client.query(WRITE_SQL, labelMarkUpdateParams(next));
+    return { mark: next, firstRaise };
+  });
 }
 
 export async function raiseMcpGatewayLabelMark(

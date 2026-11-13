@@ -625,6 +625,7 @@ export async function executeWorkflow(
     pinnedData?: Record<string, unknown>;
     nodeOutputs?: Record<string, unknown>;
     sourceExecutionId?: string;
+    nodeOutputsExecutionId?: string;
     input?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     system_prompt?: string;
@@ -923,6 +924,7 @@ export async function executeWorkflowStream(
     pinnedData?: Record<string, unknown>;
     nodeOutputs?: Record<string, unknown>;
     sourceExecutionId?: string;
+    nodeOutputsExecutionId?: string;
     input?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     system_prompt?: string;
@@ -946,7 +948,8 @@ export async function fetchWorkflowPins(workflowId: string) {
   }>(`/api/workflows/${workflowId}/pins`);
 }
 
-export async function saveWorkflowPin(workflowId: string, nodeId: string, data: unknown) {
+/** `executionId`: the run the data was copied from, so the server can mark a pin taken from sensitive work. */
+export async function saveWorkflowPin(workflowId: string, nodeId: string, data: unknown, executionId?: string) {
   return apiRequest<{
     workflowId: string;
     nodeId: string;
@@ -954,7 +957,7 @@ export async function saveWorkflowPin(workflowId: string, nodeId: string, data: 
     pinnedData: Record<string, unknown>;
   }>(`/api/workflows/${workflowId}/pins/${encodeURIComponent(nodeId)}`, {
     method: "PUT",
-    body: JSON.stringify({ data })
+    body: JSON.stringify(executionId ? { data, executionId } : { data })
   });
 }
 
@@ -2560,6 +2563,8 @@ export interface AuditChainStatus {
   ok: boolean;
   rowsChecked: number;
   firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
+  /** The chain starts after rows retention deleted: its first row and prev hash, matched by this retention checkpoint. */
+  anchor?: { firstId: string; prevHash: string; checkpointId: string };
   /**
    * Rows whose content cannot be checked (a row written before audit text was normalised, or an edit); `ok` is false
    * while present. `position` (1-based walk index), `prevHash` and `entryHash` place the row in the chain; `id` and

@@ -141,6 +141,7 @@ export const SUBJECT_EXPORT_NOT_COVERED = [
   "The audit log (security logging; a staff export lists the person's own entries)",
   "Tool-call telemetry (argument summaries) and rule events (masked evidence only)",
   "Usage and cost events",
+  "Signed run manifests already generated (they hold rendered prompts; export them per run as audit bundles)",
   "Knowledge bases (ingested documents)",
   "Backups already written, model providers and MCP servers (outside this deployment)"
 ];

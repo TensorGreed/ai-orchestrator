@@ -107,7 +107,7 @@ Prefer approach 1; reach for `specTemplate` only when the schema of the data isn
 ## Tradeoffs
 
 - **SVG only.** PNG output would need `node-canvas` (native bindings, platform-fragile). SVG embeds cleanly into HTML and renders crisply at any size; the existing `pdf_output` node already runs Chromium and rasterizes the SVG to the final PDF. PNG is the obvious follow-up if a non-Chromium consumer needs it.
-- **Render time scales with data size.** Vega's render is CPU-bound. For >50k data points, downsample upstream first (a `code_execution` or `set_node` aggregating into bucket counts).
+- **Render time scales with data size.** Vega's render is CPU-bound. For >50k data points, downsample upstream first (a `code_node` or `aggregate_node` aggregating into bucket counts).
 - **No interactivity.** Output SVG is static — no Vega tooltips / pan-zoom in the rendered output. For interactive dashboards, use the spec's `dataUrl` in a browser-side embed instead.
 
 </div>

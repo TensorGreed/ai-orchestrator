@@ -2,7 +2,7 @@
  * Phase 13.1 — PostgresStore: Workflows, folders, projects, templates, workflow versions and workflow shares.
  * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
-import { DEFAULT_PROJECT_ID, type Folder, type Project, type Workflow, type WorkflowListItem } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, keepPinnedDataMarks, type Folder, type Project, type Workflow, type WorkflowListItem } from "@ai-orchestrator/shared";
 import type { PoolClient } from "pg";
 import { ProjectNotEmptyError } from "../store-errors.js";
 import { type Store } from "../store.js";
@@ -153,18 +153,35 @@ export async function getWorkflow(ctx: PgContext, id: string): Promise<Workflow 
 /** `options.createdBy` (a user id) is stored only when the row is first inserted (Phase 10.2). */
 export async function upsertWorkflow(ctx: PgContext, workflow: Workflow, options: { createdBy?: string | null } = {}): Promise<Workflow> {
   const now = new Date().toISOString();
-  const existing = await ctx.store.getWorkflow(workflow.id);
-  const createdAt = existing?.createdAt ?? now;
-  const payload: Workflow = {
-    ...workflow,
-    projectId: workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID,
-    folderId: workflow.folderId ?? existing?.folderId,
-    tags: Array.isArray(workflow.tags) ? workflow.tags.filter((t) => typeof t === "string") : existing?.tags,
-    createdAt,
-    updatedAt: now
+  const build = (existing: Workflow | null): { payload: Workflow; params: unknown[] } => {
+    const createdAt = existing?.createdAt ?? now;
+    const payload: Workflow = {
+      // v74 — a pin copied from a sensitive run keeps its mark while the node is pinned, whatever the client sent.
+      ...keepPinnedDataMarks(existing, workflow),
+      projectId: workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID,
+      folderId: workflow.folderId ?? existing?.folderId,
+      tags: Array.isArray(workflow.tags) ? workflow.tags.filter((t) => typeof t === "string") : existing?.tags,
+      createdAt,
+      updatedAt: now
+    };
+    const params = [
+      payload.id,
+      payload.name,
+      payload.schemaVersion,
+      payload.workflowVersion,
+      JSON.stringify(payload),
+      createdAt,
+      now,
+      JSON.stringify(payload.tags ?? []),
+      payload.projectId ?? DEFAULT_PROJECT_ID,
+      payload.folderId ?? null,
+      options.createdBy ?? null
+    ];
+    return { payload, params };
   };
-  const sql = `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+  const insert = `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`;
+  const sql = `${insert}
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          schema_version = EXCLUDED.schema_version,
@@ -174,37 +191,44 @@ export async function upsertWorkflow(ctx: PgContext, workflow: Workflow, options
          tags_json = EXCLUDED.tags_json,
          project_id = EXCLUDED.project_id,
          folder_id = EXCLUDED.folder_id`;
-  const params = [
-    payload.id,
-    payload.name,
-    payload.schemaVersion,
-    payload.workflowVersion,
-    JSON.stringify(payload),
-    createdAt,
-    now,
-    JSON.stringify(payload.tags ?? []),
-    payload.projectId ?? DEFAULT_PROJECT_ID,
-    payload.folderId ?? null,
-    options.createdBy ?? null
-  ];
-  if (!existing) {
-    await ctx.execute(sql, params);
-    return payload;
+  if (!(await ctx.store.getWorkflow(workflow.id))) {
+    // A new workflow. A row another save inserted meanwhile is not overwritten here: the update below merges with it.
+    const fresh = build(null);
+    const inserted = await ctx.pool.query(`${insert} ON CONFLICT (id) DO NOTHING`, fresh.params);
+    if ((inserted.rowCount ?? 0) > 0) return fresh.payload;
   }
   // 13.3 — a held workflow's runs reach their project through the workflow, so it cannot leave a held project (or
   // move at all while a hold covers it or its rows). The hold check and the write share one transaction under the
-  // legal-hold lock, read against the row as it is now.
-  await ctx.withTransaction(async (client) => {
+  // legal-hold lock, read against the row as it is now. v74 — the stored pin marks are read under the same row lock,
+  // so a concurrent save can never drop a mark another save just stored.
+  return await ctx.withTransaction(async (client) => {
     // The lock first, before the row lock, as every hold-checked delete does.
     await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
-    const current = await client.query<{ project_id: string | null }>(`SELECT project_id FROM workflows WHERE id = $1 FOR UPDATE`, [payload.id]);
-    const currentProject = current.rows[0] ? (current.rows[0].project_id ?? DEFAULT_PROJECT_ID) : null;
+    const current = await client.query<{ project_id: string | null; workflow_json: string; created_at: string; tags_json: string | null; folder_id: string | null }>(
+      `SELECT project_id, workflow_json, created_at, tags_json, folder_id FROM workflows WHERE id = $1 FOR UPDATE`,
+      [workflow.id]
+    );
+    const row = current.rows[0];
+    const existing = row ? lockedWorkflow(row) : null;
+    const { payload, params } = build(existing);
+    const currentProject = row ? (row.project_id ?? DEFAULT_PROJECT_ID) : null;
     if (currentProject !== null && currentProject !== payload.projectId) {
       await refuseIfHeld(client, { kind: "workflow", id: payload.id }, "This workflow", "moved to another project");
     }
     await client.query(sql, params);
+    return payload;
   });
-  return payload;
+}
+
+/** The stored workflow as getWorkflow reads it, from a row read under its lock. */
+function lockedWorkflow(row: { project_id: string | null; workflow_json: string; created_at: string; tags_json: string | null; folder_id: string | null }): Workflow {
+  const parsed = JSON.parse(toStr(row.workflow_json)) as Workflow;
+  parsed.createdAt = toStr(row.created_at);
+  const tags = parseTagsJson(row.tags_json);
+  if (tags !== undefined) parsed.tags = tags;
+  parsed.projectId = row.project_id ? toStr(row.project_id) : (parsed.projectId ?? DEFAULT_PROJECT_ID);
+  parsed.folderId = row.folder_id ? toStr(row.folder_id) : undefined;
+  return parsed;
 }
 
 export async function deleteWorkflow(ctx: PgContext, id: string, options: { refuseIfGateEnforced?: boolean } = {}): Promise<boolean> {

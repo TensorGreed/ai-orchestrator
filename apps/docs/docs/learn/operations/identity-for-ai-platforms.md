@@ -64,7 +64,7 @@ Global roles alone are too coarse once several teams share a platform. Projects 
 
 A <Term id="service-account">service account</Term> is an identity for a program. It cannot sign in, it is not tied to one employee, and its keys are made by an admin. Good practice for its API keys:
 
-- **A role ceiling.** The key acts with the lower of its ceiling and its owner's current role. A deploy key needs builder, not admin.
+- **A role ceiling.** A key never has more than its ceiling, and never more than its owner has right now. A deploy key needs builder, not admin.
 - **A project list.** The key reaches only the named projects; everything else reads as missing.
 - **An expiry, and rotation with overlap.** A new key, with the old one working for a short grace window, lets callers switch without an outage.
 - **No approvals.** A program should never be the one who approves an agent's risky step. Keep approvals for people.

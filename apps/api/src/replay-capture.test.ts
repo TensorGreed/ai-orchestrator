@@ -542,6 +542,37 @@ describe("sampling and limits", () => {
     expect((await context.store.getReplayRecording(importedId))!.capabilities.capture?.source).toBeUndefined();
   });
 
+  it("never captures a run started from a sensitive run's content (v74): copied from a marked run, or using marked pins", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    await save(context, hookWorkflow("wf-copied"));
+    await enableCapture(context, builder.cookie, "wf-copied", { maxPerDay: 10 });
+    const key = (await call(context, "POST", "/api/auth/api-keys", builder.cookie, { name: "CI" })).json<{ key: string }>().key;
+    const viaKey = (payload: Record<string, unknown>) =>
+      context.app.inject({ method: "POST", url: "/api/workflows/wf-copied/execute", headers: { authorization: `Bearer ${key}` }, payload });
+    const finished = { workflowId: "wf-copied", status: "success", startedAt: "2026-11-13T00:00:00.000Z", completedAt: "2026-11-13T00:00:01.000Z", inputJson: { input: {} }, nodeResultsJson: [] };
+    await context.store.saveExecutionHistory({ id: "run-marked", ...finished, sensitive: true });
+    await context.store.saveExecutionHistory({ id: "run-clean", ...finished, sensitive: false });
+
+    expect((await viaKey({ sourceExecutionId: "run-marked" })).statusCode).toBe(200);
+    // Pinned data copied from a sensitive run, used by the run.
+    const marked = await call(context, "PUT", "/api/workflows/wf-copied/pins/hook", builder.cookie, { data: { user_prompt: "copied" }, executionId: "run-marked" });
+    expect(marked.statusCode, marked.body).toBe(200);
+    expect((await viaKey({ usePinnedData: true })).statusCode).toBe(200);
+    await settle();
+    expect((await inbox(context, builder.cookie, "wf-copied")).total).toBe(0);
+    const metrics = await context.app.inject({ method: "GET", url: "/metrics" });
+    expect(metrics.statusCode).toBe(200);
+    expect(metrics.body).toContain('replay_captures_total{outcome="skipped_sensitive_input"} 2');
+
+    // The same runs from a clean run, and with marked pins left unused, are captured as before.
+    expect((await viaKey({ sourceExecutionId: "run-clean" })).statusCode).toBe(200);
+    expect((await viaKey({ usePinnedData: false })).statusCode).toBe(200);
+    await waitForCaptures(context, builder.cookie, "wf-copied", 2);
+    await settle();
+    expect((await inbox(context, builder.cookie, "wf-copied")).total).toBe(2);
+  });
+
   it("a run that pauses for approval keeps nothing and frees its slot; its resume is never captured", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");

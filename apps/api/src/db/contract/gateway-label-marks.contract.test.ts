@@ -151,6 +151,45 @@ describeStoreContract("store contract: gateway label marks", (ctx) => {
     expect((await store.raiseMcpGatewayLabelMark(raise({ convertUnobserved: true }))).firstRaise).toBe(false);
   });
 
+  it("peeks at a live mark without moving its last call or expiry, and misses an expired one", async () => {
+    const store = ctx.store();
+    expect(await store.peekMcpGatewayLabelMark(KEY, at(0).now)).toEqual({ mark: null, firstRaise: false });
+    await store.raiseMcpGatewayLabelMark(raise({ provenance: ["untrusted_external"], dataClasses: ["pii.email"] }));
+    for (const offsetMs of [1_000, 5_000, IDLE - 1]) {
+      const peeked = await store.peekMcpGatewayLabelMark(KEY, at(offsetMs).now);
+      expect(peeked.firstRaise).toBe(false);
+      expect(peeked.mark).toMatchObject({ ...KEY, provenance: ["untrusted_external"], dataClasses: ["pii.email"], raiseAudited: true });
+      expect(Date.parse(peeked.mark!.lastSeenAt)).toBe(T0);
+      expect(Date.parse(peeked.mark!.expiresAt)).toBe(T0 + IDLE);
+    }
+    // Stored as it was: the peeks touched nothing.
+    const [listed] = await store.listMcpGatewayLabelMarks({ clientId: KEY.clientId }, at(2_000).now);
+    expect(Date.parse(listed!.lastSeenAt)).toBe(T0);
+    expect(Date.parse(listed!.expiresAt)).toBe(T0 + IDLE);
+    // At its expiry it is gone for a peek too (the peek never brought it back to life).
+    expect((await store.peekMcpGatewayLabelMark(KEY, at(IDLE).now)).mark).toBeNull();
+    expect(await store.readMcpGatewayLabelMark(KEY, at(IDLE + 1))).toBeNull();
+  });
+
+  it("converts a live mark's note of untracked results once on a peek, still without moving its last call or expiry", async () => {
+    const store = ctx.store();
+    await store.raiseMcpGatewayLabelMark(raise({ unobserved: true }));
+    const peeks = await Promise.all(Array.from({ length: 6 }, (_, index) => store.peekMcpGatewayLabelMark(KEY, at(1_000 + index).now)));
+    // Exactly one peek converted it; every peek saw it converted.
+    expect(peeks.filter((peek) => peek.firstRaise)).toHaveLength(1);
+    for (const peek of peeks) expect(peek.mark).toMatchObject({ unobserved: false, provenance: ["untrusted_external"], raiseAudited: true });
+    const [listed] = await store.listMcpGatewayLabelMarks({ clientId: KEY.clientId }, at(2_000).now);
+    expect(listed).toMatchObject({ unobserved: false, provenance: ["untrusted_external"], raiseAudited: true });
+    expect(Date.parse(listed!.raisedAt!)).toBeGreaterThanOrEqual(T0 + 1_000);
+    expect(Date.parse(listed!.lastSeenAt)).toBe(T0);
+    expect(Date.parse(listed!.expiresAt)).toBe(T0 + IDLE);
+    // A caller's raise afterwards does not report the first raise again.
+    expect((await store.raiseMcpGatewayLabelMark(raise({ provenance: ["sensitive"], offsetMs: 3_000 }))).firstRaise).toBe(false);
+    // An expired note is not converted (nor brought back).
+    await store.raiseMcpGatewayLabelMark(raise({ toolsetId: "mts_2", unobserved: true }));
+    expect(await store.peekMcpGatewayLabelMark({ ...KEY, toolsetId: "mts_2" }, at(IDLE + 1).now)).toEqual({ mark: null, firstRaise: false });
+  });
+
   it("loses no label when many raises run at once", async () => {
     const store = ctx.store();
     const classes = Array.from({ length: 12 }, (_, index) => `pii.c${index}`);

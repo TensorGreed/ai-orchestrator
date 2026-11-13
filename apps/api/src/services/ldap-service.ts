@@ -22,7 +22,7 @@ export interface LdapProfile {
   attributes: Record<string, unknown>;
 }
 
-interface LdapClientLike {
+export interface LdapClientLike {
   bind(dn: string, password: string): Promise<void>;
   search(
     baseDn: string,
@@ -31,7 +31,7 @@ interface LdapClientLike {
   unbind(): Promise<void>;
 }
 
-interface LdaptsModule {
+export interface LdaptsModule {
   Client: new (options: { url: string }) => LdapClientLike;
 }
 
@@ -41,12 +41,41 @@ const CONFIGURATION_ERROR = (detail: string): Error => {
   return err;
 };
 
+/** Why a directory sign-in was refused: for the server log and the audit entry only, never for the caller. */
+export type LdapSignInRefusal = "user_not_found" | "invalid_credentials" | "directory_error";
+
+/** A refused LDAP sign-in. The route answers the same for every reason, so a caller cannot tell them apart. */
+export class LdapAuthError extends Error {
+  constructor(
+    readonly reason: LdapSignInRefusal,
+    detail: string
+  ) {
+    super(detail);
+    this.name = "LdapAuthError";
+  }
+}
+
+/** The directory's "invalid credentials" (result code 49), as ldapts reports it. */
+function isInvalidCredentials(error: unknown): boolean {
+  const err = error as { name?: unknown; code?: unknown };
+  return err?.name === "InvalidCredentialsError" || err?.code === 49;
+}
+
 function loadLdapts(): LdaptsModule | null {
   try {
     return require("ldapts") as LdaptsModule;
   } catch {
     return null;
   }
+}
+
+/**
+ * A value for an LDAP search filter, escaped as RFC 4515 requires: `*`, `(`, `)`, `\` and NUL become `\2a`, `\28`,
+ * `\29`, `\5c` and `\00`, so the value is always matched literally (never a wildcard or a nested filter). A
+ * backslash before the character (`\*`) is not RFC 4515: ldapts refuses such a filter as an invalid hex escape.
+ */
+export function escapeLdapFilterValue(value: string): string {
+  return value.replace(/[*()\\\0]/g, (char) => `\\${char.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }
 
 function normalizeStringArray(raw: unknown): string[] {
@@ -60,15 +89,21 @@ function normalizeStringArray(raw: unknown): string[] {
 }
 
 export class LdapService {
+  private readonly loadClient: () => LdaptsModule | null;
+
   constructor(
     private readonly store: Store,
-    private readonly config: LdapConfig
-  ) {}
+    private readonly config: LdapConfig,
+    /** Tests: the LDAP client module (default: the optional `ldapts` package, when installed). */
+    options: { loadClient?: () => LdaptsModule | null } = {}
+  ) {
+    this.loadClient = options.loadClient ?? loadLdapts;
+  }
 
   isReady(): boolean {
     if (!this.config.enabled) return false;
     if (!this.config.url || !this.config.baseDn) return false;
-    return Boolean(loadLdapts());
+    return Boolean(this.loadClient());
   }
 
   async authenticate(email: string, password: string): Promise<LdapProfile> {
@@ -78,7 +113,7 @@ export class LdapService {
     if (!this.config.url || !this.config.baseDn) {
       throw CONFIGURATION_ERROR("LDAP_URL and LDAP_BASE_DN must be set");
     }
-    const mod = loadLdapts();
+    const mod = this.loadClient();
     if (!mod) {
       throw CONFIGURATION_ERROR("ldapts package is not installed");
     }
@@ -89,10 +124,7 @@ export class LdapService {
         await client.bind(this.config.bindDn, this.config.bindPassword ?? "");
       }
 
-      const filter = this.config.userFilter.replace(
-        /\{\{email\}\}/g,
-        email.replace(/([\\*()\0])/g, "\\$1")
-      );
+      const filter = this.config.userFilter.replace(/\{\{email\}\}/g, () => escapeLdapFilterValue(email));
       const { searchEntries } = await client.search(this.config.baseDn, {
         filter,
         scope: "sub",
@@ -100,13 +132,13 @@ export class LdapService {
       });
 
       if (!searchEntries.length) {
-        throw new Error("User not found in LDAP directory");
+        throw new LdapAuthError("user_not_found", "User not found in LDAP directory");
       }
 
       const entry = searchEntries[0];
       const userDn = typeof entry.dn === "string" ? entry.dn : "";
       if (!userDn) {
-        throw new Error("LDAP entry is missing dn");
+        throw new LdapAuthError("directory_error", "LDAP entry is missing dn");
       }
 
       // Rebind as the user to verify password.
@@ -114,6 +146,9 @@ export class LdapService {
       const verifyClient = new mod.Client({ url: this.config.url });
       try {
         await verifyClient.bind(userDn, password);
+      } catch (error) {
+        if (isInvalidCredentials(error)) throw new LdapAuthError("invalid_credentials", "The directory refused the password");
+        throw error;
       } finally {
         await verifyClient.unbind().catch(() => undefined);
       }

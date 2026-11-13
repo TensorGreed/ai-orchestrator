@@ -37,7 +37,7 @@ export const TRACKS: Track[] = [
     id: "mcp",
     title: "MCP fundamentals",
     shortTitle: "MCP fundamentals",
-    summary: "What the Model Context Protocol is, how a tool call travels, which transport carries it, OAuth for remote servers and what tool annotations tell you.",
+    summary: "What MCP is, its host, client and server roles, tools, resources and prompts, the transports, OAuth for remote servers, and tool annotations.",
     level: "beginner",
     pages: ["what-is-mcp", "hosts-clients-servers", "tools-resources-prompts", "transports", "authorization", "tool-annotations"],
     next: "/learn/security/mcp-security-risks"
@@ -46,7 +46,7 @@ export const TRACKS: Track[] = [
     id: "agents",
     title: "How AI agents work",
     shortTitle: "AI agents",
-    summary: "The tool-calling loop, how agents stop and fail, supervisor and worker agents, what an agent remembers and where a person should approve.",
+    summary: "The tool-calling loop, when a fixed workflow beats an agent, supervisor and worker agents, memory, long tool lists and human approval.",
     level: "beginner",
     pages: ["what-is-an-ai-agent", "workflows-vs-agents", "supervisor-and-workers", "agent-memory", "too-many-tools", "human-in-the-loop"],
     next: "security"
@@ -55,7 +55,7 @@ export const TRACKS: Track[] = [
     id: "security",
     title: "Agent security",
     shortTitle: "Agent security",
-    summary: "Prompt injection, the OWASP Top 10 for LLM apps, the lethal trifecta, MCP security risks and least privilege for agents.",
+    summary: "Prompt injection, the OWASP Top 10 for LLM apps, the lethal trifecta, MCP risks, least privilege, and keeping personal data out of prompts.",
     level: "intermediate",
     pages: ["prompt-injection", "owasp-llm-top-10", "lethal-trifecta", "mcp-security-risks", "least-privilege-for-agents", "sensitive-data-in-prompts"],
     next: "testing"
@@ -73,7 +73,7 @@ export const TRACKS: Track[] = [
     id: "operations",
     title: "Running AI in production",
     shortTitle: "Running in production",
-    summary: "LLM gateways and MCP gateways, cost caps, self-hosting, audit trails, and identity: SSO, MFA, roles and keys.",
+    summary: "LLM and MCP gateways, cost caps, self-hosting, retention and erasure, audit trails, and identity: SSO, MFA, roles and keys.",
     level: "intermediate",
     pages: ["llm-gateway-vs-mcp-gateway", "llm-cost-control", "self-hosting-ai-agents", "ai-data-retention-and-erasure", "audit-trails-for-agents", "identity-for-ai-platforms"],
     next: "/recipes/"

@@ -372,6 +372,16 @@ describe("db:import re-encryption", () => {
     expect(vaultSecret(KEY_B).openValue("approval_tool_results", copied.approvedToolResultsSealed)).toBe('{"call_1":{"ok":true}}');
   });
 
+  it("re-seals an audit export destination's header values", () => {
+    const sealed = vaultSecret(KEY_A).sealValue("audit-export-headers", '{"Authorization":"Bearer t"}');
+    const config = JSON.stringify({ url: "https://siem.example.com", headersSealed: sealed });
+    const { rows, touched } = reencryptRows("audit_export_destinations", [{ id: "d1", config_json: config }, { id: "d2", config_json: '{"path":"x"}' }], KEY_A_BYTES, KEY_B_BYTES);
+    expect(touched).toBe(1);
+    const out = JSON.parse(String(rows[0]!.config_json)) as { url: string; headersSealed: string };
+    expect(out.url).toBe("https://siem.example.com");
+    expect(vaultSecret(KEY_B).openValue("audit-export-headers", out.headersSealed)).toBe('{"Authorization":"Bearer t"}');
+  });
+
   it("names the table when the source key cannot open a value", () => {
     const secret = vaultSecret(KEY_A).sealValue("guard-token-vault", "x");
     expect(() => reencryptRows("guard_token_vault", [{ token: "t", value_sealed: secret }], KEY_B_BYTES, KEY_A_BYTES)).toThrow(
@@ -401,6 +411,10 @@ describe("db:import re-encryption", () => {
     const app = fs.readFileSync(path.join(API_ROOT, "src", "app.ts"), "utf8");
     expect(app).toContain(`const TOOL_RESULTS_PURPOSE = "${JSON_SEALED_FIELDS[0]!.purpose}";`);
     expect(app).toContain(`${JSON_SEALED_FIELDS[0]!.key}: secretService.sealValue(TOOL_RESULTS_PURPOSE`);
+    const auditExport = fs.readFileSync(path.join(API_ROOT, "src", "services", "audit-export-service.ts"), "utf8");
+    expect(JSON_SEALED_FIELDS[1]).toMatchObject({ table: "audit_export_destinations", column: "config_json" });
+    expect(auditExport).toContain(`export const AUDIT_EXPORT_HEADERS_PURPOSE = "${JSON_SEALED_FIELDS[1]!.purpose}";`);
+    expect(auditExport).toContain(`${JSON_SEALED_FIELDS[1]!.key}: this.sealer.sealValue(AUDIT_EXPORT_HEADERS_PURPOSE`);
   });
 
   /**
@@ -418,6 +432,7 @@ describe("db:import re-encryption", () => {
       handling: "subject_ref_keys.key_sealed and subject_requests.value_sealed (SEALED_COLUMNS); subject_exports (NOT_EXPORTED_TABLES)"
     },
     "app.ts": { calls: 1, handling: "workflow_executions.state_json approvedToolResultsSealed (JSON_SEALED_FIELDS)" },
+    "services/audit-export-service.ts": { calls: 1, handling: "audit_export_destinations.config_json headersSealed (JSON_SEALED_FIELDS)" },
     "services/challenge-store.ts": { calls: 2, handling: "pending_challenges (NOT_EXPORTED_TABLES)" },
     "services/mcp-elicitation-service.ts": { calls: 1, handling: "an answer sent over the cluster bus, never stored" },
     "services/oidc-service.ts": { calls: 1, handling: "the OIDC flow cookie, never stored" },

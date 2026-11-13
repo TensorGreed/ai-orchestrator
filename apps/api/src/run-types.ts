@@ -56,6 +56,11 @@ export interface RunWorkflowExecutionInput {
   usePinnedData?: boolean;
   pinnedData?: Record<string, unknown>;
   nodeOutputs?: Record<string, unknown>;
+  /**
+   * v74 — the run starts from content copied from a run that was sensitive work for content capture (a retry, a run
+   * from a source execution, a single-node run): it exports no content and marks what it writes. Set by the server.
+   */
+  sensitiveInput?: boolean;
   webhookPayload?: Record<string, unknown>;
   variables?: Record<string, unknown>;
   systemPrompt?: string;

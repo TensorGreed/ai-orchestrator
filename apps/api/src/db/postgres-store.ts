@@ -462,6 +462,9 @@ export class PostgresStore implements Store {
   async loadSessionMemorySensitive(...args: Parameters<Store["loadSessionMemorySensitive"]>): ReturnType<Store["loadSessionMemorySensitive"]> {
     return sessions.loadSessionMemorySensitive(this.ctx, ...args);
   }
+  async loadSessionMemoryMarked(...args: Parameters<Store["loadSessionMemoryMarked"]>): ReturnType<Store["loadSessionMemoryMarked"]> {
+    return sessions.loadSessionMemoryMarked(this.ctx, ...args);
+  }
   async saveSessionMemory(...args: Parameters<Store["saveSessionMemory"]>): ReturnType<Store["saveSessionMemory"]> {
     return sessions.saveSessionMemory(this.ctx, ...args);
   }
@@ -709,6 +712,9 @@ export class PostgresStore implements Store {
   }
   async getExecutionRelease(...args: Parameters<Store["getExecutionRelease"]>): ReturnType<Store["getExecutionRelease"]> {
     return release.getExecutionRelease(this.ctx, ...args);
+  }
+  async getExecutionSensitive(...args: Parameters<Store["getExecutionSensitive"]>): ReturnType<Store["getExecutionSensitive"]> {
+    return release.getExecutionSensitive(this.ctx, ...args);
   }
   async listReleasedVersionHashes(...args: Parameters<Store["listReleasedVersionHashes"]>): ReturnType<Store["listReleasedVersionHashes"]> {
     return release.listReleasedVersionHashes(this.ctx, ...args);
@@ -1020,6 +1026,9 @@ export class PostgresStore implements Store {
   // MCP 2026-07-28 (v71) — label marks of stateless gateway callers (postgres/gateway-label-marks.ts).
   async readMcpGatewayLabelMark(...args: Parameters<Store["readMcpGatewayLabelMark"]>): ReturnType<Store["readMcpGatewayLabelMark"]> {
     return gateway_label_marks.readMcpGatewayLabelMark(this.ctx, ...args);
+  }
+  async peekMcpGatewayLabelMark(...args: Parameters<Store["peekMcpGatewayLabelMark"]>): ReturnType<Store["peekMcpGatewayLabelMark"]> {
+    return gateway_label_marks.peekMcpGatewayLabelMark(this.ctx, ...args);
   }
   async raiseMcpGatewayLabelMark(...args: Parameters<Store["raiseMcpGatewayLabelMark"]>): ReturnType<Store["raiseMcpGatewayLabelMark"]> {
     return gateway_label_marks.raiseMcpGatewayLabelMark(this.ctx, ...args);

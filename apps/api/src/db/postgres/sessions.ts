@@ -220,6 +220,23 @@ export async function loadSessionMemoryLabels(ctx: PgContext, namespace: string,
   return row ? parseStoredDataLabels(row.labels_json) : null;
 }
 
+/** v74 — the messages and loadSessionMemorySensitive's answer, from one SELECT. */
+export async function loadSessionMemoryMarked(ctx: PgContext, namespace: string, sessionId: string): Promise<{ messages: ChatMessage[]; sensitive: boolean }> {
+  const row = await ctx.queryOne<{ messages_json: string; sensitive: number | string | null; labels_json: string | null }>(
+    `SELECT messages_json, sensitive, labels_json FROM session_memory WHERE namespace = $1 AND session_id = $2`,
+    [namespace, sessionId]
+  );
+  if (!row) return { messages: [], sensitive: false };
+  let messages: ChatMessage[] = [];
+  try {
+    const parsed = JSON.parse(toStr(row.messages_json));
+    if (Array.isArray(parsed)) messages = parsed as ChatMessage[];
+  } catch {
+    messages = [];
+  }
+  return { messages, sensitive: Number(row.sensitive ?? 0) === 1 || labelsMarkSensitive(parseStoredDataLabels(row.labels_json)) };
+}
+
 /** v73 — the memory was written by sensitive work, or its stored labels say sensitive. False when there is none. */
 export async function loadSessionMemorySensitive(ctx: PgContext, namespace: string, sessionId: string): Promise<boolean> {
   const row = await ctx.queryOne<{ sensitive: number | string | null; labels_json: string | null }>(

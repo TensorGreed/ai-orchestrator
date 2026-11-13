@@ -32,7 +32,7 @@ A release gate is not an approval step, though it can include one. Approval asks
 
 ## In L2M
 
-Optionally, under **Evaluations → Release gates**, a workflow's new version reaches production only after a [replay job](/product/golden-sets#replay-jobs) of that exact saved version passed over its <Term id="golden-set">golden sets</Term>. By default it needs every case to pass, with no regressions and at least three cases. Only an admin can override a blocked gate, with a reason that is audited. Rolling back to a version that already shipped skips the gate ([release gate](/product/release-gate#the-gate)).
+Optionally, under **Evaluations → Release gates**, you can make publishing a workflow version depend on a passed [replay job](/product/golden-sets#replay-jobs) over its <Term id="golden-set">golden sets</Term>, run against that same saved version. The default bar is every case passing, no regressions and at least three cases. A blocked gate can be overridden by an admin only, who must give a reason; the override is audited. Rolling back to a version that already shipped skips the gate ([release gate](/product/release-gate#the-gate)).
 
 ## Further reading
 

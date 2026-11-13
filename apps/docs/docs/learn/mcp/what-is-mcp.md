@@ -35,7 +35,7 @@ The specification names three roles:
 <figcaption>One host, one client per server. Servers are not meant to see each other or the whole conversation: the host decides what each one receives.</figcaption>
 </figure>
 
-The split matters for security. The specification's design principles say servers should not be able to read the whole conversation or "see into" other servers. The host sits in the middle and keeps those boundaries.
+The split matters for security. The specification's design principles say servers should not be able to read the whole conversation or "see into" other servers. The host sits in the middle and keeps those boundaries. [MCP hosts, clients and servers](/learn/mcp/hosts-clients-servers) goes further: local and remote servers, and where each credential lives.
 
 ## What a server offers: tools, resources, prompts
 
@@ -48,6 +48,8 @@ A server can offer three kinds of things. The specification separates them by wh
 | **Prompts** | The user | Templates the person picks | A "summarise this incident" command |
 
 Tools get the most attention, because they are how an agent acts. An <Term id="mcp-tool">MCP tool</Term> has a name, a description and a JSON Schema for its input. It can also declare an output schema, and hints about its behaviour, such as whether it only reads. The specification tells clients to treat those hints as untrusted unless the server is trusted.
+
+[MCP tools, resources and prompts](/learn/mcp/tools-resources-prompts) explains when a server should use each one, what output schemas add, and how tool errors differ from protocol errors.
 
 In the other direction, a client can offer features to the server. In the 2025-11-25 revision these are sampling (the server asks the client's model for a completion), elicitation (the server asks the person a question) and roots (the client tells the server which folders it may work in).
 

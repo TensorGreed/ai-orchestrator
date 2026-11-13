@@ -260,7 +260,9 @@ export const SEALED_COLUMNS: Record<string, { column: string; purpose: string }>
  * opened is dropped and the agent asks again, so a key change without re-sealing could run an approved tool twice.
  */
 export const JSON_SEALED_FIELDS: ReadonlyArray<{ table: string; column: string; key: string; purpose: string }> = [
-  { table: "workflow_executions", column: "state_json", key: "approvedToolResultsSealed", purpose: "approval_tool_results" }
+  { table: "workflow_executions", column: "state_json", key: "approvedToolResultsSealed", purpose: "approval_tool_results" },
+  // An http audit export destination's header values (audit-export-service.ts AUDIT_EXPORT_HEADERS_PURPOSE).
+  { table: "audit_export_destinations", column: "config_json", key: "headersSealed", purpose: "audit-export-headers" }
 ];
 
 class SqliteAdapter implements BackupAdapter {

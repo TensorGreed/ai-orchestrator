@@ -174,7 +174,7 @@ The `signature` on the manifest response is an Ed25519 signature over the canoni
 
 ## Run audit events and restarts
 
-Run actions a person starts are written to the audit log (category `execution`, resource type `workflow`, `metadata.executionId` set):
+Run actions a person starts are written to the [audit log](./audit-log.md) (category `execution`, resource type `workflow`, `metadata.executionId` set):
 
 | Event | When |
 | --- | --- |
@@ -184,6 +184,6 @@ Run actions a person starts are written to the audit log (category `execution`, 
 | `execution.cancel_requested` | A person cancels a running or waiting run. When the run was still executing, it also ends with `execution.canceled` from the system. |
 | `execution.audit_bundle.export` | A run's audit bundle is downloaded. |
 
-Run history cannot be deleted one run at a time, so there is no per-run delete event; retention pruning is written to the server log, not the audit log.
+There is no `execution.*` event for a deleted run. A data-subject deletion request that removes runs is audited as `data_subject.deleted` with counts per kind; the [data-subject lookup](../product/production-capture.md#data-subject-lookup) delete writes `replay.find_subject.deleted` rows naming each deleted row's id; and a start-up or scheduled retention purge that deleted rows writes one `retention.purged` entry with counts (never row contents).
 
 When the server restarts, runs still recorded as running are marked `error` with "interrupted: the server stopped while this run was in progress", and the count is logged. Runs waiting for approval are kept, and so are runs the job queue still owns. With `HA_ENABLED=true` or a Postgres database, only runs older than the longest a run may last (24 hours) plus a minute are touched, because another instance may own a newer run, so on those setups orphaned runs are cleaned up after up to about 24 hours. Webhook-only instances (`WORKER_MODE=webhook`) never reconcile. `QUEUE_STUCK_JOB_TIMEOUT_MS` (default `600000`) is raised to the run time limit plus a minute when set lower, so a job that is still executing is not picked up twice. A job that carries its own `executionTimeoutMs` is not treated as stuck before that limit (up to 24 hours) plus a minute has passed. The setting is validated at startup.

@@ -17,7 +17,7 @@ guide: [/learn/operations/llm-gateway-vs-mcp-gateway]
 Why that beats one big server:
 
 - **Less to misuse.** A support agent's endpoint holds the support tools, not the database admin tools the same upstream server also offers. That is <Term id="least-privilege">least privilege</Term> applied to the tool list.
-- **Fewer wrong picks and fewer tokens.** An agent usually sends its tool definitions to the model with every request, where they use part of the <Term id="context-window">context window</Term>. A short list is cheaper, and easier for the model to choose from, than a long one.
+- **Fewer wrong picks and fewer tokens.** An agent usually sends its tool definitions to the model with every request, where they use part of the <Term id="context-window">context window</Term>. A short list is cheaper, and easier for the model to choose from, than a long one. See [too many tools](/learn/agents/too-many-tools).
 - **One credential per purpose.** A client's token can be limited to the toolsets it may call, and revoking it affects nothing else.
 
 ## Example

@@ -10,6 +10,8 @@ When someone asks what you hold about them, an admin (or a user with the `data_s
 downloaded once, or, after you confirm what it found, deletes it. Nothing here is on by default and a deployment that
 never uses it behaves exactly as before.
 
+Concepts: [AI data retention, erasure requests and legal holds](/learn/operations/ai-data-retention-and-erasure).
+
 Two parts work together:
 
 - **Subject references** (optional, per workflow): the values that identify the person a run is about, stored as keyed
@@ -86,13 +88,15 @@ matches are left out of the export and counted in its manifest (`possibleMatches
 | Runs (input, output, node results, custom data, error) | yes | yes |
 | Paused runs | | yes |
 | Approval requests | | yes |
-| Agent memory sessions and artifacts | yes (`session_id`) | yes |
+| Agent memory sessions and artifacts | yes (`session_id`) | yes (messages and artifacts; not the session's cached tool results) |
 | MCP cassettes | | yes |
 | Golden and captured runs, golden-set cases, eval and replay results | | yes |
 
 **Not covered** (the manifest lists these too): logs, metrics, traces and log-streaming destinations; the audit log (a
 staff export lists the person's own entries); tool-call telemetry and rule events (they hold summaries and masked
-evidence only); usage and cost events; knowledge bases; backups already written; model providers and MCP servers.
+evidence only); usage and cost events; signed run manifests already generated (they hold rendered prompts; an
+[audit bundle](./audit-bundles.md) exports one run's); knowledge bases; backups already written; model providers and MCP
+servers.
 
 ### How it runs
 
@@ -155,7 +159,8 @@ run that was still stopping.
 | A run | The run, its paused state, tool-call telemetry, rule events, MCP cassettes, approval requests, elicitations, queue jobs (and dead letters), and its subject references. |
 | Usage of a deleted run | **Kept**, with `user_id` and `user_email` cleared: tokens and cost stay, so totals, budgets and spend reports do not change. |
 | Approval request, paused run, MCP cassette | The row. |
-| Agent memory session or artifact | The row. |
+| Agent memory session | The session's messages, its artifacts, its cached tool results (the session tool cache) and its subject references. |
+| Agent memory artifact | The artifact. |
 | Golden or captured run, golden-set case, eval or replay result | The row, as the data-subject lookup deletes it. Release-gate jobs whose evidence it removed are marked stale. |
 | Reversible tokens | The vault entries of tokens that appear in the deleted rows and stand for **this person's** value. A later reveal of such a token finds nothing. Tokens of other people's values stay. While any legal hold is active the entries wait (the same token may stand in a held row the request did not find) and are deleted when the hold is released. |
 
@@ -198,7 +203,9 @@ before the deletion does not bring the data back: they print `re-applied N erasu
 
 **Not covered** by a deletion: logs, metrics, traces and log-streaming destinations; backups already written (until
 restored, see above); model providers, MCP servers and other systems the runs sent data to; knowledge bases; tokens
-that are not in the person's rows, and format-preserving tokens.
+that are not in the person's rows, and format-preserving tokens; a signed run manifest already generated for a deleted
+run (it holds rendered prompts and is pruned once it is older than `AUDIT_LOG_RETENTION_DAYS`, its run being gone; never
+when that is `0`).
 
 ## Due dates and notices
 

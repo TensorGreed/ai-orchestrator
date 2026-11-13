@@ -3240,6 +3240,7 @@ function StudioApp() {
       runMode?: "workflow" | "single_node";
       usePinnedData?: boolean;
       nodeOutputs?: Record<string, unknown>;
+      nodeOutputsExecutionId?: string;
       system_prompt?: string;
       user_prompt?: string;
       record?: boolean;
@@ -3259,6 +3260,8 @@ function StudioApp() {
     if (runMode === "single_node") {
       payload.runMode = "single_node";
       payload.nodeOutputs = extractNodeOutputsFromExecution(executionResult);
+      // The run they come from, so the server treats them as that run's content (sensitive work stays marked).
+      if (executionResult?.executionId) payload.nodeOutputsExecutionId = executionResult.executionId;
     }
 
     if (!promptNodeSources.systemPromptFromNodes) {
@@ -4078,7 +4081,7 @@ function StudioApp() {
         setBusy(true);
         setError(null);
         const saved = currentWorkflowExists ? currentWorkflow : await persistWorkflow();
-        const response = await saveWorkflowPin(saved.id, nodeId, nodeResult.output);
+        const response = await saveWorkflowPin(saved.id, nodeId, nodeResult.output, executionResult?.executionId);
         setCurrentWorkflow((current) =>
           current.id === saved.id
             ? {

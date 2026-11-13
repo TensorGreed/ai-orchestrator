@@ -5,7 +5,7 @@ topic: mcp
 definition: "The part of an AI application that holds one connection to one MCP server: it negotiates the protocol version and capabilities, then sends that server's requests and receives its replies."
 description: "An MCP client is the connection a host app opens to one MCP server. What it negotiates, what it must check, and how it differs from the host."
 related: [mcp-host, mcp-server, model-context-protocol, mcp-session]
-guide: [/learn/mcp/what-is-mcp]
+guide: [/learn/mcp/hosts-clients-servers, /learn/mcp/what-is-mcp]
 ---
 
 # MCP client

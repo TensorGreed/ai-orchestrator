@@ -951,9 +951,11 @@ export interface KnowledgeBaseStore {
       metadata?: Record<string, unknown> | null;
       vector: number[];
     }>;
+    /** v74 — the run adding them is sensitive work for content capture: the chunks are marked. */
+    sensitive?: boolean;
   }): { inserted: number; dimensions: number } | Promise<{ inserted: number; dimensions: number }>;
 
-  /** Read every chunk + vector for a KB; caller scores in JS. */
+  /** Read every chunk + vector for a KB; caller scores in JS. `sensitive` (v74): present only when the chunk is marked. */
   listKnowledgeBaseChunks(knowledgeBaseId: string): Array<{
     id: string;
     sourceId: string | null;
@@ -961,6 +963,7 @@ export interface KnowledgeBaseStore {
     content: string;
     metadata: Record<string, unknown> | null;
     vector: number[];
+    sensitive?: boolean;
   }> | Promise<Array<{
     id: string;
     sourceId: string | null;
@@ -968,6 +971,7 @@ export interface KnowledgeBaseStore {
     content: string;
     metadata: Record<string, unknown> | null;
     vector: number[];
+    sensitive?: boolean;
   }>>;
 
   getKnowledgeBase(id: string): { id: string; embedderId: string; dimensions: number } | null | Promise<{ id: string; embedderId: string; dimensions: number } | null>;
@@ -990,6 +994,7 @@ export interface KnowledgeBaseStore {
     content: string;
     metadata: Record<string, unknown> | null;
     score: number;
+    sensitive?: boolean;
   }> | Promise<Array<{
     id: string;
     sourceId: string | null;
@@ -997,7 +1002,14 @@ export interface KnowledgeBaseStore {
     content: string;
     metadata: Record<string, unknown> | null;
     score: number;
+    sensitive?: boolean;
   }>>;
+}
+
+/** v74 — what a knowledge base search tells its caller about the chunks it returned. */
+export interface KnowledgeBaseReadObserver {
+  /** Called once per search with whether any chunk it returned was written by sensitive work. */
+  onRetrieved(sensitive: boolean): void;
 }
 
 /**
@@ -1047,10 +1059,24 @@ export interface HybridSearchOptions {
 export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
   readonly id = "knowledge-base";
 
+  /** v74 — ids of marked chunks this adapter has read, so a search can tell whether what it returns holds one. */
+  private readonly sensitiveChunkIds = new Set<string>();
+
   constructor(
     private readonly store: KnowledgeBaseStore,
-    private readonly knowledgeBaseId: string
+    private readonly knowledgeBaseId: string,
+    private readonly observer?: KnowledgeBaseReadObserver
   ) {}
+
+  private noteRows(rows: ReadonlyArray<{ id: string; sensitive?: boolean }>): void {
+    for (const row of rows) if (row.sensitive === true) this.sensitiveChunkIds.add(row.id);
+  }
+
+  /** Tells the observer whether the documents a search hands on hold a marked chunk; returns them unchanged. */
+  private retrieved(documents: ConnectorDocument[]): ConnectorDocument[] {
+    this.observer?.onRetrieved(documents.some((document) => typeof document.id === "string" && this.sensitiveChunkIds.has(document.id)));
+    return documents;
+  }
 
   async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
     if (documents.length === 0) return; // append-only; nothing to do
@@ -1080,9 +1106,14 @@ export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
   }
 
   async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    return this.retrieved(await this.vectorSearch(query, topK, embedder));
+  }
+
+  private async vectorSearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
     const queryVector = await embedder.embed(query);
     const chunks = await this.store.listKnowledgeBaseChunks(this.knowledgeBaseId);
     if (chunks.length === 0) return [];
+    this.noteRows(chunks);
     return chunks
       .map((chunk) => ({
         chunk,
@@ -1112,12 +1143,17 @@ export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
    * implement bm25 (graceful degradation for non-KB stores).
    */
   async bm25Search(query: string, topK: number): Promise<ConnectorDocument[]> {
+    return this.retrieved(await this.lexicalSearch(query, topK));
+  }
+
+  private async lexicalSearch(query: string, topK: number): Promise<ConnectorDocument[]> {
     if (!this.store.bm25SearchKnowledgeBase) return [];
     const rows = await this.store.bm25SearchKnowledgeBase({
       knowledgeBaseId: this.knowledgeBaseId,
       query,
       topK
     });
+    this.noteRows(rows);
     return rows.map((r) => ({
       id: r.id,
       text: r.content,
@@ -1152,13 +1188,16 @@ export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
   ): Promise<ConnectorDocument[]> {
     const candidates = options.candidatesPerRanker ?? Math.max(20, topK * 4);
     const [vectorResults, bm25Results] = await Promise.all([
-      this.similaritySearch(query, candidates, embedder),
-      this.bm25Search(query, candidates)
+      this.vectorSearch(query, candidates, embedder),
+      this.lexicalSearch(query, candidates)
     ]);
     if (bm25Results.length === 0) {
-      return vectorResults.slice(0, topK);
+      return this.retrieved(vectorResults.slice(0, topK));
     }
+    return this.retrieved(this.fuse(vectorResults, bm25Results, topK, options));
+  }
 
+  private fuse(vectorResults: ConnectorDocument[], bm25Results: ConnectorDocument[], topK: number, options: HybridSearchOptions): ConnectorDocument[] {
     const fused = reciprocalRankFusion<ConnectorDocument>(
       [
         { items: vectorResults, weight: options.vectorWeight ?? 1 },

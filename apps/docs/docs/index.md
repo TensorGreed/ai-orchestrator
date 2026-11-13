@@ -19,7 +19,7 @@ hero:
       link: https://github.com/TensorGreed/ai-orchestrator
 features:
   - title: MCP-first
-    details: Wire any Model Context Protocol server in as an agent tool. Schemas are compacted, tools are shortlisted by prompt relevance, and full outputs are cached across multi-turn sessions. Expose your own workflows back out as MCP tools that other agents invoke.
+    details: Wire any Model Context Protocol server in as an agent tool. Tool schemas are compacted, and full outputs are cached across multi-turn sessions. Expose your own workflows back out as MCP tools that other agents invoke.
   - title: Multi-agent Swarm
     details: Compose Supervisor → Worker hierarchies via dedicated attachment ports. Workers become synthetic tools to the parent, recursively. Each worker brings its own model, tools and memory.
   - title: VS Code agent surface

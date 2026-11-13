@@ -500,6 +500,11 @@ export interface Store extends AiGatewayStore, SubjectStore {
    */
   setExecutionTraceId(executionId: string, traceId: string, options?: { fence?: QueueClaimFence }): Promise<boolean>;
   getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null>;
+  /**
+   * v74 — whether content copied from this run is sensitive: its record is marked, or its run never wrote a final
+   * answer (see saveExecutionHistory's `sensitive`). Null when there is no record.
+   */
+  getExecutionSensitive(executionId: string): Promise<boolean | null>;
   /** The hashes `version` had when it was released (any release, rollbacks included). */
   listReleasedVersionHashes(workflowId: string, version: number): Promise<string[]>;
   /** The release gates that are switched on. */
@@ -862,6 +867,13 @@ export interface Store extends AiGatewayStore, SubjectStore {
    */
   readMcpGatewayLabelMark(key: McpGatewayLabelMarkKey, at: { now: string; expiresAt: string }): Promise<McpGatewayLabelMark | null>;
   /**
+   * v71 — the caller's live mark, read for one of the client's legacy sessions without counting as the caller's
+   * activity: its last call and expiry stay as stored. A live mark that noted untracked results is converted in the
+   * same step (atomically, row lock on Postgres), still without moving them; `firstRaise` as for a raise. Null mark
+   * when there is none or it expired.
+   */
+  peekMcpGatewayLabelMark(key: McpGatewayLabelMarkKey, now: string): Promise<{ mark: McpGatewayLabelMark | null; firstRaise: boolean }>;
+  /**
    * v71 — merges a call's labels into the caller's mark (created when missing; an expired mark starts clean) and moves
    * its expiry on, atomically across instances (row lock on Postgres). Labels never leave a mark. `firstRaise` is true
    * for exactly one call per mark: the one that first raised it to outside content or sensitive data.
@@ -1046,6 +1058,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
       metadata?: Record<string, unknown> | null;
       vector: number[];
     }>;
+    /** v74 — added by sensitive work: the chunks are marked (`sensitive` on the rows read back). */
+    sensitive?: boolean;
   }): Promise<{ inserted: number; dimensions: number }>;
   /**
    * Pull every chunk for a KB. For Phase 9.1's hand-rolled cosine search
@@ -1074,6 +1088,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
     content: string;
     metadata: Record<string, unknown> | null;
     score: number;
+    /** v74 — present only when the chunk was written by sensitive work. */
+    sensitive?: true;
   }>>;
   /** Preview chunks for the UI — content + metadata, no vectors. */
   listKnowledgeBaseChunkPreviews(input: { knowledgeBaseId: string; limit?: number; sourceId?: string }): Promise<Array<{
@@ -1862,6 +1878,11 @@ export interface Store extends AiGatewayStore, SubjectStore {
    */
   loadSessionMemorySensitive(namespace: string, sessionId: string): Promise<boolean>;
   /**
+   * v74 — loadSessionMemory and loadSessionMemorySensitive in one SELECT, so a run reads the mark with the messages at
+   * no extra query (whether or not content capture is on).
+   */
+  loadSessionMemoryMarked(namespace: string, sessionId: string): Promise<{ messages: ChatMessage[]; sensitive: boolean }>;
+  /**
    * Saves a session's memory. `labels` (Phase 16) are given only while the
    * run tracks labels and are merged with the labels already stored; a save
    * without them (an untracked run) keeps the stored labels and adds
@@ -2023,6 +2044,14 @@ export interface Store extends AiGatewayStore, SubjectStore {
     nodeResultsJson?: unknown;
     customData?: unknown;
     error?: string;
+    /**
+     * v74 — whether the run was sensitive work for content capture: `true` marks the record, and the mark stays through
+     * later writes; `false` is the run's own final answer that it was not; `"pending"` is a write made before the run
+     * finished (a progress write), which counts as marked until the run's final write says otherwise, so a record a
+     * cancel or a reconcile ends fails closed. Left out, the stored value is kept (0 on a new record). Not part of the
+     * record the API returns; read it with getExecutionSensitive.
+     */
+    sensitive?: boolean | "pending";
   }, options?: {
     /**
      * A progress write: refused (nothing changes) when the run's record is already finished, i.e. `success`,
@@ -2569,11 +2598,15 @@ export interface Store extends AiGatewayStore, SubjectStore {
    * `unverifiable` (present only when not empty) lists rows whose content cannot be checked: either a row written
    * before audit text was normalised, or an edit. Each is named by its chain position and hashes; its id and createdAt
    * are as stored (unverified). `ok` is false while it is not empty. The rule is in db/audit-chain.ts.
+   *
+   * `anchor` (present when retention deleted the oldest rows) names the first row left, its prev_hash and the
+   * retention checkpoint that records them.
    */
   verifyAuditChain(): Promise<{
     ok: boolean;
     rowsChecked: number;
     firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
+    anchor?: { firstId: string; prevHash: string; checkpointId: string };
     unverifiable?: Array<{ id: string; createdAt: string; position: number; prevHash: string; entryHash: string; reason: string }>;
   }>;
   listAuditLogs(filter?: {
@@ -2611,6 +2644,11 @@ export interface Store extends AiGatewayStore, SubjectStore {
     page: number;
     pageSize: number;
   }>;
+  /**
+   * Deletes the oldest audit rows in insertion order, up to the first one created at or after `before` (so the chain
+   * keeps no gap), and appends a retention checkpoint recording the anchor hash (db/audit-chain.ts, "Retention").
+   * Returns how many rows it deleted.
+   */
   pruneAuditLogs(options: { before: string }): Promise<number>;
   listLogStreamDestinations(): Promise<LogStreamDestinationRecord[]>;
   getLogStreamDestination(id: string): Promise<LogStreamDestinationRecord | null>;
@@ -3041,4 +3079,9 @@ export interface Store extends AiGatewayStore, SubjectStore {
     cases: Array<{ recording: ReplayRecordingInsert; fixture: Omit<Parameters<Store["createEvalFixture"]>[0], "datasetId" | "recordingId"> }>;
     limits: ReplayRecordingLimits;
   }): Promise<{ recordingIds: string[] } | ReplayRecordingRefusal>;
+}
+
+/** v74 — the stored `execution_history.sensitive` value of a write: 1 marked, 2 not finished, 0 otherwise. */
+export function executionSensitiveValue(sensitive: boolean | "pending" | undefined): number {
+  return sensitive === true ? 1 : sensitive === "pending" ? 2 : 0;
 }

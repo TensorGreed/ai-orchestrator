@@ -268,6 +268,7 @@ for (const kind of kinds) {
       const manifest = JSON.parse(files["manifest.json"]!) as Record<string, unknown>;
       expect(manifest).toMatchObject({ format: "l2m-subject-export", requestId: created.id, counts: { run: 1 }, truncated: false, foundByReference: 1 });
       expect((manifest.notCovered as string[])[0]).toContain("search of stored data was turned off");
+      expect(manifest.notCovered).toEqual(expect.arrayContaining([expect.stringContaining("Signed run manifests")]));
       expect((manifest.searched as { storedData: boolean }).storedData).toBe(false);
       const runs = jsonl(files["run.jsonl"]);
       expect(runs.map((row) => row.id)).toEqual(["run-1"]);

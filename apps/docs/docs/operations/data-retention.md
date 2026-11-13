@@ -9,6 +9,8 @@ L2M deletes old data by age on a schedule. Each kind of data has its own setting
 set, an instance deletes exactly what it deleted before 13.3, and nothing more. One setting that did nothing before is
 applied now, and older `.env` files set it: see [Upgrading: usage retention](#upgrading-usage-retention) first.
 
+Concepts: [AI data retention, erasure requests and legal holds](/learn/operations/ai-data-retention-and-erasure).
+
 Admins see the values in effect, what is due now and the latest purges under **Settings > Access control > Data
 protection** (read-only), or from `GET /api/admin/retention`. A project can keep some kinds of data for a different
 time than the deployment: see [Per-project retention](#per-project-retention).
@@ -33,7 +35,7 @@ the hold is released.
 | Eval runs | `EVAL_RUN_RETENTION_DAYS` | 90 | Finished eval runs and replay jobs with their results. The newest run of every set stays. |
 | Captured runs | `REPLAY_CAPTURE_RETENTION_DAYS` | 14 | Captured production runs nobody promoted. |
 | Rule simulations | fixed | 30 | Content rules simulations and their replay jobs. |
-| Audit log | `AUDIT_LOG_RETENTION_DAYS` | 365 | Audit entries, cached run manifests whose run is gone, and ended sign-in sessions. |
+| Audit log | `AUDIT_LOG_RETENTION_DAYS` | 365 | [Audit entries](../security/audit-log.md), cached run manifests whose run is gone, and ended sign-in sessions. |
 | Log stream deliveries | `LOG_STREAM_EVENT_RETENTION_DAYS` | 14 | The delivery history of log streams (not what the destinations keep). |
 | Workflow versions | `WORKFLOW_VERSION_RETENTION` | 100 | A count, not an age: saved versions kept per workflow. |
 
