@@ -1606,7 +1606,8 @@ export async function createApp(
         }
       : {}),
     scrub: (() => {
-      if (!telemetrySettings.enabled) return undefined;
+      // Tracing, or the MCP metrics of a metrics-only setup (tool names on mcp.client.operation.duration).
+      if (!telemetrySettings.enabled && !telemetrySettings.metricsEndpoint) return undefined;
       const scrubber = new SecretScrubber([
         ...environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
         ...headerSecretValues(telemetrySettings.headers)
@@ -1976,8 +1977,9 @@ export async function createApp(
       toolReadOnlyOverride: readOnlyMarks.lookup
     },
     // Tracing (only while it is on): a CLIENT span per MCP operation, and trace context sent to MCP servers in
-    // `_meta` and HTTP headers unless L2M_OTEL_PROPAGATE_TO_MCP=false or the server's connection opts out.
-    ...(telemetry.instrumentation.enabled ? { instrument: telemetry.instrumentation } : {}),
+    // `_meta` and HTTP headers unless L2M_OTEL_PROPAGATE_TO_MCP=false or the server's connection opts out. With only a
+    // metrics endpoint each operation is measured (mcp.client.operation.duration) with no span and no trace context.
+    ...(telemetry.mcpInstrumentation.enabled ? { instrument: telemetry.mcpInstrumentation } : {}),
     // Phase 10.8 — snapshot mock servers read accepted snapshots and cassettes from the store.
     snapshots: {
       loadSnapshot: async (sourceServerId) => {
@@ -12388,8 +12390,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     limiter: gatewayClientLimiter,
     network: networkControls,
     // A SERVER span per gateway request while tracing is on; `_meta` trace context follows the inbound trust rule.
-    ...(telemetry.instrumentation.enabled
-      ? { tracing: { instrumentation: telemetry.instrumentation, trustInbound: telemetrySettings.trustInbound } }
+    // With only a metrics endpoint each request is measured (mcp.server.operation.duration) with no span.
+    ...(telemetry.mcpInstrumentation.enabled
+      ? { tracing: { instrumentation: telemetry.mcpInstrumentation, trustInbound: telemetrySettings.trustInbound } }
       : {}),
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
