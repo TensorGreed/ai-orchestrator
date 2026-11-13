@@ -8805,10 +8805,12 @@ export async function executeWorkflow(
         () => true
       ));
     const sensitivity = new SessionSensitivity({
+      // As runWithContentExclusion decides: with capture off, reads of marked rows add no label (rows are still marked).
+      contentCapture: dependencies.instrument?.capturesContent === true && typeof dependencies.instrument.withContentExclusion === "function",
       declared,
       workSensitive: () => redactor.active || labelsMarkSensitive(currentLabelScope()?.inputLabels()),
       readBefore: request.resumeState?.sensitiveSessionRead === true,
-      // A read of a marked row is sensitive data in the reading node's labels, as a declared source is.
+      // With capture on, a read of a marked row is sensitive data in the reading node's labels, as a declared source is.
       onSensitiveRead: () => currentLabelScope()?.add(SENSITIVE_LABELS)
     });
     const tracking = { ...redacting, ...sensitivityTrackingSessionStores(redacting, sensitivity) };

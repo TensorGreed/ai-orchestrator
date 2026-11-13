@@ -69,7 +69,7 @@ describe("SessionSensitivity and the tracking stores", () => {
   it("leaves unmarked reads and writes alone: arguments pass through exactly, the declared check runs once, on the first write", async () => {
     const backing = memoryStores({ memory: { s1: { messages: [{ role: "user", content: "hi" }] } } });
     let declaredCalls = 0;
-    const sensitivity = new SessionSensitivity({ declared: async () => (declaredCalls += 1, false), workSensitive: () => false });
+    const sensitivity = new SessionSensitivity({ contentCapture: true, declared: async () => (declaredCalls += 1, false), workSensitive: () => false });
     const stores = sensitivityTrackingSessionStores(backing.stores, sensitivity);
     expect(await stores.memoryStore!.loadMessages("ns", "s1")).toEqual([{ role: "user", content: "hi" }]);
     expect(declaredCalls).toBe(0);
@@ -86,7 +86,7 @@ describe("SessionSensitivity and the tracking stores", () => {
 
   it("a read of marked memory makes the run sensitive_memory and marks everything it writes after", async () => {
     const backing = memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card 4242" }], sensitive: true } } });
-    const sensitivity = new SessionSensitivity({ declared: async () => false, workSensitive: () => false });
+    const sensitivity = new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => false });
     const stores = sensitivityTrackingSessionStores(backing.stores, sensitivity);
     await stores.memoryStore!.loadMessages("ns", "s1");
     expect(sensitivity.exclusion()).toBe("sensitive_memory");
@@ -103,7 +103,7 @@ describe("SessionSensitivity and the tracking stores", () => {
   it("notes marked or sensitive-labelled tool cache rows (list and get) and artifacts", async () => {
     for (const read of ["list", "get", "labels", "artifact"] as const) {
       const backing = memoryStores();
-      const sensitivity = new SessionSensitivity({ declared: async () => false, workSensitive: () => false });
+      const sensitivity = new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => false });
       const stores = sensitivityTrackingSessionStores(backing.stores, sensitivity);
       if (read === "artifact") {
         await backing.stores.sessionArtifactStore.saveArtifact({ namespace: "ns", sessionId: "s", artifactKey: "a", value: 1, sensitive: true });
@@ -124,7 +124,7 @@ describe("SessionSensitivity and the tracking stores", () => {
     }
     // An unmarked row with plain labels notes nothing.
     const backing = memoryStores();
-    const sensitivity = new SessionSensitivity({ declared: async () => false, workSensitive: () => false });
+    const sensitivity = new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => false });
     const stores = sensitivityTrackingSessionStores(backing.stores, sensitivity);
     await backing.stores.toolDataStore.saveToolCall({ namespace: "ns", sessionId: "s", toolName: "t", args: {}, output: 1, labels: USER });
     await stores.toolDataStore!.listToolCalls({ namespace: "ns", sessionId: "s" });
@@ -145,12 +145,12 @@ describe("SessionSensitivity and the tracking stores", () => {
         }
       }
     };
-    const plain = new SessionSensitivity({ declared: async () => false, workSensitive: () => false });
+    const plain = new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => false });
     await sensitivityTrackingSessionStores(legacy, plain).memoryStore!.loadMessages("ns", "s1");
     expect(labelReads).toBe(0);
 
     let labelled = 0;
-    const byLabels = new SessionSensitivity({ declared: async () => false, workSensitive: () => false, onSensitiveRead: () => (labelled += 1) });
+    const byLabels = new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => false, onSensitiveRead: () => (labelled += 1) });
     byLabels.noteRead(true, false);
     expect(byLabels.readSensitive).toBe(true);
     expect(byLabels.exclusion()).toBe("sensitive_memory");
@@ -164,16 +164,16 @@ describe("SessionSensitivity and the tracking stores", () => {
   it("fails closed: a mark that cannot be read counts as marked, a declared check that fails marks writes", async () => {
     const backing = memoryStores({ memory: { s1: { messages: [{ role: "user", content: "x" }] } } });
     const broken = { ...backing.stores, memoryStore: { ...backing.stores.memoryStore, loadSensitive: async () => Promise.reject(new Error("db down")) } };
-    const read = new SessionSensitivity({ declared: async () => false, workSensitive: () => false });
+    const read = new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => false });
     await sensitivityTrackingSessionStores(broken, read).memoryStore!.loadMessages("ns", "s1");
     expect(read.readSensitive).toBe(true);
 
-    expect(await new SessionSensitivity({ declared: async () => Promise.reject(new Error("registry down")), workSensitive: () => false }).writeSensitive()).toBe(true);
-    expect(await new SessionSensitivity({ declared: async () => false, workSensitive: () => { throw new Error("labels unreadable"); } }).writeSensitive()).toBe(true);
-    expect(await new SessionSensitivity({ declared: async () => false, workSensitive: () => true }).writeSensitive()).toBe(true);
-    expect(await new SessionSensitivity({ declared: async () => false, workSensitive: () => false }).writeSensitive(SENSITIVE)).toBe(true);
-    expect(await new SessionSensitivity({ declared: async () => false, workSensitive: () => false }).writeSensitive(USER)).toBe(false);
-    expect(new SessionSensitivity({ declared: async () => false, workSensitive: () => false, readBefore: true }).exclusion()).toBe("sensitive_memory");
+    expect(await new SessionSensitivity({ contentCapture: true, declared: async () => Promise.reject(new Error("registry down")), workSensitive: () => false }).writeSensitive()).toBe(true);
+    expect(await new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => { throw new Error("labels unreadable"); } }).writeSensitive()).toBe(true);
+    expect(await new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => true }).writeSensitive()).toBe(true);
+    expect(await new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => false }).writeSensitive(SENSITIVE)).toBe(true);
+    expect(await new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => false }).writeSensitive(USER)).toBe(false);
+    expect(new SessionSensitivity({ contentCapture: true, declared: async () => false, workSensitive: () => false, readBefore: true }).exclusion()).toBe("sensitive_memory");
   });
 });
 
@@ -363,17 +363,100 @@ describe("runs that write and read session state", () => {
       [node("start", "manual_trigger"), node("read", "local_memory", { namespace: "shared", sessionIdTemplate: "{{session_id}}" }), node("out", "output")],
       [["start", "read"], ["read", "out"]]
     );
-    const marked = await executeWorkflow({ workflow: wf, sessionId: "s1" }, deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card" }], sensitive: true } } }).stores));
+    const marked = await executeWorkflow(
+      { workflow: wf, sessionId: "s1" },
+      deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card" }], sensitive: true } } }).stores, { instrument: capturing().instrument })
+    );
     expect(outputLabelsOf(marked)?.provenance).toContain("sensitive");
-    const clean = await executeWorkflow({ workflow: wf, sessionId: "s1" }, deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "hi" }] } } }).stores));
+    const clean = await executeWorkflow(
+      { workflow: wf, sessionId: "s1" },
+      deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "hi" }] } } }).stores, { instrument: capturing().instrument })
+    );
     expect(outputLabelsOf(clean)?.provenance ?? []).not.toContain("sensitive");
 
     // An agent that read marked memory: its own result labels say sensitive too.
     const agentRun = await executeWorkflow(
       { workflow: agentFlow("wf-h"), sessionId: "s1" },
-      deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card" }, { role: "assistant", content: "ok" }], sensitive: true } } }).stores)
+      deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card" }, { role: "assistant", content: "ok" }], sensitive: true } } }).stores, {
+        instrument: capturing().instrument
+      })
     );
     expect(agentRun.nodeResults.find((entry) => entry.nodeId === "agent")?.labels?.provenance ?? outputLabelsOf(agentRun)?.provenance).toContain("sensitive");
+  });
+
+  it("with capture off, reading a marked row changes no label and makes no extra memory query (as before v73); writes are still marked", async () => {
+    const memoryRead = (sensitive: boolean) => memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card" }, { role: "assistant", content: "ok" }], sensitive } } });
+    /** The same run on a marked and an unmarked copy of the session: labels, outputs and memory queries. */
+    const runBoth = async (
+      wf: Workflow,
+      seed: (backing: ReturnType<typeof memoryStores>, sensitive: boolean) => Promise<void> | void,
+      provider?: () => LLMProviderAdapter,
+      instrument?: RunInstrumentation
+    ) => {
+      const outcomes = [];
+      for (const sensitive of [true, false]) {
+        const backing = memoryRead(sensitive);
+        await seed(backing, sensitive);
+        let markQueries = 0;
+        const loadSensitive = backing.stores.memoryStore.loadSensitive!;
+        const memoryStore = { ...backing.stores.memoryStore, loadSensitive: async (namespace: string, sessionId: string) => (markQueries += 1, loadSensitive(namespace, sessionId)) };
+        const result = await executeWorkflow({ workflow: wf, sessionId: "s1" }, deps({ ...backing.stores, memoryStore }, instrument ? { instrument } : {}, provider?.()));
+        expect(result.status).toBe("success");
+        outcomes.push({
+          labels: result.nodeResults.map((entry) => [entry.nodeId, entry.labels ?? null]),
+          output: result.output,
+          outputLabels: outputLabelsOf(result) ?? null,
+          markQueries
+        });
+      }
+      return { marked: outcomes[0]!, unmarked: outcomes[1]! };
+    };
+    const noSeed = () => undefined;
+    const readers: Array<[string, Workflow, (backing: ReturnType<typeof memoryStores>, sensitive: boolean) => Promise<void> | void, (() => LLMProviderAdapter)?]> = [
+      [
+        "simple memory",
+        workflow("wf-off-a", [node("start", "manual_trigger"), node("read", "local_memory", { namespace: "shared", sessionIdTemplate: "{{session_id}}" }), node("out", "output")], [["start", "read"], ["read", "out"]]),
+        noSeed
+      ],
+      ["agent memory", agentFlow("wf-off-b"), noSeed],
+      [
+        "artifact",
+        workflow(
+          "wf-off-c",
+          [node("start", "manual_trigger"), node("read", "session_artifact_load", { namespace: "shared", sessionIdTemplate: "{{session_id}}", artifactKey: "note" }), node("out", "output")],
+          [["start", "read"], ["read", "out"]]
+        ),
+        async (backing, sensitive) => {
+          await backing.stores.sessionArtifactStore.saveArtifact({ namespace: "shared", sessionId: "s1", artifactKey: "note", value: { card: "4242" }, ...(sensitive ? { sensitive: true } : {}) });
+        }
+      ],
+      [
+        "tool cache",
+        agentFlow("wf-off-d", { toolCallingEnabled: true }),
+        async (backing, sensitive) => {
+          await backing.stores.toolDataStore.saveToolCall({ namespace: "shared", sessionId: "s1", toolName: "lookup", args: {}, output: { card: "4242" }, ...(sensitive ? { sensitive: true } : {}) });
+        },
+        () => new Scripted((_request, call) => (call === 1 ? { content: "", toolCalls: [{ id: "c1", name: "session_cache_get", arguments: { record_id: "rec-1" } }] } : { content: "done", toolCalls: [] }))
+      ]
+    ];
+    for (const [name, wf, seed, provider] of readers) {
+      // No instrumentation at all, and instrumentation with capture off: the mark changes nothing a caller sees.
+      for (const instrument of [undefined, capturing(false).instrument]) {
+        const { marked, unmarked } = await runBoth(wf, seed, provider, instrument);
+        expect(marked, name).toEqual(unmarked);
+        expect(marked.markQueries, name).toBe(0);
+        expect(JSON.stringify(marked.outputLabels?.provenance ?? []), name).not.toContain("sensitive");
+      }
+      // With capture on the same read does label the run (the user decision keeps it for capture only).
+      const on = await runBoth(wf, seed, provider, capturing().instrument);
+      expect(on.marked.outputLabels?.provenance, name).toContain("sensitive");
+      expect(on.unmarked.outputLabels?.provenance ?? [], name).not.toContain("sensitive");
+    }
+
+    // Writes by sensitive work are still marked with capture off (the declared source here).
+    const backing = memoryStores();
+    await executeWorkflow({ workflow: agentFlow("wf-off-e", { sensitiveOutput: true }), sessionId: "s1" }, deps(backing.stores, { instrument: capturing(false).instrument }));
+    expect(backing.memory.get("s1")?.sensitive).toBe(true);
   });
 
   it("a sub-workflow with its own scoped stores notes and marks like its parent", async () => {

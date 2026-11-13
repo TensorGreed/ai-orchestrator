@@ -9,8 +9,10 @@ import type { WorkflowExecutionDependencies } from "./executor";
  * written by work that content capture treats as sensitive is marked (`sensitive` = 1), whether or not capture is on
  * at the time, so turning capture on later cannot export it. A run that reads a marked row (or a row whose stored
  * labels say sensitive) is sensitive from then on: its spans export no content (`l2m.content.dropped` =
- * `sensitive_memory`), and what it writes to session state is marked in turn. With capture off nothing is exported
- * anyway; only the marks are kept, and memory works as before.
+ * `sensitive_memory`), its output labels say `sensitive` when the row carried the mark, and what it writes to session
+ * state is marked in turn. With capture off nothing is exported anyway: rows written by sensitive work are still
+ * marked, but reads add no label and memory reads make no extra query, so labels flow exactly as before v73. A tool
+ * cache record or session artifact carries its mark in the row itself, so reading one still marks what the run writes.
  *
  * Sensitive work, when a row is written: a node of the run (or of a sub-workflow it calls) declares a sensitive source
  * (checked once per run, on the first write, failing closed), a Reveal node revealed something, the writing node's
@@ -23,6 +25,11 @@ export class SessionSensitivity {
 
   constructor(
     private readonly options: {
+      /**
+       * Content capture is on for the run. Only then does a read of a marked row add the `sensitive` label (and the
+       * run's output labels), and only then is a memory read's mark looked up (one more query per read).
+       */
+      contentCapture: boolean;
       /** The run's declared sensitive sources (the content capture check); called at most once. */
       declared: () => Promise<boolean>;
       /** Sensitive work right now, apart from declared sources (Reveal, the running node's input labels). */
@@ -38,7 +45,12 @@ export class SessionSensitivity {
     }
   ) {
     this.readMarked = options.readBefore === true;
-    this.readMarkedRow = options.readBefore === true;
+    this.readMarkedRow = options.readBefore === true && options.contentCapture;
+  }
+
+  /** Whether a memory read looks up the row's mark (content capture on). */
+  get checksMemoryReads(): boolean {
+    return this.options.contentCapture;
   }
 
   /** True once the run read a row written by sensitive work. */
@@ -60,7 +72,7 @@ export class SessionSensitivity {
   noteRead(sensitive: boolean, marked = sensitive): void {
     if (!sensitive) return;
     this.readMarked = true;
-    if (!marked) return;
+    if (!marked || !this.options.contentCapture) return;
     this.readMarkedRow = true;
     try {
       this.options.onSensitiveRead?.();
@@ -111,7 +123,8 @@ export function sensitivityTrackingSessionStores(dependencies: SessionStores, se
               const messages = await memoryStore.loadMessages(namespace, sessionId);
               // A store without the v73 mark is left to label tracking: on tracked runs the engine reads its stored labels
               // (once, as before v73) and they keep the content out; an untracked run reads no labels at all.
-              if (messages.length > 0 && memoryStore.loadSensitive) {
+              // With capture off the mark is not looked up: nothing is exported, and labels flow as before v73.
+              if (messages.length > 0 && memoryStore.loadSensitive && sensitivity.checksMemoryReads) {
                 let sensitive: boolean;
                 try {
                   sensitive = await memoryStore.loadSensitive(namespace, sessionId);
