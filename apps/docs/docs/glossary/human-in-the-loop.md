@@ -4,7 +4,7 @@ term: "Human in the loop"
 topic: agents
 definition: "A design in which a person can see, approve, change or stop an AI system's action before it takes effect, instead of the system acting alone."
 description: "Human in the loop means a person can approve, change or stop an agent's action before it happens. Where the MCP spec says to use it and how."
-related: [approval-gate, write-tool, tool-calling, least-privilege]
+related: [approval-gate, write-tool, tool-calling, least-privilege, excessive-agency]
 guide: [/learn/agents/human-in-the-loop, /learn/security/prompt-injection]
 ---
 
@@ -12,7 +12,7 @@ guide: [/learn/agents/human-in-the-loop, /learn/security/prompt-injection]
 
 **A design in which a person can see, approve, change or stop an AI system's action before it takes effect, instead of the system acting alone.**
 
-Agents are useful because they choose their own steps, and risky for the same reason. A person in the loop is the backstop for the steps that cannot be undone: sending money, deleting records, emailing customers, pushing code. The MCP Tools specification says that "there SHOULD always be a human in the loop with the ability to deny tool invocations", and that clients should ask for confirmation on sensitive operations and show tool inputs before calling the server. OWASP lists human approval for high-risk actions among the mitigations for prompt injection and excessive agency.
+Agents are useful because they choose their own steps, and risky for the same reason. A person in the loop is the backstop for the steps that cannot be undone: sending money, deleting records, emailing customers, pushing code. The MCP Tools specification says that "there SHOULD always be a human in the loop with the ability to deny tool invocations", and that clients should ask for confirmation on sensitive operations and show tool inputs before calling the server. OWASP lists human approval for high-risk actions among the mitigations for prompt injection and <Term id="excessive-agency">excessive agency</Term>.
 
 ## Example
 

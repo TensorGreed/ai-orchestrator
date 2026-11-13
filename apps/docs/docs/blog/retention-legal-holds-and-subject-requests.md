@@ -9,7 +9,7 @@ socialCard: true
 
 # Retention, legal holds and data-subject requests
 
-An agent platform stores more personal data than it seems to. Every run keeps the user's message, the arguments of each tool call, the tool results and the answer; agent memory keeps whole conversations. Between 10 and 12 November 2026 we merged five pieces of work that make that data manageable on a self-hosted L2M: a retention service, retention per project, legal holds, data-subject requests with a one-time export, and deletion of one person's data on request. Per-project retention, holds, requests and deletion are optional. The retention service deletes what was deleted before, with one exception: read the note on usage retention below before you upgrade.
+An agent platform stores more personal data than it seems to. Every run keeps the user's message, the arguments of each tool call, the tool results and the answer; <Term id="agent-memory">agent memory</Term> keeps whole conversations. Between 10 and 12 November 2026 we merged five pieces of work that make that data manageable on a self-hosted L2M: a retention service, retention per project, legal holds, data-subject requests with a one-time export, and deletion of one person's data on request. Per-project retention, holds, requests and deletion are optional. The retention service deletes what was deleted before, with one exception: read the note on usage retention below before you upgrade.
 
 ## Start with a data map
 
@@ -51,7 +51,7 @@ Tool calls and rule events are the security evidence of what a project's tools w
 Retention deletes; sometimes you must not. A <Term id="legal-hold">legal hold</Term> ([PR #177](https://github.com/TensorGreed/ai-orchestrator/pull/177), 11 November) keeps a project, a workflow, a list of runs, or the rows found for one person's identifier from deletion until the hold is released:
 
 - retention purges leave held rows out, and the first purge after the release deletes those already past their retention;
-- deleting a held workflow, project, golden set or golden run is refused with `409 legal_hold`, and a held workflow cannot be moved to another project;
+- deleting a held workflow, project, <Term id="golden-set">golden set</Term> or golden run is refused with `409 legal_hold`, and a held workflow cannot be moved to another project;
 - an agent's stored conversation under a hold only grows (session artifacts can still be replaced under their key).
 
 A hold never changes who may read the data. Placing and releasing a hold are audited, need a fresh MFA check when step-up is on, and a release needs a signed-in person and a reason. A released hold stays listed, so the record is complete.

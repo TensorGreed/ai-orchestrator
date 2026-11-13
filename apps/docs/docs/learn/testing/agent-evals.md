@@ -4,7 +4,7 @@ sidebarTitle: "Agent evals"
 description: "What an agent eval is: tasks, trials, graders and transcripts, capability vs regression evals, pass@k vs pass^k, and how to write your first 20 cases."
 level: intermediate
 about: eval
-related: [eval, golden-run, pass-at-k]
+related: [eval, golden-run, golden-set, pass-at-k]
 socialCard: true
 ---
 
@@ -102,7 +102,7 @@ Security behaviour is testable the same way. A task can feed the agent a documen
 
 L2M, a self-hosted workflow builder and agent runtime, builds its evals from real runs:
 
-- A <Term id="golden-run">golden run</Term> is a finished run you saved as the reference: its input, each step's result and its MCP tool calls, plus a recording of its MCP and model calls if you turned on **Record MCP calls** before the run. A golden set groups golden runs for one workflow, and a replay job runs the whole set against a changed version ([golden sets](/product/golden-sets)).
+- A <Term id="golden-run">golden run</Term> is a finished run you saved as the reference: its input, each step's result and its MCP tool calls, plus a recording of its MCP and model calls if you turned on **Record MCP calls** before the run. A <Term id="golden-set">golden set</Term> groups golden runs for one workflow, and a <Term id="replay">replay</Term> job runs the whole set against a changed version ([golden sets](/product/golden-sets)).
 - Each case is graded by [scorers](/product/golden-sets#scorers). The code graders include `status`, `json_equal`, `json_schema`, `contains`, `regex`, `text_similarity` (word overlap), `budget` (cost, tokens and latency) and `tool_sequence`. The model grader is `llm_judge`, with a rubric, absolute or pairwise mode and up to five votes; it is off until the deployment turns judges on. RAG answers have their own scorers, such as faithfulness and context recall; faithfulness also needs judges turned on ([RAG eval scorers](/nodes/knowledge-bases#rag-specific-eval-scorers-phase-9-5)).
 - `tool_sequence` grades the path: the same calls in the same order, the expected calls in order with extras allowed, the same set of tools, or every expected tool with extras allowed. In the two ordered modes it can also compare arguments, exactly or by key names; by default it ignores them. Its `forbiddenTools` option fails a case that called a tool it must not. A separate scorer, `guard_outcome`, checks that a content rule caught a planted attack or let a harmless input through.
 - A replay job can run each case up to five times and decide it with `all`, `majority` or `any`. `all` is the per-case version of pass^k and `any` of pass@k; L2M reports which cases passed and marks a case whose repeats disagree as flaky, but it does not compute a pass@k or pass^k figure for you.

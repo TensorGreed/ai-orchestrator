@@ -4,7 +4,7 @@ term: "Context window"
 topic: agents
 definition: "The most text, counted in tokens, that a model can take into account in one call: system prompt, conversation, tool definitions and tool results, plus the answer it writes."
 description: "The context window is how many tokens a model reads in one call: prompt, history, tool definitions and results. Why agents run out of it."
-related: [token-llm, agent-loop, session-tool-cache, max-iterations]
+related: [token-llm, agent-memory, agent-loop, session-tool-cache, max-iterations]
 guide: [/learn/agents/too-many-tools, /learn/agents/agent-memory, /learn/agents/what-is-an-ai-agent]
 ---
 

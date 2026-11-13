@@ -9,6 +9,8 @@ You don't need any of this for simple workflows. Nothing here is on by
 default: a workflow with no rule set, or with the built-in default
 rule set, runs, checks and stores exactly as before.
 
+Concepts: [the lethal trifecta](/learn/security/lethal-trifecta) explains why tracking where data came from matters; see also <Term id="data-labels">data labels</Term>.
+
 ## Data labels
 
 Data labels answer two questions about each step of a run: **where did this

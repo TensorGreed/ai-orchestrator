@@ -8,7 +8,8 @@
     "build": "pnpm gen:nodes && pnpm gen:recipes && vitepress build docs",
     "preview": "vitepress preview docs --host 0.0.0.0 --port 4173",
     "gen:nodes": "tsx scripts/generate-node-reference.ts",
-    "gen:recipes": "tsx scripts/generate-recipes.ts"
+    "gen:recipes": "tsx scripts/generate-recipes.ts",
+    "test": "vitest run scripts"
   },
   "dependencies": {
     "@ai-orchestrator/shared": "workspace:*"

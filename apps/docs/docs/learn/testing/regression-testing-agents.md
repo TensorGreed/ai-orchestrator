@@ -4,13 +4,13 @@ sidebarTitle: "Regression testing agents"
 description: "Catch a prompt, model or tool change that breaks your agent before users do: save known-good runs, replay changes against recordings, gate CI."
 level: intermediate
 about: golden-run
-related: [golden-run, eval]
+related: [golden-run, replay, golden-set, release-gate, eval]
 socialCard: true
 ---
 
 # Regression testing AI agents
 
-A regression test for an agent checks that a change (a new prompt, another model, an updated tool) did not break something that used to work. The practical way to build one is to save known-good runs, called golden runs, and replay a changed workflow against them, with outside calls answered from the recording so the test has no side effects. Group the runs into a set, run the set in CI, and fail the build when a run that used to pass now fails.
+A regression test for an agent checks that a change (a new prompt, another model, an updated tool) did not break something that used to work. The practical way to build one is to save known-good runs, called golden runs, and <Term id="replay">replay</Term> a changed workflow against them, with outside calls answered from the recording so the test has no side effects. Group the runs into a set, run the set in CI, and fail the build when a run that used to pass now fails.
 
 ## What a regression is for an agent
 
@@ -63,7 +63,7 @@ How strict "behaved like" is depends on the graders. Exact equality of the outpu
 
 ## Grouping runs into a set
 
-One golden run is a test case. A golden set is the suite: the golden runs that together describe what one workflow must keep doing. Practical rules:
+One golden run is a test case. A <Term id="golden-set">golden set</Term> is the suite: the golden runs that together describe what one workflow must keep doing. Practical rules:
 
 - **One set per workflow**, or per behaviour of a large workflow (refunds, address changes, escalations).
 - **Name cases by what they check**, not by when they were recorded: "refund outside 30-day window is declined".
@@ -78,7 +78,7 @@ A regression suite is worth most when it runs without anyone remembering to run 
 2. On every pull request, replay the golden set against the changed definition.
 3. Map the result to an exit code: 0 when every case passed, non-zero when any failed or was inconclusive.
 4. Write a JUnit XML report, so your CI system shows each case as a test.
-5. Only let a version reach production after its tests passed on that exact version: a release gate.
+5. Only let a version reach production after its tests passed on that exact version: a <Term id="release-gate">release gate</Term> (see [release gates for AI workflows](/learn/testing/release-gates)).
 
 Replays with a live model cost money and time, so set a cost cap and a timeout on the step.
 
@@ -103,7 +103,7 @@ Replay tests catch a lot, not everything. Know what yours cannot see:
 
 L2M, a self-hosted workflow builder and agent runtime, implements this loop on your own deployment:
 
-- **Golden runs.** On the Runs page, **Save as golden** keeps a finished run as a reference: its input, every node's result, its MCP tool calls and, if you turned on **Record MCP calls** before the run, a cassette of its MCP traffic plus a tape of its model calls ([golden runs](/product/golden-runs)). Secrets are scrubbed before anything is stored.
+- **Golden runs.** On the Runs page, **Save as golden** keeps a finished run as a reference: its input, every node's result, its MCP tool calls and, if you turned on **Record MCP calls** before the run, a cassette of its MCP traffic plus a tape of its model calls ([golden runs](/product/golden-runs); [testing agents that call MCP tools](/learn/testing/testing-mcp-tools) covers cassettes and mocks). Secrets are scrubbed before anything is stored.
 - **Replay.** Logic steps run, models run live by default, and by default MCP calls are answered only from the cassette. HTTP requests, database writes, messages and code nodes are answered from the recording ([what a replay does](/product/golden-runs#what-a-replay-does)). A replay job can opt a server into live read-only calls, or a node into a live read such as an HTTP GET; writes never run live. A call the recording cannot answer makes the result inconclusive.
 - **Golden sets and replay jobs.** A golden set groups golden runs for one workflow. A replay job runs them against a draft, a saved version or a workflow file, grades each case with scorers, and can repeat each case up to five times ([golden sets](/product/golden-sets)).
 - **CI.** `l2m replay run --set <id> --file <workflow.json> --junit <report.xml>` replays a workflow file from your repository and exits 0 when every case passed, 1 on a regression, and 4 when a case was inconclusive or the job did not complete ([CI for AI agents](/guides/ci-for-ai-agents)).

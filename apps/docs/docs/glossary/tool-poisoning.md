@@ -4,7 +4,7 @@ term: "Tool poisoning"
 topic: security
 definition: "An attack that hides instructions for the model in a tool's description, schema or results, so the agent follows them while the user sees only a harmless tool."
 description: "Tool poisoning hides instructions in a tool's description, schema or results so the model follows them. Examples and how to detect and limit it."
-related: [indirect-prompt-injection, tool-shadowing, prompt-injection, mcp-tool, mcp-server]
+related: [indirect-prompt-injection, rug-pull, tool-shadowing, prompt-injection, mcp-tool, mcp-server]
 guide: [/learn/security/mcp-security-risks]
 ---
 
@@ -21,7 +21,7 @@ A server offers `add_numbers`. Its description, which most clients show only in 
 ## How to limit it
 
 - **Review before use.** Read full tool definitions, not only names, before a server is allowed.
-- **Pin and diff.** Hash each reviewed definition (descriptions, schemas and annotations) and ask for review when it changes. A tool that changes after approval is a rug pull.
+- **Pin and diff.** Hash each reviewed definition (descriptions, schemas and <Term id="tool-annotations">annotations</Term>) and ask for review when it changes. A tool that changes after approval is a <Term id="rug-pull">rug pull</Term>.
 - **Show the arguments.** Let a person see the full arguments of sensitive calls, and keep secrets out of the agent's reach.
 - **Give each agent few tools.** Fewer servers per agent means less text that can steer it, and less <Term id="tool-shadowing">tool shadowing</Term>.
 

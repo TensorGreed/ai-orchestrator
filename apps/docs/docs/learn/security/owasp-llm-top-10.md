@@ -3,7 +3,7 @@ title: "OWASP Top 10 for LLM apps, explained for agents"
 sidebarTitle: "OWASP Top 10 for LLM apps"
 description: "The ten OWASP LLM risks for 2025, one by one, with what each looks like in an agent that calls tools and a concrete control for each one."
 level: intermediate
-related: [prompt-injection]
+related: [prompt-injection, excessive-agency, output-checks, spotlighting]
 socialCard: true
 ---
 
@@ -29,7 +29,7 @@ Each entry below has four parts: what OWASP means, what it looks like in an agen
 
 **A control.** Layers: mark outside content, give the agent fewer and narrower tools, ask a person before risky actions, and test with attack cases. No single filter is enough. The [prompt injection guide](/learn/security/prompt-injection) covers each layer.
 
-**In L2M.** When no rule set is bound to an agent's project or workflow, the agent gets a built-in default rule set. It blocks known injection patterns in prompts and tool results, and command, SQL and path attacks in tool arguments; spotlighting, approval before write tools and approval after untrusted content are optional ([where content rules run](/product/content-rules#where-content-rules-run)).
+**In L2M.** When no rule set is bound to an agent's project or workflow, the agent gets a built-in default rule set. It blocks known injection patterns in prompts and tool results, and command, SQL and path attacks in tool arguments; <Term id="spotlighting">spotlighting</Term>, approval before write tools and approval after untrusted content are optional ([where content rules run](/product/content-rules#where-content-rules-run)).
 
 ### LLM02: Sensitive information disclosure
 
@@ -73,7 +73,7 @@ Each entry below has four parts: what OWASP means, what it looks like in an agen
 
 ### LLM06: Excessive agency
 
-**What it is.** Excessive agency: the application can take harmful actions because it has more functionality, permissions or autonomy than its task needs. OWASP names those three root causes.
+**What it is.** <Term id="excessive-agency">Excessive agency</Term>: the application can take harmful actions because it has more functionality, permissions or autonomy than its task needs. OWASP names those three root causes.
 
 **In an agent.** This is the central agent risk. A support agent connected to a server with 40 tools, including `delete_customer`, has excessive functionality even if it never calls it, because an injection or a bad plan can.
 
@@ -95,7 +95,7 @@ Each entry below has four parts: what OWASP means, what it looks like in an agen
 
 **What it is.** Weaknesses in how embeddings are stored and retrieved in retrieval-augmented generation (RAG): one tenant's documents returned to another, poisoned entries, or source text recovered from embeddings.
 
-**In an agent.** An agent searching a shared vector store returns another customer's documents because the search has no filter on who is asking.
+**In an agent.** An agent searching a shared <Term id="vector-store">vector store</Term> returns another customer's documents because the search has no filter on who is asking.
 
 **A control.** Enforce access control in the retrieval layer (per tenant, per project, per user), validate what goes into the store, and log retrievals.
 
@@ -109,7 +109,7 @@ Each entry below has four parts: what OWASP means, what it looks like in an agen
 
 **A control.** Ground answers in retrieved sources, show citations, check that claims are supported by those sources, and make uncertainty visible to the reader.
 
-**In L2M.** Retrieval nodes return citation instructions and an `extract_citations` node maps citation markers back to documents ([citations](/nodes/knowledge-bases#citations-phase-9-4)). An optional grounding check tests whether an answer is supported by the retrieved documents ([grounding in sources](/product/content-rules-output-checks#grounding-in-sources)), and RAG eval scorers measure faithfulness on test cases.
+**In L2M.** Retrieval nodes return citation instructions and an `extract_citations` node maps citation markers back to documents ([citations](/nodes/knowledge-bases#citations-phase-9-4)). An optional <Term id="grounding">grounding</Term> check tests whether an answer is supported by the retrieved documents ([grounding in sources](/product/content-rules-output-checks#grounding-in-sources)), and RAG eval scorers measure faithfulness on test cases.
 
 ### LLM10: Unbounded consumption
 

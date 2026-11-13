@@ -6,13 +6,13 @@ level: beginner
 about: model-context-protocol
 demo: wf-demo-support-agent
 demoRecorded: true
-related: [model-context-protocol, mcp-server, mcp-host, mcp-tool, tool-calling]
+related: [model-context-protocol, mcp-server, mcp-client, mcp-host, mcp-tool, tool-calling]
 socialCard: true
 ---
 
 # What is the Model Context Protocol (MCP)?
 
-The <Term id="model-context-protocol">Model Context Protocol</Term> (MCP) is an open standard for connecting AI applications to tools and data. A program called an <Term id="mcp-server">MCP server</Term> offers tools, resources and prompts; an AI application connects to it as an MCP client, lists what it offers and calls it with JSON-RPC messages. Write a server once, and MCP-capable apps and agents can use it.
+The <Term id="model-context-protocol">Model Context Protocol</Term> (MCP) is an open standard for connecting AI applications to tools and data. A program called an <Term id="mcp-server">MCP server</Term> offers tools, resources and prompts; an AI application connects to it as an <Term id="mcp-client">MCP client</Term>, lists what it offers and calls it with JSON-RPC messages. Write a server once, and MCP-capable apps and agents can use it.
 
 ## The problem it solves
 
@@ -126,9 +126,9 @@ Old and new revisions can work together: the 2026-07-28 specification describes 
 L2M plays both roles:
 
 - **As a host and client.** An Agent Orchestrator node calls MCP tools through MCP Tool nodes attached to its `tool` port. Servers run over Streamable HTTP or stdio, and an in-process mock server ships for trying things without setup. The [MCP server registry](/product/mcp-server-registry) keeps one entry per server, with health probes and the history of its tool schemas.
-- **As a server.** The [MCP gateway](/product/mcp-gateway) serves workflows and registered tools to other MCP clients, such as an IDE agent, through toolsets with a token per client.
+- **As a server.** The [MCP gateway](/product/mcp-gateway) serves workflows and registered tools to other MCP clients, such as an IDE agent, through <Term id="toolset">toolsets</Term> with a token per client.
 
-On protocol versions: the gateway speaks 2025-11-25, 2025-06-18 and 2025-03-26, and when L2M connects to a server it asks for 2025-06-18. Support for 2026-07-28 is being built.
+On protocol versions: by default the gateway speaks 2025-11-25, 2025-06-18 and 2025-03-26, and when L2M connects to a server it asks for 2025-06-18. Wider 2026-07-28 support is opt-in: with `MCP_GATEWAY_MODERN_PROTOCOL=on` the gateway also serves 2026-07-28 clients without sessions, and `MCP_CLIENT_PROTOCOL_DEFAULT` (or a server's own `protocolMode`) lets L2M talk to 2026-07-28 servers first. Even by default, L2M switches to 2026-07-28 for a server that speaks nothing older. [MCP transports](/learn/mcp/transports) explains what changes on the wire.
 
 The gaps listed above are covered by optional L2M features: [tool policy](/product/mcp-tool-policy) to allow, deny or require approval per tool, [approvals](/product/approvals) before write tools, and [tool-call telemetry](/product/mcp-tool-call-telemetry). A simple workflow needs none of them.
 

@@ -9,6 +9,8 @@ An API key is used as `Authorization: Bearer ao_…` on any API call. Every key 
 personal key, made under **Settings › Account › API Keys**) or a service account. Both are optional: with no service
 account and no key scope, keys work exactly as before.
 
+Concepts: [Identity for AI platforms](/learn/operations/identity-for-ai-platforms) compares people, service accounts and gateway clients.
+
 ## Service accounts
 
 A service account is an identity for automation: CI pipelines, scripts, other services. It is managed by admins under

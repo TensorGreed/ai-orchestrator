@@ -4,7 +4,7 @@ term: "Model Context Protocol (MCP)"
 topic: mcp
 definition: "An open protocol that lets AI applications discover and use tools, data and prompt templates from separate servers through one standard set of JSON-RPC messages."
 description: "The Model Context Protocol is an open standard for connecting AI apps to tools and data through servers. What it defines and what it leaves out."
-related: [mcp-server, mcp-tool, mcp-gateway, tool-calling]
+related: [mcp-server, mcp-tool, mcp-client, mcp-gateway, tool-calling]
 guide: [/learn/mcp/what-is-mcp]
 ---
 
@@ -28,7 +28,7 @@ MCP is not a model feature and does not replace <Term id="tool-calling">tool cal
 
 ## In L2M
 
-L2M is both sides of the protocol. As a client, agents use tools from MCP servers through [MCP Tool nodes](/extensions/mcp). As a server, the [MCP gateway](/product/mcp-gateway) serves workflows and registered tools to other MCP clients, speaking protocol versions 2025-11-25, 2025-06-18 and 2025-03-26.
+L2M is both sides of the protocol. As a client, agents use tools from MCP servers through [MCP Tool nodes](/extensions/mcp). As a server, the [MCP gateway](/product/mcp-gateway) serves workflows and registered tools to other <Term id="mcp-client">MCP clients</Term>, speaking protocol versions 2025-11-25, 2025-06-18 and 2025-03-26.
 
 ## Further reading
 

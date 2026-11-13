@@ -7,6 +7,8 @@ description: "Register each MCP server once in L2M: scheduled health probes, too
 
 The **MCP → Servers** page keeps one list of every MCP server your agents call. Each entry is probed on a schedule, its tool schemas are kept as history, and a schema change that could break existing callers is flagged before it reaches a run. Everything lives in your own deployment: the registry is a table in your L2M database and the probes run in your API process.
 
+Concepts: <Term id="tool-annotations">tool annotations</Term>, <Term id="rug-pull">rug pulls</Term>, and [MCP authorization](/learn/mcp/authorization) for the OAuth flow.
+
 ## Why register a server
 
 An MCP Tool node can carry its own adapter, connection and secret. That works for one workflow, but it means the same server is configured in many places and nobody notices when it goes down or changes a tool. A registered server is configured once:

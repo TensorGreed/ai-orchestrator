@@ -2,7 +2,7 @@
 layout: page
 sidebar: false
 title: "Testing AI agents: evals, replay and release gates"
-description: "Guides to testing AI agents: the vocabulary of evals, regression tests built from recorded runs, replay without side effects, and gating releases in CI."
+description: "Guides to testing AI agents: evals, regression tests built from recorded runs, record, replay and mocks for MCP tools, and release gates."
 track: testing
 ---
 

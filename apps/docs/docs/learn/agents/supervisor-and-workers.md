@@ -3,15 +3,16 @@ title: "Multi-agent systems: supervisor and worker agents"
 sidebarTitle: "Supervisor and workers"
 description: "How a supervisor agent delegates to worker agents exposed as tools: when it helps, what it costs, how to test it, and a sample that runs with no API key."
 level: intermediate
+about: supervisor-agent
 demo: wf-demo-research-swarm
 demoRecorded: true
-related: [worker-agent, ai-agent, tool-calling, agent-loop]
+related: [supervisor-agent, worker-agent, ai-agent, tool-calling, agent-loop]
 socialCard: true
 ---
 
 # Multi-agent systems: supervisor and worker agents
 
-The supervisor and worker pattern is one way to build a multi-agent system, also called the orchestrator-worker pattern. One agent (the supervisor) splits a task and hands each part to a specialist agent (a <Term id="worker-agent">worker</Term>). The supervisor sees each worker as a tool: calling it starts the worker's own agent loop, with its own model, tools and prompt, and the worker's result comes back as the tool result. The supervisor then combines the answers into one reply.
+The supervisor and worker pattern is one way to build a multi-agent system, also called the orchestrator-worker pattern. One agent (the <Term id="supervisor-agent">supervisor</Term>) splits a task and hands each part to a specialist agent (a <Term id="worker-agent">worker</Term>). The supervisor sees each worker as a tool: calling it starts the worker's own agent loop, with its own model, tools and prompt, and the worker's result comes back as the tool result. The supervisor then combines the answers into one reply.
 
 ## The pattern
 
@@ -101,7 +102,7 @@ More agents mean more places for a change to break something. The supervisor mig
 
 - **Test each worker alone.** A worker is an ordinary agent. Run it with a fixed task prompt and check its answer before you wire it in.
 - **Check the delegation, not just the final text.** In a good run, which workers were called, in what order, with what task? The run trace answers that: worker activity appears in the supervisor's trace, marked with the worker it came from.
-- **Keep a known-good run.** Record a run's MCP calls and save it as a [golden run](/product/golden-runs). After a prompt or model change, replay against it: MCP calls are answered from the recording, so the replay has no live side effects, and you see what changed in the output, the tool calls and the cost.
+- **Keep a known-good run.** Record a run's MCP calls and save it as a [golden run](/product/golden-runs). After a prompt or model change, <Term id="replay">replay</Term> against it: MCP calls are answered from the recording, so the replay has no live side effects, and you see what changed in the output, the tool calls and the cost.
 - **Gate releases on it.** A [release gate](/product/release-gate) can require replays to pass before a new version is published. See [CI for AI agents](/guides/ci-for-ai-agents).
 
 [Regression testing AI agents](/learn/testing/regression-testing-agents) explains golden runs and replay in more depth. These testing features are optional. A supervisor workflow runs without any of them.

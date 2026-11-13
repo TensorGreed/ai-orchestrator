@@ -2,13 +2,13 @@
 layout: page
 sidebar: false
 title: "MCP fundamentals: the Model Context Protocol explained"
-description: "Guides to the Model Context Protocol: what MCP is, hosts, clients and servers, how a tool call travels, and OAuth authorization for remote servers."
+description: "Guides to the Model Context Protocol: what MCP is, how a tool call travels, stdio and Streamable HTTP, OAuth for remote servers, and tool annotations."
 track: mcp
 ---
 
 <div class="hub-page">
 
-<HubHero eyebrow="Learn · Track" title="MCP fundamentals" lead="What the Model Context Protocol is, who talks to whom, how a tool call travels, and how remote servers ask for authorization. Written against the specification's own text, with the 2026-07-28 revision noted where it changes things." />
+<HubHero eyebrow="Learn · Track" title="MCP fundamentals" lead="What the Model Context Protocol is, who talks to whom, how a tool call travels, which transport carries it, how remote servers ask for authorization, and what tool annotations can and cannot tell you. Written against the specification's own text, with the 2026-07-28 revision noted where it changes things." />
 
 <TrackGuides track="mcp" />
 

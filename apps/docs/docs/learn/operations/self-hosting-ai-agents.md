@@ -65,7 +65,7 @@ A self-hosted agent platform is a handful of ordinary services:
 - **The database.** Users, workflows, run history, encrypted secrets, audit records. Everything stateful lives here.
 - **Workers.** Processes that take queued runs, so long agent runs do not tie up the processes answering HTTP.
 - **Model endpoints.** A hosted model API, a local model server, or both.
-- **<Term id="mcp-server">MCP servers</Term>.** The tools: remote servers over HTTP, or local programs the platform starts over stdio.
+- **<Term id="mcp-server">MCP servers</Term>.** The tools: remote servers over HTTP, or local programs the platform starts over <Term id="stdio-transport">stdio</Term>.
 - **A reverse proxy** for TLS, and optionally a load balancer when there is more than one API process.
 
 ## Start small: one process, one file
@@ -124,7 +124,7 @@ Self-hosting moves work to your team:
 5. Schedule backups and run one restore drill.
 6. Pin image digests and verify signatures.
 7. Send logs and metrics to the systems you already watch.
-8. Set retention for run history and agent memory to what your policy allows.
+8. Set retention for run history and <Term id="agent-memory">agent memory</Term> to what your policy allows.
 9. Set a deployment budget and an iteration limit on every agent.
 10. Write down who upgrades it and who answers alerts.
 

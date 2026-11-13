@@ -4,7 +4,7 @@ term: "Indirect prompt injection"
 topic: security
 definition: "Prompt injection in which the attacker's instructions hide in content the model reads while doing its job, such as a web page, an email, a document or a tool result."
 description: "Indirect prompt injection hides instructions in content an agent reads: a web page, email, file or tool result. Why agents are exposed and how to limit it."
-related: [prompt-injection, tool-poisoning, rag]
+related: [prompt-injection, tool-poisoning, data-labels, spotlighting, lethal-trifecta, rag]
 guide: [/learn/security/prompt-injection, /learn/security/mcp-security-risks]
 ---
 
@@ -24,9 +24,9 @@ An agent summarises a user's unread email. One message, from a stranger, contain
 
 ## How to limit it
 
-- **Mark outside content as data.** Delimit or label it so the model is told it is not instructions (spotlighting). This reduces the risk; it does not remove it.
-- **Track where data came from.** Once untrusted content is in a run, restrict what that run may send out (data labels).
-- **Do not combine the three risks** Simon Willison calls the lethal trifecta: private data, untrusted content and a way to send data out, in one agent.
+- **Mark outside content as data.** Delimit or label it so the model is told it is not instructions (<Term id="spotlighting">spotlighting</Term>). This reduces the risk; it does not remove it.
+- **Track where data came from.** Once untrusted content is in a run, restrict what that run may send out (<Term id="data-labels">data labels</Term>).
+- **Do not combine the three risks** Simon Willison calls the <Term id="lethal-trifecta">lethal trifecta</Term>: private data, untrusted content and a way to send data out, in one agent.
 - **Approve outbound actions.** Put a person before sends, payments and writes.
 
 ## Common confusion

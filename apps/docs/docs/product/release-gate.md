@@ -7,6 +7,8 @@ description: "L2M release gates: a workflow version reaches production only afte
 
 A workflow has a **draft** (the latest save) and, once you publish, a **published version**. Production traffic runs the published version; the editor keeps running the draft. With a **release gate** on, a version reaches production only after a replay job of that exact version passed over the workflow's [golden sets](./golden-sets.md), under the policy in force when you publish.
 
+Concepts: [Release gates for AI workflows](/learn/testing/release-gates) explains why a <Term id="release-gate">release gate</Term> checks the exact version that ships.
+
 Nothing changes for a workflow that was never published: every entry point runs the latest save, as before.
 
 ## Which version runs where

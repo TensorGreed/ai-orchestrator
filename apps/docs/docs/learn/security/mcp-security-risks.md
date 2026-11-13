@@ -4,7 +4,7 @@ sidebarTitle: "MCP security risks"
 description: "The main MCP security risks from the spec and OWASP: tool poisoning, rug pulls, shadowing, confused deputy, token passthrough, SSRF and their controls."
 level: intermediate
 about: tool-poisoning
-related: [tool-poisoning, tool-shadowing, ssrf, mcp-gateway]
+related: [tool-poisoning, rug-pull, tool-shadowing, confused-deputy, token-passthrough, ssrf, mcp-gateway]
 socialCard: true
 ---
 
@@ -36,11 +36,11 @@ Controls:
 
 ## Rug pulls
 
-A rug pull is a server that changes its tool definitions after you reviewed them. The tool you approved last week was harmless; today its description carries an instruction, or a read tool quietly gained a write parameter.
+A <Term id="rug-pull">rug pull</Term> is a server that changes its tool definitions after you reviewed them. The tool you approved last week was harmless; today its description carries an instruction, or a read tool quietly gained a write parameter.
 
 Controls:
 
-- **Pin what you reviewed.** Record each tool's full definition (or a hash of it) when you approve the server, and compare on every connection. OWASP recommends hashing the complete definition, including input schema, output schema and annotations.
+- **Pin what you reviewed.** Record each tool's full definition (or a hash of it) when you approve the server, and compare on every connection. OWASP recommends hashing the complete definition, including input schema, output schema and <Term id="tool-annotations">annotations</Term>.
 - **Re-review on change.** A changed definition should block the tool, or at least alert someone, until a person looks at the diff.
 - **Pin server versions.** Install a specific, reviewed version of a server, not "latest".
 
@@ -58,7 +58,7 @@ Controls:
 
 ## Confused deputy
 
-A confused deputy is a program with authority that is tricked into using it for someone else. In MCP, the classic case is an MCP server that proxies a third-party API with a single, static OAuth client ID. The spec describes how an attacker can use the third-party consent cookie left over from a user's earlier, legitimate login to skip the consent screen and receive an authorization code meant for the user.
+A <Term id="confused-deputy">confused deputy</Term> is a program with authority that is tricked into using it for someone else. In MCP, the classic case is an MCP server that proxies a third-party API with a single, static OAuth client ID. The spec describes how an attacker can use the third-party consent cookie left over from a user's earlier, legitimate login to skip the consent screen and receive an authorization code meant for the user.
 
 The spec's controls are concrete: the proxy server **must** get per-client consent before forwarding to the third party, validate the `redirect_uri` by exact string match, and handle the OAuth `state` parameter correctly (random, single-use, set only after consent).
 
@@ -66,7 +66,7 @@ There is a broader form of the same problem in agents. An agent calls tools with
 
 ## Token passthrough
 
-Token passthrough is an MCP server accepting a token from the client and forwarding it to a downstream API without checking that the token was issued for the MCP server itself. The spec forbids it: MCP servers **must not** accept tokens that were not explicitly issued for them.
+<Term id="token-passthrough">Token passthrough</Term> is an MCP server accepting a token from the client and forwarding it to a downstream API without checking that the token was issued for the MCP server itself. The spec forbids it: MCP servers **must not** accept tokens that were not explicitly issued for them.
 
 Why it matters: the downstream API cannot tell who is really calling, the MCP server's own rate limits and audit trail are bypassed, and a stolen token for one service can be used through the server against another. The fix is audience validation: each hop gets its own token, issued for that hop.
 
@@ -82,7 +82,7 @@ The same applies to any tool that fetches URLs on the model's behalf: a `fetch_p
 
 Many MCP servers run as local processes started from a command line in a configuration file. That command runs with the client's privileges. A malicious configuration, a malicious package, or an insecure local HTTP server reachable from a browser can all lead to code running on the machine.
 
-The spec's controls: show the exact command before running a new local server and require explicit consent; run servers in a sandbox with minimal default access to the file system and network; prefer the stdio transport for local servers, or require an authorization token on a local HTTP server.
+The spec's controls: show the exact command before running a new local server and require explicit consent; run servers in a sandbox with minimal default access to the file system and network; prefer the <Term id="stdio-transport">stdio</Term> transport for local servers, or require an authorization token on a local HTTP server.
 
 ## Over-broad scopes
 
@@ -115,7 +115,7 @@ L2M is a self-hosted workflow builder and agent runtime with an MCP server regis
 - **Rug pulls: partly (opt-in).** The registry snapshots each registered server's tool schemas on every probe (every five minutes by default) and diffs each snapshot against the last. A removed tool, a removed or narrowed property or a new required property counts as a [breaking change](/product/mcp-server-registry#what-counts-as-a-breaking-change); with **Block runs on breaking change** switched on, runs that use the server are refused until an admin accepts the change. A changed description, a new optional parameter or changed tool annotations are recorded in the [changes feed](/product/mcp-control-plane#changes-feed) but are not breaking, so they never block runs. That matters for the **No write tools** setting and the optional "untrusted content, then a write tool" approval rule: both trust a server's `readOnlyHint` unless an admin marks the tool, so a server that relabels a write tool as read-only gets past them. Approval before write tools is not fooled this way, because it trusts only an admin's marking. For servers you do not fully trust, mark their tools yourself on the MCP servers page.
 - **Tool poisoning: not scanned (no control).** L2M does not inspect tool descriptions for hidden instructions. Review them yourself before you register a server. Gateway clients see descriptions from the stored snapshot, not a live `tools/list`, so a gateway tool's text changes only when the server is probed again.
 - **Shadowing: names only (built in).** An agent sees each MCP tool prefixed by its adapter, and when two servers serve the same tool name both copies get a server-specific prefix ([tool names the model sees](/runtime/agent-loop#tool-names-the-model-sees)); gateway tools are named `<server-slug>__<tool>`. That stops name collisions. It does not stop one server's description from talking about another server's tool, so keep untrusted servers off agents that hold sensitive tools.
-- **Token passthrough: not possible through the gateway (built in).** Each <Term id="mcp-gateway">MCP gateway</Term> [client](/product/mcp-gateway#clients) gets its own token, minted by L2M, stored hashed and limited to chosen toolsets, a role and an optional expiry. That token is never forwarded upstream: calls to the server use the server's own secret or, when the server is set to [delegated credentials](/product/mcp-server-registry#delegated-credentials), the calling user's own OAuth connection, which also keeps tools acting in the user's context.
+- **Token passthrough: not possible through the gateway (built in).** Each <Term id="mcp-gateway">MCP gateway</Term> [client](/product/mcp-gateway#clients) gets its own token, minted by L2M, stored hashed and limited to chosen <Term id="toolset">toolsets</Term>, a role and an optional expiry. That token is never forwarded upstream: calls to the server use the server's own secret or, when the server is set to [delegated credentials](/product/mcp-server-registry#delegated-credentials), the calling user's own OAuth connection, which also keeps tools acting in the user's context.
 - **OAuth to remote servers (built in).** When L2M connects to a remote MCP server that uses OAuth, it requires PKCE with S256, sends the `resource` indicator, and requires HTTPS for the OAuth endpoints except on loopback ([OAuth for remote servers](/product/mcp-server-registry#oauth-for-remote-servers)).
 - **SSRF: partly (built in, private ranges opt-in).** [Outbound URL checks](/security/outbound-url-checks) cover the HTTP Request node, browser nodes, RAG endpoints and the built-in tools' fetches. Cloud metadata addresses are always blocked; private ranges are blocked only after you set `OUTBOUND_DENY_PRIVATE`. MCP HTTP connections are not under these address checks, whether the server is registered (admins only) or set inline on an MCP Tool node (any builder). The OAuth discovery URLs a remote server hands back must use HTTPS, and with `MCP_OAUTH_BLOCK_PRIVATE_HOSTS=true` (off by default) L2M refuses OAuth requests to private, loopback, link-local and cloud metadata addresses; see [OAuth for remote servers](/product/mcp-server-registry#oauth-for-remote-servers). For MCP HTTP connections themselves, if builders should not reach internal addresses, restrict outbound traffic from the L2M host at the network layer, with an egress proxy or firewall.
 - **Local server compromise (opt-in).** An admin can run a stdio server in a [sandbox](/product/mcp-server-registry#sandboxed-stdio-servers): a throwaway container with no network by default, a read-only file system, a non-root user and all capabilities dropped. A [deployment catalog](/product/mcp-onboarding#deployment-catalog) can require local servers to come from a list with exact versions.
@@ -123,7 +123,7 @@ L2M is a self-hosted workflow builder and agent runtime with an MCP server regis
 - **Injection through tool results (default rule set built in; the rest opt-in).** When no rule set is bound to an agent's project or workflow, the agent gets a built-in default rule set that checks tool arguments and tool results, unless the deployment switches automatic rule sets off. The built-in set never applies to gateway calls; there, a rule set you bind checks both channels ([content rules on the gateway](/product/mcp-gateway#content-rules-on-the-gateway)). An optional rule asks for approval before a write tool runs after outside content entered the context ([untrusted content and write tools](/guides/govern-mcp-tools#untrusted-content-and-write-tools)).
 - **Monitoring (on by default).** Every MCP tool call is recorded with an [argument summary](/product/mcp-tool-call-telemetry#the-argument-summary) in which sensitive values are kept only as keyed hashes.
 
-The gateway speaks MCP protocol versions 2025-11-25, 2025-06-18 and 2025-03-26, not yet the stateless 2026-07-28 revision. For a step-by-step setup, see [Govern MCP tools](/guides/govern-mcp-tools) and the [self-hosted MCP gateway guide](/guides/self-hosted-mcp-gateway).
+By default the gateway speaks MCP protocol versions 2025-11-25, 2025-06-18 and 2025-03-26; serving the stateless 2026-07-28 revision is opt-in (`MCP_GATEWAY_MODERN_PROTOCOL=on`). For a step-by-step setup, see [Govern MCP tools](/guides/govern-mcp-tools) and the [self-hosted MCP gateway guide](/guides/self-hosted-mcp-gateway).
 
 ## Try it in L2M
 

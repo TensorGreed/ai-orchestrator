@@ -309,19 +309,27 @@ export function renderRecipe(recipe: RecipeConfig, workflow: Workflow, demo: Dem
   return lines.join("\n");
 }
 
-function main() {
-  const config = JSON.parse(fs.readFileSync(CONFIG, "utf8")) as { recipes: RecipeConfig[] };
-  const demo = readDemoSupport();
-  fs.mkdirSync(OUT_DIR, { recursive: true });
-  fs.mkdirSync(FILES_DIR, { recursive: true });
+/** Throws on the first config mistake the generator cannot recover from: a bad or repeated slug, unknown keys, a missing sample. */
+export function validateRecipes(recipes: RecipeConfig[], samplesDir = SAMPLES): void {
   const slugs = new Set<string>();
-  for (const recipe of config.recipes) {
+  for (const recipe of recipes) {
     if (!/^[a-z0-9-]+$/.test(recipe.slug) || recipe.slug === "index") throw new Error(`[recipes] bad slug "${recipe.slug}"`);
     if (!["none", "model", "services"].includes(recipe.keys)) throw new Error(`[recipes] ${recipe.slug}: keys must be none, model or services`);
     if (slugs.has(recipe.slug)) throw new Error(`[recipes] slug "${recipe.slug}" is used twice`);
     slugs.add(recipe.slug);
+    if (!fs.existsSync(path.join(samplesDir, recipe.sample))) throw new Error(`[recipes] ${recipe.sample} is not in samples/workflows/`);
+  }
+}
+
+function main() {
+  const config = JSON.parse(fs.readFileSync(CONFIG, "utf8")) as { recipes: RecipeConfig[] };
+  validateRecipes(config.recipes);
+  const demo = readDemoSupport();
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+  fs.mkdirSync(FILES_DIR, { recursive: true });
+  const slugs = new Set(config.recipes.map((recipe) => recipe.slug));
+  for (const recipe of config.recipes) {
     const source = path.join(SAMPLES, recipe.sample);
-    if (!fs.existsSync(source)) throw new Error(`[recipes] ${recipe.sample} is not in samples/workflows/`);
     const raw = fs.readFileSync(source, "utf8");
     const parsed = JSON.parse(raw) as { workflow?: Workflow } & Workflow;
     const workflow = parsed.workflow ?? parsed;

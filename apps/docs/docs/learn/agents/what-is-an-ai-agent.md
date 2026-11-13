@@ -97,7 +97,7 @@ What the runtime does at each edge of the loop:
 
 Every iteration, model call and tool call shows on the run's trace. Governance is optional and off until you set it up: [tool policy](/product/mcp-tool-policy), [approval before write tools](/guides/human-approval-for-agent-tool-calls) and [budgets](/product/budgets).
 
-When one agent has too many jobs, split it: a supervisor agent can hand parts of the task to worker agents, each with its own model and tools. See [supervisor and worker agents](/learn/agents/supervisor-and-workers).
+When one agent has too many jobs, split it: a <Term id="supervisor-agent">supervisor agent</Term> can hand parts of the task to worker agents, each with its own model and tools. See [supervisor and worker agents](/learn/agents/supervisor-and-workers).
 
 ## Try it in L2M
 

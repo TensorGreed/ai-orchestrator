@@ -2,13 +2,13 @@
 layout: page
 sidebar: false
 title: "How AI agents work: loops, tools and teams"
-description: "Guides to AI agents: the tool-calling loop, how agents stop and fail, and supervisor and worker agents, each with a runnable example in the demo."
+description: "Guides to AI agents: the tool-calling loop, how agents stop and fail, supervisor and worker agents, agent memory and human approval, with runnable demos."
 track: agents
 ---
 
 <div class="hub-page">
 
-<HubHero eyebrow="Learn · Track" title="How AI agents work" lead="What an agent is, how its loop runs, and how a supervisor splits work across worker agents. Guides on memory and human approval are planned. No prior knowledge of agents needed; knowing what a language model is helps." />
+<HubHero eyebrow="Learn · Track" title="How AI agents work" lead="What an agent is, how its loop runs, how a supervisor splits work across worker agents, what an agent should remember, and where a person should approve its actions. No prior knowledge of agents needed; knowing what a language model is helps." />
 
 <TrackGuides track="agents" />
 
