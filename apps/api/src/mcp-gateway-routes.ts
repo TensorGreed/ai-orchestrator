@@ -2073,8 +2073,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
    * MCP 2026-07-28 `subscriptions/listen`, acknowledge-only: the gateway serves tools and its tool list does not
    * announce changes, so the stream opens with an acknowledgment that honours nothing, then stays open with
    * keep-alive comments until the client closes it, MCP_GATEWAY_LISTEN_MAX_MS passes or the server shuts down (the
-   * last two end with a `complete` result). A stream takes no principal state. It counts against the client's
-   * concurrency limit (when it has one) and the per-client stream cap.
+   * last two end with a `complete` result). A stream takes no principal state. It counts only against the per-client
+   * stream cap: not against the client's rate or concurrency limits, which cap `tools/call`.
    */
   const handleModernListen = async (
     request: FastifyRequest,
@@ -2105,31 +2105,13 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       retryLater(`This client already has ${open} subscription streams open (at most ${listenMaxPerClient}).`, "listen_streams_limit");
       return;
     }
-    // Reserved before the limiter is awaited, so two requests cannot both pass the cap.
+    // Reserved in the same tick as the check above (nothing is awaited in between), so two requests cannot both pass the cap.
     listenCounts.set(clientKey, open + 1);
     const unreserve = () => {
       const left = (listenCounts.get(clientKey) ?? 1) - 1;
       if (left <= 0) listenCounts.delete(clientKey);
       else listenCounts.set(clientKey, left);
     };
-    // A stream holds one of the client's concurrency slots (never a rate token) for as long as it is open.
-    let release = () => undefined as void;
-    const effective = effectiveGatewayRateLimit(auth.client, toolset);
-    if (effective) {
-      let admitted;
-      try {
-        admitted = await limiter.acquire(effective.key, { ...effective.limit, requestsPerMinute: null, burst: null });
-      } catch (error) {
-        unreserve();
-        throw error;
-      }
-      if (!admitted.ok) {
-        unreserve();
-        retryLater(admitted.message, admitted.reason);
-        return;
-      }
-      release = admitted.release;
-    }
 
     const hookHeaders = hookHeadersOf(reply);
     reply.hijack();
@@ -2151,7 +2133,6 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       stopHeartbeat();
       listenStreams.delete(finish);
       reply.raw.off("close", cleanup);
-      release();
       unreserve();
     };
     /** Graceful end: the `complete` result, then close. */
@@ -2162,7 +2143,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       if (!reply.raw.writableEnded) reply.raw.end();
     };
     reply.raw.on("close", cleanup);
-    // Gone already (during admission): its close event has fired, so free the slots now.
+    // Gone already (during admission): its close event has fired, so free the stream count now.
     if (reply.raw.destroyed || request.raw.socket?.destroyed) {
       cleanup();
       return;

@@ -832,25 +832,39 @@ describe("MCP gateway subscriptions/listen (acknowledge-only)", () => {
     }
   });
 
-  it("counts a stream against the client's concurrency limit, not its rate", async () => {
+  it("does not take the client's concurrency slot or a rate token", async () => {
     const fixture = await setup({ env: on });
     expect(
       (await api(fixture.context, fixture.cookie, "PATCH", `/api/mcp/clients/${fixture.client.id}`, { rateLimit: { requestsPerMinute: 1, burst: 1, maxConcurrent: 1 } })).status
     ).toBe(200);
-    const stream = await listen(fixture);
-    await waitFor(() => stream.messages().length === 1);
-    // The stream holds the one slot: a second stream is refused, and so is a tool call.
-    const second = await modern(fixture, "subscriptions/listen", {}, { headers: { accept: "text/event-stream" } });
-    expect(second.statusCode).toBe(429);
+    const first = await listen(fixture, { id: 1 });
+    const second = await listen(fixture, { id: 2 });
+    await waitFor(() => first.messages().length === 1 && second.messages().length === 1);
+    // Two streams are open, yet the client's one concurrent call and its one call per minute are still available.
     const call = await modern(fixture, "tools/call", { name: "mock_tools__calculator", arguments: { expression: "1+1" } });
-    expect(call.json().error?.code).toBe(-31029);
+    expect(call.json().error).toBeUndefined();
+    expect(call.json().result.structuredContent).toMatchObject({ result: 2 });
+    for (const stream of [first, second]) {
+      stream.controller.abort();
+      await stream.pump;
+    }
+  });
+
+  it("frees the stream count when the client closes a stream (cap of one)", async () => {
+    const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_MAX_PER_CLIENT: "1" } });
+    const stream = await listen(fixture, { id: 1 });
+    await waitFor(() => stream.messages().length === 1);
     stream.controller.abort();
     await stream.pump;
-    // Closing frees the slot; the stream used no rate token, so the one allowed call goes through.
+    let again!: Awaited<ReturnType<typeof listen>>;
     await waitFor(async () => {
-      const retry = await modern(fixture, "tools/call", { name: "mock_tools__calculator", arguments: { expression: "1+1" } });
-      return retry.json().error === undefined;
+      again = await listen(fixture, { id: 2 });
+      if (again.response.status === 200) return true;
+      await again.pump;
+      return false;
     });
+    again.controller.abort();
+    await again.pump;
   });
 
   it("is not served with modern mode off, and legacy sessions do not get it", async () => {
