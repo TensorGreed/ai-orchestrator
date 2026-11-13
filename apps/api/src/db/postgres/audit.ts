@@ -566,6 +566,14 @@ export async function recordAuditExportRun(ctx: PgContext, input: Parameters<Sto
         // The transaction rolls back: no run row, no cursor change.
         if (exists.rows.length > 0) throw new AuditExportCursorMovedError(input.destinationId, input.cursorFrom ?? null);
       }
+    } else if (input.status === "success") {
+      // Nothing to send: the check counts as the destination's last run, so an idle one waits its interval again.
+      await client.query(
+        `UPDATE audit_export_destinations
+         SET last_export_at = $1, last_status = $2, last_error = NULL, updated_at = $3
+         WHERE id = $4`,
+        [input.completedAt, input.status, new Date().toISOString(), input.destinationId]
+      );
     } else if (input.status === "failure") {
       await client.query(
         `UPDATE audit_export_destinations

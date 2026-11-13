@@ -325,12 +325,15 @@ describeStoreContract("store contract: audit", (ctx) => {
     expect(await store.getAuditExportDestination("x1")).toMatchObject({ lastExportId: "b", lastStatus: "failure", lastError: "unknown" });
     await store.recordAuditExportRun({ id: "r3", destinationId: "x1", startedAt: "2026-03-03T00:00:00.000Z", completedAt: "2026-03-03T00:00:01.000Z", status: "partial", rowsExported: 2, error: "half" });
     expect(await store.getAuditExportDestination("x1")).toMatchObject({ lastStatus: "failure", lastError: "unknown" });
+    // An empty successful check: the cursor stays, the check counts as the last run (an idle destination waits its interval).
+    await store.recordAuditExportRun({ id: "r4", destinationId: "x1", startedAt: "2026-03-04T00:00:00.000Z", completedAt: "2026-03-04T00:00:01.000Z", status: "success", rowsExported: 0 });
+    expect(await store.getAuditExportDestination("x1")).toMatchObject({ lastExportId: "b", lastExportAt: "2026-03-04T00:00:01.000Z", lastStatus: "success", lastError: null });
 
     const runs = await store.listAuditExportRuns("x1");
-    expect(runs.map((r) => r.id)).toEqual(["r3", "r2", "r1"]);
-    expect(runs[2]).toEqual({ id: "r1", destinationId: "x1", startedAt: "2026-03-01T00:00:00.000Z", completedAt: "2026-03-01T00:00:01.000Z", status: "success", rowsExported: 10, firstId: "a", lastId: "b", error: null });
-    expect(runs[0]).toMatchObject({ firstId: null, lastId: null, error: "half" });
-    expect((await store.listAuditExportRuns("x1", 0)).map((r) => r.id)).toEqual(["r3"]);
+    expect(runs.map((r) => r.id)).toEqual(["r4", "r3", "r2", "r1"]);
+    expect(runs[3]).toEqual({ id: "r1", destinationId: "x1", startedAt: "2026-03-01T00:00:00.000Z", completedAt: "2026-03-01T00:00:01.000Z", status: "success", rowsExported: 10, firstId: "a", lastId: "b", error: null });
+    expect(runs[1]).toMatchObject({ firstId: null, lastId: null, error: "half" });
+    expect((await store.listAuditExportRuns("x1", 0)).map((r) => r.id)).toEqual(["r4"]);
 
     expect(await store.deleteAuditExportDestination("x1")).toBe(true);
     expect(await store.deleteAuditExportDestination("x1")).toBe(true);

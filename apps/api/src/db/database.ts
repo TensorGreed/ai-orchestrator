@@ -12453,6 +12453,14 @@ export class SqliteStore implements Store {
          WHERE id = ?`,
         [input.lastId, input.completedAt, input.status, new Date().toISOString(), input.destinationId]
       );
+    } else if (input.status === "success") {
+      // Nothing to send: the check counts as the destination's last run, so an idle one waits its interval again.
+      this.exec(
+        `UPDATE audit_export_destinations
+         SET last_export_at = ?, last_status = ?, last_error = NULL, updated_at = ?
+         WHERE id = ?`,
+        [input.completedAt, input.status, new Date().toISOString(), input.destinationId]
+      );
     } else if (input.status === "failure") {
       this.exec(
         `UPDATE audit_export_destinations

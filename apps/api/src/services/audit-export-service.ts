@@ -95,6 +95,10 @@ interface ExportRunOutcome {
 export class AuditExportService {
   private timer: NodeJS.Timeout | null = null;
   private inFlight = new Set<string>();
+  /** Destinations whose last run stopped at a bound with more rows to send (see drain). */
+  private readonly behind = new Set<string>();
+  private readonly maxBatchesPerRun: number;
+  private readonly runBudgetMs: number;
   private readonly store: Store;
   private readonly checkIntervalMs: number;
   private readonly batchSize: number;
@@ -105,13 +109,25 @@ export class AuditExportService {
 
   constructor(
     store: Store,
-    options: { checkIntervalMs?: number; batchSize?: number; safeFsRoot?: string; lock?: AuditExportLock; sealer?: AuditExportSealer } = {}
+    options: {
+      checkIntervalMs?: number;
+      batchSize?: number;
+      /** Most batches one run ships before it yields to the next tick (default 20). */
+      maxBatchesPerRun?: number;
+      /** No new batch starts once a run has taken this long (default: the check interval). */
+      runBudgetMs?: number;
+      safeFsRoot?: string;
+      lock?: AuditExportLock;
+      sealer?: AuditExportSealer;
+    } = {}
   ) {
     this.store = store;
     this.lock = options.lock;
     this.sealer = options.sealer;
     this.checkIntervalMs = options.checkIntervalMs ?? 60_000;
     this.batchSize = options.batchSize ?? 500;
+    this.maxBatchesPerRun = Math.max(1, options.maxBatchesPerRun ?? 20);
+    this.runBudgetMs = options.runBudgetMs ?? this.checkIntervalMs;
     this.safeFsRoot = path.resolve(options.safeFsRoot ?? "apps/api/data");
   }
 
@@ -282,7 +298,8 @@ export class AuditExportService {
     for (const dest of dests) {
       if (this.inFlight.has(dest.id)) continue;
       const lastMs = dest.lastExportAt ? Date.parse(dest.lastExportAt) : 0;
-      if (now - lastMs < dest.intervalSeconds * 1000) continue;
+      // A destination still behind after its last run goes again on the next tick, whatever its interval.
+      if (now - lastMs < dest.intervalSeconds * 1000 && !this.behind.has(dest.id)) continue;
       this.inFlight.add(dest.id);
       try {
         // Another instance exporting this destination now: its batch moves the cursor; this tick skips it.
@@ -304,10 +321,48 @@ export class AuditExportService {
    * endpoint can drive a destination on demand.
    */
   async runDestination(id: string, options: { waitMs?: number } = {}): Promise<ExportRunOutcome> {
-    if (!this.lock) return await this.exportBatch(id);
-    const outcome = await this.lock(id, options.waitMs ?? AUDIT_EXPORT_NOW_LOCK_WAIT_MS, async () => await this.exportBatch(id));
+    if (!this.lock) return await this.drain(id);
+    const outcome = await this.lock(id, options.waitMs ?? AUDIT_EXPORT_NOW_LOCK_WAIT_MS, async () => await this.drain(id));
     if (!outcome.acquired) throw new AuditExportBusyError(id);
     return outcome.value;
+  }
+
+  /**
+   * Ships the backlog in order, one batch after another, each batch recorded (and the cursor moved) only once it was
+   * delivered: at least once, never out of order. Stops at the first failure (retried on the next tick), when a batch
+   * comes back short (caught up), or at the bounds (maxBatchesPerRun batches, or runBudgetMs since the start), so one
+   * destination never holds the exporter; a destination stopped by a bound with more to send is marked behind and
+   * runs again on the next tick instead of waiting for its interval.
+   */
+  private async drain(id: string): Promise<ExportRunOutcome> {
+    const started = Date.now();
+    let total: ExportRunOutcome | undefined;
+    for (let batch = 1; ; batch += 1) {
+      const outcome = await this.exportBatch(id);
+      total = total
+        ? {
+            status: outcome.status === "failure" ? "partial" : total.status,
+            rowsExported: total.rowsExported + outcome.rowsExported,
+            firstId: total.firstId ?? outcome.firstId,
+            lastId: outcome.status === "failure" ? total.lastId : outcome.lastId ?? total.lastId,
+            error: outcome.error
+          }
+        : outcome;
+      const full = outcome.status === "success" && outcome.rowsExported >= this.batchSize;
+      if (!full) {
+        this.behind.delete(id);
+        return total;
+      }
+      if (batch >= this.maxBatchesPerRun || Date.now() - started >= this.runBudgetMs) {
+        this.behind.add(id);
+        this.logger?.info("Audit export destination is behind; continuing on the next tick", {
+          destinationId: id,
+          batches: batch,
+          rowsExported: total.rowsExported
+        });
+        return total;
+      }
+    }
   }
 
   /** Reads the batch after the destination's cursor, delivers it and records the run (which moves the cursor). */

@@ -118,12 +118,17 @@ curl -s -X POST http://localhost:4000/api/audit-export/destinations \
 ```
 
 - **Scheduled runs** need `AUDIT_EXPORT_ENABLED=true`. Every `AUDIT_EXPORT_CHECK_INTERVAL_MS` (60 s) L2M runs each
-  enabled destination whose `intervalSeconds` (default 3600) has passed since its last successful batch. In a cluster
-  only the leader runs them, and a destination is never exported by two instances at once.
-- **One batch per run.** A run sends at most `AUDIT_EXPORT_BATCH_SIZE` entries (500). If the deployment writes more
-  entries per interval than that, the destination falls behind: shorten `intervalSeconds` or raise the batch size.
-- **Run now** (`POST /api/audit-export/destinations/:id/run`) sends the next batch at once, with or without
-  `AUDIT_EXPORT_ENABLED`; `409` while another instance is exporting it. `GET /api/audit-export/destinations/:id/runs`
+  enabled destination whose `intervalSeconds` (default 3600) has passed since its last successful run (a run with
+  nothing to send counts, so an idle destination is checked once per interval). In a cluster only the leader runs
+  them, and a destination is never exported by two instances at once.
+- **A run drains the backlog.** It sends batches of at most `AUDIT_EXPORT_BATCH_SIZE` entries (500) one after another,
+  in order, moving the cursor after each delivered batch, until a batch comes back short (caught up), a batch fails
+  (sent again, from the same entry, at the next scheduled run), 20 batches were sent, or the run has taken
+  `AUDIT_EXPORT_CHECK_INTERVAL_MS`. A destination stopped by those bounds with more to send runs again at the next
+  check instead of waiting for its interval, so it catches up at up to 20 batches a minute.
+- **Run now** (`POST /api/audit-export/destinations/:id/run`) runs the destination at once, with the same bounds,
+  with or without `AUDIT_EXPORT_ENABLED` (its `status` is `partial` when a later batch failed after earlier ones were
+  delivered); `409` while another instance is exporting it. `GET /api/audit-export/destinations/:id/runs`
   lists the latest runs with their status, row count and error.
 - **Header values** are sealed with the master key (`SECRET_MASTER_KEY_BASE64`) when they are saved, and every answer
   shows them as `__secret__` (the header names stay visible). To change a destination's config with `PUT`, send the
@@ -161,7 +166,7 @@ entry must arrive. Log streams still receive events when `AUDIT_LOG_ENABLED=fals
 | `AUDIT_LOG_PRUNE_INTERVAL_MS` | `3600000` | How often old entries are deleted (on the leader). |
 | `AUDIT_EXPORT_ENABLED` | `false` | Run export destinations on their schedule. |
 | `AUDIT_EXPORT_CHECK_INTERVAL_MS` | `60000` | How often destinations are checked. |
-| `AUDIT_EXPORT_BATCH_SIZE` | `500` | Most entries one run sends. |
+| `AUDIT_EXPORT_BATCH_SIZE` | `500` | Most entries one batch sends (a run sends up to 20 batches). |
 | `AUDIT_EXPORT_FILE_ROOT` | `apps/api/data` | Directory `file` destinations must write under (relative to the API's working directory). |
 | `LOG_STREAM_ENABLED` | `true` | Send events to log streams. |
 | `LOG_STREAM_FLUSH_INTERVAL_MS` | `2000` | How often waiting events are sent. |
