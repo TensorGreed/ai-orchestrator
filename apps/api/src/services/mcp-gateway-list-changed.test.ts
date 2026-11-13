@@ -91,6 +91,21 @@ describe("GatewayListChangedHub", () => {
     expect(hub.generation).toBe(6);
   });
 
+  it("lets a stream that opened during a hint ask for a check (the open-time race)", async () => {
+    const { hub, states } = makeHub();
+    states.set("ts/c", { kind: "list", fingerprint: "A" });
+    // The stream reads the generation, then its first list; a change lands and hints meanwhile (nothing watched yet).
+    const before = hub.generation;
+    states.set("ts/c", { kind: "list", fingerprint: "B" });
+    hub.hint();
+    const stream = watcher("ts", "c", "A");
+    hub.watch(stream.entry);
+    expect(hub.generation).not.toBe(before);
+    hub.hint();
+    await tick(80);
+    expect(stream.events).toEqual(["changed"]);
+  });
+
   it("ends the streams of a scope that is gone, and stops checking a scope nobody watches", async () => {
     const { hub, states, reads } = makeHub();
     states.set("ts/c", { kind: "list", fingerprint: "A" });
@@ -135,10 +150,10 @@ describe("GatewayListChangedHub", () => {
     const stream = watcher("ts", "c", "A");
     hub.watch(stream.entry);
     await bus.publish("ctl", { t: "workflow_changed", id: "wf" });
-    await bus.publish("ctl", { t: GATEWAY_TOOLS_CHANGED_MESSAGE, v: 99 });
     await tick(60);
     expect(reads).toHaveLength(0);
-    await bus.publish("ctl", { t: GATEWAY_TOOLS_CHANGED_MESSAGE });
+    // A newer instance's version still counts: the message decides nothing.
+    await bus.publish("ctl", { t: GATEWAY_TOOLS_CHANGED_MESSAGE, v: 99 });
     await tick(60);
     expect(stream.events).toEqual(["changed"]);
     hub.stop();
@@ -171,9 +186,9 @@ describe("tool list change helpers", () => {
     expect(toolListFingerprint([a])).not.toBe(toolListFingerprint([{ ...a, description: "x" }]));
   });
 
-  it("recognises the bus message, up to this build's version", () => {
+  it("recognises the bus message, whatever its version", () => {
     expect(isGatewayToolsChangedMessage({ v: 1, t: GATEWAY_TOOLS_CHANGED_MESSAGE })).toBe(true);
-    expect(isGatewayToolsChangedMessage({ v: 2, t: GATEWAY_TOOLS_CHANGED_MESSAGE })).toBe(false);
+    expect(isGatewayToolsChangedMessage({ v: 2, t: GATEWAY_TOOLS_CHANGED_MESSAGE })).toBe(true);
     expect(isGatewayToolsChangedMessage({ v: 1, t: "cancel" })).toBe(false);
   });
 
@@ -184,6 +199,12 @@ describe("tool list change helpers", () => {
     expect(isToolListMutation("PUT", "/api/mcp/servers/:id/tools/:toolName/classification", 200)).toBe(true);
     expect(isToolListMutation("POST", "/api/mcp/clients/:id/revoke", 200)).toBe(true);
     expect(isToolListMutation("PUT", "/api/data-destinations/:id", 200)).toBe(true);
+    // A client's role is capped by its creator's.
+    expect(isToolListMutation("PUT", "/api/users/:id", 200)).toBe(true);
+    expect(isToolListMutation("PUT", "/api/custom-roles/:id", 200)).toBe(true);
+    for (const route of ["/api/mcp/servers/:id/playground/call", "/api/mcp/clients/:id/rotate", "/api/mcp/clients/:id/network", "/api/users/:id/sessions/revoke"]) {
+      expect(isToolListMutation("POST", route, 200)).toBe(false);
+    }
     // Reads, failures, simulations and other routes do not.
     expect(isToolListMutation("GET", "/api/mcp/toolsets", 200)).toBe(false);
     expect(isToolListMutation("PUT", "/api/mcp/toolsets/:id", 400)).toBe(false);

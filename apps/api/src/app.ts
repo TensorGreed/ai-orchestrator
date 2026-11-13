@@ -2127,6 +2127,17 @@ export async function createApp(
   const gatewayToolsChanged = () => {
     if (config.MCP_GATEWAY_MODERN_PROTOCOL === "on") announce({ t: GATEWAY_TOOLS_CHANGED_MESSAGE });
   };
+  /** Only a workflow some toolset exposes can change a gateway tool list; a failed lookup announces anyway. */
+  const workflowToolsChanged = async (workflowId: string) => {
+    if (config.MCP_GATEWAY_MODERN_PROTOCOL !== "on") return;
+    try {
+      const toolsets = await store.listMcpToolsets();
+      if (!toolsets.some((toolset) => toolset.members.some((member) => member.kind === "workflow" && member.workflowId === workflowId))) return;
+    } catch (error) {
+      app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "Could not read MCP toolsets for a workflow change");
+    }
+    gatewayToolsChanged();
+  };
   /**
    * A workflow was saved, published, restored or deleted through this instance: reload its schedules and triggers here
    * (an instance without background workers has neither), then, in cluster mode, tell the other instances so the leader
@@ -2141,7 +2152,7 @@ export async function createApp(
       await triggerService?.reloadWorkflow(workflowId);
     }
     if (clusterMode) announce({ t: "workflow_changed", id: workflowId });
-    gatewayToolsChanged();
+    await workflowToolsChanged(workflowId);
   };
 
   // 13.3 — every purge by age goes through the retention service (created below, once the leader election, audit and

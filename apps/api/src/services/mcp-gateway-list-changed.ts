@@ -13,9 +13,11 @@
  *     after the bus reconnects (messages may have been lost). Hints within GATEWAY_LIST_CHANGED_DEBOUNCE_MS share one
  *     check.
  *   - every MCP_GATEWAY_LISTEN_CHECK_MS while a stream is watched, as the fallback for lost messages and changes
- *     nothing announces (0 turns it off).
+ *     nothing announces, such as rules written by background jobs or rules whose conditions depend on time (0 turns
+ *     it off).
  *
- * Cost: nothing at all while no stream is watched (no timer, a hint is dropped). A check builds one catalog per
+ * Cost: the hub does nothing while no stream is watched (no timer, a hint is dropped); the hints themselves are still
+ * published while modern mode is on (one small bus message per change, see app.ts). A check builds one catalog per
  * (toolset, client) pair with watched streams on this instance, from the database, as `tools/list` does; no upstream
  * server is contacted.
  *
@@ -23,7 +25,7 @@
  * is ended gracefully (a `complete` result): reconnecting gets the refusal `tools/list` would get.
  */
 import crypto from "node:crypto";
-import { CLUSTER_BUS_VERSION, type ClusterBus, type ClusterMessage } from "./cluster-bus.js";
+import type { ClusterBus, ClusterMessage } from "./cluster-bus.js";
 
 /** The cluster bus `ctl` message that hints at a tool list change: `{ t }`, no payload (receivers re-read). */
 export const GATEWAY_TOOLS_CHANGED_MESSAGE = "mcp_tools_changed";
@@ -32,9 +34,12 @@ export const DEFAULT_MCP_GATEWAY_LISTEN_CHECK_MS = 30_000;
 /** Hints within this window share one check. */
 export const GATEWAY_LIST_CHANGED_DEBOUNCE_MS = 250;
 
-/** True for a bus message that hints at a tool list change (any other field is ignored; it decides nothing). */
+/**
+ * True for a bus message that hints at a tool list change. Its version and every other field are ignored: it carries
+ * nothing and decides nothing (receivers re-read), so a hint from a newer instance during a rolling upgrade still counts.
+ */
 export function isGatewayToolsChangedMessage(message: ClusterMessage): boolean {
-  return message.t === GATEWAY_TOOLS_CHANGED_MESSAGE && typeof message.v === "number" && message.v <= CLUSTER_BUS_VERSION;
+  return message.t === GATEWAY_TOOLS_CHANGED_MESSAGE;
 }
 
 /** A fingerprint of a tool list as a caller receives it (descriptors in their served order). */
@@ -44,18 +49,37 @@ export function toolListFingerprint(descriptors: readonly unknown[]): string {
 
 /**
  * Admin API routes whose successful non-GET requests may change a toolset's tool list: toolsets, MCP clients (role,
- * toolsets, revoke), MCP servers (edits, probes, tool classifications and open-world overrides), tool rules and data
- * destinations (read by open-world rules). A match only schedules a check, so a route here that changed nothing costs
- * one check while streams are watched.
+ * toolsets, revoke), MCP servers (edits, probes, tool classifications and open-world overrides), tool rules, data
+ * destinations (read by open-world rules), and users and custom roles (a client's role is capped by its creator's).
+ * A match only schedules a check, so a route here that changed nothing costs one check while streams are watched.
  */
-const TOOL_LIST_ROUTE_PREFIXES = ["/api/mcp/toolsets", "/api/mcp/clients", "/api/mcp/servers", "/api/mcp/policies", "/api/data-destinations"] as const;
-/** Routes under those prefixes that only read or simulate. */
+const TOOL_LIST_ROUTE_PREFIXES = [
+  "/api/mcp/toolsets",
+  "/api/mcp/clients",
+  "/api/mcp/servers",
+  "/api/mcp/policies",
+  "/api/data-destinations",
+  "/api/users",
+  "/api/custom-roles"
+] as const;
+/** Routes under those prefixes that only read, simulate, call a tool or touch credentials: no tool list changes. */
 const TOOL_LIST_READ_ONLY_ROUTES: ReadonlySet<string> = new Set([
   "/api/mcp/policies/simulate",
   "/api/mcp/policies/evaluate",
   "/api/mcp/policies/suggestions/generate",
   "/api/mcp/policies/suggestions/:id/dismiss",
-  "/api/data-destinations/preview"
+  "/api/data-destinations/preview",
+  "/api/mcp/servers/:id/playground/call",
+  "/api/mcp/servers/:id/prompts/get",
+  "/api/mcp/servers/:id/resources/read",
+  "/api/mcp/servers/:id/oauth/connect",
+  "/api/mcp/servers/:id/oauth/refresh",
+  "/api/mcp/servers/:id/breaker/reset",
+  "/api/mcp/clients/:id/rotate",
+  "/api/mcp/clients/:id/network",
+  "/api/users/invite",
+  "/api/users/:id/mfa/reset",
+  "/api/users/:id/sessions/revoke"
 ]);
 
 /** Whether a finished request (method, route template, status) may have changed a toolset's tool list. */

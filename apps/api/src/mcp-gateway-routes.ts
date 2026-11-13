@@ -2434,8 +2434,13 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     if (hub) {
       app.addHook("onResponse", async (request, reply) => {
         if (!isToolListMutation(request.method, request.routeOptions.url, reply.statusCode)) return;
-        hub.hint();
-        deps.clusterBus?.publish("ctl", { t: GATEWAY_TOOLS_CHANGED_MESSAGE }).catch((error: unknown) => {
+        // The bus delivers to this instance too; without a bus, or when publishing fails, hint here directly.
+        if (!deps.clusterBus) {
+          hub.hint();
+          return;
+        }
+        deps.clusterBus.publish("ctl", { t: GATEWAY_TOOLS_CHANGED_MESSAGE }).catch((error: unknown) => {
+          hub.hint();
           app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Could not announce an MCP gateway tool list change");
         });
       });
