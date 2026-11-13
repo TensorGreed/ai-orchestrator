@@ -35,6 +35,13 @@ describe("UsageService cost observer", () => {
     expect(totals.costUsd).toBe(7);
   });
 
+  it("reports a run of a workflow with no project under the default project, as the model allowlists count it", async () => {
+    const { usage, observed } = service(async () => undefined);
+    await usage.recordExecution({ ...run, projectId: undefined });
+    await usage.recordExecution({ ...run, projectId: null as unknown as string });
+    expect(observed.map((entry) => entry.projectId)).toEqual(["default", "default"]);
+  });
+
   it("reports nothing when the usage event could not be written", async () => {
     const { usage, observed } = service(async () => {
       throw new Error("disk full");
