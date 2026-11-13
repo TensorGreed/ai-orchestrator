@@ -163,11 +163,15 @@ describeStoreContract("store contract: audit", (ctx) => {
     expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(0);
     expect((await store.listAuditLogs({ eventType: "audit.retention_checkpoint" })).total).toBe(1);
 
-    // A second prune that deletes everything: its checkpoint is the only row, anchored to itself.
-    expect(await store.pruneAuditLogs({ before: "2999-01-01T00:00:00.000Z" })).toBe(4);
+  });
+
+  it("a prune that deletes every row leaves its checkpoint as the only row, anchored to itself", async () => {
+    const store = ctx.store();
+    for (const id of ["o1", "o2"]) await store.writeAuditLog(entry(id, { createdAt: "2001-01-01T00:00:00.000Z" }));
+    expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(2);
     const only = await store.listAuditLogsAfter({ afterId: null, limit: 10 });
     expect(only).toHaveLength(1);
-    expect(only[0]!.metadata).toMatchObject({ firstRetainedId: only[0]!.id, lastPrunedId: "n3", deleted: 4 });
+    expect(only[0]!.metadata).toMatchObject({ firstRetainedId: only[0]!.id, lastPrunedId: "o2", deleted: 2 });
     expect(await store.verifyAuditChain()).toMatchObject({ ok: true, rowsChecked: 1, anchor: { firstId: only[0]!.id, checkpointId: only[0]!.id } });
   });
 

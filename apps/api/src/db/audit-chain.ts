@@ -70,11 +70,16 @@
  *
  * The walk takes the first row's stored prev_hash as given and checks every link and hash from there as before. At the
  * end, a chain whose first row does not start at 64 zeros is intact only if the **last** verified checkpoint names
- * exactly that row and that prev_hash; otherwise it is broken at its first row (as before this rule). So deleting more
- * rows from the start, or editing the first row's prev_hash, still fails, and editing any row kept (the checkpoint
- * included) fails at that row as before. Like the rest of the chain (an unkeyed hash), a checkpoint proves order and
- * content, not who wrote it: anyone who can write the database can append rows, so compare with the exported copy or a
- * signed audit bundle to rule that out.
+ * exactly that row and that prev_hash and is plausible (plausibleCheckpoint: the first row is not older than the
+ * cut-off, the cut-off is a day or more before the checkpoint, which is not dated in the future); otherwise it is
+ * broken at its first row (as before this rule). So deleting more rows from the start, or editing the first row's
+ * prev_hash, fails, and editing any row kept (the checkpoint included) fails at that row as before.
+ *
+ * Limit. The chain is an unkeyed hash, so a checkpoint proves order and content, not who wrote it. Someone with write
+ * access to the database can delete rows from the start and append a checkpoint of their own; the plausibility rule
+ * makes that checkpoint claim a cut-off after the deleted rows and date itself at least a day after the first row
+ * left, but cannot rule it out (just as such a person could rehash the whole chain). Compare with the exported copy or
+ * a signed audit bundle to rule that out.
  */
 import { createHash } from "node:crypto";
 
@@ -113,7 +118,7 @@ export function auditRetentionCheckpointEntry(id: string, checkpoint: AuditReten
 }
 
 /** The checkpoint a verified row records, or undefined when the row is not one (or its metadata is not well formed). */
-function retentionCheckpointOf(fields: AuditCanonicalInput): { anchorHash: string; firstRetainedId: string } | undefined {
+function retentionCheckpointOf(fields: AuditCanonicalInput): { anchorHash: string; firstRetainedId: string; before: string } | undefined {
   if (fields.eventType !== AUDIT_RETENTION_CHECKPOINT_EVENT || fields.category !== "system" || fields.actorType !== "system") return undefined;
   if (!fields.metadataJson) return undefined;
   let parsed: unknown;
@@ -123,9 +128,10 @@ function retentionCheckpointOf(fields: AuditCanonicalInput): { anchorHash: strin
     return undefined;
   }
   if (!parsed || typeof parsed !== "object") return undefined;
-  const { anchorHash, firstRetainedId } = parsed as Record<string, unknown>;
+  const { anchorHash, firstRetainedId, before } = parsed as Record<string, unknown>;
   if (typeof anchorHash !== "string" || !/^[0-9a-f]{64}$/.test(anchorHash) || typeof firstRetainedId !== "string" || !firstRetainedId) return undefined;
-  return { anchorHash, firstRetainedId };
+  if (typeof before !== "string" || !Number.isFinite(Date.parse(before))) return undefined;
+  return { anchorHash, firstRetainedId, before };
 }
 
 // ignoreBOM: a leading EF BB BF is the character U+FEFF, kept as stored (as the drivers keep it). Without it the
@@ -411,7 +417,7 @@ export class AuditChainWalker {
   /** The first row, when it does not start at 64 zeros (rows before it were deleted). */
   private start: { id: string; createdAt: string; prevHash: string } | undefined;
   /** The last verified retention checkpoint. */
-  private checkpoint: { id: string; anchorHash: string; firstRetainedId: string } | undefined;
+  private checkpoint: { id: string; createdAt: string; anchorHash: string; firstRetainedId: string; before: string } | undefined;
 
   /** Walks the next row (insertion order, entry_hash IS NOT NULL). False once the chain is broken: stop feeding. */
   push(row: AuditChainRow): boolean {
@@ -463,7 +469,7 @@ export class AuditChainWalker {
     this.prev = row.entryHash;
     this.checked += 1;
     const checkpoint = retentionCheckpointOf(row.fields);
-    if (checkpoint) this.checkpoint = { id, ...checkpoint };
+    if (checkpoint) this.checkpoint = { id, createdAt, ...checkpoint };
     return true;
   }
 
@@ -475,7 +481,7 @@ export class AuditChainWalker {
     } else if (this.start) {
       const { id, createdAt, prevHash } = this.start;
       const checkpoint = this.checkpoint;
-      if (!checkpoint || checkpoint.anchorHash !== prevHash || checkpoint.firstRetainedId !== id) {
+      if (!checkpoint || checkpoint.anchorHash !== prevHash || checkpoint.firstRetainedId !== id || !plausibleCheckpoint(checkpoint, createdAt)) {
         // No retention checkpoint accounts for the rows missing before the first one: broken there, as before.
         return { ok: false, rowsChecked: 0, firstBrokenAt: { id, createdAt, expected: checkpoint?.anchorHash ?? GENESIS_HASH, stored: prevHash } };
       }
@@ -485,6 +491,25 @@ export class AuditChainWalker {
     }
     return this.unverifiable.length > 0 ? { ...result, ok: false, unverifiable: [...this.unverifiable] } : result;
   }
+}
+
+const DAY_MS = 86_400_000;
+/** Clock skew allowed for a checkpoint's own time. */
+const CHECKPOINT_FUTURE_SKEW_MS = 5 * 60_000;
+
+/**
+ * What a real prune's checkpoint always satisfies (see "Retention" above): it deleted only rows created before its
+ * cut-off, so the first row it left was created at or after it; the cut-off is at least one day (the smallest
+ * AUDIT_LOG_RETENTION_DAYS) before the checkpoint was written; and the checkpoint is not dated in the future. A
+ * checkpoint appended by hand to hide rows deleted from the start must therefore claim a cut-off after those rows and
+ * date itself a day or more after the first row left.
+ */
+function plausibleCheckpoint(checkpoint: { createdAt: string; before: string }, firstCreatedAt: string): boolean {
+  const before = Date.parse(checkpoint.before);
+  const written = Date.parse(checkpoint.createdAt);
+  const first = Date.parse(firstCreatedAt);
+  if (![before, written, first].every(Number.isFinite)) return false;
+  return first >= before && written - before >= DAY_MS && written <= Date.now() + CHECKPOINT_FUTURE_SKEW_MS;
 }
 
 /** Walks `rows` (insertion order, entry_hash IS NOT NULL) by the rule above. */

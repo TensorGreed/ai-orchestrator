@@ -165,6 +165,35 @@ describe("audit export destination headers", () => {
     // Running it again changes nothing.
     expect(await new AuditExportService(store, { sealer: secretService }).sealStoredHeaders()).toBe(0);
   });
+
+  it("headers sealed under another master key: start-up goes on, and an update asks for new values instead of failing", async () => {
+    const { app, cookie } = await boot({
+      before: async (store) => {
+        const other = new SecretService(store, crypto.randomBytes(32).toString("base64"));
+        const headersSealed = other.sealValue(AUDIT_EXPORT_HEADERS_PURPOSE, JSON.stringify({ Authorization: `Bearer ${TOKEN}` }));
+        for (const id of ["axd-a", "axd-b"]) {
+          await store.createAuditExportDestination({
+            id,
+            name: id,
+            kind: "http",
+            // A plain copy next to an unopenable sealed one: sealing it at start-up fails for this row only.
+            config: { url: "https://siem.example.com/ingest", headersSealed, headers: { Authorization: "stale" } },
+            intervalSeconds: 300
+          });
+        }
+      }
+    });
+    const put = (config: Record<string, unknown>) =>
+      app.inject({ method: "PUT", url: "/api/audit-export/destinations/axd-a", headers: { cookie }, payload: { config } });
+    const masked = await put({ url: "https://siem.example.com/ingest", headers: { Authorization: "__secret__" } });
+    expect(masked.statusCode).toBe(400);
+    expect(masked.json<{ error: string }>().error).toMatch(/cannot be opened/);
+    expect((await put({ url: "https://siem.example.com/ingest", headers: { Authorization: `Bearer ${NEW_TOKEN}` } })).statusCode).toBe(200);
+    const listed = await app.inject({ method: "GET", url: "/api/audit-export/destinations", headers: { cookie } });
+    const byId = new Map(listed.json<{ destinations: Array<{ id: string; config: Record<string, unknown> }> }>().destinations.map((d) => [d.id, d.config]));
+    expect(byId.get("axd-a")).toMatchObject({ headers: { Authorization: "__secret__" } });
+    expect(byId.has("axd-b")).toBe(true);
+  });
 });
 
 describe("log stream webhook headers", () => {

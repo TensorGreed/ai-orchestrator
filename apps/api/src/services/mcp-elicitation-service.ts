@@ -48,8 +48,6 @@ import type { Store } from "../db/store.js";
 import type { ClusterBus, ClusterMessage } from "./cluster-bus.js";
 import type { ChallengeSealer } from "./challenge-store.js";
 
-/** Trigger types where a person is in front of the run and can answer. */
-
 const ELICITATION_ROLE_RANK: Record<string, number> = { viewer: 1, operator: 2, builder: 3, admin: 4 };
 
 /**
@@ -60,6 +58,7 @@ export function seesOthersElicitations(role: string): boolean {
   return (ELICITATION_ROLE_RANK[role] ?? 0) >= ELICITATION_ROLE_RANK.operator!;
 }
 
+/** Trigger types where a person is in front of the run and can answer. */
 export const ATTENDED_TRIGGER_TYPES = new Set(["manual", "manual_stream", "manual_retry", "approval_resume"]);
 
 export function isAttendedTrigger(triggerType: string | undefined): boolean {

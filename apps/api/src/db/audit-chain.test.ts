@@ -166,7 +166,7 @@ describe("verifyAuditRows after retention", () => {
     };
     add(fields("k1", "kept"));
     add(fields("k2", "kept"));
-    const meta = { anchorHash: deleted[1]!.entryHash, firstRetainedId: "k1", lastPrunedId: "o2", before: "2026-01-01T00:00:00.000Z", deleted: 2, ...options.metadata };
+    const meta = { anchorHash: deleted[1]!.entryHash, firstRetainedId: "k1", lastPrunedId: "o2", before: "2025-12-01T00:00:00.000Z", deleted: 2, ...options.metadata };
     const entry = auditRetentionCheckpointEntry("cp", meta as never);
     add(fields("cp", entry.message, {
       eventType: entry.eventType, category: entry.category, action: entry.action, actorType: entry.actorType,
@@ -204,6 +204,17 @@ describe("verifyAuditRows after retention", () => {
   it("only the last checkpoint counts: an older one cannot anchor a front a later prune moved", () => {
     const later = { anchorHash: "a".repeat(64), firstRetainedId: "k9", lastPrunedId: "k8", before: "2026-02-01T00:00:00.000Z", deleted: 1 };
     expect(verifyAuditRows(pruned({ extraCheckpoint: later }).kept)).toMatchObject({ ok: false, firstBrokenAt: { id: "k1" } });
+  });
+
+  it("an implausible checkpoint does not anchor: a cut-off after the first row, less than a day before it, or dated ahead", () => {
+    // Rows deleted from the start inside the retention: the forged cut-off is after the first row left.
+    expect(verifyAuditRows(pruned({ metadata: { before: "2026-01-02T00:00:00.000Z" } }).kept)).toMatchObject({ ok: false, firstBrokenAt: { id: "k1" } });
+    // A cut-off less than a day before the checkpoint (no retention is shorter than a day).
+    expect(verifyAuditRows(pruned({ metadata: { before: "2025-12-31T12:00:00.000Z" } }).kept)).toMatchObject({ ok: false, firstBrokenAt: { id: "k1" } });
+    // A checkpoint dated in the future.
+    expect(
+      verifyAuditRows(pruned({ checkpoint: { createdAt: "2999-01-01T00:00:00.000Z" }, metadata: { before: "2998-01-01T00:00:00.000Z" } }).kept)
+    ).toMatchObject({ ok: false, firstBrokenAt: { id: "k1" } });
   });
 
   it("a tampered row after the anchor fails at that row", () => {

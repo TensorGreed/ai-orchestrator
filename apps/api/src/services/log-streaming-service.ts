@@ -544,7 +544,7 @@ export class LogStreamingService {
         if (config[field] !== undefined) config[field] = SECRET_PLACEHOLDER;
       }
       // A webhook header can carry a token: its name is shown, its value never.
-      if (isHeaderRecord(config.headers)) {
+      if (config.headers && typeof config.headers === "object" && !Array.isArray(config.headers)) {
         config.headers = Object.fromEntries(Object.keys(config.headers).map((name) => [name, SECRET_PLACEHOLDER]));
       }
     }

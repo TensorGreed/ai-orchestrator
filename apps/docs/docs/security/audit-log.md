@@ -87,8 +87,11 @@ they were written, up to the first entry inside the retention, so no gap opens i
 that deletes entries appends a retention checkpoint (`audit.retention_checkpoint`, category `system`, actor `system`)
 whose metadata records the hash of the last deleted entry (`anchorHash`), the first entry left (`firstRetainedId`),
 the cut-off and the count. The check starts from the first entry left and passes only if the latest checkpoint names
-exactly that entry and that hash; deleting more entries from the start, or editing any entry kept (the checkpoint
-included), still fails. A chain purged by an older release, before checkpoints, reports as broken at its first entry
+exactly that entry and that hash and is plausible: the first entry left is not older than the cut-off, the cut-off is at
+least a day before the checkpoint, and the checkpoint is not dated in the future. Editing any entry kept (the checkpoint
+included) still fails. The chain is an unkeyed hash, so it shows order and content, not who wrote an entry: someone
+with write access to the database could delete recent entries from the start and append a checkpoint of their own.
+Compare with the exported copy or a signed audit bundle to rule that out. A chain purged by an older release, before checkpoints, reports as broken at its first entry
 until the next purge that deletes entries writes one. Keep the exported copy as the long-term record, or set
 `AUDIT_LOG_RETENTION_DAYS=0` to keep every entry.
 
@@ -154,7 +157,8 @@ encrypted with the master key. The webhook's HMAC secret, its header values and 
 Log streams are a live feed, not a guaranteed copy: events wait in memory (at most `LOG_STREAM_BUFFER_SIZE`, the
 oldest dropped first), are tried `LOG_STREAM_RETRY_MAX_ATTEMPTS` times, and are lost if the process stops before they
 are sent. Every audit event goes to the log streams, once, whichever feature records it (MCP servers, knowledge bases,
-budgets and export destinations included), and so does the retention checkpoint. Use an export destination when every
+budgets and export destinations included), and so do the retention checkpoint and run outcomes (`execution.success`,
+`execution.error`, with the error redacted and cut to 2,000 characters). Use an export destination when every
 entry must arrive. Log streams still receive events when `AUDIT_LOG_ENABLED=false`.
 
 ## Settings

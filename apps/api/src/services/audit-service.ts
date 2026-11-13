@@ -186,10 +186,13 @@ export class AuditService {
 
   /** Retention. The checkpoint the store appends (db/audit-chain.ts, "Retention") goes to the log streams too. */
   async purge(options: { before: string }): Promise<number> {
+    const started = Date.now();
     const deleted = await this.store.pruneAuditLogs(options);
     if (deleted > 0 && this.stream) {
       const checkpoint = (await this.store.listAuditLogs({ eventType: AUDIT_RETENTION_CHECKPOINT_EVENT, pageSize: 1 })).items[0];
-      if (checkpoint) {
+      const meta = (checkpoint?.metadata ?? {}) as { before?: unknown; deleted?: unknown };
+      // Only the checkpoint this purge wrote (a purge of unhashed legacy rows writes none).
+      if (checkpoint && meta.before === options.before && meta.deleted === deleted && Date.parse(checkpoint.createdAt) >= started - 1000) {
         await this.emit({
           eventType: checkpoint.eventType,
           category: "system",

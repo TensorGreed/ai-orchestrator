@@ -45,6 +45,9 @@ interface AuditExportDestinationConfig {
 /** The SecretService purpose the header values are sealed with (db-shared.ts JSON_SEALED_FIELDS re-seals it). */
 export const AUDIT_EXPORT_HEADERS_PURPOSE = "audit-export-headers";
 
+/** The most rows Store.listAuditLogsAfter returns for one batch. */
+const AUDIT_EXPORT_READ_MAX = 5000;
+
 /** What a header value reads as in an API answer; sending it back on an update keeps the stored value. */
 export const AUDIT_EXPORT_SECRET_PLACEHOLDER = "__secret__";
 
@@ -157,7 +160,7 @@ export class AuditExportService {
     enabled?: boolean;
     createdBy?: string | null;
   }): Promise<AuditExportDestinationView> {
-    const config = this.storedConfig(input.kind, input.config, {});
+    const config = this.storedConfig(input.kind, input.config, () => ({}));
     await this.store.createAuditExportDestination({ ...input, config });
     const created = await this.getDestination(input.id);
     if (!created) throw new Error("failed to create audit export destination");
@@ -179,7 +182,14 @@ export class AuditExportService {
     if (patch.intervalSeconds !== undefined) next.intervalSeconds = patch.intervalSeconds;
     if (patch.enabled !== undefined) next.enabled = patch.enabled;
     if (patch.config !== undefined) {
-      next.config = this.storedConfig(existing.kind, patch.config, this.headersOf(existing.config as AuditExportDestinationConfig));
+      next.config = this.storedConfig(existing.kind, patch.config, () => {
+        try {
+          return this.headersOf(existing.config as AuditExportDestinationConfig);
+        } catch {
+          // Sealed under another master key: only new values can be saved.
+          throw new AuditExportConfigError("The stored header values cannot be opened (the master key changed?); send every header value");
+        }
+      });
     }
     await this.store.updateAuditExportDestination(id, next);
     return await this.getDestination(id);
@@ -195,19 +205,34 @@ export class AuditExportService {
     for (const dest of await this.store.listAuditExportDestinations()) {
       const config = dest.config as AuditExportDestinationConfig;
       if (config.headers === undefined) continue;
-      const { headers, ...rest } = config;
-      const plain = isStringRecord(headers) ? headers : {};
-      // A row that already has sealed headers keeps them; the plain copy is dropped either way.
-      const merged = config.headersSealed ? this.headersOf(config) : plain;
-      await this.store.updateAuditExportDestination(dest.id, { config: { ...rest, ...this.sealHeaders(merged) } });
-      sealed += 1;
+      try {
+        const { headers, ...rest } = config;
+        // fetch sent non-string values as text, so they are kept as text.
+        const plain: Record<string, string> =
+          headers && typeof headers === "object" && !Array.isArray(headers)
+            ? Object.fromEntries(Object.entries(headers as Record<string, unknown>).map(([name, value]) => [name, String(value)]))
+            : {};
+        // A row that already has sealed headers keeps them; the plain copy is dropped either way.
+        const merged = config.headersSealed ? this.headersOf(config) : plain;
+        await this.store.updateAuditExportDestination(dest.id, { config: { ...rest, ...this.sealHeaders(merged) } });
+        sealed += 1;
+      } catch (err) {
+        this.logger?.warn("Could not seal an audit export destination's stored headers", {
+          destinationId: dest.id,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
     }
     if (sealed > 0) this.logger?.info("Sealed audit export destination headers stored in plain text", { destinations: sealed });
     return sealed;
   }
 
   /** The config to store: validated, headers sealed (a placeholder keeps `previous`'s value of that header). */
-  private storedConfig(kind: string, input: Record<string, unknown>, previous: Record<string, string>): Record<string, unknown> {
+  private storedConfig(
+    kind: string,
+    input: Record<string, unknown>,
+    previous: () => Record<string, string>
+  ): Record<string, unknown> {
     const { headers: rawHeaders, headersSealed: _ignored, ...rest } = input as AuditExportDestinationConfig & Record<string, unknown>;
     if (kind === "http") {
       if (typeof rest.url !== "string" || !/^https?:\/\//i.test(rest.url)) throw new AuditExportConfigError("http destination requires an http(s) config.url");
@@ -227,7 +252,7 @@ export class AuditExportService {
       if (!HEADER_NAME.test(name)) throw new AuditExportConfigError(`config.headers: "${name}" is not a valid header name`);
       if (typeof value !== "string") throw new AuditExportConfigError(`config.headers.${name} must be a string`);
       if (value === AUDIT_EXPORT_SECRET_PLACEHOLDER) {
-        const kept = Object.entries(previous).find(([key]) => key.toLowerCase() === name.toLowerCase());
+        const kept = Object.entries(previous()).find(([key]) => key.toLowerCase() === name.toLowerCase());
         if (!kept) throw new AuditExportConfigError(`config.headers.${name}: no stored value to keep; send the value`);
         headers[name] = kept[1];
       } else {
@@ -348,7 +373,8 @@ export class AuditExportService {
             error: outcome.error
           }
         : outcome;
-      const full = outcome.status === "success" && outcome.rowsExported >= this.batchSize;
+      // The stores read at most AUDIT_EXPORT_READ_MAX rows per batch, whatever the batch size.
+      const full = outcome.status === "success" && outcome.rowsExported >= Math.min(this.batchSize, AUDIT_EXPORT_READ_MAX);
       if (!full) {
         this.behind.delete(id);
         return total;
@@ -477,7 +503,9 @@ export class AuditExportService {
     await fs.mkdir(path.dirname(target), { recursive: true });
     const realDir = await fs.realpath(path.dirname(target));
     this.assertInside(realRoot, realDir, config.path);
-    const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | (fsConstants.O_NOFOLLOW ?? 0);
+    // O_NONBLOCK: a FIFO placed at the path must not hang the exporter (it fails as "not a regular file" below).
+    const flags =
+      fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
     let handle: fs.FileHandle;
     try {
       handle = await fs.open(path.join(realDir, path.basename(target)), flags, 0o640);
@@ -488,6 +516,8 @@ export class AuditExportService {
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error(`file destination path ${config.path} is not a regular file`);
+      // A hard link inside the root could name a file outside it.
+      if (stat.nlink > 1) throw new Error(`file destination path ${config.path} has other hard links; refusing to write there`);
       await handle.appendFile(ndjson, "utf8");
     } finally {
       await handle.close();
@@ -545,7 +575,7 @@ export function auditExportConfigSummary(config: Record<string, unknown>): Recor
 /** Whether `child` is strictly inside `parent` (both absolute and resolved): never `parent` itself or a sibling. */
 function isInside(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
-  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

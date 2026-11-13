@@ -3188,7 +3188,9 @@ export async function createApp(
         triggerType: input.triggerType,
         durationMs: toDurationMs(input.result.startedAt, input.result.completedAt),
         status: input.result.status,
-        error: input.result.error ?? null
+        // Redacted and cut short: the engine's error can quote tool output or a URL, and this entry also goes to the
+        // log streams.
+        error: input.result.error ? String(secretService.redact(String(input.result.error))).slice(0, 2000) : null
       }
     });
 
@@ -9067,6 +9069,8 @@ export async function createApp(
           resourceType: "user",
           resourceId: existing.id,
           metadata: { method: "ldap", mfaChallengeIssued: true }
+        }).catch((auditError: unknown) => {
+          request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP challenge audit not recorded");
         });
         return { mfaChallenge: challengeId, expiresInSeconds: Math.floor(MFA_CHALLENGE_TTL_MS / 1000) };
       }
