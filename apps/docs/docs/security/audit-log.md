@@ -79,7 +79,7 @@ compare with an exported copy to find what changed. The portable backup (`db:exp
 `db:import` refuses a restore whose chain does not match it (see [Backup and recovery](../operations/backup-and-recovery.md)).
 
 The check covers what is in the database. Someone who can write to the database could rebuild the whole chain after
-an edit, so keep a copy outside it as well: an export destination or a log stream (below).
+an edit, so keep a copy outside it as well, through an export destination (below).
 
 **Retention and the chain.** Entries older than `AUDIT_LOG_RETENTION_DAYS` are deleted. The first entry left after a
 purge still points at the deleted entry before it, and the check reports the chain as broken at that entry. Keep the
@@ -93,8 +93,9 @@ when step-up is on (see [Step-up for security actions](./auth-rbac.md#step-up-fo
 ### Export destinations (batches of NDJSON)
 
 An export destination receives the audit entries in order, in batches, as NDJSON (one JSON object per line, with each
-entry's `entryHash`). It keeps a cursor, so every entry is sent once, and a failed batch is sent again on the next
-try.
+entry's `entryHash`). It keeps a cursor, so each entry is normally sent once, and a failed batch is sent again on the next
+try. Delivery is at least once (for example, an entry can be sent again after its cursor entry was purged), so
+de-duplicate on `id`.
 
 | Kind | Config | Delivery |
 |---|---|---|
@@ -124,7 +125,7 @@ Destination changes are audited as `audit_export.destination.created`, `.updated
 
 ### Log streams (each event as it happens)
 
-A log stream sends each audit event soon after it is written, to `syslog` (RFC 5424 over UDP or TCP), a `webhook`
+A log stream sends audit events soon after they are written, to `syslog` (RFC 5424 over UDP or TCP), a `webhook`
 (JSON, optionally signed: `sha256=<hex HMAC-SHA256 of the body>` in `x-ao-signature` or a header you name) or `sentry`. A stream can be
 limited to some categories and to a minimum level: failures are `error`, denials `warn`, everything else `info`.
 
@@ -134,7 +135,8 @@ the Sentry DSN are stored encrypted with the master key and shown masked.
 
 Log streams are a live feed, not a guaranteed copy: events wait in memory (at most `LOG_STREAM_BUFFER_SIZE`, the
 oldest dropped first), are tried `LOG_STREAM_RETRY_MAX_ATTEMPTS` times, and are lost if the process stops before they
-are sent. Use an export destination when every entry must arrive. Log streams still receive events when
+are sent. Some events are written to the audit log only and never reach log streams, among them changes to MCP
+servers, knowledge bases, budgets and export destinations. Use an export destination when every entry must arrive. Log streams still receive events when
 `AUDIT_LOG_ENABLED=false`.
 
 ## Settings

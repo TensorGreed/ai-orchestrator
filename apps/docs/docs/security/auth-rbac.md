@@ -92,7 +92,7 @@ needs a role also accepts every role above it.
 |---|---|---|
 | `viewer` | People who watch | Read workflows, runs and approvals in the projects they can read. |
 | `operator` | People who run and supervise | What a viewer can do, plus queue runs, cancel runs, decide approvals and answer MCP servers' questions. Cannot edit workflows or run them directly. |
-| `builder` | People who build | What an operator can do, plus create, edit, run and delete workflows, manage secrets, variables, projects and evals. |
+| `builder` | People who build | What an operator can do (except answer MCP questions from other people's runs), plus create, edit, run and delete workflows, manage secrets, variables, projects and evals. |
 | `admin` | People who run the deployment | Everything, including users, roles, SSO, the MCP registry, policy and gateway, retention and the audit log. |
 
 ## Access model summary
@@ -107,14 +107,19 @@ needs a role also accepts every role above it.
     exist only where a queue runs. Direct runs (`/execute`, `/execute/stream`, retry, replay and the compat webhook
     API) need `builder`.
   - cancel a running or paused run (`POST /api/executions/:id/cancel`)
-  - decide approvals: a gate that lists no approver roles or users accepts any operator, builder or admin (see
-    [Approvals](../product/approvals.md))
-  - answer an MCP server's question (elicitation) from a run someone else started, which a viewer cannot (see
-    [Elicitation](../product/mcp-server-registry.md#elicitation-a-server-asks-the-person-a-question))
+  - decide approval-gate requests: a gate that lists no approver roles or users accepts any operator, builder or admin
+    (see [Approvals](../product/approvals.md)). Release requests in the same inbox need `workflow:publish`, which
+    operators do not have. A gate that lists the `viewer` role or a viewer by name lets that viewer decide too.
+  - see and answer an MCP server's question (elicitation) from a run someone else started (see
+    [Elicitation](../product/mcp-server-registry.md#elicitation-a-server-asks-the-person-a-question)). Only operators
+    and admins can do this; viewers and builders see and answer only the questions of runs they started (and of queued
+    runs).
   - connect and disconnect their own account on MCP servers that use each user's own credentials (**My connections**,
     see [Delegated credentials](../product/mcp-server-registry.md#delegated-credentials))
 
-  Every one of these also needs `workflow:execute` in the workflow's project (see [Project access](#project-access)).
+  Queuing, cancelling, deciding and answering also need `workflow:execute` in the workflow's project (see
+  [Project access](#project-access)); My connections needs it in the MCP server's project. The queue depth needs only
+  the role, and the dead-letter list shows only workflows you can read.
   In `role` isolation an operator without a membership gets `workflow:read`, `workflow:execute` and `secret:use`
   there, so a run they start or resume can use the project's secrets, but they cannot list or create secrets.
   Like viewers, operators reading a run that answered an outside caller may see its step data hidden by
@@ -694,7 +699,8 @@ the CAs Node trusts; for a private CA set `NODE_EXTRA_CA_CERTS` on the API.
    directory whose users cannot set their own `mail` value.
 4. [Group mappings](#group-to-role-mappings) for provider `ldap` apply to the groups in `LDAP_GROUPS_ATTRIBUTE`: a
    mapping without a project sets the global role (raising it, never lowering it), and one with a project adds a
-   project membership. A new user with no matching mapping is a `viewer`.
+   project membership. A new user with no matching mapping is a `viewer`. When several of the user's groups map to a global role, the first
+   group listed in the entry wins.
 5. The answer is `{ user, expiresAt, provisioned }` with the session cookie set, as for a password login. The session
    is recorded with method `ldap`.
 
@@ -703,10 +709,12 @@ A user who has an authenticator set up gets `{ mfaChallenge, expiresInSeconds }`
 `MFA_REQUIRED_ROLES` without an authenticator gets a session that can only set one up (see
 [MFA required per role](#mfa-required-per-role)). `SSO_MFA` does not apply to LDAP.
 
-Service accounts cannot sign in through LDAP. The route counts against the sign-in rate limit
-(`RATE_LIMIT_AUTH_MAX`). The code step is audited as `user.login.mfa_challenge` with `method: "ldap"`; other LDAP
-sign-ins, successful or refused, are not written to the audit log, so use the session list (method `ldap`) and the
-directory's own logs to follow them.
+Without `email` or `password` the route answers `400`. Any other failure answers `401` with the reason in the message:
+an unknown user, a wrong password, a directory that cannot be reached, a certificate error or a wrong `LDAP_BIND_DN`
+password. Service accounts cannot sign in through LDAP. The route counts against the sign-in rate limit
+(`RATE_LIMIT_AUTH_MAX`). The code step is audited as `user.login.mfa_challenge` with `method: "ldap"`, and a wrong
+code as `mfa.code_failed`; other LDAP sign-ins, successful or refused, are not written to the audit log, so use the
+session list (method `ldap`) and the directory's own logs to follow them.
 
 ## MFA on SSO
 
