@@ -1042,6 +1042,8 @@ function ExpressionField({
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [formatError, setFormatError] = useState("");
+  // The scope tip shows under the template field being edited only, not under every field of the node.
+  const [editing, setEditing] = useState(false);
   const showJsonFormat = shouldOfferJsonFormatting(label);
 
   useEffect(() => {
@@ -1105,7 +1107,14 @@ function ExpressionField({
           </button>
         )}
       </div>
-      <textarea aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} rows={rows} />
+      <textarea
+        aria-label={label}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onFocus={() => setEditing(true)}
+        onBlur={() => setEditing(false)}
+        rows={rows}
+      />
       {formatError && <div className="cfg-field-error">{formatError}</div>}
       <div className="expression-suggestions" aria-label={`${label} suggestions`}>
         {EXPRESSION_SUGGESTIONS.map((item) => (
@@ -1119,6 +1128,12 @@ function ExpressionField({
           </button>
         ))}
       </div>
+      {mode === "template" && editing && (
+        <div className="cfg-tip" data-testid="template-scope-tip">
+          <code>{"{{field}}"}</code> reads the steps connected straight into this one. For an earlier step, use{" "}
+          <code>{"{{results.<nodeId>.field}}"}</code>.
+        </div>
+      )}
       {(previewText || previewError) && (
         <div className={previewError ? "expression-preview error" : "expression-preview"}>
           <strong>Preview</strong>

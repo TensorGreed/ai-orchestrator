@@ -5,6 +5,10 @@ description: "Fixes for common L2M problems: missing master key, webhook 404s, u
 
 # Common Issues
 
+## A template renders empty two steps away
+
+<span v-pre>`{{nodeId.field}}`</span> and <span v-pre>`{{field}}`</span> read only the steps connected straight into the node. For a step further back, use <span v-pre>`{{results.<nodeId>.field}}`</span> (or <span v-pre>`{{ $node('<nodeId>').output.field }}`</span> in an expression), which reads any step that has already finished. A path that does not resolve renders empty with no warning, so also check the node id and the field path against the step's output. See [Templates and expressions](/runtime/templates-and-expressions).
+
 ## `SECRET_MASTER_KEY_BASE64 environment variable is required`
 
 Set `SECRET_MASTER_KEY_BASE64` in `.env` with a base64-encoded 32-byte value.

@@ -253,6 +253,7 @@ export default defineConfig({
         text: "Runtime",
         items: [
           { text: "Agent Loop", link: "/runtime/agent-loop" },
+          { text: "Templates and Expressions", link: "/runtime/templates-and-expressions" },
           { text: "Expose a Workflow as an MCP Tool", link: "/runtime/workflow-as-mcp-tool" },
           { text: "Built-in Agent Tools", link: "/runtime/built-in-agent-tools" },
           { text: "Workflow Tool", link: "/runtime/workflow-tool" }

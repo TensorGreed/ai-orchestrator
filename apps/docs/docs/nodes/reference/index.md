@@ -17,6 +17,8 @@ code by the docs build.
 
 141 node types across 8 categories.
 
+Fields that take <span v-pre>`{{ }}`</span> templates (prompts, URLs, bodies, values) read the steps connected straight into the node; [Templates and expressions](/runtime/templates-and-expressions) covers reading earlier steps with `results`.
+
 ## Categories
 
 - [Input](/nodes/reference/input) — Workflow entry points: triggers (cron, webhook, manual, form, chat, MCP-server) and static-input helpers. (27 nodes)

@@ -24,6 +24,8 @@ function expressionContextFor(values: Record<string, unknown>): ExpressionContex
       customData: toRecord(executionContext.customData)
     },
     $vars: (values.vars && typeof values.vars === "object" ? values.vars : {}) as Record<string, unknown>,
+    // `$node('id')` reads what `results.id` reads: any completed node (the same object, so it is sent to the sandbox once).
+    $nodeOutputs: toRecord(values.results),
     extras: values
   };
 }

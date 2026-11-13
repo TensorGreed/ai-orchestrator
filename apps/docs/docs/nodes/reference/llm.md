@@ -15,6 +15,8 @@ Chat-completion model adapters and prompt-template helpers.
 
 15 nodes.
 
+Fields that take <span v-pre>`{{ }}`</span> templates (prompts, URLs, bodies, values) read the steps connected straight into the node; [Templates and expressions](/runtime/templates-and-expressions) covers reading earlier steps with `results`.
+
 ---
 ### `ai_gateway_chat_model` — AI Gateway Chat Model
 

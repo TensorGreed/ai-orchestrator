@@ -139,6 +139,11 @@ function renderNodeSection(node: NodeDefinition): string {
   return parts.join("\n");
 }
 
+/** Templated fields read the steps connected straight into a node; what else they can read is on one page. */
+const TEMPLATES_NOTE =
+  "Fields that take <span v-pre>`{{ }}`</span> templates (prompts, URLs, bodies, values) read the steps connected straight into the node; " +
+  "[Templates and expressions](/runtime/templates-and-expressions) covers reading earlier steps with `results`.";
+
 function renderCategoryPage(category: NodeCategory, nodes: NodeDefinition[]): string {
   const sorted = [...nodes].sort((a, b) => a.type.localeCompare(b.type));
   const count = `${sorted.length} node${sorted.length === 1 ? "" : "s"}`;
@@ -158,6 +163,8 @@ function renderCategoryPage(category: NodeCategory, nodes: NodeDefinition[]): st
     CATEGORY_BLURB[category],
     "",
     `${count}.`,
+    "",
+    TEMPLATES_NOTE,
     "",
     "---",
     ""
@@ -184,6 +191,8 @@ function renderIndexPage(byCategory: Map<NodeCategory, NodeDefinition[]>): strin
     "code by the docs build.",
     "",
     `${nodeDefinitions.length} node types across ${byCategory.size} categories.`,
+    "",
+    TEMPLATES_NOTE,
     "",
     "## Categories",
     ""
