@@ -66,8 +66,8 @@ URL, request body or prompt. That covers three cases:
 
 The expression feature set is unchanged: `$input`, `$json`, `$node()`,
 `$workflow`, `$execution`, `$vars`, `$env` (a curated subset, never the real
-environment), `$now`, `$today`, `$if`, `$ifEmpty` and `$jmespath` all work as
-before. In workflow templates, `$node('id').output` is the output of any step
+environment), `$now`, `$today`, `$if`, `$ifEmpty` and `$jmespath` all work. In
+workflow templates, `$node('id').output` is the output of any step
 that has already finished, the same as `results.id`
 ([templates and expressions](/runtime/templates-and-expressions)). Differences from the earlier V8-based evaluator:
 

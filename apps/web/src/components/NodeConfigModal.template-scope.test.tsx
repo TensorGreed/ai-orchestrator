@@ -1,9 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Node } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
 import * as api from "../lib/api";
-import { NodeInspector, withPreviewResults } from "./NodeConfigModal";
+import { NodeInspector } from "./NodeConfigModal";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -44,20 +44,28 @@ describe("template fields: reading earlier steps", () => {
     vi.mocked(api.previewExpression).mockResolvedValue({ ok: true, result: "" });
   });
 
-  it("shows a tip under template fields that points to {{results.<nodeId>.field}} for earlier steps", () => {
+  it("shows a tip under the template field being edited that points to {{results.<nodeId>.field}} for earlier steps", () => {
     render(<NodeInspector {...props()} />);
+    expect(screen.queryByTestId("template-scope-tip")).toBeNull();
+    const url = screen.getByLabelText("URL Template");
+    fireEvent.focus(url);
     const tips = screen.getAllByTestId("template-scope-tip");
-    expect(tips.length).toBeGreaterThan(0);
+    // One tip, under the field being edited, not under every template field of the node.
+    expect(tips).toHaveLength(1);
+    expect(url.parentElement!.contains(tips[0]!)).toBe(true);
     expect(tips[0]!.textContent).toContain("{{field}} reads the steps connected straight into this one");
     expect(tips[0]!.textContent).toContain("{{results.<nodeId>.field}}");
+    fireEvent.blur(url);
+    expect(screen.queryByTestId("template-scope-tip")).toBeNull();
   });
 
   it("shows no tip on a node without template fields", () => {
     render(<NodeInspector {...props({ node: node("ask", "user_prompt", { text: "Hi" }) })} />);
+    for (const field of screen.queryAllByRole("textbox")) fireEvent.focus(field);
     expect(screen.queryByTestId("template-scope-tip")).toBeNull();
   });
 
-  it("previews {{results.<nodeId>.field}} with the last run's node outputs, as the run renders it", async () => {
+  it("previews a template field in template mode with the last run's node outputs, which the server renders as `results`", async () => {
     const executionResult = {
       executionId: "ex-1",
       status: "success",
@@ -69,15 +77,10 @@ describe("template fields: reading earlier steps", () => {
     } as unknown as Parameters<typeof NodeInspector>[0]["executionResult"];
     render(<NodeInspector {...props({ executionResult })} />);
     await waitFor(() => expect(api.previewExpression).toHaveBeenCalled());
-    const context = vi.mocked(api.previewExpression).mock.calls[0]![0].context as { input: Record<string, unknown> };
+    const call = vi.mocked(api.previewExpression).mock.calls.find(([payload]) => payload.expression.includes("results.fetch.id"))![0];
+    expect(call.mode).toBe("template");
+    const context = call.context as { input: Record<string, unknown>; nodeOutputs: Record<string, unknown> };
     expect(context.input.note).toBe("between");
-    expect(context.input.results).toEqual({ fetch: { id: "42" }, mid: { note: "between" }, http: { status: 200 } });
-  });
-
-  it("sets `results` over a parent field of that name, as the run does, and leaves inputs that are not objects alone", () => {
-    expect(withPreviewResults({ results: "a parent's field" }, { a: 1 })).toEqual({ results: { a: 1 } });
-    expect(withPreviewResults("text", { a: 1 })).toBe("text");
-    expect(withPreviewResults({ x: 1 }, {})).toEqual({ x: 1 });
-    expect(withPreviewResults({ x: 1 }, { a: { y: 2 } })).toEqual({ x: 1, results: { a: { y: 2 } } });
+    expect(context.nodeOutputs).toEqual({ fetch: { id: "42" }, mid: { note: "between" }, http: { status: 200 } });
   });
 });

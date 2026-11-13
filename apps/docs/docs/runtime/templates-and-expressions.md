@@ -32,7 +32,7 @@ A node's template sees the steps connected straight into it, the run's input, an
 | `{{vars.name}}`, `{{ $vars.name }}` | Workflow variables, in every node. | `{{vars.API_URL}}` |
 | `{{workflow.id}}`, `{{workflow.name}}`, `{{execution.id}}`, `{{execution.customData.key}}` | The workflow and this run. `$workflow` and `$execution` work in expressions. | `{{execution.id}}` |
 
-The node id is the id in the workflow JSON, not the label on the canvas. A direct parent's field with the same name as a run input (a parent that outputs `user_prompt`, say) is the one `{{user_prompt}}` reads.
+The node id is the id in the workflow JSON, not the label on the canvas; nodes added in the editor get ids such as `http_request-k3j9x2`. A path body takes such an id as it is: `{{results.http_request-k3j9x2.body}}`. In an expression, a `-` is a minus sign, so write `results['http_request-k3j9x2'].body` or `$node('http_request-k3j9x2').output.body`. A direct parent's field with the same name as a run input (a parent that outputs `user_prompt`, say) is the one `{{user_prompt}}` reads.
 
 ### Direct parents and earlier steps
 
@@ -44,7 +44,7 @@ fetch → summarize → report
 
 In `report`, `{{summarize.text}}` works, but `{{fetch.body}}` renders empty because `fetch` is not a direct parent of `report`. Use `{{results.fetch.body}}` (or `{{ $node('fetch').output.body }}`) to read any step that has already finished, wherever it is in the graph.
 
-Steps that pass their input on keep the parent's data in reach: after a No-op, Wait, IF, Switch or Chat Intent Router step, or a disabled node, `{{fetch.body}}` still works in the next node. `parent_outputs` holds the direct parents only, so `{{parent_outputs.fetch.body}}` does not see through them.
+Steps that pass their input on keep the parent's data in reach: after a No-op, Wait, Filter, IF, Switch or Chat Intent Router step, or a disabled node, for example, `{{fetch.body}}` still works in the next node. `parent_outputs` holds the direct parents only, so `{{parent_outputs.fetch.body}}` does not see through them.
 
 A step that has not run yet (it comes later, or its branch was skipped) is not in `results`, unless its output is pinned: reading it renders empty.
 
@@ -52,7 +52,7 @@ If a step checks a value with [content rules](/product/content-rules), read the 
 
 ### Loops
 
-The nodes connected straight after a **Loop / ForEach** node run once per item. Inside a pass, `{{item}}` (or the name set in **Item variable**) is the current item and `{{_loop_index}}` its position, from 0.
+The nodes connected straight after a **Loop / ForEach** node run once per item. Only those repeat: a node after them runs once, after the loop. Inside a pass, `{{item}}` (or the name set in **Item variable**) is the current item and `{{_loop_index}}` its position, from 0.
 
 After the loop, a loop body node's result is its **last pass**: `{{results.<bodyId>.field}}`, and the nodes after it, see that pass only. To use every pass, read the Loop node's output: `{{results.<loopId>.items}}` is a list with one entry per pass, each with `index`, `item` and `outputs.<bodyId>`; `{{results.<loopId>.count}}` is the number of passes.
 
@@ -73,7 +73,7 @@ When a template renders empty, check, in this order:
 3. Whether the step ran before this one in the last run (the run's trace shows each step's output).
 4. The field path: the step's **Output** tab in the inspector shows the exact shape.
 
-The editor's preview under each template field renders it with the last run's data, `results` included.
+The editor's preview under each template field renders it as a run would, with the last run's data: the node's recorded input, and every step's output as `results`.
 
 ## Expressions
 
@@ -90,7 +90,7 @@ Expressions are JavaScript with these names available:
 | `$jmespath(value, 'path')` | A JMESPath-style lookup. |
 | `$env` | A small, curated set of environment values (never secrets). |
 
-Every top-level field of the template data is also a name of its own, so `{{ answer.toUpperCase() }}` and `{{ results.fetch.status === 200 ? 'ok' : 'retry' }}` both work.
+Every top-level field of the template data whose name is a valid JavaScript name is also a name of its own, so `{{ answer.toUpperCase() }}` and `{{ results.fetch.status === 200 ? 'ok' : 'retry' }}` both work.
 
 :::
 

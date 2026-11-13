@@ -126,6 +126,18 @@ describe("$node() in a template", () => {
     // Node outputs that are not the input's `results` are sent as they are.
     const separate = serializeExpressionPayload({ ...base, input: { results }, nodeOutputs: { fetch: { title: "other" } } });
     expect(evaluateInSandbox("$node('fetch').output.title + '/' + $input.results.fetch.title", separate)).toBe("other/Only-once-marker");
+    // No node outputs, or an input that is not an object: nothing to share, `$node()` reads nothing.
+    for (const input of [{ results: {} }, "text", ["a"], null]) {
+      const payload = serializeExpressionPayload({ ...base, input, nodeOutputs: {} });
+      expect(evaluateInSandbox("$node('fetch').output === undefined", payload)).toBe(true);
+    }
+  });
+
+  it("reads a node with a dash in its id, as the editor names nodes", () => {
+    const values = { results: { "http_request-k3j9x2": { body: { title: "Hi" } } } };
+    expect(renderTemplate("{{ $node('http_request-k3j9x2').output.body.title }}", values)).toBe("Hi");
+    expect(renderTemplate("{{ results['http_request-k3j9x2'].body.title }}", values)).toBe("Hi");
+    expect(renderTemplate("{{results.http_request-k3j9x2.body.title}}", values)).toBe("Hi");
   });
 
   it("reads a node two steps away, where the bare {{nodeId.field}} form (direct parents only) stays empty", async () => {

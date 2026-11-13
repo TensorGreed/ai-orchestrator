@@ -1003,16 +1003,6 @@ interface ExpressionPreviewContext {
   customData?: Record<string, unknown>;
 }
 
-/**
- * The preview's template data: a run renders `{{results.<nodeId>.field}}` from every completed node, but a node's
- * recorded input holds only its parents' data, so the last run's node outputs are set as `results` for the preview
- * (as the run sets them, over any parent field of that name).
- */
-export function withPreviewResults(input: unknown, nodeOutputs: Record<string, unknown>): unknown {
-  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(nodeOutputs).length === 0) return input;
-  return { ...(input as Record<string, unknown>), results: nodeOutputs };
-}
-
 const EXPRESSION_SUGGESTIONS = [
   { label: "$json", value: "$json" },
   { label: "$input", value: "$input" },
@@ -1052,6 +1042,8 @@ function ExpressionField({
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [formatError, setFormatError] = useState("");
+  // The scope tip shows under the template field being edited only, not under every field of the node.
+  const [editing, setEditing] = useState(false);
   const showJsonFormat = shouldOfferJsonFormatting(label);
 
   useEffect(() => {
@@ -1115,7 +1107,14 @@ function ExpressionField({
           </button>
         )}
       </div>
-      <textarea aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} rows={rows} />
+      <textarea
+        aria-label={label}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onFocus={() => setEditing(true)}
+        onBlur={() => setEditing(false)}
+        rows={rows}
+      />
       {formatError && <div className="cfg-field-error">{formatError}</div>}
       <div className="expression-suggestions" aria-label={`${label} suggestions`}>
         {EXPRESSION_SUGGESTIONS.map((item) => (
@@ -1129,7 +1128,7 @@ function ExpressionField({
           </button>
         ))}
       </div>
-      {mode === "template" && (
+      {mode === "template" && editing && (
         <div className="cfg-tip" data-testid="template-scope-tip">
           <code>{"{{field}}"}</code> reads the steps connected straight into this one. For an earlier step, use{" "}
           <code>{"{{results.<nodeId>.field}}"}</code>.
@@ -1647,7 +1646,7 @@ export function NodeInspector({
   }, [executionResult]);
   const expressionPreviewContext = useMemo<ExpressionPreviewContext>(
     () => ({
-      input: withPreviewResults(currentNodeResult?.input ?? currentNodeResult?.output, nodeOutputsForPreview),
+      input: currentNodeResult?.input ?? currentNodeResult?.output,
       vars: workflowContext?.vars,
       nodeOutputs: nodeOutputsForPreview,
       workflow: {

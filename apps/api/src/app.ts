@@ -86,6 +86,7 @@ import {
   exportWorkflowToJson,
   importWorkflowFromJson,
   renderExpressionTemplate,
+  renderTemplate,
   runWithSandboxOwner,
   validateWorkflowGraph,
   KnowledgeBaseVectorStoreAdapter,
@@ -11789,12 +11790,24 @@ export async function createApp(
       }
     };
 
+    // A template field renders as a run renders it: path bodies (`{{results.http_request-abc12.items.0.id}}`) by path,
+    // with `results` (and `$node()`) holding the given node outputs over any input field of that name.
+    const templateData: Record<string, unknown> = {
+      ...asRecord(context.input),
+      vars: context.vars ?? {},
+      workflow: { id: context.workflow?.id ?? "", name: context.workflow?.name ?? "" },
+      execution: expressionContext.$execution,
+      ...(context.nodeOutputs ? { results: context.nodeOutputs } : {})
+    };
+
     try {
       // Previews count against the user's own sandbox circuit breaker, not a workflow's.
       const result = runWithSandboxOwner(`user:${user.id}`, () =>
-        parsed.data.mode === "template" || parsed.data.expression.includes("{{")
-          ? renderExpressionTemplate(parsed.data.expression, expressionContext)
-          : evaluateExpression(parsed.data.expression, expressionContext)
+        parsed.data.mode === "template"
+          ? renderTemplate(parsed.data.expression, templateData)
+          : parsed.data.expression.includes("{{")
+            ? renderExpressionTemplate(parsed.data.expression, expressionContext)
+            : evaluateExpression(parsed.data.expression, expressionContext)
       );
       return {
         ok: true,
