@@ -504,9 +504,13 @@ describe("/v1 model spans and metrics", () => {
       "gen_ai.response.finish_reasons": ["stop"]
     });
     expect(chat!.attributes["l2m.stream.closed_early"]).toBeUndefined();
-    // The span covers the stream: it ends after the last chunk, inside the request.
-    const endOf = (span: ReadableSpan) => span.endTime[0] * 1e9 + span.endTime[1];
-    expect(endOf(chat!)).toBeLessThanOrEqual(endOf(server));
+    // The span covers the stream: it ends after the last chunk (its usage is above), inside the request. Checked by
+    // the order the spans ended in, not by their end times: the SDK anchors each span's times on Date.now() (whole
+    // milliseconds) when it starts, so two spans' clocks can differ by up to a millisecond, more than the gap here.
+    // The exporter records spans synchronously as they end, so its list is in end order.
+    const ended = fixture.spans.getFinishedSpans().map((span) => span.spanContext().spanId);
+    expect(ended.indexOf(chat!.spanContext().spanId)).toBeGreaterThanOrEqual(0);
+    expect(ended.indexOf(chat!.spanContext().spanId)).toBeLessThan(ended.indexOf(server.spanContext().spanId));
     expect(server.attributes["l2m.gateway.status"]).toBe("ok");
     noContent(fixture.spans.getFinishedSpans());
   });
