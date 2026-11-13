@@ -128,8 +128,10 @@ import {
   DEFAULT_MCP_GATEWAY_LISTEN_MAX_MS,
   DEFAULT_MCP_GATEWAY_LISTEN_MAX_PER_CLIENT,
   listenFilterError,
+  listenHonouredFilter,
   subscriptionsAcknowledged,
   subscriptionsComplete,
+  toolsListChangedNotification,
   MODERN_GATEWAY_METHODS,
   gatewayDiscoverResult,
   gatewayServerInfo,
@@ -158,9 +160,19 @@ import { createMcpClientAdmission } from "./mcp-client-admission.js";
 import { parseTrustProxy } from "./config.js";
 import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } from "./services/mcp-tool-telemetry.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
+import type { ClusterBus } from "./services/cluster-bus.js";
+import {
+  DEFAULT_MCP_GATEWAY_LISTEN_CHECK_MS,
+  GATEWAY_TOOLS_CHANGED_MESSAGE,
+  GatewayListChangedHub,
+  isToolListMutation,
+  toolListFingerprint,
+  type ToolListScope,
+  type ToolListScopeState
+} from "./services/mcp-gateway-list-changed.js";
 import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
-import type { McpGatewayLabelMark, McpGatewayLabelMarkKey } from "./db/gateway-label-marks.js";
+import { labelMarkRaised, type McpGatewayLabelMark, type McpGatewayLabelMarkKey } from "./db/gateway-label-marks.js";
 import { filterAsync, mapAsync } from "./async-array.js";
 import { pageOfById, pageRequestFromQuery } from "./pagination.js";
 
@@ -328,6 +340,11 @@ export interface McpGatewayDeps {
    * the request's `_meta` under the inbound trust rule. Absent: no spans.
    */
   tracing?: McpGatewayTracing;
+  /**
+   * G3b — hints that a toolset's tool list may have changed travel on this bus's `ctl` topic, so `subscriptions/listen`
+   * streams on every instance are told. Absent: hints stay in this process (the periodic check still runs).
+   */
+  clusterBus?: Pick<ClusterBus, "publish" | "subscribe" | "onResync">;
 }
 
 /** MCP 2026-07-28 (v71) — a stateless caller's stored label mark could not be read: its call is refused. */
@@ -725,6 +742,49 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     // The stored mark's raise is audited by the store's firstRaise, never by the local view.
     session.labels.raiseAudited = true;
   };
+  /**
+   * A legacy session on a tracking toolset joins the client's stored mark (already converted: results noted while the
+   * toolset did not track count as outside content), when it opens and again on every call. The stored raise is audited
+   * by the store's firstRaise, never again by the session.
+   */
+  const seedLegacySession = (session: GatewaySession, mark: McpGatewayLabelMark) => {
+    if (labelMarkRaised(mark)) mirrorStoredMark(session, mark);
+  };
+  /**
+   * The stored mark of a client's stateless calls (the same token and user) on a toolset, read for its legacy sessions.
+   * A note of results returned while the toolset did not track is converted in the store, as a stateless call converts
+   * it, so it is counted and audited once (`firstRaise`). Throws when the mark cannot be read or converted.
+   */
+  const readClientStoredMark = async (auth: AuthenticatedClient, toolset: McpToolset): Promise<{ mark: McpGatewayLabelMark | null; firstRaise: boolean }> => {
+    const clock = markClock();
+    const key: McpGatewayLabelMarkKey = { clientId: auth.client.id, toolsetId: toolset.id, scopeKey: auth.client.createdBy ?? "" };
+    const mark = await store.readMcpGatewayLabelMark(key, clock);
+    if (!mark?.unobserved) return { mark, firstRaise: false };
+    const raised = await store.raiseMcpGatewayLabelMark({ ...key, provenance: [], dataClasses: [], convertUnobserved: true, now: clock.now, expiresAt: clock.expiresAt });
+    return { mark: raised.mark, firstRaise: raised.firstRaise };
+  };
+  /**
+   * 12.2 — a legacy session on a tracking toolset, with modern mode on (marks are stored only then): before each call the
+   * client's stored mark is read again, so labels its stateless calls collected after the session opened, on any
+   * instance, reach the session too. Throws LabelMarkUnavailableError when it cannot be read: the call is refused, as a
+   * stateless call is.
+   */
+  const refreshLegacySessionMark = async (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset): Promise<void> => {
+    let stored: { mark: McpGatewayLabelMark | null; firstRaise: boolean };
+    try {
+      stored = await readClientStoredMark(auth, toolset);
+    } catch (error) {
+      app.log.warn(
+        { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, sessionId: session.id },
+        "MCP gateway could not read a client's label mark for a session call; the call was refused"
+      );
+      throw new LabelMarkUnavailableError();
+    }
+    if (!stored.mark) return;
+    seedLegacySession(session, stored.mark);
+    if (stored.firstRaise) await auditStoredRaise(session, auth, toolset, null, "results_before_tracking", storedLabelsView(stored.mark));
+  };
+  const LEGACY_MARK_UNAVAILABLE_MESSAGE = "Outside-content labels could not be checked for this client, so the session was not opened. Try again.";
   /** A first-raise audit that fails is logged; it never withholds a result whose labels were stored. */
   const auditStoredRaise = async (...args: Parameters<typeof auditFirstRaise>) => {
     try {
@@ -828,6 +888,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   const labelsForCall = async (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset): Promise<DataLabels | undefined> => {
     if (!toolset.trackSessionLabels) return undefined;
     if (session.era === "modern") return await statelessCallLabels(session, auth, toolset);
+    if (modernMode === "on") await refreshLegacySessionMark(session, auth, toolset);
     const { labels, raised } = sessionCallLabels(session.labels);
     if (raised) await auditFirstRaise(session, auth, toolset, null, "results_before_tracking");
     return labels;
@@ -1762,8 +1823,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       if (blocked) return await budgetRefusal(session, auth, toolset, request, tool.name, blocked);
     }
 
-    // 12.2 — read from the session only, never from the request (`_meta`, headers or arguments). A stateless caller's
-    // stored mark that cannot be read refuses the call.
+    // 12.2 — read from the session only, never from the request (`_meta`, headers or arguments). A stored mark that
+    // cannot be read (a stateless caller's, or the client's for a legacy session while modern mode is on) refuses the call.
     let callLabels: DataLabels | undefined;
     try {
       callLabels = await labelsForCall(session, auth, toolset);
@@ -2036,6 +2097,26 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const params = asRecord(message.params);
     const protocolVersion = negotiateProtocolVersion(params.protocolVersion);
     const clientInfo = asRecord(params.clientInfo);
+    // 12.2 — on a tracking toolset a new session starts from the client's stored mark (what its stateless calls
+    // collected on any instance before the session opened), and reads it again before each call (labelsForCall).
+    // Unreadable or unwritable: the session is not opened. Marks are only stored while modern mode is on; with it off
+    // nothing is read.
+    let storedMark: McpGatewayLabelMark | null = null;
+    let storedFirstRaise = false;
+    if (toolset.trackSessionLabels && modernMode === "on") {
+      try {
+        ({ mark: storedMark, firstRaise: storedFirstRaise } = await readClientStoredMark(auth, toolset));
+      } catch (error) {
+        app.log.warn(
+          { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id },
+          "MCP gateway could not read a client's label mark; the session was not opened"
+        );
+        const refusal = rpcError(message.id, -32000, LEGACY_MARK_UNAVAILABLE_MESSAGE);
+        reply.code(503).header("retry-after", "5").send(refusal);
+        // Returned so the request's span and metric record the refusal.
+        return refusal;
+      }
+    }
     let session: GatewaySession;
     try {
       session = await sessions.create({
@@ -2049,10 +2130,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       });
     } catch (error) {
       if (error instanceof GatewaySessionLimitError) {
-        reply.code(503).header("retry-after", "30").send(rpcError(message.id, -32000, error.message));
-        return;
+        const refusal = rpcError(message.id, -32000, error.message);
+        reply.code(503).header("retry-after", "30").send(refusal);
+        return refusal;
       }
       throw error;
+    }
+    if (storedMark) {
+      seedLegacySession(session, storedMark);
+      if (storedFirstRaise) await auditStoredRaise(session, auth, toolset, null, "results_before_tracking", storedLabelsView(storedMark));
     }
     await deps.auditRaw({
       category: "system",
@@ -2275,13 +2361,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   /** Listen streams open per client on this instance (the cap is MCP_GATEWAY_LISTEN_MAX_PER_CLIENT). */
   const listenCounts = new Map<string, number>();
 
+  const toolListChanges = createToolListChangeSignals();
+
   /**
-   * MCP 2026-07-28 `subscriptions/listen`, acknowledge-only: the gateway serves tools and its tool list does not
-   * announce changes, so the stream opens with an acknowledgment that honours nothing, then stays open with
-   * keep-alive comments until the client closes it, MCP_GATEWAY_LISTEN_MAX_MS passes or the server shuts down (the
-   * last two end with a `complete` result). A stream takes no principal state. It counts only against the per-client
-   * stream cap: not against the client's rate or concurrency limits, which cap `tools/call`. Returns, for the
-   * request's span, the refusal it sent, GATEWAY_CALLER_GONE when the caller hung up before the stream opened, or
+   * MCP 2026-07-28 `subscriptions/listen`: the stream opens with an acknowledgment of the subset of the filter the
+   * gateway honours (`toolsListChanged` only: it serves tools), then stays open with keep-alive comments until the
+   * client closes it, MCP_GATEWAY_LISTEN_MAX_MS passes or the server shuts down (the last two end with a `complete`
+   * result). With `toolsListChanged` it gets `notifications/tools/list_changed` when its caller's tool list changes
+   * (G3b, see services/mcp-gateway-list-changed.ts). A stream takes no principal state. It counts only against the
+   * per-client stream cap: not against the client's rate or concurrency limits, which cap `tools/call`. Returns, for
+   * the request's span, the refusal it sent, GATEWAY_CALLER_GONE when the caller hung up before the stream opened, or
    * undefined once the stream is open.
    */
   const handleModernListen = async (
@@ -2320,6 +2409,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       else listenCounts.set(clientKey, left);
     };
 
+    // G3b — the list the stream starts from, read before the acknowledgment so no change after it can be missed.
+    const watchScope: ToolListScope = { toolsetId: toolset.id, clientId: auth.client.id };
+    const opening = listenHonouredFilter(message.params).toolsListChanged ? await toolListChanges.opening(watchScope) : null;
+    const honoured = opening ? { toolsListChanged: true as const } : {};
+
     const hookHeaders = hookHeadersOf(reply);
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -2333,11 +2427,13 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     let ended = false;
     let timer: NodeJS.Timeout | undefined;
     let stopHeartbeat = () => undefined as void;
+    let unwatch = () => undefined as void;
     const cleanup = () => {
       if (ended) return;
       ended = true;
       clearTimeout(timer);
       stopHeartbeat();
+      unwatch();
       listenStreams.delete(finish);
       reply.raw.off("close", cleanup);
       unreserve();
@@ -2359,9 +2455,88 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => ended);
     timer = setTimeout(finish, listenMaxMs);
     timer.unref?.();
-    writeSse(reply, subscriptionsAcknowledged(message.id));
+    writeSse(reply, subscriptionsAcknowledged(message.id, honoured));
+    if (opening) {
+      unwatch = toolListChanges.watch(opening, {
+        scope: watchScope,
+        fingerprint: opening.fingerprint,
+        onChanged: () => {
+          if (!ended) writeSse(reply, toolsListChangedNotification(message.id));
+        },
+        onGone: finish
+      });
+    }
     return undefined;
   };
+
+  /**
+   * G3b — the tool list changes `subscriptions/listen` streams are told about (modern mode only; with it off no stream
+   * exists, no hook is added and nothing is published). A scope's list is read as `tools/list` builds it for that
+   * client, from the database; the client's role is resolved again, so a role change counts too. Successful admin
+   * changes through this instance hint at once (and on the bus, for streams on other instances).
+   */
+  function createToolListChangeSignals() {
+    const toolListState = async (scope: ToolListScope): Promise<ToolListScopeState> => {
+      const [toolset, client] = await Promise.all([store.getMcpToolset(scope.toolsetId), store.getMcpClient(scope.clientId)]);
+      const live =
+        toolset?.enabled &&
+        client &&
+        !client.revokedAt &&
+        !(client.expiresAt && Date.parse(client.expiresAt) <= Date.now()) &&
+        client.toolsetIds.includes(scope.toolsetId);
+      if (!toolset || !client || !live) return { kind: "gone" };
+      const subject = await resolveMcpClientSubject(store, client);
+      const catalog = await catalogFor(toolset, subject.role, client.id);
+      // The descriptors a modern `tools/list` serves, in its order (pages joined).
+      const descriptors = sortToolsByName(catalog.tools).flatMap((tool) => stripDescriptorHeaderAnnotations(toMcpToolDescriptor(tool)) ?? []);
+      return { kind: "list", fingerprint: toolListFingerprint(descriptors) };
+    };
+    const hub =
+      modernMode === "on"
+        ? new GatewayListChangedHub({
+            state: toolListState,
+            checkMs: config.MCP_GATEWAY_LISTEN_CHECK_MS ?? DEFAULT_MCP_GATEWAY_LISTEN_CHECK_MS,
+            ...(deps.clusterBus ? { bus: deps.clusterBus } : {}),
+            logger: { warn: (fields, text) => app.log.warn({ ...fields, ...(typeof fields.err === "string" ? { err: deps.redact(fields.err) } : {}) }, text) }
+          })
+        : null;
+    if (hub) {
+      app.addHook("onResponse", async (request, reply) => {
+        if (!isToolListMutation(request.method, request.routeOptions.url, reply.statusCode)) return;
+        // The bus delivers to this instance too; without a bus, or when publishing fails, hint here directly.
+        if (!deps.clusterBus) {
+          hub.hint();
+          return;
+        }
+        deps.clusterBus.publish("ctl", { t: GATEWAY_TOOLS_CHANGED_MESSAGE }).catch((error: unknown) => {
+          hub.hint();
+          app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Could not announce an MCP gateway tool list change");
+        });
+      });
+      app.addHook("onClose", async () => hub.stop());
+    }
+    return {
+      /** The list a stream opens with; null when it cannot be watched (modern mode off, or the read failed: then the acknowledgment leaves `toolsListChanged` out). */
+      opening: async (scope: ToolListScope): Promise<{ fingerprint: string; generation: number } | null> => {
+        if (!hub) return null;
+        const generation = hub.generation;
+        try {
+          const state = await toolListState(scope);
+          return state.kind === "list" ? { fingerprint: state.fingerprint, generation } : null;
+        } catch (error) {
+          app.log.warn({ toolsetId: scope.toolsetId, err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Could not read an MCP gateway tool list for a listen stream");
+          return null;
+        }
+      },
+      watch: (opening: { generation: number }, watcher: Parameters<GatewayListChangedHub["watch"]>[0]): (() => void) => {
+        if (!hub) return () => undefined;
+        const unwatch = hub.watch(watcher);
+        // A hint that arrived while the first list was read: check again now that the stream is watched.
+        if (hub.generation !== opening.generation) hub.hint();
+        return unwatch;
+      }
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // Routes

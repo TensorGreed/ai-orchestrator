@@ -145,6 +145,7 @@ import {
 } from "./legal-hold-sql.js";
 import { GATEWAY_APPROVAL_ONE_PENDING_INDEX, ONE_PENDING_APPROVAL_INDEX, POLICY_SUGGESTION_ONE_OPEN_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
 import {
+  labelsMarkSensitive,
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
   type McpCredentialMode,
@@ -360,6 +361,8 @@ interface SessionMemoryRow {
   messages_json: string;
   /** Migration 37 — the memory's data labels; null on rows written while labels were not tracked. */
   labels_json?: string | null;
+  /** v73 — 1 when written by sensitive work. */
+  sensitive?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -376,6 +379,8 @@ interface SessionToolCacheRow {
   summary_json: string | null;
   /** Migration 37 — the cached result's data labels; null when not tracked. */
   labels_json?: string | null;
+  /** v73 — 1 when written by sensitive work. */
+  sensitive?: number | null;
   created_at: string;
 }
 
@@ -386,6 +391,8 @@ interface SessionArtifactRow {
   value_json: string;
   /** Migration 37 — labels of what the saving run put in the artifact; null when it did not track labels. */
   labels_json?: string | null;
+  /** v73 — 1 when written by sensitive work. */
+  sensitive?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -2564,6 +2571,11 @@ function labelsField(value: string | null | undefined): { labels?: DataLabels } 
   return labels ? { labels } : {};
 }
 
+/** v73 — `{ sensitive: true }` for a row written by sensitive work, else nothing. */
+function sensitiveField(value: unknown): { sensitive?: true } {
+  return Number(value ?? 0) === 1 ? { sensitive: true } : {};
+}
+
 function parseJsonSafe(value: unknown): unknown {
   try {
     return JSON.parse(toString(value));
@@ -4495,6 +4507,10 @@ export class SqliteStore implements Store {
     ensureLabelMarkSchema(this.db);
     // v72 — the trace id of the run's span (NULL while tracing is off).
     this.ensureColumn("execution_history", "trace_id", "TEXT");
+    // v73 — session rows written by sensitive work (content capture keeps them out of later runs' exported content).
+    this.ensureColumn("session_memory", "sensitive", "INTEGER NOT NULL", "0");
+    this.ensureColumn("session_tool_cache", "sensitive", "INTEGER NOT NULL", "0");
+    this.ensureColumn("session_artifacts", "sensitive", "INTEGER NOT NULL", "0");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -5463,14 +5479,25 @@ export class SqliteStore implements Store {
     return row ? parseStoredDataLabels(row.labels_json) : null;
   }
 
+  /** v73 — the memory was written by sensitive work, or its stored labels say sensitive. False when there is none. */
+  async loadSessionMemorySensitive(namespace: string, sessionId: string): Promise<boolean> {
+    const row = this.queryOne<{ sensitive: number | null; labels_json: string | null }>(
+      `SELECT sensitive, labels_json FROM session_memory WHERE namespace = ? AND session_id = ?`,
+      [namespace, sessionId]
+    );
+    return row ? Number(row.sensitive ?? 0) === 1 || labelsMarkSensitive(parseStoredDataLabels(row.labels_json)) : false;
+  }
+
   /**
    * Saves a session's memory. `labels` (Phase 16) are given only while the
    * run tracks labels and are merged with the labels already stored; a save
    * without them (an untracked run) keeps the stored labels and adds
    * `untrusted_external` (it re-saves the old messages with a turn of unknown
-   * origin); a row with no labels stays without.
+   * origin); a row with no labels stays without. `options.sensitive` (v73)
+   * marks the row as written by sensitive work; a marked row stays marked.
    */
-  async saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): Promise<void> {
+  async saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels, options?: { sensitive?: boolean }): Promise<void> {
+    const sensitive = options?.sensitive === true ? 1 : 0;
     const existing = this.queryOne<SessionMemoryRow>(
       `SELECT namespace, session_id, messages_json, labels_json, created_at, updated_at
        FROM session_memory
@@ -5489,26 +5516,28 @@ export class SqliteStore implements Store {
       const merged = mergeDataLabels([parseStoredDataLabels(existing?.labels_json ?? null), labels].filter((entry): entry is DataLabels => Boolean(entry)));
       const labelsJson = merged && !isEmptyDataLabels(merged) ? JSON.stringify({ ...merged, source: "propagated" }) : existing?.labels_json ?? null;
       this.exec(
-        `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, sensitive, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(namespace, session_id) DO UPDATE SET
            messages_json = excluded.messages_json,
            labels_json = excluded.labels_json,
+           sensitive = CASE WHEN session_memory.sensitive = 1 OR excluded.sensitive = 1 THEN 1 ELSE 0 END,
            updated_at = excluded.updated_at`,
-        [namespace, sessionId, JSON.stringify(toStore), labelsJson, createdAt, now]
+        [namespace, sessionId, JSON.stringify(toStore), labelsJson, sensitive, createdAt, now]
       );
     } else {
       // An untracked run loads the stored messages and saves them again with its turn: the labels stay, plus
       // `untrusted_external` for the unknown new turn. Nothing stored means nothing written (zero-config).
       const kept = labelsForUntrackedSave(parseStoredDataLabels(existing?.labels_json ?? null));
       this.exec(
-        `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, sensitive, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(namespace, session_id) DO UPDATE SET
            messages_json = excluded.messages_json,
            labels_json = excluded.labels_json,
+           sensitive = CASE WHEN session_memory.sensitive = 1 OR excluded.sensitive = 1 THEN 1 ELSE 0 END,
            updated_at = excluded.updated_at`,
-        [namespace, sessionId, JSON.stringify(toStore), kept ? JSON.stringify(kept) : null, createdAt, now]
+        [namespace, sessionId, JSON.stringify(toStore), kept ? JSON.stringify(kept) : null, sensitive, createdAt, now]
       );
     }
 
@@ -5526,6 +5555,8 @@ export class SqliteStore implements Store {
     summary?: unknown;
     /** Phase 16 — given only while the run tracks labels. */
     labels?: DataLabels;
+    /** v73 — written by sensitive work. */
+    sensitive?: boolean;
   }): Promise<{
     id: string;
     namespace: string;
@@ -5537,6 +5568,7 @@ export class SqliteStore implements Store {
     error?: string;
     summary?: unknown;
     labels?: DataLabels | null;
+    sensitive?: boolean;
     createdAt: string;
   }> {
     const now = new Date().toISOString();
@@ -5554,8 +5586,9 @@ export class SqliteStore implements Store {
           error,
           summary_json,
           labels_json,
+          sensitive,
           created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         input.namespace,
@@ -5567,6 +5600,7 @@ export class SqliteStore implements Store {
         input.error ?? null,
         input.summary === undefined ? null : JSON.stringify(input.summary),
         input.labels && !isEmptyDataLabels(input.labels) ? JSON.stringify(input.labels) : null,
+        input.sensitive === true ? 1 : 0,
         now
       ]
     );
@@ -5596,6 +5630,7 @@ export class SqliteStore implements Store {
       error: input.error,
       summary: input.summary,
       ...(input.labels && !isEmptyDataLabels(input.labels) ? { labels: input.labels } : {}),
+      ...(input.sensitive === true ? { sensitive: true } : {}),
       createdAt: now
     };
   }
@@ -5615,6 +5650,7 @@ export class SqliteStore implements Store {
     error?: string;
     summary?: unknown;
     labels?: DataLabels | null;
+    sensitive?: boolean;
     createdAt: string;
   }>> {
     const limit =
@@ -5627,7 +5663,7 @@ export class SqliteStore implements Store {
     let rows: SessionToolCacheRow[];
     if (toolName) {
       rows = this.queryAll<SessionToolCacheRow>(
-        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, sensitive, created_at
          FROM session_tool_cache
          WHERE namespace = ? AND session_id = ? AND tool_name = ?
          ORDER BY created_at DESC
@@ -5636,7 +5672,7 @@ export class SqliteStore implements Store {
       );
     } else {
       rows = this.queryAll<SessionToolCacheRow>(
-        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, sensitive, created_at
          FROM session_tool_cache
          WHERE namespace = ? AND session_id = ?
          ORDER BY created_at DESC
@@ -5661,6 +5697,7 @@ export class SqliteStore implements Store {
         error: row.error ? toString(row.error) : undefined,
         summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
         ...labelsField(row.labels_json),
+        ...sensitiveField(row.sensitive),
         createdAt: toString(row.created_at)
       };
     });
@@ -5681,10 +5718,11 @@ export class SqliteStore implements Store {
     error?: string;
     summary?: unknown;
     labels?: DataLabels | null;
+    sensitive?: boolean;
     createdAt: string;
   } | null> {
     const row = this.queryOne<SessionToolCacheRow>(
-      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
+      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, sensitive, created_at
        FROM session_tool_cache
        WHERE namespace = ? AND session_id = ? AND id = ?`,
       [input.namespace, input.sessionId, input.id]
@@ -5710,6 +5748,7 @@ export class SqliteStore implements Store {
       error: row.error ? toString(row.error) : undefined,
       summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
       ...labelsField(row.labels_json),
+      ...sensitiveField(row.sensitive),
       createdAt: toString(row.created_at)
     };
   }
@@ -5727,17 +5766,20 @@ export class SqliteStore implements Store {
     artifactKey: string;
     value: unknown;
     labels?: DataLabels;
+    /** v73 — written by sensitive work; a marked row stays marked. */
+    sensitive?: boolean;
   }): Promise<{
     namespace: string;
     sessionId: string;
     artifactKey: string;
     value: unknown;
     labels?: DataLabels | null;
+    sensitive?: boolean;
     createdAt: string;
     updatedAt: string;
   }> {
     const existing = this.queryOne<SessionArtifactRow>(
-      `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
+      `SELECT namespace, session_id, artifact_key, value_json, labels_json, sensitive, created_at, updated_at
        FROM session_artifacts
        WHERE namespace = ? AND session_id = ? AND artifact_key = ?`,
       [input.namespace, input.sessionId, input.artifactKey]
@@ -5747,12 +5789,15 @@ export class SqliteStore implements Store {
     // Phase 16 — a tracked save replaces the labels (its load put the old ones into the labels it saves). An untracked
     // save (no labels given) may carry the old value forward: the stored labels stay, plus `untrusted_external`.
     const labels = input.labels === undefined ? labelsForUntrackedSave(parseStoredDataLabels(existing?.labels_json ?? null)) ?? undefined : !isEmptyDataLabels(input.labels) ? input.labels : undefined;
+    // v73 — a marked artifact stays marked: the new value may carry the old one forward.
+    const sensitive = input.sensitive === true || Number(existing?.sensitive ?? 0) === 1;
     this.exec(
-      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, sensitive, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
          value_json = excluded.value_json,
          labels_json = excluded.labels_json,
+         sensitive = CASE WHEN session_artifacts.sensitive = 1 OR excluded.sensitive = 1 THEN 1 ELSE 0 END,
          updated_at = excluded.updated_at`,
       [
         input.namespace,
@@ -5760,6 +5805,7 @@ export class SqliteStore implements Store {
         input.artifactKey,
         JSON.stringify(input.value ?? null),
         labels ? JSON.stringify({ ...labels, source: "propagated" }) : null,
+        sensitive ? 1 : 0,
         createdAt,
         now
       ]
@@ -5773,6 +5819,7 @@ export class SqliteStore implements Store {
       artifactKey: input.artifactKey,
       value: input.value ?? null,
       ...(labels ? { labels } : {}),
+      ...(sensitive ? { sensitive: true } : {}),
       createdAt,
       updatedAt: now
     };
@@ -5788,11 +5835,12 @@ export class SqliteStore implements Store {
     artifactKey: string;
     value: unknown;
     labels?: DataLabels | null;
+    sensitive?: boolean;
     createdAt: string;
     updatedAt: string;
   } | null> {
     const row = this.queryOne<SessionArtifactRow>(
-      `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
+      `SELECT namespace, session_id, artifact_key, value_json, labels_json, sensitive, created_at, updated_at
        FROM session_artifacts
        WHERE namespace = ? AND session_id = ? AND artifact_key = ?`,
       [input.namespace, input.sessionId, input.artifactKey]
@@ -5809,6 +5857,7 @@ export class SqliteStore implements Store {
       artifactKey: toString(row.artifact_key),
       value: parseJsonSafe(row.value_json),
       ...(labels ? { labels } : {}),
+      ...sensitiveField(row.sensitive),
       createdAt: toString(row.created_at),
       updatedAt: toString(row.updated_at)
     };

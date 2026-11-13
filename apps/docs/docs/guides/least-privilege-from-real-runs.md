@@ -7,6 +7,8 @@ description: "Tighten MCP tool access from recorded calls: simulate a draft rule
 
 Writing tool rules by hand means guessing which tools an agent needs. L2M already records every MCP tool call with a safe summary of its arguments, so it can answer two questions from what really happened:
 
+Concepts: [Least privilege for AI agents](/learn/security/least-privilege-for-agents) explains the layers this guide tightens.
+
 - **What would this rule have done?** Simulate a draft rule, or a whole edited rule set, on the calls of the last 7 or 30 days before you save it.
 - **What is the least this agent needs?** Ask for suggestions: for each workflow and gateway client, an allow for every tool it actually used and a deny for the other tools on that server. Accept one in shadow mode, watch it, then enforce it.
 

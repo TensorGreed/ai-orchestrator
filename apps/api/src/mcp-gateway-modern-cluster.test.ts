@@ -6,6 +6,7 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -50,7 +51,7 @@ run("MCP 2026-07-28 gateway callers across replicas", () => {
     for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   }, 60_000);
 
-  async function addReplica(name: string): Promise<Replica> {
+  async function addReplica(name: string, env: Record<string, string> = {}): Promise<Replica> {
     primary ??= await createTestStore({ kind: "postgres" });
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-gw-modern-cluster-"));
     tempDirs.push(tempDir);
@@ -71,7 +72,8 @@ run("MCP 2026-07-28 gateway callers across replicas", () => {
       CLUSTER_HEARTBEAT_MS: "200",
       CLUSTER_INSTANCE_TIMEOUT_MS: "5000",
       WORKER_MODE: "api",
-      MCP_GATEWAY_MODERN_PROTOCOL: "on"
+      MCP_GATEWAY_MODERN_PROTOCOL: "on",
+      ...env
     });
     const app = await createApp(
       config,
@@ -112,7 +114,7 @@ run("MCP 2026-07-28 gateway callers across replicas", () => {
     const created = toolset.json<{ toolset: McpToolset }>().toolset;
     const client = await replica.app.inject({ method: "POST", url: "/api/mcp/clients", headers: { cookie }, payload: { name: `${name} agent`, toolsetIds: [created.id], role: "builder" } });
     expect(client.statusCode, client.body).toBe(201);
-    return { slug: created.slug, toolsetId: created.id, ...client.json<{ client: McpClient; token: string }>() };
+    return { slug: created.slug, toolsetId: created.id, serverId, ...client.json<{ client: McpClient; token: string }>() };
   }
 
   async function modernCall(replica: Replica, slug: string, token: string, expression: string) {
@@ -211,5 +213,65 @@ run("MCP 2026-07-28 gateway callers across replicas", () => {
     expect(update.statusCode).toBe(200);
     // B never served the caller: the stored note makes the earlier result count as outside content.
     expect((await modernCall(b, slug, token, "2+2")).json().error.code).toBe(-31030);
+  });
+
+  it("tells a listen stream on one replica about a tool rule saved on another, over the cluster bus", async () => {
+    // No periodic check on either replica: only the bus can carry the change.
+    const a = await addReplica("listen-a", { MCP_GATEWAY_LISTEN_CHECK_MS: "0" });
+    const b = await addReplica("listen-b", { MCP_GATEWAY_LISTEN_CHECK_MS: "0" });
+    await b.app.listen({ port: 0, host: "127.0.0.1" });
+    const cookie = await adminCookie(a);
+    const { slug, token, serverId } = await toolsetWithClient(a, cookie, "Watched", false);
+
+    const controller = new AbortController();
+    const response = await fetch(`http://127.0.0.1:${(b.app.server.address() as AddressInfo).port}/mcp/${slug}`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        authorization: `Bearer ${token}`,
+        "mcp-protocol-version": MODERN,
+        "mcp-method": "subscriptions/listen"
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "fleet-1", method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: META } })
+    });
+    expect(response.status).toBe(200);
+    let text = "";
+    const reader = response.body!.getReader();
+    const pump = (async () => {
+      const decoder = new TextDecoder();
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) return;
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+      } catch {
+        // Aborted by the test.
+      }
+    })();
+    const messages = () => text.split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6)) as Record<string, any>);
+    const until = async (check: () => boolean) => {
+      const deadline = Date.now() + 10_000;
+      while (!check()) {
+        if (Date.now() > deadline) throw new Error(`Timed out; stream so far: ${text}`);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    await until(() => messages().length === 1);
+    expect(messages()[0]!.params.notifications).toEqual({ toolsListChanged: true });
+
+    const rule = await a.app.inject({
+      method: "POST",
+      url: "/api/mcp/policies",
+      headers: { cookie },
+      payload: { name: "No calculator for builders", effect: "deny", roles: ["builder"], serverId, toolPattern: "calculator" }
+    });
+    expect(rule.statusCode, rule.body).toBe(201);
+    await until(() => messages().some((message) => message.method === "notifications/tools/list_changed"));
+    expect(messages()[1]).toEqual({ jsonrpc: "2.0", method: "notifications/tools/list_changed", params: { _meta: { "io.modelcontextprotocol/subscriptionId": "fleet-1" } } });
+    controller.abort();
+    await pump;
   });
 });

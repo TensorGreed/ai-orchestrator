@@ -412,7 +412,7 @@ export const INDEX_ENTRIES: IndexEntry[] = [
     term: "OpenTelemetry",
     topic: "operations",
     definition: "An open standard and set of tools for traces, metrics and logs, sent over its own protocol (OTLP) to any compatible backend.",
-    docs: "/operations/observability"
+    docs: "/operations/opentelemetry"
   },
   {
     slug: "tool-call-telemetry",

@@ -3,13 +3,13 @@ title: "Least privilege for MCP tools, learned from real calls"
 description: "Argument-aware MCP tool rules, safe argument summaries in telemetry, and rule suggestions tested on the last 7 or 30 days of real calls before you enforce."
 date: 2026-11-12
 author: "The L2M team"
-related: [least-privilege, shadow-mode, tool-call-telemetry, approval-gate]
+related: [least-privilege, mcp-tool-policy, shadow-mode, tool-call-telemetry, approval-gate]
 socialCard: true
 ---
 
 # Least privilege for MCP tools, learned from real calls
 
-Allowing an agent to use an MCP server usually means allowing every tool on it, with any arguments. On 30 October 2026 we merged three changes that narrow that down in L2M: tool rules that read a call's arguments, a summary of each call's arguments that is safe to keep, and a way to test a rule against the last 7 or 30 days of real calls, or ask for rules suggested from the last 30, before anything is enforced. This post explains the gap they close and how they fit together.
+Allowing an agent to use an MCP server usually means allowing every tool on it, with any arguments. On 30 October 2026 we merged three changes that narrow that down in L2M: <Term id="mcp-tool-policy">tool rules</Term> that read a call's arguments, a summary of each call's arguments that is safe to keep, and a way to test a rule against the last 7 or 30 days of real calls, or ask for rules suggested from the last 30, before anything is enforced. This post explains the gap they close and how they fit together.
 
 ## The gap between "allowed server" and "allowed call"
 
@@ -19,7 +19,7 @@ A rule that says "this agent may use the code-hosting server" covers none of tha
 
 ## Rules that read arguments
 
-[MCP tool policy](/product/mcp-tool-policy) rules can now carry conditions on a call's arguments ([PR #117](https://github.com/TensorGreed/ai-orchestrator/pull/117)): `equals`, `one_of`, `starts_with`, `matches`, number comparisons, `between` and `exists`, with dot paths such as `options.branch` and `files[*].path`. A rule can also test the run's data labels, and can be limited to particular workflows or MCP gateway clients.
+[MCP tool policy](/product/mcp-tool-policy) rules can now carry conditions on a call's arguments ([PR #117](https://github.com/TensorGreed/ai-orchestrator/pull/117)): `equals`, `one_of`, `starts_with`, `matches`, number comparisons, `between` and `exists`, with dot paths such as `options.branch` and `files[*].path`. A rule can also test the run's <Term id="data-labels">data labels</Term>, and can be limited to particular workflows or MCP gateway clients.
 
 Rules have three effects: allow, deny and the new `require_approval`. Precedence is deny, then require approval, then allow, and a narrower rule carves an exception out of a broader one. So the deploy bot above becomes three rules, each limited to the deploy workflow:
 

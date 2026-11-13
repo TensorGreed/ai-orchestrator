@@ -1,0 +1,2 @@
+otel-data/*
+!otel-data/.gitkeep

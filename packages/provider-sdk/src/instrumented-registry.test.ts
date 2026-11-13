@@ -374,6 +374,30 @@ describe("instrumented embedding registry", () => {
     expect(spans[0]!.errors).toEqual([{ error: "", type: "llm_provider_error" }]);
     expect(registry.tryGet("missing")).toBeUndefined();
   });
+
+  it("runs an embedder outside the registry (embedWith): as it is on a plain registry, recorded once through layers", async () => {
+    const outside = embedder();
+    const call = { provider: { providerId: "cohere", model: "embed-c", baseUrl: "https://api.cohere.ai/v1" }, input: ["SECRET q"] };
+    // A plain registry calls it as it is.
+    const plain = new EmbeddingProviderRegistry();
+    expect((await plain.embedWith(outside, call, context)).embeddings).toEqual([[0.1, 0.2, 0.3]]);
+
+    const { instrument, spans } = recorder();
+    const observed: ModelCallObservation[] = [];
+    const inner = createInstrumentedEmbeddingRegistry(plain, { instrument, observe: (o) => observed.push(o) });
+    const outer = createInstrumentedEmbeddingRegistry(inner, { instrument, observe: (o) => observed.push(o) });
+    const answer = await outer.embedWith(outside, call, context);
+    expect(answer.usage).toEqual({ inputTokens: 9, totalTokens: 9 });
+    expect(spans).toHaveLength(1);
+    expect(spans[0]!.info).toEqual({ providerId: "cohere", model: "embed-c", operation: "embeddings", serverAddress: "api.cohere.ai", serverPort: 443 });
+    expect(spans[0]!.attributes).toMatchObject({ "gen_ai.usage.input_tokens": 9, "gen_ai.embeddings.dimension.count": 3 });
+    expect(observed).toHaveLength(1);
+    expect(JSON.stringify([spans, observed])).not.toContain("SECRET");
+
+    const failing = createInstrumentedEmbeddingRegistry(plain, { instrument });
+    await expect(failing.embedWith(embedder(true), call, context)).rejects.toThrow("bad SECRET");
+    expect(spans[1]!.errors).toEqual([{ error: "", type: "llm_provider_error" }]);
+  });
 });
 
 describe("resilientFetch trace headers", () => {

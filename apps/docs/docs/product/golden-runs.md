@@ -7,7 +7,7 @@ description: "Save known-good runs as golden runs and replay a changed L2M workf
 
 A **golden run** is a run you keep as a reference: what went in, what every node returned and which MCP calls it made. **Replay** runs a changed workflow (the draft, or a saved version) against that reference, with every node that reaches outside L2M and every code node answered from the recording, then shows what changed and gives a verdict: **pass**, **fail** or **inconclusive**. Use it to check a prompt, model or tool change before it reaches anyone.
 
-Concepts: [Regression testing AI agents](/learn/testing/regression-testing-agents) explains why a <Term id="golden-run">golden run</Term> makes a good regression test.
+Concepts: [Regression testing AI agents](/learn/testing/regression-testing-agents) explains why a <Term id="golden-run">golden run</Term> makes a good regression test, and what <Term id="replay">replay</Term> answers from the recording.
 
 Everything stays on your deployment.
 

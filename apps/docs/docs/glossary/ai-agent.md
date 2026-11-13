@@ -4,7 +4,7 @@ term: "AI agent"
 topic: agents
 definition: "A system in which a language model decides, step by step, which tools to call and in what order, reading each result before it chooses the next step, until it can answer."
 description: "An AI agent is a model that decides which tools to call, in a loop, until it can answer. How it differs from a chatbot or a fixed workflow."
-related: [agent-loop, tool-calling, workflow-dag, max-iterations, human-in-the-loop]
+related: [agent-loop, tool-calling, workflow-dag, supervisor-agent, max-iterations, human-in-the-loop]
 guide: [/learn/agents/what-is-an-ai-agent]
 ---
 
@@ -28,7 +28,7 @@ Agents trade predictability for flexibility. The same source warns that their au
 
 ## In L2M
 
-The Agent Orchestrator node runs an agent: a chat model on its `chat_model` port, MCP tools on its `tool` port, optional memory, and `maxIterations` as the limit. A Supervisor node is an agent that hands parts of a task to worker agents, which it sees as tools. See the [agent loop](/runtime/agent-loop), and run one with no API key in the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent).
+The Agent Orchestrator node runs an agent: a chat model on its `chat_model` port, MCP tools on its `tool` port, optional memory, and `maxIterations` as the limit. A <Term id="supervisor-agent">Supervisor</Term> node is an agent that hands parts of a task to worker agents, which it sees as tools. See the [agent loop](/runtime/agent-loop), and run one with no API key in the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent).
 
 ## Further reading
 

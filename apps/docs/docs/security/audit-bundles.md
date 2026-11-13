@@ -7,6 +7,8 @@ description: "Export a finished L2M run as an audit bundle with an Ed25519-signe
 
 Every finished run can be exported as an **audit bundle**: a zip holding a signed **run manifest**, the run's node inputs and outputs, its trace and logs, and the files it produced. Anyone with the deployment's public key can check, offline, that nothing in the bundle was changed after L2M signed it. The public key has to come from the deployment through a channel you trust: the key embedded in a bundle proves nothing about who signed it.
 
+Concepts: [Audit trails for AI agents](/learn/operations/audit-trails-for-agents) covers what an agent audit trail should record and how a signature proves it is intact.
+
 Everything happens on your own deployment. Signing uses a key that never leaves the server, and verification needs no network access, no hosted service and no timestamping or transparency service.
 
 ## The run manifest

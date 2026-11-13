@@ -26,7 +26,8 @@
  * (v71, `mcp_gateway_label_marks`), keyed the same way and shared by every
  * instance, so it survives eviction, the idle sweep of this instance and a
  * call answered by another instance (mcp-gateway-routes.ts). A caller's legacy
- * sessions keep their own marks (a new session always starts clean, as before).
+ * sessions keep their own marks; on a tracking toolset a new one starts from the
+ * stored mark, so opening a session never clears it.
  */
 
 import crypto from "node:crypto";

@@ -159,7 +159,7 @@ describe("discover, lists and CORS", () => {
   it("builds server/discover with private cache hints and instructions only when the toolset has a description", () => {
     expect(gatewayDiscoverResult({ toolset: { slug: "s", name: "S", description: "Use me" }, mode: "on", ttlMs: 1000 })).toEqual({
       supportedVersions: gatewaySupportedVersions("on"),
-      capabilities: { tools: { listChanged: false } },
+      capabilities: { tools: { listChanged: true } },
       instructions: "Use me",
       ttlMs: 1000,
       cacheScope: "private"
@@ -250,6 +250,22 @@ describe("subscriptions/listen helpers", () => {
         resultType: "complete",
         _meta: { "io.modelcontextprotocol/subscriptionId": 3, "io.modelcontextprotocol/serverInfo": { name: "l2m-x", version: "1" } }
       }
+    });
+  });
+
+  it("honours toolsListChanged only, echoes it in the acknowledgment and builds the change notification", async () => {
+    const { listenHonouredFilter, subscriptionsAcknowledged, toolsListChangedNotification } = await import("./mcp-gateway-modern.js");
+    expect(listenHonouredFilter(undefined)).toEqual({});
+    expect(listenHonouredFilter({ notifications: { toolsListChanged: false, promptsListChanged: true, resourceSubscriptions: ["file:///a"] } })).toEqual({});
+    expect(listenHonouredFilter({ notifications: { toolsListChanged: true, resourcesListChanged: true } })).toEqual({ toolsListChanged: true });
+    expect(subscriptionsAcknowledged(9, { toolsListChanged: true }).params).toEqual({
+      _meta: { "io.modelcontextprotocol/subscriptionId": 9 },
+      notifications: { toolsListChanged: true }
+    });
+    expect(toolsListChangedNotification("s")).toEqual({
+      jsonrpc: "2.0",
+      method: "notifications/tools/list_changed",
+      params: { _meta: { "io.modelcontextprotocol/subscriptionId": "s" } }
     });
   });
 });

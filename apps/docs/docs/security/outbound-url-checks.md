@@ -16,6 +16,8 @@ the host. This
 blocks server-side request forgery (SSRF) and local-file reads through those
 nodes.
 
+Concepts: [the lethal trifecta](/learn/security/lethal-trifecta) shows how URLs become a way for data to leave an agent.
+
 MCP HTTP servers do not go through these checks. For the OAuth discovery,
 registration, token and refresh requests of remote MCP servers, set
 `MCP_OAUTH_BLOCK_PRIVATE_HOSTS=true` (off by default) to refuse private,

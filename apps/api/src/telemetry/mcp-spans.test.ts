@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { InMemorySpanExporter, type ReadableSpan, type SpanProcessor } from "@ai-orchestrator/otel";
+import { AggregationTemporality, InMemoryMetricExporter, InMemorySpanExporter, PeriodicExportingMetricReader, type ReadableSpan, type ResourceMetrics, type SpanProcessor } from "@ai-orchestrator/otel";
 import { CONTENT_ATTRIBUTES, type McpClient, type McpToolset } from "@ai-orchestrator/shared";
 import { gatewayToolName, slugifyServerName } from "@ai-orchestrator/mcp-sdk";
 import { createApp } from "../app.js";
@@ -86,7 +86,7 @@ function collectInto(exporter: InMemorySpanExporter): SpanProcessor {
   };
 }
 
-async function setup(env: Record<string, string>): Promise<Fixture> {
+async function setup(env: Record<string, string>, metricReader?: PeriodicExportingMetricReader): Promise<Fixture> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-otel-mcp-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
@@ -106,7 +106,8 @@ async function setup(env: Record<string, string>): Promise<Fixture> {
   const exporter = new InMemorySpanExporter();
   const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), authService, undefined, undefined, undefined, {
     telemetrySpanProcessors: [collectInto(exporter)],
-    telemetryRegisterGlobals: false
+    telemetryRegisterGlobals: false,
+    ...(metricReader ? { telemetryMetricReaders: [metricReader] } : {})
   });
   await app.ready();
   const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: ADMIN });
@@ -366,6 +367,46 @@ describe("tracing off", () => {
     expect(response.statusCode).toBe(200);
     expect(upstreamMeta(response.json())).toBeNull();
     expect(fixture.exporter.getFinishedSpans()).toEqual([]);
+  });
+});
+
+describe("metrics only (tracing off, a metrics endpoint set)", () => {
+  it("records the MCP operation durations of the gateway and its upstream calls, with no spans and no trace context", async () => {
+    const metricExporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    const reader = new PeriodicExportingMetricReader({ exporter: metricExporter, exportIntervalMillis: 3_600_000 });
+    const fixture = await setup(
+      { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://127.0.0.1:9/v1/metrics", OTEL_METRICS_ENABLED: "true", OTEL_METRICS_PUSH_INTERVAL_MS: "3600000" },
+      reader
+    );
+    const sessionId = await openSession(fixture);
+    const response = await rpc(
+      fixture,
+      { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: TOOL, arguments: {}, _meta: { traceparent: CALLER_TRACEPARENT } } },
+      { "mcp-session-id": sessionId, traceparent: CALLER_TRACEPARENT }
+    );
+    expect(response.statusCode).toBe(200);
+    // Nothing is traced, so nothing is sent upstream.
+    expect(upstreamMeta(response.json())).toBeNull();
+    const unknown = await rpc(fixture, { jsonrpc: "2.0", id: 6, method: "nope/nothing", params: {} }, { "mcp-session-id": sessionId });
+    expect(unknown.json().error.code).toBe(-32601);
+    expect(fixture.exporter.getFinishedSpans()).toEqual([]);
+
+    await reader.forceFlush();
+    const metrics = metricExporter.getMetrics().flatMap((resource: ResourceMetrics) => resource.scopeMetrics.flatMap((scope) => scope.metrics));
+    const points = (name: string) => metrics.filter((metric) => metric.descriptor.name === name).flatMap((metric) => metric.dataPoints.map((point) => point.attributes));
+    const server = points("mcp.server.operation.duration");
+    expect(server).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ "mcp.method.name": "initialize" }),
+        expect.objectContaining({ "mcp.method.name": "tools/call", "gen_ai.operation.name": "execute_tool" }),
+        expect.objectContaining({ "mcp.method.name": "_OTHER", "error.type": "-32601", "rpc.response.status_code": "-32601" })
+      ])
+    );
+    // No ids on the server metric (the caller picks the tool name; it is on the client metric only).
+    for (const attributes of server) expect(Object.keys(attributes).filter((key) => /session|client\.id|toolset|gen_ai\.tool/.test(key))).toEqual([]);
+    expect(points("mcp.client.operation.duration")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ "mcp.method.name": "tools/call", "gen_ai.tool.name": "echo_meta", "network.transport": "pipe" })])
+    );
   });
 });
 

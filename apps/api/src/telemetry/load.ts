@@ -20,6 +20,12 @@ export interface Telemetry {
   readonly metrics: MetricsPipeline | null;
   /** What the engine, runtime and SDK packages are given: the no-op while tracing is off. */
   readonly instrumentation: RunInstrumentation;
+  /**
+   * What the MCP clients and the MCP gateway are given: `instrumentation` while tracing is on; with only a metrics
+   * endpoint, one that records the MCP operation duration metrics and nothing else (no spans, no trace context);
+   * else the no-op.
+   */
+  readonly mcpInstrumentation: RunInstrumentation;
   readonly settings: TelemetrySettings;
 }
 
@@ -48,7 +54,7 @@ export async function loadTelemetry(settings: TelemetrySettings, options: LoadTe
     : null;
   if (!settings.enabled) {
     if (!metricsExport) {
-      return Object.freeze({ enabled: false, runtime: null, metrics: null, instrumentation: NOOP_RUN_INSTRUMENTATION, settings });
+      return Object.freeze({ enabled: false, runtime: null, metrics: null, instrumentation: NOOP_RUN_INSTRUMENTATION, mcpInstrumentation: NOOP_RUN_INSTRUMENTATION, settings });
     }
     // A metrics endpoint without tracing: only the meter provider and its reader are built (no tracer, no globals).
     const otel = await import("@ai-orchestrator/otel");
@@ -57,7 +63,8 @@ export async function loadTelemetry(settings: TelemetrySettings, options: LoadTe
       export: metricsExport,
       ...(options.metricReaders ? { readers: options.metricReaders } : {})
     });
-    return Object.freeze({ enabled: false, runtime: null, metrics, instrumentation: NOOP_RUN_INSTRUMENTATION, settings });
+    const mcpInstrumentation = otel.createMcpMetricsInstrumentation(metrics.meter, ...(options.scrub ? [options.scrub] : []));
+    return Object.freeze({ enabled: false, runtime: null, metrics, instrumentation: NOOP_RUN_INSTRUMENTATION, mcpInstrumentation, settings });
   }
   const otel = await import("@ai-orchestrator/otel");
   const runtime = otel.createOtelRuntime({
@@ -82,5 +89,5 @@ export async function loadTelemetry(settings: TelemetrySettings, options: LoadTe
     ...(options.metricReaders ? { metricReaders: options.metricReaders } : {}),
     ...(options.registerGlobals === false ? { registerGlobals: false } : {})
   });
-  return Object.freeze({ enabled: true, runtime, metrics: runtime.metrics, instrumentation: runtime.instrumentation, settings });
+  return Object.freeze({ enabled: true, runtime, metrics: runtime.metrics, instrumentation: runtime.instrumentation, mcpInstrumentation: runtime.instrumentation, settings });
 }

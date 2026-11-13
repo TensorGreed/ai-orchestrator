@@ -146,6 +146,8 @@ export class McpProbeService {
       checkSandbox?: (config: MCPServerConfig) => McpSandboxStatus;
       /** Phase 10.7 — whose own connection probes a delegated server; null when nobody usable. */
       delegatedProbeUser?: (server: McpServerRecord, requestedBy?: string | null) => Promise<string | null>;
+      /** G3b — a probe stored a new tool snapshot for the server (its tool list changed). */
+      onSnapshotChanged?: (serverId: string) => void;
     },
     private readonly options: {
       /** Default interval for servers without an override; 0 disables the background loop. */
@@ -367,6 +369,7 @@ export class McpProbeService {
     if (catalog) {
       await this.store.upsertMcpServerCatalog(serverId, catalog);
     }
+    if (snapshot) this.deps.onSnapshotChanged?.(serverId);
 
     if (snapshot?.breaking) {
       this.logger?.warn("MCP server tool schema changed in a breaking way", {

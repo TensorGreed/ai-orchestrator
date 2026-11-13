@@ -61,6 +61,15 @@ export class EmbeddingProviderRegistry {
   ids(): string[] {
     return [...this.adapters.keys()];
   }
+
+  /**
+   * Runs an embedder that is not one of this registry's adapters (a RAG or knowledge-base embedder with its own
+   * transport) the way this registry runs its own: here it is called as it is; an instrumented registry records it
+   * like any embeddings call (span and metrics).
+   */
+  async embedWith(adapter: EmbeddingProviderAdapter, request: EmbeddingRequest, context: ProviderExecutionContext): Promise<EmbeddingResponse> {
+    return await adapter.embed(request, context);
+  }
 }
 
 interface OpenAIEmbeddingsBody {

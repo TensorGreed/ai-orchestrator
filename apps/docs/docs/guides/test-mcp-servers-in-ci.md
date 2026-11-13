@@ -7,6 +7,8 @@ description: "Make MCP-dependent agents testable: record MCP calls as cassettes,
 
 Agents that call MCP servers are hard to test: servers change their tool schemas, go down, and return different answers from one run to the next. A test that passed yesterday can fail today because a server renamed a parameter, and nobody hears about it until a run breaks in production.
 
+Concepts: [Testing agents that call MCP tools](/learn/testing/testing-mcp-tools) explains what record and replay, mocks and schema checks each catch and miss.
+
 Three techniques fix that, and L2M has all three built in, running on your own deployment:
 
 - **Record and replay**: capture every MCP call a run makes as a *cassette*, then run the workflow again with the calls answered from it.

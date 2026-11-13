@@ -118,7 +118,17 @@ export class MemorySeedCapture {
     return {
       loadMessages: async (namespace, sessionId) => {
         const messages = await store.loadMessages(namespace, sessionId);
-        this.capture(namespace, sessionId, messages);
+        // v73 — the seed carries the session's mark even when the run itself does not look it up (content capture off
+        // reads no marks): one query per seeded session, on recorded runs only. A mark that cannot be read counts as set.
+        if (this.capture(namespace, sessionId, messages) && store.loadSensitive) {
+          let sensitive: boolean;
+          try {
+            sensitive = await store.loadSensitive(namespace, sessionId);
+          } catch {
+            sensitive = true;
+          }
+          if (sensitive) this.captureSensitive(namespace, sessionId);
+        }
         return messages;
       },
       saveMessages: (namespace, sessionId, messages, options) =>
@@ -132,8 +142,23 @@ export class MemorySeedCapture {
               return labels;
             }
           }
+        : {}),
+      ...(store.loadSensitive
+        ? {
+            // v73 — memory written by sensitive work stays marked in the seed, so a replay that reads it exports no content.
+            loadSensitive: async (namespace: string, sessionId: string) => {
+              const sensitive = await store.loadSensitive!(namespace, sessionId);
+              if (sensitive) this.captureSensitive(namespace, sessionId);
+              return sensitive;
+            }
+          }
         : {})
     };
+  }
+
+  private captureSensitive(namespace: string, sessionId: string): void {
+    const entry = this.sessions.get(`${namespace}\u0000${sessionId}`);
+    if (entry) entry.sensitive = true;
   }
 
   private captureLabels(namespace: string, sessionId: string, labels: DataLabels): void {
@@ -141,17 +166,19 @@ export class MemorySeedCapture {
     if (entry && !entry.labels) entry.labels = structuredClone(labels);
   }
 
-  private capture(namespace: string, sessionId: string, messages: ChatMessage[]): void {
+  /** Records what the session held the first time it is read; true when this read added it to the seed. */
+  private capture(namespace: string, sessionId: string, messages: ChatMessage[]): boolean {
     const key = `${namespace}\u0000${sessionId}`;
-    if (this.sessions.has(key) || this.truncated) return;
+    if (this.sessions.has(key) || this.truncated) return false;
     const entry: ModelMemorySeedEntry = { namespace, sessionId, messages: this.options.scrub(messages) as ChatMessage[] };
     const size = Buffer.byteLength(JSON.stringify(entry), "utf8");
     if (this.bytes + size > this.options.maxBytes) {
       this.truncated = true;
-      return;
+      return false;
     }
     this.bytes += size;
     this.sessions.set(key, entry);
+    return true;
   }
 
   toSeed(): ModelMemorySeed | null {

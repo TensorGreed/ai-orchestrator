@@ -3,7 +3,7 @@ title: "CI for agents: golden runs, replay and a release gate"
 description: "How L2M tests an agent change before it ships: save known-good runs, replay changes against recordings in CI, and publish only the version that passed."
 date: 2026-11-12
 author: "The L2M team"
-related: [golden-run]
+related: [golden-run, replay, golden-set, release-gate]
 demo: wf-demo-faq-release
 demoRecorded: true
 socialCard: true
@@ -11,7 +11,7 @@ socialCard: true
 
 # CI for agents: golden runs, replay and a release gate
 
-A prompt edit can change what an agent does as much as a code change can, and most teams ship it with a quick manual try. Between 23 and 24 October 2026 we merged the pieces that let L2M treat agent changes like code: keep known-good runs, replay every change against them with the outside world answered from a recording, fail the build on a regression, and let only a version that passed reach production. This post explains how those pieces fit together and why we made the choices we did.
+A prompt edit can change what an agent does as much as a code change can, and most teams ship it with a quick manual try. Between 23 and 24 October 2026 we merged the pieces that let L2M treat agent changes like code: keep known-good runs, <Term id="replay">replay</Term> every change against them with the outside world answered from a recording, fail the build on a regression, and let only a version that passed reach production. This post explains how those pieces fit together and why we made the choices we did.
 
 ## The problem: changes you cannot unit test
 
@@ -25,7 +25,7 @@ So we started from what already exists in production: real runs.
 
 A <Term id="golden-run">golden run</Term> is a finished run saved as a reference ([PR #45](https://github.com/TensorGreed/ai-orchestrator/pull/45)). It keeps the input, every node's result and the run's MCP calls as a cassette. Secrets are scrubbed before anything is stored, and golden runs stay until someone deletes them or their workflow; they are not purged by age.
 
-Writing good cases by hand is slow, so [production capture](/product/production-capture) ([PR #56](https://github.com/TensorGreed/ai-orchestrator/pull/56), 24 October) does it from traffic. It is off until a builder turns it on for a workflow, and then samples real runs (10% by default, at most 20 a day), masks the personal data in them, and puts them in a **Captured runs** inbox. A builder promotes the useful ones into a golden set in one click.
+Writing good cases by hand is slow, so [production capture](/product/production-capture) ([PR #56](https://github.com/TensorGreed/ai-orchestrator/pull/56), 24 October) does it from traffic. It is off until a builder turns it on for a workflow, and then samples real runs (10% by default, at most 20 a day), masks the personal data in them, and puts them in a **Captured runs** inbox. A builder promotes the useful ones into a <Term id="golden-set">golden set</Term> in one click.
 
 ## Replay: run what is safe, answer the rest from the recording
 
@@ -43,7 +43,7 @@ Two rules matter more than the table.
 
 **Inconclusive is not a pass.** If the candidate makes an MCP call the cassette cannot answer, reaches a node the golden run never saw, or changed a code node, the case is inconclusive. We could have let those through as "probably fine". We did not, because a replay that proved nothing must not look like one that passed.
 
-**Nothing is written.** Replays do not write session memory, knowledge bases or the tool cache, and they do not fire error workflows or notifications. By default the only live traffic is the model calls, and their spend still counts toward [budgets](/product/budgets). A job can also let named read-only nodes and read-only MCP tools call live; such a job never counts as release proof.
+**Nothing is written.** Replays do not write <Term id="agent-memory">session memory</Term>, knowledge bases or the tool cache, and they do not fire error workflows or notifications. By default the only live traffic is the model calls, and their spend still counts toward [budgets](/product/budgets). A job can also let named read-only nodes and read-only MCP tools call live; such a job never counts as release proof.
 
 ## Golden sets, scorers and replay jobs
 

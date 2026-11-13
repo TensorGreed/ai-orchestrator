@@ -90,6 +90,8 @@ export interface ModelMemorySeedEntry {
   messages: ChatMessage[];
   /** Phase 16 — the labels stored with that memory when the run read it; absent when none were recorded. */
   labels?: DataLabels;
+  /** v73 — that memory was written by sensitive work; absent when not. */
+  sensitive?: boolean;
 }
 
 export interface ModelMemorySeed {
@@ -135,7 +137,9 @@ export const modelMemorySeedSchema = z.object({
         sessionId: z.string().max(400),
         messages: z.array(z.record(z.string(), z.unknown())).max(10_000),
         /** Phase 16 — the labels stored with that memory when the run read it (absent: none recorded). */
-        labels: dataLabelsSchema.optional()
+        labels: dataLabelsSchema.optional(),
+        /** v73 — that memory was written by sensitive work (absent: not). */
+        sensitive: z.boolean().optional()
       })
     )
     .max(1_000),

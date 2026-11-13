@@ -21,7 +21,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ModelCostObservation } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, type ModelCostObservation } from "@ai-orchestrator/shared";
 import type { Store } from "../db/store.js";
 
 export interface ModelPricing {
@@ -245,7 +245,8 @@ export class UsageService {
     for (const entry of costs.values()) {
       if (entry.costUsd <= 0) continue;
       try {
-        observer({ providerId: entry.providerId, model: entry.model, projectId: projectId ?? null, costUsd: entry.costUsd, source: "run" });
+        // A workflow with no project counts as the default project, as it does for the model allowlists.
+        observer({ providerId: entry.providerId, model: entry.model, projectId: projectId ?? DEFAULT_PROJECT_ID, costUsd: entry.costUsd, source: "run" });
       } catch {
         // Metrics never fail the usage write they mirror.
       }

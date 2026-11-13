@@ -65,7 +65,7 @@ A self-hosted agent platform is a handful of ordinary services:
 - **The database.** Users, workflows, run history, encrypted secrets, audit records. Everything stateful lives here.
 - **Workers.** Processes that take queued runs, so long agent runs do not tie up the processes answering HTTP.
 - **Model endpoints.** A hosted model API, a local model server, or both.
-- **<Term id="mcp-server">MCP servers</Term>.** The tools: remote servers over HTTP, or local programs the platform starts over stdio.
+- **<Term id="mcp-server">MCP servers</Term>.** The tools: remote servers over HTTP, or local programs the platform starts over <Term id="stdio-transport">stdio</Term>.
 - **A reverse proxy** for TLS, and optionally a load balancer when there is more than one API process.
 
 ## Start small: one process, one file
@@ -124,7 +124,7 @@ Self-hosting moves work to your team:
 5. Schedule backups and run one restore drill.
 6. Pin image digests and verify signatures.
 7. Send logs and metrics to the systems you already watch.
-8. Set retention for run history and agent memory to what your policy allows.
+8. Set retention for run history and <Term id="agent-memory">agent memory</Term> to what your policy allows.
 9. Set a deployment budget and an iteration limit on every agent.
 10. Write down who upgrades it and who answers alerts.
 
@@ -137,7 +137,7 @@ Self-hosting moves work to your team:
 - **Scaling.** In [cluster mode](/operations/cluster) (`DB_TYPE=postgres` and `HA_ENABLED=true`), several API instances and separate [queue workers](/operations/queue-and-workers) share one Postgres, with one leader for schedules and purges. On SQLite, one process is its own worker. [Scaling](/operations/scaling) covers roles, sizing and a load test harness. MCP gateway sessions are the one piece that needs sticky routing; the cluster page shows how to route them.
 - **Backups.** [Backup and recovery](/operations/backup-and-recovery) has procedures for SQLite, Postgres and a portable export, a restore drill, and what to do after losing the master key (`SECRET_MASTER_KEY_BASE64`).
 - **Verification.** Each release image is signed with keyless cosign and carries SLSA build provenance and CycloneDX SBOMs: [Verify a release](/operations/verify-a-release).
-- **Observability.** Structured logs, Prometheus metrics at `/metrics`, and optional OTLP export of traces and metrics: [Observability](/operations/observability).
+- **Observability.** Structured logs, Prometheus metrics at `/metrics`, and optional OTLP export of traces and metrics: [Observability](/operations/observability) and [OpenTelemetry](/operations/opentelemetry).
 
 ## Try it in L2M
 
