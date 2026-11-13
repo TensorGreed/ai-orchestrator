@@ -2,13 +2,13 @@
 layout: page
 sidebar: false
 title: "AI agent security: prompt injection to MCP risks"
-description: "Guides to securing AI agents: prompt injection, the OWASP Top 10 for LLM apps, the lethal trifecta, MCP security risks and least privilege."
+description: "Guides to securing AI agents: prompt injection, the OWASP Top 10 for LLM apps, the lethal trifecta, MCP risks, least privilege and sensitive data."
 track: security
 ---
 
 <div class="hub-page">
 
-<HubHero eyebrow="Learn · Track" title="Agent security" lead="How agents get attacked through the text they read and the tools they call, and the layered controls that limit the damage. You should know what an agent and a tool call are; the agents track covers both." />
+<HubHero eyebrow="Learn · Track" title="Agent security" lead="How agents get attacked through the text they read and the tools they call, and the layered controls that limit the damage, including how to keep personal data and secrets out of prompts, logs and traces. You should know what an agent and a tool call are; the agents track covers both." />
 
 <TrackGuides track="security" />
 

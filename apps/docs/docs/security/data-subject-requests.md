@@ -10,6 +10,8 @@ When someone asks what you hold about them, an admin (or a user with the `data_s
 downloaded once, or, after you confirm what it found, deletes it. Nothing here is on by default and a deployment that
 never uses it behaves exactly as before.
 
+Concepts: [AI data retention, erasure requests and legal holds](/learn/operations/ai-data-retention-and-erasure).
+
 Two parts work together:
 
 - **Subject references** (optional, per workflow): the values that identify the person a run is about, stored as keyed
@@ -90,9 +92,10 @@ matches are left out of the export and counted in its manifest (`possibleMatches
 | MCP cassettes | | yes |
 | Golden and captured runs, golden-set cases, eval and replay results | | yes |
 
-**Not covered** (the manifest lists these too): logs, metrics, traces and log-streaming destinations; the audit log (a
-staff export lists the person's own entries); tool-call telemetry and rule events (they hold summaries and masked
-evidence only); usage and cost events; knowledge bases; backups already written; model providers and MCP servers.
+**Not covered** (the manifest lists these too, except run manifests): logs, metrics, traces and log-streaming
+destinations; the audit log (a staff export lists the person's own entries); tool-call telemetry and rule events (they
+hold summaries and masked evidence only); usage and cost events; run manifests already generated (they hold rendered
+prompts); knowledge bases; backups already written; model providers and MCP servers.
 
 ### How it runs
 
@@ -198,7 +201,8 @@ before the deletion does not bring the data back: they print `re-applied N erasu
 
 **Not covered** by a deletion: logs, metrics, traces and log-streaming destinations; backups already written (until
 restored, see above); model providers, MCP servers and other systems the runs sent data to; knowledge bases; tokens
-that are not in the person's rows, and format-preserving tokens.
+that are not in the person's rows, and format-preserving tokens; a run manifest already generated for a deleted run (it
+holds rendered prompts and is pruned once it is older than `AUDIT_LOG_RETENTION_DAYS`, its run being gone).
 
 ## Due dates and notices
 

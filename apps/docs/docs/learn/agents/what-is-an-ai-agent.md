@@ -43,7 +43,7 @@ A single model call answers from what it already knows and what is in the prompt
 
 A useful line comes from Anthropic's guide to building agents: workflows are "systems where LLMs and tools are orchestrated through predefined code paths", while agents are "systems where LLMs dynamically direct their own processes and tool usage". A fixed workflow runs the same steps every time; an agent picks its next step from what it just learned.
 
-That freedom has a price. The same guide notes that agentic systems "often trade latency and cost for better task performance", and recommends the simplest solution that works: often a single, well-prompted model call is enough. Many real systems mix both: a fixed workflow with one agent step inside it.
+That freedom has a price. The same guide notes that agentic systems "often trade latency and cost for better task performance", and recommends the simplest solution that works: often a single, well-prompted model call is enough. Many real systems mix both: a fixed workflow with one agent step inside it. [Workflows vs agents](/learn/agents/workflows-vs-agents) shows when to pick each and how to combine them.
 
 ## Zero, one or many tool calls per turn
 
@@ -68,7 +68,7 @@ An agent stops in one of these ways:
 
 - **It never stops.** The model keeps asking for tools, often the same one with the same arguments. The iteration limit ends the run instead of letting it spend forever.
 - **The wrong tool.** Two tools with similar names or vague descriptions get mixed up. Tool descriptions are prompts: write them as carefully as the system prompt.
-- **Too many tools.** Every tool definition takes room in the model's <Term id="context-window">context window</Term>. A long tool list crowds out the task, and the model picks the wrong tool more often. Give each agent only the tools it needs.
+- **Too many tools.** Every tool definition takes room in the model's <Term id="context-window">context window</Term>. A long tool list crowds out the task, and the model picks the wrong tool more often. Give each agent only the tools it needs; [too many tools](/learn/agents/too-many-tools) lists ways to trim the list.
 - **Results too large.** A tool that returns a whole database table can overflow the context on the next call. Return what the model needs, not everything.
 - **Made-up arguments.** The model invents an id or a date. Tools should validate input and return a clear error the model can act on.
 - **Instructions inside data.** Text a tool returns can contain instructions ("ignore your previous task"). The model may follow them. This is prompt injection, and the main reason to limit what an agent's tools can do.

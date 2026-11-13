@@ -37,7 +37,7 @@ Each entry below has four parts: what OWASP means, what it looks like in an agen
 
 **In an agent.** The agent reads a customer record to answer one question and repeats it to the wrong person, or puts an API key it found in a file into a tool argument that goes to a third party.
 
-**A control.** Keep sensitive values out of the model's context unless the step needs them: mask or tokenise them on the way in, and restore them only at the step that must see the real value. Keep credentials out of prompts entirely.
+**A control.** Keep sensitive values out of the model's context unless the step needs them: mask or tokenise them on the way in, and restore them only at the step that must see the real value. Keep credentials out of prompts entirely. [Keeping personal data and secrets out of AI prompts](/learn/security/sensitive-data-in-prompts) walks through each place data leaks.
 
 **In L2M.** The default rule set redacts credentials in prompts, tool results and answers, and masks card numbers in tool results and answers. In tool arguments it blocks private keys and sends likely exfiltration to review, but lets other credentials through, so add a rule set for the API-key case above. Optionally, a [protection port](/product/content-rules#protection-port) masks, hashes, encrypts or tokenises values before a model sees them, and a [Reveal node](/product/content-rules#reveal-node) restores them only where a rule allows. Secrets are stored encrypted and referenced by id, never pasted into configs ([secrets](/security/secrets#design)).
 

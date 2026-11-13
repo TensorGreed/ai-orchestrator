@@ -7,6 +7,8 @@ description: "Record a masked sample of an L2M workflow's real production runs i
 
 Golden sets are only as good as the runs in them. **Production capture** records a sample of a workflow's real production runs, masks the personal data in them, and puts them in a **Captured runs** inbox. From there a builder promotes the useful ones into a [golden set](./golden-sets.md) in one click, and discards the rest.
 
+Concepts: <Term id="masking">data masking</Term>, and [AI data retention and erasure](/learn/operations/ai-data-retention-and-erasure) for how captured runs fit a deletion request.
+
 Capture is off for every workflow until a builder turns it on. A workflow that never turns it on runs exactly as before: nothing is recorded and the inbox stays empty.
 
 ## Turning it on

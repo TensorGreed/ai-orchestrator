@@ -5,7 +5,7 @@ description: "How the L2M agent loop runs: messages, tool discovery, model calls
 
 # Agent Loop
 
-Concepts: [What is an AI agent?](/learn/agents/what-is-an-ai-agent) explains the loop in plain words, and [supervisor and worker agents](/learn/agents/supervisor-and-workers) covers the `worker` port. [Agent memory](/learn/agents/agent-memory) covers session memory and the session tool cache. Glossary: <Term id="agent-loop">agent loop</Term>, <Term id="context-window">context window</Term>, <Term id="supervisor-agent">supervisor agent</Term>.
+Concepts: [What is an AI agent?](/learn/agents/what-is-an-ai-agent) explains the loop in plain words, and [supervisor and worker agents](/learn/agents/supervisor-and-workers) covers the `worker` port. [Agent memory](/learn/agents/agent-memory) covers session memory and the session tool cache. Glossary: <Term id="agent-loop">agent loop</Term>, <Term id="context-window">context window</Term>, <Term id="supervisor-agent">supervisor agent</Term>. [Too many tools](/learn/agents/too-many-tools) covers keeping the tool list short.
 
 ## Execution model
 

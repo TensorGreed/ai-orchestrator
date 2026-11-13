@@ -7,7 +7,7 @@ description: "Register each MCP server once in L2M: scheduled health probes, too
 
 The **MCP → Servers** page keeps one list of every MCP server your agents call. Each entry is probed on a schedule, its tool schemas are kept as history, and a schema change that could break existing callers is flagged before it reaches a run. Everything lives in your own deployment: the registry is a table in your L2M database and the probes run in your API process.
 
-Concepts: <Term id="tool-annotations">tool annotations</Term>, <Term id="rug-pull">rug pulls</Term>, and [MCP authorization](/learn/mcp/authorization) for the OAuth flow.
+Concepts: <Term id="tool-annotations">tool annotations</Term>, <Term id="rug-pull">rug pulls</Term>, [MCP authorization](/learn/mcp/authorization) for the OAuth flow, and [MCP tools, resources and prompts](/learn/mcp/tools-resources-prompts) for what each primitive is for.
 
 ## Why register a server
 
@@ -24,7 +24,7 @@ Admins register servers from **MCP servers → + Register server**:
 
 1. Optionally start from a preset (filesystem, git, GitHub and the other curated servers). The preset fills in the adapter and connection.
 2. Pick the adapter: `http_mcp` for a server reachable over HTTP, `stdio_mcp` to spawn a local process, `mock-mcp` for the built-in demo tools, or a community adapter.
-3. Fill in the connection JSON. For HTTP that is `endpoint`, `transport`, `timeoutMs` and `authType` (`none`, `bearer`, `api_key`, `custom_headers` or `oauth`; see [OAuth for remote servers](#oauth-for-remote-servers)). For stdio it is `command`, `args`, `env`, `cwd`, `timeoutMs` and `secretEnvVar`.
+3. Fill in the connection JSON. For HTTP that is `endpoint`, `transport`, `timeoutMs` and `authType` (`none`, `bearer`, `basic` or `oauth`; see [OAuth for remote servers](#oauth-for-remote-servers)), plus optional `headers` for fixed extra request headers (plain values, not secrets). For stdio it is `command`, `args`, `env`, `cwd`, `timeoutMs` and `secretEnvVar`.
 4. Pick an auth secret from the Secrets store if the server needs one. The value never goes into the connection JSON and is never returned by the API.
 5. Choose the probe schedule and whether breaking changes block runs.
 
@@ -205,7 +205,7 @@ Besides tools, a server can publish **resources** (files, records, documents, ea
 
 When a server sends `notifications/resources/list_changed`, `prompts/list_changed` or `tools/list_changed` during a run, the registry re-probes it a couple of seconds later (one re-probe per server however many notifications arrive), so the catalog and the tool snapshot follow the server without waiting for the next scheduled probe.
 
-Reads are capped by `MCP_RESOURCE_MAX_BYTES`; a larger resource fails the read with a message that names the limit. Resource reads and prompt fetches go through [tool policy](./mcp-tool-policy.md) with their own rule kinds, and are written to the audit log as `mcp_resource.read` / `mcp_resource.read_denied` and `mcp_prompt.get` / `mcp_prompt.get_denied` (URI or prompt name, never the contents).
+Reads are capped by `MCP_RESOURCE_MAX_BYTES`; a larger resource fails the read with a message that names the limit. Resource reads and prompt fetches go through [tool policy](./mcp-tool-policy.md) with their own rule kinds. Reads and fetches made from the Playground are written to the audit log as `mcp_resource.read` / `mcp_resource.read_denied` and `mcp_prompt.get` / `mcp_prompt.get_denied` (URI or prompt name, never the contents); during a run, the node's output records the resource or prompt it used.
 
 ### Reading a resource from a workflow
 
