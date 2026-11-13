@@ -2939,6 +2939,23 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE session_tool_cache DROP COLUMN IF EXISTS sensitive;
       ALTER TABLE session_memory DROP COLUMN IF EXISTS sensitive;
     `
+  },
+  {
+    version: 74,
+    description: "Content capture — mark runs and knowledge base chunks from sensitive work",
+    // 1 when the run (execution_history) or the run that added the chunk (knowledge_base_chunks) was sensitive work for
+    // content capture; once set, a run's mark stays through later writes of its record. Content copied from a marked
+    // run (pinned data, a retry, a single-node run) and a retrieved marked chunk keep a later run's content out of
+    // exported spans (l2m.content.dropped = sensitive_run_data / sensitive_knowledge). Rows from before keep 0. Deleted
+    // with the row, so retention, erasure and legal holds need no extra step.
+    up: `
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS sensitive INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE knowledge_base_chunks ADD COLUMN IF NOT EXISTS sensitive INTEGER NOT NULL DEFAULT 0;
+    `,
+    down: `
+      ALTER TABLE knowledge_base_chunks DROP COLUMN IF EXISTS sensitive;
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS sensitive;
+    `
   }
 ];
 

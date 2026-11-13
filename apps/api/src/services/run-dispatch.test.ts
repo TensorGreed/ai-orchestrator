@@ -14,6 +14,7 @@ import {
   QUEUE_DISPATCH_CAPABILITY,
   QUEUE_RESULT_OUTPUT_LABELS_KEY,
   RESPONSE_BOUNDARY_CAPABILITY,
+  SENSITIVE_INPUT_CAPABILITY,
   capabilitiesFor,
   readDispatchedRunSpec,
   resultForQueue,
@@ -90,6 +91,10 @@ describe("decideDispatch (capability gate)", () => {
     const boundary: DispatchedRunSpec = { ...spec(), run: { ...spec().run, responseBoundary: { surface: "webhook" } } };
     expect(capabilitiesFor(spec())).toEqual([]);
     expect(capabilitiesFor(boundary)).toEqual([RESPONSE_BOUNDARY_CAPABILITY]);
+    // v74 — a run started from a sensitive run's content needs workers that keep it out of exported content.
+    expect(capabilitiesFor({ ...spec(), run: { ...spec().run, sensitiveInput: true } })).toEqual([SENSITIVE_INPUT_CAPABILITY]);
+    expect(capabilitiesFor({ ...boundary, run: { ...boundary.run, sensitiveInput: true } })).toEqual([RESPONSE_BOUNDARY_CAPABILITY, SENSITIVE_INPUT_CAPABILITY]);
+    expect(decideDispatch([current, older], "default", [SENSITIVE_INPUT_CAPABILITY]).queue).toBe(false);
     // The gate keeps one decision per pool and capability set.
     const reported: Array<{ label: string; inline: boolean; changed: boolean }> = [];
     const changes: boolean[] = [];

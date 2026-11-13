@@ -625,6 +625,7 @@ export async function executeWorkflow(
     pinnedData?: Record<string, unknown>;
     nodeOutputs?: Record<string, unknown>;
     sourceExecutionId?: string;
+    nodeOutputsExecutionId?: string;
     input?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     system_prompt?: string;
@@ -923,6 +924,7 @@ export async function executeWorkflowStream(
     pinnedData?: Record<string, unknown>;
     nodeOutputs?: Record<string, unknown>;
     sourceExecutionId?: string;
+    nodeOutputsExecutionId?: string;
     input?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     system_prompt?: string;
@@ -946,7 +948,8 @@ export async function fetchWorkflowPins(workflowId: string) {
   }>(`/api/workflows/${workflowId}/pins`);
 }
 
-export async function saveWorkflowPin(workflowId: string, nodeId: string, data: unknown) {
+/** `executionId`: the run the data was copied from, so the server can mark a pin taken from sensitive work. */
+export async function saveWorkflowPin(workflowId: string, nodeId: string, data: unknown, executionId?: string) {
   return apiRequest<{
     workflowId: string;
     nodeId: string;
@@ -954,7 +957,7 @@ export async function saveWorkflowPin(workflowId: string, nodeId: string, data: 
     pinnedData: Record<string, unknown>;
   }>(`/api/workflows/${workflowId}/pins/${encodeURIComponent(nodeId)}`, {
     method: "PUT",
-    body: JSON.stringify({ data })
+    body: JSON.stringify(executionId ? { data, executionId } : { data })
   });
 }
 

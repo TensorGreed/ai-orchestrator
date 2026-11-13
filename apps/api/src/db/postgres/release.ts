@@ -516,6 +516,12 @@ export async function setExecutionTraceId(ctx: PgContext, executionId: string, t
   })) === true;
 }
 
+/** v74 — see Store.getExecutionSensitive. */
+export async function getExecutionSensitive(ctx: PgContext, executionId: string): Promise<boolean | null> {
+  const row = await ctx.queryOne<{ sensitive: number | string | null }>(`SELECT sensitive FROM execution_history WHERE id = $1`, [executionId]);
+  return row ? Number(row.sensitive ?? 0) === 1 : null;
+}
+
 export async function getExecutionRelease(ctx: PgContext, executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {
   const row = await ctx.queryOne<{ release_channel: string | null; release_version: number | null }>(
     `SELECT release_channel, release_version FROM execution_history WHERE id = $1`,

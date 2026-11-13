@@ -46,6 +46,9 @@ import {
   connectorAddressInSecret,
   declaresSensitiveOutput,
   labelsMarkSensitive,
+  pinnedDataMarked,
+  CONTENT_DROPPED_SENSITIVE_KNOWLEDGE,
+  CONTENT_DROPPED_SENSITIVE_RUN_DATA,
   destinationHostOfSetting,
   inputProvenance,
   withImpliedSensitive,
@@ -634,6 +637,11 @@ export interface WorkflowExecutionDependencies {
     error: string;
     errorStack?: string;
     timestamp: string;
+    /**
+     * v74 — the failed run was sensitive work for content capture: the error workflow's run exports no content and
+     * marks what it writes (pass it on as `sensitiveInput`).
+     */
+    sensitive?: boolean;
   }) => Promise<void>;
   /**
    * Phase 12 coverage — set by the engine for the duration of a run (not part of the caller contract): the values
@@ -741,6 +749,12 @@ export interface ExecuteWorkflowRequest {
    * resumed runs (whose caller was answered when they paused) never check.
    */
   responseBoundary?: ResponseBoundary;
+  /**
+   * v74 — the run starts from content of a run that was sensitive work for content capture: an error workflow's input
+   * from such a run, or node outputs copied from one. The run exports no content (`sensitive_run_data`) and marks what
+   * it writes, as after a read of a marked session row. Set by the API.
+   */
+  sensitiveInput?: boolean;
 }
 
 /**
@@ -5896,7 +5910,11 @@ async function executeNodeHandler(
                "knowledge-base vector store unavailable — dependencies.knowledgeBaseStore not wired"
              );
            }
-           store = new KnowledgeBaseVectorStoreAdapter(dependencies.knowledgeBaseStore, kbId);
+           // v74 — a search that returns a chunk written by sensitive work is a read of marked content.
+           const sensitivity = dependencies.sessionSensitivity;
+           store = new KnowledgeBaseVectorStoreAdapter(dependencies.knowledgeBaseStore, kbId, {
+             onRetrieved: (sensitive) => sensitivity?.noteRead(sensitive, sensitive, CONTENT_DROPPED_SENSITIVE_KNOWLEDGE)
+           });
          }
          else throw new Error(`Unknown vector store ID: ${vectorStoreId}`);
       }
@@ -8811,6 +8829,9 @@ export async function executeWorkflow(
       workSensitive: () => redactor.active || labelsMarkSensitive(currentLabelScope()?.inputLabels()),
       readBefore: request.resumeState?.sensitiveSessionRead === true,
       readMarkedBefore: request.resumeState?.sensitiveSessionReadMarked === true,
+      ...(request.resumeState?.sensitiveSessionReadReason ? { readReasonBefore: request.resumeState.sensitiveSessionReadReason } : {}),
+      // v74 — an error workflow's input from a sensitive run, or node outputs copied from one (a resume kept it above).
+      carriedSensitive: request.sensitiveInput === true && !request.resumeState,
       // With capture on, a read of a marked row is sensitive data in the reading node's labels, as a declared source is.
       onSensitiveRead: () => currentLabelScope()?.add(SENSITIVE_LABELS)
     });
@@ -8824,6 +8845,19 @@ export async function executeWorkflow(
       Object.defineProperty(redacted, REVEALED_VALUES, { value: true, enumerable: true });
       const labels = runOutputLabels.get(result);
       if (labels) runOutputLabels.set(redacted, labels);
+    }
+    // v74 — the run's history record is marked when what is known of it says sensitive work, so content copied from
+    // it later (pinned data, a retry, a single-node run) is treated as sensitive. The declared sources are counted when
+    // the run checked them (capture on, or a session write); otherwise whoever copies its content checks them then.
+    const declaredKnown = declaredCheck ? await declaredCheck : false;
+    if (
+      sensitivity.readSensitive ||
+      redactor.active ||
+      declaredKnown ||
+      labelsMarkSensitive(runOutputLabels.get(result)) ||
+      result.nodeResults.some((entry) => labelsMarkSensitive(entry.labels))
+    ) {
+      Object.defineProperty(redacted, SENSITIVE_WORK, { value: true, enumerable: true });
     }
     return redacted;
   };
@@ -8867,8 +8901,35 @@ async function runWithContentExclusion<T>(
   }, fn);
 }
 
+/**
+ * v74 — an error workflow's input comes from the failing run: it is sensitive when what that run writes would be marked
+ * (a read of marked content, a Reveal, sensitive labels on the failed node, or a declared sensitive source, checked
+ * once and failing closed). Asked only when an error workflow is set.
+ */
+async function errorInputSensitive(dependencies: WorkflowExecutionDependencies, labels?: DataLabels): Promise<boolean> {
+  const sensitivity = dependencies.sessionSensitivity;
+  if (!sensitivity) return false;
+  try {
+    return await sensitivity.writeSensitive(labels);
+  } catch {
+    return true;
+  }
+}
+
 /** Marks a result whose run revealed values: a symbol key, so it survives object spreads but never serialises. */
 const REVEALED_VALUES: unique symbol = Symbol("l2m.revealedValues");
+
+/** v74 — marks a result whose run was sensitive work for content capture (same kind of key as REVEALED_VALUES). */
+const SENSITIVE_WORK: unique symbol = Symbol("l2m.sensitiveWork");
+
+/**
+ * v74 — the run was sensitive work for content capture, as far as the run knows: it read marked content, a Reveal node
+ * revealed something, it checked its declared sensitive sources and found one, or its labels say sensitive. Known only
+ * to the process that ran it; the API records it on the run's history so content copied from the run stays marked.
+ */
+export function runWasSensitiveWork(result: object): boolean {
+  return (result as { [SENSITIVE_WORK]?: boolean })[SENSITIVE_WORK] === true;
+}
 
 /**
  * Phase 12 coverage — a Reveal node of this run (or of a sub-workflow it ran) revealed something. Known only to the
@@ -9084,6 +9145,12 @@ async function executeWorkflowRun(
       nodeOutputs.set(nodeId, output);
     }
   }
+  // v74 — pinned data copied from a run that was sensitive work: the run read it as it starts (every pin is in the
+  // node outputs from now on), so it exports no content and marks what it writes. A resumed run kept this in its state.
+  const markedPins = new Set(request.resumeState ? [] : Object.keys(pinnedData).filter((nodeId) => pinnedDataMarked(workflow, nodeId)));
+  if (markedPins.size > 0) dependencies.sessionSensitivity?.noteCarried(CONTENT_DROPPED_SENSITIVE_RUN_DATA);
+  // With capture on, a marked pin is sensitive data in its node's labels, as a read of a marked row is.
+  const pinLabelsSensitive = (nodeId: string) => markedPins.has(nodeId) && dependencies.sessionSensitivity?.labelsReads === true;
   // Phase 16 — labels beside the outputs. Outputs seeded by the editor and pinned data were given by a user,
   // and keep the origin of the node type that usually produces them (a pinned HTTP result was fetched from outside).
   const labelState = await initRunLabels(request, workflow, dependencies, (nodeId) => descendantCache.getDescendants(nodeId));
@@ -9094,7 +9161,9 @@ async function executeWorkflowRun(
     return unionLabels([labelsOf(["user"]), source === "external" ? labelsOf(["untrusted_external"]) : undefined, source === "input" ? labelState.input : undefined]);
   };
   if (!request.resumeState) {
-    for (const nodeId of nodeOutputs.keys()) labelState.set(nodeId, givenLabels(nodeId));
+    for (const nodeId of nodeOutputs.keys()) {
+      labelState.set(nodeId, pinLabelsSensitive(nodeId) ? unionLabels([givenLabels(nodeId), SENSITIVE_LABELS]) : givenLabels(nodeId));
+    }
   }
   /**
    * 12.2 — a person approved at `nodeId`. An approval node (Human Approval, Approval Gate, an approved guard review
@@ -9626,7 +9695,9 @@ async function executeWorkflowRun(
       ...(boundaryCallerInput ? { boundaryCallerInput } : {}),
       // v73 — a resumed run that had read session state written by sensitive work stays sensitive.
       ...(dependencies.sessionSensitivity?.readSensitive ? { sensitiveSessionRead: true } : {}),
-      ...(dependencies.sessionSensitivity?.readMarkedSensitive ? { sensitiveSessionReadMarked: true } : {})
+      ...(dependencies.sessionSensitivity?.readMarkedSensitive ? { sensitiveSessionReadMarked: true } : {}),
+      // v74 — and why, when that was not session state (a knowledge base chunk, a sensitive run's content).
+      ...(dependencies.sessionSensitivity?.readReason ? { sensitiveSessionReadReason: dependencies.sessionSensitivity.readReason } : {})
     };
 
     if (dependencies.persistPausedExecution) {
@@ -9705,13 +9776,15 @@ async function executeWorkflowRun(
       });
     }
     if (workflow.settings?.errorWorkflowId && dependencies.triggerErrorWorkflow) {
+      const sensitive = await errorInputSensitive(dependencies);
       dependencies.triggerErrorWorkflow({
         errorWorkflowId: workflow.settings.errorWorkflowId,
         sourceWorkflowId: workflow.id,
         sourceWorkflowName: workflow.name,
         executionId: request.executionId,
         error: fields.error,
-        timestamp: completedAt
+        timestamp: completedAt,
+        ...(sensitive ? { sensitive: true } : {})
       }).catch(() => {
         // Intentionally ignored — error workflow trigger failures do not affect the result
       });
@@ -9919,7 +9992,7 @@ async function executeWorkflowRun(
         const output = withoutUsage(pinnedData[node.id]);
         nodeOutputs.set(node.id, output);
         // Phase 16 — pinned data was given by a user (plus the node type's own origin).
-        labelState.set(node.id, labelState.finalize(unionLabels([givenLabels(node.id), nodeSensitive ? SENSITIVE_LABELS : undefined]), output));
+        labelState.set(node.id, labelState.finalize(unionLabels([givenLabels(node.id), nodeSensitive || pinLabelsSensitive(node.id) ? SENSITIVE_LABELS : undefined]), output));
         const completedAt = nowIso();
         const durationMs = Date.now() - started;
         nodeResults.push({
@@ -10505,13 +10578,15 @@ async function executeWorkflowRun(
 
         // Trigger error workflow if configured
         if (workflow.settings?.errorWorkflowId && dependencies.triggerErrorWorkflow) {
+          const sensitive = await errorInputSensitive(dependencies, labelScope.pendingLabels());
           dependencies.triggerErrorWorkflow({
             errorWorkflowId: workflow.settings.errorWorkflowId,
             sourceWorkflowId: workflow.id,
             sourceWorkflowName: workflow.name,
             executionId: request.executionId,
             error: failedError ?? "Unknown error",
-            timestamp: nowIso()
+            timestamp: nowIso(),
+            ...(sensitive ? { sensitive: true } : {})
           }).catch(() => {
             // Intentionally ignored — error workflow trigger failures do not affect the result
           });

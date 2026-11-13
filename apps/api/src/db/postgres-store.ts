@@ -462,6 +462,9 @@ export class PostgresStore implements Store {
   async loadSessionMemorySensitive(...args: Parameters<Store["loadSessionMemorySensitive"]>): ReturnType<Store["loadSessionMemorySensitive"]> {
     return sessions.loadSessionMemorySensitive(this.ctx, ...args);
   }
+  async loadSessionMemoryMarked(...args: Parameters<Store["loadSessionMemoryMarked"]>): ReturnType<Store["loadSessionMemoryMarked"]> {
+    return sessions.loadSessionMemoryMarked(this.ctx, ...args);
+  }
   async saveSessionMemory(...args: Parameters<Store["saveSessionMemory"]>): ReturnType<Store["saveSessionMemory"]> {
     return sessions.saveSessionMemory(this.ctx, ...args);
   }
@@ -709,6 +712,9 @@ export class PostgresStore implements Store {
   }
   async getExecutionRelease(...args: Parameters<Store["getExecutionRelease"]>): ReturnType<Store["getExecutionRelease"]> {
     return release.getExecutionRelease(this.ctx, ...args);
+  }
+  async getExecutionSensitive(...args: Parameters<Store["getExecutionSensitive"]>): ReturnType<Store["getExecutionSensitive"]> {
+    return release.getExecutionSensitive(this.ctx, ...args);
   }
   async listReleasedVersionHashes(...args: Parameters<Store["listReleasedVersionHashes"]>): ReturnType<Store["listReleasedVersionHashes"]> {
     return release.listReleasedVersionHashes(this.ctx, ...args);

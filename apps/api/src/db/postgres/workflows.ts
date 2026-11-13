@@ -2,7 +2,7 @@
  * Phase 13.1 — PostgresStore: Workflows, folders, projects, templates, workflow versions and workflow shares.
  * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
-import { DEFAULT_PROJECT_ID, type Folder, type Project, type Workflow, type WorkflowListItem } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, keepPinnedDataMarks, type Folder, type Project, type Workflow, type WorkflowListItem } from "@ai-orchestrator/shared";
 import type { PoolClient } from "pg";
 import { ProjectNotEmptyError } from "../store-errors.js";
 import { type Store } from "../store.js";
@@ -156,7 +156,8 @@ export async function upsertWorkflow(ctx: PgContext, workflow: Workflow, options
   const existing = await ctx.store.getWorkflow(workflow.id);
   const createdAt = existing?.createdAt ?? now;
   const payload: Workflow = {
-    ...workflow,
+    // v74 — a pin copied from a sensitive run keeps its mark while its data is unchanged, whatever the client sent.
+    ...keepPinnedDataMarks(existing, workflow),
     projectId: workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID,
     folderId: workflow.folderId ?? existing?.folderId,
     tags: Array.isArray(workflow.tags) ? workflow.tags.filter((t) => typeof t === "string") : existing?.tags,

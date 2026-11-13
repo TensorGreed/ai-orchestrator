@@ -81,6 +81,7 @@ import {
   executeCodeNodeSandbox,
   executeWorkflow,
   runRevealedValues,
+  runWasSensitiveWork,
   evaluateExpression,
   exportWorkflowToJson,
   importWorkflowFromJson,
@@ -303,6 +304,7 @@ import {
   dispatchedPolicyActor,
   DispatchTimeoutError,
   QUEUE_DISPATCH_CAPABILITY,
+  SENSITIVE_INPUT_CAPABILITY,
   RESPONSE_BOUNDARY_CAPABILITY,
   readDispatchedRunSpec,
   resultForQueue,
@@ -610,7 +612,12 @@ const providerTestSchema = z.object({
 
 const pinDataSchema = z
   .object({
-    data: z.unknown()
+    data: z.unknown(),
+    /**
+     * v74 — the run the data was copied from (the editor's last run). When that run was sensitive work for content
+     * capture, the pin is marked: runs that use it export no content and mark what they write.
+     */
+    executionId: z.string().trim().min(1).max(200).optional()
   })
   .superRefine((value, context) => {
     if (!Object.prototype.hasOwnProperty.call(value, "data")) {
@@ -2556,6 +2563,8 @@ export async function createApp(
           usePinnedData: input.usePinnedData,
           pinnedData: input.pinnedData,
           nodeOutputs: input.nodeOutputs,
+          // v74 — node outputs copied from a run that was sensitive work.
+          ...(input.sensitiveInput === true ? { sensitiveInput: true } : {}),
           input: input.directInput,
           webhookPayload: input.webhookPayload,
           variables: input.variables,
@@ -2774,7 +2783,9 @@ export async function createApp(
                   },
                   triggerType: "error",
                   toolPolicySubject: errorToolPolicySubject,
-                  executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
+                  executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
+                  // v74 — the failed run was sensitive work: its error is that run's content.
+                  ...(payload.sensitive === true ? { sensitiveInput: true } : {})
                 },
                 {
                   connectorRegistry,
@@ -3122,7 +3133,9 @@ export async function createApp(
       outputJson: input.result.output,
       nodeResultsJson: input.result.nodeResults,
       customData: input.customData ?? input.result.customData,
-      error: input.result.error
+      error: input.result.error,
+      // v74 — content copied from this run later (pinned data, a retry, a single-node run) stays out of exported content.
+      ...(runWasSensitiveWork(input.result) ? { sensitive: true } : {})
     }, {
       phase: "final",
       executionId: input.executionId,
@@ -4092,6 +4105,37 @@ export async function createApp(
     return typeof configured === "string" && QUEUE_POOL_PATTERN.test(configured) ? configured : DEFAULT_QUEUE_POOL;
   };
 
+  /**
+   * v74 — whether content copied from the run `executionId` (pinned data, a retry, a single-node run) is content of
+   * sensitive work for content capture. True when its record is marked, and also when the run has not finished, has no
+   * record, cannot be read by `user`, or its workflow declares a sensitive source now (a run made with capture off may
+   * not have checked; checked failing closed, as the run does). Content copied from such a run keeps a later run's
+   * content out of exported spans and marks what it writes.
+   */
+  const copiedRunSensitive = async (executionId: string, user: SafeUser): Promise<boolean> => {
+    try {
+      const execution = await store.getExecutionHistory(executionId);
+      if (!execution || !(await runAccess.run(user, execution, "workflow:read")).ok) return true;
+      if (!["success", "error", "canceled", "partial"].includes(execution.status)) return true;
+      if ((await store.getExecutionSensitive(executionId)) !== false) return true;
+      const workflow = await store.getWorkflow(execution.workflowId);
+      if (!workflow) return true;
+      return await workflowDeclaresSensitiveSource(
+        workflow.nodes,
+        {
+          sensitiveSecretIds: await sensitiveSecrets.ids(),
+          resolveRegisteredMcpServer: async (registryServerId) => await resolveRegisteredMcpServer(registryServerId),
+          loadWorkflow: runScope.dependenciesFor(workflow, { channel: "draft" }).loadWorkflow
+        },
+        new Set(),
+        0,
+        true
+      );
+    } catch {
+      return true;
+    }
+  };
+
   type ParsedWorkflowExecutePayload = z.infer<typeof workflowExecuteRequestSchema>;
   const prepareWorkflowExecutionPayload = async (
     payload: ParsedWorkflowExecutePayload,
@@ -4102,6 +4146,8 @@ export async function createApp(
         payload: ParsedWorkflowExecutePayload;
         nodeOutputs: Record<string, unknown>;
         requestInput: Record<string, unknown>;
+        /** v74 — the node outputs or input were copied from a run that was sensitive work. */
+        sensitiveInput: boolean;
       }
     | null> => {
     const sourceExecutionId = typeof payload.sourceExecutionId === "string" && payload.sourceExecutionId.trim()
@@ -4151,13 +4197,29 @@ export async function createApp(
       }
     };
 
+    // v74 — content copied from earlier runs: the source run's input and outputs, and node outputs the editor took from
+    // a run it names. Checked only when there is such content, so other runs make no extra query.
+    const nodeOutputsExecutionId = typeof payload.nodeOutputsExecutionId === "string" && payload.nodeOutputsExecutionId.trim() ? payload.nodeOutputsExecutionId.trim() : undefined;
+    const copiedFrom = [
+      ...(sourceExecutionId ? [sourceExecutionId] : []),
+      ...(nodeOutputsExecutionId && nodeOutputsExecutionId !== sourceExecutionId && Object.keys(asRecord(payload.nodeOutputs)).length > 0 ? [nodeOutputsExecutionId] : [])
+    ];
+    let sensitiveInput = false;
+    for (const executionId of copiedFrom) {
+      if (await copiedRunSensitive(executionId, user)) {
+        sensitiveInput = true;
+        break;
+      }
+    }
+
     return {
       payload: mergedPayload,
       nodeOutputs: asRecord(mergedPayload.nodeOutputs),
       requestInput: {
         ...mergedPayload,
         replayedFromExecutionId: sourceExecutionId
-      }
+      },
+      sensitiveInput
     };
   };
 
@@ -4362,7 +4424,12 @@ export async function createApp(
     return {
       addKnowledgeBaseChunks: async (input) => {
         if (!await visible(input.knowledgeBaseId)) throw missing(input.knowledgeBaseId);
-        return await store.addKnowledgeBaseChunks({ knowledgeBaseId: input.knowledgeBaseId, chunks: input.chunks });
+        return await store.addKnowledgeBaseChunks({
+          knowledgeBaseId: input.knowledgeBaseId,
+          chunks: input.chunks,
+          // v74 — chunks added by sensitive work are marked.
+          ...(input.sensitive === true ? { sensitive: true } : {})
+        });
       },
       listKnowledgeBaseChunks: async (kbId) => (await visible(kbId) ? await store.listKnowledgeBaseChunks(kbId) : []),
       bm25SearchKnowledgeBase: async (input) => (await visible(input.knowledgeBaseId) ? await store.bm25SearchKnowledgeBase(input) : []),
@@ -4448,6 +4515,7 @@ export async function createApp(
         options ? await store.saveSessionMemory(namespace, sessionId, messages, labels, options) : await store.saveSessionMemory(namespace, sessionId, messages, labels),
       loadMemoryLabels: async (namespace, sessionId) => await store.loadSessionMemoryLabels(namespace, sessionId),
       loadMemorySensitive: async (namespace, sessionId) => await store.loadSessionMemorySensitive(namespace, sessionId),
+      loadMemoryMarked: async (namespace, sessionId) => await store.loadSessionMemoryMarked(namespace, sessionId),
       saveToolCall: async (input) => await store.saveSessionToolCall(input),
       listToolCalls: async (input) => await store.listSessionToolCalls(input),
       getToolCall: async (input) => await store.getSessionToolCall(input),
@@ -5014,7 +5082,7 @@ export async function createApp(
         concurrency: runsBackgroundWorkers && queueService ? queueService.concurrency() : null,
         // In cluster mode a queue consumer claims under heartbeat leases with fencing tokens.
         // ... and runs jobs another instance dispatched (EXECUTION_DISPATCH=queue checks every live consumer has this).
-        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY, RESPONSE_BOUNDARY_CAPABILITY] : [])] : [],
+        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY, RESPONSE_BOUNDARY_CAPABILITY, SENSITIVE_INPUT_CAPABILITY] : [])] : [],
         appVersion: config.OTEL_SERVICE_VERSION || process.env.npm_package_version || null,
         schemaVersion: Math.max(...MIGRATIONS.map((migration) => migration.version)),
         runtime: () => ({
@@ -11196,12 +11264,20 @@ export async function createApp(
         reply.code(400);
         return { error: "Invalid pin payload", details: parsed.error.issues };
       }
+      // v74 — pinned data copied from a run that was sensitive work is marked; a pin saved without a run is not (a
+      // save that keeps the data unchanged keeps an earlier mark, see keepPinnedDataMarks).
+      const fromSensitiveRun = parsed.data.executionId ? await copiedRunSensitive(parsed.data.executionId, user) : false;
+      const marks = new Set(workflow.pinnedDataSensitive ?? []);
+      if (fromSensitiveRun) marks.add(request.params.nodeId);
+      else marks.delete(request.params.nodeId);
+      const { pinnedDataSensitive: _marks, ...unmarked } = workflow;
       const nextWorkflow: Workflow = {
-        ...workflow,
+        ...unmarked,
         pinnedData: {
           ...asRecord(workflow.pinnedData),
           [request.params.nodeId]: parsed.data.data
-        }
+        },
+        ...(marks.size > 0 ? { pinnedDataSensitive: [...marks].sort() } : {})
       };
       const saved = await store.upsertWorkflow(nextWorkflow);
       await workflowChanged(saved.id);
@@ -11254,6 +11330,7 @@ export async function createApp(
     budgetService,
     admitRunBudget: async (run) => await admitRunBudget(run),
     prepareWorkflowExecutionPayload,
+    copiedRunSensitive,
     auditRunAction,
     mcpCassetteService,
     mcpRegistry,
