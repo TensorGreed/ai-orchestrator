@@ -22,7 +22,7 @@ export interface LdapProfile {
   attributes: Record<string, unknown>;
 }
 
-interface LdapClientLike {
+export interface LdapClientLike {
   bind(dn: string, password: string): Promise<void>;
   search(
     baseDn: string,
@@ -31,7 +31,7 @@ interface LdapClientLike {
   unbind(): Promise<void>;
 }
 
-interface LdaptsModule {
+export interface LdaptsModule {
   Client: new (options: { url: string }) => LdapClientLike;
 }
 
@@ -69,6 +69,15 @@ function loadLdapts(): LdaptsModule | null {
   }
 }
 
+/**
+ * A value for an LDAP search filter, escaped as RFC 4515 requires: `*`, `(`, `)`, `\` and NUL become `\2a`, `\28`,
+ * `\29`, `\5c` and `\00`, so the value is always matched literally (never a wildcard or a nested filter). A
+ * backslash before the character (`\*`) is not RFC 4515: ldapts refuses such a filter as an invalid hex escape.
+ */
+export function escapeLdapFilterValue(value: string): string {
+  return value.replace(/[*()\\\0]/g, (char) => `\\${char.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
 function normalizeStringArray(raw: unknown): string[] {
   if (Array.isArray(raw)) {
     return raw.filter((v): v is string => typeof v === "string");
@@ -80,15 +89,21 @@ function normalizeStringArray(raw: unknown): string[] {
 }
 
 export class LdapService {
+  private readonly loadClient: () => LdaptsModule | null;
+
   constructor(
     private readonly store: Store,
-    private readonly config: LdapConfig
-  ) {}
+    private readonly config: LdapConfig,
+    /** Tests: the LDAP client module (default: the optional `ldapts` package, when installed). */
+    options: { loadClient?: () => LdaptsModule | null } = {}
+  ) {
+    this.loadClient = options.loadClient ?? loadLdapts;
+  }
 
   isReady(): boolean {
     if (!this.config.enabled) return false;
     if (!this.config.url || !this.config.baseDn) return false;
-    return Boolean(loadLdapts());
+    return Boolean(this.loadClient());
   }
 
   async authenticate(email: string, password: string): Promise<LdapProfile> {
@@ -98,7 +113,7 @@ export class LdapService {
     if (!this.config.url || !this.config.baseDn) {
       throw CONFIGURATION_ERROR("LDAP_URL and LDAP_BASE_DN must be set");
     }
-    const mod = loadLdapts();
+    const mod = this.loadClient();
     if (!mod) {
       throw CONFIGURATION_ERROR("ldapts package is not installed");
     }
@@ -109,10 +124,7 @@ export class LdapService {
         await client.bind(this.config.bindDn, this.config.bindPassword ?? "");
       }
 
-      const filter = this.config.userFilter.replace(
-        /\{\{email\}\}/g,
-        email.replace(/([\\*()\0])/g, "\\$1")
-      );
+      const filter = this.config.userFilter.replace(/\{\{email\}\}/g, () => escapeLdapFilterValue(email));
       const { searchEntries } = await client.search(this.config.baseDn, {
         filter,
         scope: "sub",

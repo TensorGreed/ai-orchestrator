@@ -672,7 +672,7 @@ own login page, a script or a client that calls `POST /api/auth/ldap/login`.
 | `LDAP_BIND_DN` | unset | The account L2M binds as to search for the user. Unset: the search runs without binding first (anonymous). |
 | `LDAP_BIND_PASSWORD` | unset | That account's password. |
 | `LDAP_BASE_DN` | unset | Where the user search starts, for example `ou=people,dc=example,dc=com`. Required. |
-| `LDAP_USER_FILTER` | `(mail={{email}})` | The search filter. `{{email}}` is replaced with the email the user typed. |
+| `LDAP_USER_FILTER` | `(mail={{email}})` | The search filter. `{{email}}` is replaced with the email the user typed, escaped as RFC 4515 requires (`*`, `(`, `)`, `\` and NUL become `\2a`, `\28`, `\29`, `\5c` and `\00`), so it is always matched literally. |
 | `LDAP_GROUPS_ATTRIBUTE` | `memberOf` | The attribute of the user's entry that holds their groups, used by [group-to-role mappings](#group-to-role-mappings). |
 
 The LDAP client is an optional package that is not installed by default. Add it to the API before you turn LDAP on:
