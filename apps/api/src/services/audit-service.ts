@@ -1,6 +1,6 @@
 import { nanoid } from "nanoid";
 import type { Store } from "../db/store.js";
-import { wellFormedAuditText } from "../db/audit-chain.js";
+import { AUDIT_RETENTION_CHECKPOINT_EVENT, wellFormedAuditText } from "../db/audit-chain.js";
 
 export type AuditOutcome = "success" | "failure" | "denied";
 
@@ -103,7 +103,12 @@ function textOrNull(value: string | null | undefined): string | null {
   return value ? wellFormedAuditText(value) : null;
 }
 
+/** Where every recorded event also goes (the log streams): one path, so an event is never sent twice or skipped. */
+export type AuditStreamSink = (event: AuditEventInput) => Promise<void>;
+
 export class AuditService {
+  private stream: AuditStreamSink | undefined;
+
   constructor(
     private readonly store: Store,
     private readonly options: { enabled: boolean } = { enabled: true }
@@ -113,8 +118,31 @@ export class AuditService {
     return this.options.enabled;
   }
 
+  /**
+   * Sends every event `record` receives to `sink` as well (the log streams), after the write, also with the audit log
+   * off (AUDIT_LOG_ENABLED=false), as log streams always received them. Callers record only; they never dispatch
+   * themselves.
+   */
+  setStream(sink: AuditStreamSink | undefined): void {
+    this.stream = sink;
+  }
+
   async record(event: AuditEventInput): Promise<AuditLogEntry | null> {
-    if (!this.options.enabled) return null;
+    const entry = this.options.enabled ? await this.write(event) : null;
+    await this.emit(event);
+    return entry;
+  }
+
+  private async emit(event: AuditEventInput): Promise<void> {
+    if (!this.stream) return;
+    try {
+      await this.stream(event);
+    } catch {
+      // A log stream problem never fails the action being audited (the stream records its own delivery errors).
+    }
+  }
+
+  private async write(event: AuditEventInput): Promise<AuditLogEntry | null> {
     const id = `aud_${nanoid(16)}`;
     const actor = event.actor ?? {};
     const entry = {
@@ -156,8 +184,25 @@ export class AuditService {
     return await this.store.listAuditLogs(filter);
   }
 
+  /** Retention. The checkpoint the store appends (db/audit-chain.ts, "Retention") goes to the log streams too. */
   async purge(options: { before: string }): Promise<number> {
-    return await this.store.pruneAuditLogs(options);
+    const deleted = await this.store.pruneAuditLogs(options);
+    if (deleted > 0 && this.stream) {
+      const checkpoint = (await this.store.listAuditLogs({ eventType: AUDIT_RETENTION_CHECKPOINT_EVENT, pageSize: 1 })).items[0];
+      if (checkpoint) {
+        await this.emit({
+          eventType: checkpoint.eventType,
+          category: "system",
+          action: checkpoint.action,
+          outcome: "success",
+          actor: { type: "system" },
+          resourceType: checkpoint.resourceType ?? undefined,
+          metadata: checkpoint.metadata,
+          message: checkpoint.message ?? undefined
+        });
+      }
+    }
+    return deleted;
   }
 
   async exportCsv(filter: AuditListFilter = {}): Promise<string> {

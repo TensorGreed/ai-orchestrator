@@ -1707,7 +1707,6 @@ export async function createApp(
   const modelAllowlistService = new ModelAllowlistService(store, {
     auditRaw: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
     // The outermost layer of each allowlist view records the model call, so a refused call has its span too.
@@ -1767,7 +1766,6 @@ export async function createApp(
     // Phase 12 coverage — a Reveal node's audit entry (the audit service is set up further down; runs start later).
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     }
   });
   await guardService.ensureBuiltIns();
@@ -5209,7 +5207,6 @@ export async function createApp(
     timeoutMs: config.MCP_ELICITATION_TIMEOUT_MS,
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     logger: {
       info: (msg, fields) => app.log.info(fields ?? {}, msg),
@@ -5275,6 +5272,9 @@ export async function createApp(
   app.addHook("onClose", async () => {
     await logStreamingService.stop();
   });
+  // Every audit event goes to the log streams through this one path (AuditService.record), whichever helper or
+  // service records it; nothing else dispatches audit events, so none is sent twice.
+  auditService.setStream(async (event) => await logStreamingService.dispatchAudit(event));
 
   // 13.3 — the retention service: leader-only, one instance at a time (its lease), batched, recorded. Captured runs and
   // rule simulations register their steps further down, once their services exist.
@@ -5290,7 +5290,6 @@ export async function createApp(
     metrics: metricsService,
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },
     redact: (text) => String(secretService.redact(text))
@@ -5626,7 +5625,6 @@ export async function createApp(
   const approvalService = new ApprovalService(store, {
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: (event) => notificationService.notify(event),
     dispatch: dispatchApprovalResume,
@@ -5684,7 +5682,6 @@ export async function createApp(
     readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: (event) => notificationService.notify(event),
     redact: (value) => String(secretService.redact(value)),
@@ -5706,7 +5703,6 @@ export async function createApp(
     readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: (event) => notificationService.notify(event),
     redact: (value) => String(secretService.redact(value)),
@@ -5828,7 +5824,6 @@ export async function createApp(
     const actor = buildActor(request, user, event.actor);
     const full = { ...event, actor };
     await auditService.record(full);
-    await logStreamingService.dispatchAudit(full);
   };
   // User-initiated run actions (not webhook/schedule runs). Cancel passes the run's workflow id.
   const auditRunAction = async (
@@ -6393,9 +6388,9 @@ export async function createApp(
   // admin:break-glass command), whatever the deployment. Its audit rows are written even with AUDIT_LOG_ENABLED=false:
   // a break-glass session is only acceptable because everything it does is recorded.
   const breakGlassAudit = new AuditService(store, { enabled: true });
+  breakGlassAudit.setStream(async (event) => await logStreamingService.dispatchAudit(event));
   const recordBreakGlassAudit = async (event: AuditEventInput) => {
     await breakGlassAudit.record(event);
-    await logStreamingService.dispatchAudit(event);
   };
   const breakGlassService = new BreakGlassService({
     store,
@@ -6689,7 +6684,6 @@ export async function createApp(
     config,
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: async (event) => await notificationService.notify(event),
     metrics: metricsService,
@@ -12537,7 +12531,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     auditUser: async (request, user, event) => await audit(request, user, event),
     auditRaw: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     sensitiveSecretIds: async () => await sensitiveSecrets.ids(),
     guard: guardService,
@@ -12640,7 +12633,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     redact: (value) => String(secretService.redact(value)),
     auditRaw: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     guard: guardService,
     budgets: budgetService,
@@ -15076,14 +15068,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             metadata: { via: "data_subject_erasure", requestId }
           };
           await auditService.record(event);
-          await logStreamingService.dispatchAudit(event);
         }
         return deleted;
       }
     },
     audit: async (event) => {
       await auditService.record(event);
-      await logStreamingService.dispatchAudit(event);
     },
     notify: async (event) => await notificationService.notify(event),
     logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },

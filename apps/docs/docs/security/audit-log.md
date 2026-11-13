@@ -148,9 +148,9 @@ encrypted with the master key. The webhook's HMAC secret, its header values and 
 
 Log streams are a live feed, not a guaranteed copy: events wait in memory (at most `LOG_STREAM_BUFFER_SIZE`, the
 oldest dropped first), are tried `LOG_STREAM_RETRY_MAX_ATTEMPTS` times, and are lost if the process stops before they
-are sent. Some events are written to the audit log only and never reach log streams, among them changes to MCP
-servers, knowledge bases, budgets and export destinations. Use an export destination when every entry must arrive. Log streams still receive events when
-`AUDIT_LOG_ENABLED=false`.
+are sent. Every audit event goes to the log streams, once, whichever feature records it (MCP servers, knowledge bases,
+budgets and export destinations included), and so does the retention checkpoint. Use an export destination when every
+entry must arrive. Log streams still receive events when `AUDIT_LOG_ENABLED=false`.
 
 ## Settings
 
