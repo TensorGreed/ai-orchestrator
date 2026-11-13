@@ -160,7 +160,7 @@ import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } fr
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
-import type { McpGatewayLabelMark, McpGatewayLabelMarkKey } from "./db/gateway-label-marks.js";
+import { labelMarkRaised, type McpGatewayLabelMark, type McpGatewayLabelMarkKey } from "./db/gateway-label-marks.js";
 import { filterAsync, mapAsync } from "./async-array.js";
 import { pageOfById, pageRequestFromQuery } from "./pagination.js";
 
@@ -725,6 +725,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     // The stored mark's raise is audited by the store's firstRaise, never by the local view.
     session.labels.raiseAudited = true;
   };
+  /**
+   * A new legacy session on a tracking toolset starts from the client's stored mark. Results noted while the toolset
+   * did not track stay unobserved, so the session's first call counts them as outside content (and audits it).
+   */
+  const seedLegacySession = (session: GatewaySession, mark: McpGatewayLabelMark) => {
+    if (mark.unobserved) session.labels.unobserved = true;
+    if (labelMarkRaised(mark)) mirrorStoredMark(session, mark);
+  };
+  const LEGACY_MARK_UNAVAILABLE_MESSAGE = "Outside-content labels could not be checked for this client, so the session was not opened. Try again.";
   /** A first-raise audit that fails is logged; it never withholds a result whose labels were stored. */
   const auditStoredRaise = async (...args: Parameters<typeof auditFirstRaise>) => {
     try {
@@ -2036,6 +2045,22 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const params = asRecord(message.params);
     const protocolVersion = negotiateProtocolVersion(params.protocolVersion);
     const clientInfo = asRecord(params.clientInfo);
+    // 12.2 — on a tracking toolset a new session starts from the client's stored mark (what its stateless calls
+    // collected on any instance), so opening a session never clears it. Unreadable: the session is not opened. Marks
+    // are only stored while modern mode is on; with it off nothing is read.
+    let storedMark: McpGatewayLabelMark | null = null;
+    if (toolset.trackSessionLabels && modernMode === "on") {
+      try {
+        storedMark = await store.readMcpGatewayLabelMark({ clientId: auth.client.id, toolsetId: toolset.id, scopeKey: auth.client.createdBy ?? "" }, markClock());
+      } catch (error) {
+        app.log.warn(
+          { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id },
+          "MCP gateway could not read a client's label mark; the session was not opened"
+        );
+        reply.code(503).header("retry-after", "5").send(rpcError(message.id, -32000, LEGACY_MARK_UNAVAILABLE_MESSAGE));
+        return;
+      }
+    }
     let session: GatewaySession;
     try {
       session = await sessions.create({
@@ -2054,6 +2079,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
       throw error;
     }
+    if (storedMark) seedLegacySession(session, storedMark);
     await deps.auditRaw({
       category: "system",
       eventType: "mcp_gateway.session_started",

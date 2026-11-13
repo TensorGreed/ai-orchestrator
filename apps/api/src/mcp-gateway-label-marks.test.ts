@@ -21,6 +21,8 @@ import { SecretService } from "./services/secret-service.js";
 
 const MODERN = "2026-07-28";
 const APPROVAL_PENDING = -31030;
+/** The same refusal for a legacy session (the pre-2026-07-28 code range). */
+const LEGACY_APPROVAL_PENDING = -32030;
 
 interface Instance {
   app: FastifyInstance;
@@ -187,15 +189,31 @@ async function modernCall(
 const calc = (fixture: Fixture, instance: Instance, expression: string, extra?: Parameters<typeof modernCall>[4]) =>
   modernCall(fixture, instance, "mock_tools__calculator", { expression }, extra);
 
-async function legacySession(fixture: Fixture, instance: Instance): Promise<string> {
-  const response = await instance.app.inject({
+async function initialize(fixture: Fixture, instance: Instance) {
+  return await instance.app.inject({
     method: "POST",
     url: `/mcp/${fixture.toolset.slug}`,
     headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${fixture.token}` },
     payload: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "1" } } })
   });
+}
+
+async function legacySession(fixture: Fixture, instance: Instance): Promise<string> {
+  const response = await initialize(fixture, instance);
   expect(response.statusCode).toBe(200);
   return String(response.headers["mcp-session-id"]);
+}
+
+/** A calculator call in a legacy session. */
+async function legacyCall(fixture: Fixture, instance: Instance, sessionId: string, expression: string) {
+  const response = await instance.app.inject({
+    method: "POST",
+    url: `/mcp/${fixture.toolset.slug}`,
+    headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${fixture.token}`, "mcp-session-id": sessionId },
+    payload: JSON.stringify({ jsonrpc: "2.0", id: (nextId += 1), method: "tools/call", params: { name: "mock_tools__calculator", arguments: { expression } } })
+  });
+  expect(response.statusCode, response.body).toBe(200);
+  return response.json<{ result?: { isError?: boolean; structuredContent?: { result?: number } }; error?: { code: number } }>();
 }
 
 async function auditEvents(store: Store, eventType: string) {
@@ -262,15 +280,65 @@ describe("stored label marks of stateless callers", () => {
     expect(read).toHaveBeenCalled();
     read.mockRestore();
     expect((await calc(fixture, a, "1+2")).result?.structuredContent?.result).toBe(3);
-    // A legacy session keeps its own mark and is not affected.
-    const sessionId = await legacySession(fixture, a);
-    const legacy = await a.app.inject({
-      method: "POST",
-      url: `/mcp/${fixture.toolset.slug}`,
-      headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${fixture.token}`, "mcp-session-id": sessionId },
-      payload: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "mock_tools__calculator", arguments: { expression: "2+3" } } })
-    });
-    expect(legacy.json().result.structuredContent.result).toBe(5);
+  });
+
+  it("starts a new legacy session from the client's stored mark, so opening a session does not clear it", async () => {
+    const fixture = await setup({ track: true });
+    const a = fixture.instance;
+    // A clean client's legacy session runs the write.
+    const clean = await legacySession(fixture, a);
+    expect((await legacyCall(fixture, a, clean, "1+1")).result?.structuredContent?.result).toBe(2);
+
+    // The client's stateless calls raise the stored mark (the stateless write after them is held)...
+    await calc(fixture, a, "2+2");
+    expect((await calc(fixture, a, "3+3")).error?.code).toBe(APPROVAL_PENDING);
+    // ...and a session opened after that, on any instance, starts from it: its first write is held too.
+    await stop(a);
+    const b = await start(fixture.dbFile, fixture.env);
+    const sessionId = await legacySession(fixture, b);
+    expect((await legacyCall(fixture, b, sessionId, "4+4")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    // Raises audited: the clean session's own result, and the stored mark's first raise. The seeded session does not
+    // audit the stored raise again.
+    const raised = await auditEvents(b.store, "mcp_gateway.session_labels_raised");
+    expect(raised.map((entry) => (entry.metadata as { sessionId?: string } | undefined)?.sessionId ?? null).sort()).toEqual([clean, null].sort());
+  });
+
+  it("counts a stored note of untracked results in a new legacy session's first call", async () => {
+    const fixture = await setup({ track: false });
+    const a = fixture.instance;
+    expect((await calc(fixture, a, "1+1")).result?.structuredContent?.result).toBe(2);
+    expect((await api(a, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { trackSessionLabels: true })).status).toBe(200);
+    await stop(a);
+    const b = await start(fixture.dbFile, fixture.env);
+    const sessionId = await legacySession(fixture, b);
+    expect((await legacyCall(fixture, b, sessionId, "2+2")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    const raised = await auditEvents(b.store, "mcp_gateway.session_labels_raised");
+    expect(raised).toHaveLength(1);
+    expect(raised[0]!.metadata).toMatchObject({ reason: "results_before_tracking", sessionId });
+  });
+
+  it("does not open a legacy session on a tracking toolset when the stored mark cannot be read", async () => {
+    const fixture = await setup({ track: true });
+    const a = fixture.instance;
+    const read = vi.spyOn(a.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    const refused = await initialize(fixture, a);
+    expect(refused.statusCode).toBe(503);
+    expect(refused.headers["mcp-session-id"]).toBeUndefined();
+    expect(refused.json().error.message).toMatch(/labels could not be checked/);
+    expect(await auditEvents(a.store, "mcp_gateway.session_started")).toHaveLength(0);
+    read.mockRestore();
+    expect((await initialize(fixture, a)).statusCode).toBe(200);
+
+    // A toolset that does not track reads nothing: sessions open as before.
+    const untracked = await setup({ track: false });
+    const spy = vi.spyOn(untracked.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    expect((await initialize(untracked, untracked.instance)).statusCode).toBe(200);
+    expect(spy).not.toHaveBeenCalled();
+    // Neither does a tracking toolset while modern mode is off (no marks are stored then).
+    const off = await setup({ track: true, env: { MCP_GATEWAY_MODERN_PROTOCOL: "off" } });
+    const offSpy = vi.spyOn(off.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    expect((await initialize(off, off.instance)).statusCode).toBe(200);
+    expect(offSpy).not.toHaveBeenCalled();
   });
 
   it("withholds a result whose labels cannot be stored, and still holds the caller's next write on this instance", async () => {
