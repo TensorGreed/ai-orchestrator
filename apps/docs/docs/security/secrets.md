@@ -5,6 +5,8 @@ description: "How L2M stores secrets: AES-256-GCM encryption at rest, secret ref
 
 # Secrets
 
+Concepts: [Keeping personal data and secrets out of AI prompts](/learn/security/sensitive-data-in-prompts) and <Term id="secret-reference">secret references</Term>.
+
 ## Design
 
 - Secrets are encrypted at rest using AES-256-GCM.

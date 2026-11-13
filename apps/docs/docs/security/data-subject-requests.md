@@ -10,6 +10,8 @@ When someone asks what you hold about them, an admin (or a user with the `data_s
 downloaded once, or, after you confirm what it found, deletes it. Nothing here is on by default and a deployment that
 never uses it behaves exactly as before.
 
+Concepts: [AI data retention, erasure requests and legal holds](/learn/operations/ai-data-retention-and-erasure).
+
 Two parts work together:
 
 - **Subject references** (optional, per workflow): the values that identify the person a run is about, stored as keyed

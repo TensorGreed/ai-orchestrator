@@ -7,6 +7,8 @@ description: "Let an L2M agent call another workflow as one tool with the Workfl
 
 The **Workflow Tool** node turns another workflow into one tool an agent can call. Attach it to an Agent or Supervisor `Tool` port and pick the workflow. The child runs in the same run, in this process, with the agent's call as its input; its output is the tool result.
 
+Concepts: [Workflows vs agents](/learn/agents/workflows-vs-agents) explains why a fixed workflow behind an agent is a common design.
+
 Use it when a step is already a workflow (a lookup with retrieval and a content rule, a ticket triage flow) and you want an agent to decide when to run it.
 
 ## What the agent sees

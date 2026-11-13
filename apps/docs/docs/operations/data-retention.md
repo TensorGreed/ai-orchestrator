@@ -9,6 +9,8 @@ L2M deletes old data by age on a schedule. Each kind of data has its own setting
 set, an instance deletes exactly what it deleted before 13.3, and nothing more. One setting that did nothing before is
 applied now, and older `.env` files set it: see [Upgrading: usage retention](#upgrading-usage-retention) first.
 
+Concepts: [AI data retention, erasure requests and legal holds](/learn/operations/ai-data-retention-and-erasure).
+
 Admins see the values in effect, what is due now and the latest purges under **Settings > Access control > Data
 protection** (read-only), or from `GET /api/admin/retention`. A project can keep some kinds of data for a different
 time than the deployment: see [Per-project retention](#per-project-retention).

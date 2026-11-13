@@ -8,6 +8,8 @@ description: "Keep a project, workflow, set of runs or one person's data in L2M 
 A **legal hold** keeps data from being deleted. Holds are optional: with none placed, nothing changes. A hold never
 changes who may read the data; it only stops deletion.
 
+Concepts: [AI data retention, erasure requests and legal holds](/learn/operations/ai-data-retention-and-erasure).
+
 While a hold is active, the data it covers is kept from:
 
 - **Retention purges**, with the deployment's values and with a project's own. Run history, tool calls, rule events, approvals, cassettes, agent memory, usage, gateway

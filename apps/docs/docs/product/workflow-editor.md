@@ -5,6 +5,8 @@ description: "The L2M visual workflow editor: the node palette, connections, nod
 
 # Workflow Editor
 
+Concepts: [Workflows vs agents](/learn/agents/workflows-vs-agents) explains when to use fixed steps and when to let an agent decide.
+
 ## Core editor capabilities
 
 - Drag/drop node palette
@@ -26,7 +28,7 @@ description: "The L2M visual workflow editor: the node palette, connections, nod
    - Attachments:
      - `chat_model`: any Chat Model node, including OpenAI, Anthropic, Ollama, OpenAI Compatible, AI Gateway, Azure OpenAI, Gemini, or legacy `llm_call`
      - `memory`: `local_memory`
-     - `tool`: one or more `mcp_tool`
+     - `tool`: one or more `mcp_tool` or `workflow_tool` nodes
 3. RAG:
    - `text_input -> rag_retrieve -> prompt_template -> llm_call -> output`
 
