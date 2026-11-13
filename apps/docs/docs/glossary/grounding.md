@@ -12,7 +12,7 @@ guide: [/learn/security/owasp-llm-top-10]
 
 **Keeping a model's answer to what the documents it was given actually support, so each claim can be traced back to a source.**
 
-<Term id="rag">RAG</Term> puts retrieved documents in the prompt and tells the model to answer from them. Grounding is whether it did. A model can ignore the context and answer from its training, mix the two, or fill a gap with something plausible. OWASP's LLM09 (Misinformation) describes the result, "false or misleading information that appears credible", and lists retrieval from "trusted external databases" among the ways to reduce it, and advises users to cross-check outputs with trusted sources.
+<Term id="rag">RAG</Term> puts retrieved documents in the prompt and tells the model to answer from them. Grounding is whether it did. A model can ignore the context and answer from its training, mix the two, or fill a gap with something plausible. OWASP's LLM09 (Misinformation) describes the result: "false or misleading information that appears credible". Among its mitigations it lists retrieval from "trusted external databases", and it advises users to cross-check outputs with trusted sources.
 
 Grounding is checked in three common ways:
 

@@ -39,7 +39,7 @@ Streamable HTTP is not "MCP over SSE". SSE is only one way a reply can come back
 
 ## In L2M
 
-L2M's `http_mcp` adapter connects to remote servers over Streamable HTTP only, not the old HTTP+SSE transport. The [MCP gateway](/product/mcp-gateway#the-endpoint) serves each <Term id="toolset">toolset</Term> at `POST /mcp/<slug>` with sessions, SSE progress and an `Origin` allow-list, for protocol versions 2025-11-25, 2025-06-18 and 2025-03-26 by default. With `MCP_GATEWAY_MODERN_PROTOCOL=on` it also serves 2026-07-28 clients without sessions.
+L2M's `http_mcp` adapter connects to remote servers over Streamable HTTP only, not the old HTTP+SSE transport. In the other direction, each <Term id="toolset">toolset</Term> on the [MCP gateway](/product/mcp-gateway#the-endpoint) is a Streamable HTTP endpoint of its own, `POST /mcp/<slug>`, which checks `Origin` and can stream progress as SSE. The opt-in for 2026-07-28 clients is `MCP_GATEWAY_MODERN_PROTOCOL=on`.
 
 ## Further reading
 

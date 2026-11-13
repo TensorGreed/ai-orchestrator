@@ -20,7 +20,7 @@ The term comes from a 2024 paper by Hines and others, which describes three tech
 - **Datamarking.** Interleave a special character through the whole text, for example in place of every space. The authors found it much more effective than delimiting.
 - **Encoding.** Transform the text, for example with base64, and ask the model to decode it. The authors found it the strongest, but only for models capable enough to work on encoded text.
 
-The paper's tests ran on GPT-family models. Across its attack sets, success fell from over 50% without spotlighting to below 2% with it, and task quality barely moved.
+The paper tested GPT-family models. In its experiments, attack success fell from over 50% without spotlighting to below 2% with it, and task quality barely moved.
 
 ## Example
 

@@ -32,7 +32,7 @@ A golden set is not training data and not a public benchmark. It is private to y
 
 ## In L2M
 
-A [golden set](/product/golden-sets) groups golden runs for one workflow; a <Term id="replay">replay</Term> job runs them all against a draft, a saved version or a workflow file and scores each case. Hand-written cases can sit in a set, but replay jobs skip them. An enforced <Term id="release-gate">release gate</Term> counts only cases an admin admitted, so the set cannot be padded with easy cases.
+A [golden set](/product/golden-sets) belongs to one workflow and holds its chosen golden runs. To test a change, a <Term id="replay">replay</Term> job plays every golden run in the set against the version you pick (a draft, a saved version or a workflow file) and scores it. Hand-written cases can sit in a set, but replay jobs skip them. An enforced <Term id="release-gate">release gate</Term> counts only cases an admin admitted, so the set cannot be padded with easy cases.
 
 ## Further reading
 
