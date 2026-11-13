@@ -4908,14 +4908,19 @@ async function executeNodeHandler(
     }
 
     case "error_trigger": {
+      // The API starts an error workflow with camelCase keys (sourceWorkflowId, executionId, errorStack); the
+      // snake_case names are what the node documents and what older callers send, so both are read. `execution_id`
+      // is the failed run's id: the error workflow's own run id is not it.
+      const globals = context.globals;
+      const first = (...values: unknown[]) => values.find((value) => value !== undefined && value !== null && value !== "");
       return {
         trigger_type: "error",
-        source_workflow_id: context.globals.source_workflow_id ?? "",
-        source_workflow_name: context.globals.source_workflow_name ?? "",
-        execution_id: context.globals.execution_id ?? "",
-        error: context.globals.error ?? "",
-        error_stack: context.globals.error_stack ?? "",
-        timestamp: context.globals.timestamp ?? nowIso()
+        source_workflow_id: first(globals.source_workflow_id, globals.sourceWorkflowId) ?? "",
+        source_workflow_name: first(globals.source_workflow_name, globals.sourceWorkflowName) ?? "",
+        execution_id: first(globals.source_execution_id, globals.executionId, globals.execution_id) ?? "",
+        error: globals.error ?? "",
+        error_stack: first(globals.error_stack, globals.errorStack) ?? "",
+        timestamp: globals.timestamp ?? nowIso()
       };
     }
 

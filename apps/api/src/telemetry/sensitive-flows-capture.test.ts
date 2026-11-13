@@ -226,18 +226,19 @@ describe("error workflow input from a sensitive run (v74)", () => {
     const baseUrl = await startEchoModel();
     const secretId = await seedSecret(fixture);
     for (const kind of ["sensitive", "clean"]) {
-      // One handler per failing workflow: the error trigger's input names the failed run (its error text, run id).
-      const handlerAgent = agent("handle", "Handle: {{error}}", `echo-handler-${kind}`, baseUrl, secretId);
+      // One handler per failing workflow (each with its own model name), using the Error Trigger's documented fields.
+      const handlerAgent = agent("handle", "Handle: {{trigger.error}}", `echo-handler-${kind}`, baseUrl, secretId);
       await fixture.store.upsertWorkflow(
         flow(
           `wf-handler-${kind}`,
           [
-            n("onerror", "error_trigger"),
+            n("trigger", "error_trigger"),
             ...handlerAgent.nodes,
-            n("log", "session_artifact_save", { namespace: "errors", sessionIdTemplate: kind, artifactKey: "last", valueTemplate: "{{error}}" }),
+            n("log", "session_artifact_save", { namespace: "errors", sessionIdTemplate: "{{trigger.source_workflow_id}}", artifactKey: "last", valueTemplate: "{{trigger.error}}" }),
+            n("run", "session_artifact_save", { namespace: "errors", sessionIdTemplate: "{{trigger.source_workflow_id}}", artifactKey: "run", valueTemplate: "{{trigger.execution_id}} {{trigger.source_workflow_name}}" }),
             n("out", "output")
           ],
-          [["onerror", "handle"], ["handle", "log"], ["log", "out"], ...handlerAgent.edges]
+          [["trigger", "handle"], ["trigger", "log"], ["trigger", "run"], ["handle", "out"], ["log", "out"], ["run", "out"], ...handlerAgent.edges]
         )
       );
     }
@@ -253,19 +254,21 @@ describe("error workflow input from a sensitive run (v74)", () => {
       );
     }
 
-    await execute(fixture, "wf-fails-sensitive", {}, "error");
+    const sensitiveRun = await execute(fixture, "wf-fails-sensitive", {}, "error");
     const namespace = projectSessionNamespace("default", "errors");
     const logged = await waitFor(
-      async () => await fixture.store.loadSessionArtifact({ namespace, sessionId: "sensitive", artifactKey: "last" }),
+      async () => await fixture.store.loadSessionArtifact({ namespace, sessionId: "wf-fails-sensitive", artifactKey: "last" }),
       (row) => row !== null
     );
     expect(JSON.stringify(logged?.value)).toContain(PRIVATE_VALUE);
     expect(logged?.sensitive).toBe(true);
+    // The Error Trigger names the failed run: its workflow (the session id above), its run id and its name.
+    expect((await fixture.store.loadSessionArtifact({ namespace, sessionId: "wf-fails-sensitive", artifactKey: "run" }))?.value).toBe(`${sensitiveRun.executionId} wf-fails-sensitive`);
     expectDropped(await chatSpans(fixture, "echo-handler-sensitive"), "sensitive_run_data");
 
     const cleanRun = await execute(fixture, "wf-fails-clean", {}, "error");
     const cleanLog = await waitFor(
-      async () => await fixture.store.loadSessionArtifact({ namespace, sessionId: "clean", artifactKey: "last" }),
+      async () => await fixture.store.loadSessionArtifact({ namespace, sessionId: "wf-fails-clean", artifactKey: "last" }),
       (row) => row !== null
     );
     expect(cleanLog?.sensitive).toBeUndefined();
