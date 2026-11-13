@@ -19,6 +19,7 @@ import { AppLifecycle } from "./services/app-lifecycle.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, type TestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 
 const run = testPostgresUrl() ? describe : describe.skip;
 if (!testPostgresUrl()) noticePostgresSkipped("MCP 2026-07-28 gateway callers across replicas");
@@ -173,6 +174,77 @@ run("MCP 2026-07-28 gateway callers across replicas", () => {
     // The raise was audited once in the cluster.
     const raised = await a.store.listAuditLogs({ eventType: "mcp_gateway.session_labels_raised", pageSize: 50 });
     expect(raised.items).toHaveLength(1);
+  });
+
+  it("lets a legacy session on one replica take up the labels raised on another without renewing them, and records it once", async () => {
+    const a = await addReplica("legacy-a");
+    const b = await addReplica("legacy-b");
+    const cookie = await adminCookie(a);
+    const { slug, token, client, toolsetId } = await toolsetWithClient(a, cookie, "Legacy", true);
+    await holdWrites(a, cookie);
+    const legacy = (session: string | null, body: Record<string, unknown>) =>
+      b.app.inject({
+        method: "POST",
+        url: `/mcp/${slug}`,
+        headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}) },
+        payload: JSON.stringify({ jsonrpc: "2.0", ...body })
+      });
+    // A session on B opens while the client is clean.
+    const opened = await legacy(null, { id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "1" } } });
+    expect(opened.statusCode, opened.body).toBe(200);
+    const sessionId = String(opened.headers["mcp-session-id"]);
+    // The client's stateless call on A raises the stored mark; pin its last call ten minutes back.
+    expect((await modernCall(a, slug, token, "1+1")).json().result.structuredContent.result).toBe(2);
+    const lastSeen = new Date(Date.now() - 10 * 60_000).toISOString();
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    await testSql(a.store).run(`UPDATE mcp_gateway_label_marks SET last_seen_at = ?, expires_at = ? WHERE client_id = ?`, lastSeen, expiresAt, client.id);
+
+    // B's session calls twice: both writes are held, read from A's raise.
+    for (const id of [2, 3]) {
+      const call = await legacy(sessionId, { id, method: "tools/call", params: { name: "mock__calculator", arguments: { expression: "2+2" } } });
+      expect(call.json().error, call.body).toMatchObject({ code: -32030 });
+    }
+    // The reads did not renew the client's mark: B's panel still shows the stateless caller as seen ten minutes ago.
+    const [stored] = await b.store.listMcpGatewayLabelMarks({ clientId: client.id }, new Date().toISOString());
+    expect(stored).toMatchObject({ toolsetId, provenance: ["untrusted_external"] });
+    expect(Date.parse(stored!.lastSeenAt)).toBe(Date.parse(lastSeen));
+    expect(Date.parse(stored!.expiresAt)).toBe(Date.parse(expiresAt));
+    const panel = await b.app.inject({ method: "GET", url: `/api/mcp/clients/${client.id}/sessions`, headers: { cookie } });
+    expect(panel.json().callers).toEqual([expect.objectContaining({ lastSeenAt: stored!.lastSeenAt })]);
+
+    // One inherited event for the session, one raise for the stored mark (by A's stateless call).
+    const inherited = await a.store.listAuditLogs({ eventType: "mcp_gateway.session_labels_inherited", pageSize: 50 });
+    expect(inherited.items).toHaveLength(1);
+    expect(inherited.items[0]!.metadata).toMatchObject({ sessionId, source: "stored_mark", at: "tool_call", labels: { provenance: ["untrusted_external"], dataClasses: [] } });
+    const raised = await a.store.listAuditLogs({ eventType: "mcp_gateway.session_labels_raised", pageSize: 50 });
+    expect(raised.items.map((entry) => (entry.metadata as { sessionId?: string } | undefined)?.sessionId ?? null)).toEqual([null]);
+  });
+
+  it("stores a legacy session's raise on one replica, so the client's stateless call on another starts from it", async () => {
+    const a = await addReplica("session-raise-a");
+    const b = await addReplica("session-raise-b");
+    const cookie = await adminCookie(a);
+    const { slug, token, client } = await toolsetWithClient(a, cookie, "Session raise", true);
+    await holdWrites(a, cookie);
+    const legacy = (session: string | null, body: Record<string, unknown>) =>
+      b.app.inject({
+        method: "POST",
+        url: `/mcp/${slug}`,
+        headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}) },
+        payload: JSON.stringify({ jsonrpc: "2.0", ...body })
+      });
+    // The client has made no stateless call within an idle window (no stored mark at all).
+    expect(await a.store.listMcpGatewayLabelMarks({ clientId: client.id }, new Date().toISOString())).toEqual([]);
+    const opened = await legacy(null, { id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "1" } } });
+    expect(opened.statusCode, opened.body).toBe(200);
+    const sessionId = String(opened.headers["mcp-session-id"]);
+    // B's session gets a result: its labels go into the client's stored mark.
+    const call = await legacy(sessionId, { id: 2, method: "tools/call", params: { name: "mock__calculator", arguments: { expression: "2+2" } } });
+    expect(call.json().result?.structuredContent?.result, call.body).toBe(4);
+    // A never saw the session; the client's stateless write there is held.
+    expect((await modernCall(a, slug, token, "3+3")).json().error.code).toBe(-31030);
+    const raised = await a.store.listAuditLogs({ eventType: "mcp_gateway.session_labels_raised", pageSize: 50 });
+    expect(raised.items.map((entry) => (entry.metadata as { sessionId?: string } | undefined)?.sessionId ?? null)).toEqual([sessionId]);
   });
 
   it("keeps every label when replicas raise one caller's mark at once, and a revoke on one replica clears it for all", async () => {

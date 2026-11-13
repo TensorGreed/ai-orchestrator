@@ -867,6 +867,13 @@ export interface Store extends AiGatewayStore, SubjectStore {
    */
   readMcpGatewayLabelMark(key: McpGatewayLabelMarkKey, at: { now: string; expiresAt: string }): Promise<McpGatewayLabelMark | null>;
   /**
+   * v71 — the caller's live mark, read for one of the client's legacy sessions without counting as the caller's
+   * activity: its last call and expiry stay as stored. A live mark that noted untracked results is converted in the
+   * same step (atomically, row lock on Postgres), still without moving them; `firstRaise` as for a raise. Null mark
+   * when there is none or it expired.
+   */
+  peekMcpGatewayLabelMark(key: McpGatewayLabelMarkKey, now: string): Promise<{ mark: McpGatewayLabelMark | null; firstRaise: boolean }>;
+  /**
    * v71 — merges a call's labels into the caller's mark (created when missing; an expired mark starts clean) and moves
    * its expiry on, atomically across instances (row lock on Postgres). Labels never leave a mark. `firstRaise` is true
    * for exactly one call per mark: the one that first raised it to outside content or sensitive data.

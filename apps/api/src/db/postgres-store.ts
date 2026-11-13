@@ -1027,6 +1027,9 @@ export class PostgresStore implements Store {
   async readMcpGatewayLabelMark(...args: Parameters<Store["readMcpGatewayLabelMark"]>): ReturnType<Store["readMcpGatewayLabelMark"]> {
     return gateway_label_marks.readMcpGatewayLabelMark(this.ctx, ...args);
   }
+  async peekMcpGatewayLabelMark(...args: Parameters<Store["peekMcpGatewayLabelMark"]>): ReturnType<Store["peekMcpGatewayLabelMark"]> {
+    return gateway_label_marks.peekMcpGatewayLabelMark(this.ctx, ...args);
+  }
   async raiseMcpGatewayLabelMark(...args: Parameters<Store["raiseMcpGatewayLabelMark"]>): ReturnType<Store["raiseMcpGatewayLabelMark"]> {
     return gateway_label_marks.raiseMcpGatewayLabelMark(this.ctx, ...args);
   }

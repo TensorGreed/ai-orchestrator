@@ -70,10 +70,15 @@ export interface GatewaySession {
   /** Modern only: the user its token acts for, or '' (the third part of its stored label mark's key). */
   markScopeKey?: string;
   /**
-   * Modern only: when this instance last noted in the stored mark that a result went back while the toolset did not
-   * track (at most once per half idle window).
+   * When this instance last noted in the stored mark that a result went back while the toolset did not track (at most
+   * once per half idle window). Modern states, and legacy sessions while modern mode is on (the client's mark).
    */
   unobservedNotedAt?: number;
+  /**
+   * Legacy only (12.2, modern mode on): the session has taken up labels stored for its client elsewhere, and that
+   * was audited (`mcp_gateway.session_labels_inherited`, once per session).
+   */
+  inheritedLabelsAudited?: boolean;
   clientId: string;
   toolsetId: string;
   /** A legacy session's negotiated version; a principal state's version of its latest request. */

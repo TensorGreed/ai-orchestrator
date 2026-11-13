@@ -7,9 +7,12 @@ import { ensureAiGatewaySchema, sqliteAiGatewayStore } from "./ai-gateway-sqlite
 import { ensureErasureSchema, ensureSubjectSchema, sqliteSubjectStore } from "./subject-sqlite.js";
 import {
   LABEL_MARK_INSERT_EMPTY_SQL,
+  LABEL_MARK_PEEK_SQL,
   LABEL_MARK_TOUCH_SQL,
   LABEL_MARK_WRITE_SQL,
   labelMarkTouchParams,
+  labelMarkPeekParams,
+  convertLabelMarkQuietly,
   ensureLabelMarkSchema,
   labelMarkLive,
   labelMarkUpdateParams,
@@ -14121,6 +14124,21 @@ export class SqliteStore implements Store {
   async readMcpGatewayLabelMark(key: McpGatewayLabelMarkKey, at: { now: string; expiresAt: string }): Promise<McpGatewayLabelMark | null> {
     const row = this.queryOne<Record<string, unknown>>(LABEL_MARK_TOUCH_SQL, labelMarkTouchParams(key, at));
     return row ? mapLabelMarkRow(row) : null;
+  }
+
+  async peekMcpGatewayLabelMark(key: McpGatewayLabelMarkKey, now: string): Promise<{ mark: McpGatewayLabelMark | null; firstRaise: boolean }> {
+    const row = this.queryOne<Record<string, unknown>>(LABEL_MARK_PEEK_SQL, labelMarkPeekParams(key, now));
+    const mark = row ? mapLabelMarkRow(row) : null;
+    if (!mark?.unobserved) return { mark, firstRaise: false };
+    return this.db.transaction(() => {
+      // Read again inside the write transaction: another raise may have converted (or the sweep deleted) it meanwhile.
+      const locked = this.queryOne<Record<string, unknown>>(LABEL_MARK_PEEK_SQL, labelMarkPeekParams(key, now));
+      const stored = locked ? mapLabelMarkRow(locked) : null;
+      if (!stored?.unobserved) return { mark: stored, firstRaise: false };
+      const { next, firstRaise } = convertLabelMarkQuietly(stored, now);
+      this.exec(LABEL_MARK_WRITE_SQL, labelMarkUpdateParams(next));
+      return { mark: next, firstRaise };
+    }).immediate();
   }
 
   async raiseMcpGatewayLabelMark(input: McpGatewayLabelMarkRaise): Promise<{ mark: McpGatewayLabelMark; firstRaise: boolean }> {
