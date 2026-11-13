@@ -123,7 +123,7 @@ function evaluatorSource(maxChars: number): string {
     try { return cap(S({ v }, (k, e) => (typeof e === "bigint" ? T(e) : e))); } catch (e) { return cap(S({ v: T(v) })); }
   };
   const scope = (c) => {
-    const input = c.input, outputs = c.nodeOutputs || {}, now = new D();
+    const input = c.input, outputs = (c.outputsInInput ? input.results : c.nodeOutputs) || {}, now = new D();
     const extras = c.extrasIsInput ? input : c.extras;
     const s = {
       $input: input, $json: c.jsonIsInput || c.json === undefined ? input : c.json,
@@ -322,16 +322,25 @@ export interface SandboxExpressionPayload {
   nodeOutputs: Record<string, unknown>;
 }
 
-/** Serializes a payload once; `$json` and extras that are the input itself are sent once. */
+/**
+ * Serializes a payload once; `$json` and extras that are the input itself are sent once, and so are node outputs that
+ * are the input's `results` (a template's `$node()`).
+ */
 export function serializeExpressionPayload(payload: SandboxExpressionPayload): string {
   const jsonIsInput = payload.json === undefined || payload.json === payload.input;
   const extrasIsInput = payload.extras !== undefined && payload.extras === payload.input;
+  const input = payload.input;
+  const outputsInInput =
+    input !== null && typeof input === "object" && !Array.isArray(input) && Object.keys(payload.nodeOutputs).length > 0 &&
+    (input as Record<string, unknown>).results === payload.nodeOutputs;
   return toSandboxJson({
     ...payload,
     json: jsonIsInput ? undefined : payload.json,
     jsonIsInput,
     extras: extrasIsInput ? undefined : payload.extras,
-    extrasIsInput
+    extrasIsInput,
+    nodeOutputs: outputsInInput ? undefined : payload.nodeOutputs,
+    outputsInInput
   });
 }
 

@@ -6,7 +6,8 @@ description: "The core L2M nodes by group: inputs, prompting, LLM and agent, MCP
 # Core Nodes
 
 The nodes most workflows are built from, by their type id (the `type` in workflow JSON). Every node, with its
-fields, is in the [node reference](./reference/index.md).
+fields, is in the [node reference](./reference/index.md). [Templates and expressions](/runtime/templates-and-expressions)
+covers what a templated field can read from earlier steps.
 
 ## Input
 

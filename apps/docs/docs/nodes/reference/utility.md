@@ -15,6 +15,8 @@ DAG control flow: branching, looping, merging, sub-workflows, code execution, se
 
 44 nodes.
 
+Fields that take <span v-pre>`{{ }}`</span> templates (prompts, URLs, bodies, values) read the steps connected straight into the node; [Templates and expressions](/runtime/templates-and-expressions) covers reading earlier steps with `results`.
+
 ---
 ### `aggregate_node` — Aggregate
 

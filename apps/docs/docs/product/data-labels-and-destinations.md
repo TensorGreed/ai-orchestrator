@@ -116,7 +116,7 @@ carries the input's labels.
 
 - <span v-pre>`{{ results.fetch.body }}`</span> reads the node with id `fetch` only.
   Literal references in a longer expression (`results.fetch`,
-  `results["fetch"]`) are read the same way. Any access the parser
+  `results["fetch"]`, `$node("fetch")`) are read the same way. Any access the parser
   cannot pin to one node (`results[name]`, `$node(variable)`, the whole
   `$json` or `$input`, `arguments`, `this` or a template string with
   <span v-pre>`${ }`</span>, a spread such as `...results`) counts as reading

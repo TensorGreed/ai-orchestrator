@@ -1003,6 +1003,16 @@ interface ExpressionPreviewContext {
   customData?: Record<string, unknown>;
 }
 
+/**
+ * The preview's template data: a run renders `{{results.<nodeId>.field}}` from every completed node, but a node's
+ * recorded input holds only its parents' data, so the last run's node outputs are set as `results` for the preview
+ * (as the run sets them, over any parent field of that name).
+ */
+export function withPreviewResults(input: unknown, nodeOutputs: Record<string, unknown>): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(nodeOutputs).length === 0) return input;
+  return { ...(input as Record<string, unknown>), results: nodeOutputs };
+}
+
 const EXPRESSION_SUGGESTIONS = [
   { label: "$json", value: "$json" },
   { label: "$input", value: "$input" },
@@ -1119,6 +1129,12 @@ function ExpressionField({
           </button>
         ))}
       </div>
+      {mode === "template" && (
+        <div className="cfg-tip" data-testid="template-scope-tip">
+          <code>{"{{field}}"}</code> reads the steps connected straight into this one. For an earlier step, use{" "}
+          <code>{"{{results.<nodeId>.field}}"}</code>.
+        </div>
+      )}
       {(previewText || previewError) && (
         <div className={previewError ? "expression-preview error" : "expression-preview"}>
           <strong>Preview</strong>
@@ -1631,7 +1647,7 @@ export function NodeInspector({
   }, [executionResult]);
   const expressionPreviewContext = useMemo<ExpressionPreviewContext>(
     () => ({
-      input: currentNodeResult?.input ?? currentNodeResult?.output,
+      input: withPreviewResults(currentNodeResult?.input ?? currentNodeResult?.output, nodeOutputsForPreview),
       vars: workflowContext?.vars,
       nodeOutputs: nodeOutputsForPreview,
       workflow: {

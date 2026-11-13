@@ -15,6 +15,8 @@ Retrieval-Augmented Generation: embedders, vector stores, document loaders, retr
 
 5 nodes.
 
+Fields that take <span v-pre>`{{ }}`</span> templates (prompts, URLs, bodies, values) read the steps connected straight into the node; [Templates and expressions](/runtime/templates-and-expressions) covers reading earlier steps with `results`.
+
 ---
 ### `document_chunker` — Document Chunker
 

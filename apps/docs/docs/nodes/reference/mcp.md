@@ -15,6 +15,8 @@ Model Context Protocol clients and the workflow-as-MCP-tool exposure node.
 
 1 node.
 
+Fields that take <span v-pre>`{{ }}`</span> templates (prompts, URLs, bodies, values) read the steps connected straight into the node; [Templates and expressions](/runtime/templates-and-expressions) covers reading earlier steps with `results`.
+
 ---
 ### `mcp_tool` — MCP Tool
 

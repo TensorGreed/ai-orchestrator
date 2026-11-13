@@ -104,6 +104,8 @@ In L2M, fixed steps and agents share one canvas. The [workflow editor](/product/
 - **Execute Workflow** runs another workflow as a step, every time the run reaches it.
 - **Approval Gate** pauses the run until a person approves or rejects.
 
+Steps pass data on through templates: a prompt or field reads the step connected straight before it with <span v-pre>`{{field}}`</span>, and any earlier step with <span v-pre>`{{results.<nodeId>.field}}`</span> ([templates and expressions](/runtime/templates-and-expressions)).
+
 The model-driven parts are the **Agent Orchestrator** and **Supervisor Node**. On the canvas an agent is one step in the graph, but it also has attachment ports: `chat_model` for its model, `memory`, `tool` for its tools, and on a supervisor `worker` for other agents. Nodes on a port are not steps; the agent uses them while its loop runs ([attachment ports](/runtime/agent-loop#attachment-ports)). Its `maxIterations` is required: a new Agent Orchestrator starts at 6, a new Supervisor Node at 10.
 
 The **Workflow Tool** node is the bridge between the two. Attached to an agent's `tool` port, it turns another workflow into one tool: the agent decides when to call it, and the child workflow runs its fixed steps with the call's arguments as input ([Workflow Tool](/runtime/workflow-tool)). Unless the child declares itself read-only, it counts as a write tool, so optional write-tool approval asks before each call. That is how to build the order-status lookup from the example. Execute Workflow is the other half: the same child, run as a fixed step rather than offered as a choice.
@@ -120,4 +122,4 @@ See also: [regression testing for AI agents](/learn/testing/regression-testing-a
 
 - [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) (Anthropic engineering, December 2024): workflows and agents, the five workflow patterns, and when each fits
 - [Agent definition](https://simonwillison.net/2025/Sep/18/agents/) (Simon Willison, September 2025): "tools in a loop" as a working definition
-- In L2M: [Workflow editor](/product/workflow-editor), [Workflow Tool](/runtime/workflow-tool), [Pattern library](/patterns/)
+- In L2M: [Workflow editor](/product/workflow-editor), [Workflow Tool](/runtime/workflow-tool), [Templates and expressions](/runtime/templates-and-expressions), [Pattern library](/patterns/)
