@@ -447,6 +447,16 @@ export class InstrumentedEmbeddingRegistry extends EmbeddingProviderRegistry {
     return this.base.ids();
   }
 
+  /** `adapter` recorded once, then run the way `base` runs outside embedders (another layer may wrap it too). */
+  override async embedWith(
+    adapter: EmbeddingProviderAdapter,
+    request: Parameters<EmbeddingProviderAdapter["embed"]>[0],
+    context: ProviderExecutionContext
+  ): Promise<EmbeddingResponse> {
+    const inner: EmbeddingProviderAdapter = { id: adapter.id, embed: async (next, nextContext) => await this.base.embedWith(adapter, next, nextContext) };
+    return alreadyInstrumented(context) ? await inner.embed(request, context) : await this.recorder.embed(inner, request, context);
+  }
+
   private wrap(adapter: EmbeddingProviderAdapter): EmbeddingProviderAdapter {
     const known = this.wrapped.get(adapter);
     if (known) return known;

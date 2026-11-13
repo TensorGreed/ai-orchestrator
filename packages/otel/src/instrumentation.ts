@@ -171,11 +171,11 @@ export class OtelSpanHandle implements InstrumentationSpan {
 }
 
 /**
- * The span of one MCP request. Besides the span it keeps the attributes its duration metric needs (also for a span
- * the sampler dropped, which records nothing) and records the metric when it ends. A later round of a multi
- * round-trip request is not measured on its own: the request's span covers it.
+ * What the duration metric of one MCP request needs: the attributes it is recorded with and the outcome, kept as the
+ * request reports them, and the metric recorded once when it ends. Used by the MCP span (also for a span the sampler
+ * dropped) and, with tracing off, by the metrics-only MCP instrumentation. Without `metrics` nothing is recorded.
  */
-export class McpSpanHandle extends OtelSpanHandle {
+export class McpOperationMeasurement {
   private readonly startedAt = performance.now();
   private readonly metricAttributes: Attributes = {};
   private measured = false;
@@ -184,18 +184,14 @@ export class McpSpanHandle extends OtelSpanHandle {
   private rpcCode: string | undefined;
 
   constructor(
-    span: Span,
-    scrub: (text: string) => string,
-    initial: InstrumentationAttributes,
     private readonly side: "client" | "server",
     private readonly metrics: McpMetrics | undefined,
-    contentBinding?: SpanContentBinding
+    initial?: InstrumentationAttributes
   ) {
-    super(span, scrub, contentBinding);
-    this.capture(initial);
+    if (initial) this.capture(initial);
   }
 
-  private capture(attributes: InstrumentationAttributes): void {
+  capture(attributes: InstrumentationAttributes): void {
     const code = attributes[MCP.RPC_RESPONSE_STATUS_CODE];
     if (code !== undefined && code !== null) this.rpcCode = String(code);
     if (!this.metrics) return;
@@ -205,8 +201,48 @@ export class McpSpanHandle extends OtelSpanHandle {
     }
   }
 
+  /**
+   * The request's error type, or undefined when an outcome was already recorded: the first one wins. A JSON-RPC
+   * error code seen during the request is its error type (MCP conventions), however the failure surfaced.
+   */
+  error(error: unknown, explicit?: string): string | undefined {
+    if (this.errored) return undefined;
+    this.errored = true;
+    const type = this.rpcCode ?? errorTypeOf(error, explicit);
+    this.capture({ [ATTR_ERROR_TYPE]: type });
+    return type;
+  }
+
+  finish(): void {
+    if (this.measured || !this.metrics) return;
+    this.measured = true;
+    const seconds = (performance.now() - this.startedAt) / 1000;
+    (this.side === "server" ? this.metrics.server : this.metrics.client).record(seconds, this.metricAttributes);
+  }
+}
+
+/**
+ * The span of one MCP request. Besides the span it keeps what its duration metric needs (also for a span the sampler
+ * dropped, which records nothing) and records the metric when it ends. A later round of a multi round-trip request is
+ * not measured on its own: the request's span covers it.
+ */
+export class McpSpanHandle extends OtelSpanHandle {
+  private readonly measurement: McpOperationMeasurement;
+
+  constructor(
+    span: Span,
+    scrub: (text: string) => string,
+    initial: InstrumentationAttributes,
+    side: "client" | "server",
+    metrics: McpMetrics | undefined,
+    contentBinding?: SpanContentBinding
+  ) {
+    super(span, scrub, contentBinding);
+    this.measurement = new McpOperationMeasurement(side, metrics, initial);
+  }
+
   override setAttributes(attributes: InstrumentationAttributes): void {
-    this.capture(attributes);
+    this.measurement.capture(attributes);
     super.setAttributes(attributes);
   }
 
@@ -215,20 +251,13 @@ export class McpSpanHandle extends OtelSpanHandle {
    * and the generic recording of the error they then rethrow must not replace it or add the server's message.
    */
   override recordError(error: unknown, options: { type?: string } = {}): void {
-    if (this.errored) return;
-    this.errored = true;
-    // A JSON-RPC error code seen during the request is its error type (MCP conventions), however the failure surfaced.
-    const type = this.rpcCode ?? errorTypeOf(error, options.type);
-    this.capture({ [ATTR_ERROR_TYPE]: type });
+    const type = this.measurement.error(error, options.type);
+    if (type === undefined) return;
     super.recordError(error, { type });
   }
 
   override end(): void {
-    if (!this.measured && this.metrics) {
-      this.measured = true;
-      const seconds = (performance.now() - this.startedAt) / 1000;
-      (this.side === "server" ? this.metrics.server : this.metrics.client).record(seconds, this.metricAttributes);
-    }
+    this.measurement.finish();
     super.end();
   }
 }

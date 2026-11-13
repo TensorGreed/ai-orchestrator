@@ -4,22 +4,31 @@
  * consumer span under it here. A job without a context (tracing was off where it was enqueued, or a schedule or
  * trigger enqueued it outside any span) starts a new trace.
  */
-import { readTraceCarrier, type RunInstrumentation, type TraceCarrier } from "@ai-orchestrator/shared";
-import type { QueueJobContext, QueuedExecutionPayload } from "../services/queue-service.js";
+import { SPAN_OUTCOME_ATTRIBUTES, readTraceCarrier, type RunInstrumentation, type TraceCarrier } from "@ai-orchestrator/shared";
+import { QueueDrainAbort, QueueLeaseLostAbort, type QueueJobContext, type QueuedExecutionPayload } from "../services/queue-service.js";
+
+/** True when this worker stopped the attempt itself: it is draining, or the job's lease was lost. */
+function stoppedByQueue(signal: AbortSignal | undefined): boolean {
+  return Boolean(signal?.aborted) && (signal!.reason instanceof QueueDrainAbort || signal!.reason instanceof QueueLeaseLostAbort);
+}
 
 /**
  * Runs one attempt of a queued job under a `process l2m.queue` consumer span. A retried or reaped job gets one such
- * span per attempt, all under the same parent. Without tracing it only calls `fn`.
+ * span per attempt, all under the same parent. An attempt this worker stopped (a drain gives the job back, a lost
+ * lease leaves it to another worker) is not a failure of the job: its span gets `l2m.queue.outcome=requeued` and no
+ * error status, whether the stopped run threw or returned. Without tracing it only calls `fn`.
  */
 export async function traceQueueJob<T>(
   instrumentation: RunInstrumentation,
   payload: Pick<QueuedExecutionPayload, "executionId" | "traceContext">,
-  context: Pick<QueueJobContext, "queueItemId" | "pool" | "attempts" | "waitMs">,
+  context: Pick<QueueJobContext, "queueItemId" | "pool" | "attempts" | "waitMs"> & { signal?: AbortSignal },
   fn: () => Promise<T>
 ): Promise<T> {
   if (!instrumentation.enabled) return await fn();
+  // What a stopped attempt threw: rethrown once its span has ended, so the span does not record it as an error.
+  let stopped: { error: unknown } | undefined;
   // A queue poll woken from a request would otherwise run the job inside that request's trace.
-  return await instrumentation.withNewTrace(() =>
+  const result = await instrumentation.withNewTrace(() =>
     instrumentation.withParent(readTraceCarrier(payload.traceContext), () =>
       instrumentation.span(
         {
@@ -35,10 +44,23 @@ export async function traceQueueJob<T>(
             "l2m.queue.wait_ms": context.waitMs ?? undefined
           }
         },
-        async () => await fn()
+        async (span) => {
+          try {
+            const value = await fn();
+            if (stoppedByQueue(context.signal)) span.setAttributes({ [SPAN_OUTCOME_ATTRIBUTES.QUEUE_OUTCOME]: "requeued" });
+            return value;
+          } catch (error) {
+            if (!stoppedByQueue(context.signal)) throw error;
+            span.setAttributes({ [SPAN_OUTCOME_ATTRIBUTES.QUEUE_OUTCOME]: "requeued" });
+            stopped = { error };
+            return undefined as T;
+          }
+        }
       )
     )
   );
+  if (stopped) throw stopped.error;
+  return result;
 }
 
 /**

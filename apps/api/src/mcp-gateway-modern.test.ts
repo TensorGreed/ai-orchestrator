@@ -585,14 +585,14 @@ describe("modern mode on", () => {
     // Labels a caller declares itself in _meta are never read.
     const declared = await modern(fixture, "tools/call", { name: "mock_tools__calculator", arguments: { expression: "6*8" } }, { meta: { dataLabels: { provenance: [] } } });
     expect(declared.json().error.code).toBe(-31030);
-    // A legacy session of the same client starts clean, as sessions always have.
+    // A legacy session of the same client starts from the stored mark: opening one does not clear it.
     const sessionId = await openSession(fixture);
     const legacy = await rpc(
       fixture,
       { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "mock_tools__calculator", arguments: { expression: "2+2" } } },
       { "mcp-session-id": sessionId }
     );
-    expect(legacy.json().result.isError).toBeUndefined();
+    expect(legacy.json().error).toMatchObject({ code: -32030 });
   });
 
   it("pools upstream stdio servers per principal and stops them when the client is revoked", async () => {

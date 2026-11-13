@@ -56,6 +56,32 @@ function optionalIntFromEnv(min: number, max: number) {
   );
 }
 
+/**
+ * An OpenTelemetry switch read on every start but used only while its signal is on: a blank value reads as unset (the
+ * default), a true/false word as the boolean, and anything else is kept as written, to be refused in
+ * telemetry/settings.ts only when it would take effect (as the standard OTEL_* values are).
+ */
+function deferredBooleanFromEnv(fallback: boolean) {
+  return z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "") return undefined;
+    if (normalized === "true" || normalized === "1" || normalized === "yes") return true;
+    if (normalized === "false" || normalized === "0" || normalized === "no") return false;
+    return value.trim();
+  }, z.union([z.boolean(), z.string()]).default(fallback));
+}
+
+/** The same for a positive whole number: blank reads as unset, anything that is not one is kept as written. */
+function deferredPositiveIntFromEnv(fallback: number) {
+  return z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    if (trimmed === "") return undefined;
+    return /^\d+$/.test(trimmed) && Number(trimmed) > 0 ? Number(trimmed) : trimmed;
+  }, z.union([z.number().int().positive(), z.string()]).default(fallback));
+}
+
 /** 13.3 — the shortest usage retention: monthly budgets sum a month of usage events. */
 export const USAGE_EVENTS_MIN_RETENTION_DAYS = 31;
 
@@ -639,7 +665,7 @@ const envSchema = z.object({
   METRICS_INCLUDE_PROCESS: booleanFromEnv.default(true),
   METRICS_SLO_SUCCESS_TARGET: z.coerce.number().min(0).max(1).default(0.99),
   METRICS_SLO_P95_LATENCY_MS: z.coerce.number().int().positive().default(30000),
-  TRACING_ENABLED: booleanFromEnv.default(false),
+  TRACING_ENABLED: deferredBooleanFromEnv(false),
   TRACING_ENDPOINT: z.string().optional(),
   TRACING_SERVICE_NAME: z.string().default("ai-orchestrator"),
 
@@ -656,10 +682,12 @@ const envSchema = z.object({
   OTEL_DEPLOYMENT_ENVIRONMENT: z.string().optional(),
   /** Comma-separated `key=value` pairs merged into every span/metric resource. */
   OTEL_RESOURCE_ATTRIBUTES: z.string().default(""),
-  OTEL_METRICS_ENABLED: booleanFromEnv.default(false),
-  OTEL_METRICS_PUSH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  // These four are read as deferred values: blank means the default, and a value that does not parse stops start-up
+  // only when it would take effect (telemetry/settings.ts).
+  OTEL_METRICS_ENABLED: deferredBooleanFromEnv(false),
+  OTEL_METRICS_PUSH_INTERVAL_MS: deferredPositiveIntFromEnv(60_000),
   /** Emit a SERVER span per HTTP request while tracing is on (no hooks are installed while it is off). */
-  OTEL_HTTP_SERVER_SPANS: booleanFromEnv.default(true),
+  OTEL_HTTP_SERVER_SPANS: deferredBooleanFromEnv(true),
   // OpenTelemetry SDK settings (see telemetry/settings.ts). Tracing stays off until an OTLP endpoint or
   // TRACING_ENABLED is set, and nothing from the SDK is loaded while it is off.
   // Optional (unset = the default noted), so tests and embedders that build a config by hand need none of them.

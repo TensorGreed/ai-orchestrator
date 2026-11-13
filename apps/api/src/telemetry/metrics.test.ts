@@ -69,6 +69,9 @@ describe("metrics-only endpoint (tracing off)", () => {
     expect(telemetry.enabled).toBe(false);
     expect(telemetry.runtime).toBeNull();
     expect(telemetry.metrics).not.toBeNull();
+    // MCP requests are measured (no spans): the MCP clients and the gateway get the metrics-only instrumentation.
+    expect(telemetry.instrumentation.enabled).toBe(false);
+    expect(telemetry.mcpInstrumentation.enabled).toBe(true);
     await telemetry.metrics?.shutdown();
   });
 
@@ -76,6 +79,7 @@ describe("metrics-only endpoint (tracing off)", () => {
     const telemetry = await loadTelemetry(settings({}));
     expect(telemetry.metrics).toBeNull();
     expect(telemetry.runtime).toBeNull();
+    expect(telemetry.mcpInstrumentation.enabled).toBe(false);
   });
 });
 

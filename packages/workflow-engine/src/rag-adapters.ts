@@ -1,9 +1,22 @@
-import type { ConnectorDocument } from "@ai-orchestrator/shared";
+import type { ConnectorDocument, LLMProviderConfig } from "@ai-orchestrator/shared";
+import type { EmbeddingProviderAdapter, EmbeddingProviderRegistry, EmbeddingResponse, ProviderExecutionContext } from "@ai-orchestrator/provider-sdk";
 import pg from "pg";
+
+/** One embedded text, with what the provider reported about the call when it reported it. */
+export interface EmbeddedText {
+  vector: number[];
+  usage?: { inputTokens?: number; totalTokens?: number };
+  /** The model the provider says answered. */
+  model?: string;
+}
 
 export interface EmbeddingAdapter {
   id: string;
   embed(text: string): Promise<number[]>;
+  /** `embed` plus the token usage and model the provider reported (for metrics); absent: `embed` is used. */
+  embedDetailed?(text: string): Promise<EmbeddedText>;
+  /** Where the text is sent, for the span's `server.address` (only the host and port are recorded). */
+  readonly endpointUrl?: string;
   /**
    * 12.6 — the vendor and model this embedder sends text to, for the model allowlist (provider ids `openai`,
    * `azure_openai` with the deployment name as the model, `gemini`, `mistral`, `cohere`, `huggingface`).
@@ -34,6 +47,57 @@ export function gatedEmbeddingAdapter(adapter: EmbeddingAdapter, check: Embeddin
       await check(target);
       return await adapter.embed(text);
     }
+  };
+}
+
+/** The usage an OpenAI-shaped embeddings answer reports (`usage.prompt_tokens` / `total_tokens`), and its model. */
+function openAIShapedDetails(data: { usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown }): Omit<EmbeddedText, "vector"> {
+  const usage: NonNullable<EmbeddedText["usage"]> = {};
+  if (typeof data.usage?.prompt_tokens === "number") usage.inputTokens = data.usage.prompt_tokens;
+  if (typeof data.usage?.total_tokens === "number") usage.totalTokens = data.usage.total_tokens;
+  return { ...(Object.keys(usage).length > 0 ? { usage } : {}), ...(typeof data.model === "string" ? { model: data.model } : {}) };
+}
+
+export interface RegistryEmbeddingOptions {
+  /** The embedding registry model calls go through (the instrumented one records a span and metrics per call). */
+  registry: EmbeddingProviderRegistry;
+  /** The call's provider context (the run's, or the request's). */
+  context: () => ProviderExecutionContext;
+  /** The model allowlist check, run inside the call (a refused call is recorded with its type). */
+  check?: EmbeddingModelCheck;
+}
+
+/**
+ * `adapter` with every `embed` sent through `registry.embedWith`, so a RAG or knowledge-base embedder is recorded
+ * like any other embeddings call (span, token and duration metrics) and checked against the model allowlist first.
+ * Its own transport (endpoint, outbound URL checks, key, retries, errors) is unchanged. A local embedder (no
+ * `modelTarget`) makes no model call and is returned as it is.
+ */
+export function registryEmbeddingAdapter(adapter: EmbeddingAdapter, options: RegistryEmbeddingOptions): EmbeddingAdapter {
+  const target = adapter.modelTarget;
+  if (!target) return adapter;
+  const endpointUrl = adapter.endpointUrl;
+  const provider: LLMProviderConfig = { providerId: target.providerId, model: target.model, ...(endpointUrl ? { baseUrl: endpointUrl } : {}) };
+  const transport: EmbeddingProviderAdapter = {
+    id: target.providerId,
+    embed: async (request): Promise<EmbeddingResponse> => {
+      if (options.check) await options.check(target);
+      const startedAt = Date.now();
+      const text = request.input[0] ?? "";
+      const embedded = adapter.embedDetailed ? await adapter.embedDetailed(text) : { vector: await adapter.embed(text) };
+      return {
+        embeddings: [embedded.vector],
+        ...(embedded.usage ? { usage: embedded.usage } : {}),
+        ...(embedded.model ? { model: embedded.model } : {}),
+        latencyMs: Date.now() - startedAt
+      };
+    }
+  };
+  return {
+    id: adapter.id,
+    modelTarget: target,
+    ...(endpointUrl ? { endpointUrl } : {}),
+    embed: async (text) => (await options.registry.embedWith(transport, { provider, input: [text] }, options.context())).embeddings[0] ?? []
   };
 }
 
@@ -105,7 +169,15 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
     return { providerId: "openai", model: this.config.model || "text-embedding-3-small" };
   }
 
+  get endpointUrl(): string {
+    return this.config.baseUrl || "https://api.openai.com/v1";
+  }
+
   async embed(text: string): Promise<number[]> {
+    return (await this.embedDetailed(text)).vector;
+  }
+
+  async embedDetailed(text: string): Promise<EmbeddedText> {
     const baseUrl = this.config.baseUrl || "https://api.openai.com/v1";
     const model = this.config.model || "text-embedding-3-small";
     
@@ -122,8 +194,8 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
       throw new Error(`OpenAI Embedding API error: ${response.statusText} - ${await response.text()}`);
     }
 
-    const data = (await response.json()) as { data: Array<{ embedding: number[] }> };
-    return data.data[0]?.embedding || [];
+    const data = (await response.json()) as { data: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown };
+    return { vector: data.data[0]?.embedding || [], ...openAIShapedDetails(data) };
   }
 }
 
@@ -142,7 +214,15 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
     return { providerId: "azure_openai", model: this.config.deployment.trim() };
   }
 
+  get endpointUrl(): string | undefined {
+    return this.config.endpoint.trim() || undefined;
+  }
+
   async embed(text: string): Promise<number[]> {
+    return (await this.embedDetailed(text)).vector;
+  }
+
+  async embedDetailed(text: string): Promise<EmbeddedText> {
     const endpoint = this.config.endpoint.replace(/\/+$/, "");
     const deployment = this.config.deployment.trim();
     if (!endpoint || !deployment) {
@@ -173,8 +253,8 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
       throw new Error(`Azure OpenAI Embedding API error: ${response.statusText} - ${await response.text()}`);
     }
 
-    const data = (await response.json()) as { data: Array<{ embedding: number[] }> };
-    return data.data[0]?.embedding || [];
+    const data = (await response.json()) as { data: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown };
+    return { vector: data.data[0]?.embedding || [], ...openAIShapedDetails(data) };
   }
 }
 
@@ -618,7 +698,11 @@ export class CohereEmbeddingAdapter implements EmbeddingAdapter {
   get modelTarget(): EmbeddingModelTarget {
     return { providerId: "cohere", model: this.config.model || "embed-english-v3.0" };
   }
+  readonly endpointUrl = "https://api.cohere.ai/v1";
   async embed(text: string): Promise<number[]> {
+    return (await this.embedDetailed(text)).vector;
+  }
+  async embedDetailed(text: string): Promise<EmbeddedText> {
     const model = this.config.model || "embed-english-v3.0";
     const res = await fetch("https://api.cohere.ai/v1/embed", {
       method: "POST",
@@ -626,8 +710,9 @@ export class CohereEmbeddingAdapter implements EmbeddingAdapter {
       body: JSON.stringify({ texts: [text], model, input_type: "search_document", truncate: "END" })
     });
     if (!res.ok) throw new Error(`Cohere embedding failed (${res.status})`);
-    const json = await res.json() as { embeddings?: number[][] };
-    return json.embeddings?.[0] ?? [];
+    const json = await res.json() as { embeddings?: number[][]; meta?: { billed_units?: { input_tokens?: unknown } } };
+    const inputTokens = json.meta?.billed_units?.input_tokens;
+    return { vector: json.embeddings?.[0] ?? [], ...(typeof inputTokens === "number" ? { usage: { inputTokens } } : {}) };
   }
 }
 
@@ -637,7 +722,11 @@ export class MistralEmbeddingAdapter implements EmbeddingAdapter {
   get modelTarget(): EmbeddingModelTarget {
     return { providerId: "mistral", model: this.config.model || "mistral-embed" };
   }
+  readonly endpointUrl = "https://api.mistral.ai/v1";
   async embed(text: string): Promise<number[]> {
+    return (await this.embedDetailed(text)).vector;
+  }
+  async embedDetailed(text: string): Promise<EmbeddedText> {
     const model = this.config.model || "mistral-embed";
     const res = await fetch("https://api.mistral.ai/v1/embeddings", {
       method: "POST",
@@ -645,8 +734,8 @@ export class MistralEmbeddingAdapter implements EmbeddingAdapter {
       body: JSON.stringify({ model, input: [text] })
     });
     if (!res.ok) throw new Error(`Mistral embedding failed (${res.status})`);
-    const json = await res.json() as { data?: Array<{ embedding: number[] }> };
-    return json.data?.[0]?.embedding ?? [];
+    const json = await res.json() as { data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown };
+    return { vector: json.data?.[0]?.embedding ?? [], ...openAIShapedDetails(json) };
   }
 }
 
@@ -656,6 +745,7 @@ export class GoogleVertexEmbeddingAdapter implements EmbeddingAdapter {
   get modelTarget(): EmbeddingModelTarget {
     return { providerId: "gemini", model: this.config.model || "text-embedding-004" };
   }
+  readonly endpointUrl = "https://generativelanguage.googleapis.com";
   async embed(text: string): Promise<number[]> {
     const model = this.config.model || "text-embedding-004";
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${this.config.apiKey}`, {
@@ -675,6 +765,7 @@ export class HuggingFaceEmbeddingAdapter implements EmbeddingAdapter {
   get modelTarget(): EmbeddingModelTarget {
     return { providerId: "huggingface", model: this.config.model || "sentence-transformers/all-MiniLM-L6-v2" };
   }
+  readonly endpointUrl = "https://api-inference.huggingface.co";
   async embed(text: string): Promise<number[]> {
     const model = this.config.model || "sentence-transformers/all-MiniLM-L6-v2";
     const res = await fetch(`https://api-inference.huggingface.co/pipeline/feature-extraction/${model}`, {

@@ -3330,7 +3330,7 @@ export const openApiSpec = {
           "401": { description: "Missing, invalid, revoked or expired client token" },
           "403": { description: "Origin not allowed, or the token is not scoped to this toolset" },
           "404": { description: "Unknown or disabled toolset, unknown session, or a method 2026-07-28 callers cannot use" },
-          "503": { description: "Session limit reached and no session is idle" }
+          "503": { description: "Session limit reached and no session is idle, or (on a toolset that tracks outside content) the client's stored labels could not be read" }
         }
       },
       get: {

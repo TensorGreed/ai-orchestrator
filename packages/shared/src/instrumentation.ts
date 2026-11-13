@@ -220,7 +220,9 @@ export const SPAN_OUTCOME_ATTRIBUTES = Object.freeze({
   EMBEDDINGS_DIMENSION_COUNT: "gen_ai.embeddings.dimension.count",
   RETRY_COUNT: "l2m.retry.count",
   /** A streamed answer its reader stopped reading before the provider finished it. */
-  STREAM_CLOSED_EARLY: "l2m.stream.closed_early"
+  STREAM_CLOSED_EARLY: "l2m.stream.closed_early",
+  /** A queue job attempt this worker stopped (a drain, or a lost lease): `requeued`, recorded as an outcome, not an error. */
+  QUEUE_OUTCOME: "l2m.queue.outcome"
 } as const);
 
 /**

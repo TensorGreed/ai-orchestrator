@@ -49,6 +49,36 @@ describe("resolveTelemetrySettings", () => {
     expect(resolved).toMatchObject({ enabled: false, protocol: "http/protobuf", sampler: { name: "parentbased_always_on" }, trustInbound: "authenticated", propagateToMcp: true });
   });
 
+  it("reads a blank OTEL_METRICS_ENABLED, OTEL_METRICS_PUSH_INTERVAL_MS, OTEL_HTTP_SERVER_SPANS or TRACING_ENABLED as unset", () => {
+    const blank = { OTEL_METRICS_ENABLED: "", OTEL_METRICS_PUSH_INTERVAL_MS: " ", OTEL_HTTP_SERVER_SPANS: "", TRACING_ENABLED: "  " };
+    expect(settings(blank)).toMatchObject({ enabled: false, metricsEndpoint: null, metricsIntervalMs: 60_000, httpServerSpans: true, warnings: [] });
+    // Blank keeps the default with the signals on too.
+    expect(settings({ ...blank, OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318" })).toMatchObject({ enabled: true, metricsEndpoint: null, httpServerSpans: true });
+    expect(settings({ ...blank, OTEL_METRICS_ENABLED: "true", OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://collector:4318/v1/metrics" })).toMatchObject({ metricsIntervalMs: 60_000 });
+  });
+
+  it("refuses an invalid OTEL_METRICS_ENABLED, OTEL_METRICS_PUSH_INTERVAL_MS, OTEL_HTTP_SERVER_SPANS or TRACING_ENABLED only when it would take effect", () => {
+    const traces = { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318" };
+    const metrics = { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://collector:4318/v1/metrics", OTEL_METRICS_ENABLED: "true" };
+    // Ignored while the signal it belongs to is off.
+    expect(settings({ OTEL_HTTP_SERVER_SPANS: "sometimes", OTEL_METRICS_PUSH_INTERVAL_MS: "soon", OTEL_METRICS_ENABLED: "maybe" })).toMatchObject({ enabled: false, httpServerSpans: true, metricsIntervalMs: 60_000 });
+    expect(settings({ ...traces, OTEL_METRICS_PUSH_INTERVAL_MS: "0" })).toMatchObject({ enabled: true, metricsEndpoint: null });
+    expect(settings({ TRACING_ENABLED: "maybe", OTEL_SDK_DISABLED: "true" })).toMatchObject({ enabled: false });
+    // Refused, by name, when it would take effect.
+    expect(() => settings({ TRACING_ENABLED: "maybe" })).toThrow(/TRACING_ENABLED must be true or false/);
+    expect(() => settings({ ...traces, OTEL_HTTP_SERVER_SPANS: "sometimes" })).toThrow(/OTEL_HTTP_SERVER_SPANS must be true or false/);
+    expect(() => settings({ ...metrics, OTEL_METRICS_ENABLED: "maybe" })).toThrow(/OTEL_METRICS_ENABLED must be true or false/);
+    // The combined endpoint is a metrics endpoint too: `true` there would export metrics.
+    expect(() => settings({ ...traces, OTEL_METRICS_ENABLED: "maybe" })).toThrow(/OTEL_METRICS_ENABLED must be true or false/);
+    expect(() => settings({ ...metrics, OTEL_METRICS_PUSH_INTERVAL_MS: "soon" })).toThrow(/OTEL_METRICS_PUSH_INTERVAL_MS must be a positive whole number/);
+    // Valid values read as before.
+    expect(settings({ ...metrics, OTEL_METRICS_PUSH_INTERVAL_MS: "15000", OTEL_HTTP_SERVER_SPANS: "no", TRACING_ENABLED: "yes" })).toMatchObject({
+      enabled: true,
+      metricsIntervalMs: 15_000,
+      httpServerSpans: false
+    });
+  });
+
   it("resolves the traces endpoint: per-signal, else combined plus /v1/traces, else the legacy TRACING_ENDPOINT", () => {
     expect(settings({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318/" }).tracesEndpoint).toBe("http://collector:4318/v1/traces");
     expect(

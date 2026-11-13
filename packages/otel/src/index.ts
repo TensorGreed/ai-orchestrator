@@ -3,7 +3,7 @@
  * dynamic import, and only when tracing is configured.
  */
 export { createOtelRuntime, OtelRuntime, buildPropagator, buildSampler, type LogTraceFields } from "./runtime.js";
-export { McpSpanHandle, OtelRunInstrumentation, OtelSpanHandle, cleanAttributes, conversationIdFor, errorTypeOf, type StartSpanSpec } from "./instrumentation.js";
+export { McpOperationMeasurement, McpSpanHandle, OtelRunInstrumentation, OtelSpanHandle, cleanAttributes, conversationIdFor, errorTypeOf, type StartSpanSpec } from "./instrumentation.js";
 export {
   ContentCaptureProcessor,
   ContentDroppedError,
@@ -18,6 +18,7 @@ export {
   type ContentMasker
 } from "./content.js";
 export { McpMetrics, mcpSpanSpec, sanitizeResourceUri } from "./mcp.js";
+export { createMcpMetricsInstrumentation } from "./mcp-metrics-only.js";
 export {
   createMetricsPipeline,
   registerL2mMetrics,
