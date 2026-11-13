@@ -5,9 +5,15 @@ description: "The core L2M nodes by group: inputs, prompting, LLM and agent, MCP
 
 # Core Nodes
 
+The nodes most workflows are built from, by their type id (the `type` in workflow JSON). Every node, with its
+fields, is in the [node reference](./reference/index.md).
+
 ## Input
 
 - `webhook_input`
+- `manual_trigger`
+- `schedule_trigger`
+- `chat_trigger`
 - `text_input`
 - `system_prompt`
 - `user_prompt`
@@ -25,19 +31,26 @@ description: "The core L2M nodes by group: inputs, prompting, LLM and agent, MCP
 ## MCP / Tools
 
 - `mcp_tool`
+- `workflow_tool` (another workflow as an agent's tool)
 
 ## RAG / Data
 
 - `rag_retrieve`
 - `connector_source`
 
+## Flow control
+
+- `if_node`
+- `switch_node`
+- `merge_node`
+- `approval_gate`
+
 ## Utilities
 
-- `simple_memory`
-- `switch`
+- `local_memory` (Simple Memory)
 - `output_parser`
 - `http_request`
-- `code_execution`
+- `code_node`
 - `pdf_output`
 - `chart`
 - `execute_workflow`
@@ -49,7 +62,10 @@ description: "The core L2M nodes by group: inputs, prompting, LLM and agent, MCP
 ## Notes on execution
 
 - Disconnected nodes are skipped.
-- Switch nodes route branches by evaluated case.
+- IF nodes take the `true` or `false` branch; Switch nodes route branches by evaluated case. Branches not taken are
+  skipped.
+- Nodes on an agent's attachment ports (`chat_model`, `memory`, `tool`, `worker`) are not DAG steps: the agent uses
+  them when it runs.
 - Node execution status is persisted in execution history.
 
 ## Output Parser (`output_parser`)

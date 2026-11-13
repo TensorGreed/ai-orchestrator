@@ -239,6 +239,6 @@ Same shape as a basic flow, but the LLM Call is replaced with the dedicated Azur
 
 ## What's not here
 
-- **Approval-gated tool calls** — use a Wait node downstream of the Agent's tool output to pause for human approval. No bundled sample yet; PRs welcome.
-- **Streaming responses to the client** — webhook responses are buffered. For SSE/streaming, use the dedicated chat trigger and reach for the [helper chat page](/getting-started/quickstart) as a starting point.
+- **Approval-gated tool calls** — not a separate pattern: turn on [Ask before write tools](/product/approvals#approval-before-write-tools) for the workflow, or add a `require_approval` rule in the [MCP tool policy](/product/mcp-tool-policy#require-approval). The run pauses before the call until a person decides. To pause a run between steps, use an [Approval Gate](/product/approvals) node.
+- **Streaming responses to the client** — webhook responses are buffered. To stream a run, call `POST /api/workflows/:id/execute/stream` (server-sent events, including `llm_delta` text chunks; see the [API endpoints](/api/endpoints)).
 - **Long-running batch workflows** — the queue + DLQ + leader election machinery is in place but the batch-runner pattern is still a one-off. Document yours in an issue if you build one.

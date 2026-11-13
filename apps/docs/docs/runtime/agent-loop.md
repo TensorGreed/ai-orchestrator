@@ -41,6 +41,39 @@ An MCP server's tool reaches the model as `<adapter>__<tool>`, for example `http
 - A copy that a tool rule or **No write tools** hides does not count, so the visible copy keeps its plain name.
 - Names you choose still have to be unique, and the agent node fails while they repeat: two [Workflow Tools](./workflow-tool.md) with the same tool name, two [built-in tool](./built-in-agent-tools.md#one-name-per-tool) nodes of one provider, or two workers with the same name. The error names the nodes, and validation reports `duplicate_agent_tool_name` when the workflow shows the clash.
 
+## How the context is kept small
+
+The runtime trims what it sends the model on every call. The limits are fixed in the agent runtime unless a row says
+otherwise.
+
+**Tool definitions** (every tool the model is offered):
+
+| What | Limit |
+| --- | --- |
+| Description | 280 characters; the rest is cut and marked `...[truncated N chars]` |
+| Arguments | The first 8 top-level properties of the input schema, each kept with its type, description (120 characters), `required` and the first 10 `enum` values; nested properties and array item shapes below them are dropped |
+| `required` list | The first 8 names |
+
+**Which tools are offered.** With an MCP Tool or Workflow Tool node on the `tool` port, the model is offered every
+tool those nodes expose, trimmed as above; to keep a large server's tool list short, pick the tools on the MCP Tool
+node (**Select multiple tools**). Only an agent with no tool nodes, whose tools come from its inline `mcpServers`
+config, gets a keyword shortlist: tools are ranked by how many words of four or more letters from the user prompt
+appear in their name and description, and the model gets up to 6 that match (only the best-matching ones when a tool
+matches two or more words) or, when none match, the first 8, within about 18,000 characters of tool definitions.
+Workers on the `worker` port and the runtime's own tools (`agent_clarify`, the session cache tools, `think`) are always
+offered and never shortlisted.
+
+**Messages:**
+
+| What | Limit |
+| --- | --- |
+| System prompt | 8,000 characters |
+| User prompt, each remembered message and each model reply kept in the conversation | 3,000 characters |
+| Tool result | `toolMessageMaxChars` (default 6,000, at least 500). A longer result is compacted first: `toolPayloadMaxDepth` (8) levels, `toolPayloadMaxObjectKeys` (64) keys per object, `toolPayloadMaxArrayItems` (64) items per array and `toolPayloadMaxStringChars` (1,024) characters per string, marked `_meta.truncated`; if it is still too long, the model gets a preview |
+
+The tool-result limits are fields on the Agent node (see the [node reference](../nodes/reference/agent.md)). The full
+tool output is kept in the [session tool cache](#session-tool-cache-multi-turn-reuse) when a `session_id` is set.
+
 ## Common failure causes
 
 - No model node attached to `chat_model`
