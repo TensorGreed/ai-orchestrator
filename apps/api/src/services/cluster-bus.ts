@@ -27,7 +27,8 @@ export const CLUSTER_BUS_MAX_PAYLOAD_BYTES = 7_000;
 
 /**
  * Broadcast topics:
- *   - `ctl`: control messages (cancel, eval_cancel, workflow_changed, and later elicitation_answer, packages_changed).
+ *   - `ctl`: control messages (cancel, eval_cancel, workflow_changed, mcp_tools_changed, and later elicitation_answer,
+ *     packages_changed).
  *   - `queue`: queue wake-ups (`{ t: "wake", pool }`), so consumers claim at once instead of at their next poll.
  */
 export type ClusterBusTopic = "ctl" | "queue";

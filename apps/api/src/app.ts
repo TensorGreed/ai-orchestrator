@@ -361,6 +361,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
+import { GATEWAY_TOOLS_CHANGED_MESSAGE } from "./services/mcp-gateway-list-changed.js";
 import { gatewayCorsAllowedHeaders } from "./services/mcp-gateway-modern.js";
 import { McpClientService } from "./services/mcp-client-service.js";
 import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
@@ -2123,6 +2124,24 @@ export async function createApp(
     });
   };
   /**
+   * G3b — a workflow or a server's tool snapshot changed: MCP gateway `subscriptions/listen` streams on every instance
+   * (this one included) re-check their tool lists. Only while the gateway serves 2026-07-28 callers.
+   */
+  const gatewayToolsChanged = () => {
+    if (config.MCP_GATEWAY_MODERN_PROTOCOL === "on") announce({ t: GATEWAY_TOOLS_CHANGED_MESSAGE });
+  };
+  /** Only a workflow some toolset exposes can change a gateway tool list; a failed lookup announces anyway. */
+  const workflowToolsChanged = async (workflowId: string) => {
+    if (config.MCP_GATEWAY_MODERN_PROTOCOL !== "on") return;
+    try {
+      const toolsets = await store.listMcpToolsets();
+      if (!toolsets.some((toolset) => toolset.members.some((member) => member.kind === "workflow" && member.workflowId === workflowId))) return;
+    } catch (error) {
+      app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "Could not read MCP toolsets for a workflow change");
+    }
+    gatewayToolsChanged();
+  };
+  /**
    * A workflow was saved, published, restored or deleted through this instance: reload its schedules and triggers here
    * (an instance without background workers has neither), then, in cluster mode, tell the other instances so the leader
    * reloads at once, whichever role (`all`, `worker`, `api`, `webhook`) took the save. Every save site calls this.
@@ -2136,6 +2155,7 @@ export async function createApp(
       await triggerService?.reloadWorkflow(workflowId);
     }
     if (clusterMode) announce({ t: "workflow_changed", id: workflowId });
+    await workflowToolsChanged(workflowId);
   };
 
   // 13.3 — every purge by age goes through the retention service (created below, once the leader election, audit and
@@ -5153,7 +5173,8 @@ export async function createApp(
         if (requestedBy) return await connected(requestedBy);
         const creator = server.createdBy ? await store.getUserByEmail(server.createdBy) : null;
         return await connected(creator?.id);
-      }
+      },
+      onSnapshotChanged: () => gatewayToolsChanged()
     },
     {
       defaultIntervalMs: config.MCP_PROBE_INTERVAL_MS,
@@ -12370,6 +12391,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // front of the registry, and the toolset / client admin API.
   registerMcpGatewayRoutes({
     app,
+    clusterBus,
     runAccess,
     config,
     store,
