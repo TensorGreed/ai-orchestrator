@@ -66,7 +66,8 @@ async function ldapLogin(app: FastifyInstance, email: string, password = "pw") {
 }
 
 async function loginEntries(store: Store) {
-  return (await store.listAuditLogs({ eventType: "user.login", pageSize: 100 })).items.reverse();
+  // In the order written (listAuditLogs orders by time, and these entries can share a millisecond).
+  return (await store.listAuditLogsAfter({ afterId: null, limit: 1000 })).filter((entry) => entry.eventType === "user.login");
 }
 
 describe("LDAP sign-in", () => {

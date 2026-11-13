@@ -94,8 +94,9 @@ describeStoreContract("store contract: audit", (ctx) => {
     expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(1);
     expect(await store.pruneAuditLogs({ before: "2020-01-01T00:00:00.000Z" })).toBe(0);
     // The prune appends a retention checkpoint (see the retention tests below).
-    expect((await store.listAuditLogs()).items.map((item) => item.eventType)).toEqual(["audit.retention_checkpoint", "auth.login"]);
-    expect((await store.listAuditLogs()).items[1]!.id).toBe("new");
+    // In the order written: the entry kept, then the checkpoint (both can share a millisecond).
+    const left = await store.listAuditLogsAfter({ afterId: null, limit: 10 });
+    expect(left.map((item) => [item.id, item.eventType])).toEqual([["new", "auth.login"], [left[1]!.id, "audit.retention_checkpoint"]]);
     expect(await store.getExecutionManifest("exec-gone")).toBeNull();
     expect(await store.getExecutionManifest("exec-kept")).not.toBeNull();
     await store.saveExecutionRunContext("exec-gone-2", {}, "2001-01-01T00:00:00.000Z");
