@@ -143,4 +143,43 @@ describe("agent loop content capture", () => {
     };
     expect((await run(throwing)).stopReason).toBe("final_answer");
   });
+
+  it("v73: marks a tool cache row once the loop has seen sensitive data, whatever the call's own result labels", async () => {
+    const saved: Array<{ toolCallId?: string; sensitive?: boolean }> = [];
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(
+      new ScriptedProvider([
+        { content: "", toolCalls: [{ id: "c1", name: "files__read", arguments: { path: "a.txt" } }] },
+        { content: "", toolCalls: [{ id: "c2", name: "files__read", arguments: { path: "b.txt" } }] },
+        { content: "done", toolCalls: [] }
+      ])
+    );
+    const state = await new DefaultAgentRuntime().run(
+      { provider: { providerId: "scripted", model: "m" }, systemPrompt: "S", userPrompt: "U", tools: [{ serverId: "files", ...TOOL }], maxIterations: 5, toolCallingEnabled: true, sessionId: "s1" },
+      {
+        tools: [TOOL],
+        invokeTool: async () => ({ body: "x" }),
+        resultLabels: (_name, callId) => (callId === "c1" ? labels(["untrusted_external", "sensitive"]) : labels(["untrusted_external"]))
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined,
+        dataLabels: { input: labels(["user"]), persist: true },
+        toolDataStore: {
+          saveToolCall: async (input) => {
+            saved.push({ toolCallId: input.toolCallId, sensitive: input.sensitive });
+            return { ...input, id: `r-${saved.length}`, createdAt: "c" };
+          },
+          listToolCalls: async () => [],
+          getToolCall: async () => null
+        }
+      }
+    );
+    expect(state.stopReason).toBe("final_answer");
+    // c2's own result is not sensitive, but its arguments were chosen after the loop saw c1's sensitive result.
+    expect(saved).toEqual([
+      { toolCallId: "c1", sensitive: true },
+      { toolCallId: "c2", sensitive: true }
+    ]);
+  });
 });

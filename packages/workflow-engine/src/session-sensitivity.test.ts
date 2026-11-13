@@ -17,7 +17,7 @@ import {
   type WorkflowExecutionState,
   type WorkflowNode
 } from "@ai-orchestrator/shared";
-import { executeWorkflow, resumeWorkflowExecution, type AgentSessionArtifactRecord, type AgentSessionArtifactStore, type WorkflowExecutionDependencies } from "./executor";
+import { executeWorkflow, outputLabelsOf, resumeWorkflowExecution, type AgentSessionArtifactRecord, type AgentSessionArtifactStore, type WorkflowExecutionDependencies } from "./executor";
 import { SessionSensitivity, sensitivityTrackingSessionStores } from "./session-sensitivity";
 
 const SENSITIVE: DataLabels = { provenance: ["sensitive"], dataClasses: [], source: "propagated" };
@@ -129,6 +129,18 @@ describe("SessionSensitivity and the tracking stores", () => {
     await backing.stores.toolDataStore.saveToolCall({ namespace: "ns", sessionId: "s", toolName: "t", args: {}, output: 1, labels: USER });
     await stores.toolDataStore!.listToolCalls({ namespace: "ns", sessionId: "s" });
     expect(sensitivity.exclusion()).toBe(false);
+  });
+
+  it("a memory store without the v73 mark answers by its stored labels", async () => {
+    const backing = memoryStores({ memory: { s1: { messages: [{ role: "user", content: "x" }], labels: SENSITIVE }, s2: { messages: [{ role: "user", content: "y" }], labels: USER } } });
+    const { loadSensitive: _dropped, ...withoutMark } = backing.stores.memoryStore;
+    const legacy = { ...backing.stores, memoryStore: withoutMark };
+    const plain = new SessionSensitivity({ declared: async () => false, workSensitive: () => false });
+    await sensitivityTrackingSessionStores(legacy, plain).memoryStore!.loadMessages("ns", "s2");
+    expect(plain.readSensitive).toBe(false);
+    const labelled = new SessionSensitivity({ declared: async () => false, workSensitive: () => false });
+    await sensitivityTrackingSessionStores(legacy, labelled).memoryStore!.loadMessages("ns", "s1");
+    expect(labelled.readSensitive).toBe(true);
   });
 
   it("fails closed: a mark that cannot be read counts as marked, a declared check that fails marks writes", async () => {
@@ -325,5 +337,52 @@ describe("runs that write and read session state", () => {
       deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "hi" }] } } }).stores, { persistPausedExecution: async (input) => void clean.push(input.state) })
     );
     expect(clean[0]).not.toHaveProperty("sensitiveSessionRead");
+  });
+
+  it("a run that read a marked row hands its callers sensitive output labels; a clean run does not", async () => {
+    const wf = workflow(
+      "wf-g",
+      [node("start", "manual_trigger"), node("read", "local_memory", { namespace: "shared", sessionIdTemplate: "{{session_id}}" }), node("out", "output")],
+      [["start", "read"], ["read", "out"]]
+    );
+    const marked = await executeWorkflow({ workflow: wf, sessionId: "s1" }, deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card" }], sensitive: true } } }).stores));
+    expect(outputLabelsOf(marked)?.provenance).toContain("sensitive");
+    const clean = await executeWorkflow({ workflow: wf, sessionId: "s1" }, deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "hi" }] } } }).stores));
+    expect(outputLabelsOf(clean)?.provenance ?? []).not.toContain("sensitive");
+
+    // An agent that read marked memory: its own result labels say sensitive too.
+    const agentRun = await executeWorkflow(
+      { workflow: agentFlow("wf-h"), sessionId: "s1" },
+      deps(memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card" }, { role: "assistant", content: "ok" }], sensitive: true } } }).stores)
+    );
+    expect(agentRun.nodeResults.find((entry) => entry.nodeId === "agent")?.labels?.provenance ?? outputLabelsOf(agentRun)?.provenance).toContain("sensitive");
+  });
+
+  it("a sub-workflow with its own scoped stores notes and marks like its parent", async () => {
+    const parentStores = memoryStores();
+    const childStores = memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card 4242" }], sensitive: true } } });
+    const child = workflow(
+      "wf-child",
+      [node("cstart", "manual_trigger"), node("read", "local_memory", { namespace: "shared", sessionIdTemplate: "s1" }), node("cout", "output")],
+      [["cstart", "read"], ["read", "cout"]]
+    );
+    const parent = workflow(
+      "wf-parent",
+      [node("start", "manual_trigger"), node("call", "execute_workflow", { workflowId: "wf-child", mode: "sync" }), node("save", "session_artifact_save", { namespace: "shared", sessionIdTemplate: "{{session_id}}", artifactKey: "copy" }), node("out", "output")],
+      [["start", "call"], ["call", "save"], ["save", "out"]]
+    );
+    const capture = capturing();
+    const result = await executeWorkflow(
+      { workflow: parent, sessionId: "s1" },
+      deps(parentStores.stores, {
+        instrument: capture.instrument,
+        loadWorkflow: (id) => (id === "wf-child" ? child : undefined),
+        scopeSubWorkflow: () => ({ ...childStores.stores })
+      })
+    );
+    expect(result.status).toBe("success");
+    // The child's read (through its own stores) makes the parent run sensitive_memory and marks the parent's write.
+    expect(capture.answer()).toContain("sensitive_memory");
+    expect(parentStores.artifacts.get("copy")?.sensitive).toBe(true);
   });
 });

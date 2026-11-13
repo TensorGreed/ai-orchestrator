@@ -28,6 +28,8 @@ export class SessionSensitivity {
       workSensitive: () => boolean;
       /** A resumed run that had read a marked row before it paused. */
       readBefore?: boolean;
+      /** Called on each read of a marked row (the engine adds `sensitive` to the reading node's labels). */
+      onSensitiveRead?: () => void;
     }
   ) {
     this.readMarked = options.readBefore === true;
@@ -44,7 +46,13 @@ export class SessionSensitivity {
   }
 
   noteRead(sensitive: boolean): void {
-    if (sensitive) this.readMarked = true;
+    if (!sensitive) return;
+    this.readMarked = true;
+    try {
+      this.options.onSensitiveRead?.();
+    } catch {
+      // Labels are best effort here: the run is already sensitive for content capture and marks what it writes.
+    }
   }
 
   /** Whether a row written now (with `labels`, if the run tracks them) is marked. Fails closed. */
@@ -84,10 +92,13 @@ export function sensitivityTrackingSessionStores(dependencies: SessionStores, se
             ...memoryStore,
             loadMessages: async (namespace: string, sessionId: string) => {
               const messages = await memoryStore.loadMessages(namespace, sessionId);
-              if (messages.length > 0 && memoryStore.loadSensitive) {
+              if (messages.length > 0 && (memoryStore.loadSensitive || memoryStore.loadLabels)) {
                 let sensitive: boolean;
                 try {
-                  sensitive = await memoryStore.loadSensitive(namespace, sessionId);
+                  // A store without the v73 mark still answers by its stored labels.
+                  sensitive = memoryStore.loadSensitive
+                    ? await memoryStore.loadSensitive(namespace, sessionId)
+                    : labelsMarkSensitive(await memoryStore.loadLabels!(namespace, sessionId));
                 } catch {
                   sensitive = true;
                 }
@@ -99,7 +110,7 @@ export function sensitivityTrackingSessionStores(dependencies: SessionStores, se
             ...(memoryStore.loadSensitive ? { loadSensitive: memoryStore.loadSensitive.bind(memoryStore) } : {}),
             saveMessages: async (...args: Parameters<typeof memoryStore.saveMessages>) => {
               const [namespace, sessionId, messages, options] = args;
-              if (!(await sensitivity.writeSensitive(options?.labels))) return await memoryStore.saveMessages(...args);
+              if (options?.sensitive !== true && !(await sensitivity.writeSensitive(options?.labels))) return await memoryStore.saveMessages(...args);
               return await memoryStore.saveMessages(namespace, sessionId, messages, { ...options, sensitive: true });
             }
           }
@@ -120,7 +131,7 @@ export function sensitivityTrackingSessionStores(dependencies: SessionStores, se
               return row;
             },
             saveToolCall: async (input: Parameters<typeof toolDataStore.saveToolCall>[0]) =>
-              (await sensitivity.writeSensitive(input.labels))
+              input.sensitive === true || (await sensitivity.writeSensitive(input.labels))
                 ? await toolDataStore.saveToolCall({ ...input, sensitive: true })
                 : await toolDataStore.saveToolCall(input)
           }
@@ -136,7 +147,7 @@ export function sensitivityTrackingSessionStores(dependencies: SessionStores, se
               return row;
             },
             saveArtifact: async (input: Parameters<typeof sessionArtifactStore.saveArtifact>[0]) =>
-              (await sensitivity.writeSensitive(input.labels))
+              input.sensitive === true || (await sensitivity.writeSensitive(input.labels))
                 ? await sessionArtifactStore.saveArtifact({ ...input, sensitive: true })
                 : await sessionArtifactStore.saveArtifact(input)
           }

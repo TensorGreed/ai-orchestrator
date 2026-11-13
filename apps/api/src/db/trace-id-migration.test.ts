@@ -107,7 +107,9 @@ run("Postgres: a database at v71 upgrades to v72", () => {
         await twin.close();
       }
       const after = (await pool.query<{ version: number }>(`SELECT version::int AS version FROM schema_migrations ORDER BY version`)).rows.map((row) => row.version);
-      expect(after.at(-1)).toBe(72);
+      // v72 and every later migration ran.
+      expect(after).toContain(72);
+      expect(after.at(-1)).toBe(Math.max(...MIGRATIONS.map((migration) => migration.version)));
       expect(after).not.toContain(70);
       const column = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'execution_history' AND column_name = 'trace_id'`);
       expect(column.rows).toHaveLength(1);

@@ -20,7 +20,6 @@ describe("migration v73 (sensitive session rows)", () => {
   it("comes right after v72 and adds and drops the column on the three session tables", () => {
     const versions = MIGRATIONS.map((migration) => migration.version);
     expect(versions.indexOf(73)).toBe(versions.indexOf(72) + 1);
-    expect(Math.max(...versions)).toBe(73);
     for (const table of TABLES) {
       expect(v73.up).toContain(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS sensitive INTEGER NOT NULL DEFAULT 0`);
       expect(v73.down).toContain(`ALTER TABLE ${table} DROP COLUMN IF EXISTS sensitive`);
@@ -138,7 +137,8 @@ run("Postgres: a database at v72 upgrades to v73", () => {
         await twin.close();
       }
       const after = (await pool.query<{ version: number }>(`SELECT version::int AS version FROM schema_migrations ORDER BY version`)).rows.map((row) => row.version);
-      expect(after.at(-1)).toBe(73);
+      expect(after).toContain(73);
+      expect(after.at(-1)).toBe(Math.max(...MIGRATIONS.map((migration) => migration.version)));
       for (const table of TABLES) {
         const column = await pool.query(
           `SELECT data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = 'sensitive'`,
