@@ -129,7 +129,8 @@ import {
   type RagFetch,
   type EmbeddingAdapter,
   type EmbeddingModelTarget,
-  gatedEmbeddingAdapter
+  gatedEmbeddingAdapter,
+  registryEmbeddingAdapter
 } from "./rag-adapters";
 import {
   extractCitationsFromText,
@@ -4036,10 +4037,19 @@ function toJsonSafeValue(value: unknown): unknown {
   }
 }
 
-/** 12.6 — `embedder` with the run's model allowlist check in front of every embedding call (when the run has one). */
+/**
+ * 12.6 — `embedder` with the run's model allowlist check in front of every embedding call (when the run has one).
+ * With an embedding registry (the instrumented one while tracing or metrics are on) each call also goes through it,
+ * so it gets an `embeddings` span and the token and duration metrics; the check then runs inside the call.
+ */
 function checkedEmbedder(embedder: EmbeddingAdapter, dependencies: WorkflowExecutionDependencies, nodeId: string): EmbeddingAdapter {
   const check = dependencies.checkEmbeddingModel;
-  return check ? gatedEmbeddingAdapter(embedder, async (target) => await check(target, { nodeId })) : embedder;
+  const nodeCheck = check ? async (target: EmbeddingModelTarget) => await check(target, { nodeId }) : undefined;
+  const registry = dependencies.embeddingProviderRegistry;
+  if (registry) {
+    return registryEmbeddingAdapter(embedder, { registry, context: () => providerCallContext(dependencies, nodeId), ...(nodeCheck ? { check: nodeCheck } : {}) });
+  }
+  return nodeCheck ? gatedEmbeddingAdapter(embedder, nodeCheck) : embedder;
 }
 
 /** The outbound guard's pinned fetch, for RAG endpoints that come from a node's own config. */

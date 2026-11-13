@@ -286,7 +286,8 @@ async function startUpstream(): Promise<Upstream> {
       const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
       upstream.requests.push({ path: req.url ?? "", headers: req.headers });
       if ((req.url ?? "").endsWith("/embeddings")) {
-        const inputs = body.input as string[];
+        // The /v1 gateway sends a list; RAG and knowledge-base embedders send one text.
+        const inputs = Array.isArray(body.input) ? (body.input as string[]) : [body.input as string];
         res.writeHead(200, { "content-type": "application/json" }).end(
           JSON.stringify({ object: "list", data: inputs.map((_, index) => ({ index, embedding: [0.1, 0.2, 0.3, 0.4] })), model: "up-embed", usage: { prompt_tokens: 2, total_tokens: 2 } })
         );
@@ -614,6 +615,106 @@ describe("workflow runs through the API", () => {
     const tokens = Number(chat.attributes["gen_ai.usage.input_tokens"]) + Number(chat.attributes["gen_ai.usage.output_tokens"]);
     expect(tokens).toBeGreaterThan(0);
     expect(cost).toMatchObject({ attributes: { "gen_ai.provider.name": "openai", "gen_ai.request.model": "up-model", "l2m.project.id": "default" }, value: tokens });
+  });
+});
+
+describe("RAG and knowledge-base embedders", () => {
+  const embeddingSpans = (fixture: Fixture) => fixture.spans.getFinishedSpans().filter((span) => span.name === "embeddings rag-embed");
+
+  it("records a rag_retrieve embedder's calls as embeddings spans under the node, with usage and the metrics", async () => {
+    const fixture = await setup();
+    const workflow: Workflow = workflowOf(
+      "wf-otel-rag",
+      [
+        node("text", "text_input", { text: "which colour" }),
+        node("retrieve", "rag_retrieve", {
+          queryTemplate: "{{text}}",
+          topK: 1,
+          embedderId: "openai-embedder",
+          embeddingSecretRef: { secretId: fixture.secretId },
+          vectorStoreConfig: { baseUrl: fixture.upstream.baseUrl, model: "rag-embed" },
+          documents: [{ id: "d1", text: MARKER }]
+        }),
+        node("out", "output", { outputKey: "context" })
+      ],
+      [edge("text", "retrieve"), edge("retrieve", "out")]
+    );
+    await fixture.store.upsertWorkflow({ ...workflow, projectId: "default" });
+    const run = await api<{ status: string }>(fixture, "POST", `/api/workflows/${workflow.id}/execute`, {});
+    expect(run.status, run.raw).toBe(200);
+    expect(run.body.status).toBe("success");
+    // One call per document and one for the query, each sent by the embedder itself (its key, its endpoint).
+    const embedCalls = fixture.upstream.requests.filter((request) => request.path.endsWith("/embeddings"));
+    expect(embedCalls).toHaveLength(2);
+    expect(embedCalls[0]!.headers.authorization).toBe(`Bearer ${UPSTREAM_KEY}`);
+    const spans = await until(() => (embeddingSpans(fixture).length >= 2 ? embeddingSpans(fixture) : null), "the embeddings spans");
+    const nodeSpan = fixture.spans.getFinishedSpans().find((span) => span.name === "l2m.node rag_retrieve")!;
+    for (const span of spans) {
+      expect(parentOf(span)).toBe(nodeSpan.spanContext().spanId);
+      expect(span.attributes).toMatchObject({
+        "gen_ai.operation.name": "embeddings",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "rag-embed",
+        "gen_ai.response.model": "up-embed",
+        "gen_ai.usage.input_tokens": 2,
+        "gen_ai.embeddings.dimension.count": 4,
+        "server.address": "127.0.0.1"
+      });
+    }
+    noContent(fixture.spans.getFinishedSpans());
+    const metrics = await fixture.metrics();
+    const duration = metrics.get("gen_ai.client.operation.duration")?.find((point) => point.attributes["gen_ai.operation.name"] === "embeddings");
+    expect((duration?.value as { count: number }).count).toBe(2);
+    expect(metrics.get("gen_ai.client.token.usage")?.find((point) => point.attributes["gen_ai.request.model"] === "rag-embed")).toBeDefined();
+  });
+
+  it("records a refused embedder (model allowlist) as an embeddings span with its type, and sends nothing", async () => {
+    const fixture = await setup();
+    const allow = await api(fixture, "POST", "/api/model-allowlist", { scope: "deployment", providerId: "openai", modelGlob: "another-model" });
+    expect(allow.status, allow.raw).toBeLessThan(300);
+    const workflow: Workflow = workflowOf(
+      "wf-otel-rag-refused",
+      [
+        node("text", "text_input", { text: "which colour" }),
+        node("retrieve", "rag_retrieve", {
+          queryTemplate: "{{text}}",
+          embedderId: "openai-embedder",
+          embeddingSecretRef: { secretId: fixture.secretId },
+          vectorStoreConfig: { baseUrl: fixture.upstream.baseUrl, model: "rag-embed" },
+          documents: [{ id: "d1", text: "blue" }]
+        }),
+        node("out", "output", { outputKey: "context" })
+      ],
+      [edge("text", "retrieve"), edge("retrieve", "out")]
+    );
+    await fixture.store.upsertWorkflow({ ...workflow, projectId: "default" });
+    const run = await api<{ status: string }>(fixture, "POST", `/api/workflows/${workflow.id}/execute`, {});
+    expect(run.body.status).toBe("error");
+    expect(fixture.upstream.requests.filter((request) => request.path.endsWith("/embeddings"))).toEqual([]);
+    const [span] = await until(() => (embeddingSpans(fixture).length ? embeddingSpans(fixture) : null), "the refused span");
+    expect(span!.status.code).toBe(2);
+    expect(span!.attributes["error.type"]).toBe("model_not_allowed");
+  });
+
+  it("records a knowledge base's embedder on ingest and search", async () => {
+    const fixture = await setup();
+    const created = await api<{ knowledgeBase: { id: string } }>(fixture, "POST", "/api/knowledge-bases", {
+      name: "Traced KB",
+      embedderId: "openai-embedder",
+      embedderConfig: { baseUrl: fixture.upstream.baseUrl, model: "rag-embed", secretRef: { secretId: fixture.secretId } }
+    });
+    expect(created.status, created.raw).toBeLessThan(300);
+    const id = created.body.knowledgeBase.id;
+    const ingest = await api(fixture, "POST", `/api/knowledge-bases/${id}/ingest`, { sourceId: "s1", documents: [{ content: MARKER }] });
+    expect(ingest.status, ingest.raw).toBe(200);
+    const search = await api(fixture, "POST", `/api/knowledge-bases/${id}/search`, { query: "colour", topK: 1 });
+    expect(search.status, search.raw).toBe(200);
+    const spans = await until(() => (embeddingSpans(fixture).length >= 2 ? embeddingSpans(fixture) : null), "the knowledge base spans");
+    expect(spans.map((span) => span.attributes["gen_ai.usage.input_tokens"])).toEqual([2, 2]);
+    expect(new Set(spans.map((span) => parentOf(span)))).toEqual(
+      new Set(fixture.spans.getFinishedSpans().filter((span) => String(span.attributes["http.route"] ?? "").startsWith("/api/knowledge-bases/:id/")).map((span) => span.spanContext().spanId))
+    );
+    noContent(fixture.spans.getFinishedSpans());
   });
 });
 

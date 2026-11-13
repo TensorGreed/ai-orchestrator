@@ -91,6 +91,7 @@ import {
   TokenEmbeddingAdapter,
   OpenAIEmbeddingAdapter,
   AzureOpenAIEmbeddingAdapter,
+  registryEmbeddingAdapter,
   CohereEmbeddingAdapter,
   MistralEmbeddingAdapter,
   GoogleVertexEmbeddingAdapter,
@@ -7359,6 +7360,18 @@ export async function createApp(
    * 12.6 — a knowledge base's embedder sends text to a model, so the model allowlist of the knowledge base's project
    * applies (a shared knowledge base: the default project's). The refusal message, or null when allowed.
    */
+  /**
+   * A knowledge base's embedder. While tracing or metrics are on, each call goes through the instrumented embedding
+   * registry (an `embeddings` span and the token and duration metrics); the embedder itself is unchanged.
+   */
+  const kbEmbedder = async (kb: { embedderId: string; embedderConfig: Record<string, unknown> }): Promise<EmbeddingAdapter | null> => {
+    const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+    if (!embedder || !modelTelemetry.active) return embedder;
+    return registryEmbeddingAdapter(embedder, {
+      registry: runEmbeddingRegistry,
+      context: () => ({ resolveSecret: async (ref) => await secretService.resolveSecret(ref) })
+    });
+  };
   const kbEmbeddingRefusal = async (kb: { id: string; projectId?: string | null }, embedder: EmbeddingAdapter): Promise<string | null> => {
     const target = embedder.modelTarget;
     if (!target) return null;
@@ -7537,7 +7550,7 @@ export async function createApp(
 
     // Path 2: server-side embedding of plain documents
     if (Array.isArray(body.documents) && body.documents.length > 0) {
-      const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+      const embedder = await kbEmbedder(kb);
       if (!embedder) {
         reply.code(400);
         return { error: `Cannot instantiate embedder ${kb.embedderId} — check embedderConfig` };
@@ -7644,7 +7657,7 @@ export async function createApp(
       }
 
       // 3. Embed using the KB's configured embedder
-      const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+      const embedder = await kbEmbedder(kb);
       if (!embedder) {
         reply.code(400);
         return { error: `Cannot instantiate embedder ${kb.embedderId} — check embedderConfig` };
@@ -7759,7 +7772,7 @@ export async function createApp(
         reply.code(400);
         return { error: "query is required" };
       }
-      const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+      const embedder = await kbEmbedder(kb);
       if (!embedder) {
         reply.code(400);
         return { error: `Cannot instantiate embedder ${kb.embedderId} — check embedderConfig` };
