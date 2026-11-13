@@ -74,6 +74,11 @@ export interface GatewaySession {
    * track (at most once per half idle window).
    */
   unobservedNotedAt?: number;
+  /**
+   * Legacy only (12.2, modern mode on): the session has taken up labels its client's stateless calls stored, and that
+   * was audited (`mcp_gateway.session_labels_inherited`, once per session).
+   */
+  inheritedLabelsAudited?: boolean;
   clientId: string;
   toolsetId: string;
   /** A legacy session's negotiated version; a principal state's version of its latest request. */

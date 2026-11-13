@@ -301,6 +301,10 @@ describe("stored label marks of stateless callers", () => {
     // audit the stored raise again.
     const raised = await auditEvents(b.store, "mcp_gateway.session_labels_raised");
     expect(raised.map((entry) => (entry.metadata as { sessionId?: string } | undefined)?.sessionId ?? null).sort()).toEqual([clean, null].sort());
+    // It records once that it took them up when it opened, with the labels and where they came from.
+    const inherited = await auditEvents(b.store, "mcp_gateway.session_labels_inherited");
+    expect(inherited).toHaveLength(1);
+    expect(inherited[0]!.metadata).toMatchObject({ sessionId, clientId: fixture.client.id, source: "stored_mark", at: "session_open", labels: { provenance: ["untrusted_external"], dataClasses: [] } });
   });
 
   it("counts a stored note of untracked results in a new legacy session's first call", async () => {
@@ -321,6 +325,9 @@ describe("stored label marks of stateless callers", () => {
     const second = await legacySession(fixture, b);
     expect((await legacyCall(fixture, b, second, "4+4")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
     expect(await auditEvents(b.store, "mcp_gateway.session_labels_raised")).toHaveLength(1);
+    // The session whose read converted the note is named by the raise event; only the second session inherited.
+    const inherited = await auditEvents(b.store, "mcp_gateway.session_labels_inherited");
+    expect(inherited.map((entry) => (entry.metadata as { sessionId?: string }).sessionId)).toEqual([second]);
     const [stored] = await b.store.listMcpGatewayLabelMarks({ clientId: fixture.client.id }, new Date().toISOString());
     expect(stored).toMatchObject({ unobserved: false, provenance: ["untrusted_external"] });
   });
@@ -328,14 +335,11 @@ describe("stored label marks of stateless callers", () => {
   it("does not open a legacy session on a tracking toolset when the stored mark cannot be read", async () => {
     const fixture = await setup({ track: true });
     const a = fixture.instance;
-    // A note of untracked results that cannot be converted refuses the session too.
+    // The client's mark holds a note of untracked results: it is read and converted in one step, which fails here.
     expect((await api(a, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { trackSessionLabels: false })).status).toBe(200);
     await calc(fixture, a, "1+1");
     expect((await api(a, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { trackSessionLabels: true })).status).toBe(200);
-    const convert = vi.spyOn(a.store, "raiseMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
-    expect((await initialize(fixture, a)).statusCode).toBe(503);
-    convert.mockRestore();
-    const read = vi.spyOn(a.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    const read = vi.spyOn(a.store, "peekMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
     const refused = await initialize(fixture, a);
     expect(refused.statusCode).toBe(503);
     expect(refused.headers["mcp-session-id"]).toBeUndefined();
@@ -343,15 +347,17 @@ describe("stored label marks of stateless callers", () => {
     expect(await auditEvents(a.store, "mcp_gateway.session_started")).toHaveLength(0);
     read.mockRestore();
     expect((await initialize(fixture, a)).statusCode).toBe(200);
+    // Nothing was converted while the read failed; the session that opened converted the note once.
+    expect(await auditEvents(a.store, "mcp_gateway.session_labels_raised")).toHaveLength(1);
 
     // A toolset that does not track reads nothing: sessions open as before.
     const untracked = await setup({ track: false });
-    const spy = vi.spyOn(untracked.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    const spy = vi.spyOn(untracked.instance.store, "peekMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
     expect((await initialize(untracked, untracked.instance)).statusCode).toBe(200);
     expect(spy).not.toHaveBeenCalled();
     // Neither does a tracking toolset while modern mode is off (no marks are stored then).
     const off = await setup({ track: true, env: { MCP_GATEWAY_MODERN_PROTOCOL: "off" } });
-    const offSpy = vi.spyOn(off.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    const offSpy = vi.spyOn(off.instance.store, "peekMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
     expect((await initialize(off, off.instance)).statusCode).toBe(200);
     expect(offSpy).not.toHaveBeenCalled();
   });
@@ -373,7 +379,7 @@ describe("stored label marks of stateless callers", () => {
     // A second session, used once while the mark cannot be read: the call is refused before it reaches the tool.
     const other = await setup({ track: true });
     const session = await legacySession(other, other.instance);
-    const read = vi.spyOn(other.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    const read = vi.spyOn(other.instance.store, "peekMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
     const refused = await legacyCall(other, other.instance, session, "1+1");
     expect(refused.result?.isError).toBe(true);
     expect((refused.result?.content ?? []).map((entry) => entry.text).join("")).toMatch(/labels could not be checked/);
@@ -385,15 +391,99 @@ describe("stored label marks of stateless callers", () => {
     // With modern mode off nothing is read: a legacy session's calls run as before.
     const off = await setup({ track: true, env: { MCP_GATEWAY_MODERN_PROTOCOL: "off" } });
     const offSession = await legacySession(off, off.instance);
-    const offRead = vi.spyOn(off.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    const offRead = vi.spyOn(off.instance.store, "peekMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
     expect((await legacyCall(off, off.instance, offSession, "2+3")).result?.structuredContent?.result).toBe(5);
     expect(offRead).not.toHaveBeenCalled();
     // Nor on a toolset that does not track.
     const untracked = await setup({ track: false });
     const untrackedSession = await legacySession(untracked, untracked.instance);
-    const untrackedRead = vi.spyOn(untracked.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    const untrackedRead = vi.spyOn(untracked.instance.store, "peekMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
     expect((await legacyCall(untracked, untracked.instance, untrackedSession, "3+3")).result?.structuredContent?.result).toBe(6);
     expect(untrackedRead).not.toHaveBeenCalled();
+  });
+
+  it("does not renew the client's stored mark, or show its stateless caller as recently seen, when a legacy session reads it", async () => {
+    const fixture = await setup({ track: true });
+    const a = fixture.instance;
+    await calc(fixture, a, "1+1");
+    expect((await calc(fixture, a, "2+2")).error?.code).toBe(APPROVAL_PENDING);
+    // Pin the stored mark: its stateless caller was last seen ten minutes ago, and it ends in a minute.
+    const lastSeen = new Date(Date.now() - 10 * 60_000).toISOString();
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    await testSql(a.store).run(`UPDATE mcp_gateway_label_marks SET last_seen_at = ?, expires_at = ? WHERE client_id = ?`, lastSeen, expiresAt, fixture.client.id);
+    const stored = async () => (await a.store.listMcpGatewayLabelMarks({ clientId: fixture.client.id }, new Date().toISOString()))[0];
+
+    // A session opens and calls three times: it takes the labels up every time (its writes are held)...
+    const sessionId = await legacySession(fixture, a);
+    for (const expression of ["3+3", "4+4", "5+5"]) {
+      expect((await legacyCall(fixture, a, sessionId, expression)).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    }
+    // ...but none of that is the stateless caller's activity: the mark's last call and expiry did not move.
+    const after = await stored();
+    expect(Date.parse(after!.lastSeenAt)).toBe(Date.parse(lastSeen));
+    expect(Date.parse(after!.expiresAt)).toBe(Date.parse(expiresAt));
+
+    // A real stateless call does renew it.
+    expect((await calc(fixture, a, "6+6")).error?.code).toBe(APPROVAL_PENDING);
+    const renewed = await stored();
+    expect(Date.parse(renewed!.lastSeenAt)).toBeGreaterThan(Date.parse(lastSeen));
+    expect(Date.parse(renewed!.expiresAt)).toBeGreaterThan(Date.parse(expiresAt));
+
+    // Once the stored mark ends, the session keeps what it took up: its labels are its own and never go down.
+    await testSql(a.store).run(`UPDATE mcp_gateway_label_marks SET expires_at = ? WHERE client_id = ?`, new Date(Date.now() - 1_000).toISOString(), fixture.client.id);
+    expect((await legacyCall(fixture, a, sessionId, "7+7")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    expect(await stored()).toBeUndefined();
+  });
+
+  it("converts a stored note of untracked results for a legacy session without renewing the client's mark", async () => {
+    const fixture = await setup({ track: false });
+    const a = fixture.instance;
+    expect((await calc(fixture, a, "1+1")).result?.structuredContent?.result).toBe(2);
+    expect((await api(a, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { trackSessionLabels: true })).status).toBe(200);
+    const lastSeen = new Date(Date.now() - 10 * 60_000).toISOString();
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    await testSql(a.store).run(`UPDATE mcp_gateway_label_marks SET last_seen_at = ?, expires_at = ? WHERE client_id = ?`, lastSeen, expiresAt, fixture.client.id);
+    const sessionId = await legacySession(fixture, a);
+    expect((await legacyCall(fixture, a, sessionId, "2+2")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    const [stored] = await a.store.listMcpGatewayLabelMarks({ clientId: fixture.client.id }, new Date().toISOString());
+    expect(stored).toMatchObject({ unobserved: false, provenance: ["untrusted_external"], raiseAudited: true });
+    expect(Date.parse(stored!.lastSeenAt)).toBe(Date.parse(lastSeen));
+    expect(Date.parse(stored!.expiresAt)).toBe(Date.parse(expiresAt));
+  });
+
+  it("records once per legacy session that it took up labels its client's stateless calls raised", async () => {
+    const fixture = await setup({ track: true });
+    const a = fixture.instance;
+    // `own` raises its own labels first; `later` opens clean and waits.
+    const own = await legacySession(fixture, a);
+    expect((await legacyCall(fixture, a, own, "1+1")).result?.structuredContent?.result).toBe(2);
+    const later = await legacySession(fixture, a);
+    // The client's stateless calls raise the stored mark.
+    await calc(fixture, a, "2+2");
+    expect((await calc(fixture, a, "3+3")).error?.code).toBe(APPROVAL_PENDING);
+
+    // `later` takes the labels up on its next call, and records it once however often it reads them again.
+    expect((await legacyCall(fixture, a, later, "4+4")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    expect((await legacyCall(fixture, a, later, "5+5")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    // `own` already held them: it takes up nothing new and records nothing.
+    expect((await legacyCall(fixture, a, own, "6+6")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    // A session opened now takes them up when it opens.
+    const opened = await legacySession(fixture, a);
+    expect((await legacyCall(fixture, a, opened, "7+7")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+
+    const inherited = await auditEvents(a.store, "mcp_gateway.session_labels_inherited");
+    const bySession = new Map(inherited.map((entry) => [(entry.metadata as { sessionId?: string }).sessionId, entry]));
+    expect([...bySession.keys()].sort()).toEqual([later, opened].sort());
+    expect(inherited).toHaveLength(2);
+    const labels = { provenance: ["untrusted_external"], dataClasses: [] };
+    expect(bySession.get(later)).toMatchObject({ action: "update", resourceId: fixture.toolset.id });
+    expect(bySession.get(later)!.metadata).toMatchObject({ clientId: fixture.client.id, source: "stored_mark", at: "tool_call", labels, added: labels });
+    expect(bySession.get(opened)!.metadata).toMatchObject({ source: "stored_mark", at: "session_open", labels, added: labels });
+    expect(typeof (bySession.get(later)!.metadata as { storedRaisedAt?: unknown }).storedRaisedAt).toBe("string");
+
+    // The raise rule is unchanged: `own`'s own raise, and the stored mark's first raise by the stateless call.
+    const raised = await auditEvents(a.store, "mcp_gateway.session_labels_raised");
+    expect(raised.map((entry) => (entry.metadata as { sessionId?: string } | undefined)?.sessionId ?? null).sort()).toEqual([own, null].sort());
   });
 
   it("withholds a result whose labels cannot be stored, and still holds the caller's next write on this instance", async () => {

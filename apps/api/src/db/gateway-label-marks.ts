@@ -199,6 +199,38 @@ export function labelMarkTouchParams(key: McpGatewayLabelMarkKey, at: { now: str
   return [at.now, at.expiresAt, at.expiresAt, key.clientId, key.toolsetId, key.scopeKey, at.now];
 }
 
+/**
+ * Reads a live mark without touching it: `last_seen_at` and `expires_at` stay as stored. Used for the client's legacy
+ * sessions, which take up the mark of the client's stateless calls but are not those calls' activity.
+ */
+export const LABEL_MARK_PEEK_SQL = `SELECT * FROM mcp_gateway_label_marks
+  WHERE client_id = ? AND toolset_id = ? AND scope_key = ? AND expires_at > ?`;
+
+/** The peek's parameters, in LABEL_MARK_PEEK_SQL's order. */
+export function labelMarkPeekParams(key: McpGatewayLabelMarkKey, now: string): unknown[] {
+  return [key.clientId, key.toolsetId, key.scopeKey, now];
+}
+
+/**
+ * The conversion a peek runs on a live mark that noted untracked results: they count as outside content now (a raise,
+ * `firstRaise` as for any raise), but the mark's last call and expiry stay as stored, since no call of the caller
+ * itself happened. `stored` must be the live row, read under the row lock (Postgres) or in the write transaction
+ * (SQLite).
+ */
+export function convertLabelMarkQuietly(stored: McpGatewayLabelMark, now: string): { next: McpGatewayLabelMark; firstRaise: boolean } {
+  const { next, firstRaise } = mergeLabelMark(stored, {
+    clientId: stored.clientId,
+    toolsetId: stored.toolsetId,
+    scopeKey: stored.scopeKey,
+    provenance: [],
+    dataClasses: [],
+    convertUnobserved: true,
+    now,
+    expiresAt: stored.expiresAt
+  });
+  return { next: { ...next, lastSeenAt: stored.lastSeenAt, expiresAt: stored.expiresAt }, firstRaise };
+}
+
 /** The v71 table, as the Postgres chain creates it (TEXT timestamps on SQLite). */
 export function ensureLabelMarkSchema(db: BetterSqlite3Database): void {
   db.exec(`

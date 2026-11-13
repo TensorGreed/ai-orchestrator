@@ -743,25 +743,84 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     session.labels.raiseAudited = true;
   };
   /**
-   * A legacy session on a tracking toolset joins the client's stored mark (already converted: results noted while the
-   * toolset did not track count as outside content), when it opens and again on every call. The stored raise is audited
-   * by the store's firstRaise, never again by the session.
-   */
-  const seedLegacySession = (session: GatewaySession, mark: McpGatewayLabelMark) => {
-    if (labelMarkRaised(mark)) mirrorStoredMark(session, mark);
-  };
-  /**
    * The stored mark of a client's stateless calls (the same token and user) on a toolset, read for its legacy sessions.
-   * A note of results returned while the toolset did not track is converted in the store, as a stateless call converts
-   * it, so it is counted and audited once (`firstRaise`). Throws when the mark cannot be read or converted.
+   * The read does not count as the client's stateless activity: the mark's last call and expiry stay as stored, so a
+   * busy session neither keeps the stored labels alive nor makes the stateless caller look recently seen. A note of
+   * results returned while the toolset did not track is converted in the store in the same step, as a stateless call
+   * converts it, so it is counted and audited once (`firstRaise`). Throws when the mark cannot be read or converted.
    */
   const readClientStoredMark = async (auth: AuthenticatedClient, toolset: McpToolset): Promise<{ mark: McpGatewayLabelMark | null; firstRaise: boolean }> => {
-    const clock = markClock();
     const key: McpGatewayLabelMarkKey = { clientId: auth.client.id, toolsetId: toolset.id, scopeKey: auth.client.createdBy ?? "" };
-    const mark = await store.readMcpGatewayLabelMark(key, clock);
-    if (!mark?.unobserved) return { mark, firstRaise: false };
-    const raised = await store.raiseMcpGatewayLabelMark({ ...key, provenance: [], dataClasses: [], convertUnobserved: true, now: clock.now, expiresAt: clock.expiresAt });
-    return { mark: raised.mark, firstRaise: raised.firstRaise };
+    return await store.peekMcpGatewayLabelMark(key, markClock().now);
+  };
+  /** Recorded at most once per legacy session: it took up labels its client's stateless calls had stored. */
+  const auditInheritedLabels = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    mark: McpGatewayLabelMark,
+    added: McpGatewaySessionLabels,
+    at: "session_open" | "tool_call"
+  ) => {
+    try {
+      await deps.auditRaw({
+        category: "system",
+        eventType: "mcp_gateway.session_labels_inherited",
+        action: "update",
+        outcome: "success",
+        actor: { type: "api_key", email: auth.client.name },
+        resourceType: "mcp_toolset",
+        resourceId: toolset.id,
+        projectId: toolset.projectId,
+        metadata: {
+          ...scopeMetadata(session),
+          clientId: auth.client.id,
+          source: "stored_mark",
+          at,
+          labels: storedLabelsView(mark),
+          added,
+          storedRaisedAt: mark.raisedAt
+        }
+      });
+    } catch (error) {
+      app.log.error(
+        { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, sessionId: session.id },
+        "Failed to audit a gateway session taking up its client's stored labels"
+      );
+    }
+  };
+  /**
+   * A legacy session on a tracking toolset joins the client's stored mark (already converted: results noted while the
+   * toolset did not track count as outside content), when it opens and again on every call. The stored raise is audited
+   * once per mark, by the store's firstRaise (`session_labels_raised`), never again by the session. The first time the
+   * mark adds labels the session did not hold, raised by the client's stateless calls rather than by this session's own
+   * read, the session records `session_labels_inherited` (once per session).
+   */
+  const takeUpClientStoredMark = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    stored: { mark: McpGatewayLabelMark | null; firstRaise: boolean },
+    at: "session_open" | "tool_call"
+  ): Promise<void> => {
+    const { mark, firstRaise } = stored;
+    if (!mark || !labelMarkRaised(mark)) return;
+    const provenanceBefore = new Set(session.labels.provenance);
+    const classesBefore = new Set(session.labels.dataClasses);
+    mirrorStoredMark(session, mark);
+    if (firstRaise) {
+      // This session's read raised the stored mark first: the raise event names the session, so it inherits nothing.
+      session.inheritedLabelsAudited = true;
+      await auditStoredRaise(session, auth, toolset, null, "results_before_tracking", storedLabelsView(mark));
+      return;
+    }
+    const added: McpGatewaySessionLabels = {
+      provenance: PROVENANCE_LABELS.filter((label) => session.labels.provenance.has(label) && !provenanceBefore.has(label)),
+      dataClasses: [...session.labels.dataClasses].filter((name) => !classesBefore.has(name)).sort()
+    };
+    if (session.inheritedLabelsAudited || (added.provenance.length === 0 && added.dataClasses.length === 0)) return;
+    session.inheritedLabelsAudited = true;
+    await auditInheritedLabels(session, auth, toolset, mark, added, at);
   };
   /**
    * 12.2 — a legacy session on a tracking toolset, with modern mode on (marks are stored only then): before each call the
@@ -780,9 +839,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       );
       throw new LabelMarkUnavailableError();
     }
-    if (!stored.mark) return;
-    seedLegacySession(session, stored.mark);
-    if (stored.firstRaise) await auditStoredRaise(session, auth, toolset, null, "results_before_tracking", storedLabelsView(stored.mark));
+    await takeUpClientStoredMark(session, auth, toolset, stored, "tool_call");
   };
   const LEGACY_MARK_UNAVAILABLE_MESSAGE = "Outside-content labels could not be checked for this client, so the session was not opened. Try again.";
   /** A first-raise audit that fails is logged; it never withholds a result whose labels were stored. */
@@ -2136,10 +2193,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
       throw error;
     }
-    if (storedMark) {
-      seedLegacySession(session, storedMark);
-      if (storedFirstRaise) await auditStoredRaise(session, auth, toolset, null, "results_before_tracking", storedLabelsView(storedMark));
-    }
+    await takeUpClientStoredMark(session, auth, toolset, { mark: storedMark, firstRaise: storedFirstRaise }, "session_open");
     await deps.auditRaw({
       category: "system",
       eventType: "mcp_gateway.session_started",
