@@ -220,6 +220,33 @@ run("MCP 2026-07-28 gateway callers across replicas", () => {
     expect(raised.items.map((entry) => (entry.metadata as { sessionId?: string } | undefined)?.sessionId ?? null)).toEqual([null]);
   });
 
+  it("stores a legacy session's raise on one replica, so the client's stateless call on another starts from it", async () => {
+    const a = await addReplica("session-raise-a");
+    const b = await addReplica("session-raise-b");
+    const cookie = await adminCookie(a);
+    const { slug, token, client } = await toolsetWithClient(a, cookie, "Session raise", true);
+    await holdWrites(a, cookie);
+    const legacy = (session: string | null, body: Record<string, unknown>) =>
+      b.app.inject({
+        method: "POST",
+        url: `/mcp/${slug}`,
+        headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}) },
+        payload: JSON.stringify({ jsonrpc: "2.0", ...body })
+      });
+    // The client has made no stateless call within an idle window (no stored mark at all).
+    expect(await a.store.listMcpGatewayLabelMarks({ clientId: client.id }, new Date().toISOString())).toEqual([]);
+    const opened = await legacy(null, { id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "1" } } });
+    expect(opened.statusCode, opened.body).toBe(200);
+    const sessionId = String(opened.headers["mcp-session-id"]);
+    // B's session gets a result: its labels go into the client's stored mark.
+    const call = await legacy(sessionId, { id: 2, method: "tools/call", params: { name: "mock__calculator", arguments: { expression: "2+2" } } });
+    expect(call.json().result?.structuredContent?.result, call.body).toBe(4);
+    // A never saw the session; the client's stateless write there is held.
+    expect((await modernCall(a, slug, token, "3+3")).json().error.code).toBe(-31030);
+    const raised = await a.store.listAuditLogs({ eventType: "mcp_gateway.session_labels_raised", pageSize: 50 });
+    expect(raised.items.map((entry) => (entry.metadata as { sessionId?: string } | undefined)?.sessionId ?? null)).toEqual([sessionId]);
+  });
+
   it("keeps every label when replicas raise one caller's mark at once, and a revoke on one replica clears it for all", async () => {
     const a = await addReplica("race-a");
     const b = await addReplica("race-b");
