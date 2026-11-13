@@ -272,7 +272,7 @@ See [Audit log](../security/audit-log.md). All admin-only.
 
 - `GET /api/audit?category=&eventType=&outcome=&actorUserId=&resourceType=&resourceId=&projectId=&from=&to=&page=&pageSize=` (`{ items, total, page, pageSize }`, newest first; `pageSize` 50 by default, at most 500)
 - `GET /api/audit/export` (the same filters; a CSV file; audited as `audit.export`)
-- `GET /api/audit-log/verify-chain` (`{ ok, rowsChecked, firstBrokenAt?, unverifiable? }`)
+- `GET /api/audit-log/verify-chain` (`{ ok, rowsChecked, firstBrokenAt?, anchor?, unverifiable? }`; `anchor` names the first entry left after retention and its checkpoint)
 - `GET /api/audit-export/destinations`; `POST /api/audit-export/destinations` (`{ name, kind: "http" | "file", config, intervalSeconds?, enabled? }`), `PUT /api/audit-export/destinations/:id`, `DELETE /api/audit-export/destinations/:id` (changes need step-up and are audited)
 - `POST /api/audit-export/destinations/:id/run` (sends the next batch now; `409` while another instance exports it), `GET /api/audit-export/destinations/:id/runs?limit=`
 - `GET /api/log-streams`; `POST /api/log-streams` (`{ name, type: "syslog" | "webhook" | "sentry", config, categories?, minLevel?, enabled? }`), `PUT /api/log-streams/:id`, `DELETE /api/log-streams/:id` (changes need step-up and are audited); `POST /api/log-streams/:id/test`; `GET /api/log-streams/:id/events` (the last 100 deliveries)
