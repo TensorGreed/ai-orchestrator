@@ -68,7 +68,7 @@ import { checkGatewayCall, type GatewayGuardChannel, type GatewayGuardOutcome } 
 import type { z } from "zod";
 import { DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS, toolArgumentSummariesEnabled, type AppConfig } from "./config.js";
 import type { AuditEventInput } from "./services/audit-service.js";
-import { traceGatewayRequest, type McpGatewayTracing } from "./telemetry/mcp-gateway-tracing.js";
+import { GATEWAY_CALLER_GONE, traceGatewayRequest, type McpGatewayTracing } from "./telemetry/mcp-gateway-tracing.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
@@ -2280,8 +2280,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
    * announce changes, so the stream opens with an acknowledgment that honours nothing, then stays open with
    * keep-alive comments until the client closes it, MCP_GATEWAY_LISTEN_MAX_MS passes or the server shuts down (the
    * last two end with a `complete` result). A stream takes no principal state. It counts only against the per-client
-   * stream cap: not against the client's rate or concurrency limits, which cap `tools/call`. Returns the refusal it
-   * sent, or undefined once the stream is open (or the caller had gone), for the request's span.
+   * stream cap: not against the client's rate or concurrency limits, which cap `tools/call`. Returns, for the
+   * request's span, the refusal it sent, GATEWAY_CALLER_GONE when the caller hung up before the stream opened, or
+   * undefined once the stream is open.
    */
   const handleModernListen = async (
     request: FastifyRequest,
@@ -2290,7 +2291,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     toolset: McpToolset,
     message: JsonRpcRequest,
     accept: string | undefined
-  ): Promise<JsonRpcResponse | undefined> => {
+  ): Promise<JsonRpcResponse | typeof GATEWAY_CALLER_GONE | undefined> => {
     const serverInfo = gatewayServerInfo(toolset, SERVER_VERSION);
     const refuse = (status: number, response: JsonRpcResponse, headers: Record<string, string> = {}): JsonRpcResponse => {
       const sent = modernizeGatewayResponse(response, serverInfo);
@@ -2352,7 +2353,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     // Gone already (during admission): its close event has fired, so free the stream count now.
     if (reply.raw.destroyed || request.raw.socket?.destroyed) {
       cleanup();
-      return undefined;
+      return GATEWAY_CALLER_GONE;
     }
     listenStreams.add(finish);
     stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => ended);

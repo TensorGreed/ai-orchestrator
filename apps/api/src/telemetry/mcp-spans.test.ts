@@ -12,7 +12,7 @@ import { InMemorySpanExporter, type ReadableSpan, type SpanProcessor } from "@ai
 import { CONTENT_ATTRIBUTES, type McpClient, type McpToolset } from "@ai-orchestrator/shared";
 import { gatewayToolName, slugifyServerName } from "@ai-orchestrator/mcp-sdk";
 import { createApp } from "../app.js";
-import { gatewayMethodName, traceCarrierFromMeta, traceGatewayRequest } from "./mcp-gateway-tracing.js";
+import { GATEWAY_CALLER_GONE, gatewayMethodName, traceCarrierFromMeta, traceGatewayRequest } from "./mcp-gateway-tracing.js";
 import type { InstrumentationSpan, RunInstrumentation } from "@ai-orchestrator/shared";
 import { parseConfig } from "../config.js";
 import type { Store } from "../db/store.js";
@@ -394,5 +394,22 @@ describe("gateway span helpers", () => {
     await expect(traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => { throw new Error("secret request text"); })).rejects.toThrow("secret request text");
     await expect(traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => { throw new TypeError("more text"); })).rejects.toThrow();
     expect(recorded).toEqual([{ error: null, type: "_OTHER" }, { error: null, type: "TypeError" }]);
+  });
+
+  it("records a listen whose caller hung up before the stream opened as caller_gone, with no error and no status", async () => {
+    const calls: Array<[string, unknown]> = [];
+    const span = {
+      recordError: (...args: unknown[]) => calls.push(["recordError", args]),
+      setAttributes: (attributes: Record<string, unknown>) => calls.push(["setAttributes", attributes]),
+      setStatus: (...args: unknown[]) => calls.push(["setStatus", args])
+    } as unknown as InstrumentationSpan;
+    const instrumentation = { enabled: true, mcpRequest: async (_info: unknown, fn: (s: InstrumentationSpan) => Promise<unknown>) => await fn(span) } as unknown as RunInstrumentation;
+    const facts = { method: "subscriptions/listen", params: {}, era: "modern" as const, toolsetId: "t", clientId: "c" };
+    expect(await traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => GATEWAY_CALLER_GONE)).toBe(GATEWAY_CALLER_GONE);
+    expect(calls).toEqual([["setAttributes", { "l2m.mcp.listen.outcome": "caller_gone" }]]);
+    // An opened stream (undefined) records nothing.
+    calls.length = 0;
+    await traceGatewayRequest({ instrumentation, trustInbound: "all" }, facts, async () => undefined);
+    expect(calls).toEqual([]);
   });
 });

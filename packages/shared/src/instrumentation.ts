@@ -183,7 +183,9 @@ export const MCP_OUTCOME_ATTRIBUTES = Object.freeze({
   SESSION_ID: "mcp.session.id",
   PROTOCOL_VERSION: "mcp.protocol.version",
   JSONRPC_REQUEST_ID: "jsonrpc.request.id",
-  ROUNDS: "l2m.mcp.rounds"
+  ROUNDS: "l2m.mcp.rounds",
+  /** A gateway `subscriptions/listen` request that did not become a stream: `caller_gone` (it hung up during admission). */
+  LISTEN_OUTCOME: "l2m.mcp.listen.outcome"
 } as const);
 
 /**
