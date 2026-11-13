@@ -247,7 +247,7 @@ tools/call {tool}             SERVER   one per JSON-RPC request, batches include
 | Span | Attributes |
 |---|---|
 | CLIENT | `mcp.method.name`, `gen_ai.operation.name` (`execute_tool` for `tools/call`), `gen_ai.tool.name`, `gen_ai.prompt.name`, `mcp.resource.uri` (without credentials, query or fragment), `mcp.session.id` (session-based servers), `mcp.protocol.version`, `jsonrpc.request.id`, `network.transport` (`tcp` or `pipe` for stdio), `network.protocol.name`, `server.address` and `server.port` (host only), `l2m.mcp.server.id` (the registry id), `rpc.response.status_code`, `error.type` |
-| SERVER (gateway) | the same names without `server.*`, plus `l2m.toolset.id` and `l2m.gateway.client.id` |
+| SERVER (gateway) | the same names without `server.*`, plus `l2m.toolset.id`, `l2m.gateway.client.id` and, for `subscriptions/listen`, `l2m.mcp.listen.outcome` |
 
 Metrics, exported with the other OTLP metrics: `mcp.client.operation.duration` and `mcp.server.operation.duration` (seconds), by method, protocol version, transport and outcome. The client histogram also carries the tool and prompt name; the gateway's does not, because callers choose those names. For the same reason a gateway request whose method MCP does not define is named `_OTHER`, and a JSON-RPC error code outside the range JSON-RPC reserves (-32768 to -32000) is recorded as `_OTHER` on the metrics (the span keeps the code).
 
