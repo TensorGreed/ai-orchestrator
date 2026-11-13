@@ -5,7 +5,9 @@
  * delivery kinds today:
  *   - `http`  — POST application/x-ndjson body to a URL. The simplest
  *               integration with Splunk HEC, Datadog Logs, Logstash, etc.
- *               Optional `headers` for auth (Bearer tokens, HEC tokens).
+ *               Optional `headers` for auth (Bearer tokens, HEC tokens),
+ *               stored sealed with the master key (`headersSealed`, see
+ *               AUDIT_EXPORT_HEADERS_PURPOSE) and shown masked.
  *   - `file`  — append NDJSON to a path on the API container's local FS.
  *               Useful when paired with Filebeat / Vector picking the path
  *               up. Path must live under `/app/apps/api/data/` to keep
@@ -24,17 +26,44 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
 import type { Store } from "../db/store.js";
+import type { SecretService } from "./secret-service.js";
 
 interface AuditExportDestinationConfig {
   /** http kind */
   url?: string;
-  /** http kind: extra headers (auth, tenancy). */
+  /** http kind: extra headers (auth, tenancy), as stored by releases before they were sealed (sealStoredHeaders). */
   headers?: Record<string, string>;
+  /** http kind: the extra headers as JSON, sealed with the master key (purpose AUDIT_EXPORT_HEADERS_PURPOSE). */
+  headersSealed?: string;
   /** http kind: HTTP method (default POST). */
   method?: string;
   /** file kind */
   path?: string;
 }
+
+/** The SecretService purpose the header values are sealed with (db-shared.ts JSON_SEALED_FIELDS re-seals it). */
+export const AUDIT_EXPORT_HEADERS_PURPOSE = "audit-export-headers";
+
+/** What a header value reads as in an API answer; sending it back on an update keeps the stored value. */
+export const AUDIT_EXPORT_SECRET_PLACEHOLDER = "__secret__";
+
+/** SecretService's sealing with the master key (the purpose bound as authenticated data). */
+export type AuditExportSealer = Pick<SecretService, "sealValue" | "openValue">;
+
+type StoredDestination = NonNullable<Awaited<ReturnType<Store["getAuditExportDestination"]>>>;
+
+/** A destination as the API returns it: header values masked, never the sealed blob. */
+export type AuditExportDestinationView = StoredDestination;
+
+/** A bad destination config or path (the routes answer 400). */
+export class AuditExportConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuditExportConfigError";
+  }
+}
+
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 /**
  * Phase 13.1 — cluster mode: runs one destination's export under a cluster-wide lock keyed by the destination, so two
@@ -70,11 +99,16 @@ export class AuditExportService {
   private readonly batchSize: number;
   private readonly safeFsRoot: string;
   private readonly lock: AuditExportLock | undefined;
+  private readonly sealer: AuditExportSealer | undefined;
   private logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
 
-  constructor(store: Store, options: { checkIntervalMs?: number; batchSize?: number; safeFsRoot?: string; lock?: AuditExportLock } = {}) {
+  constructor(
+    store: Store,
+    options: { checkIntervalMs?: number; batchSize?: number; safeFsRoot?: string; lock?: AuditExportLock; sealer?: AuditExportSealer } = {}
+  ) {
     this.store = store;
     this.lock = options.lock;
+    this.sealer = options.sealer;
     this.checkIntervalMs = options.checkIntervalMs ?? 60_000;
     this.batchSize = options.batchSize ?? 500;
     this.safeFsRoot = path.resolve(options.safeFsRoot ?? "apps/api/data");
@@ -82,6 +116,137 @@ export class AuditExportService {
 
   setLogger(logger: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void }): void {
     this.logger = logger;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Destinations as the API sees them: header values sealed at rest, masked on read
+  // ---------------------------------------------------------------------------
+
+  async listDestinations(): Promise<AuditExportDestinationView[]> {
+    return (await this.store.listAuditExportDestinations()).map((dest) => this.toView(dest));
+  }
+
+  async getDestination(id: string): Promise<AuditExportDestinationView | null> {
+    const dest = await this.store.getAuditExportDestination(id);
+    return dest ? this.toView(dest) : null;
+  }
+
+  async createDestination(input: {
+    id: string;
+    name: string;
+    kind: "http" | "file";
+    config: Record<string, unknown>;
+    intervalSeconds?: number;
+    enabled?: boolean;
+    createdBy?: string | null;
+  }): Promise<AuditExportDestinationView> {
+    const config = this.storedConfig(input.kind, input.config, {});
+    await this.store.createAuditExportDestination({ ...input, config });
+    const created = await this.getDestination(input.id);
+    if (!created) throw new Error("failed to create audit export destination");
+    return created;
+  }
+
+  /**
+   * Replaces the config when `patch.config` is given. A header whose value is AUDIT_EXPORT_SECRET_PLACEHOLDER keeps
+   * the stored value of the header of the same name.
+   */
+  async updateDestination(
+    id: string,
+    patch: { name?: string; config?: Record<string, unknown>; intervalSeconds?: number; enabled?: boolean }
+  ): Promise<AuditExportDestinationView | null> {
+    const existing = await this.store.getAuditExportDestination(id);
+    if (!existing) return null;
+    const next: typeof patch = {};
+    if (patch.name !== undefined) next.name = patch.name;
+    if (patch.intervalSeconds !== undefined) next.intervalSeconds = patch.intervalSeconds;
+    if (patch.enabled !== undefined) next.enabled = patch.enabled;
+    if (patch.config !== undefined) {
+      next.config = this.storedConfig(existing.kind, patch.config, this.headersOf(existing.config as AuditExportDestinationConfig));
+    }
+    await this.store.updateAuditExportDestination(id, next);
+    return await this.getDestination(id);
+  }
+
+  /**
+   * Seals the header values of destinations written before they were sealed (stored as plain `headers`). Run once at
+   * start-up; idempotent, and each row is rewritten only with its own values. Returns how many rows it sealed.
+   */
+  async sealStoredHeaders(): Promise<number> {
+    if (!this.sealer) return 0;
+    let sealed = 0;
+    for (const dest of await this.store.listAuditExportDestinations()) {
+      const config = dest.config as AuditExportDestinationConfig;
+      if (config.headers === undefined) continue;
+      const { headers, ...rest } = config;
+      const plain = isStringRecord(headers) ? headers : {};
+      // A row that already has sealed headers keeps them; the plain copy is dropped either way.
+      const merged = config.headersSealed ? this.headersOf(config) : plain;
+      await this.store.updateAuditExportDestination(dest.id, { config: { ...rest, ...this.sealHeaders(merged) } });
+      sealed += 1;
+    }
+    if (sealed > 0) this.logger?.info("Sealed audit export destination headers stored in plain text", { destinations: sealed });
+    return sealed;
+  }
+
+  /** The config to store: validated, headers sealed (a placeholder keeps `previous`'s value of that header). */
+  private storedConfig(kind: string, input: Record<string, unknown>, previous: Record<string, string>): Record<string, unknown> {
+    const { headers: rawHeaders, headersSealed: _ignored, ...rest } = input as AuditExportDestinationConfig & Record<string, unknown>;
+    if (kind === "http") {
+      if (typeof rest.url !== "string" || !/^https?:\/\//i.test(rest.url)) throw new AuditExportConfigError("http destination requires an http(s) config.url");
+      if (rest.method !== undefined && (typeof rest.method !== "string" || !/^[A-Z]+$/.test(rest.method))) {
+        throw new AuditExportConfigError("config.method must be an HTTP method such as POST");
+      }
+    } else if (kind === "file") {
+      if (typeof rest.path !== "string" || !rest.path) throw new AuditExportConfigError("file destination requires config.path");
+      if (rawHeaders !== undefined) throw new AuditExportConfigError("file destination takes no headers");
+      return rest;
+    }
+    if (rawHeaders === undefined) return rest;
+    if (!rawHeaders || typeof rawHeaders !== "object" || Array.isArray(rawHeaders)) throw new AuditExportConfigError("config.headers must be an object of strings");
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(rawHeaders as Record<string, unknown>)) {
+      if (!HEADER_NAME.test(name)) throw new AuditExportConfigError(`config.headers: "${name}" is not a valid header name`);
+      if (typeof value !== "string") throw new AuditExportConfigError(`config.headers.${name} must be a string`);
+      if (value === AUDIT_EXPORT_SECRET_PLACEHOLDER) {
+        const kept = Object.entries(previous).find(([key]) => key.toLowerCase() === name.toLowerCase());
+        if (!kept) throw new AuditExportConfigError(`config.headers.${name}: no stored value to keep; send the value`);
+        headers[name] = kept[1];
+      } else {
+        if (/[\r\n\0]/.test(value)) throw new AuditExportConfigError(`config.headers.${name} must not contain line breaks`);
+        headers[name] = value;
+      }
+    }
+    return { ...rest, ...this.sealHeaders(headers) };
+  }
+
+  private sealHeaders(headers: Record<string, string>): { headersSealed?: string } {
+    if (Object.keys(headers).length === 0) return {};
+    if (!this.sealer) throw new AuditExportConfigError("Header values need the master key (SECRET_MASTER_KEY_BASE64) to be stored");
+    return { headersSealed: this.sealer.sealValue(AUDIT_EXPORT_HEADERS_PURPOSE, JSON.stringify(headers)) };
+  }
+
+  /** The stored header values (sealed, or plain from before they were sealed). */
+  private headersOf(config: AuditExportDestinationConfig): Record<string, string> {
+    if (typeof config.headersSealed === "string" && config.headersSealed) {
+      if (!this.sealer) throw new Error("audit export destination headers are sealed; the master key is needed to open them");
+      const parsed: unknown = JSON.parse(this.sealer.openValue(AUDIT_EXPORT_HEADERS_PURPOSE, config.headersSealed));
+      return isStringRecord(parsed) ? parsed : {};
+    }
+    return isStringRecord(config.headers) ? config.headers : {};
+  }
+
+  private toView(dest: StoredDestination): AuditExportDestinationView {
+    const { headers: _plain, headersSealed: _sealed, ...rest } = dest.config as AuditExportDestinationConfig & Record<string, unknown>;
+    let names: string[];
+    try {
+      names = Object.keys(this.headersOf(dest.config as AuditExportDestinationConfig));
+    } catch {
+      // Sealed under another key: the names cannot be shown either.
+      return { ...dest, config: { ...rest, headersUnreadable: true } };
+    }
+    const config = names.length > 0 ? { ...rest, headers: Object.fromEntries(names.map((name) => [name, AUDIT_EXPORT_SECRET_PLACEHOLDER])) } : rest;
+    return { ...dest, config };
   }
 
   /** Whether the periodic export runs here (cluster mode starts it only on the leader). */
@@ -220,7 +385,7 @@ export class AuditExportService {
     if (!config.url) throw new Error("http destination missing config.url");
     const res = await fetch(config.url, {
       method: config.method ?? "POST",
-      headers: { "content-type": "application/x-ndjson", ...(config.headers ?? {}) },
+      headers: { "content-type": "application/x-ndjson", ...this.headersOf(config) },
       body: ndjson
     });
     if (!res.ok) {
@@ -249,4 +414,29 @@ async function safeReadText(res: Response): Promise<string> {
   } catch {
     return "";
   }
+}
+
+/**
+ * What the audit log keeps about a destination config: its kind-neutral shape, never a value. A header value can be
+ * an ingestion token, and a URL can carry a credential (user info or a query token).
+ */
+export function auditExportConfigSummary(config: Record<string, unknown>): Record<string, unknown> {
+  const headers = config.headers && typeof config.headers === "object" && !Array.isArray(config.headers) ? Object.keys(config.headers).sort() : undefined;
+  let urlHost: string | undefined;
+  if (typeof config.url === "string") {
+    try {
+      urlHost = new URL(config.url).host;
+    } catch {
+      urlHost = undefined;
+    }
+  }
+  return {
+    configKeys: Object.keys(config).filter((key) => key !== "headersSealed").sort(),
+    ...(urlHost ? { urlHost } : {}),
+    ...(headers ? { headerNames: headers } : {})
+  };
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.values(value as object).every((item) => typeof item === "string");
 }

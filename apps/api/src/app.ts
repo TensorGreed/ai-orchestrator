@@ -220,7 +220,12 @@ import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
 import { SubWorkflowSpendTracker, usageUserOf, withinBudgetCheckTime, type RunSubWorkflowSpend, type Spend } from "./services/sub-workflow-spend.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
-import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
+import {
+  AuditExportBusyError,
+  AuditExportConfigError,
+  AuditExportService,
+  auditExportConfigSummary
+} from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
 import { McpElicitationService, toElicitationView } from "./services/mcp-elicitation-service.js";
 import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
@@ -5137,6 +5142,7 @@ export async function createApp(
     budgetService.stop();
   });
   const auditExportService = new AuditExportService(store, {
+    sealer: secretService,
     checkIntervalMs: config.AUDIT_EXPORT_CHECK_INTERVAL_MS,
     batchSize: config.AUDIT_EXPORT_BATCH_SIZE,
     safeFsRoot: config.AUDIT_EXPORT_FILE_ROOT,
@@ -5152,6 +5158,12 @@ export async function createApp(
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
   });
+  // Header values stored in plain text by older releases are sealed with the master key now.
+  try {
+    await auditExportService.sealStoredHeaders();
+  } catch (err) {
+    app.log.warn({ reason: err instanceof Error ? err.message : String(err) }, "Could not seal stored audit export destination headers");
+  }
   if (config.AUDIT_EXPORT_ENABLED) {
     // Cluster mode starts it when this instance becomes the leader (and stops it when it steps down).
     if (!clusterMode) auditExportService.start();
@@ -7224,7 +7236,7 @@ export async function createApp(
   app.get("/api/audit-export/destinations", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    return { destinations: await store.listAuditExportDestinations() };
+    return { destinations: await auditExportService.listDestinations() };
   });
 
   app.post<{ Body: unknown }>("/api/audit-export/destinations", async (request, reply) => {
@@ -7259,15 +7271,22 @@ export async function createApp(
       return { error: "file destination requires config.path" };
     }
     const id = `axdest_${crypto.randomUUID()}`;
-    await store.createAuditExportDestination({
-      id,
-      name: body.name.trim(),
-      kind: body.kind,
-      config: body.config,
-      intervalSeconds: body.intervalSeconds ?? 3600,
-      enabled: body.enabled !== false,
-      createdBy: user.email
-    });
+    let destination: Awaited<ReturnType<typeof auditExportService.createDestination>>;
+    try {
+      destination = await auditExportService.createDestination({
+        id,
+        name: body.name.trim(),
+        kind: body.kind,
+        config: body.config,
+        intervalSeconds: body.intervalSeconds ?? 3600,
+        enabled: body.enabled !== false,
+        createdBy: user.email
+      });
+    } catch (err) {
+      if (!(err instanceof AuditExportConfigError)) throw err;
+      reply.code(400);
+      return { error: err.message };
+    }
     await auditService.record({
       category: "system",
       eventType: "audit_export.destination.created",
@@ -7276,9 +7295,9 @@ export async function createApp(
       actor: { email: user.email, type: "user" },
       resourceType: "audit_export_destination",
       resourceId: id,
-      metadata: { kind: body.kind, intervalSeconds: body.intervalSeconds ?? 3600 }
+      metadata: { kind: body.kind, intervalSeconds: body.intervalSeconds ?? 3600, ...auditExportConfigSummary(body.config) }
     });
-    return { destination: await store.getAuditExportDestination(id) };
+    return { destination };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/audit-export/destinations/:id", async (request, reply) => {
@@ -7300,7 +7319,23 @@ export async function createApp(
       reply.code(400);
       return { error: "Empty update payload" };
     }
-    await store.updateAuditExportDestination(request.params.id, patch);
+    if (patch.config !== undefined && (!patch.config || typeof patch.config !== "object" || Array.isArray(patch.config))) {
+      reply.code(400);
+      return { error: "config must be an object" };
+    }
+    let destination: Awaited<ReturnType<typeof auditExportService.updateDestination>>;
+    try {
+      destination = await auditExportService.updateDestination(request.params.id, patch);
+    } catch (err) {
+      if (!(err instanceof AuditExportConfigError)) throw err;
+      reply.code(400);
+      return { error: err.message };
+    }
+    if (!destination) {
+      reply.code(404);
+      return { error: "Destination not found" };
+    }
+    // Which fields changed, never a config value: a header can hold an ingestion token and a URL a credential.
     await auditService.record({
       category: "system",
       eventType: "audit_export.destination.updated",
@@ -7309,9 +7344,15 @@ export async function createApp(
       actor: { email: user.email, type: "user" },
       resourceType: "audit_export_destination",
       resourceId: request.params.id,
-      metadata: { ...patch }
+      metadata: {
+        fields: Object.keys(patch).filter((key) => ["name", "config", "intervalSeconds", "enabled"].includes(key)).sort(),
+        ...(patch.name !== undefined ? { name: patch.name } : {}),
+        ...(patch.intervalSeconds !== undefined ? { intervalSeconds: patch.intervalSeconds } : {}),
+        ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+        ...(patch.config ? auditExportConfigSummary(patch.config) : {})
+      }
     });
-    return { destination: await store.getAuditExportDestination(request.params.id) };
+    return { destination };
   });
 
   app.delete<{ Params: { id: string } }>("/api/audit-export/destinations/:id", async (request, reply) => {

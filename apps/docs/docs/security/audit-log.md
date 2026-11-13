@@ -125,10 +125,15 @@ curl -s -X POST http://localhost:4000/api/audit-export/destinations \
 - **Run now** (`POST /api/audit-export/destinations/:id/run`) sends the next batch at once, with or without
   `AUDIT_EXPORT_ENABLED`; `409` while another instance is exporting it. `GET /api/audit-export/destinations/:id/runs`
   lists the latest runs with their status, row count and error.
-- **Header values** are stored with the destination as you enter them, not in the secret store, and are shown to admins
-  who list destinations. Use a token that can only write logs, and rotate it if the database or a backup leaks.
+- **Header values** are sealed with the master key (`SECRET_MASTER_KEY_BASE64`) when they are saved, and every answer
+  shows them as `__secret__` (the header names stay visible). To change a destination's config with `PUT`, send the
+  headers to keep as `"__secret__"` and the ones to change with their new values. Values that an older release stored
+  in plain text are sealed when the API starts. `db:import --source-master-key` re-seals them like other secrets.
 
-Destination changes are audited as `audit_export.destination.created`, `.updated` and `.deleted`.
+Destination changes are audited as `audit_export.destination.created`, `.updated` and `.deleted`. The entry records
+which fields changed, the config's keys, the URL's host and the header names, never a header value or the full URL.
+Releases before this one wrote the whole `PUT` body into the `.updated` entry, header values included, and an audit
+entry cannot be edited without breaking the chain: if a token was ever changed with `PUT`, rotate it.
 
 ### Log streams (each event as it happens)
 
@@ -137,8 +142,9 @@ A log stream sends audit events soon after they are written, to `syslog` (RFC 54
 limited to some categories and to a minimum level: failures are `error`, denials `warn`, everything else `info`.
 
 Create them under **Settings → Log Streams** or with `POST /api/log-streams`; **Test** sends one event, and the
-delivery history of the last `LOG_STREAM_EVENT_RETENTION_DAYS` (14) is listed per stream. The webhook's HMAC secret and
-the Sentry DSN are stored encrypted with the master key and shown masked.
+delivery history of the last `LOG_STREAM_EVENT_RETENTION_DAYS` (14) is listed per stream. A stream's config is stored
+encrypted with the master key. The webhook's HMAC secret, its header values and the Sentry DSN are shown as
+`__secret__`; an update that sends `__secret__` back keeps the stored value.
 
 Log streams are a live feed, not a guaranteed copy: events wait in memory (at most `LOG_STREAM_BUFFER_SIZE`, the
 oldest dropped first), are tried `LOG_STREAM_RETRY_MAX_ATTEMPTS` times, and are lost if the process stops before they
