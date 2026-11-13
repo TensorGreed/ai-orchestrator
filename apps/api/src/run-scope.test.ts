@@ -266,6 +266,43 @@ describe("run scope: session memory, tool cache and artifacts", () => {
     expect(await scope.dependenciesFor(workflows.legacy!).memoryStore.loadMessages("support", "s1")).toEqual([{ role: "user", content: "legacy shared" }]);
   });
 
+  it("v73: passes the sensitive mark on save and reads it from the row the messages came from (scoped or legacy)", async () => {
+    const memory = new Map<string, unknown[]>();
+    const marked = new Set<string>();
+    const saved: unknown[][] = [];
+    const { scope, workflows } = scopeFixture({
+      sessions: {
+        loadMemory: async (namespace, sessionId) => (memory.get(`${namespace}|${sessionId}`) ?? []) as never,
+        saveMemory: (...args) => {
+          saved.push(args);
+          const [namespace, sessionId, messages, , options] = args;
+          memory.set(`${namespace}|${sessionId}`, messages);
+          if (options?.sensitive) marked.add(`${namespace}|${sessionId}`);
+        },
+        loadMemorySensitive: async (namespace, sessionId) => marked.has(`${namespace}|${sessionId}`),
+        saveToolCall: async (input) => ({ ...input, id: "t", createdAt: "c" }),
+        listToolCalls: async () => [],
+        getToolCall: async () => null,
+        saveArtifact: async (input) => ({ ...input, createdAt: "c", updatedAt: "u" }),
+        loadArtifact: async () => null
+      }
+    });
+    const b = scope.dependenciesFor(workflows["b-1"]!);
+    await b.memoryStore.saveMessages("support", "s1", [{ role: "user", content: "x" }], { sensitive: true });
+    await b.memoryStore.saveMessages("support", "s2", [{ role: "user", content: "y" }]);
+    // An unmarked save keeps its arguments as before.
+    expect(saved.map((args) => args.length)).toEqual([5, 3]);
+    expect(saved[0]![4]).toEqual({ sensitive: true });
+    await b.memoryStore.loadMessages("support", "s1");
+    expect(await b.memoryStore.loadSensitive!("support", "s1")).toBe(true);
+    expect(await b.memoryStore.loadSensitive!("support", "s2")).toBe(false);
+    // A legacy row of the workflow's own default namespace: the mark is read from that row.
+    memory.set("b-1:agent|s3", [{ role: "user", content: "legacy" }]);
+    marked.add("b-1:agent|s3");
+    expect(await b.memoryStore.loadMessages("b-1:agent", "s3")).toEqual([{ role: "user", content: "legacy" }]);
+    expect(await b.memoryStore.loadSensitive!("b-1:agent", "s3")).toBe(true);
+  });
+
   it("a default-project workflow cannot read another project's legacy rows (N5)", async () => {
     const { scope, workflows, memory } = scopeFixture();
     memory.set("b-1:agent|s1", [{ role: "user", content: "B-private" }]);

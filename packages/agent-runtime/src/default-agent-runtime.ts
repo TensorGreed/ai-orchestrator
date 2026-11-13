@@ -1770,7 +1770,9 @@ ${effectiveSystemPrompt}`;
                     args: callArguments,
                     output,
                     summary: buildToolOutputSummary(callArguments, output),
-                    ...(labelTracking?.persist && resultLabels ? { labels: resultLabels } : {})
+                    ...(labelTracking?.persist && resultLabels ? { labels: resultLabels } : {}),
+                    // v73 — what the loop had seen when it made the call (its arguments can copy it) marks the row too.
+                    ...(labelTracking && labelsMarkSensitive(accumulatedLabels()) ? { sensitive: true } : {})
                   });
                 } catch {
                   // Cache persistence must never break agent execution.
@@ -1844,7 +1846,9 @@ ${effectiveSystemPrompt}`;
                     output: null,
                     error: toolError.error,
                     summary: buildToolOutputSummary(callArguments, null, toolError.error),
-                    ...(labelTracking?.persist && resultLabels ? { labels: resultLabels } : {})
+                    ...(labelTracking?.persist && resultLabels ? { labels: resultLabels } : {}),
+                    // v73 — what the loop had seen when it made the call (its arguments can copy it) marks the row too.
+                    ...(labelTracking && labelsMarkSensitive(accumulatedLabels()) ? { sensitive: true } : {})
                   });
                 } catch {
                   // Cache persistence must never break agent execution.

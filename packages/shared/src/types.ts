@@ -559,6 +559,11 @@ export interface WorkflowExecutionState {
    */
   boundaryCallerInput?: string[];
   /**
+   * v73 — the run read session memory, a tool cache record or a session artifact written by sensitive work before it
+   * paused, so the resumed run exports no content either and marks what it writes. Written and read only by the engine.
+   */
+  sensitiveSessionRead?: boolean;
+  /**
    * Phase 15.4 — the release channel the run started on. A resumed
    * production run keeps calling the published versions of its
    * sub-workflows. Written and read only by the API; absent means draft.

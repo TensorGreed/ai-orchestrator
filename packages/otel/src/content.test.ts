@@ -245,6 +245,39 @@ describe("content capture on", () => {
     expect((await one("chat throws")).attributes[CONTENT_DROPPED_ATTRIBUTE]).toBe("sensitive");
   });
 
+  it("records the drop reason a check gives, inner check first, and re-checks it at span end", async () => {
+    const { inst, one } = setup();
+    let memory: string | false = false;
+    await inst.withContentExclusion(() => memory, async () => {
+      await inst.modelCall({ providerId: "openai", model: "reasoned" }, async (span) => {
+        span.addContent?.("input_messages", MESSAGES);
+        // Turned sensitive after the content was handed over: dropped when the span ends, with the check's reason.
+        memory = "sensitive_memory";
+      });
+      await inst.withContentExclusion(() => "Not A Reason!", async () => {
+        await inst.modelCall({ providerId: "openai", model: "malformed" }, async (span) => span.addContent?.("input_messages", MESSAGES));
+      });
+    });
+    await inst.withContentExclusion(() => "sensitive_memory", async () => {
+      await inst.withContentExclusion(() => true, async () => {
+        await inst.modelCall({ providerId: "openai", model: "inner" }, async (span) => span.addContent?.("input_messages", MESSAGES));
+      });
+      await inst.withContentExclusion(() => "", async () => {
+        await inst.modelCall({ providerId: "openai", model: "outer" }, async (span) => span.addContent?.("input_messages", MESSAGES));
+      });
+    });
+    expect((await one("chat reasoned")).attributes[CONTENT_DROPPED_ATTRIBUTE]).toBe("sensitive_memory");
+    // A reason that is not lower-case letters and underscores is recorded as plain `sensitive`.
+    expect((await one("chat malformed")).attributes[CONTENT_DROPPED_ATTRIBUTE]).toBe("sensitive");
+    expect((await one("chat inner")).attributes[CONTENT_DROPPED_ATTRIBUTE]).toBe("sensitive");
+    // An empty answer means not sensitive, so the outer check's reason applies.
+    expect((await one("chat outer")).attributes[CONTENT_DROPPED_ATTRIBUTE]).toBe("sensitive_memory");
+    for (const name of ["chat reasoned", "chat malformed", "chat inner", "chat outer"]) {
+      expect(contentKeys(await one(name))).toEqual([]);
+      expect(JSON.stringify((await one(name)).attributes)).not.toContain(SECRET);
+    }
+  });
+
   it("drops content that cannot be copied: too deep, cyclic or too large", async () => {
     let deep: Record<string, unknown> = { leaf: EMAIL };
     for (let index = 0; index < 80; index += 1) deep = { next: deep };

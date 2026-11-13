@@ -86,10 +86,15 @@ export interface RunScopeDeps {
   knowledgeBaseStoreFor: (projectId: string | null | undefined) => KnowledgeBaseStore;
   sessions: {
     loadMemory: (namespace: string, sessionId: string) => Promise<ChatMessages>;
-    /** `labels` (Phase 16) are passed only while the run tracks data labels. */
-    saveMemory: (namespace: string, sessionId: string, messages: ChatMessages, labels?: DataLabels) => void | Promise<void>;
+    /**
+     * `labels` (Phase 16) are passed only while the run tracks data labels; `options.sensitive` (v73) only when the
+     * run writing it is sensitive work.
+     */
+    saveMemory: (namespace: string, sessionId: string, messages: ChatMessages, labels?: DataLabels, options?: { sensitive: true }) => void | Promise<void>;
     /** Phase 16 — labels stored with a session's memory; null when none were recorded. */
     loadMemoryLabels?: (namespace: string, sessionId: string) => Promise<DataLabels | null>;
+    /** v73 — the memory was written by sensitive work (or its labels say sensitive); false when there is none. */
+    loadMemorySensitive?: (namespace: string, sessionId: string) => Promise<boolean>;
     saveToolCall: (input: ToolCallInput) => Promise<ToolCallRecord>;
     listToolCalls: (input: { namespace: string; sessionId: string; toolName?: string; limit?: number }) => Promise<ToolCallSummary[]>;
     getToolCall: (input: { namespace: string; sessionId: string; id: string }) => Promise<ToolCallRecord | null>;
@@ -214,6 +219,13 @@ export function createRunScope(deps: RunScopeDeps) {
     // row without reading the messages again. Every store call is awaited: the Postgres store answers with promises.
     const memoryRowKey = new Map<string, string>();
     const sessionKey = (namespace: string, sessionId: string) => `${namespace}\u0000${sessionId}`;
+    // Labels and the v73 mark sit on the row the messages were read from: the scoped one, else the legacy one.
+    const memoryRowFor = async (namespace: string, sessionId: string): Promise<string> => {
+      const known = memoryRowKey.get(sessionKey(namespace, sessionId));
+      if (known !== undefined) return known;
+      const scoped = await deps.sessions.loadMemory(key(namespace), sessionId);
+      return scoped.length > 0 || !await legacyReadable(namespace) ? key(namespace) : namespace;
+    };
     const memoryStore: ScopedRunDependencies["memoryStore"] = {
       loadMessages: async (namespace, sessionId) => {
         const messages = await deps.sessions.loadMemory(key(namespace), sessionId);
@@ -225,19 +237,19 @@ export function createRunScope(deps: RunScopeDeps) {
         return deps.sessions.loadMemory(namespace, sessionId);
       },
       saveMessages: async (namespace, sessionId, messages, options) => {
-        if (options?.labels) await deps.sessions.saveMemory(key(namespace), sessionId, messages, options.labels);
+        if (options?.sensitive === true) await deps.sessions.saveMemory(key(namespace), sessionId, messages, options.labels, { sensitive: true });
+        else if (options?.labels) await deps.sessions.saveMemory(key(namespace), sessionId, messages, options.labels);
         else await deps.sessions.saveMemory(key(namespace), sessionId, messages);
       },
       loadLabels: async (namespace, sessionId) => {
         const loadLabels = deps.sessions.loadMemoryLabels;
         if (!loadLabels) return null;
-        // Labels sit on the row the messages were read from: the scoped one, else the legacy one.
-        let rowKey = memoryRowKey.get(sessionKey(namespace, sessionId));
-        if (rowKey === undefined) {
-          const scoped = await deps.sessions.loadMemory(key(namespace), sessionId);
-          rowKey = scoped.length > 0 || !await legacyReadable(namespace) ? key(namespace) : namespace;
-        }
-        return loadLabels(rowKey, sessionId);
+        return loadLabels(await memoryRowFor(namespace, sessionId), sessionId);
+      },
+      loadSensitive: async (namespace, sessionId) => {
+        const loadSensitive = deps.sessions.loadMemorySensitive;
+        if (!loadSensitive) return false;
+        return loadSensitive(await memoryRowFor(namespace, sessionId), sessionId);
       }
     };
 

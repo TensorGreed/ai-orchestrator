@@ -3,7 +3,7 @@
  * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import { randomUUID } from "node:crypto";
-import { type ChatMessage, type DataLabels, isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels } from "@ai-orchestrator/shared";
+import { type ChatMessage, type DataLabels, isEmptyDataLabels, labelsForUntrackedSave, labelsMarkSensitive, mergeDataLabels, parseStoredDataLabels } from "@ai-orchestrator/shared";
 import type { LoginSession, LoginSessionInput, SessionAuthMethod, SessionEndReason } from "../store.js";
 import { parseJsonSafe, toStr, labelsField } from "./helpers.js";
 import type { PgContext } from "./context.js";
@@ -220,12 +220,27 @@ export async function loadSessionMemoryLabels(ctx: PgContext, namespace: string,
   return row ? parseStoredDataLabels(row.labels_json) : null;
 }
 
+/** v73 — the memory was written by sensitive work, or its stored labels say sensitive. False when there is none. */
+export async function loadSessionMemorySensitive(ctx: PgContext, namespace: string, sessionId: string): Promise<boolean> {
+  const row = await ctx.queryOne<{ sensitive: number | string | null; labels_json: string | null }>(
+    `SELECT sensitive, labels_json FROM session_memory WHERE namespace = $1 AND session_id = $2`,
+    [namespace, sessionId]
+  );
+  return row ? Number(row.sensitive ?? 0) === 1 || labelsMarkSensitive(parseStoredDataLabels(row.labels_json)) : false;
+}
+
+/** v73 — `{ sensitive: true }` for a row written by sensitive work, else nothing. */
+function sensitiveField(value: unknown): { sensitive?: true } {
+  return Number(value ?? 0) === 1 ? { sensitive: true } : {};
+}
+
 /**
  * Saves a session's memory; `labels` (Phase 16) only while the run tracks labels, merged with the stored ones; none
  * keeps stored labels plus `untrusted_external`. 13.3 — under a legal hold the stored history only grows: the read,
- * the hold check and the write share a transaction under the legal-hold lock.
+ * the hold check and the write share a transaction under the legal-hold lock. `options.sensitive` (v73) marks the row
+ * as written by sensitive work; a marked row stays marked.
  */
-export async function saveSessionMemory(ctx: PgContext, namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): Promise<void> {
+export async function saveSessionMemory(ctx: PgContext, namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels, options?: { sensitive?: boolean }): Promise<void> {
   await ctx.withTransaction(async (client) => {
     await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
     const row = (
@@ -249,13 +264,14 @@ export async function saveSessionMemory(ctx: PgContext, namespace: string, sessi
       labelsJson = kept ? JSON.stringify(kept) : null;
     }
     await client.query(
-      `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, sensitive, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (namespace, session_id) DO UPDATE SET
            messages_json = EXCLUDED.messages_json,
            labels_json = EXCLUDED.labels_json,
+           sensitive = CASE WHEN session_memory.sensitive = 1 OR EXCLUDED.sensitive = 1 THEN 1 ELSE 0 END,
            updated_at = EXCLUDED.updated_at`,
-      [namespace, sessionId, JSON.stringify(toStore), labelsJson, createdAt, now]
+      [namespace, sessionId, JSON.stringify(toStore), labelsJson, options?.sensitive === true ? 1 : 0, createdAt, now]
     );
   });
 }
@@ -270,6 +286,8 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
   error?: string;
   summary?: unknown;
   labels?: DataLabels;
+  /** v73 — written by sensitive work. */
+  sensitive?: boolean;
 }): Promise<{
   id: string;
   namespace: string;
@@ -280,6 +298,7 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
   output: unknown;
   error?: string;
   summary?: unknown;
+  sensitive?: boolean;
   createdAt: string;
 }> {
   const now = new Date().toISOString();
@@ -287,8 +306,8 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
   // Calls saved within one millisecond keep their order: the cap and the newest-first lists below break created_at
   // ties by `seq` (v40's identity column, SQLite's rowid).
   const inserted = await ctx.query<{ created_at: string }>(
-    `INSERT INTO session_tool_cache (id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `INSERT INTO session_tool_cache (id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, sensitive, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING created_at`,
     [
       id,
@@ -301,6 +320,7 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
       input.error ?? null,
       input.summary === undefined ? null : JSON.stringify(input.summary),
       input.labels && !isEmptyDataLabels(input.labels) ? JSON.stringify(input.labels) : null,
+      input.sensitive === true ? 1 : 0,
       now
     ]
   );
@@ -334,6 +354,7 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
     error: input.error,
     summary: input.summary,
     ...(input.labels && !isEmptyDataLabels(input.labels) ? { labels: input.labels } : {}),
+    ...(input.sensitive === true ? { sensitive: true } : {}),
     createdAt
   };
 }
@@ -352,6 +373,7 @@ export async function listSessionToolCalls(ctx: PgContext, input: {
   args: Record<string, unknown>;
   error?: string;
   summary?: unknown;
+  sensitive?: boolean;
   createdAt: string;
 }>> {
   const limit =
@@ -369,12 +391,13 @@ export async function listSessionToolCalls(ctx: PgContext, input: {
     error: string | null;
     summary_json: string | null;
     labels_json: string | null;
+    sensitive: number | string | null;
     created_at: string;
   }>;
 
   if (input.toolName) {
     rows = await ctx.query(
-      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, labels_json, created_at
+      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, labels_json, sensitive, created_at
          FROM session_tool_cache
          WHERE namespace = $1 AND session_id = $2 AND tool_name = $3
          ORDER BY created_at DESC, seq DESC LIMIT $4`,
@@ -382,7 +405,7 @@ export async function listSessionToolCalls(ctx: PgContext, input: {
     );
   } else {
     rows = await ctx.query(
-      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, labels_json, created_at
+      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, labels_json, sensitive, created_at
          FROM session_tool_cache
          WHERE namespace = $1 AND session_id = $2
          ORDER BY created_at DESC, seq DESC LIMIT $3`,
@@ -406,6 +429,7 @@ export async function listSessionToolCalls(ctx: PgContext, input: {
       error: row.error ? toStr(row.error) : undefined,
       summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
       ...labelsField(row.labels_json),
+      ...sensitiveField(row.sensitive),
       createdAt: toStr(row.created_at)
     };
   });
@@ -425,6 +449,7 @@ export async function getSessionToolCall(ctx: PgContext, input: {
   output: unknown;
   error?: string;
   summary?: unknown;
+  sensitive?: boolean;
   createdAt: string;
 } | null> {
   const row = await ctx.queryOne<{
@@ -438,9 +463,10 @@ export async function getSessionToolCall(ctx: PgContext, input: {
     error: string | null;
     summary_json: string | null;
     labels_json: string | null;
+    sensitive: number | string | null;
     created_at: string;
   }>(
-    `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
+    `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, sensitive, created_at
        FROM session_tool_cache
        WHERE namespace = $1 AND session_id = $2 AND id = $3`,
     [input.namespace, input.sessionId, input.id]
@@ -464,6 +490,7 @@ export async function getSessionToolCall(ctx: PgContext, input: {
     error: row.error ? toStr(row.error) : undefined,
     summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
     ...labelsField(row.labels_json),
+    ...sensitiveField(row.sensitive),
     createdAt: toStr(row.created_at)
   };
 }
@@ -475,12 +502,15 @@ export async function saveSessionArtifact(ctx: PgContext, input: {
   artifactKey: string;
   value: unknown;
   labels?: DataLabels;
+  /** v73 — written by sensitive work; a marked row stays marked. */
+  sensitive?: boolean;
 }): Promise<{
   namespace: string;
   sessionId: string;
   artifactKey: string;
   value: unknown;
   labels?: DataLabels | null;
+  sensitive?: boolean;
   createdAt: string;
   updatedAt: string;
 }> {
@@ -495,14 +525,26 @@ export async function saveSessionArtifact(ctx: PgContext, input: {
 
   // A tracked save replaces the labels; an untracked one (none given) keeps the stored labels plus `untrusted_external`.
   const labels = input.labels === undefined ? labelsForUntrackedSave(parseStoredDataLabels(existing?.labels_json ?? null)) ?? undefined : !isEmptyDataLabels(input.labels) ? input.labels : undefined;
-  await ctx.execute(
-    `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+  // v73 — a marked artifact stays marked: the new value may carry the old one forward.
+  const saved = await ctx.query<{ sensitive: number | string | null }>(
+    `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, sensitive, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (namespace, session_id, artifact_key) DO UPDATE SET
          value_json = EXCLUDED.value_json,
          labels_json = EXCLUDED.labels_json,
-         updated_at = EXCLUDED.updated_at`,
-    [input.namespace, input.sessionId, input.artifactKey, JSON.stringify(input.value ?? null), labels ? JSON.stringify({ ...labels, source: "propagated" }) : null, createdAt, now]
+         sensitive = CASE WHEN session_artifacts.sensitive = 1 OR EXCLUDED.sensitive = 1 THEN 1 ELSE 0 END,
+         updated_at = EXCLUDED.updated_at
+       RETURNING sensitive`,
+    [
+      input.namespace,
+      input.sessionId,
+      input.artifactKey,
+      JSON.stringify(input.value ?? null),
+      labels ? JSON.stringify({ ...labels, source: "propagated" }) : null,
+      input.sensitive === true ? 1 : 0,
+      createdAt,
+      now
+    ]
   );
 
   return {
@@ -511,6 +553,7 @@ export async function saveSessionArtifact(ctx: PgContext, input: {
     artifactKey: input.artifactKey,
     value: input.value ?? null,
     ...(labels ? { labels } : {}),
+    ...sensitiveField(saved[0]?.sensitive),
     createdAt,
     updatedAt: now
   };
@@ -526,6 +569,7 @@ export async function loadSessionArtifact(ctx: PgContext, input: {
   artifactKey: string;
   value: unknown;
   labels?: DataLabels | null;
+  sensitive?: boolean;
   createdAt: string;
   updatedAt: string;
 } | null> {
@@ -535,10 +579,11 @@ export async function loadSessionArtifact(ctx: PgContext, input: {
     artifact_key: string;
     value_json: string;
     labels_json: string | null;
+    sensitive: number | string | null;
     created_at: string;
     updated_at: string;
   }>(
-    `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
+    `SELECT namespace, session_id, artifact_key, value_json, labels_json, sensitive, created_at, updated_at
        FROM session_artifacts
        WHERE namespace = $1 AND session_id = $2 AND artifact_key = $3`,
     [input.namespace, input.sessionId, input.artifactKey]
@@ -554,6 +599,7 @@ export async function loadSessionArtifact(ctx: PgContext, input: {
     artifactKey: toStr(row.artifact_key),
     value: parseJsonSafe(row.value_json),
     ...labelsField(row.labels_json),
+    ...sensitiveField(row.sensitive),
     createdAt: toStr(row.created_at),
     updatedAt: toStr(row.updated_at)
   };

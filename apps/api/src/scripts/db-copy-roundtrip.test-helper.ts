@@ -274,6 +274,10 @@ export async function seedAllDomains(target: Store): Promise<void> {
   await store.saveSessionToolCall({ namespace: "wf-support:agent", sessionId: "chat-1", toolName: "search", toolCallId: "tc-1", args: { q: "refund" }, output: { hits: 2 }, summary: "two hits", labels: LABELS_TOOL });
   await store.saveSessionToolCall({ namespace: "wf-support:agent", sessionId: "chat-1", toolName: "fetch_order", args: { orderId: 42 }, output: null, error: "timeout" });
   await store.saveSessionArtifact({ namespace: "wf-support:agent", sessionId: "chat-1", artifactKey: "summary", value: { text: "refund pending" }, labels: LABELS_USER });
+  // v73 — rows written by sensitive work keep their mark through a copy.
+  await store.saveSessionMemory("wf-support:agent", "chat-3", [{ role: "user", content: "my card ends 4242" }], undefined, { sensitive: true });
+  await store.saveSessionToolCall({ namespace: "wf-support:agent", sessionId: "chat-3", toolName: "lookup_card", args: { last4: "4242" }, output: { ok: true }, sensitive: true });
+  await store.saveSessionArtifact({ namespace: "wf-support:agent", sessionId: "chat-3", artifactKey: "card", value: { last4: "4242" }, sensitive: true });
 
   // ---- Webhook security state and trigger state
   await store.saveWebhookReplayKey({ replayKey: "replay-fp-1", endpointKey: "support-hook", expiresAt: FAR_FUTURE });
@@ -642,6 +646,16 @@ export function roundTripReads(): NamedRead[] {
       }
     },
     { name: "loadSessionArtifact", read: (s) => s.loadSessionArtifact({ namespace: "wf-support:agent", sessionId: "chat-1", artifactKey: "summary" }) },
+    {
+      name: "sessionSensitiveMarks",
+      read: async (s) => [
+        await s.loadSessionMemorySensitive("wf-support:agent", "chat-3"),
+        await s.loadSessionMemorySensitive("wf-support:agent", "chat-2"),
+        (await s.listSessionToolCalls({ namespace: "wf-support:agent", sessionId: "chat-3" })).map((call) => call.sensitive === true),
+        (await s.loadSessionArtifact({ namespace: "wf-support:agent", sessionId: "chat-3", artifactKey: "card" }))?.sensitive === true,
+        (await s.loadSessionArtifact({ namespace: "wf-support:agent", sessionId: "chat-1", artifactKey: "summary" }))?.sensitive === true
+      ]
+    },
 
     // Webhook security state, trigger state
     { name: "hasWebhookReplayKey", read: async (s) => [await s.hasWebhookReplayKey("replay-fp-1"), await s.hasWebhookReplayKey("unknown")] },

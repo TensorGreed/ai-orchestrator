@@ -459,6 +459,9 @@ export class PostgresStore implements Store {
   async loadSessionMemoryLabels(...args: Parameters<Store["loadSessionMemoryLabels"]>): ReturnType<Store["loadSessionMemoryLabels"]> {
     return sessions.loadSessionMemoryLabels(this.ctx, ...args);
   }
+  async loadSessionMemorySensitive(...args: Parameters<Store["loadSessionMemorySensitive"]>): ReturnType<Store["loadSessionMemorySensitive"]> {
+    return sessions.loadSessionMemorySensitive(this.ctx, ...args);
+  }
   async saveSessionMemory(...args: Parameters<Store["saveSessionMemory"]>): ReturnType<Store["saveSessionMemory"]> {
     return sessions.saveSessionMemory(this.ctx, ...args);
   }

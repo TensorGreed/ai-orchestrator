@@ -1,6 +1,6 @@
 import { createContextKey, type Attributes, type Context, type Counter } from "@opentelemetry/api";
 import type { ReadableSpan, SpanProcessor } from "@opentelemetry/sdk-trace";
-import { CONTENT_ATTRIBUTES, CONTENT_DROPPED_ATTRIBUTE, type InstrumentationContentKind } from "@ai-orchestrator/shared";
+import { CONTENT_ATTRIBUTES, CONTENT_DROPPED_ATTRIBUTE, type ContentSensitivity, type InstrumentationContentKind } from "@ai-orchestrator/shared";
 
 /**
  * Optional content capture (OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT).
@@ -68,7 +68,17 @@ export const INFERENCE_DETAILS_EVENT = "gen_ai.client.inference.operation.detail
 /** Context key of the sensitivity check spans started below `withContentExclusion` inherit. */
 export const CONTENT_EXCLUSION_KEY = createContextKey("l2m.content.exclusion");
 
-export type ContentExclusion = () => boolean;
+export type ContentExclusion = () => ContentSensitivity;
+
+const SENSITIVE_REASON = "sensitive";
+const REASON_PATTERN = /^[a-z_]{1,40}$/;
+
+/** The drop reason an exclusion answer stands for, or undefined when it says not sensitive. */
+function reasonFromAnswer(answer: ContentSensitivity): string | undefined {
+  if (answer === false || answer === "") return undefined;
+  if (typeof answer === "string" && REASON_PATTERN.test(answer)) return answer;
+  return SENSITIVE_REASON;
+}
 
 /**
  * The exclusion check in force in `context`. None means no caller opened a content scope there, and spans started
@@ -79,24 +89,24 @@ export function exclusionIn(context: Context): ContentExclusion | undefined {
   return typeof value === "function" ? (value as ContentExclusion) : undefined;
 }
 
-/** True when `check` says sensitive or throws. */
-function isSensitive(check: ContentExclusion): boolean {
+/** The reason `check` gives for dropping content, or undefined when it says not sensitive; a throw is `sensitive`. */
+export function sensitiveReason(check: ContentExclusion): string | undefined {
   try {
-    return check();
+    return reasonFromAnswer(check());
   } catch {
-    return true;
+    return SENSITIVE_REASON;
   }
 }
 
-/** `check` and every outer check: true when any says sensitive; a check that throws counts as sensitive. */
-export function composeExclusion(check: () => boolean, outer: ContentExclusion | undefined): ContentExclusion {
+/**
+ * `check` and every outer check: the first that says sensitive gives the reason (the inner one first); a check that
+ * throws counts as sensitive.
+ */
+export function composeExclusion(check: () => ContentSensitivity, outer: ContentExclusion | undefined): ContentExclusion {
   return () => {
-    try {
-      if (check()) return true;
-    } catch {
-      return true;
-    }
-    return outer ? outer() : false;
+    const own = sensitiveReason(check);
+    if (own !== undefined) return own;
+    return outer ? (sensitiveReason(outer) ?? false) : false;
   };
 }
 
@@ -286,8 +296,9 @@ export class ContentPipeline {
   add(span: object, binding: SpanContentBinding, kind: InstrumentationContentKind, value: unknown): void {
     const entry = this.entry(span, binding);
     if (entry.dropped) return;
-    if (isSensitive(binding.exclusion)) {
-      this.drop(entry, "sensitive");
+    const sensitive = sensitiveReason(binding.exclusion);
+    if (sensitive !== undefined) {
+      this.drop(entry, sensitive);
       return;
     }
     try {
@@ -305,7 +316,10 @@ export class ContentPipeline {
     const entry = this.pending.get(span);
     if (!entry) return undefined;
     this.pending.delete(span);
-    if (!entry.dropped && entry.parts.size > 0 && isSensitive(entry.exclusion)) this.drop(entry, "sensitive");
+    if (!entry.dropped && entry.parts.size > 0) {
+      const sensitive = sensitiveReason(entry.exclusion);
+      if (sensitive !== undefined) this.drop(entry, sensitive);
+    }
     return entry;
   }
 
