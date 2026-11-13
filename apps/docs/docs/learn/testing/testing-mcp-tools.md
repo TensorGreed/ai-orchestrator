@@ -1,5 +1,5 @@
 ---
-title: "Testing MCP tool calls: what replay, mocks and checks catch"
+title: "Testing MCP tool calls: replay, mocks and checks"
 sidebarTitle: "Testing MCP tools"
 description: "Why live MCP calls make agent tests flaky, and what recorded replays, schema-built mocks and breaking-change checks each catch and miss."
 level: intermediate
@@ -48,7 +48,7 @@ A useful mock does four things, in this order:
 3. **Builds an example from the tool's `outputSchema`** when there is one: a `const`, the first `enum` value, a `default`, or a placeholder of the right type for each property.
 4. **Falls back to a fixed text** for tools that declare no output schema.
 
-The error behaviour matters, because it is where an agent's recovery logic gets tested. The MCP specification separates two kinds of error. **Protocol errors** are JSON-RPC errors for "unknown tools", "malformed requests" and "server errors". **Tool execution errors** are normal results with `isError: true`, used for "API failures", "input validation errors" and "business logic errors". The specification says tool execution errors "contain actionable feedback that language models can use to self-correct and retry", and that clients "SHOULD provide tool execution errors to language models". A mock that answers bad arguments with an `isError` result lets you check that your agent reads the error and fixes its call, instead of giving up or looping.
+The error behaviour matters, because it is where an agent's recovery logic gets tested. The MCP specification separates two kinds of error. **Protocol errors** are JSON-RPC errors for unknown tools, malformed requests and server errors. **Tool execution errors** are normal results with `isError: true`, used for API failures, input validation errors and business logic errors. The specification says tool execution errors "contain actionable feedback that language models can use to self-correct and retry", and that clients "SHOULD provide tool execution errors to language models". A mock that answers bad arguments with an `isError` result lets you check that your agent reads the error and fixes its call, instead of giving up or looping.
 
 Here is a tool with an output schema, and what a schema-built mock might return for it:
 

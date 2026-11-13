@@ -33,7 +33,7 @@ Memory is not learning. The model's weights do not change: the application choos
 
 ## In L2M
 
-Attach a Simple Memory node to an agent's `memory` port. It stores the conversation per namespace and session id, reloads the last 20 messages by default (`maxMessages`), and leaves tool results out unless you turn on `persistToolMessages`. When a run has a session id, the [session tool cache](/runtime/agent-loop#session-tool-cache-multi-turn-reuse) keeps full MCP tool outputs and gives the model `session_cache_list` and `session_cache_get` to fetch them again. Memory is kept until you set the optional `AGENT_MEMORY_RETENTION_DAYS` ([data retention](/operations/data-retention)).
+An agent run with a session id keeps its conversation, stored per namespace and session id. Attach a Simple Memory node to the agent's `memory` port to give it its own namespace, a window (`maxMessages`, 20 by default) and the option to keep tool results (`persistToolMessages`, off by default). When a run has a session id, the [session tool cache](/runtime/agent-loop#session-tool-cache-multi-turn-reuse) keeps full MCP tool outputs and gives the model `session_cache_list` and `session_cache_get` to fetch them again. Memory is kept until you set the optional `AGENT_MEMORY_RETENTION_DAYS` ([data retention](/operations/data-retention)).
 
 ## Further reading
 

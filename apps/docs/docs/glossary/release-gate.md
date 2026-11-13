@@ -24,7 +24,7 @@ A gate has a few parts:
 
 ## Example
 
-Version 7 of a support workflow changes the model. Its <Term id="replay">replay</Term> job passes 19 of 20 cases. The policy needs 100%, so publishing is blocked, and the reason names the failing case. The team fixes the prompt and saves version 8, which has a new hash, so the earlier job no longer applies. A new job passes 20 of 20, and version 8 publishes.
+Version 7 of a support workflow changes the model. Its <Term id="replay">replay</Term> job passes 19 of 20 cases. The policy needs 100%, so publishing is blocked, and the job's results show which case failed. The team fixes the prompt and saves version 8, which has a new hash, so the earlier job no longer applies. A new job passes 20 of 20, and version 8 publishes.
 
 ## Common confusion
 
@@ -32,7 +32,7 @@ A release gate is not an approval step, though it can include one. Approval asks
 
 ## In L2M
 
-Optionally, under **Evaluations → Release gates**, a workflow's new version reaches production only after a [replay job](/product/golden-sets#replay-jobs) of that exact saved version passed over its <Term id="golden-set">golden sets</Term>. By default the gate needs a 100% pass rate with inconclusive cases counted as failures, no regressions, at least three cases, no new rule blocks, and golden runs no older than 30 days unless the job reruns the baseline. Only an admin can override a blocked gate, with a reason that is audited. Rolling back to a version that already shipped skips the gate ([release gate](/product/release-gate#the-gate)).
+Optionally, under **Evaluations → Release gates**, a workflow's new version reaches production only after a [replay job](/product/golden-sets#replay-jobs) of that exact saved version passed over its <Term id="golden-set">golden sets</Term>. By default it needs every case to pass, with no regressions and at least three cases. Only an admin can override a blocked gate, with a reason that is audited. Rolling back to a version that already shipped skips the gate ([release gate](/product/release-gate#the-gate)).
 
 ## Further reading
 

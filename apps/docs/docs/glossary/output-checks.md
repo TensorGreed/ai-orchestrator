@@ -33,7 +33,7 @@ Output checks are not evals. An <Term id="eval">eval</Term> runs on test cases b
 
 ## In L2M
 
-The Output Guardrail node checks an answer for personal data, a JSON Schema, topics, content safety and grounding, and on failure either stops with an error or asks the upstream model again, up to three times. Optionally, the same schema, topic, safety and grounding checks can run as [output checks](/product/content-rules-output-checks) in a content rules rule set. All of them are off until you add them.
+The Output Guardrail node checks an answer for personal data, profanity, valid JSON or a JSON Schema, topics, content safety and grounding, and on failure either stops with an error or asks the upstream model again, up to three times. Optionally, the same schema, topic, safety and grounding checks can run as [output checks](/product/content-rules-output-checks) in a content rules rule set. All of them are off until you add them.
 
 ## Further reading
 

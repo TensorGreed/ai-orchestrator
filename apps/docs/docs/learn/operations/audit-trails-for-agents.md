@@ -1,5 +1,5 @@
 ---
-title: "Audit trails for AI agents: record it, sign it, prove it"
+title: "Audit trails for AI agents: record, sign, prove"
 sidebarTitle: "Audit trails for agents"
 description: "What an agent audit trail should record (inputs, tool calls, approvals, versions), how a signed run manifest proves it is intact, and offline checks."
 level: intermediate
@@ -83,10 +83,10 @@ Privacy practice says delete what you no longer need. Audit says keep the eviden
 A workable split:
 
 - **Keep run payloads briefly** under a <Term id="data-retention">data retention</Term> setting, because they hold personal data.
-- **Keep the audit log and signed manifests longer.** They hold ids, digests and decisions, not payloads, so they cost less in privacy terms.
+- **Keep the audit log and signed manifests longer.** They hold mostly ids, digests and decisions rather than payloads. Check what else they keep: a manifest that records rendered prompts still carries what the user typed.
 - **Suspend deletion for a matter** with a <Term id="legal-hold">legal hold</Term>, so evidence for a dispute survives the normal purge.
 
-Once the payloads are gone, the manifest still proves what happened in outline: which tools ran, with which outcomes, approved by whom. It can no longer show the content. Decide which questions you need to answer a year from now before you set the windows.
+Once the payloads are gone, the manifest still proves what happened in outline: which tools ran, with which outcomes, approved by whom. It no longer holds node inputs, outputs or tool results, only their digests. Decide which questions you need to answer a year from now before you set the windows.
 
 ## Regulatory context
 
@@ -101,10 +101,10 @@ L2M, a self-hosted workflow builder and agent runtime, keeps both kinds of recor
 - **Run manifest.** Every finished run can produce a versioned JSON manifest: run status and timing, the workflow's SHA-256 hash and version, per-node status and digests, model calls with tokens and estimated cost, MCP tool calls with argument and result digests and an outcome such as `ok`, `error`, `policy_blocked`, `rate_limited` or `breaker_rejected`, prompts, citations, approvals and totals. Configs keep secret references only. The manifest is made the first time someone asks for it, then stored and served unchanged ([the run manifest](/security/audit-bundles#the-run-manifest)).
 - **Signing.** Manifests and bundles are signed with Ed25519. Optionally set `AUDIT_SIGNING_KEY_BASE64`; otherwise L2M generates a key on first use and stores it encrypted. Admins see the public key and its id under **Settings → Audit Signing** ([signing keys](/security/audit-bundles#signing-keys)).
 - **Audit bundle.** `GET /api/executions/:id/bundle` (or **Audit bundle** on the Runs page) returns a zip with the manifest, a signed index, the workflow as it ran, each node's input and output, the trace, logs and output files. Secret values the deployment holds are replaced with `[REDACTED]` before anything is written.
-- **Offline check.** `pnpm l2m audit verify l2m-audit-<id>.zip --public-key audit-key.pub.pem` checks the zip, the signature, every file's digest, the manifest digest and the workflow hash. It exits 0 when everything passed with your key, 1 when a check failed, 2 on a usage error, and 3 when no `--public-key` was given, so the signer was not verified ([verifying a bundle offline](/security/audit-bundles#verifying-a-bundle-offline)).
+- **Offline check.** `pnpm l2m audit verify l2m-audit-<id>.zip --public-key audit-key.pub.pem` checks the zip, the signature, every file's digest, the manifest digest and the workflow hash. It exits 0 when everything passed with your key, 1 when a check failed, 2 on a usage error, and 3 when no `--public-key` was given (and `--trust-embedded-key` was not), so the signer was not verified ([verifying a bundle offline](/security/audit-bundles#verifying-a-bundle-offline)).
 - **Approvals.** Approval decisions go into the manifest and into the audit log (`approval.requested`, `approval.decided`, `approval.timed_out` and others), with the reason, the edited field keys and an HMAC digest of the edits ([audit and the run manifest](/product/approvals#audit-and-the-run-manifest)). The manifest also summarises content rule verdicts, without matched content.
 - **Audit log.** Sign-ins, role and key changes, secrets, approvals, releases, legal holds and run actions such as `execution.started` and `execution.audit_bundle.export` are written to a hash-chained audit log, on by default. Admins can list and export it as CSV, check the chain with `GET /api/audit-log/verify-chain`, and optionally ship it to an HTTP endpoint or a file as NDJSON that carries each row's hash.
-- **Retention.** Run history is kept 30 days by default (`EXECUTION_HISTORY_RETENTION_DAYS`) and the audit log 365 days (`AUDIT_LOG_RETENTION_DAYS`). A stored manifest is pruned only when it is older than the audit-log retention and its run's history is gone. A legal hold keeps a run's history, and the run keeps its manifest; the audit log follows its own retention ([data retention](/operations/data-retention#what-each-setting-deletes)).
+- **Retention.** Run history is kept 30 days by default (`EXECUTION_HISTORY_RETENTION_DAYS`) and the audit log 365 days (`AUDIT_LOG_RETENTION_DAYS`). A stored manifest is pruned only when it is older than the audit-log retention and its run's history is gone. The manifest keeps rendered prompts, so it can hold user text for as long as the audit log is kept. A legal hold keeps a run's history, and the run keeps its manifest; the audit log follows its own retention ([data retention](/operations/data-retention#what-each-setting-deletes)).
 
 The live demo has a refund workflow that pauses at an Approval Gate for a person to approve or edit the reply: the kind of decision a manifest records.
 

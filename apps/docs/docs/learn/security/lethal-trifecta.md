@@ -1,5 +1,5 @@
 ---
-title: "Private data, untrusted input, a way out: agent risk"
+title: "The lethal trifecta: private data, untrusted input"
 sidebarTitle: "The lethal trifecta"
 description: "Why an agent with private data, untrusted content and a way to send data out is one prompt injection from a leak, and how to break the combination."
 level: intermediate
@@ -45,7 +45,7 @@ The strongest control is to make sure no single agent step holds all three ingre
 - **Remove the exit.** A research agent that reads the web needs no write tools and no access to customer data. Give it only read-only tools, and let a later step that you control decide what to do with its findings.
 - **Keep untrusted content out.** An agent that drafts replies from your own knowledge base does not need to fetch arbitrary URLs. If it never reads outside text, an injection has no way in.
 
-Research has turned this idea into named designs. Beurer-Kellner and colleagues ([Design Patterns for Securing LLM Agents against Prompt Injections](https://arxiv.org/abs/2506.08837), 2025) start from the principle that "once an LLM agent has ingested untrusted input, it must be constrained so that it is impossible" for that input "to trigger any consequential actions". Their six patterns include the Dual LLM pattern, where "a privileged LLM has access to tools but never processes untrusted data", and the LLM Map-Reduce pattern, which dispatches "an isolated LLM-agent to process individual pieces of 3rd party data". The [prompt injection guide](/learn/security/prompt-injection#design-patterns-that-limit-what-injected-text-can-do) walks through the others.
+Beurer-Kellner and colleagues ([Design Patterns for Securing LLM Agents against Prompt Injections](https://arxiv.org/abs/2506.08837), 2025) turn this into six named designs, such as the Dual LLM pattern, where "a privileged LLM has access to tools but never processes untrusted data"; the [prompt injection guide](/learn/security/prompt-injection#design-patterns-that-limit-what-injected-text-can-do) walks through them.
 
 Splitting has a cost: agents become less flexible, and someone has to design the hand-offs. That is the trade. An agent that can do anything with anything is the one that leaks.
 

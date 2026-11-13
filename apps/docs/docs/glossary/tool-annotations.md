@@ -24,7 +24,7 @@ A tool's name and description tell the model what the tool does. Annotations tel
 
 The defaults lean towards caution: a tool that says nothing counts as a write tool that may destroy data and reach the outside world.
 
-The schema is blunt about trust: annotations "are not guaranteed to provide a faithful description of tool behavior", and clients "MUST consider tool annotations to be untrusted unless they come from trusted servers". A hint helps an honest server explain itself. It does not stop a dishonest one.
+The schema is blunt about trust: annotations "are not guaranteed to provide a faithful description of tool behavior", and the tools page adds that clients "MUST consider tool annotations to be untrusted unless they come from trusted servers". A hint helps an honest server explain itself. It does not stop a dishonest one.
 
 ## Example
 

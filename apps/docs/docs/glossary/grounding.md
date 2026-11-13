@@ -12,7 +12,7 @@ guide: [/learn/security/owasp-llm-top-10]
 
 **Keeping a model's answer to what the documents it was given actually support, so each claim can be traced back to a source.**
 
-<Term id="rag">RAG</Term> puts retrieved documents in the prompt and tells the model to answer from them. Grounding is whether it did. A model can ignore the context and answer from its training, mix the two, or fill a gap with something plausible. OWASP's LLM09 (Misinformation) describes the result, "false or misleading information that appears credible", and lists retrieval from "trusted external databases" and cross-checking against trusted sources among the ways to reduce it.
+<Term id="rag">RAG</Term> puts retrieved documents in the prompt and tells the model to answer from them. Grounding is whether it did. A model can ignore the context and answer from its training, mix the two, or fill a gap with something plausible. OWASP's LLM09 (Misinformation) describes the result, "false or misleading information that appears credible", and lists retrieval from "trusted external databases" among the ways to reduce it, and advises users to cross-check outputs with trusted sources.
 
 Grounding is checked in three common ways:
 
@@ -30,7 +30,7 @@ Grounded is not the same as true. A grounded answer is only as good as its sourc
 
 ## In L2M
 
-RAG Retrieve returns `citationInstructions` for the prompt, and the Extract Citations node maps each `[N]` back to its chunk ([citations](/nodes/knowledge-bases#citations-phase-9-4)). Optionally, the Output Guardrail node's `grounding` check flags claims the retrieved documents do not support, and the same check is available as an [output check](/product/content-rules-output-checks#grounding-in-sources) in content rules. The check compares words, so a paraphrase can read as unsupported and a single changed figure, as in the example, can slip through. For test cases, the `faithfulness` eval scorer uses a model judge.
+RAG Retrieve returns `citationInstructions` for the prompt, and the Extract Citations node maps each `[N]` back to its chunk ([citations](/nodes/knowledge-bases#citations-phase-9-4)). Optionally, the Output Guardrail node's `grounding` check, also available as an [output check](/product/content-rules-output-checks#grounding-in-sources), flags claims whose words the sources do not support, so a paraphrase can read as unsupported and one changed figure, as in the example, can pass (an optional model judge re-checks only claims already flagged). For test cases, the `faithfulness` eval scorer uses a model judge.
 
 ## Further reading
 

@@ -32,7 +32,7 @@ No single tool is to blame. Each server can be honest and well built; the risk c
 
 ## In L2M
 
-All optional. Every run records where its data came from with [data labels](/product/data-labels-and-destinations#data-labels), such as `untrusted_external` for an unauthenticated webhook or a tool result. Two safety presets act on them: write tools need approval after the agent reads outside content, and open-world tools are denied while it holds sensitive data ([untrusted content and write tools](/guides/govern-mcp-tools#untrusted-content-and-write-tools)). Destination rules can keep data classes such as card numbers inside your private network.
+All optional. Every run records where its data came from with [data labels](/product/data-labels-and-destinations#data-labels), such as `untrusted_external` for an unauthenticated webhook or a tool result. Two optional safety presets, which start in shadow mode, act on them: write tools need approval after the agent reads outside content, and open-world tools are denied while it holds sensitive data ([untrusted content and write tools](/guides/govern-mcp-tools#untrusted-content-and-write-tools)). Destination rules can keep data classes such as card numbers inside your private network.
 
 ## Further reading
 

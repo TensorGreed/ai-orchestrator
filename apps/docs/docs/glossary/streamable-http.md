@@ -35,7 +35,7 @@ MCP-Protocol-Version: 2025-11-25
 
 ## Common confusion
 
-Streamable HTTP is not "MCP over SSE". SSE is only one way a reply can come back, and many replies are plain JSON. Note too that the 2026-07-28 revision drops the `initialize` handshake and its connection-scoped session: each request carries its protocol version and capabilities in the message body. By default L2M speaks 2025-11-25 and earlier; 2026-07-28 is opt-in.
+Streamable HTTP is not "MCP over SSE". SSE is only one way a reply can come back, and many replies are plain JSON. Note too that the 2026-07-28 revision drops the `initialize` handshake and its connection-scoped session: each request carries its protocol version and capabilities in the message body. By default L2M's gateway speaks 2025-11-25, 2025-06-18 and 2025-03-26, and serving 2026-07-28 is opt-in. As a client, L2M asks for 2025-06-18 and switches to 2026-07-28 only for a server that speaks nothing older.
 
 ## In L2M
 

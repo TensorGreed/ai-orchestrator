@@ -241,7 +241,7 @@ For registered servers the hints come from the server's current snapshot. Agents
 
 ## No write tools
 
-Each workflow has a **No write tools** setting (`settings.noWriteTools` in the workflow JSON). Turn it on from the editor's **⋯** (More actions) menu. While it is on, every write tool is blocked for agents and direct MCP Tool nodes in that workflow.
+Each workflow has a **No write tools** setting (`settings.noWriteTools` in the workflow JSON). Turn it on from the editor's **⋯** (More actions) menu. While it is on, every write tool is blocked for agents and direct MCP Tool nodes in that workflow. This switch trusts a server's own `readOnlyHint` and `destructiveHint` (an admin's mark overrides them); the [write-tool approval](/product/approvals#approval-before-write-tools) trusts only an admin's mark.
 
 The switch is checked after the rules. A tool denied by a rule is reported as a policy block, not a write-tool block.
 

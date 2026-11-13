@@ -1,5 +1,5 @@
 ---
-title: "MCP tool policy: allow, deny or require approval"
+title: "MCP tool policy: which tools an agent may call"
 term: "MCP tool policy"
 topic: security
 definition: "A set of rules, enforced outside the model, that decides whether a given agent or client may call a given MCP tool with given arguments: allow it, deny it, or hold it for a person to approve."

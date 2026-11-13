@@ -5,7 +5,6 @@ topic: agents
 definition: "Retrieval that runs a keyword search (such as BM25) and a vector search for the same query, then merges the two ranked lists into one."
 description: "Hybrid search combines keyword (BM25) and vector results, often fused with reciprocal rank fusion, then reranked. Why it finds what each misses."
 related: [rag, vector-store, grounding]
-guide: [/learn/security/owasp-llm-top-10]
 ---
 
 # Hybrid search
@@ -34,7 +33,7 @@ Hybrid search is not reranking. Fusion merges ranked lists without reading the t
 
 ## In L2M
 
-On a [knowledge base](/nodes/knowledge-bases#hybrid-search-phase-9-3), the RAG Retrieve node's `searchMode` is `vector` (the default), `bm25` or `hybrid`. Hybrid fuses both lists with RRF: `rrfK` defaults to 60, each search returns `candidatesPerRanker` results (by default the larger of 20 and four times `topK`), and each can be weighted. External <Term id="vector-store">vector stores</Term> fall back to vector search. A [Rerank node](/nodes/knowledge-bases#reranker-node-phase-9-3) can reorder the results with a hosted reranker.
+On a [knowledge base](/nodes/knowledge-bases#hybrid-search-phase-9-3), the RAG Retrieve node's `searchMode` is `vector` (the default), `bm25` or `hybrid`, and hybrid fuses the two lists with RRF (`rrfK` 60 by default, each list `candidatesPerRanker` long, by default the larger of 20 and four times `topK`, each optionally weighted). External <Term id="vector-store">vector stores</Term> fall back to vector search. A [Rerank node](/nodes/knowledge-bases#reranker-node-phase-9-3) can reorder the results with a hosted reranker.
 
 ## Further reading
 

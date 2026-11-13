@@ -11,7 +11,7 @@ related: [streamable-http, stdio-transport, mcp-session, mcp-client, mcp-server,
 
 An MCP transport is the channel that carries a client's and a server's JSON-RPC messages. The specification defines two. With <Term id="stdio-transport">stdio</Term>, the client starts the server as a child process and they exchange one message per line over its standard input and output: use it for a server that runs on the same machine as its client. With <Term id="streamable-http">Streamable HTTP</Term>, the client sends every message as an HTTP POST to one endpoint and the server answers with JSON or a stream of server-sent events: use it for a server that runs somewhere else or serves many clients.
 
-This guide follows the 2025-11-25 specification, which is what most servers speak today, and then explains what the current 2026-07-28 revision changes.
+This guide follows the 2025-11-25 specification, the revision before the current one, and then explains what the current 2026-07-28 revision changes.
 
 ## The two transports at a glance
 
@@ -102,7 +102,7 @@ The 2026-07-28 revision makes MCP stateless. For transports, that means:
 - **`server/discover`.** Servers MUST implement it to advertise their versions, capabilities and identity. Clients MAY call it first, and can use it on stdio as a probe for older servers.
 - **`subscriptions/listen`.** The GET stream and resource subscriptions are replaced by one long-lived POST stream, where the client opts in to the change notifications it wants.
 - **No resumability.** `Last-Event-ID` and SSE event ids are removed. A broken response stream loses the request, and the client MUST send it again as a new request with a new id.
-- **Standard headers.** Streamable HTTP POST requests must carry `Mcp-Method` and `Mcp-Name` headers.
+- **Standard headers.** Streamable HTTP POST requests must carry an `Mcp-Method` header, and calls to a named tool, resource or prompt also an `Mcp-Name` header.
 
 stdio stays. The revision also suggests that servers log to stderr on stdio, as the Logging feature is deprecated. The practical gain for HTTP is that with no session to find, any instance behind a load balancer can answer any request.
 
@@ -128,7 +128,7 @@ L2M is an MCP client toward the servers your agents call, and optionally an MCP 
 **As a client.** The [MCP server registry](/product/mcp-server-registry) has an adapter for each transport:
 
 - `stdio_mcp` starts the command you configure, with its `args`, `env` and `cwd`, and exchanges one JSON message per line. It keeps the last lines of stderr and shows them in the error if the process exits unexpectedly.
-- `http_mcp` speaks Streamable HTTP only. It sends `Accept: application/json, text/event-stream`, reads either kind of response, and sends the negotiated `MCP-Protocol-Version` on later requests. By default it opens each connection with `initialize`, asking for `2025-06-18`. Optionally, `MCP_CLIENT_PROTOCOL_DEFAULT=auto` (try 2026-07-28 first, then fall back) or `modern` (2026-07-28 only), or a server's own `protocolMode`, changes that. It does not speak the old HTTP+SSE transport.
+- `http_mcp` speaks Streamable HTTP only. It sends `Accept: application/json, text/event-stream`, reads either kind of response, and sends the negotiated `MCP-Protocol-Version` on later requests. By default it opens each connection with `initialize`, asking for `2025-06-18`. Optionally, `MCP_CLIENT_PROTOCOL_DEFAULT=auto` (try 2026-07-28 first, then fall back) or `modern` (2026-07-28 only), or a server's own `protocolMode`, changes that. Even by default, a server that rejects `initialize` because it speaks only 2026-07-28 is reached: the client switches to 2026-07-28 for it. It does not speak the old HTTP+SSE transport.
 
 A stdio server runs on the API host with the API's own permissions by default. Optionally, an admin can set a server's **Sandbox** to **Container**. L2M then starts it in a throwaway docker or podman container with a read-only root filesystem, a non-root user, all Linux capabilities dropped, CPU, memory and process limits, and no network unless the admin allows it. `MCP_SANDBOX_REQUIRED=true` refuses every stdio server outside a container. See [Sandboxed stdio servers](/product/mcp-server-registry#sandboxed-stdio-servers).
 
@@ -137,7 +137,7 @@ A stdio server runs on the API host with the API's own permissions by default. O
 - By default it speaks protocol versions `2025-11-25`, `2025-06-18` and `2025-03-26`, and answers an unsupported `MCP-Protocol-Version` with `400`. Optionally, with `MCP_GATEWAY_MODERN_PROTOCOL=on`, it also serves 2026-07-28 clients, which send no session id and need no sticky routing ([clients without sessions](/operations/cluster#clients-without-sessions-mcp-2026-07-28)).
 - `initialize` returns an `Mcp-Session-Id`; later requests must send it, and `DELETE` with the header ends the session. Sessions live in the memory of the instance that opened them and close after 30 idle minutes by default, so a cluster needs sticky routing.
 - Responses are JSON, or an SSE stream when the request asks for progress and the `Accept` header allows it.
-- `GET` returns `405`: the gateway offers no server-initiated stream.
+- `GET` returns `405`: the gateway opens no GET stream. (With `MCP_GATEWAY_MODERN_PROTOCOL=on`, 2026-07-28 clients can open a `subscriptions/listen` stream instead; the gateway announces no changes on it.)
 - Requests whose `Origin` is not allowed get `403`. Requests with no `Origin`, as desktop, IDE and CLI clients send, are accepted.
 - Each client sends its own bearer token. The gateway calls upstream servers with the registry's credential for each server, never with the client's token.
 

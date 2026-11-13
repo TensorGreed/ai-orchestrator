@@ -3,7 +3,7 @@ title: "Spotlighting: marking untrusted text in a prompt"
 term: "Spotlighting"
 topic: security
 definition: "A family of prompt techniques that mark which text came from outside sources, so the model treats it as data to work on rather than instructions to follow."
-description: "Spotlighting marks where text came from (delimiters, data marking, encoding) so the model treats outside content as data, not instructions."
+description: "Spotlighting marks where text came from (delimiters, datamarking, encoding) so the model treats outside content as data, not instructions."
 related: [indirect-prompt-injection, prompt-injection, data-labels]
 guide: [/learn/security/prompt-injection]
 ---
@@ -20,7 +20,7 @@ The term comes from a 2024 paper by Hines and others, which describes three tech
 - **Datamarking.** Interleave a special character through the whole text, for example in place of every space. The authors found it much more effective than delimiting.
 - **Encoding.** Transform the text, for example with base64, and ask the model to decode it. The authors found it the strongest, but only for models capable enough to work on encoded text.
 
-In the authors' experiments with GPT-family models, spotlighting cut the success rate of their attacks from over 50% to below 2%, with little effect on the underlying task.
+The paper's tests ran on GPT-family models. Across its attack sets, success fell from over 50% without spotlighting to below 2% with it, and task quality barely moved.
 
 ## Example
 
@@ -32,7 +32,7 @@ Spotlighting does not detect anything. It changes how outside text is presented 
 
 ## In L2M
 
-Spotlighting is optional and off by default. A rule set's `spotlighting` setting, `delimiters` (random boundary lines) or `datamark`, marks every tool result, the parts of an agent's prompt that come from outside content, and memory that holds outside content, and adds the matching text to the system prompt. Memory keeps the unmarked text, so marks never pile up across turns. See [agents and content rules](/product/content-rules#rules-port-on-agents).
+Spotlighting is optional and off by default. A rule set's `spotlighting` setting, `delimiters` (random boundary lines) or `datamark`, marks every tool result (the agent's internal session-cache, clarify and think tools aside), the parts of an agent's prompt that come from outside content, and memory that holds outside content, and adds the matching text to the system prompt. Memory keeps the unmarked text, so marks never pile up across turns. See [agents and content rules](/product/content-rules#rules-port-on-agents).
 
 ## Further reading
 

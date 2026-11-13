@@ -37,7 +37,7 @@ export const TRACKS: Track[] = [
     id: "mcp",
     title: "MCP fundamentals",
     shortTitle: "MCP fundamentals",
-    summary: "What the Model Context Protocol is, how a tool call travels, which transport carries it, how remote servers ask for OAuth and what tool annotations tell you.",
+    summary: "What the Model Context Protocol is, how a tool call travels, which transport carries it, OAuth for remote servers and what tool annotations tell you.",
     level: "beginner",
     pages: ["what-is-mcp", "hosts-clients-servers", "tools-resources-prompts", "transports", "authorization", "tool-annotations"],
     next: "/learn/security/mcp-security-risks"

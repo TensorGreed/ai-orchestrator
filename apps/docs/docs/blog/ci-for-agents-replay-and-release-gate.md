@@ -11,7 +11,7 @@ socialCard: true
 
 # CI for agents: golden runs, replay and a release gate
 
-A prompt edit can change what an agent does as much as a code change can, and most teams ship it with a quick manual try. Between 23 and 24 October 2026 we merged the pieces that let L2M treat agent changes like code: keep known-good runs, replay every change against them with the outside world answered from a recording, fail the build on a regression, and let only a version that passed reach production. This post explains how those pieces fit together and why we made the choices we did.
+A prompt edit can change what an agent does as much as a code change can, and most teams ship it with a quick manual try. Between 23 and 24 October 2026 we merged the pieces that let L2M treat agent changes like code: keep known-good runs, <Term id="replay">replay</Term> every change against them with the outside world answered from a recording, fail the build on a regression, and let only a version that passed reach production. This post explains how those pieces fit together and why we made the choices we did.
 
 ## The problem: changes you cannot unit test
 
@@ -25,11 +25,11 @@ So we started from what already exists in production: real runs.
 
 A <Term id="golden-run">golden run</Term> is a finished run saved as a reference ([PR #45](https://github.com/TensorGreed/ai-orchestrator/pull/45)). It keeps the input, every node's result and the run's MCP calls as a cassette. Secrets are scrubbed before anything is stored, and golden runs stay until someone deletes them or their workflow; they are not purged by age.
 
-Writing good cases by hand is slow, so [production capture](/product/production-capture) ([PR #56](https://github.com/TensorGreed/ai-orchestrator/pull/56), 24 October) does it from traffic. It is off until a builder turns it on for a workflow, and then samples real runs (10% by default, at most 20 a day), masks the personal data in them, and puts them in a **Captured runs** inbox. A builder promotes the useful ones into a golden set in one click.
+Writing good cases by hand is slow, so [production capture](/product/production-capture) ([PR #56](https://github.com/TensorGreed/ai-orchestrator/pull/56), 24 October) does it from traffic. It is off until a builder turns it on for a workflow, and then samples real runs (10% by default, at most 20 a day), masks the personal data in them, and puts them in a **Captured runs** inbox. A builder promotes the useful ones into a <Term id="golden-set">golden set</Term> in one click.
 
 ## Replay: run what is safe, answer the rest from the recording
 
-<Term id="replay">Replay</Term> runs a candidate version of the workflow on a golden run's input. Each node is handled by its class:
+Replay runs a candidate version of the workflow on a golden run's input. Each node is handled by its class:
 
 | Node | In a replay |
 | --- | --- |
@@ -47,7 +47,7 @@ Two rules matter more than the table.
 
 ## Golden sets, scorers and replay jobs
 
-A <Term id="golden-set">golden set</Term> groups the cases for one workflow ([PR #47](https://github.com/TensorGreed/ai-orchestrator/pull/47)). A replay job runs every case against a candidate and scores it. By default a case is scored on its status and on JSON equality with the golden output; other scorers check a JSON schema, text similarity, the tool-call sequence, a cost budget, or ask a model to judge.
+A golden set groups the cases for one workflow ([PR #47](https://github.com/TensorGreed/ai-orchestrator/pull/47)). A replay job runs every case against a candidate and scores it. By default a case is scored on its status and on JSON equality with the golden output; other scorers check a JSON schema, text similarity, the tool-call sequence, a cost budget, or ask a model to judge.
 
 Live models vary from run to run. [PR #54](https://github.com/TensorGreed/ai-orchestrator/pull/54) added two answers. First, recorded runs now keep their model calls as a tape, and a job can answer model calls from it. That tests a change to the logic around the model with no model drift. Second, a job can repeat each case up to five times and aggregate the results.
 
@@ -81,7 +81,7 @@ A gate is only as strong as its cases. On an enforced gate, a builder could make
 
 ## Try it in L2M
 
-Open the FAQ answerer in the [live demo](https://lsquarem.com/demo/?mode=editor&workflowId=wf-demo-faq-release){target="_self"} to watch a <Term id="release-gate">release gate</Term> block a change, with no sign-up. To set it up on your own deployment, follow [CI for AI agents](/guides/ci-for-ai-agents). The reference pages are [Golden runs and replay](/product/golden-runs), [Golden sets, replay jobs and scorers](/product/golden-sets), [Replay in CI and the release gate](/product/replay-and-release-gate) and [Release gate and publish](/product/release-gate).
+Open the FAQ answerer in the [live demo](https://lsquarem.com/demo/?mode=editor&workflowId=wf-demo-faq-release){target="_self"} to watch a release gate block a change, with no sign-up. To set it up on your own deployment, follow [CI for AI agents](/guides/ci-for-ai-agents). The reference pages are [Golden runs and replay](/product/golden-runs), [Golden sets, replay jobs and scorers](/product/golden-sets), [Replay in CI and the release gate](/product/replay-and-release-gate) and [Release gate and publish](/product/release-gate).
 
 ## Further reading
 

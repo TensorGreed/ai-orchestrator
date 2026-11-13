@@ -12,7 +12,7 @@ guide: [/learn/mcp/what-is-mcp]
 
 **The part of an AI application that holds one connection to one MCP server: it negotiates the protocol version and capabilities, then sends that server's requests and receives its replies.**
 
-The word "client" is easy to misread. In MCP it is not the app you install. The app is the <Term id="mcp-host">host</Term>, and the host creates one client for each server it connects to. The specification puts it plainly: each client has "a 1:1 relationship with a particular server". An IDE connected to a file server, a ticket tracker and a search API runs three clients side by side.
+In MCP, the "client" is not the app you install. The app is the <Term id="mcp-host">host</Term>, and the host creates one client for each server it connects to. The specification puts it plainly: each client has "a 1:1 relationship with a particular server". An IDE connected to a file server, a ticket tracker and a search API runs three clients side by side.
 
 A client's job is narrow but strict:
 
@@ -34,11 +34,11 @@ The server replies with `2025-11-25` and `"tools": { "listChanged": true }`. The
 
 ## Common confusion
 
-People often call the whole chat app or IDE "the MCP client". As shorthand that is fine. In the spec, though, the host owns consent, user authorization and the model; the client is just one connection. When a security rule says "the client MUST", it usually means the code that talks to that one server.
+People often call the whole chat app or IDE "the MCP client". That is fine as shorthand, but in the spec the host owns consent, user authorization and the model; the client is just one connection. When a security rule says "the client MUST", check what it is about: protocol rules (headers, versions, token audience) fall on the connection; rules about consent and what people see fall on the host.
 
 ## In L2M
 
-L2M is an MCP client whenever an agent or MCP Tool node calls a server: it connects over <Term id="streamable-http">Streamable HTTP</Term> or <Term id="stdio-transport">stdio</Term> and, by default, asks for protocol version `2025-06-18` in `initialize` and sends the negotiated `MCP-Protocol-Version` header afterwards. Speaking 2026-07-28 to a server is opt-in, per connection or deployment-wide. See the [MCP server registry](/product/mcp-server-registry#progress-and-cancellation). Through the [MCP gateway](/product/mcp-gateway), L2M also plays the server role for other clients.
+L2M is an MCP client whenever an agent or MCP Tool node calls a server: it connects over <Term id="streamable-http">Streamable HTTP</Term> or <Term id="stdio-transport">stdio</Term> and, by default, asks for protocol version `2025-06-18` in `initialize` and, over HTTP, sends the negotiated `MCP-Protocol-Version` header afterwards. If a server speaks only 2026-07-28 and rejects `initialize`, L2M switches to 2026-07-28 for that server. Trying 2026-07-28 first is opt-in, per connection (`protocolMode`) or deployment-wide (`MCP_CLIENT_PROTOCOL_DEFAULT`). See the [MCP server registry](/product/mcp-server-registry#progress-and-cancellation). Through the [MCP gateway](/product/mcp-gateway), L2M also plays the server role for other clients.
 
 ## Further reading
 

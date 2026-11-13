@@ -12,7 +12,7 @@ guide: [/learn/mcp/transports]
 
 **The MCP transport in which the client starts the server as a child process and exchanges newline-delimited JSON-RPC messages over the process's standard input and output.**
 
-Most local MCP servers use stdio. A config entry names a command, such as `npx -y some-server@1.2.0 /srv/shared`, and the client runs it. The client writes requests to the server's stdin; the server writes replies to stdout, one JSON message per line. The spec keeps stdout clean: the server must write nothing there that is not a valid MCP message, and logs go to stderr. To shut down, the client closes stdin, then sends `SIGTERM` and finally `SIGKILL` if the process will not exit.
+Local MCP servers usually use stdio. A config entry names a command, such as `npx -y some-server@1.2.0 /srv/shared`, and the client runs it. The client writes requests to the server's stdin; the server writes replies to stdout, one JSON message per line. The spec keeps stdout clean: the server must write nothing there that is not a valid MCP message, and logs go to stderr. To shut down, the client closes stdin, then sends `SIGTERM` and finally `SIGKILL` if the process will not exit.
 
 Why it is popular: no port, no TLS, no tokens. Only the process that started the server can talk to it. The spec says clients "SHOULD support stdio whenever possible", and the authorization spec says stdio servers should not use the OAuth flow but take credentials from the environment instead.
 

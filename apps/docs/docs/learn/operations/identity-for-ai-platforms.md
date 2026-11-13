@@ -94,12 +94,12 @@ Network allowlists add a layer: the admin interface, the API and the MCP gateway
 
 ## Identity in L2M
 
-L2M, a self-hosted workflow builder and agent runtime, implements these pieces on your own deployment. Each one is optional: with no setting, sign-in works with email and password as before.
+L2M, a self-hosted workflow builder and agent runtime, implements these pieces on your own deployment. Each one is optional: with no setting, people sign in with email and password.
 
 - **SSO.** OIDC (`OIDC_ENABLED`), with the Authorization Code flow, PKCE and checks on `iss`, `aud`, `nonce` and expiry; SAML 2.0 (`SAML_ENABLED`); and LDAP (`LDAP_ENABLED`). Allow-lists by email domain or group, verified-email linking, and group-to-role mappings ([OIDC single sign-on](/security/auth-rbac#oidc-single-sign-on)).
 - **MFA.** TOTP with backup codes. `MFA_REQUIRED_ROLES=admin,builder` requires it per role, and limits an unenrolled user to setting it up. `SSO_MFA=idp` requires the identity provider to assert MFA (through `amr`, `acr` or the SAML authentication context); `idp_or_local` also accepts L2M's own code.
 - **Step-up.** `STEP_UP_MAX_AGE_MINUTES` asks for a fresh code before actions such as creating keys, changing roles, editing secrets and creating gateway clients.
-- **Roles and projects.** Global roles `admin`, `builder`, `operator` and `viewer` (an operator can decide approvals and queue runs, but not edit or start runs from the editor); project roles project admin, editor and viewer, plus custom roles; `PROJECT_ISOLATION=strict` for teams that must not see each other's work.
+- **Roles and projects.** Global roles `admin`, `builder`, `operator` and `viewer` (an operator can decide approvals a gate allows them to and queue runs, but not edit or start runs from the editor); project roles project admin, editor and viewer, plus custom roles; `PROJECT_ISOLATION=strict` for teams that must not see each other's work.
 - **Service accounts.** Admin-managed, no sign-in, never approvers. Keys look like `ao_…` and can carry a role ceiling, a project list (which caps them at builder) and an expiry; `SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS` caps their age, and rotation keeps the old key for a grace window ([key scopes](/security/service-accounts#key-scopes)).
 - **Gateway clients.** Each MCP gateway client has its own `l2m_mcp_…` token, its toolsets, a role capped at its creator's current role, and an expiry. Only a hash of the token is stored ([clients](/product/mcp-gateway#clients)). Optionally, pin a client to address ranges or a client certificate ([network controls](/security/network-controls)).
 - **Break-glass.** `admin:break-glass` on the server host prints a one-time link for a one-hour admin session; every request in it is audited, and an alert goes to the notification channels that take it.

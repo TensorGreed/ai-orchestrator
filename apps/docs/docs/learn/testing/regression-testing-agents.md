@@ -10,7 +10,7 @@ socialCard: true
 
 # Regression testing AI agents
 
-A regression test for an agent checks that a change (a new prompt, another model, an updated tool) did not break something that used to work. The practical way to build one is to save known-good runs, called golden runs, and replay a changed workflow against them, with outside calls answered from the recording so the test has no side effects. Group the runs into a set, run the set in CI, and fail the build when a run that used to pass now fails.
+A regression test for an agent checks that a change (a new prompt, another model, an updated tool) did not break something that used to work. The practical way to build one is to save known-good runs, called golden runs, and <Term id="replay">replay</Term> a changed workflow against them, with outside calls answered from the recording so the test has no side effects. Group the runs into a set, run the set in CI, and fail the build when a run that used to pass now fails.
 
 ## What a regression is for an agent
 
@@ -39,7 +39,7 @@ Save the common path first, then the edge cases, then every run that once went w
 
 ## Replay without side effects
 
-Running a test case against live systems is a problem when the agent can act. A refund agent's test would refund someone. <Term id="replay">Replay</Term> solves this by answering the outside world from the recording:
+Running a test case against live systems is a problem when the agent can act. A refund agent's test would refund someone. Replay solves this by answering the outside world from the recording:
 
 1. Take the changed workflow (the candidate) and the golden run's input.
 2. Run the candidate. When a step would call a tool, an API or a database, look up the same call in the recording and return the recorded answer instead.

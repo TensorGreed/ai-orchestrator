@@ -5,7 +5,7 @@ description: "How the L2M agent loop runs: messages, tool discovery, model calls
 
 # Agent Loop
 
-Concepts: [What is an AI agent?](/learn/agents/what-is-an-ai-agent) explains the loop in plain words, and [supervisor and worker agents](/learn/agents/supervisor-and-workers) covers the `worker` port. [Agent memory](/learn/agents/agent-memory) covers session memory and the session tool cache. Glossary: <Term id="agent-loop">agent loop</Term>, <Term id="context-window">context window</Term>, <Term id="supervisor-agent">supervisor agent</Term>, <Term id="agent-memory">agent memory</Term>.
+Concepts: [What is an AI agent?](/learn/agents/what-is-an-ai-agent) explains the loop in plain words, and [supervisor and worker agents](/learn/agents/supervisor-and-workers) covers the `worker` port. [Agent memory](/learn/agents/agent-memory) covers session memory and the session tool cache. Glossary: <Term id="agent-loop">agent loop</Term>, <Term id="context-window">context window</Term>, <Term id="supervisor-agent">supervisor agent</Term>.
 
 ## Execution model
 
@@ -103,7 +103,7 @@ For non-chat triggers (webhook, schedule), the workflow caller inspects `result.
 
 ### What gets persisted
 
-Tool results are normally filtered from session memory (the in-context tool message has the full output). The `agent_clarify` tool result is the exception — it's always persisted, so the resume-detection on subsequent runs sees the question as *answered* and doesn't re-resume.
+Tool results are normally filtered from session memory (the in-context tool message has the full output), and the assistant's tool-call requests go with them: a call whose result is not stored is dropped from the saved message. The `agent_clarify` tool result is the exception — it's always persisted, so the resume-detection on subsequent runs sees the question as *answered* and doesn't re-resume.
 
 ### When to use it
 

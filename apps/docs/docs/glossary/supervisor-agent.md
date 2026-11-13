@@ -20,7 +20,7 @@ The pattern has costs. Every delegation starts a whole <Term id="agent-loop">age
 
 ## Example
 
-A support supervisor gets "Why was I charged twice, and where is my parcel?". It calls the billing worker with "Explain the two charges on account 4417", then the shipping worker with "Find the status of the latest order on account 4417". The billing worker uses invoice tools, the shipping worker uses a tracking tool, and neither can touch the other's systems. The supervisor merges both answers into one reply.
+A support supervisor gets "Why was I charged twice, and where is my parcel?". It calls the billing worker with "Explain the two charges on account 4417", then the shipping worker with "Find the status of the latest order on account 4417". Each worker has only its own tools, so neither can touch the other's systems. The supervisor merges both answers into one reply.
 
 ## Common confusion
 
@@ -28,7 +28,7 @@ A supervisor agent is not a router. A router picks one fixed path from the input
 
 ## In L2M
 
-The Supervisor node takes agent nodes on its `worker` port. Each worker reaches the supervisor's model as a tool named `delegate_to_<worker name>` with one `task_prompt` argument. The worker then runs its own loop with its own chat model and tools, and the task prompt becomes its `user_prompt`: it does not see the original request unless the supervisor passes it on. Build one with no API key in the [supervisor and worker agents recipe](/recipes/supervisor-worker-agents), or read the [agent loop](/runtime/agent-loop#attachment-ports) reference.
+The Supervisor node takes agent nodes on its `worker` port. Each worker reaches the supervisor's model as a tool named `delegate_to_<worker name>` with one `task_prompt` argument. The worker runs its own loop with its own chat model and tools, and the task prompt becomes its `user_prompt`, so it does not see the original request unless the supervisor passes it on. Wire one up with no API key in the [supervisor and worker agents recipe](/recipes/supervisor-worker-agents); with the built-in echo model the supervisor never delegates, so attach a tool-calling model to watch it hand work off. Details: [agent loop](/runtime/agent-loop#attachment-ports).
 
 ## Further reading
 
