@@ -137,7 +137,7 @@ A stdio server runs on the API host with the API's own permissions by default. O
 - By default it speaks protocol versions `2025-11-25`, `2025-06-18` and `2025-03-26`, and answers an unsupported `MCP-Protocol-Version` with `400`. Optionally, with `MCP_GATEWAY_MODERN_PROTOCOL=on`, it also serves 2026-07-28 clients, which send no session id and need no sticky routing ([clients without sessions](/operations/cluster#clients-without-sessions-mcp-2026-07-28)).
 - `initialize` returns an `Mcp-Session-Id`; later requests must send it, and `DELETE` with the header ends the session. Sessions live in the memory of the instance that opened them and close after 30 idle minutes by default, so a cluster needs sticky routing.
 - Responses are JSON, or an SSE stream when the request asks for progress and the `Accept` header allows it.
-- `GET` returns `405`: the gateway opens no GET stream. (With `MCP_GATEWAY_MODERN_PROTOCOL=on`, 2026-07-28 clients can open a `subscriptions/listen` stream instead; the gateway announces no changes on it.)
+- `GET` returns `405`: the gateway opens no GET stream. (With `MCP_GATEWAY_MODERN_PROTOCOL=on`, 2026-07-28 clients can open a `subscriptions/listen` stream instead; the gateway announces tool list changes on it.)
 - Requests whose `Origin` is not allowed get `403`. Requests with no `Origin`, as desktop, IDE and CLI clients send, are accepted.
 - Each client sends its own bearer token. The gateway calls upstream servers with the registry's credential for each server, never with the client's token.
 

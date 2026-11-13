@@ -236,8 +236,6 @@ Audit events:
 | `MCP_GATEWAY_SESSION_IDLE_MS` | `1800000` | Idle time before a session closes (minimum 10000). |
 | `MCP_GATEWAY_MAX_SESSIONS` | `500` | Open sessions across all clients. |
 | `MCP_GATEWAY_AUDIT_READ_ONLY_CALLS` | `first_per_session` | `all`, `first_per_session` or `none`. |
-| `MCP_GATEWAY_LISTEN_MAX_MS` | `600000` | MCP 2026-07-28: a `subscriptions/listen` stream ends with a `complete` result after this long. |
-| `MCP_GATEWAY_LISTEN_MAX_PER_CLIENT` | `4` | MCP 2026-07-28: open listen streams per client on one instance. |
 | `MCP_GATEWAY_LISTEN_CHECK_MS` | `30000` | MCP 2026-07-28: how often a stream that asked for `toolsListChanged` has its tool list re-checked, besides the change hints; `0` = hints only. |
 | `MCP_GATEWAY_APPROVAL_WINDOW_MS` | `900000` | How long after an approval the client can retry the identical call, once; also how long after a rejection the identical call is refused (10000 to 604800000). |
 | `MCP_GATEWAY_MODERN_PROTOCOL` | `off` | `on` also serves MCP `2026-07-28` clients, without sessions. See [MCP 2026-07-28 support](./mcp-2026-07-28.md#the-mcp-gateway). |
