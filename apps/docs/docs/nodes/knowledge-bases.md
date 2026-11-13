@@ -150,6 +150,10 @@ Each retrieved document carries provenance metadata:
 
 Use these in downstream prompt templates to ask the LLM for source-cited answers (Phase 9.4 will make citations first-class).
 
+Chunks that a sensitive run adds through a workflow are marked `sensitive` (chunks added through the API are not), and a
+run that retrieves a marked chunk keeps its content out of OpenTelemetry content capture. See
+[Content copied from sensitive runs](../operations/opentelemetry.md#content-copied-from-sensitive-runs).
+
 ## Standalone search
 
 For testing without wrapping in a workflow:

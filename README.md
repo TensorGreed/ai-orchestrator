@@ -6,7 +6,7 @@
 
 ## What makes it different
 
-- **MCP-first.** Wire any MCP server into an agent as a tool. The runtime compacts schemas, shortlists tools by prompt relevance, and caches full tool outputs across multi-turn sessions so models stay grounded without re-calling expensive endpoints. You can also expose your own workflows back out as MCP tools that other agents invoke (`mcp_server_trigger`).
+- **MCP-first.** Wire any MCP server into an agent as a tool. The runtime compacts tool descriptions and schemas, and caches full tool outputs across multi-turn sessions so models stay grounded without re-calling expensive endpoints. You can also expose your own workflows back out as MCP tools that other agents invoke (`mcp_server_trigger`).
 - **Multi-agent Swarm.** Compose Supervisor → Worker hierarchies via dedicated attachment ports. Workers are exposed to the parent as synthetic tools, recursively. Other visual workflow tools either lack MCP integration entirely or treat agent delegation as chained prompts rather than first-class topology.
 - **VS Code agent surface.** First-party extension at [`apps/vscode-l2m-agent`](apps/vscode-l2m-agent) turns any workflow into a coding agent inside the editor — streaming responses, patch previews with workspace-path safety, command approval, and bounded context bundling.
 
@@ -655,7 +655,7 @@ Notes:
 - `mock-mcp` is a demo adapter and always returns demo tools (`get_current_time`, `calculator`, `lookup_kb`).
 - If you want a brand-new adapter implementation, select `Custom Adapter ID` and register that adapter in `packages/mcp-sdk/src/index.ts`.
 - If your MCP server exposes many large tool schemas, model context limits can be hit. The runtime now compacts tool schemas, truncates oversized tool outputs in conversation memory, and caps tool metadata sent to the model.
-- In all-tools mode, runtime also shortlists tools by prompt relevance to reduce wrong tool picks across similarly named endpoints.
+- Every tool an MCP Tool node selects is sent to the model, so for large servers prefer `Select multiple tools`. A keyword shortlist by prompt relevance applies only to an agent with no MCP Tool or Workflow Tool node, whose tools come from its inline `mcpServers` config; Supervisor workers are always offered.
 
 ### Configurable Tool Output Limits (Agent Orchestrator)
 

@@ -1,13 +1,13 @@
 ---
 title: "MCP integration: connect MCP tools to agents"
-description: "How MCP tools reach L2M agents: MCP Tool nodes, the six built-in adapters (HTTP, stdio, mock, built-in tools, workflows, snapshots) and protocol versions."
+description: "How MCP tools reach L2M agents: MCP Tool nodes, tool discovery and selection, the six built-in adapters and the MCP protocol versions."
 ---
 
 # MCP Integration
 
 MCP tools are represented by `mcp_tool` nodes and exposed to agents as callable tool definitions.
 
-Concepts: [What is MCP?](/learn/mcp/what-is-mcp) explains the <Term id="model-context-protocol">Model Context Protocol</Term> from the start.
+Concepts: [What is MCP?](/learn/mcp/what-is-mcp) explains the <Term id="model-context-protocol">Model Context Protocol</Term> from the start. [Too many tools](/learn/agents/too-many-tools) explains why to keep each agent's tool list short.
 
 ## Built-in MCP adapters
 
