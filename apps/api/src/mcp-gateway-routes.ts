@@ -753,6 +753,24 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const key: McpGatewayLabelMarkKey = { clientId: auth.client.id, toolsetId: toolset.id, scopeKey: auth.client.createdBy ?? "" };
     return await store.peekMcpGatewayLabelMark(key, markClock().now);
   };
+  /** The stored mark's first raise, converted by an `initialize` whose session then could not be created. */
+  const auditUnopenedSessionRaise = async (auth: AuthenticatedClient, toolset: McpToolset, mark: McpGatewayLabelMark) => {
+    try {
+      await deps.auditRaw({
+        category: "system",
+        eventType: "mcp_gateway.session_labels_raised",
+        action: "update",
+        outcome: "success",
+        actor: { type: "api_key", email: auth.client.name },
+        resourceType: "mcp_toolset",
+        resourceId: toolset.id,
+        projectId: toolset.projectId,
+        metadata: { sessionId: null, clientId: auth.client.id, tool: null, reason: "results_before_tracking", labels: storedLabelsView(mark) }
+      });
+    } catch (error) {
+      app.log.error({ err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id }, "Failed to audit the first label raise of a client's stored mark");
+    }
+  };
   /** Recorded at most once per legacy session: it took up labels its client's stateless calls had stored. */
   const auditInheritedLabels = async (
     session: GatewaySession,
@@ -809,8 +827,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const classesBefore = new Set(session.labels.dataClasses);
     mirrorStoredMark(session, mark);
     if (firstRaise) {
-      // This session's read raised the stored mark first: the raise event names the session, so it inherits nothing.
-      session.inheritedLabelsAudited = true;
+      // This session's read raised the stored mark first: the raise event names the session, so this take-up is not
+      // an inheritance. Labels the client's stateless calls add later still are (the flag stays unset).
       await auditStoredRaise(session, auth, toolset, null, "results_before_tracking", storedLabelsView(mark));
       return;
     }
@@ -2186,6 +2204,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         }
       });
     } catch (error) {
+      // The read above may have converted the stored note (its first raise): that raise is audited even though no
+      // session opened, or it would never be (the store reports a first raise once).
+      if (storedMark && storedFirstRaise) await auditUnopenedSessionRaise(auth, toolset, storedMark);
       if (error instanceof GatewaySessionLimitError) {
         const refusal = rpcError(message.id, -32000, error.message);
         reply.code(503).header("retry-after", "30").send(refusal);
@@ -2193,6 +2214,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
       throw error;
     }
+    // Before anything else can fail: the session holds the stored labels from the moment it exists.
     await takeUpClientStoredMark(session, auth, toolset, { mark: storedMark, firstRaise: storedFirstRaise }, "session_open");
     await deps.auditRaw({
       category: "system",
