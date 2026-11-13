@@ -18,6 +18,7 @@ import type { WorkflowExecutionDependencies } from "./executor";
  */
 export class SessionSensitivity {
   private readMarked: boolean;
+  private readMarkedRow: boolean;
   private declared: Promise<boolean> | undefined;
 
   constructor(
@@ -28,11 +29,16 @@ export class SessionSensitivity {
       workSensitive: () => boolean;
       /** A resumed run that had read a marked row before it paused. */
       readBefore?: boolean;
-      /** Called on each read of a marked row (the engine adds `sensitive` to the reading node's labels). */
+      /**
+       * Called on each read of a row carrying the v73 mark (the engine adds `sensitive` to the reading node's labels). A
+       * row that is sensitive only by its stored labels does not call it: those labels reach the run through label
+       * tracking already, as they did before v73.
+       */
       onSensitiveRead?: () => void;
     }
   ) {
     this.readMarked = options.readBefore === true;
+    this.readMarkedRow = options.readBefore === true;
   }
 
   /** True once the run read a row written by sensitive work. */
@@ -40,14 +46,22 @@ export class SessionSensitivity {
     return this.readMarked;
   }
 
+  /** True once the run read a row carrying the v73 mark (the run's output labels then say `sensitive`). */
+  get readMarkedSensitive(): boolean {
+    return this.readMarkedRow;
+  }
+
   /** The content exclusion answer for what the run read: `sensitive_memory` once it read a marked row. */
   exclusion(): string | false {
     return this.readMarked ? CONTENT_DROPPED_SENSITIVE_MEMORY : false;
   }
 
-  noteRead(sensitive: boolean): void {
+  /** Notes a read: `sensitive` by mark or stored labels; `marked` when the row carried the v73 mark itself. */
+  noteRead(sensitive: boolean, marked = sensitive): void {
     if (!sensitive) return;
     this.readMarked = true;
+    if (!marked) return;
+    this.readMarkedRow = true;
     try {
       this.options.onSensitiveRead?.();
     } catch {
@@ -72,9 +86,12 @@ export class SessionSensitivity {
   }
 }
 
-/** A row as read: marked, or stored with labels that say sensitive. */
-function rowSensitive(row: { sensitive?: boolean; labels?: DataLabels | null } | null | undefined): boolean {
-  return Boolean(row && (row.sensitive === true || labelsMarkSensitive(row.labels)));
+type SessionRow = { sensitive?: boolean; labels?: DataLabels | null } | null | undefined;
+
+/** Notes rows as read: sensitive when marked or stored with labels that say sensitive; marked when any carries the mark. */
+function noteRows(sensitivity: SessionSensitivity, rows: readonly SessionRow[]): void {
+  const marked = rows.some((row) => row?.sensitive === true);
+  sensitivity.noteRead(marked || rows.some((row) => labelsMarkSensitive(row?.labels)), marked);
 }
 
 type SessionStores = Pick<WorkflowExecutionDependencies, "memoryStore" | "toolDataStore" | "sessionArtifactStore">;
@@ -92,13 +109,12 @@ export function sensitivityTrackingSessionStores(dependencies: SessionStores, se
             ...memoryStore,
             loadMessages: async (namespace: string, sessionId: string) => {
               const messages = await memoryStore.loadMessages(namespace, sessionId);
-              if (messages.length > 0 && (memoryStore.loadSensitive || memoryStore.loadLabels)) {
+              // A store without the v73 mark is left to label tracking: on tracked runs the engine reads its stored labels
+              // (once, as before v73) and they keep the content out; an untracked run reads no labels at all.
+              if (messages.length > 0 && memoryStore.loadSensitive) {
                 let sensitive: boolean;
                 try {
-                  // A store without the v73 mark still answers by its stored labels.
-                  sensitive = memoryStore.loadSensitive
-                    ? await memoryStore.loadSensitive(namespace, sessionId)
-                    : labelsMarkSensitive(await memoryStore.loadLabels!(namespace, sessionId));
+                  sensitive = await memoryStore.loadSensitive(namespace, sessionId);
                 } catch {
                   sensitive = true;
                 }
@@ -122,12 +138,12 @@ export function sensitivityTrackingSessionStores(dependencies: SessionStores, se
             ...toolDataStore,
             listToolCalls: async (input: Parameters<typeof toolDataStore.listToolCalls>[0]) => {
               const rows = await toolDataStore.listToolCalls(input);
-              sensitivity.noteRead(rows.some(rowSensitive));
+              noteRows(sensitivity, rows);
               return rows;
             },
             getToolCall: async (input: Parameters<typeof toolDataStore.getToolCall>[0]) => {
               const row = await toolDataStore.getToolCall(input);
-              sensitivity.noteRead(rowSensitive(row));
+              noteRows(sensitivity, [row]);
               return row;
             },
             saveToolCall: async (input: Parameters<typeof toolDataStore.saveToolCall>[0]) =>
@@ -143,7 +159,7 @@ export function sensitivityTrackingSessionStores(dependencies: SessionStores, se
             ...sessionArtifactStore,
             loadArtifact: async (input: Parameters<typeof sessionArtifactStore.loadArtifact>[0]) => {
               const row = await sessionArtifactStore.loadArtifact(input);
-              sensitivity.noteRead(rowSensitive(row));
+              noteRows(sensitivity, [row]);
               return row;
             },
             saveArtifact: async (input: Parameters<typeof sessionArtifactStore.saveArtifact>[0]) =>

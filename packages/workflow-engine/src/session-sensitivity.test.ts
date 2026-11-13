@@ -131,16 +131,34 @@ describe("SessionSensitivity and the tracking stores", () => {
     expect(sensitivity.exclusion()).toBe(false);
   });
 
-  it("a memory store without the v73 mark answers by its stored labels", async () => {
-    const backing = memoryStores({ memory: { s1: { messages: [{ role: "user", content: "x" }], labels: SENSITIVE }, s2: { messages: [{ role: "user", content: "y" }], labels: USER } } });
+  it("a memory store without the v73 mark reads no labels here (label tracking reads them, once); a labelled row is sensitive but adds no label", async () => {
+    const backing = memoryStores({ memory: { s1: { messages: [{ role: "user", content: "x" }], labels: SENSITIVE } } });
+    let labelReads = 0;
     const { loadSensitive: _dropped, ...withoutMark } = backing.stores.memoryStore;
-    const legacy = { ...backing.stores, memoryStore: withoutMark };
+    const legacy = {
+      ...backing.stores,
+      memoryStore: {
+        ...withoutMark,
+        loadLabels: async (namespace: string, sessionId: string) => {
+          labelReads += 1;
+          return await withoutMark.loadLabels!(namespace, sessionId);
+        }
+      }
+    };
     const plain = new SessionSensitivity({ declared: async () => false, workSensitive: () => false });
-    await sensitivityTrackingSessionStores(legacy, plain).memoryStore!.loadMessages("ns", "s2");
-    expect(plain.readSensitive).toBe(false);
-    const labelled = new SessionSensitivity({ declared: async () => false, workSensitive: () => false });
-    await sensitivityTrackingSessionStores(legacy, labelled).memoryStore!.loadMessages("ns", "s1");
-    expect(labelled.readSensitive).toBe(true);
+    await sensitivityTrackingSessionStores(legacy, plain).memoryStore!.loadMessages("ns", "s1");
+    expect(labelReads).toBe(0);
+
+    let labelled = 0;
+    const byLabels = new SessionSensitivity({ declared: async () => false, workSensitive: () => false, onSensitiveRead: () => (labelled += 1) });
+    byLabels.noteRead(true, false);
+    expect(byLabels.readSensitive).toBe(true);
+    expect(byLabels.exclusion()).toBe("sensitive_memory");
+    expect(byLabels.readMarkedSensitive).toBe(false);
+    expect(labelled).toBe(0);
+    byLabels.noteRead(true);
+    expect(byLabels.readMarkedSensitive).toBe(true);
+    expect(labelled).toBe(1);
   });
 
   it("fails closed: a mark that cannot be read counts as marked, a declared check that fails marks writes", async () => {

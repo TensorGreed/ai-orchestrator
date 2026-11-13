@@ -7458,7 +7458,7 @@ async function executeNodeHandler(
                 agentState.labels,
                 labelScope.segmentLabels(AGENT_RUN_SEGMENT),
                 // v73 — memory or a cached result the agent read was written by sensitive work.
-                dependencies.sessionSensitivity?.readSensitive ? SENSITIVE_LABELS : undefined
+                dependencies.sessionSensitivity?.readMarkedSensitive ? SENSITIVE_LABELS : undefined
               ]),
               agentState.labelsDeclassified ?? []
             )
@@ -8798,7 +8798,7 @@ export async function executeWorkflow(
       declared,
       workSensitive: () => redactor.active || labelsMarkSensitive(currentLabelScope()?.inputLabels()),
       readBefore: request.resumeState?.sensitiveSessionRead === true,
-      // A marked read is sensitive data in the reading node's labels, as a declared source is.
+      // A read of a marked row is sensitive data in the reading node's labels, as a declared source is.
       onSensitiveRead: () => currentLabelScope()?.add(SENSITIVE_LABELS)
     });
     const tracking = { ...redacting, ...sensitivityTrackingSessionStores(redacting, sensitivity) };
@@ -10518,7 +10518,7 @@ async function executeWorkflowRun(
         // Phase 6.4 — the error can quote what the failed node read: a caller (a Workflow Tool) keeps those labels.
         runOutputLabels.set(
           failedResult,
-          dependencies.sessionSensitivity?.readSensitive ? unionLabels([labelScope.pendingLabels(), SENSITIVE_LABELS]) : labelScope.pendingLabels()
+          dependencies.sessionSensitivity?.readMarkedSensitive ? unionLabels([labelScope.pendingLabels(), SENSITIVE_LABELS]) : labelScope.pendingLabels()
         );
         return failedResult;
       }
@@ -10552,7 +10552,7 @@ async function executeWorkflowRun(
   };
   const outputLabels = labelState.outputNodeId ? labelState.get(labelState.outputNodeId) : undefined;
   // v73 — a run that read session state written by sensitive work hands its callers sensitive output.
-  const finalLabels = dependencies.sessionSensitivity?.readSensitive ? unionLabels([outputLabels, SENSITIVE_LABELS]) : outputLabels;
+  const finalLabels = dependencies.sessionSensitivity?.readMarkedSensitive ? unionLabels([outputLabels, SENSITIVE_LABELS]) : outputLabels;
   // Phase 12 coverage — what an external caller receives is checked once, before the run is stored and answered.
   const answered = request.responseBoundary && !request.resumeState
     ? await checkRunResponse({
