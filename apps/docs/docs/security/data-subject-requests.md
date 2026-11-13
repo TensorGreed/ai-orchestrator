@@ -92,7 +92,9 @@ matches are left out of the export and counted in its manifest (`possibleMatches
 
 **Not covered** (the manifest lists these too): logs, metrics, traces and log-streaming destinations; the audit log (a
 staff export lists the person's own entries); tool-call telemetry and rule events (they hold summaries and masked
-evidence only); usage and cost events; knowledge bases; backups already written; model providers and MCP servers.
+evidence only); usage and cost events; signed run manifests already generated (they hold rendered prompts; an
+[audit bundle](./audit-bundles.md) exports one run's); knowledge bases; backups already written; model providers and MCP
+servers.
 
 ### How it runs
 
@@ -198,7 +200,8 @@ before the deletion does not bring the data back: they print `re-applied N erasu
 
 **Not covered** by a deletion: logs, metrics, traces and log-streaming destinations; backups already written (until
 restored, see above); model providers, MCP servers and other systems the runs sent data to; knowledge bases; tokens
-that are not in the person's rows, and format-preserving tokens.
+that are not in the person's rows, and format-preserving tokens; a signed run manifest already generated for a deleted
+run (it holds rendered prompts and is pruned once it is older than `AUDIT_LOG_RETENTION_DAYS`, its run being gone).
 
 ## Due dates and notices
 
