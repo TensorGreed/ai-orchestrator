@@ -3,7 +3,8 @@
  * dynamic import, and only when tracing is configured.
  */
 export { createOtelRuntime, OtelRuntime, buildPropagator, buildSampler, type LogTraceFields } from "./runtime.js";
-export { OtelRunInstrumentation, OtelSpanHandle, cleanAttributes, conversationIdFor, errorTypeOf, type StartSpanSpec } from "./instrumentation.js";
+export { McpSpanHandle, OtelRunInstrumentation, OtelSpanHandle, cleanAttributes, conversationIdFor, errorTypeOf, type StartSpanSpec } from "./instrumentation.js";
+export { McpMetrics, mcpSpanSpec, sanitizeResourceUri } from "./mcp.js";
 export {
   createMetricsPipeline,
   registerL2mMetrics,
@@ -15,6 +16,7 @@ export {
   type MetricsRecorder,
   type MetricsSnapshotSource
 } from "./metrics.js";
+export { registerGenAiMetrics, GEN_AI_DURATION_BUCKETS, GEN_AI_TOKEN_BUCKETS, type GenAiMetricsOptions, type GenAiMetricsRecorder } from "./genai-metrics.js";
 export { startHttpServerSpan, type HttpServerSpan, type HttpServerSpanInput, type InboundTraceUse } from "./http-server.js";
 export { RecentSpansProcessor, toRecentSpan, type RecentSpan } from "./recent-spans.js";
 export {

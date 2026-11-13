@@ -1,0 +1,38 @@
+# Known failures of the server-modern-on-2025-11-25 conformance run (see apps/api/conformance/run.mjs).
+# One entry per scenario, with the reason above it. The run fails when a listed scenario starts passing:
+# delete its entry then. A scenario counts as failing when any of its checks fails or warns.
+# Conformance package 0.2.0-alpha.12, scenarios of the spec revision the run name carries.
+server:
+  # logging/setLevel is not served by the gateway (-32601).
+  - logging-set-level
+  # The gateway serves tools only: this method is answered with -32601 (resources, prompts and completion are not part of the gateway).
+  - completion-complete
+  - resources-list
+  - resources-read-text
+  - resources-read-binary
+  - resources-templates-read
+  - prompts-list
+  - prompts-get-simple
+  - prompts-get-with-args
+  - prompts-get-embedded-resource
+  - prompts-get-with-image
+  # The scenario calls a fixture tool of the reference server by its bare name (for example test_simple_text); the gateway only serves the tools of its toolsets, named <server>__<tool>, and the test toolset holds the mock server's tools. A property of the test setup, not a gateway defect.
+  - tools-call-simple-text
+  - tools-call-image
+  - tools-call-audio
+  - tools-call-embedded-resource
+  - tools-call-mixed-content
+  - tools-call-with-logging
+  - tools-call-error
+  - tools-call-with-progress
+  # Needs a fixture tool that sends sampling/createMessage to the caller; the gateway does not relay server-initiated requests and has no such tool.
+  - tools-call-sampling
+  # Needs a fixture tool that sends elicitation/create to the caller; the gateway does not relay server-initiated requests and has no such tool.
+  - tools-call-elicitation
+  - elicitation-sep1034-defaults
+  - elicitation-sep1330-enums
+  # resources/subscribe and resources/unsubscribe are not served (-32601).
+  - resources-subscribe
+  - resources-unsubscribe
+  # The gateway rejects every Origin that is not in its allow list (MCP_GATEWAY_ALLOWED_ORIGINS), including http://127.0.0.1:<port>; the scenario expects a valid localhost Origin to be accepted. It targets unauthenticated localhost servers; the gateway always needs a bearer token. Rejection of foreign hosts passes.
+  - dns-rebinding-protection

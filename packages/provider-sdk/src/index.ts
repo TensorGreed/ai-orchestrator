@@ -12,6 +12,7 @@ export * from "./registry";
 export * from "./resilient-fetch";
 export * from "./model-tape";
 export * from "./gated-registry";
+export * from "./instrumented-registry";
 export * from "./default-base-urls";
 export * from "./call-options";
 export * from "./tool-call-assembly";

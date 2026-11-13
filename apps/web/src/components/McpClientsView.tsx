@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { McpGatewaySessionView, McpPolicyRole } from "@ai-orchestrator/shared";
+import type { McpGatewayCallerView, McpGatewaySessionView, McpPolicyRole } from "@ai-orchestrator/shared";
 import {
   ApiError,
   type McpClientView,
@@ -508,12 +508,22 @@ function TokenReveal({
   );
 }
 
+/** What a session or stateless caller has collected, or why it shows nothing. */
+function CollectedLabels({ tracked, labels }: { tracked: boolean; labels: McpGatewaySessionView["labels"] }) {
+  if (!tracked) return <span className="kb-subtle">outside content not tracked</span>;
+  if (labels && (labels.provenance.length > 0 || labels.dataClasses.length > 0)) return <DataLabelChips labels={labels} />;
+  return <span className="kb-subtle">nothing from outside yet</span>;
+}
+
 /**
  * 12.2 — a client's open sessions and, on toolsets that track outside content per session, the labels each session
- * has collected (the same chips as the run inspector).
+ * has collected (the same chips as the run inspector). MCP 2026-07-28: its stateless callers too, one per toolset
+ * (and user its token acts for), with the labels every server instance shares.
  */
 export function ClientSessions({ clientId }: { clientId: string }) {
   const [sessions, setSessions] = useState<McpGatewaySessionView[] | null>(null);
+  const [callers, setCallers] = useState<McpGatewayCallerView[]>([]);
+  const [callersUnavailable, setCallersUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   // Bumped by "Refresh": a session's labels change while its client works.
@@ -525,7 +535,11 @@ export function ClientSessions({ clientId }: { clientId: string }) {
     setLoading(true);
     fetchMcpClientSessions(clientId)
       .then((result) => {
-        if (!cancelled) setSessions(result.sessions);
+        if (cancelled) return;
+        setSessions(result.sessions);
+        // A server from before MCP 2026-07-28 support sends no callers.
+        setCallers(result.callers ?? []);
+        setCallersUnavailable(result.callersUnavailable === true);
       })
       .catch((err) => {
         if (!cancelled) setError(formatError(err));
@@ -547,13 +561,19 @@ export function ClientSessions({ clientId }: { clientId: string }) {
       </div>
       {error && <div className="settings-error">{error}</div>}
       {sessions === null && !error && <p className="kb-subtle">Loading…</p>}
-      {sessions !== null && sessions.length === 0 && <p className="kb-subtle">No open sessions on this server.</p>}
+      {sessions !== null && sessions.length === 0 && callers.length === 0 && <p className="kb-subtle">No open sessions on this server and no stateless callers.</p>}
+      {callersUnavailable && (
+        <p className="kb-subtle" role="status">
+          Stateless callers on other server instances could not be read; only this instance's are shown.
+        </p>
+      )}
       {sessions !== null && sessions.length > 0 && (
         <ul className="mcp-members" aria-label="Open sessions">
           {sessions.map((session) => (
             <li key={session.idPrefix} className="mcp-member">
               <code className="mcp-member-glob">{session.idPrefix}…</code>
               <span className="mcp-rule-name">{session.toolsetName ?? session.toolsetId}</span>
+              <span className="kb-subtle">Session{session.protocolVersion ? ` (${session.protocolVersion})` : ""}</span>
               {session.clientInfo.name && (
                 <span className="kb-subtle">
                   {session.clientInfo.name}
@@ -561,13 +581,7 @@ export function ClientSessions({ clientId }: { clientId: string }) {
                 </span>
               )}
               <span className="kb-subtle">last call {formatDate(session.lastSeenAt)}</span>
-              {!session.tracked ? (
-                <span className="kb-subtle">outside content not tracked</span>
-              ) : session.labels && (session.labels.provenance.length > 0 || session.labels.dataClasses.length > 0) ? (
-                <DataLabelChips labels={session.labels} />
-              ) : (
-                <span className="kb-subtle">nothing from outside yet</span>
-              )}
+              <CollectedLabels tracked={session.tracked} labels={session.labels} />
               {(session.guard?.blocks ?? 0) > 0 && (
                 <span
                   className="mcp-flag"
@@ -575,6 +589,35 @@ export function ClientSessions({ clientId }: { clientId: string }) {
                   title={session.guard?.lastBlock ? `Last: ${session.guard.lastBlock.tool}, ${session.guard.lastBlock.reason}` : undefined}
                 >
                   Rules blocked {session.guard?.blocks}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {callers.length > 0 && (
+        <ul className="mcp-members" aria-label="Stateless callers">
+          {callers.map((caller) => (
+            <li key={`${caller.toolsetId}:${caller.userId ?? ""}`} className="mcp-member">
+              <span className="mcp-rule-name">{caller.toolsetName ?? caller.toolsetId}</span>
+              <span className="kb-subtle" title="A client that calls without a session; its labels are shared by every server instance">
+                Stateless caller{caller.protocolVersion ? ` (${caller.protocolVersion})` : ""}
+              </span>
+              {caller.clientInfo?.name && (
+                <span className="kb-subtle">
+                  {caller.clientInfo.name}
+                  {caller.clientInfo.version ? ` ${caller.clientInfo.version}` : ""}
+                </span>
+              )}
+              <span className="kb-subtle">last call {formatDate(caller.lastSeenAt)}</span>
+              <CollectedLabels tracked={caller.tracked} labels={caller.labels} />
+              {(caller.guard?.blocks ?? 0) > 0 && (
+                <span
+                  className="mcp-flag"
+                  data-testid="caller-guard-blocks"
+                  title={caller.guard?.lastBlock ? `Last: ${caller.guard.lastBlock.tool}, ${caller.guard.lastBlock.reason}` : undefined}
+                >
+                  Rules blocked {caller.guard?.blocks}
                 </span>
               )}
             </li>

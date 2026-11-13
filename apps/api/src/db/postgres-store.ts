@@ -16,6 +16,7 @@ import * as data_labels from "./postgres/data-labels.js";
 import * as evals from "./postgres/eval.js";
 import * as executions from "./postgres/executions.js";
 import * as flow_state from "./postgres/flow-state.js";
+import * as gateway_label_marks from "./postgres/gateway-label-marks.js";
 import * as guard from "./postgres/guard.js";
 import * as guard_simulation from "./postgres/guard-simulation.js";
 import * as guard_benchmark from "./postgres/guard-benchmark.js";
@@ -1009,6 +1010,19 @@ export class PostgresStore implements Store {
   }
   async revokeMcpClient(...args: Parameters<Store["revokeMcpClient"]>): ReturnType<Store["revokeMcpClient"]> {
     return mcp.revokeMcpClient(this.ctx, ...args);
+  }
+  // MCP 2026-07-28 (v71) — label marks of stateless gateway callers (postgres/gateway-label-marks.ts).
+  async readMcpGatewayLabelMark(...args: Parameters<Store["readMcpGatewayLabelMark"]>): ReturnType<Store["readMcpGatewayLabelMark"]> {
+    return gateway_label_marks.readMcpGatewayLabelMark(this.ctx, ...args);
+  }
+  async raiseMcpGatewayLabelMark(...args: Parameters<Store["raiseMcpGatewayLabelMark"]>): ReturnType<Store["raiseMcpGatewayLabelMark"]> {
+    return gateway_label_marks.raiseMcpGatewayLabelMark(this.ctx, ...args);
+  }
+  async listMcpGatewayLabelMarks(...args: Parameters<Store["listMcpGatewayLabelMarks"]>): ReturnType<Store["listMcpGatewayLabelMarks"]> {
+    return gateway_label_marks.listMcpGatewayLabelMarks(this.ctx, ...args);
+  }
+  async sweepMcpGatewayLabelMarks(...args: Parameters<Store["sweepMcpGatewayLabelMarks"]>): ReturnType<Store["sweepMcpGatewayLabelMarks"]> {
+    return gateway_label_marks.sweepMcpGatewayLabelMarks(this.ctx, ...args);
   }
 
   async rotateMcpClient(...args: Parameters<Store["rotateMcpClient"]>): ReturnType<Store["rotateMcpClient"]> {

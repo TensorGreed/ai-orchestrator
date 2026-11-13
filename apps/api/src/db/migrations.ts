@@ -2882,6 +2882,33 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_usage_events_execution;
       DROP TABLE IF EXISTS erasure_tombstones;
     `
+  },
+  {
+    version: 71,
+    description: "MCP 2026-07-28 — label marks of stateless gateway callers, shared by every instance",
+    // One row per stateless caller (client credential, toolset, the user its token acts for or ''): the 12.2 label
+    // mark a session would hold. A raise merges under a row lock; a row ends at expires_at (the session idle expiry
+    // after the caller's last call), on revoke, or with its toolset, and the gateway sweeps expired rows.
+    up: `
+      CREATE TABLE IF NOT EXISTS mcp_gateway_label_marks (
+        client_id TEXT NOT NULL,
+        toolset_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL DEFAULT '',
+        provenance_json TEXT NOT NULL,
+        data_classes_json TEXT NOT NULL,
+        unobserved INTEGER NOT NULL DEFAULT 0,
+        raised_at TIMESTAMPTZ,
+        raise_audited INTEGER NOT NULL DEFAULT 0,
+        last_seen_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (client_id, toolset_id, scope_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_gateway_label_marks_expires ON mcp_gateway_label_marks(expires_at);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_mcp_gateway_label_marks_expires;
+      DROP TABLE IF EXISTS mcp_gateway_label_marks;
+    `
   }
 ];
 

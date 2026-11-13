@@ -49,8 +49,11 @@ import {
   type DataLabels,
   type DestinationRef,
   type GatewayGuardProfileRef,
+  type McpGatewayCallerView,
+  type McpGatewaySessionLabels,
   type McpGatewaySessionView,
   type Workflow,
+  PROVENANCE_LABELS,
   mcpServerDestinationRef,
   credentialRotateBodySchema,
   KEY_ROTATION_GRACE_HOURS
@@ -65,6 +68,7 @@ import { checkGatewayCall, type GatewayGuardChannel, type GatewayGuardOutcome } 
 import type { z } from "zod";
 import { DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS, toolArgumentSummariesEnabled, type AppConfig } from "./config.js";
 import type { AuditEventInput } from "./services/audit-service.js";
+import { traceGatewayRequest, type McpGatewayTracing } from "./telemetry/mcp-gateway-tracing.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
@@ -151,6 +155,7 @@ import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } fr
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
+import type { McpGatewayLabelMark, McpGatewayLabelMarkKey } from "./db/gateway-label-marks.js";
 import { filterAsync, mapAsync } from "./async-array.js";
 import { pageOfById, pageRequestFromQuery } from "./pagination.js";
 
@@ -314,10 +319,18 @@ export interface McpGatewayDeps {
    */
   network?: NetworkControls;
   /**
-   * 13.1 — the instances share a database (Postgres with HA_ENABLED=true). MCP 2026-07-28 callers are then not served
-   * on toolsets that track outside content per session: their label mark would stay on one instance.
+   * Tracing, only while it is on: a SERVER span per JSON-RPC request (both eras), parented on the trace context in
+   * the request's `_meta` under the inbound trust rule. Absent: no spans.
    */
-  clusterMode?: boolean;
+  tracing?: McpGatewayTracing;
+}
+
+/** MCP 2026-07-28 (v71) — a stateless caller's stored label mark could not be read: its call is refused. */
+class LabelMarkUnavailableError extends Error {
+  constructor() {
+    super("Outside-content labels could not be checked for this call, so it was not sent. Try again.");
+    this.name = "LabelMarkUnavailableError";
+  }
 }
 
 /**
@@ -469,7 +482,18 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
   });
   sessions.start();
+  // v71 — expired label marks of stateless callers are deleted in batches (every instance sweeps; a delete is idempotent).
+  // Only rows expired for a further idle window go: an instance whose clock runs ahead cannot delete live marks.
+  const LABEL_MARK_SWEEP_BATCH = 500;
+  const labelMarkSweep = setInterval(() => {
+    const cutoff = new Date(Date.now() - config.MCP_GATEWAY_SESSION_IDLE_MS).toISOString();
+    void store.sweepMcpGatewayLabelMarks(cutoff, LABEL_MARK_SWEEP_BATCH).catch((error: unknown) => {
+      app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to sweep expired MCP gateway label marks");
+    });
+  }, Math.max(1_000, Math.min(60_000, Math.floor(config.MCP_GATEWAY_SESSION_IDLE_MS / 2))));
+  labelMarkSweep.unref?.();
   app.addHook("onClose", async () => {
+    clearInterval(labelMarkSweep);
     await sessions.closeAll();
   });
 
@@ -638,10 +662,20 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   // 12.2 — session labels (toolsets that track outside content per session)
   // ---------------------------------------------------------------------------
 
-  /** Audited once per session: the first time it carries outside content or sensitive data. */
-  const auditFirstRaise = async (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset, tool: string | null, reason: "tool_result" | "results_before_tracking") => {
-    if (session.labels.raiseAudited) return;
-    session.labels.raiseAudited = true;
+  /** Audited once per session (or stored caller mark): the first time it carries outside content or sensitive data. */
+  const auditFirstRaise = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    tool: string | null,
+    reason: "tool_result" | "results_before_tracking",
+    stored?: McpGatewaySessionLabels
+  ) => {
+    // A stateless caller's raise is audited once per stored mark: the store said this call raised it first.
+    if (!stored) {
+      if (session.labels.raiseAudited) return;
+      session.labels.raiseAudited = true;
+    }
     await deps.auditRaw({
       category: "system",
       eventType: "mcp_gateway.session_labels_raised",
@@ -651,9 +685,128 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       resourceType: "mcp_toolset",
       resourceId: toolset.id,
       projectId: toolset.projectId,
-      metadata: { ...scopeMetadata(session), clientId: auth.client.id, tool, reason, labels: sessionLabelsView(session.labels) }
+      metadata: { ...scopeMetadata(session), clientId: auth.client.id, tool, reason, labels: stored ?? sessionLabelsView(session.labels) }
     });
   };
+
+  // MCP 2026-07-28 (v71) — a stateless caller's mark is stored, shared by every instance (db/gateway-label-marks.ts).
+  // The principal state's own mark is kept as well: a view for the admin API and eviction, and what this instance
+  // saw even when a store write failed (a call is checked with both).
+  const markIdleMs = config.MCP_GATEWAY_SESSION_IDLE_MS;
+  const markKey = (session: GatewaySession): McpGatewayLabelMarkKey => ({
+    clientId: session.clientId,
+    toolsetId: session.toolsetId,
+    scopeKey: session.markScopeKey ?? ""
+  });
+  const markClock = () => {
+    const now = Date.now();
+    return { nowMs: now, now: new Date(now).toISOString(), expiresAt: new Date(now + markIdleMs).toISOString() };
+  };
+  const storedLabelsView = (mark: Pick<McpGatewayLabelMark, "provenance" | "dataClasses">): McpGatewaySessionLabels => ({
+    provenance: PROVENANCE_LABELS.filter((label) => mark.provenance.includes(label)),
+    dataClasses: [...mark.dataClasses].sort()
+  });
+  /** What the stored mark holds joins the principal state's view (it only grows). */
+  const mirrorStoredMark = (session: GatewaySession, mark: McpGatewayLabelMark) => {
+    raiseSessionLabels(session.labels, mark, true);
+    // The stored mark's raise is audited by the store's firstRaise, never by the local view.
+    session.labels.raiseAudited = true;
+  };
+  /** A first-raise audit that fails is logged; it never withholds a result whose labels were stored. */
+  const auditStoredRaise = async (...args: Parameters<typeof auditFirstRaise>) => {
+    try {
+      await auditFirstRaise(...args);
+    } catch (error) {
+      app.log.error({ err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: args[2].id }, "Failed to audit the first label raise of a stateless gateway caller");
+    }
+  };
+
+  /**
+   * A stateless call on a tracking toolset: the stored mark (read before any policy runs), joined with the local view.
+   * Throws LabelMarkUnavailableError when the mark cannot be read: the call is refused (no label set, not even one with
+   * every provenance label, stands in for data classes the caller may hold).
+   */
+  const statelessCallLabels = async (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset): Promise<DataLabels> => {
+    const clock = markClock();
+    const key = markKey(session);
+    try {
+      let stored = await store.readMcpGatewayLabelMark(key, clock);
+      if (stored?.unobserved || session.labels.unobserved) {
+        // Results went back while the toolset did not track (on any instance): they count as outside content now.
+        const raised = await store.raiseMcpGatewayLabelMark({
+          ...key,
+          provenance: [],
+          dataClasses: [],
+          unobserved: session.labels.unobserved,
+          convertUnobserved: true,
+          now: clock.now,
+          expiresAt: clock.expiresAt
+        });
+        session.labels.unobserved = false;
+        stored = raised.mark;
+        if (raised.firstRaise) await auditStoredRaise(session, auth, toolset, null, "results_before_tracking", storedLabelsView(raised.mark));
+      }
+      if (stored) mirrorStoredMark(session, stored);
+    } catch (error) {
+      app.log.warn(
+        { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id },
+        "MCP gateway could not read a stateless caller's label mark; the call was refused"
+      );
+      throw new LabelMarkUnavailableError();
+    }
+    const provenance = PROVENANCE_LABELS.filter((label) => label === "user" || session.labels.provenance.has(label));
+    return { provenance, dataClasses: [...session.labels.dataClasses].sort(), source: "propagated" };
+  };
+
+  /**
+   * A stateless caller's result: its labels are stored before the response goes back (write-through). False when the
+   * store refused the write: the caller then gets no result (its mark could not be recorded on other instances).
+   * On a toolset that does not track, the stored mark only notes that a result went back (at most once per half idle
+   * window per instance), so turning tracking on counts it on every instance.
+   */
+  const noteStatelessResult = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    tool: string,
+    labels: Pick<DataLabels, "provenance" | "dataClasses">
+  ): Promise<boolean> => {
+    const clock = markClock();
+    const key = markKey(session);
+    if (!toolset.trackSessionLabels) {
+      raiseSessionLabels(session.labels, labels, false);
+      if (session.unobservedNotedAt !== undefined && clock.nowMs - session.unobservedNotedAt < markIdleMs / 2) return true;
+      try {
+        // Written at most once per half idle window, so it lasts one and a half: results in between stay covered.
+        const expiresAt = new Date(clock.nowMs + Math.ceil(markIdleMs * 1.5)).toISOString();
+        await store.raiseMcpGatewayLabelMark({ ...key, provenance: [], dataClasses: [], unobserved: true, now: clock.now, expiresAt });
+        session.unobservedNotedAt = clock.nowMs;
+      } catch (error) {
+        // Nothing is checked with labels on this toolset; the local view still holds the note.
+        app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id }, "MCP gateway could not note an untracked result in a caller's label mark");
+      }
+      return true;
+    }
+    // The local view first: a failed write still leaves this instance stricter.
+    raiseSessionLabels(session.labels, labels, true);
+    session.labels.raiseAudited = true;
+    try {
+      const raised = await store.raiseMcpGatewayLabelMark({ ...key, provenance: labels.provenance, dataClasses: labels.dataClasses, now: clock.now, expiresAt: clock.expiresAt });
+      mirrorStoredMark(session, raised.mark);
+      if (raised.firstRaise) await auditStoredRaise(session, auth, toolset, tool, "tool_result", storedLabelsView(raised.mark));
+      return true;
+    } catch (error) {
+      app.log.error(
+        { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, tool },
+        "MCP gateway could not store a stateless caller's label mark; the result was withheld"
+      );
+      return false;
+    }
+  };
+
+  /** The answer a stateless caller gets when its result's labels could not be stored. */
+  const MARK_WRITE_FAILED_MESSAGE =
+    "The tool ran, but what it returned could not be recorded for this client's outside-content tracking, so the result was withheld. Try again.";
 
   /**
    * The labels a call is checked with. Undefined when the toolset does not track: the call is then checked without
@@ -661,20 +814,26 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
    */
   const labelsForCall = async (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset): Promise<DataLabels | undefined> => {
     if (!toolset.trackSessionLabels) return undefined;
+    if (session.era === "modern") return await statelessCallLabels(session, auth, toolset);
     const { labels, raised } = sessionCallLabels(session.labels);
     if (raised) await auditFirstRaise(session, auth, toolset, null, "results_before_tracking");
     return labels;
   };
 
-  /** A result went back to the client (or may have): its labels join the session's mark, which never goes down. */
+  /**
+   * A result went back to the client (or may have): its labels join the session's mark, which never goes down. False
+   * when a stateless caller's mark could not be stored: the result must then not go back.
+   */
   const noteResult = async (
     session: GatewaySession,
     auth: AuthenticatedClient,
     toolset: McpToolset,
     tool: string,
     labels: Pick<DataLabels, "provenance" | "dataClasses">
-  ) => {
+  ): Promise<boolean> => {
+    if (session.era === "modern") return await noteStatelessResult(session, auth, toolset, tool, labels);
     if (raiseSessionLabels(session.labels, labels, toolset.trackSessionLabels)) await auditFirstRaise(session, auth, toolset, tool, "tool_result");
+    return true;
   };
 
   /** A server's results are sensitive when its secret or connection uses a secret flagged "sensitive output". */
@@ -1036,9 +1195,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     // 12.2 — the server was asked: what it answered (a result or an error text) goes back to the client, so it counts
     // as outside content (fail closed, also when the client cancelled). A call the runtime guard refused never
     // reached the server and carries nothing.
+    let noted = true;
     if (invocation !== undefined && !refused && !toolset.trackSessionLabels) {
       // Not tracked: only note that a result came back (turning tracking on later counts it), with no lookup.
-      raiseSessionLabels(session.labels, SERVER_RESULT_LABELS, false);
+      noted = await noteResult(session, auth, toolset, tool.name, SERVER_RESULT_LABELS);
     } else if (invocation !== undefined && !refused) {
       let labels = SERVER_RESULT_LABELS;
       try {
@@ -1046,9 +1206,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       } catch (error) {
         app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Could not read the sensitive output secrets for a gateway call");
       }
-      await noteResult(session, auth, toolset, tool.name, labels);
+      noted = await noteResult(session, auth, toolset, tool.name, labels);
     }
     if (refused) return refused;
+    if (!noted) return toolError(MARK_WRITE_FAILED_MESSAGE);
     return result;
   };
 
@@ -1172,9 +1333,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     // 12.2 — a run's output (or its error text) goes back to the client with the labels the engine gave it; without
     // them (a run on another instance, a run that failed) it counts as outside content. A run that paused or was
     // canceled answers with the gateway's own words only.
+    let noted = true;
     if (ran && outcome.status !== "waiting_approval" && outcome.status !== "canceled") {
       const known = outcome.labels;
-      await noteResult(session, auth, toolset, tool.name, {
+      noted = await noteResult(session, auth, toolset, tool.name, {
         provenance: outcome.status === "success" && known ? known.provenance : ["untrusted_external", ...(known?.provenance ?? [])],
         dataClasses: known?.dataClasses ?? []
       });
@@ -1197,6 +1359,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
     });
     if (guardResultBlocked) await guardBlocked(guardResultBlocked, "tool_result", guardScope);
+    if (!noted) return toolError(MARK_WRITE_FAILED_MESSAGE);
     return result;
   };
 
@@ -1586,8 +1749,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       if (blocked) return await budgetRefusal(session, auth, toolset, request, tool.name, blocked);
     }
 
-    // 12.2 — read from the session only, never from the request (`_meta`, headers or arguments).
-    const callLabels = await labelsForCall(session, auth, toolset);
+    // 12.2 — read from the session only, never from the request (`_meta`, headers or arguments). A stateless caller's
+    // stored mark that cannot be read refuses the call.
+    let callLabels: DataLabels | undefined;
+    try {
+      callLabels = await labelsForCall(session, auth, toolset);
+    } catch (error) {
+      if (!(error instanceof LabelMarkUnavailableError)) throw error;
+      return rpcResult(request.id, toolError(error.message));
+    }
     // 12.6 — the toolset's and client's Guard profiles. A failed read refuses the call: it may have a binding.
     let guardStack: GatewayGuardStackForCall | undefined;
     try {
@@ -1718,7 +1888,30 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
   };
 
+  /** The span facts of a request on `session` (a legacy session or a modern caller's principal state). */
+  const spanFacts = (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset, request: Pick<JsonRpcRequest, "id" | "method" | "params">) => ({
+    method: request.method,
+    params: request.params,
+    requestId: request.id,
+    era: session.era,
+    sessionId: session.id,
+    protocolVersion: session.protocolVersion,
+    toolsetId: toolset.id,
+    clientId: auth.client.id
+  });
+
+  /** One JSON-RPC request, in its SERVER span while tracing is on. */
   const dispatch = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    request: JsonRpcRequest,
+    emit: Emit,
+    modern?: ModernCallScope
+  ): Promise<JsonRpcResponse | typeof SUPPRESSED> =>
+    await traceGatewayRequest(deps.tracing, spanFacts(session, auth, toolset, request), () => dispatchRequest(session, auth, toolset, request, emit, modern));
+
+  const dispatchRequest = async (
     session: GatewaySession,
     auth: AuthenticatedClient,
     toolset: McpToolset,
@@ -1929,10 +2122,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return;
     }
     if (message.method === "server/discover") {
-      reply
-        .code(200)
-        .header("content-type", "application/json")
-        .send(modernizeGatewayResponse(rpcResult(message.id, gatewayDiscoverResult({ toolset, mode: modernMode, ttlMs: listTtlMs })), serverInfo));
+      await traceGatewayRequest(
+        deps.tracing,
+        { method: message.method, params: message.params, requestId: message.id, era: "modern", protocolVersion: validated.protocolVersion, toolsetId: toolset.id, clientId: auth.client.id },
+        async () => {
+          reply
+            .code(200)
+            .header("content-type", "application/json")
+            .send(modernizeGatewayResponse(rpcResult(message.id, gatewayDiscoverResult({ toolset, mode: modernMode, ttlMs: listTtlMs })), serverInfo));
+        }
+      );
       return;
     }
     // The caller's principal state.
@@ -1943,6 +2142,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       try {
         const found = await sessions.principal({
           principalScope,
+          // The stored column, not the resolved user: deleting the creator must not hand the caller a clean mark.
+          markScopeKey: auth.client.createdBy ?? "",
           clientId: auth.client.id,
           toolsetId: toolset.id,
           protocolVersion: validated.protocolVersion,
@@ -2082,17 +2283,6 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           // Not JSON: the session path answers with its parse error.
         }
         if (earlyParsed && isModernGatewayMessage(early)) {
-          if (deps.clusterMode && toolset.trackSessionLabels) {
-            // Until the label mark is shared across instances, a toolset that tracks outside content per session serves
-            // only session-based callers in cluster mode. This answer is not a modern error, so a client that speaks
-            // both versions falls back to initialize and a session.
-            httpError(
-              reply,
-              400,
-              `${SESSION_REQUIRED_MESSAGE} Toolset '${toolset.slug}' tracks outside content per session, so in cluster mode it serves only session-based clients.`
-            );
-            return reply;
-          }
           await handleModernPost(request, reply, auth, toolset, early, accept);
           return reply;
         }
@@ -2136,7 +2326,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           reply.code(400).send(rpcError(initialize.message.id, JSON_RPC_ERRORS.invalidRequest, "This request already belongs to a session; start a new one without Mcp-Session-Id."));
           return reply;
         }
-        await handleInitialize(request, reply, auth, toolset, initialize.message);
+        await traceGatewayRequest(
+          deps.tracing,
+          { method: "initialize", params: initialize.message.params, requestId: initialize.message.id, era: "legacy", toolsetId: toolset.id, clientId: auth.client.id },
+          async () => await handleInitialize(request, reply, auth, toolset, initialize.message)
+        );
         return reply;
       }
 
@@ -2936,7 +3130,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     decideGatewayApproval(request, reply, "rejected")
   );
 
-  // 12.2 — a client's open sessions on this instance, with the labels each has collected on a tracking toolset.
+  // 12.2 — a client's open sessions on this instance, with the labels each has collected on a tracking toolset. MCP
+  // 2026-07-28 (D16): and its stateless callers, from the stored label marks (every instance) and the principal states
+  // of this instance. `callersUnavailable`: the stored marks could not be read, so only this instance's callers show.
   app.get<{ Params: { id: string } }>("/api/mcp/clients/:id/sessions", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
@@ -2956,20 +3152,90 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         clientId: session.clientId,
         toolsetId: session.toolsetId,
         toolsetName: toolset?.name ?? null,
+        protocolVersion: session.protocolVersion,
         clientInfo: session.clientInfo,
         createdAt: new Date(session.createdAt).toISOString(),
         lastSeenAt: new Date(session.lastSeenAt).toISOString(),
         tracked,
         labels: tracked ? sessionLabelsView(session.labels) : null,
         raisedAt: tracked && session.labels.raisedAt !== null ? new Date(session.labels.raisedAt).toISOString() : null,
-        guard: {
-          blocks: session.guard.blocks,
-          lastBlock: session.guard.lastBlock ? { ...session.guard.lastBlock, at: new Date(session.guard.lastBlock.at).toISOString() } : null
-        }
+        guard: guardView(session)
       };
     });
-    return { clientId: client.id, sessions: views };
+    const { callers, unavailable } = await callerViews(client.id, toolsets);
+    return { clientId: client.id, sessions: views, callers, ...(unavailable ? { callersUnavailable: true } : {}) };
   });
+
+  const guardView = (session: GatewaySession): McpGatewaySessionView["guard"] => ({
+    blocks: session.guard.blocks,
+    lastBlock: session.guard.lastBlock ? { ...session.guard.lastBlock, at: new Date(session.guard.lastBlock.at).toISOString() } : null
+  });
+
+  /**
+   * D16 — a client's stateless callers: one per stored mark (any instance) and per principal state on this instance,
+   * joined on (toolset, user). Labels come from the stored mark on a tracking toolset (joined with this instance's view).
+   */
+  const callerViews = async (clientId: string, toolsets: Map<string, McpToolset | null>): Promise<{ callers: McpGatewayCallerView[]; unavailable: boolean }> => {
+    const now = new Date().toISOString();
+    let stored: McpGatewayLabelMark[] = [];
+    let unavailable = false;
+    try {
+      stored = await store.listMcpGatewayLabelMarks({ clientId }, now);
+    } catch (error) {
+      unavailable = true;
+      app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)), clientId }, "Could not read the stored label marks of a gateway client");
+    }
+    const local = sessions.list((session) => session.era === "modern" && session.clientId === clientId);
+    const keyOf = (toolsetId: string, scopeKey: string) => `${toolsetId}\u0000${scopeKey}`;
+    const entries = new Map<string, { toolsetId: string; scopeKey: string; mark?: McpGatewayLabelMark; state?: GatewaySession }>();
+    for (const mark of stored) entries.set(keyOf(mark.toolsetId, mark.scopeKey), { toolsetId: mark.toolsetId, scopeKey: mark.scopeKey, mark });
+    for (const state of local) {
+      const key = keyOf(state.toolsetId, state.markScopeKey ?? "");
+      const entry = entries.get(key) ?? { toolsetId: state.toolsetId, scopeKey: state.markScopeKey ?? "" };
+      entry.state = state;
+      entries.set(key, entry);
+    }
+    for (const { toolsetId } of entries.values()) {
+      if (toolsets.has(toolsetId)) continue;
+      try {
+        toolsets.set(toolsetId, await store.getMcpToolset(toolsetId));
+      } catch (error) {
+        app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId }, "Could not read a toolset for the gateway callers view");
+        toolsets.set(toolsetId, null);
+      }
+    }
+    const callers = [...entries.values()].map(({ toolsetId, scopeKey, mark, state }): McpGatewayCallerView => {
+      const toolset = toolsets.get(toolsetId) ?? null;
+      const tracked = toolset?.trackSessionLabels === true;
+      const localSeen = state ? new Date(state.lastSeenAt).toISOString() : null;
+      const lastSeenAt = [mark?.lastSeenAt, localSeen].filter((value): value is string => value !== null && value !== undefined).sort().at(-1)!;
+      let labels: McpGatewayCallerView["labels"] = null;
+      let raisedAt: string | null = null;
+      if (tracked) {
+        const provenance = new Set<string>([...(mark?.provenance ?? []), ...(state ? [...state.labels.provenance] : [])]);
+        const dataClasses = new Set<string>([...(mark?.dataClasses ?? []), ...(state ? [...state.labels.dataClasses] : [])]);
+        labels = { provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)), dataClasses: [...dataClasses].sort() };
+        const localRaised = state && state.labels.raisedAt !== null ? new Date(state.labels.raisedAt).toISOString() : null;
+        raisedAt = [mark?.raisedAt ?? null, localRaised].filter((value): value is string => value !== null).sort()[0] ?? null;
+      }
+      return {
+        clientId,
+        toolsetId,
+        toolsetName: toolset?.name ?? null,
+        userId: scopeKey === "" ? null : scopeKey,
+        protocolVersion: state ? String(state.protocolVersion) : null,
+        clientInfo: state ? state.clientInfo : null,
+        lastSeenAt,
+        expiresAt: mark?.expiresAt ?? null,
+        tracked,
+        labels,
+        raisedAt,
+        guard: state ? guardView(state) : null
+      };
+    });
+    callers.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt) || a.toolsetId.localeCompare(b.toolsetId));
+    return { callers, unavailable };
+  };
 
   app.get<{ Params: { id: string } }>("/api/mcp/clients/:id/usage", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);

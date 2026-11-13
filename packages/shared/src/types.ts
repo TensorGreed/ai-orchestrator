@@ -582,6 +582,11 @@ export interface WorkflowExecutionState {
    */
   guardRunSource?: "eval";
   /**
+   * The trace context (W3C `traceparent`, `tracestate`) of the node that paused the run, written only while tracing is
+   * on. The resumed run's span links back to it; it is a link, not a parent. Written and read only by the API.
+   */
+  traceContext?: Record<string, string>;
+  /**
    * The user the run's budgets are matched against (who started it), so the sub-workflows of the resumed part are
    * checked against that user's budgets, not the approver's. Written and read only by the API.
    */
@@ -1991,6 +1996,8 @@ export interface McpGatewaySessionView {
   clientId: string;
   toolsetId: string;
   toolsetName: string | null;
+  /** The MCP version the session negotiated in `initialize` (2025-11-25 and earlier). */
+  protocolVersion?: string;
   clientInfo: { name?: string; version?: string };
   createdAt: string;
   lastSeenAt: string;
@@ -2002,6 +2009,34 @@ export interface McpGatewaySessionView {
   raisedAt: string | null;
   /** 12.6 — the session's calls Guard blocked on the gateway (this instance), and the latest one; reasons are short and redacted. */
   guard: { blocks: number; lastBlock: { tool: string; channel: "tool_arguments" | "tool_result"; reason: string; at: string } | null };
+}
+
+/**
+ * MCP 2026-07-28 — a stateless caller of the gateway as the admin API shows it: a client credential on one toolset
+ * (and the user its token acts for), with no session. Its label mark is stored in the database and shared by every
+ * instance; the rest (client info, version, content rule blocks) is known only on an instance it called recently.
+ */
+export interface McpGatewayCallerView {
+  clientId: string;
+  toolsetId: string;
+  toolsetName: string | null;
+  /** The user the client's token acts for; null for a plain client credential. */
+  userId: string | null;
+  /** The version of the caller's latest request on the instance that answered; null when it has not called that instance recently. */
+  protocolVersion: string | null;
+  clientInfo: { name?: string; version?: string } | null;
+  /** The latest call this deployment knows of. */
+  lastSeenAt: string;
+  /** When the label mark ends if the caller makes no further call; null when nothing is stored for the caller. */
+  expiresAt: string | null;
+  /** Whether the caller's toolset tracks outside content now. */
+  tracked: boolean;
+  /** What the caller has collected (shared across instances); null when its toolset does not track. */
+  labels: McpGatewaySessionLabels | null;
+  /** When the caller first carried outside content or sensitive data; null when it has not. */
+  raisedAt: string | null;
+  /** Content rule blocks of the caller on the instance that answered (null when it has not called that instance recently). */
+  guard: McpGatewaySessionView["guard"] | null;
 }
 
 /** A client credential for the MCP gateway. The token itself is never stored or returned again. */

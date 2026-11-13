@@ -1,0 +1,7 @@
+# Known failures of the client-auth conformance run (the auth suite at spec version 2026-07-28).
+# The run fails when a listed scenario starts passing: delete its entry then. Conformance package 0.2.0-alpha.12.
+client:
+  # Warning only: no client-ID metadata document is used.
+  - auth/basic-cimd
+  # No scope step-up after a 403 insufficient_scope answer.
+  - auth/scope-step-up

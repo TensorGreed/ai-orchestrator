@@ -280,3 +280,73 @@ jobs:
           name: vscode-l2m-agent-vsix
           path: apps/vscode-l2m-agent/vscode-l2m-agent.vsix
           if-no-files-found: error
+
+  # The official MCP conformance suite against the gateway (modern mode on and off) and the HTTP MCP client, for spec
+  # versions 2025-11-25 and 2026-07-28. Its own job: it is not one of the required checks and does not gate them.
+  # Pull requests run it when they touch the MCP client SDK, the gateway or the conformance harness; pushes to main
+  # always run it. Docs-only pull requests skip it like the test jobs above. Known gaps are listed, with reasons, in
+  # apps/api/conformance/baselines/; the run fails on a new failure and on a listed scenario that now passes.
+  mcp-conformance:
+    name: MCP conformance
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Detect relevant changes
+        id: relevant
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$DOCS_ONLY" = "true" ]; then echo "run=false" >> "$GITHUB_OUTPUT"; echo "Docs-only change; skipping."; exit 0; fi
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename')
+          # The MCP client SDK, the gateway routes, services and tests, the shared schemas, app wiring and config, the conformance
+          # harness, dependency manifests (a version bump of the suite or the SDK), or this workflow.
+          if grep -Eq '^(package\.json|pnpm-lock\.yaml|apps/api/package\.json|apps/api/src/(app|config)\.ts|packages/shared/|packages/mcp-sdk/|apps/api/conformance/|apps/api/src/mcp-gateway|apps/api/src/services/mcp-gateway|\.github/workflows/ci\.yml$)' <<<"$files"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No MCP client or gateway file changed; skipping."
+          fi
+
+      - name: Checkout
+        if: steps.relevant.outputs.run == 'true'
+        uses: actions/checkout@v7
+
+      - name: Enable Corepack
+        if: steps.relevant.outputs.run == 'true'
+        run: corepack enable
+
+      - name: Setup Node.js
+        if: steps.relevant.outputs.run == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        if: steps.relevant.outputs.run == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Run the conformance suite
+        if: steps.relevant.outputs.run == 'true'
+        run: node apps/api/conformance/run.mjs --out "$RUNNER_TEMP/conformance-results"
+
+      - name: Upload conformance results
+        if: always() && steps.relevant.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: mcp-conformance-results
+          path: ${{ runner.temp }}/conformance-results
+          if-no-files-found: ignore
+
+      - name: Not needed for this change
+        if: steps.relevant.outputs.run != 'true'
+        run: echo "The MCP conformance suite is not needed for this change."

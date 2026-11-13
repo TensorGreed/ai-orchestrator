@@ -110,7 +110,7 @@ async function postEmbeddings(
   const response = await resilientFetch(
     url,
     { method: "POST", headers, body: JSON.stringify(body), signal: context.signal },
-    { timeoutMs, maxRetries, provider, onRetry: context.onRetry }
+    { timeoutMs, maxRetries, provider, onRetry: context.onRetry, traceHeaders: context.traceHeaders }
   );
   const bodyRead = { timeoutMs, signal: context.signal, provider };
   if (!response.ok) {

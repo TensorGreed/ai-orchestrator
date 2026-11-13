@@ -10,8 +10,11 @@ import type {
   MCPServerConfig,
   McpToolAnnotations,
   MCPToolDefinition,
-  MCPToolResult
+  MCPToolResult,
+  RunInstrumentation,
+  TraceCarrier
 } from "@ai-orchestrator/shared";
+import { MCP_OUTCOME_ATTRIBUTES } from "@ai-orchestrator/shared";
 import type {
   MCPExecutionContext,
   MCPServerAdapter,
@@ -44,6 +47,7 @@ import {
   parseListChangedNotification
 } from "../client-features";
 import { withToolAnnotations } from "../tool-annotations";
+import { annotateMcpError, annotateMcpRequest, mcpTraceCarrier, traceContextHeaders, traceMcpRound, withTraceContext } from "../tracing";
 import { buildToolCallResult, withOutputSchema } from "../structured-output";
 import {
   CANCEL_NOTIFICATION_TIMEOUT_MS,
@@ -730,6 +734,11 @@ export interface HttpMcpProtocolOptions {
 export interface HttpMcpServerAdapterOptions {
   oauth?: McpOAuthTokenProvider;
   protocol?: HttpMcpProtocolOptions;
+  /**
+   * Tracing (only while it is on): each request carries the active span's trace context in its headers and
+   * `params._meta`, and its session, version and id are recorded on the active MCP span.
+   */
+  trace?: RunInstrumentation;
 }
 
 /** What the adapter has observed about a server's protocol, for display. */
@@ -756,9 +765,11 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
    * without a listing first) still knows which tools are safe to send again.
    */
   private readonly rememberedAnnotations = new Map<string, Map<string, McpToolAnnotations | undefined>>();
+  private readonly trace?: RunInstrumentation;
 
   constructor(options?: HttpMcpServerAdapterOptions) {
     this.oauth = options?.oauth;
+    this.trace = options?.trace?.enabled ? options.trace : undefined;
     this.protocol = options?.protocol ?? {};
     this.eraCache = this.protocol.eraCache ?? new McpEraCache();
     this.modernOnlyCache = new McpEraCache();
@@ -1017,13 +1028,17 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
     };
     let supported: string[] | undefined;
     for (let attempt = 0; attempt < 2 && supported === undefined; attempt += 1) {
-      const params = this.outgoingParams(session, {}, context);
+      const carrier = mcpTraceCarrier(this.trace, config);
+      const params = this.outgoingParams(session, {}, context, carrier);
       try {
         // A short probe without retries: a legacy server that ignores the method must not hold up initialize.
         const { response } = await postRpc(
           session.endpoint,
           { jsonrpc: "2.0", id: nextRequestId("server-discover"), method: "server/discover", params },
-          { ...session.headers, ...buildMcpStandardHeaders(session.protocolVersion as string, "server/discover", params) },
+          mergeHeaders(session.headers, {
+            ...buildMcpStandardHeaders(session.protocolVersion as string, "server/discover", params),
+            ...traceContextHeaders(carrier)
+          }),
           Math.min(session.timeoutMs, ERA_PROBE_TIMEOUT_MS),
           { ...(context.signal ? { signal: context.signal } : {}), maxRetries: 0 }
         );
@@ -1139,15 +1154,17 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
       return session;
     };
 
+    // initialize carries trace context in its headers only (for this request; the session's headers never keep it).
+    const traceHeaders = traceContextHeaders(mcpTraceCarrier(this.trace, config));
     let initialize: Awaited<ReturnType<typeof postRpc>>;
     try {
-      initialize = await postRpc(endpoint, initializePayload, headers, timeoutMs, { signal: context.signal });
+      initialize = await postRpc(endpoint, initializePayload, mergeHeaders(headers, traceHeaders), timeoutMs, { signal: context.signal });
     } catch (error) {
       // An OAuth access token the server rejects is refreshed once before giving up.
       if (error instanceof McpHttpError && error.status === 401 && authTypeOf(config) === "oauth") {
         headers = await buildHeaders(true);
         try {
-          initialize = await postRpc(endpoint, initializePayload, headers, timeoutMs, { signal: context.signal });
+          initialize = await postRpc(endpoint, initializePayload, mergeHeaders(headers, traceHeaders), timeoutMs, { signal: context.signal });
         } catch (retryError) {
           const modern = fallForward(retryError);
           if (modern) return modern;
@@ -1200,16 +1217,21 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
    * `auto` probe call it; `initialize` and notifications do not carry
    * `_meta`). Modern requests get their protocol keys here, merged with
    * `withRequestMeta` so a progress token and any other key are kept; legacy
-   * params pass through unchanged. Trace context (`traceparent`,
-   * `tracestate`) for either era belongs here as well, merged the same way.
+   * params get no protocol keys. Trace context (`traceparent`, `tracestate`,
+   * `baggage`) is merged the same way for either era, when tracing gave a
+   * carrier for the request.
    */
   private outgoingParams(
     session: PreparedSession,
     params: Record<string, unknown>,
-    context: MCPExecutionContext
+    context: MCPExecutionContext,
+    carrier?: TraceCarrier
   ): Record<string, unknown> {
-    if (session.era !== "modern") return params;
-    return withRequestMeta(params, modernRequestMetaFor(context, session.protocolVersion ?? MCP_CLIENT_MODERN_PROTOCOL_VERSION));
+    const withProtocol =
+      session.era === "modern"
+        ? withRequestMeta(params, modernRequestMetaFor(context, session.protocolVersion ?? MCP_CLIENT_MODERN_PROTOCOL_VERSION))
+        : params;
+    return withTraceContext(withProtocol, carrier);
   }
 
   /** D13 — whether a tool call may be sent again after a broken connection: read-only or idempotent tools only. */
@@ -1281,11 +1303,19 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
       if (entry) cancelPromise = this.cancelRequest(session, entry, cancelReason(signal));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
+    const carrier = mcpTraceCarrier(this.trace, config);
+    const traceHeaders = traceContextHeaders(carrier);
+    const extraHeaders = options.headers ? { ...options.headers, ...traceHeaders } : traceHeaders;
+    annotateMcpRequest(this.trace, {
+      ...(session.era === "modern" ? {} : { sessionId: session.headers["mcp-session-id"] }),
+      protocolVersion: session.era === "modern" ? session.protocolVersion : session.headers["mcp-protocol-version"],
+      requestId: payload.id
+    });
     try {
       return await postRpc(
         session.endpoint,
-        { jsonrpc: "2.0", ...payload, params: this.outgoingParams(session, payload.params, context) },
-        options.headers ? mergeHeaders(session.headers, options.headers) : session.headers,
+        { jsonrpc: "2.0", ...payload, params: this.outgoingParams(session, payload.params, context, carrier) },
+        Object.keys(extraHeaders).length > 0 ? mergeHeaders(session.headers, extraHeaders) : session.headers,
         options.timeoutMs ?? session.timeoutMs,
         {
           ...(signal ? { signal } : {}),
@@ -1302,6 +1332,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
         }
       );
     } catch (error) {
+      annotateMcpError(this.trace, error);
       if (cancelPromise) await cancelPromise;
       // A timed-out tools/call is cancelled too, so the server can stop working on it.
       if (entry && !entry.cancelled && error instanceof Error && /timed out/.test(error.message)) {
@@ -1459,7 +1490,17 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
       onHeaderMismatch?: () => Promise<boolean>;
     }
   ): Promise<Record<string, unknown>> {
+    const target = options.toolName ?? (typeof params.name === "string" ? params.name : undefined);
+    let rounds = 0;
     const send = async (roundParams: Record<string, unknown>): Promise<unknown> => {
+      rounds += 1;
+      return await traceMcpRound(
+        this.trace,
+        { method, ...(target ? { target } : {}), round: rounds, serverId: config.registryServerId ?? config.serverId },
+        () => sendRound(roundParams)
+      );
+    };
+    const sendRound = async (roundParams: Record<string, unknown>): Promise<unknown> => {
       let retried = false;
       for (;;) {
         try {
@@ -1486,12 +1527,16 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
         ...(config.registryServerId ? { registryServerId: config.registryServerId } : {}),
         ...(options.toolName ? { toolName: options.toolName } : {})
       };
-      return runMrtrRequest(method as McpMrtrMethod, params, send, {
-        context,
-        origin,
-        clientCapabilities: buildClientCapabilities(context),
-        maxRounds: this.protocol.mrtrMaxRounds ?? DEFAULT_MRTR_MAX_ROUNDS
-      });
+      try {
+        return await runMrtrRequest(method as McpMrtrMethod, params, send, {
+          context,
+          origin,
+          clientCapabilities: buildClientCapabilities(context),
+          maxRounds: this.protocol.mrtrMaxRounds ?? DEFAULT_MRTR_MAX_ROUNDS
+        });
+      } finally {
+        if (rounds > 1) this.trace?.annotate({ [MCP_OUTCOME_ATTRIBUTES.ROUNDS]: rounds });
+      }
     }
     const classified = classifyMcpResult(method, await send(params));
     if (classified.resultType !== "complete") {

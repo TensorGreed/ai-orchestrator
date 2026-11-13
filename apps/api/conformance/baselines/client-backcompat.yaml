@@ -1,0 +1,9 @@
+# Known failures of the client-backcompat conformance run (the 2025-03-26 OAuth scenarios).
+# The run fails when a listed scenario starts passing: delete its entry then. Conformance package 0.2.0-alpha.12.
+client:
+  # oauth.ts implements the current flow only (protected resource metadata, then authorization server metadata).
+  # The 2025-03-26 shape (the MCP server doubles as authorization server, metadata at its own origin) is not
+  # supported on purpose: discovery fails with "Could not find OAuth protected resource metadata".
+  - auth/2025-03-26-oauth-metadata-backcompat
+  # Same: the /authorize, /token and /register endpoint fallback of 2025-03-26 is not implemented.
+  - auth/2025-03-26-oauth-endpoint-fallback

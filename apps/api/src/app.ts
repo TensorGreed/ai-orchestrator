@@ -63,6 +63,7 @@ import {
   type McpToolProgressEvent,
   type McpElicitationView,
   type MCPServerConfig,
+  type ModelCostObservation,
   type NodeActivityEvent,
   type NodeProgressSnapshot,
   type ReleaseChannel,
@@ -73,7 +74,7 @@ import {
   WorkflowError,
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
-import { BUDGET_SCOPE_TYPES, isBudgetScopeType, type BudgetScopeType } from "@ai-orchestrator/shared";
+import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, type BudgetScopeType } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
 import {
@@ -208,9 +209,11 @@ import { createSharedRateLimitStore, SHARED_RATE_LIMIT_BUCKET, type SharedRateLi
 import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService } from "./services/tracing-service";
-import type { SpanProcessor } from "@ai-orchestrator/otel";
+import type { MetricReader, SpanProcessor } from "@ai-orchestrator/otel";
 import { resolveTelemetrySettings } from "./telemetry/settings.js";
 import { loadTelemetry, type Telemetry } from "./telemetry/load.js";
+import { createModelTelemetry } from "./telemetry/model-telemetry.js";
+import { pausedTraceContext, traceQueueJob } from "./telemetry/queue-tracing.js";
 import { installHandlerContext, installHttpServerSpans, traceLogMixin } from "./telemetry/http-tracing.js";
 import { UsageService } from "./services/usage-service";
 import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
@@ -1457,6 +1460,11 @@ export interface CreateAppOptions {
   telemetrySpanProcessors?: readonly SpanProcessor[];
   /** Register the process-wide OpenTelemetry globals while tracing is on (default true; tests turn it off). */
   telemetryRegisterGlobals?: boolean;
+  /**
+   * Extra OpenTelemetry metric readers (tests collect metrics in memory); they also turn the GenAI metrics on. Used only
+   * where a meter provider is built: while tracing is on or with a metrics endpoint.
+   */
+  telemetryMetricReaders?: readonly MetricReader[];
 }
 
 /** What provisionSsoUser needs to link or create the local user of an SSO login. */
@@ -1554,9 +1562,15 @@ export async function createApp(
       return (text: string) => scrubber.text(text);
     })(),
     ...(options.telemetrySpanProcessors ? { spanProcessors: options.telemetrySpanProcessors } : {}),
-    ...(options.telemetryRegisterGlobals === false ? { registerGlobals: false } : {})
+    ...(options.telemetryRegisterGlobals === false ? { registerGlobals: false } : {}),
+    ...(options.telemetryMetricReaders ? { metricReaders: options.telemetryMetricReaders } : {})
   });
   const telemetryRuntime = telemetry.runtime;
+  // Model-call spans and the GenAI metrics: the provider and embedding registries are wrapped only while tracing is on
+  // or metrics export (otherwise they are used as they are).
+  const modelTelemetry = await createModelTelemetry(telemetry, {
+    metrics: telemetrySettings.metricsEndpoint !== null || (options.telemetryMetricReaders?.length ?? 0) > 0
+  });
   const app = Fastify({
     logger: {
       level: config.LOG_LEVEL,
@@ -1608,11 +1622,16 @@ export async function createApp(
       await auditService.record(event);
       await logStreamingService.dispatchAudit(event);
     },
-    logger: (message, metadata) => app.log.warn(metadata ?? {}, message)
+    logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
+    // The outermost layer of each allowlist view records the model call, so a refused call has its span too.
+    ...(modelTelemetry.active ? { instrumentRegistry: (registry: ProviderRegistry) => modelTelemetry.providers(registry) } : {})
   });
   await modelAllowlistService.start();
   app.addHook("onClose", async () => modelAllowlistService.stop());
-  const baseProviderRegistry = createDefaultProviderRegistry();
+  // Instrumented at the base too, so a call through any other view (a tape miss, a recorded run) is recorded once.
+  const baseProviderRegistry = modelTelemetry.providers(createDefaultProviderRegistry());
+  // The embedding adapters /v1 and the runs' output checks call (instrumented the same way).
+  const runEmbeddingRegistry = modelTelemetry.embeddings(createDefaultEmbeddingRegistry());
   const providerRegistry = modelAllowlistService.registry(baseProviderRegistry, { projectId: null, source: "deployment" });
   /** The allowlist scope of a run of `workflow` (a workflow with no project uses the default project's list). */
   type ModelRun = { executionId?: string; runKey?: string; sourceExecutionId?: string };
@@ -1864,6 +1883,16 @@ export async function createApp(
       mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
       legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE
     },
+    // MCP 2026-07-28 — the same settings for stdio servers, plus the wait for their server/discover probe.
+    stdioProtocol: {
+      defaultMode: config.MCP_CLIENT_PROTOCOL_DEFAULT,
+      mrtrMaxRounds: config.MCP_CLIENT_MRTR_MAX_ROUNDS,
+      legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE,
+      probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS
+    },
+    // Tracing (only while it is on): a CLIENT span per MCP operation, and trace context sent to MCP servers in
+    // `_meta` and HTTP headers unless L2M_OTEL_PROPAGATE_TO_MCP=false or the server's connection opts out.
+    ...(telemetry.instrumentation.enabled ? { instrument: telemetry.instrumentation } : {}),
     // Phase 10.8 — snapshot mock servers read accepted snapshots and cassettes from the store.
     snapshots: {
       loadSnapshot: async (sourceServerId) => {
@@ -1973,6 +2002,8 @@ export async function createApp(
   const queueSettings = resolveQueueSettings(config, { clusterMode: queueClusterMode });
   // The producer exists on every instance (any WORKER_MODE), so an api replica accepts /enqueue for the workers.
   const queueProducer = queueService?.producer ?? new QueueProducer(store, { maxPending: queueSettings.maxPending });
+  // Jobs carry the enqueuer's trace context in their payload JSON while tracing is on (no column, nothing when off).
+  if (telemetry.enabled) queueProducer.setTracing({ instrumentation: telemetry.instrumentation, verbose: telemetrySettings.spanDetail === "verbose" });
   // Phase 13.1 — where runs execute (EXECUTION_DISPATCH): inline (default) here, or queue (cluster mode only) on the
   // queue's workers with this instance relaying events and results (services/run-dispatch.ts).
   const executionDispatch = resolveExecutionDispatch(config, { clusterMode });
@@ -2275,7 +2306,8 @@ export async function createApp(
         projectId: input.workflow.projectId ?? DEFAULT_PROJECT_ID,
         ...(input.triggerType ? { triggerType: input.triggerType } : {}),
         runMode: input.runMode ?? "workflow",
-        replay: Boolean(input.replay)
+        replay: Boolean(input.replay),
+        ...(input.traceLinks && input.traceLinks.length > 0 ? { links: input.traceLinks } : {})
       },
       async (span) => {
         const result = await runWorkflowExecutionInScope(input);
@@ -2418,6 +2450,7 @@ export async function createApp(
           // 12.6 — checked against the model allowlist of the workflow's project (a tape replay: see above).
           providerRegistry: tapeReplay ? runModelRegistry : modelScopedRun(mergedWorkflow, runModelRegistry, runModelScope),
           checkEmbeddingModel: modelScopedEmbeddings(mergedWorkflow, runModelScope),
+          ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
           connectorRegistry,
           mcpRegistry: runPlan?.registry ?? mcpRegistry,
           agentRuntime,
@@ -2500,6 +2533,7 @@ export async function createApp(
           persistPausedExecution: input.replay ? undefined : async (paused) => {
             // Phase 13.1 — a queued run in cluster mode pauses only while its claim holds the queue item.
             const queueFence = queueRunFences.get(paused.executionId)?.fence;
+            const pausedTrace = pausedTraceContext(runInstrumentation);
             const pausedHere = await store.saveWorkflowExecutionState({
               id: paused.executionId,
               workflowId: paused.workflowId,
@@ -2517,6 +2551,8 @@ export async function createApp(
                 ...paused.state,
                 ...(channel === "production" ? { releaseChannel: "production" as const, releaseVersion } : {}),
                 ...(input.gatewayGuard ? { gatewayGuard: input.gatewayGuard } : {}),
+                // The pausing node's trace context: the resumed run's span links back to it (tracing on only).
+                ...(pausedTrace ? { traceContext: pausedTrace } : {}),
                 // 12.6 — and its client and toolset, so the resumed part's usage is charged to them.
                 ...(input.gatewayUsage ? { gatewayUsage: input.gatewayUsage } : {}),
                 // 12.7 — an eval run's resumed part still records its Content rules verdicts as eval traffic.
@@ -2610,6 +2646,7 @@ export async function createApp(
                   // 12.6 — the error handler's model calls are checked for its own project, audited once per failed run.
                   providerRegistry: modelScopedRun(errorWf, baseProviderRegistry, errorModelRun),
                   checkEmbeddingModel: modelScopedEmbeddings(errorWf, errorModelRun),
+                  ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
                   scopeSubWorkflow: modelScopedSubWorkflows(errorScoped.scopeSubWorkflow, baseProviderRegistry, errorModelRun),
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
@@ -4062,7 +4099,8 @@ export async function createApp(
   if (schedulerService) {
     // A scheduler test double that only fires schedules has no loader.
     schedulerService.setWorkflowLoader?.(async (workflowId) => await productionWorkflow(workflowId));
-    schedulerService.setExecutionHandler((input) => executeScheduledWorkflow(input));
+    // A schedule fire is its own trace: the timer would otherwise inherit the context of the request that saved it.
+    schedulerService.setExecutionHandler((input) => runInstrumentation.withNewTrace(() => executeScheduledWorkflow(input)));
     app.addHook("onClose", async () => {
       schedulerService.stop();
     });
@@ -4139,7 +4177,7 @@ export async function createApp(
 
   if (triggerService) {
     triggerService.setWorkflowLoader(async (workflowId) => await productionWorkflow(workflowId));
-    triggerService.setExecutionHandler(async (payload) => executeTriggeredWorkflow(payload));
+    triggerService.setExecutionHandler(async (payload) => await runInstrumentation.withNewTrace(() => executeTriggeredWorkflow(payload)));
     triggerService.setSecretResolver((ref) => secretService.resolveSecret(ref));
     triggerService.setOutboundGuard(outboundGuard, nodeDnsResolver);
     app.addHook("onClose", async () => {
@@ -4937,6 +4975,7 @@ export async function createApp(
   secretService.attachExternalSecrets(externalSecretsService);
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
   const usageService = new UsageService(store, { pricingOverridesJson: config.LLM_PRICING_OVERRIDES_JSON });
+  if (modelTelemetry.active) usageService.setCostObserver((observation) => modelTelemetry.recordCost(observation));
   usageService.setLogger({
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
@@ -5357,6 +5396,8 @@ export async function createApp(
           executionId: job.executionId,
           triggerType: "approval_resume",
           triggeredBy: actedBy,
+          // The resumed run is its own span, linked (not parented) to the node that paused, hours or days earlier.
+          ...(readTraceCarrier(state.traceContext) ? { traceLinks: [readTraceCarrier(state.traceContext)!] } : {}),
           resumeState: { ...state, workflow: resumeWorkflow },
           approvalDecision,
           // The run resumes on the version it started with (the paused state's workflow), on its channel.
@@ -12227,7 +12268,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     priceSampling: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
     limiter: gatewayClientLimiter,
     network: networkControls,
-    clusterMode,
+    // A SERVER span per gateway request while tracing is on; `_meta` trace context follows the inbound trust rule.
+    ...(telemetry.instrumentation.enabled
+      ? { tracing: { instrumentation: telemetry.instrumentation, trustInbound: telemetrySettings.trustInbound } }
+      : {}),
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;
@@ -12306,7 +12350,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   // 12.6b — the OpenAI-compatible /v1 AI gateway and its admin API. Inert until an admin creates a route set and grants
   // it to a client: with none, every /v1 call answers 401 or 404.
-  const embeddingRegistry = createDefaultEmbeddingRegistry();
+  const embeddingRegistry = runEmbeddingRegistry;
   registerAiGatewayRoutes({
     app,
     config,
@@ -12325,6 +12369,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     network: networkControls,
     priceRequest: (providerId, model, inputTokens, outputTokens, cachedInputTokens) =>
       usageService.estimateAiGatewayCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
+    ...(modelTelemetry.active ? { instrument: modelTelemetry.instrumentation, recordCost: (observation: ModelCostObservation) => modelTelemetry.recordCost(observation) } : {}),
     checkModel:
       options.aiGatewayCheckModel ??
       (async (scope, call) =>
@@ -15057,7 +15102,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   };
 
   if (queueService) {
-    queueService.setHandler(async (payload, context) => {
+    queueService.setHandler(async (payload, context) => await traceQueueJob(runInstrumentation, payload, context, async () => {
       // Phase 13.1 — the run a job executes is the queue's (see queueConsumedRuns), keyed on the payload's execution
       // id. Marked before the run is registered as active, so it never records an owner row and the self-fence never
       // stops it: the queue's lease, heartbeat and reaper own it.
@@ -15089,7 +15134,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         releaseActiveExecution(payload.executionId, controller);
         queueConsumedRuns.delete(queueOwnedExecutionId);
       }
-    });
+    }));
 
     if (queueClusterMode) {
       queueService.enableLeases({

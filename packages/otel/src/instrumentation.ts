@@ -12,6 +12,7 @@ import {
   type Context,
   type ContextManager,
   type Link,
+  type Meter,
   type Span,
   type TextMapPropagator,
   type Tracer
@@ -36,6 +37,7 @@ import type {
 } from "@ai-orchestrator/shared";
 import { NOOP_INSTRUMENTATION_SPAN, NOOP_SCOPED_INSTRUMENTATION_SPAN } from "@ai-orchestrator/shared";
 import type { OtelRuntimeOptions } from "./options.js";
+import { MCP_CLIENT_METRIC_KEYS, MCP_REQUEST_KEYS, MCP_SERVER_METRIC_KEYS, McpMetrics, mcpSpanSpec, metricValue } from "./mcp.js";
 import { ATTR_ERROR_TYPE, ATTR_EXCEPTION_MESSAGE, ATTR_EXCEPTION_TYPE, ATTR_SERVER_ADDRESS, ATTR_SERVER_PORT, GEN_AI, GEN_AI_OPERATION, L2M, MCP, genAiProviderName } from "./semconv.js";
 
 const KINDS: Record<InstrumentationSpanKind, SpanKind> = {
@@ -155,6 +157,68 @@ export class OtelSpanHandle implements InstrumentationSpan {
   }
 }
 
+/**
+ * The span of one MCP request. Besides the span it keeps the attributes its duration metric needs (also for a span
+ * the sampler dropped, which records nothing) and records the metric when it ends. A later round of a multi
+ * round-trip request is not measured on its own: the request's span covers it.
+ */
+export class McpSpanHandle extends OtelSpanHandle {
+  private readonly startedAt = performance.now();
+  private readonly metricAttributes: Attributes = {};
+  private measured = false;
+  private errored = false;
+  /** The JSON-RPC error code the server answered with, once seen: it is the request's `error.type`. */
+  private rpcCode: string | undefined;
+
+  constructor(
+    span: Span,
+    scrub: (text: string) => string,
+    initial: InstrumentationAttributes,
+    private readonly side: "client" | "server",
+    private readonly metrics: McpMetrics | undefined
+  ) {
+    super(span, scrub);
+    this.capture(initial);
+  }
+
+  private capture(attributes: InstrumentationAttributes): void {
+    const code = attributes[MCP.RPC_RESPONSE_STATUS_CODE];
+    if (code !== undefined && code !== null) this.rpcCode = String(code);
+    if (!this.metrics) return;
+    const clean = cleanAttributes(attributes);
+    for (const key of this.side === "server" ? MCP_SERVER_METRIC_KEYS : MCP_CLIENT_METRIC_KEYS) {
+      if (clean[key] !== undefined) this.metricAttributes[key] = metricValue(key, clean[key]);
+    }
+  }
+
+  override setAttributes(attributes: InstrumentationAttributes): void {
+    this.capture(attributes);
+    super.setAttributes(attributes);
+  }
+
+  /**
+   * The first outcome recorded wins: the MCP wrappers record the JSON-RPC code or failure kind (type only, no text),
+   * and the generic recording of the error they then rethrow must not replace it or add the server's message.
+   */
+  override recordError(error: unknown, options: { type?: string } = {}): void {
+    if (this.errored) return;
+    this.errored = true;
+    // A JSON-RPC error code seen during the request is its error type (MCP conventions), however the failure surfaced.
+    const type = this.rpcCode ?? errorTypeOf(error, options.type);
+    this.capture({ [ATTR_ERROR_TYPE]: type });
+    super.recordError(error, { type });
+  }
+
+  override end(): void {
+    if (!this.measured && this.metrics) {
+      this.measured = true;
+      const seconds = (performance.now() - this.startedAt) / 1000;
+      (this.side === "server" ? this.metrics.server : this.metrics.client).record(seconds, this.metricAttributes);
+    }
+    super.end();
+  }
+}
+
 /** A span the caller opened and enters for parts of its work (see `ScopedInstrumentationSpan`). */
 export class OtelScopedSpan extends OtelSpanHandle implements ScopedInstrumentationSpan {
   constructor(
@@ -183,6 +247,8 @@ export interface InstrumentationDeps {
   internalPropagator: TextMapPropagator;
   options: Pick<OtelRuntimeOptions, "spanDetail" | "naming" | "propagateToProviders" | "propagateToMcp">;
   scrub: (text: string) => string;
+  /** Where the MCP operation duration histograms are recorded; without one no MCP metric is recorded. */
+  meter?: Meter;
 }
 
 export interface StartSpanSpec {
@@ -197,8 +263,13 @@ export interface StartSpanSpec {
 /** Implements the shared `RunInstrumentation` seam over an OpenTelemetry tracer. */
 export class OtelRunInstrumentation implements RunInstrumentation {
   readonly enabled = true;
+  private readonly mcpMetrics: McpMetrics | undefined;
+  /** Open MCP spans by their OpenTelemetry span, so `annotate` reaches their handle (and their metric). */
+  private readonly mcpHandles = new WeakMap<Span, McpSpanHandle>();
 
-  constructor(private readonly deps: InstrumentationDeps) {}
+  constructor(private readonly deps: InstrumentationDeps) {
+    this.mcpMetrics = deps.meter ? new McpMetrics(deps.meter) : undefined;
+  }
 
   /** Starts a span (not made active). */
   startSpan(spec: StartSpanSpec): OtelSpanHandle {
@@ -362,25 +433,39 @@ export class OtelRunInstrumentation implements RunInstrumentation {
     return this.wrap(this.toolSpec(info), fn);
   }
 
+  /**
+   * An MCP request: CLIENT for L2M calling a server, SERVER for the gateway answering one. A server span whose
+   * request carried trace context in `_meta` takes it as parent and links the transport's (HTTP) span, as the MCP
+   * conventions ask; an untrusted caller's context is only linked. A later round of a multi round-trip request is a
+   * child of the request's span and is not measured separately.
+   */
   mcpRequest<T>(info: McpRequestSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {
-    return this.wrap(
-      {
-        name: info.target ? `${info.method} ${info.target}` : info.method,
-        kind: info.side === "server" ? "server" : "client",
-        attributes: {
-          [MCP.METHOD_NAME]: info.method,
-          [GEN_AI.TOOL_NAME]: info.method === "tools/call" ? info.target : undefined,
-          [MCP.SESSION_ID]: info.sessionId,
-          [MCP.PROTOCOL_VERSION]: info.protocolVersion,
-          [MCP.JSONRPC_REQUEST_ID]: info.requestId === undefined ? undefined : String(info.requestId),
-          [MCP.NETWORK_TRANSPORT]: info.transport,
-          [ATTR_SERVER_ADDRESS]: info.serverAddress,
-          [ATTR_SERVER_PORT]: info.serverPort,
-          [L2M.MCP_SERVER_ID]: info.serverId
+    const side = info.side === "server" ? "server" : "client";
+    const spec = mcpSpanSpec(info, this.deps.scrub);
+    const active = this.deps.contextManager.active();
+    let parent = active;
+    const links: Link[] = [];
+    if (side === "server" && info.remoteParent) {
+      const remote = this.extract(info.remoteParent.carrier, ROOT_CONTEXT, "inbound");
+      const remoteContext = remote ? trace.getSpanContext(remote) : undefined;
+      if (remote && remoteContext) {
+        if (info.remoteParent.use === "parent") {
+          parent = remote;
+          const transport = trace.getSpanContext(active);
+          if (transport && isSpanContextValid(transport)) links.push({ context: transport, attributes: { [L2M.LINK_REASON]: "transport" } });
+        } else {
+          links.push({ context: remoteContext, attributes: { [L2M.LINK_REASON]: "untrusted_inbound" } });
         }
-      },
-      fn
+      }
+    }
+    const span = this.deps.tracer.startSpan(
+      spec.name,
+      { kind: side === "server" ? SpanKind.SERVER : SpanKind.CLIENT, attributes: cleanAttributes(spec.attributes), ...(links.length > 0 ? { links } : {}) },
+      parent
     );
+    const handle = new McpSpanHandle(span, this.deps.scrub, spec.attributes, side, info.round && info.round > 1 ? undefined : this.mcpMetrics);
+    this.mcpHandles.set(span, handle);
+    return this.within(handle, fn);
   }
 
   span<T>(info: GenericSpanInfo, fn: (span: InstrumentationSpan) => Promise<T>): Promise<T> {
@@ -389,7 +474,13 @@ export class OtelRunInstrumentation implements RunInstrumentation {
 
   annotate(attributes: InstrumentationAttributes): void {
     const span = trace.getSpan(this.deps.contextManager.active());
-    if (span?.isRecording()) span.setAttributes(cleanAttributes(attributes));
+    if (!span) return;
+    // An MCP span's handle also keeps what its duration metric needs, sampled or not.
+    const mcp = this.mcpHandles.get(span);
+    if (mcp) mcp.setAttributes(attributes);
+    // What an MCP client reports about its request belongs on an MCP span only (a call made outside one, such as a
+    // capability lookup, must not put MCP attributes on the HTTP or tool span around it).
+    else if (span.isRecording() && !Object.keys(attributes).every((key) => MCP_REQUEST_KEYS.has(key))) span.setAttributes(cleanAttributes(attributes));
   }
 
   inject(carrier: TraceCarrier, target: TraceInjectTarget): boolean {
@@ -424,6 +515,10 @@ export class OtelRunInstrumentation implements RunInstrumentation {
   withParent<T>(carrier: TraceCarrier | null | undefined, fn: () => T): T {
     const context = this.extract(carrier, this.deps.contextManager.active());
     return context ? this.deps.contextManager.with(context, fn) : fn();
+  }
+
+  withNewTrace<T>(fn: () => T): T {
+    return this.deps.contextManager.with(ROOT_CONTEXT, fn);
   }
 
   activeTraceIds(): TraceIds | null {

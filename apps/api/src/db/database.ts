@@ -5,6 +5,20 @@ import { randomUUID } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import { ensureAiGatewaySchema, sqliteAiGatewayStore } from "./ai-gateway-sqlite.js";
 import { ensureErasureSchema, ensureSubjectSchema, sqliteSubjectStore } from "./subject-sqlite.js";
+import {
+  LABEL_MARK_INSERT_EMPTY_SQL,
+  LABEL_MARK_TOUCH_SQL,
+  LABEL_MARK_WRITE_SQL,
+  labelMarkTouchParams,
+  ensureLabelMarkSchema,
+  labelMarkLive,
+  labelMarkUpdateParams,
+  mapLabelMarkRow,
+  mergeLabelMark,
+  type McpGatewayLabelMark,
+  type McpGatewayLabelMarkKey,
+  type McpGatewayLabelMarkRaise
+} from "./gateway-label-marks.js";
 import { parseMemoryArtifactRowId, parseMemorySessionRowId, type SubjectStore } from "./subject-store.js";
 import {
   CLEAR_RUN_USAGE_SQL,
@@ -4476,6 +4490,8 @@ export class SqliteStore implements Store {
     ensureSubjectSchema(this.db);
     // 13.3 (v69) — erasure tombstones.
     ensureErasureSchema(this.db);
+    // MCP 2026-07-28 (v71) — label marks of stateless gateway callers.
+    ensureLabelMarkSchema(this.db);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -13902,6 +13918,8 @@ export class SqliteStore implements Store {
     this.db.transaction(() => {
       this.exec(`DELETE FROM mcp_toolset_members WHERE toolset_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_toolsets WHERE id = ?`, [id]);
+      // v71 — the label marks of the toolset's stateless callers end with it.
+      this.exec(`DELETE FROM mcp_gateway_label_marks WHERE toolset_id = ?`, [id]);
       for (const client of this.listMcpClientsSync()) {
         if (!client.toolsetIds.includes(id)) continue;
         this.exec(`UPDATE mcp_clients SET toolset_ids_json = ? WHERE id = ?`, [
@@ -13972,10 +13990,47 @@ export class SqliteStore implements Store {
   async revokeMcpClient(id: string): Promise<McpClient | null> {
     const existing = this.getMcpClientSync(id);
     if (!existing) return null;
-    if (!existing.revokedAt) {
-      this.exec(`UPDATE mcp_clients SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
-    }
+    this.db.transaction(() => {
+      if (!existing.revokedAt) {
+        this.exec(`UPDATE mcp_clients SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+      }
+      // v71 — the label marks of the client's stateless calls end with the credential.
+      this.exec(`DELETE FROM mcp_gateway_label_marks WHERE client_id = ?`, [id]);
+    })();
     return this.getMcpClientSync(id);
+  }
+
+  // MCP 2026-07-28 (v71) — label marks of stateless gateway callers (gateway-label-marks.ts).
+  async readMcpGatewayLabelMark(key: McpGatewayLabelMarkKey, at: { now: string; expiresAt: string }): Promise<McpGatewayLabelMark | null> {
+    const row = this.queryOne<Record<string, unknown>>(LABEL_MARK_TOUCH_SQL, labelMarkTouchParams(key, at));
+    return row ? mapLabelMarkRow(row) : null;
+  }
+
+  async raiseMcpGatewayLabelMark(input: McpGatewayLabelMarkRaise): Promise<{ mark: McpGatewayLabelMark; firstRaise: boolean }> {
+    return this.db.transaction(() => {
+      this.exec(LABEL_MARK_INSERT_EMPTY_SQL, [input.clientId, input.toolsetId, input.scopeKey, input.now, input.expiresAt]);
+      const row = this.queryOne<Record<string, unknown>>(
+        `SELECT * FROM mcp_gateway_label_marks WHERE client_id = ? AND toolset_id = ? AND scope_key = ?`,
+        [input.clientId, input.toolsetId, input.scopeKey]
+      );
+      const stored = row ? mapLabelMarkRow(row) : null;
+      const { next, firstRaise } = mergeLabelMark(stored && labelMarkLive(stored, input.now) ? stored : null, input);
+      this.exec(LABEL_MARK_WRITE_SQL, labelMarkUpdateParams(next));
+      return { mark: next, firstRaise };
+    }).immediate();
+  }
+
+  async listMcpGatewayLabelMarks(filter: { clientId: string }, now: string): Promise<McpGatewayLabelMark[]> {
+    return this.queryAll<Record<string, unknown>>(
+      `SELECT * FROM mcp_gateway_label_marks WHERE client_id = ? AND expires_at > ? ORDER BY last_seen_at DESC, toolset_id, scope_key`,
+      [filter.clientId, now]
+    ).map(mapLabelMarkRow);
+  }
+
+  async sweepMcpGatewayLabelMarks(now: string, limit: number): Promise<number> {
+    return this.db
+      .prepare(`DELETE FROM mcp_gateway_label_marks WHERE rowid IN (SELECT rowid FROM mcp_gateway_label_marks WHERE expires_at <= ? LIMIT ?)`)
+      .run(now, limit).changes;
   }
 
   async updateMcpClientNetwork(id: string, input: { allowedIps: string[]; certFingerprints: string[]; certSubject: string | null }): Promise<McpClient | null> {

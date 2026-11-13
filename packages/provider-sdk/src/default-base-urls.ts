@@ -48,14 +48,49 @@ export function providerDestinationHost(
   provider: { baseUrl?: unknown; extra?: unknown },
   env: Record<string, string | undefined> = process.env
 ): string | undefined | null {
+  const url = providerEffectiveBaseUrl(providerId, provider, env);
+  return url === null ? null : url === undefined ? undefined : hostOfSetting(url);
+}
+
+/**
+ * The base URL a call to this provider goes to: the node's, else the adapter's default. `null` for a provider that
+ * sends nothing over the network; undefined when none is known.
+ */
+function providerEffectiveBaseUrl(
+  providerId: string,
+  provider: { baseUrl?: unknown; extra?: unknown },
+  env: Record<string, string | undefined>
+): string | undefined | null {
   if (PROVIDERS_WITHOUT_NETWORK.has(providerId)) return null;
   const fixed = PROVIDERS_WITH_FIXED_HOST.has(providerId) ? providerDefaultBaseUrl(providerId, env) : undefined;
-  if (fixed) return hostOfSetting(fixed);
+  if (fixed) return fixed;
   const extra = provider.extra && typeof provider.extra === "object" && !Array.isArray(provider.extra) ? (provider.extra as Record<string, unknown>) : {};
   const configured = setting(provider.baseUrl) ?? (providerId === "azure_openai" ? setting(extra.endpoint) ?? setting(env.AZURE_OPENAI_ENDPOINT) : undefined);
-  if (configured !== undefined) return hostOfSetting(configured);
-  const fallback = providerDefaultBaseUrl(providerId, env);
-  return fallback ? hostOfSetting(fallback) : undefined;
+  if (configured !== undefined) return configured;
+  return providerDefaultBaseUrl(providerId, env);
+}
+
+/**
+ * Where a provider call goes, as trace attributes want it (`server.address`, `server.port`): the host and port only,
+ * never a path, query or credentials. Undefined for a provider that sends nothing over the network or a base URL that
+ * cannot be read (a template).
+ */
+export function providerServerEndpoint(
+  providerId: string,
+  provider: { baseUrl?: unknown; extra?: unknown },
+  env: Record<string, string | undefined> = process.env
+): { address: string; port: number } | undefined {
+  const url = providerEffectiveBaseUrl(providerId, provider, env);
+  if (!url || !/^https?:\/\//i.test(url) || url.includes("{{")) return undefined;
+  try {
+    const parsed = new URL(url);
+    const address = parsed.hostname.replace(/^\[|\]$/g, "");
+    if (!address) return undefined;
+    const port = parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+    return { address, port };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Phase 16 — the destination of a call to this provider, or null when it sends nothing over the network. */

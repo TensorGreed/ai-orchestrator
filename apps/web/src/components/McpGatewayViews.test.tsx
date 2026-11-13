@@ -477,6 +477,110 @@ describe("MCP gateway views", () => {
     expect(api.updateGuardClientBinding).toHaveBeenCalledWith("mcc_1", { mode: "inherit" });
   });
 
+  it("lists stateless callers next to sessions, labelled with their protocol version, and says when other instances could not be read", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpClientSessions).mockResolvedValue({
+      clientId: "mcc_1",
+      sessions: [
+        {
+          idPrefix: "a1b2c3d4",
+          clientId: "mcc_1",
+          toolsetId: "mts_1",
+          toolsetName: "Support tools",
+          protocolVersion: "2025-11-25",
+          clientInfo: { name: "Cursor", version: "1.2" },
+          createdAt: "2026-10-20T10:00:00.000Z",
+          lastSeenAt: "2026-10-20T10:05:00.000Z",
+          tracked: true,
+          labels: { provenance: [], dataClasses: [] },
+          raisedAt: null,
+          guard: { blocks: 0, lastBlock: null }
+        }
+      ],
+      callers: [
+        {
+          clientId: "mcc_1",
+          toolsetId: "mts_1",
+          toolsetName: "Support tools",
+          userId: "u1",
+          protocolVersion: "2026-07-28",
+          clientInfo: { name: "Fleet agent", version: "2" },
+          lastSeenAt: "2026-10-20T10:07:00.000Z",
+          expiresAt: "2026-10-20T10:37:00.000Z",
+          tracked: true,
+          labels: { provenance: ["untrusted_external"], dataClasses: [] },
+          raisedAt: "2026-10-20T10:06:00.000Z",
+          guard: { blocks: 3, lastBlock: { tool: "support_tools__lookup", channel: "tool_result", reason: "Blocked by content rules", at: "2026-10-20T10:06:30.000Z" } }
+        },
+        {
+          clientId: "mcc_1",
+          toolsetId: "mts_2",
+          toolsetName: "Other tools",
+          userId: null,
+          protocolVersion: null,
+          clientInfo: null,
+          lastSeenAt: "2026-10-20T10:04:00.000Z",
+          expiresAt: null,
+          tracked: false,
+          labels: null,
+          raisedAt: null,
+          guard: null
+        }
+      ],
+      callersUnavailable: true
+    });
+    render(<McpServersPage view="clients" isAdmin={false} activeProjectId={null} />);
+    const list = await screen.findByRole("list", { name: "MCP clients" });
+    await user.click(within(list).getByRole("button", { name: "Sessions" }));
+    const sessions = await within(list).findByRole("list", { name: "Open sessions" });
+    expect(within(sessions).getByText("Session (2025-11-25)")).toBeInTheDocument();
+    const callers = within(list).getByRole("list", { name: "Stateless callers" });
+    const rows = within(callers).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]!).getByText("Stateless caller (2026-07-28)")).toBeInTheDocument();
+    expect(within(rows[0]!).getByText("Fleet agent 2")).toBeInTheDocument();
+    expect(within(rows[0]!).getByLabelText("Data labels: from outside")).toBeInTheDocument();
+    expect(within(rows[0]!).getByTestId("caller-guard-blocks")).toHaveTextContent("Rules blocked 3");
+    // Seen on another instance only: no version, no client info.
+    expect(within(rows[1]!).getByText("Stateless caller")).toBeInTheDocument();
+    expect(within(rows[1]!).getByText("outside content not tracked")).toBeInTheDocument();
+    expect(within(list).getByRole("status")).toHaveTextContent("Stateless callers on other server instances could not be read");
+  });
+
+  it("shows stateless callers alone, and an empty panel when there are neither", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpClientSessions).mockResolvedValueOnce({ clientId: "mcc_1", sessions: [] });
+    render(<McpServersPage view="clients" isAdmin={false} activeProjectId={null} />);
+    const list = await screen.findByRole("list", { name: "MCP clients" });
+    await user.click(within(list).getByRole("button", { name: "Sessions" }));
+    expect(await within(list).findByText("No open sessions on this server and no stateless callers.")).toBeInTheDocument();
+    vi.mocked(api.fetchMcpClientSessions).mockResolvedValueOnce({
+      clientId: "mcc_1",
+      sessions: [],
+      callers: [
+        {
+          clientId: "mcc_1",
+          toolsetId: "mts_1",
+          toolsetName: "Support tools",
+          userId: null,
+          protocolVersion: "2026-07-28",
+          clientInfo: {},
+          lastSeenAt: "2026-10-20T10:07:00.000Z",
+          expiresAt: "2026-10-20T10:37:00.000Z",
+          tracked: true,
+          labels: { provenance: [], dataClasses: [] },
+          raisedAt: null,
+          guard: { blocks: 0, lastBlock: null }
+        }
+      ]
+    });
+    await user.click(within(list).getByRole("button", { name: "Refresh" }));
+    const callers = await within(list).findByRole("list", { name: "Stateless callers" });
+    expect(within(callers).getByText("nothing from outside yet")).toBeInTheDocument();
+    expect(within(list).queryByText(/no stateless callers/)).not.toBeInTheDocument();
+    expect(within(list).queryByRole("list", { name: "Open sessions" })).not.toBeInTheDocument();
+  });
+
   it("shows a session's content rule blocks", async () => {
     const user = userEvent.setup();
     vi.mocked(api.fetchMcpClientSessions).mockResolvedValue({

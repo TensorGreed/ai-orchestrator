@@ -109,8 +109,10 @@ export interface ToolCallSpanInfo {
 export interface McpRequestSpanInfo {
   /** JSON-RPC method: tools/call, tools/list, resources/read, ... */
   method: string;
-  /** The tool, prompt or resource the method targets. */
+  /** The tool (tools/call) or prompt (prompts/get) the method targets: it goes into the span name. */
   target?: string;
+  /** resources/read: the resource URI (`mcp.resource.uri`); the implementation drops its query, fragment and credentials. */
+  resourceUri?: string;
   /** `client` for L2M calling a server, `server` for the MCP gateway answering a client. */
   side?: "client" | "server";
   /** The registry id of the MCP server (never its URL). */
@@ -119,9 +121,36 @@ export interface McpRequestSpanInfo {
   protocolVersion?: string;
   requestId?: string | number;
   transport?: "tcp" | "pipe";
+  /** `http` for Streamable HTTP (`network.protocol.name`). */
+  networkProtocol?: string;
   serverAddress?: string;
   serverPort?: number;
+  /** Server side: the caller's address (`client.address`). */
+  clientAddress?: string;
+  /** Gateway (server side): the toolset and the MCP client the request came through. */
+  toolsetId?: string;
+  gatewayClientId?: string;
+  /**
+   * Client side: a later round of a multi round-trip request (2026-07-28), numbered from 2. Round 1 is the request's
+   * own span; each later round is a child span of it.
+   */
+  round?: number;
+  /**
+   * Server side: the trace context the request carried in `params._meta`. `parent` makes it the span's parent (and
+   * links the transport's span); `link` keeps the transport's span as parent and only links it (an untrusted caller).
+   */
+  remoteParent?: { carrier: TraceCarrier; use: "parent" | "link" };
 }
+
+/** Attribute names an MCP span's outcome is recorded under (the response's JSON-RPC error code, round count). */
+export const MCP_OUTCOME_ATTRIBUTES = Object.freeze({
+  RPC_RESPONSE_STATUS_CODE: "rpc.response.status_code",
+  ERROR_TYPE: "error.type",
+  SESSION_ID: "mcp.session.id",
+  PROTOCOL_VERSION: "mcp.protocol.version",
+  JSONRPC_REQUEST_ID: "jsonrpc.request.id",
+  ROUNDS: "l2m.mcp.rounds"
+} as const);
 
 /**
  * A span opened without running anything in it, for work that is not one function: a workflow node or an agent turn
@@ -148,8 +177,60 @@ export const SPAN_OUTCOME_ATTRIBUTES = Object.freeze({
   USAGE_OUTPUT_TOKENS: "gen_ai.usage.output_tokens",
   USAGE_CACHE_READ_INPUT_TOKENS: "gen_ai.usage.cache_read.input_tokens",
   TOOL_OUTCOME: "l2m.tool.outcome",
-  CONTENT_RULES_OUTCOME: "l2m.content_rules.outcome"
+  CONTENT_RULES_OUTCOME: "l2m.content_rules.outcome",
+  RESPONSE_MODEL: "gen_ai.response.model",
+  RESPONSE_ID: "gen_ai.response.id",
+  RESPONSE_FINISH_REASONS: "gen_ai.response.finish_reasons",
+  EMBEDDINGS_DIMENSION_COUNT: "gen_ai.embeddings.dimension.count",
+  RETRY_COUNT: "l2m.retry.count",
+  /** A streamed answer its reader stopped reading before the provider finished it. */
+  STREAM_CLOSED_EARLY: "l2m.stream.closed_early"
 } as const);
+
+/**
+ * Attributes the /v1 AI gateway sets on its request's HTTP server span: ids that link the span to the gateway's usage
+ * row (`ai_gateway_requests`) and the outcome, never the prompt or the answer.
+ */
+export const GATEWAY_SPAN_ATTRIBUTES = Object.freeze({
+  REQUEST_ID: "l2m.gateway.request.id",
+  ROUTE_SET_ID: "l2m.gateway.route_set.id",
+  ROUTE_ALIAS: "l2m.gateway.route.alias",
+  CLIENT_ID: "l2m.gateway.client.id",
+  /** The usage row's status (`ok`, `upstream_error`, `blocked_prompt`, ...) or the refusal (`rate_limited`, `budget_blocked`, ...). */
+  STATUS: "l2m.gateway.status"
+} as const);
+
+/**
+ * One model call as the metrics see it, reported by the instrumented provider registries when the call ends. Ids and
+ * counts only; `packages/otel` turns it into the GenAI duration and token metrics.
+ */
+export interface ModelCallObservation {
+  operation: "chat" | "embeddings";
+  /** L2M provider id. */
+  providerId: string;
+  /** The model the provider was sent. */
+  requestModel: string;
+  /** The model the provider said answered, when it said. */
+  responseModel?: string;
+  serverAddress?: string;
+  serverPort?: number;
+  stream: boolean;
+  durationMs: number;
+  /** Token counts the provider reported (none when it reported none). */
+  usage?: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number };
+  /** Set when the call failed: a low-cardinality type, never the error's text. */
+  errorType?: string;
+}
+
+/** A priced model spend, reported after its usage row was written (the row stays the record). */
+export interface ModelCostObservation {
+  providerId: string;
+  model: string;
+  projectId?: string | null;
+  costUsd: number;
+  /** `run` (a workflow run's usage event) or `ai_gateway` (a /v1 request). */
+  source: "run" | "ai_gateway";
+}
 
 export type InstrumentationSpanKind = "internal" | "server" | "client" | "producer" | "consumer";
 
@@ -194,6 +275,12 @@ export interface RunInstrumentation {
   inject(carrier: TraceCarrier, target: TraceInjectTarget): boolean;
   /** Runs `fn` with the remote span in `carrier` as the parent; a missing or malformed carrier leaves the context as it is. */
   withParent<T>(carrier: TraceCarrier | null | undefined, fn: () => T): T;
+  /**
+   * Runs `fn` with no active span, so what it starts is a new trace root. Timers and queue polls inherit the context of
+   * whatever created them (a request that saved a schedule); a schedule fire, a trigger event or a queue job starts here
+   * instead of inside that request's trace.
+   */
+  withNewTrace<T>(fn: () => T): T;
   /** The active span's ids, or null when there is none (or tracing is off). */
   activeTraceIds(): TraceIds | null;
 }
@@ -234,6 +321,7 @@ export const NOOP_RUN_INSTRUMENTATION: RunInstrumentation = Object.freeze({
   annotate: () => undefined,
   inject: () => false,
   withParent: <T>(_carrier: TraceCarrier | null | undefined, fn: () => T): T => fn(),
+  withNewTrace: <T>(fn: () => T): T => fn(),
   activeTraceIds: () => null
 });
 
@@ -259,4 +347,21 @@ export function parseTraceparentHeader(value: string | null | undefined): { trac
   if (version === "00" && text.length !== 55) return null;
   if (/^0+$/.test(traceId) || /^0+$/.test(spanId)) return null;
   return { traceId, spanId, sampled: (parseInt(flags, 16) & 0x01) === 1, traceFlags: flags };
+}
+
+/** The longest `tracestate` kept from stored or queued data (the W3C limit is 512 characters). */
+const MAX_TRACESTATE_LENGTH = 512;
+
+/**
+ * Reads a trace carrier out of stored JSON (a queue payload, a paused run's state): only a valid `traceparent` and a
+ * bounded `tracestate` are kept, so a hand-edited row can never put anything else on a span link or a parent.
+ */
+export function readTraceCarrier(value: unknown): TraceCarrier | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { traceparent, tracestate } = value as { traceparent?: unknown; tracestate?: unknown };
+  if (typeof traceparent !== "string" || !parseTraceparentHeader(traceparent)) return undefined;
+  return {
+    traceparent,
+    ...(typeof tracestate === "string" && tracestate.length > 0 && tracestate.length <= MAX_TRACESTATE_LENGTH ? { tracestate } : {})
+  };
 }

@@ -31,6 +31,8 @@ import {
   type UsageEstimate
 } from "@ai-orchestrator/provider-sdk";
 import {
+  GATEWAY_SPAN_ATTRIBUTES,
+  SPAN_OUTCOME_ATTRIBUTES,
   effectiveGatewayRateLimit,
   effectiveModelName,
   openAiChatCompletionRequestSchema,
@@ -45,6 +47,8 @@ import {
   type LLMUsage,
   type McpClient,
   type McpToolPolicySubject,
+  type ModelCostObservation,
+  type RunInstrumentation,
   type SecretReference
 } from "@ai-orchestrator/shared";
 import type { z } from "zod";
@@ -129,6 +133,13 @@ export interface AiGatewayDeps {
   streamCheck?: { minChars?: number; maxChars?: number; holdChars?: number };
   /** D16 — the memo of prompt text that passed cleanly. Absent: one per app, in this process (10 000 entries, 10 minutes). */
   historyMemo?: AiGatewayHistoryMemo;
+  /**
+   * Tracing: the request's ids and outcome go on its HTTP server span (never the prompt or the answer). Absent or the
+   * no-op: nothing is annotated. The model call's own span comes from the instrumented provider registry.
+   */
+  instrument?: RunInstrumentation;
+  /** Mirrors the priced spend of a written usage row into the cost metric. Absent: nothing is reported. */
+  recordCost?: (observation: ModelCostObservation) => void;
 }
 
 interface Admitted {
@@ -261,6 +272,13 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     }
   };
 
+  const instrument = deps.instrument?.enabled ? deps.instrument : null;
+  /** The request's ids and outcome on its HTTP server span (a no-op while tracing is off). */
+  const annotate = (attributes: Parameters<RunInstrumentation["annotate"]>[0]) => {
+    instrument?.annotate(attributes);
+  };
+  const CONTENT_RULES_OUTCOME: Partial<Record<RecordedGuardOutcome, string>> = { block: "blocked", rewrite: "rewritten" };
+
   const clientAdmission = createMcpClientAdmission({
     ...(deps.network ? { network: deps.network } : {}),
     auditRaw: audit,
@@ -327,6 +345,12 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
     const resolved = await store.resolveAiGatewayRoute(client.id, model);
     if (!resolved) throw aiGatewayErrors.modelNotFound(model);
     const { route, routeSet } = resolved;
+    annotate({
+      [GATEWAY_SPAN_ATTRIBUTES.REQUEST_ID]: requestId,
+      [GATEWAY_SPAN_ATTRIBUTES.CLIENT_ID]: client.id,
+      [GATEWAY_SPAN_ATTRIBUTES.ROUTE_SET_ID]: routeSet.id,
+      [GATEWAY_SPAN_ATTRIBUTES.ROUTE_ALIAS]: route.alias
+    });
     if (route.kind !== kind) {
       throw aiGatewayErrors.invalidRequest(
         kind === "embedding" ? `The model '${model}' is a chat model, not an embedding model.` : `The model '${model}' is an embedding model; use /v1/embeddings.`,
@@ -351,6 +375,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       const decision = await limiter.acquire(key, effective.limit);
       if (!decision.ok) {
         release();
+        annotate({ [GATEWAY_SPAN_ATTRIBUTES.STATUS]: "rate_limited" });
         await auditRefusal(client, routeSet, "ai_gateway.rate_limited", { alias: route.alias, reason: decision.reason, source: effective.source });
         throw aiGatewayErrors.rateLimited(decision.message, Math.max(1, Math.ceil(decision.retryAfterMs / 1000)));
       }
@@ -374,6 +399,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
           throw error;
         }
         if (blocked) {
+          annotate({ [GATEWAY_SPAN_ATTRIBUTES.STATUS]: "budget_blocked" });
           await auditRefusal(client, routeSet, "ai_gateway.budget_blocked", { alias: route.alias, budgetId: blocked.budget.id, period: blocked.budget.period });
           throw aiGatewayErrors.insufficientQuota(`${blocked.message} Requests are refused until the budget resets or is raised.`, retryAfterSeconds(blocked.budget.period));
         }
@@ -383,6 +409,7 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
           await deps.checkModel({ projectId: routeSet.projectId, clientId: client.id, routeSetId: routeSet.id, requestId }, { providerId: route.providerId, model: effectiveModelName(route), operation });
         } catch (error) {
           if (error instanceof Error && error.name === "ModelNotAllowedError") {
+            annotate({ [GATEWAY_SPAN_ATTRIBUTES.STATUS]: "model_not_allowed" });
             await auditRefusal(client, routeSet, "ai_gateway.model_not_allowed", { alias: route.alias, providerId: route.providerId, model: route.model });
             throw aiGatewayErrors.modelNotAllowed(model);
           }
@@ -521,11 +548,22 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
       guardOutcome: input.guardOutcome,
       errorCode: input.errorCode ?? null
     };
+    annotate({
+      [GATEWAY_SPAN_ATTRIBUTES.STATUS]: row.status,
+      [SPAN_OUTCOME_ATTRIBUTES.CONTENT_RULES_OUTCOME]: CONTENT_RULES_OUTCOME[row.guardOutcome]
+    });
     try {
       await store.insertAiGatewayRequest(row);
     } catch (error) {
       app.log.warn({ requestId: row.id, err: error instanceof Error ? error.message : String(error) }, "AI gateway usage row could not be written");
       return;
+    }
+    if (deps.recordCost && typeof row.costUsd === "number" && row.costUsd > 0) {
+      try {
+        deps.recordCost({ providerId: row.providerId, model: row.model, projectId: row.projectId, costUsd: row.costUsd, source: "ai_gateway" });
+      } catch {
+        // Metrics never fail the request.
+      }
     }
     if (deps.budgets && tokens.total > 0) {
       const ctx: BudgetCheckContext & { executionId: string } = {

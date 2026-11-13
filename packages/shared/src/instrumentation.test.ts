@@ -4,6 +4,7 @@ import {
   NOOP_SCOPED_INSTRUMENTATION_SPAN,
   SPAN_OUTCOME_ATTRIBUTES,
   parseTraceparentHeader,
+  readTraceCarrier,
   type InstrumentationSpan
 } from "./instrumentation";
 
@@ -94,5 +95,30 @@ describe("parseTraceparentHeader", () => {
     ]) {
       expect(parseTraceparentHeader(value)).toBeNull();
     }
+  });
+});
+
+describe("readTraceCarrier", () => {
+  const id = "4bf92f3577b34da6a3ce929d0e0e4736";
+  const span = "00f067aa0ba902b7";
+
+  it("keeps a valid traceparent and a bounded tracestate, and nothing else", () => {
+    expect(readTraceCarrier({ traceparent: `00-${id}-${span}-01`, tracestate: "a=1", extra: "x" })).toEqual({ traceparent: `00-${id}-${span}-01`, tracestate: "a=1" });
+    expect(readTraceCarrier({ traceparent: `00-${id}-${span}-01` })).toEqual({ traceparent: `00-${id}-${span}-01` });
+    expect(readTraceCarrier({ traceparent: `00-${id}-${span}-01`, tracestate: "x".repeat(513) })).toEqual({ traceparent: `00-${id}-${span}-01` });
+    expect(readTraceCarrier({ traceparent: `00-${id}-${span}-01`, tracestate: 5 })).toEqual({ traceparent: `00-${id}-${span}-01` });
+  });
+
+  it("returns undefined for anything that is not a carrier with a valid traceparent", () => {
+    for (const value of [undefined, null, "x", 5, [], {}, { traceparent: 5 }, { traceparent: "garbage" }, { tracestate: "a=1" }]) {
+      expect(readTraceCarrier(value)).toBeUndefined();
+    }
+  });
+});
+
+describe("the no-op trace scope", () => {
+  it("withNewTrace and withParent only call fn", () => {
+    expect(NOOP_RUN_INSTRUMENTATION.withNewTrace(() => 7)).toBe(7);
+    expect(NOOP_RUN_INSTRUMENTATION.withParent({ traceparent: "x" }, () => 8)).toBe(8);
   });
 });

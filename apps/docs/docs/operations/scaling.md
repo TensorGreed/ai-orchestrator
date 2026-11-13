@@ -33,7 +33,8 @@ liveness on `GET /health`. Ordinary traffic needs no stickiness: sessions, runs,
 database, the second step of an MFA sign-in, MCP OAuth callbacks and elicitation answers are shared through it in
 cluster mode, and cancels reach the instance running a run over the cluster bus. Only MCP gateway sessions are kept
 per replica; if clients use the gateway, make the balancer learn the `Mcp-Session-Id` and route by it, with the
-snippets in [Cluster operations](./cluster.md#mcp-gateway-sessions).
+snippets in [Cluster operations](./cluster.md#mcp-gateway-sessions). Clients that call without a session (MCP
+`2026-07-28`) need no stickiness: their labels are shared through the database.
 
 ## A worked compose example
 

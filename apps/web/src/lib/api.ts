@@ -119,6 +119,7 @@ import type {
   SubjectRequestCreateInput,
   SubjectRequestView,
   SubjectRefPreviewView,
+  McpGatewayCallerView,
   McpGatewaySessionView,
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -4008,9 +4009,14 @@ export async function updateProjectRetention(projectId: string, classes: Project
   });
 }
 
-/** 12.2 — a client's open sessions on the instance that answers, with the labels each has collected. */
+/**
+ * 12.2 — a client's open sessions on the instance that answers, with the labels each has collected; MCP 2026-07-28:
+ * and its stateless callers (from every instance; `callersUnavailable` when only this instance's could be read).
+ */
 export async function fetchMcpClientSessions(id: string) {
-  return apiRequest<{ clientId: string; sessions: McpGatewaySessionView[] }>(`/api/mcp/clients/${encodeURIComponent(id)}/sessions`);
+  return apiRequest<{ clientId: string; sessions: McpGatewaySessionView[]; callers?: McpGatewayCallerView[]; callersUnavailable?: boolean }>(
+    `/api/mcp/clients/${encodeURIComponent(id)}/sessions`
+  );
 }
 
 export async function fetchMcpClientUsage(id: string, window: McpTelemetryWindow = "7d") {

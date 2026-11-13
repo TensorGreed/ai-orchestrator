@@ -213,6 +213,8 @@ export const NOT_EXPORTED_TABLES: Record<string, string> = {
   cluster_instances: "liveness of running instances",
   cluster_run_owners: "which live instance runs a run",
   log_stream_events: "log stream delivery history",
+  mcp_gateway_label_marks:
+    "label marks of stateless MCP gateway callers; each ends within MCP_GATEWAY_SESSION_IDLE_MS of the caller's last call, and callers start clean after a restore, as gateway sessions do",
   retention_runs: "retention purge log (counts only), kept 90 days; the next purge writes a new one",
   subject_exports: "short-lived data-subject export files (personal data), downloaded once or expired within SUBJECT_EXPORT_TTL_HOURS",
   guard_profile_revision: "a change counter the guard tables' triggers bump; caches only compare it",

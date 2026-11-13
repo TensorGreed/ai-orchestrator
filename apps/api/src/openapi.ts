@@ -3740,9 +3740,15 @@ export const openApiSpec = {
       get: {
         tags: ["MCP"],
         summary:
-          "A client's open gateway sessions on the instance that answers, with the labels each has collected on a toolset that tracks outside content per session (builder)",
+          "A client's open gateway sessions on the instance that answers, with the labels each has collected on a toolset that tracks outside content per session, and its stateless (MCP 2026-07-28) callers from every instance (builder)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Sessions: id prefix, toolset, client info, times, tracked, labels (null when not tracked), raisedAt" }, "404": { description: "Not found" } }
+        responses: {
+          "200": {
+            description:
+              "sessions: id prefix, toolset, protocol version, client info, times, tracked, labels (null when not tracked), raisedAt. callers: toolset, userId, protocolVersion and clientInfo (null when the answering instance has not served the caller recently), lastSeenAt, expiresAt, tracked, labels, raisedAt, guard. callersUnavailable: true when only the answering instance's callers could be listed"
+          },
+          "404": { description: "Not found" }
+        }
       }
     },
     "/api/mcp/clients/{id}/usage": {
