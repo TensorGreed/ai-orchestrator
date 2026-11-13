@@ -3,7 +3,7 @@
 # delete its entry then. A scenario counts as failing when any of its checks fails or warns.
 # Conformance package 0.2.0-alpha.12, scenarios of the spec revision the run name carries.
 server:
-  # Only diagnostic fixture tools the gateway does not serve remain (test_missing_capability, test_streaming_elicitation, test_logging_tool: reported 'Not testable'); subscriptions/listen is not served. The _meta (-32602 with the id), modern initialize (404/-32601) and header/_meta version mismatch (-32020) checks pass.
+  # Only diagnostic fixture tools the gateway does not serve remain (test_missing_capability, test_streaming_elicitation, test_logging_tool: reported 'Not testable'). The subscriptions/listen acknowledgment and subscription id checks pass (the tools and prompts list-changed checks are skipped: the gateway declares no listChanged). The _meta (-32602 with the id), modern initialize (404/-32601) and header/_meta version mismatch (-32020) checks pass.
   - server-stateless
   # The gateway serves tools only: this method is answered with -32601 (resources, prompts and completion are not part of the gateway).
   - completion-complete
