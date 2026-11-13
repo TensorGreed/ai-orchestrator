@@ -4733,7 +4733,7 @@ export class SqliteStore implements Store {
     const updatedAt = now;
 
     const payload: Workflow = {
-      // v74 — a pin copied from a sensitive run keeps its mark while its data is unchanged, whatever the client sent.
+      // v74 — a pin copied from a sensitive run keeps its mark while the node is pinned, whatever the client sent.
       ...keepPinnedDataMarks(existing, workflow),
       projectId: workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID,
       folderId: workflow.folderId ?? existing?.folderId,

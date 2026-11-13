@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SqliteStore } from "./database.js";
 import { MIGRATIONS } from "./migrations.js";
 import type { Store } from "./store.js";
+import type { Workflow } from "@ai-orchestrator/shared";
 import { EXPORTED_TABLES, openBackupAdapter } from "../scripts/db-shared.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "../test-support/test-store.js";
 
@@ -191,5 +192,56 @@ run("Postgres: a database at v73 upgrades to v74", () => {
     } finally {
       await pool.end();
     }
+  });
+});
+
+run("Postgres: pin marks under concurrent saves (v74)", () => {
+  let test: TestStore | undefined;
+  afterEach(async () => {
+    await test?.cleanup();
+    test = undefined;
+  });
+
+  it("a save that read the workflow before another save stored a pin mark keeps that mark", async () => {
+    test = await createTestStore({ kind: "postgres" });
+    await test.store.ensureDefaultProject();
+    const base = {
+      id: "wf-pins",
+      name: "Pins",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [{ id: "a", type: "manual_trigger", name: "a", position: { x: 0, y: 0 }, config: {} }],
+      edges: [],
+      pinnedData: { a: { answer: "card 4242" } }
+    } as Workflow;
+    await test.store.upsertWorkflow(base);
+    const pool = testStorePool(test);
+    const client = await pool.connect();
+    try {
+      // Another save holds the row and stores the mark; this save starts meanwhile, without the mark.
+      await client.query("BEGIN");
+      const locked = await client.query<{ workflow_json: string }>(`SELECT workflow_json FROM workflows WHERE id = $1 FOR UPDATE`, ["wf-pins"]);
+      const marked = { ...(JSON.parse(locked.rows[0]!.workflow_json) as Workflow), pinnedDataSensitive: ["a"] };
+      await client.query(`UPDATE workflows SET workflow_json = $1 WHERE id = $2`, [JSON.stringify(marked), "wf-pins"]);
+      const concurrent = test.store.upsertWorkflow({ ...base, name: "Renamed" });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await client.query("COMMIT");
+      expect((await concurrent).pinnedDataSensitive).toEqual(["a"]);
+    } finally {
+      client.release();
+      await pool.end();
+    }
+    const stored = await test.store.getWorkflow("wf-pins");
+    expect(stored?.name).toBe("Renamed");
+    expect(stored?.pinnedDataSensitive).toEqual(["a"]);
+  });
+
+  it("two first saves of a new workflow do not overwrite each other's marks", async () => {
+    test = await createTestStore({ kind: "postgres" });
+    await test.store.ensureDefaultProject();
+    const base = { id: "wf-new", name: "New", schemaVersion: "1.0.0", workflowVersion: 1, projectId: "default", nodes: [], edges: [], pinnedData: { a: 1 } } as unknown as Workflow;
+    await Promise.all([test.store.upsertWorkflow({ ...base, pinnedDataSensitive: ["a"] }), test.store.upsertWorkflow(base)]);
+    expect((await test.store.getWorkflow("wf-new"))?.pinnedDataSensitive).toEqual(["a"]);
   });
 });
