@@ -37,7 +37,8 @@ const KNOWN_METHODS: ReadonlySet<string> = new Set([
   "prompts/list",
   "prompts/get",
   "completion/complete",
-  "logging/setLevel"
+  "logging/setLevel",
+  "subscriptions/listen"
 ]);
 
 export function gatewayMethodName(method: string): string {

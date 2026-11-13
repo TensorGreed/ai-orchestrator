@@ -35,6 +35,7 @@ import {
   JSON_RPC_ERRORS,
   classifyMessage,
   rpcError,
+  rpcResult,
   type JsonRpcNotification,
   type JsonRpcRequest,
   type JsonRpcResponse
@@ -46,7 +47,7 @@ export type GatewayModernMode = "off" | "on";
 export const DEFAULT_MCP_GATEWAY_LIST_TTL_MS = 60_000;
 
 /** The methods a modern caller can use on a toolset. Anything else is 404 with -32601. */
-export const MODERN_GATEWAY_METHODS: ReadonlySet<string> = new Set(["server/discover", "tools/list", "tools/call"]);
+export const MODERN_GATEWAY_METHODS: ReadonlySet<string> = new Set(["server/discover", "tools/list", "tools/call", "subscriptions/listen"]);
 
 /**
  * The versions the gateway speaks, newest first: the modern ones (served per request) followed by the legacy ones
@@ -173,6 +174,53 @@ export function gatewayDiscoverResult(input: {
     ...(input.toolset.description ? { instructions: input.toolset.description } : {}),
     ...gatewayCacheHints(input.ttlMs)
   };
+}
+
+/** `_meta` key that ties every message of a subscription stream to its `subscriptions/listen` request id. */
+export const MCP_META_SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId";
+
+/** `MCP_GATEWAY_LISTEN_MAX_MS` default: a listen stream ends gracefully after this long (clients reconnect). */
+export const DEFAULT_MCP_GATEWAY_LISTEN_MAX_MS = 600_000;
+/** `MCP_GATEWAY_LISTEN_MAX_PER_CLIENT` default: open listen streams per client on one instance. */
+export const DEFAULT_MCP_GATEWAY_LISTEN_MAX_PER_CLIENT = 4;
+
+const LISTEN_BOOLEAN_FILTERS = ["toolsListChanged", "promptsListChanged", "resourcesListChanged"] as const;
+
+/**
+ * The `notifications` filter of a `subscriptions/listen` request, checked for shape only: an object (or absent)
+ * whose known fields have the types the specification gives. Unknown fields are ignored. The gateway honours none of
+ * it today (it serves tools only and its tool list does not announce changes), so the acknowledgment is empty.
+ * Returns an error message, or null when the filter is well formed.
+ */
+export function listenFilterError(params: unknown): string | null {
+  const filter = isRecord(params) ? params.notifications : undefined;
+  if (filter === undefined) return null;
+  if (!isRecord(filter)) return "notifications must be an object.";
+  for (const field of LISTEN_BOOLEAN_FILTERS) {
+    if (filter[field] !== undefined && typeof filter[field] !== "boolean") return `notifications.${field} must be a boolean.`;
+  }
+  const uris = filter.resourceSubscriptions;
+  if (uris !== undefined && (!Array.isArray(uris) || uris.some((uri) => typeof uri !== "string"))) {
+    return "notifications.resourceSubscriptions must be an array of strings.";
+  }
+  return null;
+}
+
+/** First message of a listen stream: the subset the gateway honours (none: it declares `tools.listChanged: false`). */
+export function subscriptionsAcknowledged(subscriptionId: JsonRpcRequest["id"]): JsonRpcNotification {
+  return {
+    jsonrpc: "2.0",
+    method: "notifications/subscriptions/acknowledged",
+    params: { _meta: { [MCP_META_SUBSCRIPTION_ID]: subscriptionId }, notifications: {} }
+  };
+}
+
+/** Graceful end of a listen stream: the successful response to the `subscriptions/listen` request. */
+export function subscriptionsComplete(
+  subscriptionId: JsonRpcRequest["id"],
+  serverInfo: { name: string; version: string; title?: string }
+): JsonRpcResponse {
+  return modernizeGatewayResponse(rpcResult(subscriptionId, { _meta: { [MCP_META_SUBSCRIPTION_ID]: subscriptionId } }), serverInfo);
 }
 
 /** Tools in a deterministic order for modern callers (by exposed name), as the specification asks of list results. */

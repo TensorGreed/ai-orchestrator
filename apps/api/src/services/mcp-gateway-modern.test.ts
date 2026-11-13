@@ -181,3 +181,33 @@ describe("configuration", () => {
     }
   });
 });
+
+describe("subscriptions/listen helpers", () => {
+  it("checks the shape of the notifications filter only", async () => {
+    const { listenFilterError } = await import("./mcp-gateway-modern.js");
+    expect(listenFilterError(undefined)).toBeNull();
+    expect(listenFilterError({})).toBeNull();
+    expect(listenFilterError({ notifications: {} })).toBeNull();
+    expect(listenFilterError({ notifications: { toolsListChanged: true, promptsListChanged: false, resourceSubscriptions: ["file:///a"], extra: 1 } })).toBeNull();
+    expect(listenFilterError({ notifications: "all" })).toMatch(/object/);
+    expect(listenFilterError({ notifications: { resourcesListChanged: 1 } })).toMatch(/resourcesListChanged/);
+    expect(listenFilterError({ notifications: { resourceSubscriptions: "file:///a" } })).toMatch(/array of strings/);
+  });
+
+  it("builds the acknowledgment and the graceful end with the subscription id", async () => {
+    const { subscriptionsAcknowledged, subscriptionsComplete } = await import("./mcp-gateway-modern.js");
+    expect(subscriptionsAcknowledged("a")).toEqual({
+      jsonrpc: "2.0",
+      method: "notifications/subscriptions/acknowledged",
+      params: { _meta: { "io.modelcontextprotocol/subscriptionId": "a" }, notifications: {} }
+    });
+    expect(subscriptionsComplete(3, { name: "l2m-x", version: "1" })).toEqual({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        resultType: "complete",
+        _meta: { "io.modelcontextprotocol/subscriptionId": 3, "io.modelcontextprotocol/serverInfo": { name: "l2m-x", version: "1" } }
+      }
+    });
+  });
+});

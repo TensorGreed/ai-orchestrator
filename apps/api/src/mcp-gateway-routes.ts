@@ -125,6 +125,11 @@ function isRuntimeRefusal(kind: string | undefined): kind is McpRuntimeRejection
 }
 import {
   DEFAULT_MCP_GATEWAY_LIST_TTL_MS,
+  DEFAULT_MCP_GATEWAY_LISTEN_MAX_MS,
+  DEFAULT_MCP_GATEWAY_LISTEN_MAX_PER_CLIENT,
+  listenFilterError,
+  subscriptionsAcknowledged,
+  subscriptionsComplete,
   MODERN_GATEWAY_METHODS,
   gatewayDiscoverResult,
   gatewayServerInfo,
@@ -437,6 +442,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   // MCP 2026-07-28 — modern callers are served only when switched on (D2: off by default).
   const modernMode: GatewayModernMode = config.MCP_GATEWAY_MODERN_PROTOCOL === "on" ? "on" : "off";
   const listTtlMs = config.MCP_GATEWAY_LIST_TTL_MS ?? DEFAULT_MCP_GATEWAY_LIST_TTL_MS;
+  const listenMaxMs = config.MCP_GATEWAY_LISTEN_MAX_MS ?? DEFAULT_MCP_GATEWAY_LISTEN_MAX_MS;
+  const listenMaxPerClient = config.MCP_GATEWAY_LISTEN_MAX_PER_CLIENT ?? DEFAULT_MCP_GATEWAY_LISTEN_MAX_PER_CLIENT;
   // Phase 12.4 — a safe summary of each call's arguments and the client's role on its telemetry row (unless switched off).
   const summarizeArguments = createToolArgumentSummarizer({
     enabled: toolArgumentSummariesEnabled(config),
@@ -492,6 +499,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     });
   }, Math.max(1_000, Math.min(60_000, Math.floor(config.MCP_GATEWAY_SESSION_IDLE_MS / 2))));
   labelMarkSweep.unref?.();
+  /** Open `subscriptions/listen` streams: ended gracefully by the preClose hook below, before the server waits for open connections. */
+  const listenStreams = new Set<() => void>();
+  // preClose runs before the HTTP server stops waiting for open connections, which these streams would hold open.
+  app.addHook("preClose", async () => {
+    for (const end of [...listenStreams]) end();
+  });
   app.addHook("onClose", async () => {
     clearInterval(labelMarkSweep);
     await sessions.closeAll();
@@ -2121,6 +2134,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         .send(rpcError(message.id, JSON_RPC_ERRORS.methodNotFound, `Method not found: ${message.method.slice(0, 100)}`));
       return;
     }
+    if (message.method === "subscriptions/listen") {
+      // The span covers admission and the acknowledgment (or the refusal), not the stream's lifetime.
+      await traceGatewayRequest(
+        deps.tracing,
+        { method: message.method, params: message.params, requestId: message.id, era: "modern", protocolVersion: validated.protocolVersion, toolsetId: toolset.id, clientId: auth.client.id },
+        async () => await handleModernListen(request, reply, auth, toolset, message, accept)
+      );
+      return;
+    }
     if (message.method === "server/discover") {
       await traceGatewayRequest(
         deps.tracing,
@@ -2248,6 +2270,96 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       .send(
         modernizeGatewayResponse(response === SUPPRESSED ? rpcError(message.id, JSON_RPC_ERRORS.requestCancelled, "Request cancelled.") : response, serverInfo)
       );
+  };
+
+  /** Listen streams open per client on this instance (the cap is MCP_GATEWAY_LISTEN_MAX_PER_CLIENT). */
+  const listenCounts = new Map<string, number>();
+
+  /**
+   * MCP 2026-07-28 `subscriptions/listen`, acknowledge-only: the gateway serves tools and its tool list does not
+   * announce changes, so the stream opens with an acknowledgment that honours nothing, then stays open with
+   * keep-alive comments until the client closes it, MCP_GATEWAY_LISTEN_MAX_MS passes or the server shuts down (the
+   * last two end with a `complete` result). A stream takes no principal state. It counts only against the per-client
+   * stream cap: not against the client's rate or concurrency limits, which cap `tools/call`. Returns the refusal it
+   * sent, or undefined once the stream is open (or the caller had gone), for the request's span.
+   */
+  const handleModernListen = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    message: JsonRpcRequest,
+    accept: string | undefined
+  ): Promise<JsonRpcResponse | undefined> => {
+    const serverInfo = gatewayServerInfo(toolset, SERVER_VERSION);
+    const refuse = (status: number, response: JsonRpcResponse, headers: Record<string, string> = {}): JsonRpcResponse => {
+      const sent = modernizeGatewayResponse(response, serverInfo);
+      reply.code(status).headers({ "content-type": "application/json", ...headers }).send(sent);
+      return sent;
+    };
+    if (!acceptAllows(accept, "text/event-stream")) {
+      return refuse(406, rpcError(message.id, JSON_RPC_ERRORS.invalidRequest, "subscriptions/listen needs Accept: text/event-stream."));
+    }
+    const filterError = listenFilterError(message.params);
+    if (filterError) {
+      return refuse(400, rpcError(message.id, JSON_RPC_ERRORS.invalidParams, filterError));
+    }
+    const retryLater = (text: string, reason: string) =>
+      refuse(429, rpcError(message.id, JSON_RPC_ERRORS.retryLater, text, { reason, retryAfterMs: 1_000, retryAfterSeconds: 1 }), { "retry-after": "1" });
+    const clientKey = auth.client.id;
+    const open = listenCounts.get(clientKey) ?? 0;
+    if (open >= listenMaxPerClient) {
+      return retryLater(`This client already has ${open} subscription streams open (at most ${listenMaxPerClient}).`, "listen_streams_limit");
+    }
+    // Reserved in the same tick as the check above (nothing is awaited in between), so two requests cannot both pass the cap.
+    listenCounts.set(clientKey, open + 1);
+    const unreserve = () => {
+      const left = (listenCounts.get(clientKey) ?? 1) - 1;
+      if (left <= 0) listenCounts.delete(clientKey);
+      else listenCounts.set(clientKey, left);
+    };
+
+    const hookHeaders = hookHeadersOf(reply);
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      ...hookHeaders,
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+      "x-request-id": request.id
+    });
+    let ended = false;
+    let timer: NodeJS.Timeout | undefined;
+    let stopHeartbeat = () => undefined as void;
+    const cleanup = () => {
+      if (ended) return;
+      ended = true;
+      clearTimeout(timer);
+      stopHeartbeat();
+      listenStreams.delete(finish);
+      reply.raw.off("close", cleanup);
+      unreserve();
+    };
+    /** Graceful end: the `complete` result, then close. */
+    const finish = () => {
+      if (ended) return;
+      writeSse(reply, subscriptionsComplete(message.id, serverInfo));
+      cleanup();
+      if (!reply.raw.writableEnded) reply.raw.end();
+    };
+    reply.raw.on("close", cleanup);
+    // Gone already (during admission): its close event has fired, so free the stream count now.
+    if (reply.raw.destroyed || request.raw.socket?.destroyed) {
+      cleanup();
+      return undefined;
+    }
+    listenStreams.add(finish);
+    stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => ended);
+    timer = setTimeout(finish, listenMaxMs);
+    timer.unref?.();
+    writeSse(reply, subscriptionsAcknowledged(message.id));
+    return undefined;
   };
 
   // ---------------------------------------------------------------------------

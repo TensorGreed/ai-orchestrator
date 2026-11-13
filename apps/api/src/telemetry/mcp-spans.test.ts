@@ -281,6 +281,31 @@ describe("MCP gateway SERVER spans and upstream CLIENT spans", () => {
     expect(server!.attributes).toMatchObject({ "mcp.method.name": "server/discover", "mcp.protocol.version": MODERN, "jsonrpc.request.id": "9" });
   });
 
+  it("modern: subscriptions/listen gets a SERVER span that ends with the acknowledgment, and a refusal records its code", async () => {
+    const fixture = await setup({ TRACING_ENABLED: "true", MCP_GATEWAY_LISTEN_MAX_MS: "1000" });
+    const listen = (id: number, accept: string) =>
+      rpc(fixture, { jsonrpc: "2.0", id, method: "subscriptions/listen", params: { _meta: modernMeta({ traceparent: CALLER_TRACEPARENT }) } }, { ...modernHeaders("subscriptions/listen"), accept });
+    const startedAt = Date.now();
+    const streamed = await listen(11, "application/json, text/event-stream");
+    expect(streamed.statusCode).toBe(200);
+    expect(streamed.body).toContain("notifications/subscriptions/acknowledged");
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
+    const [span] = spansNamed(fixture, "subscriptions/listen", SPAN_KIND_SERVER);
+    expect(span!.parentSpanContext?.spanId).toBe(CALLER_SPAN);
+    expect(span!.attributes).toMatchObject({ "mcp.method.name": "subscriptions/listen", "mcp.protocol.version": MODERN, "jsonrpc.request.id": "11" });
+    expect(span!.status.code).not.toBe(2);
+    // Ended when the stream was acknowledged, not when it closed a second later.
+    const durationMs = span!.duration[0] * 1000 + span!.duration[1] / 1e6;
+    expect(durationMs).toBeLessThan(900);
+
+    fixture.exporter.reset();
+    const refused = await listen(12, "application/json");
+    expect(refused.statusCode).toBe(406);
+    const [refusal] = spansNamed(fixture, "subscriptions/listen", SPAN_KIND_SERVER);
+    expect(refusal!.attributes).toMatchObject({ "jsonrpc.request.id": "12", "error.type": String(refused.json().error.code) });
+    expect(refusal!.status.code).toBe(2);
+  });
+
   it("does not send trace context to a server that opted out", async () => {
     const fixture = await setup({ TRACING_ENABLED: "true" });
     const servers = await fixture.store.listMcpServers();
@@ -312,6 +337,7 @@ describe("gateway span helpers", () => {
   it("names only the methods MCP defines; anything else is _OTHER", () => {
     expect(gatewayMethodName("tools/call")).toBe("tools/call");
     expect(gatewayMethodName("server/discover")).toBe("server/discover");
+    expect(gatewayMethodName("subscriptions/listen")).toBe("subscriptions/listen");
     expect(gatewayMethodName("x".repeat(500))).toBe("_OTHER");
   });
 

@@ -432,7 +432,7 @@ describe("modern mode on", () => {
     expect(noCapabilities.json().error).toMatchObject({ code: -32602, data: { missing: ["io.modelcontextprotocol/clientCapabilities"] } });
 
     // Methods the gateway does not serve to modern callers (ping is gone in 2026-07-28): 404 with -32601.
-    for (const method of ["ping", "resources/list", "prompts/list", "subscriptions/listen"]) {
+    for (const method of ["ping", "resources/list", "prompts/list"]) {
       const response = await send({ _meta: modernMeta() }, modernHeaders(method), method);
       expect(response.statusCode, method).toBe(404);
       expect(response.json().error.code).toBe(-32601);
@@ -699,5 +699,183 @@ describe("modern mode on", () => {
     expect(allowed).toEqual(expect.arrayContaining(["authorization", "mcp-session-id", "mcp-protocol-version", "mcp-method", "mcp-name", "mcp-param-region"]));
     expect(allowed).not.toContain("x-evil");
     expect(allowed.some((entry) => entry.includes("bad"))).toBe(false);
+  });
+});
+
+describe("MCP gateway subscriptions/listen (acknowledge-only)", () => {
+  const on = { MCP_GATEWAY_MODERN_PROTOCOL: "on", SSE_HEARTBEAT_INTERVAL_MS: "50" };
+
+  /** Opens a listen stream over a real socket; `read` returns text received so far. */
+  async function listen(fixture: Fixture, options: { id?: number | string; params?: Record<string, unknown>; accept?: string; headers?: Record<string, string> } = {}) {
+    const controller = new AbortController();
+    const id = options.id ?? 7;
+    const response = await fetch(`${fixture.context.baseUrl}/mcp/${fixture.toolset.slug}`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "content-type": "application/json",
+        accept: options.accept ?? "text/event-stream",
+        authorization: `Bearer ${fixture.token}`,
+        ...modernHeaders("subscriptions/listen"),
+        ...(options.headers ?? {})
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true, resourceSubscriptions: ["file:///a"] }, ...(options.params ?? {}), _meta: modernMeta() } })
+    });
+    let text = "";
+    const reader = response.body?.getReader();
+    const pump = (async () => {
+      if (!reader) return;
+      const decoder = new TextDecoder();
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) return;
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+      } catch {
+        // Aborted by the test.
+      }
+    })();
+    const messages = () =>
+      text
+        .split("\n\n")
+        .flatMap((frame) => frame.split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6)) as Record<string, any>));
+    return { response, controller, pump, read: () => text, messages };
+  }
+
+  it("acknowledges with an empty honoured set, keeps the stream alive and ends when the client closes it", async () => {
+    const fixture = await setup({ env: on });
+    const stream = await listen(fixture, { id: 7 });
+    expect(stream.response.status).toBe(200);
+    expect(stream.response.headers.get("content-type")).toContain("text/event-stream");
+    expect(stream.response.headers.get("x-accel-buffering")).toBe("no");
+    await waitFor(() => stream.messages().length === 1 && stream.read().includes(": ping"));
+    expect(stream.messages()[0]).toEqual({
+      jsonrpc: "2.0",
+      method: "notifications/subscriptions/acknowledged",
+      params: { _meta: { "io.modelcontextprotocol/subscriptionId": 7 }, notifications: {} }
+    });
+    // No state is created for a stream and no session header is returned.
+    expect(stream.response.headers.get("mcp-session-id")).toBeNull();
+    expect(await auditEvents(fixture.context.store, "mcp_gateway.caller_seen")).toHaveLength(0);
+    stream.controller.abort();
+    await stream.pump;
+  });
+
+  it("ends with a complete result after MCP_GATEWAY_LISTEN_MAX_MS", async () => {
+    const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_MAX_MS: "1000" } });
+    const stream = await listen(fixture, { id: "sub-1" });
+    await stream.pump;
+    const messages = stream.messages();
+    expect(messages).toHaveLength(2);
+    expect(messages[0]!.params._meta["io.modelcontextprotocol/subscriptionId"]).toBe("sub-1");
+    expect(messages[1]).toMatchObject({
+      jsonrpc: "2.0",
+      id: "sub-1",
+      result: { resultType: "complete", _meta: { "io.modelcontextprotocol/subscriptionId": "sub-1", "io.modelcontextprotocol/serverInfo": { name: expect.stringMatching(/^l2m-/) } } }
+    });
+  });
+
+  it("ends open streams with a complete result when the server shuts down", async () => {
+    const fixture = await setup({ env: on });
+    const stream = await listen(fixture);
+    await waitFor(() => stream.messages().length === 1);
+    await fixture.context.app.close();
+    await stream.pump;
+    expect(stream.messages()[1]).toMatchObject({ id: 7, result: { resultType: "complete" } });
+  });
+
+  it("refuses without Accept: text/event-stream and on a malformed filter", async () => {
+    const fixture = await setup({ env: on });
+    const noSse = await rpc(
+      fixture,
+      { jsonrpc: "2.0", id: 1, method: "subscriptions/listen", params: { _meta: modernMeta() } },
+      { ...modernHeaders("subscriptions/listen"), accept: "application/json" }
+    );
+    expect(noSse.statusCode).toBe(406);
+    expect(noSse.json().error.code).toBe(-32600);
+    const bad = await modern(fixture, "subscriptions/listen", { notifications: { toolsListChanged: "yes" } });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error).toMatchObject({ code: -32602 });
+    const badUris = await modern(fixture, "subscriptions/listen", { notifications: { resourceSubscriptions: [1] } });
+    expect(badUris.statusCode).toBe(400);
+    const notObject = await modern(fixture, "subscriptions/listen", { notifications: [] });
+    expect(notObject.statusCode).toBe(400);
+    // A mismatched Mcp-Method header is still -32020.
+    const mismatch = await modern(fixture, "subscriptions/listen", {}, { headers: { "mcp-method": "tools/list" } });
+    expect(mismatch.statusCode).toBe(400);
+    expect(mismatch.json().error.code).toBe(-32020);
+  });
+
+  it("caps the streams one client holds open and frees a slot when one closes", async () => {
+    const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_MAX_PER_CLIENT: "2" } });
+    const first = await listen(fixture, { id: 1 });
+    const second = await listen(fixture, { id: 2 });
+    await waitFor(() => first.messages().length === 1 && second.messages().length === 1);
+    const third = await modern(fixture, "subscriptions/listen", {}, { headers: { accept: "text/event-stream" } });
+    expect(third.statusCode).toBe(429);
+    expect(third.json().error).toMatchObject({ code: -31029, data: { reason: "listen_streams_limit" } });
+    first.controller.abort();
+    await first.pump;
+    // The server sees the close a moment after the client aborts.
+    let retried!: Awaited<ReturnType<typeof listen>>;
+    await waitFor(async () => {
+      retried = await listen(fixture, { id: 3 });
+      if (retried.response.status === 200) return true;
+      await retried.pump;
+      return false;
+    });
+    await waitFor(() => retried.messages().length === 1);
+    for (const stream of [second, retried]) {
+      stream.controller.abort();
+      await stream.pump;
+    }
+  });
+
+  it("does not take the client's concurrency slot or a rate token", async () => {
+    const fixture = await setup({ env: on });
+    expect(
+      (await api(fixture.context, fixture.cookie, "PATCH", `/api/mcp/clients/${fixture.client.id}`, { rateLimit: { requestsPerMinute: 1, burst: 1, maxConcurrent: 1 } })).status
+    ).toBe(200);
+    const first = await listen(fixture, { id: 1 });
+    const second = await listen(fixture, { id: 2 });
+    await waitFor(() => first.messages().length === 1 && second.messages().length === 1);
+    // Two streams are open, yet the client's one concurrent call and its one call per minute are still available.
+    const call = await modern(fixture, "tools/call", { name: "mock_tools__calculator", arguments: { expression: "1+1" } });
+    expect(call.json().error).toBeUndefined();
+    expect(call.json().result.structuredContent).toMatchObject({ result: 2 });
+    for (const stream of [first, second]) {
+      stream.controller.abort();
+      await stream.pump;
+    }
+  });
+
+  it("frees the stream count when the client closes a stream (cap of one)", async () => {
+    const fixture = await setup({ env: { ...on, MCP_GATEWAY_LISTEN_MAX_PER_CLIENT: "1" } });
+    const stream = await listen(fixture, { id: 1 });
+    await waitFor(() => stream.messages().length === 1);
+    stream.controller.abort();
+    await stream.pump;
+    let again!: Awaited<ReturnType<typeof listen>>;
+    await waitFor(async () => {
+      again = await listen(fixture, { id: 2 });
+      if (again.response.status === 200) return true;
+      await again.pump;
+      return false;
+    });
+    again.controller.abort();
+    await again.pump;
+  });
+
+  it("is not served with modern mode off, and legacy sessions do not get it", async () => {
+    const off = await setup({ env: { MCP_GATEWAY_MODERN_PROTOCOL: "off" } });
+    const refused = await modern(off, "subscriptions/listen", {}, { headers: { accept: "text/event-stream" } });
+    expect(refused.statusCode).toBe(400);
+    // The answer a modern request gets with modern mode off, unchanged by this feature.
+    expect(refused.json().error.message).toContain("Unsupported MCP-Protocol-Version");
+    const onFixture = await setup({ env: on });
+    const sessionId = await openSession(onFixture);
+    const legacy = await rpc(onFixture, { jsonrpc: "2.0", id: 2, method: "subscriptions/listen", params: {} }, { "mcp-session-id": sessionId, "mcp-protocol-version": "2025-11-25" });
+    expect(legacy.json().error.code).toBe(-32601);
   });
 });
