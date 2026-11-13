@@ -174,7 +174,7 @@ import {
   type StepUpAction
 } from "./services/mfa-policy.js";
 import type { LoginSession } from "./services/session-service.js";
-import { LdapService } from "./services/ldap-service";
+import { LdapAuthError, LdapService, type LdapProfile } from "./services/ldap-service";
 import {
   OIDC_FLOW_COOKIE_NAME,
   OIDC_FLOW_COOKIE_PATH,
@@ -8308,6 +8308,17 @@ export async function createApp(
     if (lockedUntil) return mfaLockedAnswer(reply, lockedUntil);
     if (!await mfaService.verify(userId, code)) {
       await recordMfaFailure(request, null, userId, "sign_in");
+      if (challenge.ldap) {
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.login",
+          action: "login",
+          outcome: "failure",
+          metadata: { method: "ldap", reason: "mfa_invalid", identityKey: challenge.ldap.subject }
+        }).catch((auditError: unknown) => {
+          request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP MFA failure audit not recorded");
+        });
+      }
       if (challenge.sso) {
         await audit(request, null, {
           category: "auth",
@@ -8341,12 +8352,32 @@ export async function createApp(
     if (challenge.ldap) {
       // The LDAP sign-in passed its TOTP step: only now are the account and its group mappings updated.
       try {
-        const { user } = await provisionSsoUser(challenge.ldap);
+        const { user, created } = await provisionSsoUser(challenge.ldap);
         if (user.id !== userId) throw new Error("The LDAP account resolved to another user than the one that passed the code step");
         const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: true });
+        await audit(request, user, {
+          category: "auth",
+          eventType: "user.login",
+          action: "login",
+          resourceType: "user",
+          resourceId: user.id,
+          metadata: { method: "ldap", provisioned: created, mfa: "local_totp" }
+        }).catch((auditError: unknown) => {
+          request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP login audit not recorded");
+        });
         return { user, expiresAt };
       } catch (error) {
-        request.log.warn({ reason: error instanceof Error ? error.message : "unknown" }, "LDAP sign-in failed after the MFA step");
+        const detail = error instanceof Error ? error.message : "unknown";
+        request.log.warn({ reason: detail }, "LDAP sign-in failed after the MFA step");
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.login",
+          action: "login",
+          outcome: "failure",
+          metadata: { method: "ldap", reason: "account_refused", identityKey: challenge.ldap.subject, error: detail }
+        }).catch((auditError: unknown) => {
+          request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP login audit not recorded");
+        });
         reply.code(401);
         return { error: "Sign-in could not be completed. Try again." };
       }
@@ -8979,6 +9010,30 @@ export async function createApp(
   // Phase 5.1 — LDAP login
   // ---------------------------------------------------------------------------
 
+  /**
+   * A refused LDAP sign-in: the reason and the directory's message go to the server log and the audit entry, the
+   * caller gets one answer for every reason (unknown user, wrong password, a directory or account problem), so the
+   * route cannot be used to tell who has an account.
+   */
+  const refuseLdapSignIn = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    attempt: { email: string; reason: string; detail: string; status?: 401 | 503 }
+  ) => {
+    request.log.warn({ reason: attempt.reason, detail: attempt.detail }, "LDAP sign-in refused");
+    await audit(request, null, {
+      category: "auth",
+      eventType: "user.login",
+      action: "login",
+      outcome: "failure",
+      metadata: { method: "ldap", email: attempt.email, reason: attempt.reason, error: attempt.detail }
+    }).catch((auditError: unknown) => {
+      request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP login audit not recorded");
+    });
+    reply.code(attempt.status ?? 401);
+    return attempt.status === 503 ? { error: "LDAP sign-in is not available." } : { error: "Invalid credentials" };
+  };
+
   app.post<{ Body: unknown }>("/api/auth/ldap/login", async (request, reply) => {
     const body = asRecord(request.body);
     const email = typeof body.email === "string" ? body.email.trim() : "";
@@ -8987,8 +9042,18 @@ export async function createApp(
       reply.code(400);
       return { error: "email and password are required" };
     }
+    let profile: LdapProfile;
     try {
-      const profile = await ldapService.authenticate(email, password);
+      profile = await ldapService.authenticate(email, password);
+    } catch (error) {
+      const err = error as Error & { code?: string };
+      if (err.code === "CONFIGURATION_ERROR") {
+        return await refuseLdapSignIn(request, reply, { email, reason: "ldap_unavailable", detail: err.message, status: 503 });
+      }
+      const reason = error instanceof LdapAuthError ? error.reason : "directory_error";
+      return await refuseLdapSignIn(request, reply, { email, reason, detail: err instanceof Error ? err.message : String(error) });
+    }
+    try {
       const provision: SsoProvisionInput = {
         provider: "ldap",
         subject: profile.dn || profile.email,
@@ -9013,16 +9078,30 @@ export async function createApp(
       }
       const { user, created } = await provisionSsoUser(provision);
       const { expiresAt } = await issueSessionForUser(request, reply, user, { method: "ldap", mfaVerified: false });
+      const mfaEnrollmentRequired = mfaRequiredFor(mfaPolicy, user.role);
+      await audit(request, user, {
+        category: "auth",
+        eventType: "user.login",
+        action: "login",
+        resourceType: "user",
+        resourceId: user.id,
+        metadata: { method: "ldap", provisioned: created, ...(mfaEnrollmentRequired ? { mfaEnrollmentRequired: true } : {}) }
+      }).catch((auditError: unknown) => {
+        request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "LDAP login audit not recorded");
+      });
       return {
         user,
         expiresAt,
         provisioned: created,
-        ...(mfaRequiredFor(mfaPolicy, user.role) ? { mfaEnrollmentRequired: true } : {})
+        ...(mfaEnrollmentRequired ? { mfaEnrollmentRequired: true } : {})
       };
     } catch (error) {
-      const err = error as Error & { code?: string };
-      reply.code(err.code === "CONFIGURATION_ERROR" ? 503 : 401);
-      return { error: err.message };
+      // The directory accepted the password, but the account cannot sign in (a service account, a deleted link, ...).
+      return await refuseLdapSignIn(request, reply, {
+        email,
+        reason: "account_refused",
+        detail: error instanceof Error ? error.message : String(error)
+      });
     }
   });
 

@@ -41,6 +41,26 @@ const CONFIGURATION_ERROR = (detail: string): Error => {
   return err;
 };
 
+/** Why a directory sign-in was refused: for the server log and the audit entry only, never for the caller. */
+export type LdapSignInRefusal = "user_not_found" | "invalid_credentials" | "directory_error";
+
+/** A refused LDAP sign-in. The route answers the same for every reason, so a caller cannot tell them apart. */
+export class LdapAuthError extends Error {
+  constructor(
+    readonly reason: LdapSignInRefusal,
+    detail: string
+  ) {
+    super(detail);
+    this.name = "LdapAuthError";
+  }
+}
+
+/** The directory's "invalid credentials" (result code 49), as ldapts reports it. */
+function isInvalidCredentials(error: unknown): boolean {
+  const err = error as { name?: unknown; code?: unknown };
+  return err?.name === "InvalidCredentialsError" || err?.code === 49;
+}
+
 function loadLdapts(): LdaptsModule | null {
   try {
     return require("ldapts") as LdaptsModule;
@@ -100,13 +120,13 @@ export class LdapService {
       });
 
       if (!searchEntries.length) {
-        throw new Error("User not found in LDAP directory");
+        throw new LdapAuthError("user_not_found", "User not found in LDAP directory");
       }
 
       const entry = searchEntries[0];
       const userDn = typeof entry.dn === "string" ? entry.dn : "";
       if (!userDn) {
-        throw new Error("LDAP entry is missing dn");
+        throw new LdapAuthError("directory_error", "LDAP entry is missing dn");
       }
 
       // Rebind as the user to verify password.
@@ -114,6 +134,9 @@ export class LdapService {
       const verifyClient = new mod.Client({ url: this.config.url });
       try {
         await verifyClient.bind(userDn, password);
+      } catch (error) {
+        if (isInvalidCredentials(error)) throw new LdapAuthError("invalid_credentials", "The directory refused the password");
+        throw error;
       } finally {
         await verifyClient.unbind().catch(() => undefined);
       }

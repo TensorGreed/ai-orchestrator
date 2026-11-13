@@ -681,8 +681,9 @@ The LDAP client is an optional package that is not installed by default. Add it 
 pnpm --filter @ai-orchestrator/api add ldapts
 ```
 
-In a container, add it to the image you build. Without it, or without `LDAP_URL` and `LDAP_BASE_DN`, the route
-answers `503` with `LDAP not configured: ...`; with `LDAP_ENABLED=false` it answers `503` as well.
+In a container, add it to the image you build. Without it, or without `LDAP_URL` and `LDAP_BASE_DN`, or with
+`LDAP_ENABLED=false`, the route answers `503` "LDAP sign-in is not available."; the reason (`LDAP not configured: ...`)
+is in the server log and the audit entry.
 
 Use an `ldaps://` URL so passwords do not cross the network in clear text. The server's certificate is checked against
 the CAs Node trusts; for a private CA set `NODE_EXTRA_CA_CERTS` on the API.
@@ -692,7 +693,7 @@ the CAs Node trusts; for a private CA set `NODE_EXTRA_CA_CERTS` on the API.
 `POST /api/auth/ldap/login` with `{ "email": "...", "password": "..." }`:
 
 1. L2M binds as `LDAP_BIND_DN` (when set) and searches below `LDAP_BASE_DN`, in the whole subtree, with
-   `LDAP_USER_FILTER`. The first entry found is the user. No entry: `401` "User not found in LDAP directory".
+   `LDAP_USER_FILTER`. The first entry found is the user. No entry: `401`.
 2. It binds again as that entry's DN with the password the user gave. A wrong password: `401`.
 3. The account is found by the entry's `mail` attribute (else the email the user typed). An L2M user with that email
    is signed in; otherwise a new user is created. An existing account is linked by email alone, so connect only a
@@ -709,12 +710,18 @@ A user who has an authenticator set up gets `{ mfaChallenge, expiresInSeconds }`
 `MFA_REQUIRED_ROLES` without an authenticator gets a session that can only set one up (see
 [MFA required per role](#mfa-required-per-role)). `SSO_MFA` does not apply to LDAP.
 
-Without `email` or `password` the route answers `400`. Any other failure answers `401` with the reason in the message:
-an unknown user, a wrong password, a directory that cannot be reached, a certificate error or a wrong `LDAP_BIND_DN`
-password. Service accounts cannot sign in through LDAP. The route counts against the sign-in rate limit
-(`RATE_LIMIT_AUTH_MAX`). The code step is audited as `user.login.mfa_challenge` with `method: "ldap"`, and a wrong
-code as `mfa.code_failed`; other LDAP sign-ins, successful or refused, are not written to the audit log, so use the
-session list (method `ldap`) and the directory's own logs to follow them.
+Without `email` or `password` the route answers `400`. Any other failure answers `401` "Invalid credentials", the same
+for every reason (an unknown user, a wrong password, a directory that cannot be reached, a certificate error, a wrong
+`LDAP_BIND_DN` password, or an account that cannot sign in), so the answer does not tell a caller whether an account
+exists. Service accounts cannot sign in through LDAP. The route counts against the sign-in rate limit
+(`RATE_LIMIT_AUTH_MAX`).
+
+Every LDAP sign-in is audited as `user.login` with `method: "ldap"`, like the other sign-in methods. A success records
+the user and `provisioned` (and `mfa: "local_totp"` after the code step, or `mfaEnrollmentRequired`); a refusal has
+outcome `failure`, the email typed, a `reason` (`user_not_found`, `invalid_credentials`, `directory_error`,
+`account_refused`, `ldap_unavailable`, or `mfa_invalid` for a wrong code) and the directory's message as `error`. The
+code step itself is audited as `user.login.mfa_challenge`, and a wrong code also as `mfa.code_failed`. The reason is
+also written to the server log.
 
 ## MFA on SSO
 
