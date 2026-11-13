@@ -1,0 +1,18 @@
+# A local OpenTelemetry Collector for L2M. From the repository root:
+#
+#   COLLECTOR_UID=$(id -u) COLLECTOR_GID=$(id -g) docker compose -f ops/otel/docker-compose.yml up -d
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_METRICS_ENABLED=true pnpm dev:product
+#
+# Spans and metrics land in ops/otel/otel-data/*.jsonl (git-ignored). See
+# apps/docs/docs/operations/opentelemetry.md.
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    # Runs as you, so it can write the otel-data folder (COLLECTOR_UID and COLLECTOR_GID default to 1000).
+    user: "${COLLECTOR_UID:-1000}:${COLLECTOR_GID:-1000}"
+    volumes:
+      - ./collector.yaml:/etc/otelcol/config.yaml:ro
+      - ./otel-data:/data
+    ports:
+      - "127.0.0.1:4318:4318"

@@ -137,7 +137,7 @@ Self-hosting moves work to your team:
 - **Scaling.** In [cluster mode](/operations/cluster) (`DB_TYPE=postgres` and `HA_ENABLED=true`), several API instances and separate [queue workers](/operations/queue-and-workers) share one Postgres, with one leader for schedules and purges. On SQLite, one process is its own worker. [Scaling](/operations/scaling) covers roles, sizing and a load test harness. MCP gateway sessions are the one piece that needs sticky routing; the cluster page shows how to route them.
 - **Backups.** [Backup and recovery](/operations/backup-and-recovery) has procedures for SQLite, Postgres and a portable export, a restore drill, and what to do after losing the master key (`SECRET_MASTER_KEY_BASE64`).
 - **Verification.** Each release image is signed with keyless cosign and carries SLSA build provenance and CycloneDX SBOMs: [Verify a release](/operations/verify-a-release).
-- **Observability.** Structured logs, Prometheus metrics at `/metrics`, and optional OTLP export of traces and metrics: [Observability](/operations/observability).
+- **Observability.** Structured logs, Prometheus metrics at `/metrics`, and optional OTLP export of traces and metrics: [Observability](/operations/observability) and [OpenTelemetry](/operations/opentelemetry).
 
 ## Try it in L2M
 

@@ -1,0 +1,35 @@
+# A local OpenTelemetry Collector for trying L2M's traces and metrics (see
+# apps/docs/docs/operations/opentelemetry.md). It receives OTLP over HTTP on
+# port 4318 (both http/protobuf and http/json), prints a one-line summary of
+# each batch, and appends everything it receives, as OTLP JSON lines, to
+# ./otel-data/traces.jsonl and ./otel-data/metrics.jsonl.
+#
+# For production, replace the exporters with your tracing and metrics
+# backends, and add sampling, batching and retries to suit.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: basic
+  file/traces:
+    path: /data/traces.jsonl
+  file/metrics:
+    path: /data/metrics.jsonl
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, file/traces]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, file/metrics]
