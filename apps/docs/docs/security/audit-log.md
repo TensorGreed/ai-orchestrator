@@ -72,6 +72,7 @@ the order it was written and answers:
 | `ok` | `true` when every entry checked out. |
 | `rowsChecked` | Entries verified. |
 | `firstBrokenAt` | The first entry whose link or hash does not match: `{ id, createdAt, expected, stored }`. The walk stops there. |
+| `anchor` | Present when retention deleted the oldest entries: `{ firstId, prevHash, checkpointId }`, the first entry left, the hash it points back to and the retention checkpoint that records it (below). |
 | `unverifiable` | Entries written by an older release whose stored text cannot be checked exactly, with their position in the chain and the reason. `ok` is `false` while there are any; compare those rows with a backup or an export. |
 
 A broken link means a row was deleted, inserted, reordered or changed after it was written. Restore from a backup or
@@ -81,9 +82,15 @@ compare with an exported copy to find what changed. The portable backup (`db:exp
 The check covers what is in the database. Someone who can write to the database could rebuild the whole chain after
 an edit, so keep a copy outside it as well, through an export destination (below).
 
-**Retention and the chain.** Entries older than `AUDIT_LOG_RETENTION_DAYS` are deleted. The first entry left after a
-purge still points at the deleted entry before it, and the check reports the chain as broken at that entry. Keep the
-exported copy as the long-term record, or set `AUDIT_LOG_RETENTION_DAYS=0` to keep every entry.
+**Retention and the chain.** Entries older than `AUDIT_LOG_RETENTION_DAYS` are deleted, oldest first in the order
+they were written, up to the first entry inside the retention, so no gap opens in the middle of the chain. Each purge
+that deletes entries appends a retention checkpoint (`audit.retention_checkpoint`, category `system`, actor `system`)
+whose metadata records the hash of the last deleted entry (`anchorHash`), the first entry left (`firstRetainedId`),
+the cut-off and the count. The check starts from the first entry left and passes only if the latest checkpoint names
+exactly that entry and that hash; deleting more entries from the start, or editing any entry kept (the checkpoint
+included), still fails. A chain purged by an older release, before checkpoints, reports as broken at its first entry
+until the next purge that deletes entries writes one. Keep the exported copy as the long-term record, or set
+`AUDIT_LOG_RETENTION_DAYS=0` to keep every entry.
 
 ## Shipping the log out
 

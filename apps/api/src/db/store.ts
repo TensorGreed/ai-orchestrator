@@ -2569,11 +2569,15 @@ export interface Store extends AiGatewayStore, SubjectStore {
    * `unverifiable` (present only when not empty) lists rows whose content cannot be checked: either a row written
    * before audit text was normalised, or an edit. Each is named by its chain position and hashes; its id and createdAt
    * are as stored (unverified). `ok` is false while it is not empty. The rule is in db/audit-chain.ts.
+   *
+   * `anchor` (present when retention deleted the oldest rows) names the first row left, its prev_hash and the
+   * retention checkpoint that records them.
    */
   verifyAuditChain(): Promise<{
     ok: boolean;
     rowsChecked: number;
     firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
+    anchor?: { firstId: string; prevHash: string; checkpointId: string };
     unverifiable?: Array<{ id: string; createdAt: string; position: number; prevHash: string; entryHash: string; reason: string }>;
   }>;
   listAuditLogs(filter?: {
@@ -2611,6 +2615,11 @@ export interface Store extends AiGatewayStore, SubjectStore {
     page: number;
     pageSize: number;
   }>;
+  /**
+   * Deletes the oldest audit rows in insertion order, up to the first one created at or after `before` (so the chain
+   * keeps no gap), and appends a retention checkpoint recording the anchor hash (db/audit-chain.ts, "Retention").
+   * Returns how many rows it deleted.
+   */
   pruneAuditLogs(options: { before: string }): Promise<number>;
   listLogStreamDestinations(): Promise<LogStreamDestinationRecord[]>;
   getLogStreamDestination(id: string): Promise<LogStreamDestinationRecord | null>;

@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import {
   auditEntryHash,
+  auditRetentionCheckpointEntry,
   GENESIS_HASH,
   storedSqliteAuditText,
   verifyAuditRows,
@@ -149,5 +150,65 @@ describe("storedSqliteAuditText", () => {
       expect(decoded).toBe(new TextDecoder().decode(bytes(hex)));
       expect(decoded).toContain("\uFFFD");
     }
+  });
+});
+
+describe("verifyAuditRows after retention", () => {
+  /** A chain from genesis, the rows before `firstKept` deleted, then a retention checkpoint (and `after`) appended. */
+  function pruned(options: { checkpoint?: Partial<AuditCanonicalInput>; metadata?: Record<string, unknown>; extraCheckpoint?: Record<string, unknown> } = {}) {
+    const deleted = chain([fields("o1", "old"), fields("o2", "old")]);
+    let prev = deleted[1]!.entryHash;
+    const kept: AuditChainRow[] = [];
+    const add = (f: AuditCanonicalInput) => {
+      const entryHash = auditEntryHash(prev, f);
+      kept.push({ fields: f, prevHash: prev, entryHash });
+      prev = entryHash;
+    };
+    add(fields("k1", "kept"));
+    add(fields("k2", "kept"));
+    const meta = { anchorHash: deleted[1]!.entryHash, firstRetainedId: "k1", lastPrunedId: "o2", before: "2026-01-01T00:00:00.000Z", deleted: 2, ...options.metadata };
+    const entry = auditRetentionCheckpointEntry("cp", meta as never);
+    add(fields("cp", entry.message, {
+      eventType: entry.eventType, category: entry.category, action: entry.action, actorType: entry.actorType,
+      resourceType: entry.resourceType, metadataJson: JSON.stringify(entry.metadata), ...options.checkpoint
+    }));
+    if (options.extraCheckpoint) {
+      const extra = auditRetentionCheckpointEntry("cp2", options.extraCheckpoint as never);
+      add(fields("cp2", extra.message, {
+        eventType: extra.eventType, category: "system", action: "prune", actorType: "system", metadataJson: JSON.stringify(extra.metadata)
+      }));
+    }
+    add(fields("k3", "after"));
+    return { deleted, kept };
+  }
+
+  it("before this rule a pruned chain always failed at its first row; with the checkpoint it verifies from there", () => {
+    const { deleted, kept } = pruned();
+    expect(verifyAuditRows(kept)).toEqual({
+      ok: true,
+      rowsChecked: 4,
+      anchor: { firstId: "k1", prevHash: deleted[1]!.entryHash, checkpointId: "cp" }
+    });
+  });
+
+  it("without a checkpoint naming the first row and its prev_hash, the chain is broken at the first row", () => {
+    const { kept } = pruned();
+    // One more row deleted from the start than the checkpoint records.
+    expect(verifyAuditRows(kept.slice(1))).toMatchObject({ ok: false, rowsChecked: 0, firstBrokenAt: { id: "k2", stored: kept[0]!.entryHash } });
+    // A checkpoint that does not come from the system actor, or names another row, does not anchor.
+    expect(verifyAuditRows(pruned({ checkpoint: { actorType: "user" } }).kept)).toMatchObject({ ok: false, firstBrokenAt: { id: "k1", expected: GENESIS_HASH } });
+    expect(verifyAuditRows(pruned({ metadata: { firstRetainedId: "k2" } }).kept)).toMatchObject({ ok: false, firstBrokenAt: { id: "k1" } });
+    expect(verifyAuditRows(pruned({ metadata: { anchorHash: "f".repeat(64) } }).kept)).toMatchObject({ ok: false, firstBrokenAt: { id: "k1", expected: "f".repeat(64) } });
+  });
+
+  it("only the last checkpoint counts: an older one cannot anchor a front a later prune moved", () => {
+    const later = { anchorHash: "a".repeat(64), firstRetainedId: "k9", lastPrunedId: "k8", before: "2026-02-01T00:00:00.000Z", deleted: 1 };
+    expect(verifyAuditRows(pruned({ extraCheckpoint: later }).kept)).toMatchObject({ ok: false, firstBrokenAt: { id: "k1" } });
+  });
+
+  it("a tampered row after the anchor fails at that row", () => {
+    const { kept } = pruned();
+    const edited = kept.map((row) => (row.fields.id === "k2" ? { ...row, fields: { ...row.fields, message: "edited" } } : row));
+    expect(verifyAuditRows(edited)).toMatchObject({ ok: false, rowsChecked: 1, firstBrokenAt: { id: "k2" } });
   });
 });

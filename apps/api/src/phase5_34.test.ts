@@ -727,9 +727,11 @@ describe("Phase 5.4 — Audit logging", () => {
       outcome: "success",
       createdAt: "2001-01-01T00:00:00.000Z"
     });
-    const cutoff = new Date("2010-01-01T00:00:00.000Z").toISOString();
-    const pruned = await ctx.store.pruneAuditLogs({ before: cutoff });
-    expect(pruned).toBeGreaterThanOrEqual(1);
+    // Retention deletes the oldest rows in insertion order up to the first one inside the retention (the chain keeps
+    // no gap), so a back-dated row written after the login's rows waits for them.
+    expect(await ctx.store.pruneAuditLogs({ before: new Date("2010-01-01T00:00:00.000Z").toISOString() })).toBe(0);
+    const pruned = await ctx.store.pruneAuditLogs({ before: new Date(Date.now() + 60_000).toISOString() });
+    expect(pruned).toBeGreaterThanOrEqual(2);
 
     const list = await ctx.app.inject({
       method: "GET",

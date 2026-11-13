@@ -11,6 +11,12 @@ describe("AuditChainStatusLine", () => {
     expect(screen.getByText(/Chain intact — verified 12 rows/)).toBeInTheDocument();
   });
 
+  it("says when the chain starts at a retention checkpoint", () => {
+    render(<AuditChainStatusLine status={{ ok: true, rowsChecked: 5, anchor: { firstId: "aud_first", prevHash: "c".repeat(64), checkpointId: "aud_cp" } }} />);
+    expect(screen.getByText(/Older entries were removed by retention/)).toBeInTheDocument();
+    expect(screen.getByText("aud_cp")).toBeInTheDocument();
+  });
+
   it("names the first broken row", () => {
     render(
       <AuditChainStatusLine

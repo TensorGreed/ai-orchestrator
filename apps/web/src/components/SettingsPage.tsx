@@ -1859,7 +1859,15 @@ export function AuditChainStatusLine({ status }: { status: AuditChainStatus }) {
   return (
     <div className="settings-help" style={{ marginTop: "0.5rem" }}>
       {status.ok ? (
-        <span style={{ color: "#16a34a" }}>✓ Chain intact — verified {status.rowsChecked} rows.</span>
+        <span style={{ color: "#16a34a" }}>
+          ✓ Chain intact — verified {status.rowsChecked} rows.
+          {status.anchor ? (
+            <>
+              {" "}Older entries were removed by retention; the chain starts at row <code>{status.anchor.firstId}</code>, anchored by
+              checkpoint <code>{status.anchor.checkpointId}</code>.
+            </>
+          ) : null}
+        </span>
       ) : status.firstBrokenAt ? (
         <span style={{ color: "#dc2626" }}>
           ✗ Chain broken at row {status.firstBrokenAt.id} ({status.firstBrokenAt.createdAt}). Rows verified before break: {status.rowsChecked}.

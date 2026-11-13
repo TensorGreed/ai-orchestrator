@@ -58,10 +58,75 @@
  * marker on the row would be as unauthenticated as the row). So the report never assumes the benign cause: it names
  * the row by its chain position (walk index, its prev_hash, which the previous row pins, and its entry_hash, which
  * the next row pins) and shows id and created_at as stored, unverified. Compare the row with a backup or an export.
+ *
+ * ## Retention (the chain's start after a prune)
+ *
+ * Retention (AUDIT_LOG_RETENTION_DAYS) deletes the oldest rows, so the first row left no longer starts at 64 zeros: its
+ * prev_hash is the entry_hash of the last row deleted. A prune deletes only a prefix of the chain in insertion order
+ * (it stops at the first row inside the retention), so it never opens a gap in the middle, and in the same transaction
+ * it appends a retention checkpoint row (AUDIT_RETENTION_CHECKPOINT_EVENT, actor `system`) whose metadata records that
+ * anchor (`anchorHash`) and the id of the first row it left (`firstRetainedId`). The checkpoint is an ordinary chained
+ * row: its content is hashed and the rows after it pin it.
+ *
+ * The walk takes the first row's stored prev_hash as given and checks every link and hash from there as before. At the
+ * end, a chain whose first row does not start at 64 zeros is intact only if the **last** verified checkpoint names
+ * exactly that row and that prev_hash; otherwise it is broken at its first row (as before this rule). So deleting more
+ * rows from the start, or editing the first row's prev_hash, still fails, and editing any row kept (the checkpoint
+ * included) fails at that row as before. Like the rest of the chain (an unkeyed hash), a checkpoint proves order and
+ * content, not who wrote it: anyone who can write the database can append rows, so compare with the exported copy or a
+ * signed audit bundle to rule that out.
  */
 import { createHash } from "node:crypto";
 
 export const GENESIS_HASH = "0".repeat(64);
+
+/** The event type of the row a retention prune appends (see "Retention" above). */
+export const AUDIT_RETENTION_CHECKPOINT_EVENT = "audit.retention_checkpoint";
+
+/** What a retention checkpoint row's metadata records. */
+export interface AuditRetentionCheckpoint {
+  /** The entry_hash of the last row the prune deleted: the prev_hash of the first row it left. */
+  anchorHash: string;
+  /** The first hashed row left after the prune (the checkpoint row itself when the prune left no other). */
+  firstRetainedId: string;
+  /** The last hashed row the prune deleted. */
+  lastPrunedId: string;
+  /** The prune's cut-off: it deleted the rows before the first one created at or after it. */
+  before: string;
+  /** How many rows it deleted. */
+  deleted: number;
+}
+
+/** The writeAuditLog entry of a retention checkpoint (both stores append it inside the prune's transaction). */
+export function auditRetentionCheckpointEntry(id: string, checkpoint: AuditRetentionCheckpoint) {
+  return {
+    id,
+    eventType: AUDIT_RETENTION_CHECKPOINT_EVENT,
+    category: "system",
+    action: "prune",
+    outcome: "success" as const,
+    actorType: "system" as const,
+    resourceType: "audit_log",
+    metadata: { ...checkpoint },
+    message: `Retention deleted ${checkpoint.deleted} audit entries created before ${checkpoint.before}; the chain continues from the anchor hash.`
+  };
+}
+
+/** The checkpoint a verified row records, or undefined when the row is not one (or its metadata is not well formed). */
+function retentionCheckpointOf(fields: AuditCanonicalInput): { anchorHash: string; firstRetainedId: string } | undefined {
+  if (fields.eventType !== AUDIT_RETENTION_CHECKPOINT_EVENT || fields.category !== "system" || fields.actorType !== "system") return undefined;
+  if (!fields.metadataJson) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fields.metadataJson);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const { anchorHash, firstRetainedId } = parsed as Record<string, unknown>;
+  if (typeof anchorHash !== "string" || !/^[0-9a-f]{64}$/.test(anchorHash) || typeof firstRetainedId !== "string" || !firstRetainedId) return undefined;
+  return { anchorHash, firstRetainedId };
+}
 
 // ignoreBOM: a leading EF BB BF is the character U+FEFF, kept as stored (as the drivers keep it). Without it the
 // decoder drops it, so a value starting with U+FEFF would not be the text the writer hashed.
@@ -261,6 +326,11 @@ export interface AuditChainResult {
   ok: boolean;
   rowsChecked: number;
   firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
+  /**
+   * Present when the chain starts after rows retention deleted: the first row's prev_hash, matched by the last
+   * retention checkpoint (`checkpointId`). See "Retention" above.
+   */
+  anchor?: { firstId: string; prevHash: string; checkpointId: string };
   /** Rows whose content could not be checked (see the rule above). Present only when not empty. */
   unverifiable?: AuditUnverifiableRow[];
 }
@@ -338,13 +408,22 @@ export class AuditChainWalker {
   private position = 0;
   private readonly unverifiable: AuditUnverifiableRow[] = [];
   private broken: AuditChainResult["firstBrokenAt"];
+  /** The first row, when it does not start at 64 zeros (rows before it were deleted). */
+  private start: { id: string; createdAt: string; prevHash: string } | undefined;
+  /** The last verified retention checkpoint. */
+  private checkpoint: { id: string; anchorHash: string; firstRetainedId: string } | undefined;
 
   /** Walks the next row (insertion order, entry_hash IS NOT NULL). False once the chain is broken: stop feeding. */
   push(row: AuditChainRow): boolean {
     if (this.broken) return false;
-    const prev = this.prev;
     const { id, createdAt } = row.fields;
     this.position += 1;
+    if (this.position === 1 && row.prevHash !== GENESIS_HASH) {
+      // Checked in result(): the last retention checkpoint must name this row and this prev_hash.
+      this.start = { id, createdAt, prevHash: row.prevHash };
+      this.prev = row.prevHash;
+    }
+    const prev = this.prev;
     if (row.prevHash !== prev) {
       this.broken = { id, createdAt, expected: prev, stored: row.prevHash };
       return false;
@@ -383,14 +462,27 @@ export class AuditChainWalker {
     }
     this.prev = row.entryHash;
     this.checked += 1;
+    const checkpoint = retentionCheckpointOf(row.fields);
+    if (checkpoint) this.checkpoint = { id, ...checkpoint };
     return true;
   }
 
   /** The verdict over the rows pushed so far. */
   result(): AuditChainResult {
-    const result: AuditChainResult = this.broken
-      ? { ok: false, rowsChecked: this.checked, firstBrokenAt: this.broken }
-      : { ok: true, rowsChecked: this.checked };
+    let result: AuditChainResult;
+    if (this.broken) {
+      result = { ok: false, rowsChecked: this.checked, firstBrokenAt: this.broken };
+    } else if (this.start) {
+      const { id, createdAt, prevHash } = this.start;
+      const checkpoint = this.checkpoint;
+      if (!checkpoint || checkpoint.anchorHash !== prevHash || checkpoint.firstRetainedId !== id) {
+        // No retention checkpoint accounts for the rows missing before the first one: broken there, as before.
+        return { ok: false, rowsChecked: 0, firstBrokenAt: { id, createdAt, expected: checkpoint?.anchorHash ?? GENESIS_HASH, stored: prevHash } };
+      }
+      result = { ok: true, rowsChecked: this.checked, anchor: { firstId: id, prevHash, checkpointId: checkpoint.id } };
+    } else {
+      result = { ok: true, rowsChecked: this.checked };
+    }
     return this.unverifiable.length > 0 ? { ...result, ok: false, unverifiable: [...this.unverifiable] } : result;
   }
 }
