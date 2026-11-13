@@ -500,6 +500,11 @@ export interface Store extends AiGatewayStore, SubjectStore {
    */
   setExecutionTraceId(executionId: string, traceId: string, options?: { fence?: QueueClaimFence }): Promise<boolean>;
   getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null>;
+  /**
+   * v74 — whether content copied from this run is sensitive: its record is marked, or its run never wrote a final
+   * answer (see saveExecutionHistory's `sensitive`). Null when there is no record.
+   */
+  getExecutionSensitive(executionId: string): Promise<boolean | null>;
   /** The hashes `version` had when it was released (any release, rollbacks included). */
   listReleasedVersionHashes(workflowId: string, version: number): Promise<string[]>;
   /** The release gates that are switched on. */
@@ -1046,6 +1051,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
       metadata?: Record<string, unknown> | null;
       vector: number[];
     }>;
+    /** v74 — added by sensitive work: the chunks are marked (`sensitive` on the rows read back). */
+    sensitive?: boolean;
   }): Promise<{ inserted: number; dimensions: number }>;
   /**
    * Pull every chunk for a KB. For Phase 9.1's hand-rolled cosine search
@@ -1074,6 +1081,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
     content: string;
     metadata: Record<string, unknown> | null;
     score: number;
+    /** v74 — present only when the chunk was written by sensitive work. */
+    sensitive?: true;
   }>>;
   /** Preview chunks for the UI — content + metadata, no vectors. */
   listKnowledgeBaseChunkPreviews(input: { knowledgeBaseId: string; limit?: number; sourceId?: string }): Promise<Array<{
@@ -1862,6 +1871,11 @@ export interface Store extends AiGatewayStore, SubjectStore {
    */
   loadSessionMemorySensitive(namespace: string, sessionId: string): Promise<boolean>;
   /**
+   * v74 — loadSessionMemory and loadSessionMemorySensitive in one SELECT, so a run reads the mark with the messages at
+   * no extra query (whether or not content capture is on).
+   */
+  loadSessionMemoryMarked(namespace: string, sessionId: string): Promise<{ messages: ChatMessage[]; sensitive: boolean }>;
+  /**
    * Saves a session's memory. `labels` (Phase 16) are given only while the
    * run tracks labels and are merged with the labels already stored; a save
    * without them (an untracked run) keeps the stored labels and adds
@@ -2023,6 +2037,14 @@ export interface Store extends AiGatewayStore, SubjectStore {
     nodeResultsJson?: unknown;
     customData?: unknown;
     error?: string;
+    /**
+     * v74 — whether the run was sensitive work for content capture: `true` marks the record, and the mark stays through
+     * later writes; `false` is the run's own final answer that it was not; `"pending"` is a write made before the run
+     * finished (a progress write), which counts as marked until the run's final write says otherwise, so a record a
+     * cancel or a reconcile ends fails closed. Left out, the stored value is kept (0 on a new record). Not part of the
+     * record the API returns; read it with getExecutionSensitive.
+     */
+    sensitive?: boolean | "pending";
   }, options?: {
     /**
      * A progress write: refused (nothing changes) when the run's record is already finished, i.e. `success`,
@@ -3041,4 +3063,9 @@ export interface Store extends AiGatewayStore, SubjectStore {
     cases: Array<{ recording: ReplayRecordingInsert; fixture: Omit<Parameters<Store["createEvalFixture"]>[0], "datasetId" | "recordingId"> }>;
     limits: ReplayRecordingLimits;
   }): Promise<{ recordingIds: string[] } | ReplayRecordingRefusal>;
+}
+
+/** v74 — the stored `execution_history.sensitive` value of a write: 1 marked, 2 not finished, 0 otherwise. */
+export function executionSensitiveValue(sensitive: boolean | "pending" | undefined): number {
+  return sensitive === true ? 1 : sensitive === "pending" ? 2 : 0;
 }

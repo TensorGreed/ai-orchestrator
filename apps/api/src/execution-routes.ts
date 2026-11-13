@@ -86,7 +86,9 @@ export interface ExecutionRoutesDeps {
     payload: WorkflowExecutePayload,
     reply: FastifyReply,
     user: SafeUser
-  ) => Promise<{ payload: WorkflowExecutePayload; nodeOutputs: Record<string, unknown>; requestInput: Record<string, unknown> } | null>;
+  ) => Promise<{ payload: WorkflowExecutePayload; nodeOutputs: Record<string, unknown>; requestInput: Record<string, unknown>; sensitiveInput: boolean } | null>;
+  /** v74 — content copied from this run is content of sensitive work (see app.ts copiedRunSensitive). */
+  copiedRunSensitive: (executionId: string, user: SafeUser) => Promise<boolean>;
   auditRunAction: (
     request: { ip?: string; headers: Record<string, unknown> },
     user: SafeUser,
@@ -139,6 +141,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     budgetService,
     admitRunBudget,
     prepareWorkflowExecutionPayload,
+    copiedRunSensitive,
     auditRunAction,
     mcpCassetteService,
     mcpRegistry,
@@ -234,6 +237,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       usePinnedData: executionPayload.usePinnedData,
       pinnedData: executionPayload.pinnedData,
       nodeOutputs: prepared.nodeOutputs,
+      // v74 — content copied from a run that was sensitive work.
+      ...(prepared.sensitiveInput ? { sensitiveInput: true } : {}),
       directInput: executionPayload.input,
       variables: executionPayload.variables,
       systemPrompt: executionPayload.system_prompt,
@@ -372,6 +377,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         usePinnedData: executionPayload.usePinnedData,
         pinnedData: executionPayload.pinnedData,
         nodeOutputs: prepared.nodeOutputs,
+        // v74 — content copied from a run that was sensitive work.
+        ...(prepared.sensitiveInput ? { sensitiveInput: true } : {}),
         directInput: executionPayload.input,
         variables: executionPayload.variables,
         systemPrompt: executionPayload.system_prompt,
@@ -604,6 +611,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       usePinnedData: executionPayload.usePinnedData,
       pinnedData: executionPayload.pinnedData,
       nodeOutputs: prepared.nodeOutputs,
+      // v74 — content copied from a run that was sensitive work.
+      ...(prepared.sensitiveInput ? { sensitiveInput: true } : {}),
       directInput: executionPayload.input,
       variables: executionPayload.variables,
       systemPrompt: executionPayload.system_prompt,
@@ -687,6 +696,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       mcpReplay: { sourceExecutionId: source.id, cassetteId: cassette.id, mode }
     };
     const sourceGatewayGuard = parseGatewayGuardStack(asRecord(source.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
+    // v74 — the source run's input and recorded MCP answers are its content.
+    const sensitiveInput = await copiedRunSensitive(source.id, user);
     const result = await runDispatcher.run({
       v: DISPATCH_SPEC_VERSION,
       run: {
@@ -703,6 +714,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       policyActor: user,
       workflow,
       customData,
+      ...(sensitiveInput ? { sensitiveInput: true } : {}),
       executionId,
       triggerType: "mcp_replay",
       triggeredBy: user.email

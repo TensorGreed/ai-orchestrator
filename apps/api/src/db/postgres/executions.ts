@@ -3,7 +3,7 @@
  * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import type { PoolClient } from "pg";
-import { type CancelExecutionResult, type QueueClaimFence, type Store } from "../store.js";
+import { executionSensitiveValue, type CancelExecutionResult, type QueueClaimFence, type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { deleteUnlockedInBatches } from "./prune.js";
@@ -60,6 +60,7 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
   nodeResultsJson?: unknown;
   customData?: unknown;
   error?: string;
+  sensitive?: boolean | "pending";
 }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; unlessInterruptedWith?: string; fence?: QueueClaimFence }): Promise<boolean> {
   const condition = options?.unlessFinished
     ? `NOT (execution_history.status IN ('success', 'error', 'canceled') OR (execution_history.status = 'partial' AND execution_history.completed_at IS NOT NULL))`
@@ -68,7 +69,7 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       : "";
   // Phase 13.1 — a run the dead-executor reconcile already failed keeps that record (see Store.saveExecutionHistory).
   const interrupted = options?.unlessInterruptedWith !== undefined;
-  const notInterrupted = `NOT (execution_history.status = 'error' AND (execution_history.error IS NULL OR execution_history.error = $15))`;
+  const notInterrupted = `NOT (execution_history.status = 'error' AND (execution_history.error IS NULL OR execution_history.error = $17))`;
   const guard = interrupted
     ? `
        WHERE ${condition ? `(${condition}) AND ` : ""}${notInterrupted}`
@@ -78,8 +79,8 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       : "";
   const fence = options?.fence;
   const sql =
-    `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error)
-       SELECT $1::text, $2::text, $3::text, $4::text, $5::timestamptz, $6::timestamptz, $7::integer, $8::text, $9::text, $10::text, $11::text, $12::text, $13::text, $14::text
+    `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error, sensitive)
+       SELECT $1::text, $2::text, $3::text, $4::text, $5::timestamptz, $6::timestamptz, $7::integer, $8::text, $9::text, $10::text, $11::text, $12::text, $13::text, $14::text, $15::integer
        -- 13.3: a run a data-subject deletion erased (its tombstone) is never written back by its executor.
        WHERE NOT EXISTS (SELECT 1 FROM erasure_tombstones WHERE kind = 'run' AND row_id = $1)
        ON CONFLICT (id) DO UPDATE SET
@@ -95,7 +96,10 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
          output_json = EXCLUDED.output_json,
          node_results_json = EXCLUDED.node_results_json,
          custom_data_json = EXCLUDED.custom_data_json,
-         error = EXCLUDED.error${guard}`;
+         error = EXCLUDED.error,
+         -- v74: a mark stays once set (a progress write or a cancel after it never clears it); a write that does not
+         -- say ($16 = 1) keeps the stored value.
+         sensitive = CASE WHEN execution_history.sensitive = 1 OR EXCLUDED.sensitive = 1 THEN 1 WHEN $16::integer = 1 THEN execution_history.sensitive ELSE EXCLUDED.sensitive END${guard}`;
   const params = [
       input.id,
       input.workflowId,
@@ -111,6 +115,8 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
       input.customData === undefined ? null : JSON.stringify(input.customData),
       input.error ?? null,
+      executionSensitiveValue(input.sensitive),
+      input.sensitive === undefined ? 1 : 0,
       ...(interrupted ? [options.unlessInterruptedWith] : [])
   ];
   if (!fence) {

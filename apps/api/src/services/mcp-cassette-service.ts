@@ -133,6 +133,17 @@ export class MemorySeedCapture {
       },
       saveMessages: (namespace, sessionId, messages, options) =>
         options ? store.saveMessages(namespace, sessionId, messages, options) : store.saveMessages(namespace, sessionId, messages),
+      ...(store.loadMessagesMarked
+        ? {
+            // v74 — the engine reads memory this way when the store can: the seed takes the messages and the mark from
+            // the one query, with no lookup of its own.
+            loadMessagesMarked: async (namespace: string, sessionId: string) => {
+              const loaded = await store.loadMessagesMarked!(namespace, sessionId);
+              if (this.capture(namespace, sessionId, loaded.messages) && loaded.sensitive) this.captureSensitive(namespace, sessionId);
+              return loaded;
+            }
+          }
+        : {}),
       ...(store.loadLabels
         ? {
             // Phase 16 — the labels a tracked run read with the memory ride along in the seed, so its replay reads them too.

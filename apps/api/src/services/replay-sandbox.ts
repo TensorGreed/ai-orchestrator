@@ -75,6 +75,14 @@ export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbo
     loadSensitive: async (namespace, sessionId) => {
       const key = sessionKey(namespace, sessionId);
       return sensitiveMemory.has(key) || labelsMarkSensitive(memoryLabels.get(key));
+    },
+    // v74 — the messages with the mark, as the stores read them (so a replay notes the read whether or not capture is on).
+    loadMessagesMarked: async (namespace, sessionId) => {
+      const key = sessionKey(namespace, sessionId);
+      return {
+        messages: structuredClone((memory.get(key) ?? []) as Awaited<ReturnType<AgentSessionMemoryStore["loadMessages"]>>),
+        sensitive: sensitiveMemory.has(key) || labelsMarkSensitive(memoryLabels.get(key))
+      };
     }
   };
 

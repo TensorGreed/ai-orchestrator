@@ -3394,6 +3394,47 @@ describe("Phase 1.6 — Error Trigger Node", () => {
     expect(output?.trigger_type).toBe("error");
   });
 
+  it("names the failed run from the keys the API sends (camelCase) and from the documented snake_case keys", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("trigger", "error_trigger"),
+        makeNode("tout", "output", { responseTemplate: "{{trigger.source_workflow_id}}|{{trigger.source_workflow_name}}|{{trigger.execution_id}}|{{trigger.error}}|{{trigger.error_stack}}" })
+      ],
+      [makeEdge("trigger", "tout")]
+    );
+    const fromApi = await executeWorkflow(
+      {
+        workflow,
+        executionId: "handler-run",
+        triggerType: "error",
+        input: { error: "boom", errorStack: "at x", sourceWorkflowId: "wf-src", sourceWorkflowName: "Source", executionId: "failed-run", timestamp: "2026-01-01T00:00:00.000Z" }
+      },
+      makeDeps()
+    );
+    expect(fromApi.output).toEqual({ result: "wf-src|Source|failed-run|boom|at x" });
+    const snakeCase = await executeWorkflow(
+      {
+        workflow,
+        executionId: "handler-run",
+        triggerType: "error",
+        variables: { source_workflow_id: "wf-old", source_workflow_name: "Old", source_execution_id: "old-run", error: "bad", error_stack: "at y" }
+      },
+      makeDeps()
+    );
+    expect(snakeCase.output).toEqual({ result: "wf-old|Old|old-run|bad|at y" });
+    // A run that is not an error run cannot name a failed run with the API's keys: execution_id stays its own id.
+    const manual = await executeWorkflow(
+      {
+        workflow,
+        executionId: "handler-run",
+        input: { error: "boom", sourceWorkflowId: "wf-src", executionId: "failed-run", source_execution_id: "other" },
+        variables: { source_workflow_id: "wf-old" }
+      },
+      makeDeps()
+    );
+    expect(manual.output).toEqual({ result: "wf-old||handler-run|boom|" });
+  });
+
   it("triggerErrorWorkflow is called when errorWorkflowId is set and execution fails", async () => {
     let resolveTrigger!: () => void;
     const triggerPromise = new Promise<void>((resolve) => { resolveTrigger = resolve; });

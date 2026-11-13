@@ -1680,7 +1680,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     label: "Error Trigger",
     category: "Input",
     effectFreeEntry: true,
-    description: "Fires when a designated production workflow fails. Configure target workflows in their Error Workflow setting.",
+    description: "Fires when a designated production workflow fails. Configure target workflows in their Error Workflow setting. Its output names the failed run: source_workflow_id, source_workflow_name, execution_id (the failed run's id), error, error_stack and timestamp.",
     configSchema: {
       type: "object",
       properties: {}

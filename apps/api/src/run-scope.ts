@@ -95,6 +95,8 @@ export interface RunScopeDeps {
     loadMemoryLabels?: (namespace: string, sessionId: string) => Promise<DataLabels | null>;
     /** v73 — the memory was written by sensitive work (or its labels say sensitive); false when there is none. */
     loadMemorySensitive?: (namespace: string, sessionId: string) => Promise<boolean>;
+    /** v74 — loadMemory and loadMemorySensitive from one query. */
+    loadMemoryMarked?: (namespace: string, sessionId: string) => Promise<{ messages: ChatMessages; sensitive: boolean }>;
     saveToolCall: (input: ToolCallInput) => Promise<ToolCallRecord>;
     listToolCalls: (input: { namespace: string; sessionId: string; toolName?: string; limit?: number }) => Promise<ToolCallSummary[]>;
     getToolCall: (input: { namespace: string; sessionId: string; id: string }) => Promise<ToolCallRecord | null>;
@@ -250,7 +252,22 @@ export function createRunScope(deps: RunScopeDeps) {
         const loadSensitive = deps.sessions.loadMemorySensitive;
         if (!loadSensitive) return false;
         return loadSensitive(await memoryRowFor(namespace, sessionId), sessionId);
-      }
+      },
+      // v74 — as loadMessages (the scoped row, else the legacy one), with the mark read in the same query.
+      ...(deps.sessions.loadMemoryMarked
+        ? {
+            loadMessagesMarked: async (namespace: string, sessionId: string) => {
+              const loadMarked = deps.sessions.loadMemoryMarked!;
+              const scoped = await loadMarked(key(namespace), sessionId);
+              if (scoped.messages.length > 0 || !await legacyReadable(namespace)) {
+                memoryRowKey.set(sessionKey(namespace, sessionId), key(namespace));
+                return scoped;
+              }
+              memoryRowKey.set(sessionKey(namespace, sessionId), namespace);
+              return loadMarked(namespace, sessionId);
+            }
+          }
+        : {})
     };
 
     const toolDataStore: ScopedRunDependencies["toolDataStore"] = {

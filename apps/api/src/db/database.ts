@@ -155,13 +155,13 @@ import {
   type McpSandboxSettings,
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
-import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, releaseGateRestrictsToAdmins, type DataLabels } from "@ai-orchestrator/shared";
+import { isEmptyDataLabels, keepPinnedDataMarks, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, releaseGateRestrictsToAdmins, type DataLabels } from "@ai-orchestrator/shared";
 import type { McpToolCallLabels, McpToolOpenWorldOverride, McpToolPolicySubject, ToolArgumentSummary } from "@ai-orchestrator/shared";
 import { gatewayGuardField, parseRecordedCallLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, McpPolicyEnforceRefusedError, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
-import { mcpGatewayApprovalRetentionCutoff, userKindWhere } from "./store.js";
+import { executionSensitiveValue, mcpGatewayApprovalRetentionCutoff, userKindWhere } from "./store.js";
 import { sessionsToEvict } from "./session-eviction.js";
 import {
   auditEntryHash,
@@ -660,6 +660,8 @@ export interface KnowledgeBaseChunkRecord {
   metadata: Record<string, unknown> | null;
   vector: number[];
   createdAt: string;
+  /** v74 — written by sensitive work; present only when true. */
+  sensitive?: true;
 }
 
 interface KnowledgeBaseRow {
@@ -685,6 +687,8 @@ interface KnowledgeBaseChunkRow {
   metadata_json: string | null;
   vector_json: string;
   created_at: string;
+  /** v74 — 1 when written by sensitive work. */
+  sensitive?: number | null;
 }
 
 function mapKnowledgeBase(row: KnowledgeBaseRow): KnowledgeBaseRecord {
@@ -716,7 +720,8 @@ function mapKnowledgeBaseChunk(row: KnowledgeBaseChunkRow): KnowledgeBaseChunkRe
       ? (safeJsonParse(toString(row.metadata_json)) as Record<string, unknown>)
       : null,
     vector: safeJsonParse(toString(row.vector_json)) as number[],
-    createdAt: toString(row.created_at)
+    createdAt: toString(row.created_at),
+    ...sensitiveField(row.sensitive)
   };
 }
 
@@ -4511,6 +4516,9 @@ export class SqliteStore implements Store {
     this.ensureColumn("session_memory", "sensitive", "INTEGER NOT NULL", "0");
     this.ensureColumn("session_tool_cache", "sensitive", "INTEGER NOT NULL", "0");
     this.ensureColumn("session_artifacts", "sensitive", "INTEGER NOT NULL", "0");
+    // v74 — runs and knowledge base chunks from sensitive work (content copied from them stays out of exported content).
+    this.ensureColumn("execution_history", "sensitive", "INTEGER NOT NULL", "0");
+    this.ensureColumn("knowledge_base_chunks", "sensitive", "INTEGER NOT NULL", "0");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -4725,7 +4733,8 @@ export class SqliteStore implements Store {
     const updatedAt = now;
 
     const payload: Workflow = {
-      ...workflow,
+      // v74 — a pin copied from a sensitive run keeps its mark while the node is pinned, whatever the client sent.
+      ...keepPinnedDataMarks(existing, workflow),
       projectId: workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID,
       folderId: workflow.folderId ?? existing?.folderId,
       tags: Array.isArray(workflow.tags) ? workflow.tags.filter((t) => typeof t === "string") : existing?.tags,
@@ -5479,6 +5488,23 @@ export class SqliteStore implements Store {
     return row ? parseStoredDataLabels(row.labels_json) : null;
   }
 
+  /** v74 — the messages and loadSessionMemorySensitive's answer, from one SELECT. */
+  async loadSessionMemoryMarked(namespace: string, sessionId: string): Promise<{ messages: ChatMessage[]; sensitive: boolean }> {
+    const row = this.queryOne<{ messages_json: string; sensitive: number | null; labels_json: string | null }>(
+      `SELECT messages_json, sensitive, labels_json FROM session_memory WHERE namespace = ? AND session_id = ?`,
+      [namespace, sessionId]
+    );
+    if (!row) return { messages: [], sensitive: false };
+    let messages: ChatMessage[] = [];
+    try {
+      const parsed = JSON.parse(toString(row.messages_json));
+      if (Array.isArray(parsed)) messages = parsed as ChatMessage[];
+    } catch {
+      messages = [];
+    }
+    return { messages, sensitive: Number(row.sensitive ?? 0) === 1 || labelsMarkSensitive(parseStoredDataLabels(row.labels_json)) };
+  }
+
   /** v73 — the memory was written by sensitive work, or its stored labels say sensitive. False when there is none. */
   async loadSessionMemorySensitive(namespace: string, sessionId: string): Promise<boolean> {
     const row = this.queryOne<{ sensitive: number | null; labels_json: string | null }>(
@@ -5988,6 +6014,7 @@ export class SqliteStore implements Store {
     nodeResultsJson?: unknown;
     customData?: unknown;
     error?: string;
+    sensitive?: boolean | "pending";
   }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; unlessInterruptedWith?: string; fence?: QueueClaimFence }): Promise<boolean> {
     const fence = options?.fence;
     if (fence) {
@@ -6073,10 +6100,11 @@ export class SqliteStore implements Store {
           output_json,
           node_results_json,
           custom_data_json,
-          error
+          error,
+          sensitive
         )
         -- 13.3: a run a data-subject deletion erased (its tombstone) is never written back by its executor.
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         WHERE NOT EXISTS (SELECT 1 FROM erasure_tombstones WHERE kind = 'run' AND row_id = ?)
         ON CONFLICT(id) DO UPDATE SET
           workflow_id = excluded.workflow_id,
@@ -6091,7 +6119,8 @@ export class SqliteStore implements Store {
           output_json = excluded.output_json,
           node_results_json = excluded.node_results_json,
           custom_data_json = excluded.custom_data_json,
-          error = excluded.error${guard}`
+          error = excluded.error,
+          sensitive = CASE WHEN execution_history.sensitive = 1 OR excluded.sensitive = 1 THEN 1 WHEN ? = 1 THEN execution_history.sensitive ELSE excluded.sensitive END${guard}`
     ).run(
         input.id,
         input.workflowId,
@@ -6107,7 +6136,9 @@ export class SqliteStore implements Store {
         input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
         input.customData === undefined ? null : JSON.stringify(input.customData),
         input.error ?? null,
+        executionSensitiveValue(input.sensitive),
         input.id,
+        input.sensitive === undefined ? 1 : 0,
         ...(interrupted ? [options.unlessInterruptedWith] : [])
     );
     this.persist();
@@ -9933,6 +9964,13 @@ export class SqliteStore implements Store {
     return true;
   }
 
+  /** v74 — see Store.getExecutionSensitive. */
+  async getExecutionSensitive(executionId: string): Promise<boolean | null> {
+    const row = this.queryOne<{ sensitive: number | null }>(`SELECT sensitive FROM execution_history WHERE id = ?`, [executionId]);
+    // 2 (a record its run has not finished writing: still running, or ended by a cancel or a reconcile) fails closed.
+    return row ? Number(row.sensitive ?? 0) !== 0 : null;
+  }
+
   async getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {
     const row = this.queryOne<{ release_channel: string | null; release_version: number | null }>(`SELECT release_channel, release_version FROM execution_history WHERE id = ?`, [executionId]);
     if (!row || !row.release_channel) return null;
@@ -12560,6 +12598,7 @@ export class SqliteStore implements Store {
       metadata?: Record<string, unknown> | null;
       vector: number[];
     }>;
+    sensitive?: boolean;
   }): Promise<{ inserted: number; dimensions: number }> {
     const kb = this.getKnowledgeBaseSync(input.knowledgeBaseId);
     if (!kb) throw new Error(`Knowledge base not found: ${input.knowledgeBaseId}`);
@@ -12578,8 +12617,8 @@ export class SqliteStore implements Store {
     for (const c of input.chunks) {
       this.exec(
         `INSERT INTO knowledge_base_chunks (
-           id, knowledge_base_id, source_id, chunk_index, content, metadata_json, vector_json, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           id, knowledge_base_id, source_id, chunk_index, content, metadata_json, vector_json, created_at, sensitive
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           c.id ?? `kbc_${randomUUID()}`,
           input.knowledgeBaseId,
@@ -12588,7 +12627,8 @@ export class SqliteStore implements Store {
           c.content,
           c.metadata ? JSON.stringify(c.metadata) : null,
           JSON.stringify(c.vector),
-          now
+          now,
+          input.sensitive === true ? 1 : 0
         ]
       );
     }
@@ -12641,6 +12681,7 @@ export class SqliteStore implements Store {
     content: string;
     metadata: Record<string, unknown> | null;
     score: number;
+    sensitive?: true;
   }>> {
     const ftsQuery = buildFts5Query(input.query);
     if (!ftsQuery) return [];
@@ -12653,6 +12694,7 @@ export class SqliteStore implements Store {
       content: string;
       metadata_json: string | null;
       raw_score: number;
+      sensitive: number | null;
     };
     let rows: Row[];
     try {
@@ -12663,6 +12705,7 @@ export class SqliteStore implements Store {
            c.chunk_index AS chunk_index,
            c.content AS content,
            c.metadata_json AS metadata_json,
+           c.sensitive AS sensitive,
            bm25(knowledge_base_chunks_fts) AS raw_score
          FROM knowledge_base_chunks_fts
          JOIN knowledge_base_chunks c ON c.rowid = knowledge_base_chunks_fts.rowid
@@ -12693,7 +12736,8 @@ export class SqliteStore implements Store {
       metadata: r.metadata_json
         ? (safeJsonParse(toString(r.metadata_json)) as Record<string, unknown>)
         : null,
-      score: (negated[idx]! - min) / range
+      score: (negated[idx]! - min) / range,
+      ...sensitiveField(r.sensitive)
     }));
   }
 

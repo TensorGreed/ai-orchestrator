@@ -42,3 +42,4 @@ export * from "./instrumentation";
 export * from "./data-subject";
 export * from "./legal-hold";
 export * from "./retention-policy";
+export * from "./pinned-data-marks";
