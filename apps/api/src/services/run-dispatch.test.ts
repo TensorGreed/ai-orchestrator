@@ -95,6 +95,9 @@ describe("decideDispatch (capability gate)", () => {
     expect(capabilitiesFor({ ...spec(), run: { ...spec().run, sensitiveInput: true } })).toEqual([SENSITIVE_INPUT_CAPABILITY]);
     expect(capabilitiesFor({ ...boundary, run: { ...boundary.run, sensitiveInput: true } })).toEqual([RESPONSE_BOUNDARY_CAPABILITY, SENSITIVE_INPUT_CAPABILITY]);
     expect(decideDispatch([current, older], "default", [SENSITIVE_INPUT_CAPABILITY]).queue).toBe(false);
+    const markedPins = { ...spec(), run: { ...spec().run, workflow: { ...spec().run.workflow, pinnedData: { a: 1 }, pinnedDataSensitive: ["a"] } } };
+    expect(capabilitiesFor(markedPins)).toEqual([SENSITIVE_INPUT_CAPABILITY]);
+    expect(capabilitiesFor({ ...markedPins, run: { ...markedPins.run, usePinnedData: false } })).toEqual([]);
     // The gate keeps one decision per pool and capability set.
     const reported: Array<{ label: string; inline: boolean; changed: boolean }> = [];
     const changes: boolean[] = [];

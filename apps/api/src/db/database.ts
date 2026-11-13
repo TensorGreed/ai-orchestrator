@@ -161,7 +161,7 @@ import { gatewayGuardField, parseRecordedCallLabels } from "@ai-orchestrator/sha
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, McpPolicyEnforceRefusedError, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
-import { mcpGatewayApprovalRetentionCutoff, userKindWhere } from "./store.js";
+import { executionSensitiveValue, mcpGatewayApprovalRetentionCutoff, userKindWhere } from "./store.js";
 import { sessionsToEvict } from "./session-eviction.js";
 import {
   auditEntryHash,
@@ -6014,7 +6014,7 @@ export class SqliteStore implements Store {
     nodeResultsJson?: unknown;
     customData?: unknown;
     error?: string;
-    sensitive?: boolean;
+    sensitive?: boolean | "pending";
   }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; unlessInterruptedWith?: string; fence?: QueueClaimFence }): Promise<boolean> {
     const fence = options?.fence;
     if (fence) {
@@ -6120,7 +6120,7 @@ export class SqliteStore implements Store {
           node_results_json = excluded.node_results_json,
           custom_data_json = excluded.custom_data_json,
           error = excluded.error,
-          sensitive = CASE WHEN execution_history.sensitive = 1 OR excluded.sensitive = 1 THEN 1 ELSE 0 END${guard}`
+          sensitive = CASE WHEN execution_history.sensitive = 1 OR excluded.sensitive = 1 THEN 1 WHEN ? = 1 THEN execution_history.sensitive ELSE excluded.sensitive END${guard}`
     ).run(
         input.id,
         input.workflowId,
@@ -6136,8 +6136,9 @@ export class SqliteStore implements Store {
         input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
         input.customData === undefined ? null : JSON.stringify(input.customData),
         input.error ?? null,
-        input.sensitive === true ? 1 : 0,
+        executionSensitiveValue(input.sensitive),
         input.id,
+        input.sensitive === undefined ? 1 : 0,
         ...(interrupted ? [options.unlessInterruptedWith] : [])
     );
     this.persist();
@@ -9966,7 +9967,8 @@ export class SqliteStore implements Store {
   /** v74 — see Store.getExecutionSensitive. */
   async getExecutionSensitive(executionId: string): Promise<boolean | null> {
     const row = this.queryOne<{ sensitive: number | null }>(`SELECT sensitive FROM execution_history WHERE id = ?`, [executionId]);
-    return row ? Number(row.sensitive ?? 0) === 1 : null;
+    // 2 (a record its run has not finished writing: still running, or ended by a cancel or a reconcile) fails closed.
+    return row ? Number(row.sensitive ?? 0) !== 0 : null;
   }
 
   async getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {

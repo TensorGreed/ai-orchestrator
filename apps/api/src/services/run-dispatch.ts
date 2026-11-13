@@ -33,15 +33,17 @@ export const QUEUE_DISPATCH_CAPABILITY = "queue-dispatch-v1";
  */
 export const RESPONSE_BOUNDARY_CAPABILITY = "content-rules-response-v1";
 /**
- * v74 — a worker that keeps a run started from a sensitive run's content (`run.sensitiveInput`) out of exported
- * content. A job that carries it is dispatched only while every live consumer of its pool advertises this: an older
+ * v74 — a worker that keeps a run started from a sensitive run's content (`run.sensitiveInput`, or marked pinned data
+ * on `run.workflow`) out of exported content. A job that carries it is dispatched only while every live consumer of its pool advertises this: an older
  * worker would ignore the field. Until then such runs go inline.
  */
 export const SENSITIVE_INPUT_CAPABILITY = "content-capture-sensitive-input-v1";
 
 /** The capabilities a worker needs, besides QUEUE_DISPATCH_CAPABILITY, to run this spec. */
 export function capabilitiesFor(spec: DispatchedRunSpec): string[] {
-  return [...(spec.run.responseBoundary ? [RESPONSE_BOUNDARY_CAPABILITY] : []), ...(spec.run.sensitiveInput === true ? [SENSITIVE_INPUT_CAPABILITY] : [])];
+  // v74 — pinned data copied from a sensitive run is marked on the workflow itself; an older worker would ignore it.
+  const markedPins = spec.run.usePinnedData !== false && (spec.run.workflow.pinnedDataSensitive?.length ?? 0) > 0;
+  return [...(spec.run.responseBoundary ? [RESPONSE_BOUNDARY_CAPABILITY] : []), ...(spec.run.sensitiveInput === true || markedPins ? [SENSITIVE_INPUT_CAPABILITY] : [])];
 }
 
 /** The DispatchedRunSpec format this build writes and reads. */

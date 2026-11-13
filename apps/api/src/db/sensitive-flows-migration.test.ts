@@ -37,6 +37,18 @@ async function expectUpgraded(store: Store) {
   // A later write of the record without the flag (the finished run's write, a cancel) keeps the mark.
   await store.saveExecutionHistory({ id: "run-new", workflowId: "wf", status: "success", startedAt: "2026-11-02T00:00:00.000Z", completedAt: "2026-11-02T00:00:01.000Z" });
   expect(await store.getExecutionSensitive("run-new")).toBe(true);
+  // A write made before the run finished counts as sensitive until the run's final write says otherwise; a write that
+  // does not say keeps what is stored; a final "not sensitive" clears a pending record but never a mark.
+  await store.saveExecutionHistory({ id: "run-pending", workflowId: "wf", status: "running", startedAt: "2026-11-02T00:00:00.000Z", sensitive: "pending" });
+  expect(await store.getExecutionSensitive("run-pending")).toBe(true);
+  await store.saveExecutionHistory({ id: "run-pending", workflowId: "wf", status: "error", startedAt: "2026-11-02T00:00:00.000Z", error: "worker failed" });
+  expect(await store.getExecutionSensitive("run-pending")).toBe(true);
+  await store.saveExecutionHistory({ id: "run-pending", workflowId: "wf", status: "success", startedAt: "2026-11-02T00:00:00.000Z", sensitive: false });
+  expect(await store.getExecutionSensitive("run-pending")).toBe(false);
+  await store.saveExecutionHistory({ id: "run-new", workflowId: "wf", status: "success", startedAt: "2026-11-02T00:00:00.000Z", sensitive: false });
+  expect(await store.getExecutionSensitive("run-new")).toBe(true);
+  await store.saveExecutionHistory({ id: "run-fresh", workflowId: "wf", status: "error", startedAt: "2026-11-02T00:00:00.000Z" });
+  expect(await store.getExecutionSensitive("run-fresh")).toBe(false);
   // The record the API returns carries no new field.
   expect(await store.getExecutionHistory("run-new")).not.toHaveProperty("sensitive");
 

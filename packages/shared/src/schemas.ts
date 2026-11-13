@@ -267,7 +267,7 @@ export const workflowExecuteRequestSchema = z.object({
    * v74 — the run `nodeOutputs` were copied from (an editor's single-node run): when it was sensitive work, this run
    * exports no content either and marks what it writes.
    */
-  nodeOutputsExecutionId: z.string().min(1).optional(),
+  nodeOutputsExecutionId: z.string().min(1).max(200).optional(),
   sessionId: z.string().optional(),
   session_id: z.string().optional(),
   executionTimeoutMs: z.number().int().positive().optional(),

@@ -263,12 +263,14 @@ describe("error workflow input from a sensitive run (v74)", () => {
     expect(logged?.sensitive).toBe(true);
     expectDropped(await chatSpans(fixture, "echo-handler-sensitive"), "sensitive_run_data");
 
-    await execute(fixture, "wf-fails-clean", {}, "error");
+    const cleanRun = await execute(fixture, "wf-fails-clean", {}, "error");
     const cleanLog = await waitFor(
       async () => await fixture.store.loadSessionArtifact({ namespace, sessionId: "clean", artifactKey: "last" }),
       (row) => row !== null
     );
     expect(cleanLog?.sensitive).toBeUndefined();
+    // The clean run's own final write says so: its record is not marked.
+    expect(await fixture.store.getExecutionSensitive(cleanRun.executionId)).toBe(false);
     expectExported(await chatSpans(fixture, "echo-handler-clean"), PRIVATE_VALUE);
 
     // The sensitive run's own spans never held the seeded secret or the private value.
@@ -323,7 +325,14 @@ describe("pinned data copied from a sensitive run (v74)", () => {
     expectDropped(await chatSpans(fixture, "echo-reader"), "sensitive");
     expect((await fixture.spans.getFinishedSpans()).some((span) => span.name === "chat echo-unused")).toBe(false);
 
-    // The same data pinned by hand (no run named) is not marked, and is exported as before.
+    // Editing the pinned data keeps the mark: it is still the sensitive run's content. Only removing the pin clears it.
+    const edited = await api(fixture, "PUT", "/api/workflows/wf-reader/pins/source", { data: { ...(sourceOutput as Record<string, unknown>), note: "edited" } });
+    expect(edited.statusCode).toBe(200);
+    expect((await fixture.store.getWorkflow("wf-reader"))?.pinnedDataSensitive).toEqual(["source"]);
+    expect((await fixture.app.inject({ method: "DELETE", url: "/api/workflows/wf-reader/pins/source", headers: { cookie: fixture.cookie } })).statusCode).toBe(200);
+    expect((await fixture.store.getWorkflow("wf-reader"))?.pinnedDataSensitive).toBeUndefined();
+
+    // Data pinned by hand (no run named) on an unmarked node is not marked, and is exported as before.
     const byHand = await api(fixture, "PUT", "/api/workflows/wf-reader/pins/source", { data: { answer: "hand-written note Qz11" } });
     expect(byHand.statusCode).toBe(200);
     expect((await fixture.store.getWorkflow("wf-reader"))?.pinnedDataSensitive).toBeUndefined();
@@ -350,6 +359,38 @@ describe("pinned data copied from a sensitive run (v74)", () => {
     expect((await on.store.getWorkflow("wf-reader"))?.pinnedDataSensitive).toEqual(["source"]);
     await execute(on, "wf-reader", { usePinnedData: true });
     expectDropped(await chatSpans(on, "echo-reader"), "sensitive");
+  });
+});
+
+describe("runs whose record does not say they were clean (v74)", () => {
+  it("a run its executor never finished (canceled or reconciled after a progress write) and a production run whose published version declared a sensitive source count as sensitive", async () => {
+    const { fixture } = await newFixture("l2m-sensflow-unfinished-");
+    const baseUrl = await startEchoModel();
+    const secretId = await seedSecret(fixture);
+    await fixture.store.upsertWorkflow(readerFlow("wf-reader", baseUrl, secretId));
+    // The draft declares nothing sensitive, so only the record and the version that ran can say so.
+    await fixture.store.upsertWorkflow(flow("wf-source", [n("start", "manual_trigger"), n("out", "output")], [["start", "out"]]));
+    const pinFrom = async (executionId: string) => {
+      await fixture.app.inject({ method: "DELETE", url: "/api/workflows/wf-reader/pins/source", headers: { cookie: fixture.cookie } });
+      const pinned = await api(fixture, "PUT", "/api/workflows/wf-reader/pins/source", { data: { answer: "copied" }, executionId });
+      expect(pinned.statusCode, pinned.body).toBe(200);
+      return (await fixture.store.getWorkflow("wf-reader"))?.pinnedDataSensitive;
+    };
+
+    // A progress write, then a cancel: the run never said it was clean.
+    await fixture.store.saveExecutionHistory({ id: "run-progress", workflowId: "wf-source", status: "running", startedAt: "2026-11-13T00:00:00.000Z", sensitive: "pending" });
+    await fixture.store.cancelExecution({ id: "run-progress", onlyFrom: ["running"] });
+    expect((await fixture.store.getExecutionHistory("run-progress"))?.status).toBe("canceled");
+    expect(await pinFrom("run-progress")).toEqual(["source"]);
+
+    // A production run of a published version with a Sensitive output node, whose draft dropped the flag since.
+    await fixture.store.saveExecutionHistory({ id: "run-prod", workflowId: "wf-source", status: "success", startedAt: "2026-11-13T00:00:00.000Z", completedAt: "2026-11-13T00:00:01.000Z", sensitive: false });
+    await fixture.store.writeWorkflowVersion({ id: "wfv-sensitive", workflowId: "wf-source", version: 7, workflowJson: JSON.stringify(sourceFlow("wf-source", baseUrl, secretId)), createdBy: null, changeNote: null });
+    await fixture.store.setExecutionRelease("run-prod", "production", 7);
+    expect(await pinFrom("run-prod")).toEqual(["source"]);
+    // The same run on the draft (clean now) is clean.
+    await fixture.store.setExecutionRelease("run-prod", "draft", null);
+    expect(await pinFrom("run-prod")).toBeUndefined();
   });
 });
 

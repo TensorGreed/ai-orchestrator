@@ -2362,8 +2362,10 @@ export async function createApp(
       // is the mark, and counts an `error` with no message as final too: no current path rewrites a same-id run
       // that ended that way, but a future same-id retry would be refused here in cluster mode, not written over.
       const fence = queueRunFences.get(meta.executionId)?.fence;
+      // v74 — a record written before the run finished counts as sensitive until the run's final write says otherwise,
+      // so a run a cancel or a reconcile ends keeps content copied from it out of exported content (fails closed).
       const written = await store.saveExecutionHistory(
-        record,
+        meta.phase === "progress" && record.sensitive !== true ? { ...record, sensitive: "pending" } : record,
         meta.phase === "progress"
           ? { unlessFinished: true, ...(fence ? { fence } : {}) }
           : { unlessCanceled: true, ...(clusterMode ? { unlessInterruptedWith: DEAD_EXECUTOR_RUN_ERROR } : {}), ...(fence ? { fence } : {}) }
@@ -2851,6 +2853,16 @@ export async function createApp(
         replayCapture?.abandon(captureTicket, "skipped_reveal");
         captureHandedOff = true;
       }
+      // v74 — nor is a run that started from a sensitive run's content (an error workflow's input, copied node outputs,
+      // marked pinned data): its replay would not know where that content came from.
+      if (
+        captureTicket &&
+        !captureHandedOff &&
+        (input.sensitiveInput === true || (input.usePinnedData === true && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0))
+      ) {
+        replayCapture?.abandon(captureTicket, "skipped_sensitive_input");
+        captureHandedOff = true;
+      }
       // Otherwise the capture is taken once the run's final history is stored (persistExecutionHistoryRecord).
       if (captureTicket && runPlan && !captureHandedOff && input.executionId) {
         sweepStaleCaptures();
@@ -3135,7 +3147,7 @@ export async function createApp(
       customData: input.customData ?? input.result.customData,
       error: input.result.error,
       // v74 — content copied from this run later (pinned data, a retry, a single-node run) stays out of exported content.
-      ...(runWasSensitiveWork(input.result) ? { sensitive: true } : {})
+      sensitive: runWasSensitiveWork(input.result)
     }, {
       phase: "final",
       executionId: input.executionId,
@@ -4107,10 +4119,11 @@ export async function createApp(
 
   /**
    * v74 — whether content copied from the run `executionId` (pinned data, a retry, a single-node run) is content of
-   * sensitive work for content capture. True when its record is marked, and also when the run has not finished, has no
-   * record, cannot be read by `user`, or its workflow declares a sensitive source now (a run made with capture off may
-   * not have checked; checked failing closed, as the run does). Content copied from such a run keeps a later run's
-   * content out of exported spans and marks what it writes.
+   * sensitive work for content capture. True when its record is marked or was never finished by its run (a cancel or a
+   * reconcile ended it), and also when the run has not finished, has no record, cannot be read by `user`, or the
+   * workflow it ran declares a sensitive source (a run made with capture off may not have checked; checked failing
+   * closed, as the run does): the published version a production run ran, and the draft. Content copied from such a
+   * run keeps a later run's content out of exported spans and marks what it writes.
    */
   const copiedRunSensitive = async (executionId: string, user: SafeUser): Promise<boolean> => {
     try {
@@ -4120,17 +4133,31 @@ export async function createApp(
       if ((await store.getExecutionSensitive(executionId)) !== false) return true;
       const workflow = await store.getWorkflow(execution.workflowId);
       if (!workflow) return true;
-      return await workflowDeclaresSensitiveSource(
-        workflow.nodes,
-        {
-          sensitiveSecretIds: await sensitiveSecrets.ids(),
-          resolveRegisteredMcpServer: async (registryServerId) => await resolveRegisteredMcpServer(registryServerId),
-          loadWorkflow: runScope.dependenciesFor(workflow, { channel: "draft" }).loadWorkflow
-        },
-        new Set(),
-        0,
-        true
-      );
+      const ran: Workflow[] = [workflow];
+      const ranOn = await store.getExecutionRelease(executionId);
+      if (ranOn?.channel === "production") {
+        // The version that ran; one that cannot be found or read fails closed.
+        if (ranOn.version === null) return true;
+        const version = await store.getWorkflowVersion(execution.workflowId, ranOn.version);
+        const snapshot = version ? (JSON.parse(version.workflowJson) as Partial<Workflow> | null) : null;
+        if (!snapshot || !Array.isArray(snapshot.nodes)) return true;
+        ran.push({ ...workflow, nodes: snapshot.nodes });
+      }
+      for (const candidate of ran) {
+        const declared = await workflowDeclaresSensitiveSource(
+          candidate.nodes,
+          {
+            sensitiveSecretIds: await sensitiveSecrets.ids(),
+            resolveRegisteredMcpServer: async (registryServerId) => await resolveRegisteredMcpServer(registryServerId),
+            loadWorkflow: runScope.dependenciesFor(workflow, { channel: ranOn?.channel ?? "draft" }).loadWorkflow
+          },
+          new Set(),
+          0,
+          true
+        );
+        if (declared) return true;
+      }
+      return false;
     } catch {
       return true;
     }
@@ -11264,12 +11291,11 @@ export async function createApp(
         reply.code(400);
         return { error: "Invalid pin payload", details: parsed.error.issues };
       }
-      // v74 — pinned data copied from a run that was sensitive work is marked; a pin saved without a run is not (a
-      // save that keeps the data unchanged keeps an earlier mark, see keepPinnedDataMarks).
+      // v74 — pinned data copied from a run that was sensitive work is marked; a pin saved without a run is not marked,
+      // but a node's earlier mark stays until its pin is removed (see keepPinnedDataMarks).
       const fromSensitiveRun = parsed.data.executionId ? await copiedRunSensitive(parsed.data.executionId, user) : false;
       const marks = new Set(workflow.pinnedDataSensitive ?? []);
       if (fromSensitiveRun) marks.add(request.params.nodeId);
-      else marks.delete(request.params.nodeId);
       const { pinnedDataSensitive: _marks, ...unmarked } = workflow;
       const nextWorkflow: Workflow = {
         ...unmarked,

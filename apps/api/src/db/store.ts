@@ -501,8 +501,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
   setExecutionTraceId(executionId: string, traceId: string, options?: { fence?: QueueClaimFence }): Promise<boolean>;
   getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null>;
   /**
-   * v74 — whether the run's history record is marked as sensitive work for content capture; null when there is no
-   * record. Content copied from a marked run (pinned data, a retry, a single-node run) is treated as sensitive.
+   * v74 — whether content copied from this run is sensitive: its record is marked, or its run never wrote a final
+   * answer (see saveExecutionHistory's `sensitive`). Null when there is no record.
    */
   getExecutionSensitive(executionId: string): Promise<boolean | null>;
   /** The hashes `version` had when it was released (any release, rollbacks included). */
@@ -2038,10 +2038,13 @@ export interface Store extends AiGatewayStore, SubjectStore {
     customData?: unknown;
     error?: string;
     /**
-     * v74 — the run was sensitive work for content capture. Sticky: a later write without it (a progress write, a
-     * cancel) keeps the mark. Not part of the record the API returns; read it with getExecutionSensitive.
+     * v74 — whether the run was sensitive work for content capture: `true` marks the record, and the mark stays through
+     * later writes; `false` is the run's own final answer that it was not; `"pending"` is a write made before the run
+     * finished (a progress write), which counts as marked until the run's final write says otherwise, so a record a
+     * cancel or a reconcile ends fails closed. Left out, the stored value is kept (0 on a new record). Not part of the
+     * record the API returns; read it with getExecutionSensitive.
      */
-    sensitive?: boolean;
+    sensitive?: boolean | "pending";
   }, options?: {
     /**
      * A progress write: refused (nothing changes) when the run's record is already finished, i.e. `success`,
@@ -3060,4 +3063,9 @@ export interface Store extends AiGatewayStore, SubjectStore {
     cases: Array<{ recording: ReplayRecordingInsert; fixture: Omit<Parameters<Store["createEvalFixture"]>[0], "datasetId" | "recordingId"> }>;
     limits: ReplayRecordingLimits;
   }): Promise<{ recordingIds: string[] } | ReplayRecordingRefusal>;
+}
+
+/** v74 — the stored `execution_history.sensitive` value of a write: 1 marked, 2 not finished, 0 otherwise. */
+export function executionSensitiveValue(sensitive: boolean | "pending" | undefined): number {
+  return sensitive === true ? 1 : sensitive === "pending" ? 2 : 0;
 }

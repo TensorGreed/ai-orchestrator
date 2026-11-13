@@ -3,7 +3,7 @@
  * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import type { PoolClient } from "pg";
-import { type CancelExecutionResult, type QueueClaimFence, type Store } from "../store.js";
+import { executionSensitiveValue, type CancelExecutionResult, type QueueClaimFence, type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { deleteUnlockedInBatches } from "./prune.js";
@@ -60,7 +60,7 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
   nodeResultsJson?: unknown;
   customData?: unknown;
   error?: string;
-  sensitive?: boolean;
+  sensitive?: boolean | "pending";
 }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; unlessInterruptedWith?: string; fence?: QueueClaimFence }): Promise<boolean> {
   const condition = options?.unlessFinished
     ? `NOT (execution_history.status IN ('success', 'error', 'canceled') OR (execution_history.status = 'partial' AND execution_history.completed_at IS NOT NULL))`
@@ -69,7 +69,7 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       : "";
   // Phase 13.1 — a run the dead-executor reconcile already failed keeps that record (see Store.saveExecutionHistory).
   const interrupted = options?.unlessInterruptedWith !== undefined;
-  const notInterrupted = `NOT (execution_history.status = 'error' AND (execution_history.error IS NULL OR execution_history.error = $16))`;
+  const notInterrupted = `NOT (execution_history.status = 'error' AND (execution_history.error IS NULL OR execution_history.error = $17))`;
   const guard = interrupted
     ? `
        WHERE ${condition ? `(${condition}) AND ` : ""}${notInterrupted}`
@@ -97,8 +97,9 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
          node_results_json = EXCLUDED.node_results_json,
          custom_data_json = EXCLUDED.custom_data_json,
          error = EXCLUDED.error,
-         -- v74: a mark stays once set (a progress write or a cancel after it never clears it).
-         sensitive = CASE WHEN execution_history.sensitive = 1 OR EXCLUDED.sensitive = 1 THEN 1 ELSE 0 END${guard}`;
+         -- v74: a mark stays once set (a progress write or a cancel after it never clears it); a write that does not
+         -- say ($16 = 1) keeps the stored value.
+         sensitive = CASE WHEN execution_history.sensitive = 1 OR EXCLUDED.sensitive = 1 THEN 1 WHEN $16::integer = 1 THEN execution_history.sensitive ELSE EXCLUDED.sensitive END${guard}`;
   const params = [
       input.id,
       input.workflowId,
@@ -114,7 +115,8 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
       input.customData === undefined ? null : JSON.stringify(input.customData),
       input.error ?? null,
-      input.sensitive === true ? 1 : 0,
+      executionSensitiveValue(input.sensitive),
+      input.sensitive === undefined ? 1 : 0,
       ...(interrupted ? [options.unlessInterruptedWith] : [])
   ];
   if (!fence) {
