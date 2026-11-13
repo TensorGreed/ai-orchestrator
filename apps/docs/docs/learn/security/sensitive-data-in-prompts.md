@@ -11,7 +11,7 @@ demoRecorded: true
 
 # Keeping personal data and secrets out of AI prompts
 
-Personal data and secrets leak from an AI application through more doors than the prompt: tool arguments, tool results, the model's answer, logs, traces and agent memory all carry copies. The fix is a short pipeline. Detect the sensitive values, replace each one with a stand-in (a mask, a keyed hash, a ciphertext or a token) before the text reaches a model, a tool or a log, and turn a token back into the real value only at the one step that needs it. Credentials are a different problem: keep them out of the data path altogether and pass references instead of values.
+<Term id="pii">Personal data</Term> and secrets leak from an AI application through more doors than the prompt: tool arguments, tool results, the model's answer, logs, traces and agent memory all carry copies. The fix is a short pipeline. Detect the sensitive values, replace each one with a stand-in (a mask, a keyed hash, a ciphertext or a token) before the text reaches a model, a tool or a log, and turn a token back into the real value only at the one step that needs it. Credentials are a different problem: keep them out of the data path altogether and pass references instead of values.
 
 OWASP lists this risk as LLM02, <Term id="sensitive-information-disclosure">Sensitive Information Disclosure</Term>. It names "personal identifiable information (PII), financial details, health records, confidential business data, security credentials, and legal documents" as the data at stake, and among its mitigations it suggests "tokenization to preprocess and sanitize sensitive information."
 
@@ -21,9 +21,9 @@ Follow one support ticket through an agent. The customer writes: "My card 4111 1
 
 - **The prompt.** The ticket goes into the model's context. A hosted model provider now has a copy, under its own retention terms.
 - **Tool arguments.** The agent calls `lookup_customer(email="ann@example.com")`. The MCP server, its logs and anything it forwards to now hold the value.
-- **Tool results.** The CRM answers with the customer's name, address and order history. That is often more <Term id="pii">personal data</Term> than the user typed, and it all lands in the context for the next model call.
+- **Tool results.** The CRM answers with the customer's name, address and order history. That is often more personal data than the user typed, and it all lands in the context for the next model call.
 - **The answer.** The model can repeat any of it, to this user or, through shared memory or a badly scoped retrieval, to the next one.
-- **Logs, traces and telemetry.** Request logs, debug output, tracing spans and tool-call records copy prompts and arguments. They are often kept longer, and read by more people, than the application database.
+- **Logs, traces and telemetry.** Request logs, debug output, tracing spans and <Term id="tool-call-telemetry">tool-call records</Term> copy prompts and arguments. They are often kept longer, and read by more people, than the application database.
 - **Stored state.** Run history, agent memory, cached tool results and test recordings keep the data after the request ends, and a later run can send it to a model again.
 
 Two things make agents worse than ordinary apps here. They copy data between steps on their own, so a value typed once can reach five systems. And the model decides what to call, so you cannot list every flow in advance.
@@ -80,7 +80,7 @@ Telemetry is where good intentions fail. A team masks the prompt carefully, then
 
 Some habits that hold up:
 
-- **Record shape, not content, by default.** For a tool call, the useful facts are which tool, how long, whether it failed, and roughly what kind of arguments it took. A <Term id="tool-call-telemetry">tool-call record</Term> can keep types, lengths and keyed hashes of the arguments and still support "which callers send this value" questions.
+- **Record shape, not content, by default.** For a tool call, the useful facts are which tool, how long, whether it failed, and roughly what kind of arguments it took. A tool-call record can keep types, lengths and keyed hashes of the arguments and still support "which callers send this value" questions.
 - **Make content capture opt-in and cleaned.** If traces must carry prompts, mask detected values and remove secrets before export, and drop content entirely for work you know is sensitive.
 - **Remember state that outlives the run.** Agent memory and cached tool results written during a sensitive conversation can be read by a later run that looks harmless. Mark them, and let the mark travel with the data.
 - **Keep test data masked.** Production runs copied into a test set are personal data. Mask them before they are stored, with stable surrogates so replays still line up.
@@ -94,7 +94,7 @@ The pattern is references, not values. A workflow stores a <Term id="secret-refe
 
 ## Sensitive data in L2M
 
-L2M, a self-hosted workflow builder and agent runtime, has controls for each step above. A simple workflow needs no setup: argument summaries and secret encryption are on by default, and everything else is opt-in.
+In L2M, each step above has a matching control. A simple workflow needs no setup: argument summaries and secret encryption are on by default, and everything else is opt-in.
 
 - **Detectors.** The data rule detectors find emails, phone numbers, card numbers (Luhn), IBANs (mod-97), US SSNs, UK National Insurance numbers, credentials with known prefixes, high-entropy values next to credential-like names, JWTs, private-key blocks and custom dictionaries. Names, addresses and free-text health details are not detected ([detectors and their limits](/product/content-rules-engine#detectors)).
 - **Protection.** Optionally, a [content rules](/product/content-rules#protection-port) step replaces detected values through the **Protection Provider** nodes attached to its protection port: `mask`, `keyed_hash` (HMAC-SHA-256), `aes_gcm` (AES-256-GCM), `token_vault` (random, deterministic or format-preserving tokens) or `surrogate` (a one-way, same-shape stand-in). Providers that need a key take a stored secret by reference.

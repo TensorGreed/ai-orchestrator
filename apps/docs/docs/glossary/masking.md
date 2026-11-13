@@ -22,7 +22,7 @@ A support message arrives: "Refund to card 4111 1111 1111 1111, contact jo@examp
 
 Masking is one of several ways to replace a value, and they are not interchangeable:
 
-- **Keyed hashing** gives the same output for the same input under one key, so records can be counted or joined. Masking does not promise that: two different cards that end in 1111 mask alike.
+- **Keyed hashing** gives the same output for the same input under one key, so records can be counted or joined. A mask cannot be used that way: two different cards that end in 1111 mask alike.
 - **Encryption** can be undone by anyone with the key.
 - **A <Term id="protection-token">protection token</Term>** stands in for the value and can be exchanged for it later, where a rule allows.
 - **A surrogate** is a realistic fake of the same shape (a valid-looking card number), useful in test data.

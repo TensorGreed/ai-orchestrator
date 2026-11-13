@@ -11,13 +11,13 @@ related: [mcp-tool, context-window, toolset, tool-calling, mcp-tool-policy, toke
 
 # Too many tools
 
-Every tool an agent can use is described to the model on every request, so a long tool list costs tokens on every turn, leaves less room for the task, and makes wrong picks more likely. The fix is to decide which tools each agent really needs and to send only those: connect each agent to its own servers, select tools rather than taking whole servers, publish small toolsets to outside clients, and let deny rules hide what nobody should call. Then measure which tools are actually used, and remove the rest.
+Every <Term id="mcp-tool">tool</Term> an agent can use is described to the model on every request, so a long tool list costs <Term id="token-llm">tokens</Term> on every turn, leaves less room for the task, and makes wrong picks more likely. The fix is to decide which tools each agent really needs and to send only those: connect each agent to its own servers, select tools rather than taking whole servers, publish small <Term id="toolset">toolsets</Term> to outside clients, and let deny rules hide what nobody should call. Then measure which tools are actually used, and remove the rest.
 
 ## What a tool list costs
 
-A model cannot call a tool it has not been told about. So before each request, the runtime sends the model the full description of every <Term id="mcp-tool">tool</Term> it may use: the name, a description in plain words, and a JSON Schema for the arguments. The model reads all of it to decide on a <Term id="tool-calling">tool call</Term>.
+A model cannot call a tool it has not been told about. So before each request, the runtime sends the model the full description of every tool it may use: the name, a description in plain words, and a JSON Schema for the arguments. The model reads all of it to decide on a <Term id="tool-calling">tool call</Term>.
 
-That description is not sent once. An agent calls the model once per iteration of its loop, and each call carries the whole list again. A run that takes five iterations sends the list five times; a chat with ten turns sends it on every turn of every run. The definitions count as input <Term id="token-llm">tokens</Term> each time, and they share the model's <Term id="context-window">context window</Term> with the system prompt, the conversation and the tool results.
+That description is not sent once. An agent calls the model once per iteration of its loop, and each call carries the whole list again. A run that takes five iterations sends the list five times; a chat with ten turns sends it on every turn of every run. The definitions count as input tokens each time, and they share the model's <Term id="context-window">context window</Term> with the system prompt, the conversation and the tool results.
 
 MCP makes adding tools easy, which is how lists grow. Connect a code hosting server, a ticket tracker and a docs search server to one agent and it may hold a hundred tools, most of which a given task never touches. Each server was designed on its own, so none of them knows how long the combined list has become.
 
@@ -55,7 +55,7 @@ A shortlist is a fallback for large catalogues, not a replacement for choosing t
 
 ## Fix 3: toolsets for clients
 
-Agents you build are not the only callers. A desktop chat app, an IDE or another team's agent may connect to your tools through an MCP gateway. Give each such client a <Term id="toolset">toolset</Term>: a named group of tools served at its own endpoint. A support assistant connects to the support toolset; IDE agents connect to the engineering one. Each client's `tools/list` then returns its own short list, and its credential can call nothing else.
+Agents you build are not the only callers. A desktop chat app, an IDE or another team's agent may connect to your tools through an MCP gateway. Give each such client a toolset: a named group of tools served at its own endpoint. A support assistant connects to the support toolset; IDE agents connect to the engineering one. Each client's `tools/list` then returns its own short list, and its credential can call nothing else.
 
 ## Fix 4: deny rules hide tools
 
