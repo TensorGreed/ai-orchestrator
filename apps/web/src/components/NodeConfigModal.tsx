@@ -3675,7 +3675,7 @@ export function NodeInspector({
           help={
             <>
               Controls which discovered tools the agent can call.
-              <strong> All</strong> exposes everything the server offers. The runtime
+              <strong> All</strong> exposes everything the server offers that tool policy allows. The runtime
               shortens each tool's description and schema but sends every tool, so for
               large servers prefer <strong>Multi</strong>. <strong>Single</strong> binds the node to one tool
               by name — best for narrow, deterministic flows. <strong>Multi</strong>

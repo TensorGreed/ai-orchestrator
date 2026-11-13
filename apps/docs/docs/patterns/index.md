@@ -143,15 +143,15 @@ The Vector Retriever returns the top-K matching chunks; Prompt Template stitches
 
 **Topology**:
 ```
-Webhook Input ──▶ Conditional ──▶ Branch A ──▶ ...
-                       │
-                       └────────▶ Branch B ──▶ ...
+Webhook Input ──▶ LLM Call ──▶ IF ──true──▶ Success Output
+                                │
+                                └──false──▶ Error Output
 ```
 
-**Sample**: `Conditional Flow` (`conditional-flow.json`).
+**Sample**: `Conditional Branching Flow` (`conditional-flow.json`). For more than two branches, use a Switch node.
 
 **Sharp edges**:
-- Use a Set node before the Conditional to extract the discriminating field — keeps the Conditional config short.
+- Use a Set node before the IF or Switch node to extract the discriminating field — keeps its condition short.
 - Each branch is a separate DAG path; if you need them to converge, end with a Merge node.
 
 ---

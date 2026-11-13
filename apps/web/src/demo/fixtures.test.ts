@@ -30,9 +30,13 @@ describe("demo fixtures", () => {
     expect(demoFixtures.workflows.workflowList.map((item) => item.id).sort()).toEqual(demoFixtures.workflows.workflows.map((workflow) => workflow.id).sort());
   });
 
-  it("describe IF branches the way their edges run", () => {
+  it("describe IF branches the way their edges run, in the demo and in the samples", () => {
+    const samples = Object.values(import.meta.glob("../../../../samples/workflows/*.json", { eager: true, import: "default" })).map(
+      (file) => (file as { workflow: (typeof demoFixtures.workflows.workflows)[number] }).workflow
+    );
     let checked = 0;
-    for (const workflow of demoFixtures.workflows.workflows) {
+    for (const workflow of [...demoFixtures.workflows.workflows, ...samples]) {
+      if (!workflow) continue;
       const branches = /\[true: ([^\]]+)\] \/ \[false: ([^\]]+)\]/.exec(workflow.description ?? "");
       if (!branches) continue;
       const target = (handle: string) => {
@@ -42,7 +46,7 @@ describe("demo fixtures", () => {
       expect([target("true"), target("false")], workflow.id).toEqual([branches[1], branches[2]]);
       checked += 1;
     }
-    expect(checked).toBeGreaterThan(0);
+    expect(checked).toBeGreaterThan(1);
   });
 
   it("have templates whose workflow JSON the shared schema accepts", () => {

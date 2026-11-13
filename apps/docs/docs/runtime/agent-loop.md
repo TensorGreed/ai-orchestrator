@@ -46,7 +46,7 @@ An MCP server's tool reaches the model as `<adapter>__<tool>`, for example `http
 The runtime trims what it sends the model on every call. The limits are fixed in the agent runtime unless a row says
 otherwise.
 
-**Tool definitions** (every tool the model is offered):
+**Tool definitions** (every MCP, Workflow Tool and worker tool the model is offered):
 
 | What | Limit |
 | --- | --- |
@@ -57,11 +57,11 @@ otherwise.
 **Which tools are offered.** With an MCP Tool or Workflow Tool node on the `tool` port, the model is offered every
 tool those nodes expose, trimmed as above; to keep a large server's tool list short, pick the tools on the MCP Tool
 node (**Select multiple tools**). Only an agent with no tool nodes, whose tools come from its inline `mcpServers`
-config, gets a keyword shortlist: tools are ranked by how many words of four or more letters from the user prompt
+config, gets a keyword shortlist: tools are ranked by how many words from the user prompt (runs of four or more letters, digits or underscores)
 appear in their name and description, and the model gets up to 6 that match (only the best-matching ones when a tool
 matches two or more words) or, when none match, the first 8, within about 18,000 characters of tool definitions.
-Workers on the `worker` port and the runtime's own tools (`agent_clarify`, the session cache tools, `think`) are always
-offered and never shortlisted.
+Workers on the `worker` port and the runtime's own tools (`agent_clarify` always, the session cache tools with a
+`session_id`, `think` when it is turned on) are offered whenever they are present and never shortlisted.
 
 **Messages:**
 

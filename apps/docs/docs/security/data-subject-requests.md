@@ -201,7 +201,8 @@ before the deletion does not bring the data back: they print `re-applied N erasu
 **Not covered** by a deletion: logs, metrics, traces and log-streaming destinations; backups already written (until
 restored, see above); model providers, MCP servers and other systems the runs sent data to; knowledge bases; tokens
 that are not in the person's rows, and format-preserving tokens; a signed run manifest already generated for a deleted
-run (it holds rendered prompts and is pruned once it is older than `AUDIT_LOG_RETENTION_DAYS`, its run being gone).
+run (it holds rendered prompts and is pruned once it is older than `AUDIT_LOG_RETENTION_DAYS`, its run being gone; never
+when that is `0`).
 
 ## Due dates and notices
 

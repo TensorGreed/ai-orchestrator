@@ -180,7 +180,7 @@ export const SUBJECT_DELETION_NOT_COVERED = [
   "Model providers, MCP servers and other systems the runs sent data to",
   "Knowledge bases (ingested documents)",
   "Tokens that are not in the person's rows, and format-preserving tokens",
-  "Signed run manifests already generated for deleted runs (they hold rendered prompts; pruned once older than AUDIT_LOG_RETENTION_DAYS)"
+  "Signed run manifests already generated for deleted runs (they hold rendered prompts; pruned once older than AUDIT_LOG_RETENTION_DAYS, never when it is 0)"
 ];
 
 /** Why a staff member's audit-log rows are kept (the deletion view and the docs say so). */
