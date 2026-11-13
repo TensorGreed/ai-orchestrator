@@ -213,7 +213,7 @@ async function legacyCall(fixture: Fixture, instance: Instance, sessionId: strin
     payload: JSON.stringify({ jsonrpc: "2.0", id: (nextId += 1), method: "tools/call", params: { name: "mock_tools__calculator", arguments: { expression } } })
   });
   expect(response.statusCode, response.body).toBe(200);
-  return response.json<{ result?: { isError?: boolean; structuredContent?: { result?: number } }; error?: { code: number } }>();
+  return response.json<{ result?: { isError?: boolean; content?: Array<{ text?: string }>; structuredContent?: { result?: number } }; error?: { code: number } }>();
 }
 
 async function auditEvents(store: Store, eventType: string) {
@@ -354,6 +354,46 @@ describe("stored label marks of stateless callers", () => {
     const offSpy = vi.spyOn(off.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
     expect((await initialize(off, off.instance)).statusCode).toBe(200);
     expect(offSpy).not.toHaveBeenCalled();
+  });
+
+  it("reads the client's stored mark again on every call of an open legacy session, and fails closed", async () => {
+    const fixture = await setup({ track: true });
+    const a = fixture.instance;
+    // A session opened while the client is clean, and not used yet: its own labels stay empty.
+    const sessionId = await legacySession(fixture, a);
+    // The client's stateless calls raise the stored mark after the session opened (the stateless write after them is held).
+    expect((await calc(fixture, a, "2+2")).result?.structuredContent?.result).toBe(4);
+    expect((await calc(fixture, a, "3+3")).error?.code).toBe(APPROVAL_PENDING);
+    // The open session's next call reads the mark again: its write is held too.
+    expect((await legacyCall(fixture, a, sessionId, "4+4")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    // The stored raise is audited once, by the stateless call that raised it; the session does not audit it again.
+    const raised = await auditEvents(a.store, "mcp_gateway.session_labels_raised");
+    expect(raised.map((entry) => (entry.metadata as { sessionId?: string } | undefined)?.sessionId ?? null)).toEqual([null]);
+
+    // A second session, used once while the mark cannot be read: the call is refused before it reaches the tool.
+    const other = await setup({ track: true });
+    const session = await legacySession(other, other.instance);
+    const read = vi.spyOn(other.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    const refused = await legacyCall(other, other.instance, session, "1+1");
+    expect(refused.result?.isError).toBe(true);
+    expect((refused.result?.content ?? []).map((entry) => entry.text).join("")).toMatch(/labels could not be checked/);
+    expect(refused.result?.structuredContent).toBeUndefined();
+    expect(read).toHaveBeenCalled();
+    read.mockRestore();
+    expect((await legacyCall(other, other.instance, session, "1+2")).result?.structuredContent?.result).toBe(3);
+
+    // With modern mode off nothing is read: a legacy session's calls run as before.
+    const off = await setup({ track: true, env: { MCP_GATEWAY_MODERN_PROTOCOL: "off" } });
+    const offSession = await legacySession(off, off.instance);
+    const offRead = vi.spyOn(off.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    expect((await legacyCall(off, off.instance, offSession, "2+3")).result?.structuredContent?.result).toBe(5);
+    expect(offRead).not.toHaveBeenCalled();
+    // Nor on a toolset that does not track.
+    const untracked = await setup({ track: false });
+    const untrackedSession = await legacySession(untracked, untracked.instance);
+    const untrackedRead = vi.spyOn(untracked.instance.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    expect((await legacyCall(untracked, untracked.instance, untrackedSession, "3+3")).result?.structuredContent?.result).toBe(6);
+    expect(untrackedRead).not.toHaveBeenCalled();
   });
 
   it("withholds a result whose labels cannot be stored, and still holds the caller's next write on this instance", async () => {

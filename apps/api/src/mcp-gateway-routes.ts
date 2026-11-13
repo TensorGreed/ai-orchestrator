@@ -743,12 +743,46 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     session.labels.raiseAudited = true;
   };
   /**
-   * A new legacy session on a tracking toolset starts from the client's stored mark (already converted: results noted
-   * while the toolset did not track count as outside content). The stored raise is audited by the store's firstRaise,
-   * never again by the session.
+   * A legacy session on a tracking toolset joins the client's stored mark (already converted: results noted while the
+   * toolset did not track count as outside content), when it opens and again on every call. The stored raise is audited
+   * by the store's firstRaise, never again by the session.
    */
   const seedLegacySession = (session: GatewaySession, mark: McpGatewayLabelMark) => {
     if (labelMarkRaised(mark)) mirrorStoredMark(session, mark);
+  };
+  /**
+   * The stored mark of a client's stateless calls (the same token and user) on a toolset, read for its legacy sessions.
+   * A note of results returned while the toolset did not track is converted in the store, as a stateless call converts
+   * it, so it is counted and audited once (`firstRaise`). Throws when the mark cannot be read or converted.
+   */
+  const readClientStoredMark = async (auth: AuthenticatedClient, toolset: McpToolset): Promise<{ mark: McpGatewayLabelMark | null; firstRaise: boolean }> => {
+    const clock = markClock();
+    const key: McpGatewayLabelMarkKey = { clientId: auth.client.id, toolsetId: toolset.id, scopeKey: auth.client.createdBy ?? "" };
+    const mark = await store.readMcpGatewayLabelMark(key, clock);
+    if (!mark?.unobserved) return { mark, firstRaise: false };
+    const raised = await store.raiseMcpGatewayLabelMark({ ...key, provenance: [], dataClasses: [], convertUnobserved: true, now: clock.now, expiresAt: clock.expiresAt });
+    return { mark: raised.mark, firstRaise: raised.firstRaise };
+  };
+  /**
+   * 12.2 — a legacy session on a tracking toolset, with modern mode on (marks are stored only then): before each call the
+   * client's stored mark is read again, so labels its stateless calls collected after the session opened, on any
+   * instance, reach the session too. Throws LabelMarkUnavailableError when it cannot be read: the call is refused, as a
+   * stateless call is.
+   */
+  const refreshLegacySessionMark = async (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset): Promise<void> => {
+    let stored: { mark: McpGatewayLabelMark | null; firstRaise: boolean };
+    try {
+      stored = await readClientStoredMark(auth, toolset);
+    } catch (error) {
+      app.log.warn(
+        { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, sessionId: session.id },
+        "MCP gateway could not read a client's label mark for a session call; the call was refused"
+      );
+      throw new LabelMarkUnavailableError();
+    }
+    if (!stored.mark) return;
+    seedLegacySession(session, stored.mark);
+    if (stored.firstRaise) await auditStoredRaise(session, auth, toolset, null, "results_before_tracking", storedLabelsView(stored.mark));
   };
   const LEGACY_MARK_UNAVAILABLE_MESSAGE = "Outside-content labels could not be checked for this client, so the session was not opened. Try again.";
   /** A first-raise audit that fails is logged; it never withholds a result whose labels were stored. */
@@ -854,6 +888,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   const labelsForCall = async (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset): Promise<DataLabels | undefined> => {
     if (!toolset.trackSessionLabels) return undefined;
     if (session.era === "modern") return await statelessCallLabels(session, auth, toolset);
+    if (modernMode === "on") await refreshLegacySessionMark(session, auth, toolset);
     const { labels, raised } = sessionCallLabels(session.labels);
     if (raised) await auditFirstRaise(session, auth, toolset, null, "results_before_tracking");
     return labels;
@@ -1788,8 +1823,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       if (blocked) return await budgetRefusal(session, auth, toolset, request, tool.name, blocked);
     }
 
-    // 12.2 — read from the session only, never from the request (`_meta`, headers or arguments). A stateless caller's
-    // stored mark that cannot be read refuses the call.
+    // 12.2 — read from the session only, never from the request (`_meta`, headers or arguments). A stored mark that
+    // cannot be read (a stateless caller's, or the client's for a legacy session while modern mode is on) refuses the call.
     let callLabels: DataLabels | undefined;
     try {
       callLabels = await labelsForCall(session, auth, toolset);
@@ -2063,22 +2098,14 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const protocolVersion = negotiateProtocolVersion(params.protocolVersion);
     const clientInfo = asRecord(params.clientInfo);
     // 12.2 — on a tracking toolset a new session starts from the client's stored mark (what its stateless calls
-    // collected on any instance before the session opened). Results the mark noted while the toolset did not track
-    // are converted in the store here, as a stateless call converts them, so they are counted and audited once.
+    // collected on any instance before the session opened), and reads it again before each call (labelsForCall).
     // Unreadable or unwritable: the session is not opened. Marks are only stored while modern mode is on; with it off
     // nothing is read.
     let storedMark: McpGatewayLabelMark | null = null;
     let storedFirstRaise = false;
     if (toolset.trackSessionLabels && modernMode === "on") {
-      const clock = markClock();
-      const key: McpGatewayLabelMarkKey = { clientId: auth.client.id, toolsetId: toolset.id, scopeKey: auth.client.createdBy ?? "" };
       try {
-        storedMark = await store.readMcpGatewayLabelMark(key, clock);
-        if (storedMark?.unobserved) {
-          const raised = await store.raiseMcpGatewayLabelMark({ ...key, provenance: [], dataClasses: [], convertUnobserved: true, now: clock.now, expiresAt: clock.expiresAt });
-          storedMark = raised.mark;
-          storedFirstRaise = raised.firstRaise;
-        }
+        ({ mark: storedMark, firstRaise: storedFirstRaise } = await readClientStoredMark(auth, toolset));
       } catch (error) {
         app.log.warn(
           { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id },
