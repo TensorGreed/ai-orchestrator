@@ -562,12 +562,15 @@ describe("sampling and limits", () => {
     await settle();
     expect((await inbox(context, builder.cookie, "wf-copied")).total).toBe(0);
     const metrics = await context.app.inject({ method: "GET", url: "/metrics" });
-    if (metrics.statusCode === 200) expect(metrics.body).toContain('replay_captures_total{outcome="skipped_sensitive_input"} 2');
+    expect(metrics.statusCode).toBe(200);
+    expect(metrics.body).toContain('replay_captures_total{outcome="skipped_sensitive_input"} 2');
 
     // The same runs from a clean run, and with marked pins left unused, are captured as before.
     expect((await viaKey({ sourceExecutionId: "run-clean" })).statusCode).toBe(200);
     expect((await viaKey({ usePinnedData: false })).statusCode).toBe(200);
     await waitForCaptures(context, builder.cookie, "wf-copied", 2);
+    await settle();
+    expect((await inbox(context, builder.cookie, "wf-copied")).total).toBe(2);
   });
 
   it("a run that pauses for approval keeps nothing and frees its slot; its resume is never captured", async () => {

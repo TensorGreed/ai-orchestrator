@@ -263,7 +263,11 @@ describe("error workflow input from a sensitive run (v74)", () => {
     expect(JSON.stringify(logged?.value)).toContain(PRIVATE_VALUE);
     expect(logged?.sensitive).toBe(true);
     // The Error Trigger names the failed run: its workflow (the session id above), its run id and its name.
-    expect((await fixture.store.loadSessionArtifact({ namespace, sessionId: "wf-fails-sensitive", artifactKey: "run" }))?.value).toBe(`${sensitiveRun.executionId} wf-fails-sensitive`);
+    const named = await waitFor(
+      async () => await fixture.store.loadSessionArtifact({ namespace, sessionId: "wf-fails-sensitive", artifactKey: "run" }),
+      (row) => row !== null
+    );
+    expect(named?.value).toBe(`${sensitiveRun.executionId} wf-fails-sensitive`);
     expectDropped(await chatSpans(fixture, "echo-handler-sensitive"), "sensitive_run_data");
 
     const cleanRun = await execute(fixture, "wf-fails-clean", {}, "error");

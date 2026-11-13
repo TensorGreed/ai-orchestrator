@@ -225,7 +225,16 @@ run("Postgres: pin marks under concurrent saves (v74)", () => {
       const marked = { ...(JSON.parse(locked.rows[0]!.workflow_json) as Workflow), pinnedDataSensitive: ["a"] };
       await client.query(`UPDATE workflows SET workflow_json = $1 WHERE id = $2`, [JSON.stringify(marked), "wf-pins"]);
       const concurrent = test.store.upsertWorkflow({ ...base, name: "Renamed" });
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Commit only once that save waits for the row lock: it has read the workflow (without the mark) by then.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const waiting = await pool.query<{ n: string }>(
+          `SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE%'`
+        );
+        if (Number(waiting.rows[0]!.n) > 0) break;
+        if (Date.now() > deadline) throw new Error("the concurrent save never waited for the row lock");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
       await client.query("COMMIT");
       expect((await concurrent).pinnedDataSensitive).toEqual(["a"]);
     } finally {

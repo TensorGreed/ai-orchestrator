@@ -4908,18 +4908,19 @@ async function executeNodeHandler(
     }
 
     case "error_trigger": {
-      // The API starts an error workflow with camelCase keys (sourceWorkflowId, executionId, errorStack); the
-      // snake_case names are what the node documents and what older callers send, so both are read. `execution_id`
-      // is the failed run's id: the error workflow's own run id is not it.
+      // The API starts an error workflow (trigger type `error`) with camelCase keys (sourceWorkflowId, executionId,
+      // errorStack); the snake_case names are what older callers send, so both are read on such a run. Only there:
+      // another run's caller cannot name a failed run. `execution_id` is the failed run's id on an error run.
       const globals = context.globals;
+      const errorRun = globals.trigger_type === "error";
       const first = (...values: unknown[]) => values.find((value) => value !== undefined && value !== null && value !== "");
       return {
         trigger_type: "error",
-        source_workflow_id: first(globals.source_workflow_id, globals.sourceWorkflowId) ?? "",
-        source_workflow_name: first(globals.source_workflow_name, globals.sourceWorkflowName) ?? "",
-        execution_id: first(globals.source_execution_id, globals.executionId, globals.execution_id) ?? "",
+        source_workflow_id: first(globals.source_workflow_id, errorRun ? globals.sourceWorkflowId : undefined) ?? "",
+        source_workflow_name: first(globals.source_workflow_name, errorRun ? globals.sourceWorkflowName : undefined) ?? "",
+        execution_id: first(errorRun ? globals.source_execution_id : undefined, errorRun ? globals.executionId : undefined, globals.execution_id) ?? "",
         error: globals.error ?? "",
-        error_stack: first(globals.error_stack, globals.errorStack) ?? "",
+        error_stack: first(globals.error_stack, errorRun ? globals.errorStack : undefined) ?? "",
         timestamp: globals.timestamp ?? nowIso()
       };
     }
