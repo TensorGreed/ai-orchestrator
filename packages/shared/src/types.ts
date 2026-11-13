@@ -1044,6 +1044,11 @@ export interface AgentRunRequest {
   memory?: AgentMemoryConfig;
   toolOutputLimits?: AgentToolOutputLimits;
   bypassToolFiltering?: boolean;
+  /**
+   * Tool names the model is always offered. The prompt-relevance shortlist (used when `bypassToolFiltering` is off)
+   * only picks among the other tools, so a Supervisor's worker tools are never dropped from a run.
+   */
+  pinnedToolNames?: string[];
   images?: ChatMessageImage[];
   /** Phase 6.4 — offer the internal `think` tool (a scratchpad step; no policy, content rules or labels). Off unless set. */
   thinkTool?: boolean;
