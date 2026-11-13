@@ -53,6 +53,31 @@ describe("replay sandbox", () => {
     expect(await sandbox.memoryStore.loadMessages("ns", "s2")).toEqual([]);
   });
 
+  it("v73: the seed keeps the mark of memory a run read without looking the mark up (content capture off), failing closed", async () => {
+    const capture = new MemorySeedCapture({ maxBytes: 100_000, scrub: (value) => value });
+    let markReads = 0;
+    const recorded = capture.wrap({
+      loadMessages: async () => [{ role: "user", content: "card 4242" }],
+      saveMessages: async () => undefined,
+      loadSensitive: async (_namespace, sessionId) => {
+        markReads += 1;
+        if (sessionId === "broken") throw new Error("db down");
+        return sessionId === "marked";
+      }
+    });
+    // Only loadMessages, as a run with capture off calls it; a second read of a session asks nothing more.
+    await recorded.loadMessages("ns", "marked");
+    await recorded.loadMessages("ns", "marked");
+    await recorded.loadMessages("ns", "plain");
+    await recorded.loadMessages("ns", "broken");
+    expect(markReads).toBe(3);
+    expect(capture.toSeed()!.sessions.map((session) => [session.sessionId, session.sensitive === true])).toEqual([
+      ["marked", true],
+      ["plain", false],
+      ["broken", true]
+    ]);
+  });
+
   it("v73: keeps the sensitive mark of seeded memory and of what the replay writes", async () => {
     // The recorded run read marked memory: the seed says so, and the replay's memory reads as sensitive.
     const capture = new MemorySeedCapture({ maxBytes: 100_000, scrub: (value) => value });

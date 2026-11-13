@@ -564,6 +564,11 @@ export interface WorkflowExecutionState {
    */
   sensitiveSessionRead?: boolean;
   /**
+   * v73 — of those reads, one was of a row carrying the mark itself (not only stored labels) while content capture was
+   * on, so the resumed run's output labels say `sensitive` too. Written and read only by the engine.
+   */
+  sensitiveSessionReadMarked?: boolean;
+  /**
    * Phase 15.4 — the release channel the run started on. A resumed
    * production run keeps calling the published versions of its
    * sub-workflows. Written and read only by the API; absent means draft.

@@ -459,6 +459,126 @@ describe("runs that write and read session state", () => {
     expect(backing.memory.get("s1")?.sensitive).toBe(true);
   });
 
+  it("with capture off, a paused and resumed run, a failed run and a scoped sub-workflow label a marked read as an unmarked one", async () => {
+    const seeded = (sensitive: boolean) => memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card" }, { role: "assistant", content: "ok" }], sensitive } } });
+    const off = () => capturing(false).instrument;
+    const view = (result: Awaited<ReturnType<typeof executeWorkflow>>) => ({
+      status: result.status,
+      labels: result.nodeResults.map((entry) => [entry.nodeId, entry.labels ?? null]),
+      outputLabels: outputLabelsOf(result) ?? null
+    });
+
+    // Paused for an approval, then resumed.
+    const paused = workflow(
+      "wf-off-pause",
+      [
+        node("start", "manual_trigger"),
+        node("read", "local_memory", { namespace: "shared", sessionIdTemplate: "{{session_id}}" }),
+        node("ask", "human_approval", { approvalMessage: "Go?", timeoutMinutes: 30 }),
+        node("out", "output")
+      ],
+      [["start", "read"], ["read", "ask"], ["ask", "out"]]
+    );
+    const pauseViews = [];
+    for (const sensitive of [true, false]) {
+      const states: WorkflowExecutionState[] = [];
+      const first = await executeWorkflow(
+        { workflow: paused, executionId: `run-off-${sensitive}`, sessionId: "s1" },
+        deps(seeded(sensitive).stores, { instrument: off(), persistPausedExecution: async (input) => void states.push(input.state) })
+      );
+      expect(first.status).toBe("waiting_approval");
+      expect(states[0]).not.toHaveProperty("sensitiveSessionRead");
+      expect(states[0]).not.toHaveProperty("sensitiveSessionReadMarked");
+      const resumed = await resumeWorkflowExecution(
+        { executionId: `run-off-${sensitive}`, state: states[0]!, decision: "approve", actedBy: "lead@example.com" },
+        deps(seeded(sensitive).stores, { instrument: off() })
+      );
+      pauseViews.push(view(resumed));
+    }
+    expect(pauseViews[0]).toEqual(pauseViews[1]);
+
+    // A failed run: a step after the memory read fails (its sub-workflow does not exist).
+    const failing = workflow(
+      "wf-off-fail",
+      [
+        node("start", "manual_trigger"),
+        node("read", "local_memory", { namespace: "shared", sessionIdTemplate: "{{session_id}}" }),
+        node("call", "execute_workflow", { workflowId: "wf-missing", mode: "sync" }),
+        node("out", "output")
+      ],
+      [["start", "read"], ["read", "call"], ["call", "out"]]
+    );
+    const failViews = [];
+    for (const sensitive of [true, false]) {
+      const result = await executeWorkflow({ workflow: failing, sessionId: "s1" }, deps(seeded(sensitive).stores, { instrument: off(), loadWorkflow: () => undefined }));
+      expect(result.status).toBe("error");
+      failViews.push(view(result));
+    }
+    expect(failViews[0]).toEqual(failViews[1]);
+
+    // A sub-workflow with its own scoped stores.
+    const child = workflow(
+      "wf-off-child",
+      [node("cstart", "manual_trigger"), node("read", "local_memory", { namespace: "shared", sessionIdTemplate: "s1" }), node("cout", "output")],
+      [["cstart", "read"], ["read", "cout"]]
+    );
+    const parent = workflow(
+      "wf-off-parent",
+      [node("start", "manual_trigger"), node("call", "execute_workflow", { workflowId: "wf-off-child", mode: "sync" }), node("out", "output")],
+      [["start", "call"], ["call", "out"]]
+    );
+    const subViews = [];
+    for (const sensitive of [true, false]) {
+      const childStores = seeded(sensitive);
+      const result = await executeWorkflow(
+        { workflow: parent, sessionId: "s1" },
+        deps(memoryStores().stores, { instrument: off(), loadWorkflow: (id) => (id === "wf-off-child" ? child : undefined), scopeSubWorkflow: () => ({ ...childStores.stores }) })
+      );
+      expect(result.status).toBe("success");
+      subViews.push(view(result));
+    }
+    expect(subViews[0]).toEqual(subViews[1]);
+  });
+
+  it("a resumed run labels its output sensitive only when it had read a marked row with capture on, not a labels-only one", async () => {
+    const wf = workflow(
+      "wf-resume-labels",
+      [
+        node("start", "manual_trigger"),
+        node("read", "session_artifact_load", { namespace: "shared", sessionIdTemplate: "{{session_id}}", artifactKey: "note" }),
+        node("ask", "human_approval", { approvalMessage: "Go?", timeoutMinutes: 30 }),
+        node("out", "output")
+      ],
+      [["start", "read"], ["read", "ask"], ["ask", "out"]]
+    );
+    const outcomes: Record<string, { state: WorkflowExecutionState; labels: string[] }> = {};
+    for (const kind of ["marked", "labels"] as const) {
+      const backing = memoryStores();
+      await backing.stores.sessionArtifactStore.saveArtifact({
+        namespace: "shared",
+        sessionId: "s1",
+        artifactKey: "note",
+        value: { note: "x" },
+        ...(kind === "marked" ? { sensitive: true } : { labels: SENSITIVE })
+      });
+      const states: WorkflowExecutionState[] = [];
+      await executeWorkflow(
+        { workflow: wf, executionId: `run-${kind}`, sessionId: "s1" },
+        deps(backing.stores, { instrument: capturing().instrument, persistPausedExecution: async (input) => void states.push(input.state) })
+      );
+      const resumed = await resumeWorkflowExecution(
+        { executionId: `run-${kind}`, state: states[0]!, decision: "approve", actedBy: "lead@example.com" },
+        deps(memoryStores().stores, { instrument: capturing().instrument })
+      );
+      outcomes[kind] = { state: states[0]!, labels: outputLabelsOf(resumed)?.provenance ?? [] };
+    }
+    expect(outcomes.marked!.state).toMatchObject({ sensitiveSessionRead: true, sensitiveSessionReadMarked: true });
+    expect(outcomes.marked!.labels).toContain("sensitive");
+    expect(outcomes.labels!.state.sensitiveSessionRead).toBe(true);
+    expect(outcomes.labels!.state).not.toHaveProperty("sensitiveSessionReadMarked");
+    expect(outcomes.labels!.labels).not.toContain("sensitive");
+  });
+
   it("a sub-workflow with its own scoped stores notes and marks like its parent", async () => {
     const parentStores = memoryStores();
     const childStores = memoryStores({ memory: { s1: { messages: [{ role: "user", content: "card 4242" }], sensitive: true } } });

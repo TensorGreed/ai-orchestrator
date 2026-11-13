@@ -36,6 +36,8 @@ export class SessionSensitivity {
       workSensitive: () => boolean;
       /** A resumed run that had read a marked row before it paused. */
       readBefore?: boolean;
+      /** A resumed run that had read a row carrying the mark while content capture was on (labels it `sensitive`). */
+      readMarkedBefore?: boolean;
       /**
        * Called on each read of a row carrying the v73 mark (the engine adds `sensitive` to the reading node's labels). A
        * row that is sensitive only by its stored labels does not call it: those labels reach the run through label
@@ -44,8 +46,8 @@ export class SessionSensitivity {
       onSensitiveRead?: () => void;
     }
   ) {
-    this.readMarked = options.readBefore === true;
-    this.readMarkedRow = options.readBefore === true && options.contentCapture;
+    this.readMarked = options.readBefore === true || options.readMarkedBefore === true;
+    this.readMarkedRow = options.readMarkedBefore === true && options.contentCapture;
   }
 
   /** Whether a memory read looks up the row's mark (content capture on). */

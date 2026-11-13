@@ -8810,6 +8810,7 @@ export async function executeWorkflow(
       declared,
       workSensitive: () => redactor.active || labelsMarkSensitive(currentLabelScope()?.inputLabels()),
       readBefore: request.resumeState?.sensitiveSessionRead === true,
+      readMarkedBefore: request.resumeState?.sensitiveSessionReadMarked === true,
       // With capture on, a read of a marked row is sensitive data in the reading node's labels, as a declared source is.
       onSensitiveRead: () => currentLabelScope()?.add(SENSITIVE_LABELS)
     });
@@ -9624,7 +9625,8 @@ async function executeWorkflowRun(
       ...(boundaryRenderings ? { boundaryRenderings } : {}),
       ...(boundaryCallerInput ? { boundaryCallerInput } : {}),
       // v73 — a resumed run that had read session state written by sensitive work stays sensitive.
-      ...(dependencies.sessionSensitivity?.readSensitive ? { sensitiveSessionRead: true } : {})
+      ...(dependencies.sessionSensitivity?.readSensitive ? { sensitiveSessionRead: true } : {}),
+      ...(dependencies.sessionSensitivity?.readMarkedSensitive ? { sensitiveSessionReadMarked: true } : {})
     };
 
     if (dependencies.persistPausedExecution) {
