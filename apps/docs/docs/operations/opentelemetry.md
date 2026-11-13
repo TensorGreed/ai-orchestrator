@@ -58,13 +58,13 @@ A collector in another container or host works the same way: point `OTEL_EXPORTE
 
 `node scripts/otel-smoke.mjs` checks the whole path without any outside service. It starts a small OTLP receiver that writes what it gets to a file, starts the API on a temporary database pointing at it, runs the MCP agent quickstart with a `traceparent`, stops the API with `SIGTERM`, and checks that:
 
-- one trace holds the HTTP request, the run, its nodes, the agent loop, the model call and the MCP `tools/list` call, with the right parents, under the caller's trace id;
+- one trace holds the HTTP request, the run, its nodes, the agent loop, the model call and the MCP `tools/list` call, under the caller's trace id, with the right parents from the request down to the model call;
 - the run's stored trace id is that trace id;
 - the OTLP auth header arrived decoded, and the resource carries the service name and `OTEL_RESOURCE_ATTRIBUTES`;
-- the `ao.*`, GenAI and MCP metrics arrived;
+- the `ao.*` and GenAI metrics arrived;
 - nothing was exported before the stop (so the exit flush delivered it), and no secret value (the master key, the OTLP token, the admin password) appears in what was sent.
 
-`--protocol http/protobuf` runs it with the API's default encoding, and `--keep` keeps the work directory with the received file and the API log. The API test suite runs it in both encodings. It refuses to run when `apps/api/.env` sets a variable it needs, since that file overrides the environment.
+`--protocol http/protobuf` runs it with the API's default encoding; that run checks the content type, the span and metric names and the trace id, while the parents, the header and the resource are checked in `http/json`. `--keep` keeps the work directory with the received file and the API log. The API test suite runs it in both encodings, except when `apps/api/.env` exists or `TEST_POSTGRES_URL` is set. It refuses to run when `apps/api/.env` sets a variable it needs, since that file overrides the environment.
 
 ## When it is on
 
@@ -72,8 +72,9 @@ A collector in another container or host works the same way: point `OTEL_EXPORTE
 |---|---|---|
 | Nothing | Off: no OpenTelemetry module is loaded | Off |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | On, exported to `<endpoint>/v1/traces` | With `OTEL_METRICS_ENABLED=true`, to `<endpoint>/v1/metrics` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | On, exported there | Off unless a metrics endpoint is also set |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | On, exported there | Off unless a metrics endpoint and `OTEL_METRICS_ENABLED=true` are also set |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` and `OTEL_METRICS_ENABLED=true` | Off | On |
+| `TRACING_ENDPOINT` (deprecated) | On, exported there | Off |
 | `TRACING_ENABLED=true` (deprecated) and no endpoint | On, kept in memory only (for `GET /api/observability/traces`) | Off |
 | `OTEL_SDK_DISABLED=true`, with anything else | Off | Off |
 
@@ -101,11 +102,11 @@ Header values are never shown by the API: `GET /api/observability` lists header 
 
 Every span and metric carries:
 
-- `service.name`: `OTEL_SERVICE_NAME`, else `TRACING_SERVICE_NAME` (default `ai-orchestrator`). `OTEL_SERVICE_NAME` wins over a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`.
+- `service.name`: `OTEL_SERVICE_NAME`, else `TRACING_SERVICE_NAME` (default `ai-orchestrator`). `OTEL_SERVICE_NAME` wins over a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`, which in turn wins over `TRACING_SERVICE_NAME` and the default.
 - `service.version`: `OTEL_SERVICE_VERSION`, if set.
 - `telemetry.sdk.name`, `telemetry.sdk.language` and `telemetry.sdk.version`, set by the OpenTelemetry SDK.
 - `host.name` (the machine's host name), `process.pid` and `service.instance.id` (a random id per start), so replicas can be told apart.
-- Every `key=value` pair in `OTEL_RESOURCE_ATTRIBUTES` (percent-decoded); it overrides any of the above except `service.name`. Set `deployment.environment.name` here.
+- Every `key=value` pair in `OTEL_RESOURCE_ATTRIBUTES` (percent-decoded); it overrides any of the above, and `service.name` too unless `OTEL_SERVICE_NAME` is set. Set `deployment.environment.name` here.
 
 Spans are recorded under the instrumentation scope `l2m` with the schema URL `https://opentelemetry.io/schemas/1.41.0`; OTLP metrics under the scope `ai-orchestrator`.
 
@@ -342,7 +343,7 @@ Images are named by type only, never copied. Not captured: embedding inputs, ret
 | `secret_detected` | The final check still found a secret value. |
 | `timeout` | Masking, or reading the secret values and dictionaries it needs, took more than 10 seconds. |
 | `backpressure` | More than 256 spans were waiting for masking. |
-| `too_large` | The span's content is over 8 times `L2M_OTEL_CONTENT_MAX_CHARS` of text (at least 64 KiB, at most 1 MiB). |
+| `too_large` | The span's content is over 8 times the attribute limit (the smaller of `L2M_OTEL_CONTENT_MAX_CHARS` and `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`) of text, at least 64 KiB and at most 1 MiB. |
 
 `l2m_otel_content_dropped_total` (by `reason`) counts these in the OTLP metrics.
 
@@ -378,7 +379,7 @@ Outbound, L2M sends trace context to MCP servers ([above](#trace-context-sent-to
 
 ## Settings
 
-Every setting is optional. Unset (or empty) means the default shown.
+Every setting is optional. Unset means the default shown; an empty value means the default too, except for `OTEL_METRICS_ENABLED`, `OTEL_METRICS_PUSH_INTERVAL_MS`, `OTEL_HTTP_SERVER_SPANS` and `TRACING_ENABLED`, which are checked on every start (see below).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -405,7 +406,7 @@ Every setting is optional. Unset (or empty) means the default shown.
 | `OTEL_METRICS_ENABLED` | `false` | Push metrics over OTLP (needs a metrics endpoint or the combined one). |
 | `OTEL_METRICS_PUSH_INTERVAL_MS` | `60000` | Metrics push interval. |
 | `L2M_OTEL_TRUST_INBOUND` | `authenticated` | `authenticated`, `all` or `none`. See [trust](#inbound-trace-context-and-who-is-trusted). |
-| `L2M_OTEL_TRUSTED_PROXIES` | empty | IP addresses or CIDR ranges whose inbound trace context is always continued. |
+| `L2M_OTEL_TRUSTED_PROXIES` | empty | IP addresses or CIDR ranges whose inbound trace context is continued under `authenticated` (ignored with `none`). |
 | `L2M_OTEL_SPAN_DETAIL` | `standard` | `verbose` adds one span per agent turn (`l2m.agent.iteration`) and a `send l2m.queue` PRODUCER span per enqueued job. |
 | `L2M_OTEL_NAMES` | `names` | `ids` keeps workflow, node and agent names out of spans. |
 | `L2M_OTEL_TRACE_URL_TEMPLATE` | unset | An absolute http(s) URL containing `{traceId}`. The run page then links each traced run to it (**Open trace**). |
@@ -416,7 +417,7 @@ Every setting is optional. Unset (or empty) means the default shown.
 | `L2M_OTEL_CONTENT_MAX_CHARS` | `8192` | Longest captured content attribute (256 to 1048576). |
 | `L2M_OTEL_CAPTURE_GATEWAY_CONTENT` | `false` | `true` also captures content for `/v1` AI gateway requests, while content capture is on. Workflow runs do not depend on it. |
 
-The standard `OTEL_*` values are read only while they are used, so values meant for other tools sharing the environment never stop L2M. While tracing or metrics export is on, an unsupported value (a sampler, propagator, protocol or number L2M cannot use) falls back to its default with a warning at start-up. Only these stop the API at start-up, with a message naming the setting: an endpoint L2M is about to use that is not an absolute `http://` or `https://` URL, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` with a traces or metrics endpoint in use, and a bad `L2M_OTEL_*` value (such as a trusted-proxy entry that is not an IP address or CIDR range, or a trace URL template without `{traceId}`).
+Most standard `OTEL_*` values are read only while they are used, so values meant for other tools sharing the environment do not stop L2M. The exceptions are `OTEL_METRICS_ENABLED`, `OTEL_HTTP_SERVER_SPANS` and `TRACING_ENABLED` (which must be `true`, `false`, `1`, `0`, `yes` or `no`) and `OTEL_METRICS_PUSH_INTERVAL_MS` (a number): an empty or invalid value stops the API at start-up, whether or not tracing is on. While tracing or metrics export is on, an unsupported value (a sampler, propagator, protocol or number L2M cannot use) falls back to its default with a warning at start-up. Only these stop the API at start-up, with a message naming the setting: an endpoint L2M is about to use that is not an absolute `http://` or `https://` URL, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` with a traces or metrics endpoint in use, and a bad `L2M_OTEL_*` value (such as a trusted-proxy entry that is not an IP address or CIDR range, or a trace URL template without `{traceId}`).
 
 All of these are listed, commented, in [`.env.example`](https://github.com/TensorGreed/ai-orchestrator/blob/main/.env.example).
 
@@ -457,7 +458,7 @@ These still work, and the API logs a warning at start-up when they are set:
 }
 ```
 
-`GET /api/observability/traces` (admin) returns the most recent spans of the instance that answers (the last 5,000), and `?traceId=<id>` the spans of one trace. In a cluster, each instance keeps its own.
+`GET /api/observability/traces` (admin) returns the most recent spans of the instance that answers (50 by default, `?limit=` up to 200, from the last 5,000 it keeps), and `?traceId=<id>` the spans of one trace. In a cluster, each instance keeps its own.
 
 ## Performance
 
