@@ -117,7 +117,7 @@ Diff entries for output schemas are marked `schema: "output"` and labelled on th
 
 When a run can show progress, L2M sends a `progressToken` with each `tools/call` and collects the server's `notifications/progress` messages: from the SSE response stream for HTTP servers, and from the process's output for stdio servers. Each one goes to the run's event stream as a `node_progress` event and appears on the run tape as "tool: 40% — message" for MCP Tool nodes and for tool calls made by agents. The latest progress is also saved on the node's result.
 
-When a run is cancelled or a call times out (the connection's `timeoutMs`, and the run's `WORKFLOW_EXECUTION_TIMEOUT_MS`), L2M sends `notifications/cancelled` with the request id of each call still in flight before it closes the session. For HTTP servers the request is then aborted; stdio servers get their input closed and a short grace period before the process is stopped. The `initialize` request is never cancelled, as the protocol requires. L2M asks for protocol version `2025-06-18` and sends the negotiated `MCP-Protocol-Version` header on later requests.
+When a run is cancelled or a call times out (the connection's `timeoutMs`, and the run's `WORKFLOW_EXECUTION_TIMEOUT_MS`), L2M sends `notifications/cancelled` with the request id of each call still in flight before it closes the session. For HTTP servers the request is then aborted; stdio servers get their input closed and a short grace period before the process is stopped. The `initialize` request is never cancelled, as the protocol requires. With the `initialize` handshake L2M asks for protocol version `2025-06-18` and sends the negotiated `MCP-Protocol-Version` header on later requests. Servers that speak MCP `2026-07-28` work too: each server's **Protocol version** setting picks the era, and a call to a `2026-07-28` server over HTTP is cancelled by closing its request. See [MCP 2026-07-28 support](./mcp-2026-07-28.md#l2m-as-a-client).
 
 ## OAuth for remote servers
 
@@ -339,6 +339,10 @@ Admins can restrict which tools of a server each role may use, per project, and 
 | `MCP_OAUTH_BLOCK_PRIVATE_HOSTS` | `false` | Refuse OAuth requests to private, loopback, link-local and cloud metadata addresses (checked at connect time; the MCP server's own host stays allowed). |
 | `MCP_OAUTH_PRIVATE_HOST_ALLOWLIST` | empty | Comma-separated hosts or CIDRs of private identity providers OAuth may still reach while blocking is on. |
 | `MCP_OAUTH_CLIENT_METADATA_ENABLED` | `false` | Offer L2M's client metadata document as the client id to authorization servers that support it. |
+| `MCP_CLIENT_PROTOCOL_DEFAULT` | `legacy` | Protocol of servers whose connection sets none: `legacy`, `auto` or `modern`. See [MCP 2026-07-28 support](./mcp-2026-07-28.md#protocol-modes). |
+| `MCP_CLIENT_ERA_PROBE_TIMEOUT_MS` | `5000` | How long a server set to Auto gets to answer the `2026-07-28` probe (500 to 60000). |
+| `MCP_CLIENT_MRTR_MAX_ROUNDS` | `5` | Most input rounds one call to a `2026-07-28` server may take (1 to 20). |
+| `MCP_CLIENT_LEGACY_SAFE_REISSUE` | `true` | `initialize`-based servers follow the safe re-send rule too (`2026-07-28` servers always do); `false` sends every request again after a broken connection, as before. See [the safe re-send rule](./mcp-2026-07-28.md#the-safe-re-send-rule). |
 | `MCP_ELICITATION_TIMEOUT_MS` | `600000` | How long a server's question waits for an answer (10 seconds to 24 hours), capped by the run's execution timeout. |
 | `MCP_RESOURCE_MAX_BYTES` | `5242880` | Largest resource a run or the playground reads. |
 | `MCP_SANDBOX_DEFAULT` | `none` | Sandbox for stdio servers that do not choose one: `none` or `container`. |

@@ -226,6 +226,7 @@ export default defineConfig({
           { text: "MCP tool-call telemetry", link: "/product/mcp-tool-call-telemetry" },
           { text: "MCP tool policy", link: "/product/mcp-tool-policy" },
           { text: "MCP gateway", link: "/product/mcp-gateway" },
+          { text: "MCP 2026-07-28 support", link: "/product/mcp-2026-07-28" },
           { text: "/v1 AI gateway", link: "/product/ai-gateway" },
           { text: "Budgets", link: "/product/budgets" },
           { text: "MCP onboarding and catalog", link: "/product/mcp-onboarding" },
@@ -316,7 +317,8 @@ export default defineConfig({
         items: [
           { text: "CI Pipeline", link: "/operations/ci" },
           { text: "Testing + Quality Gates", link: "/operations/testing-and-quality" },
-          { text: "Observability (OTel, metrics, traces)", link: "/operations/observability" },
+          { text: "Observability (logs, metrics)", link: "/operations/observability" },
+          { text: "OpenTelemetry", link: "/operations/opentelemetry" },
           { text: "Postgres", link: "/operations/postgres" },
           { text: "Queue and workers", link: "/operations/queue-and-workers" },
           { text: "Cluster operations", link: "/operations/cluster" },

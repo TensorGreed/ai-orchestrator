@@ -96,11 +96,11 @@ Workflow tools run as the workflow does for any trigger: the run is recorded in 
 
 ## The endpoint
 
-`POST /mcp/<toolset>` implements the MCP **Streamable HTTP** transport (JSON-RPC 2.0).
+`POST /mcp/<toolset>` implements the MCP **Streamable HTTP** transport (JSON-RPC 2.0). The table below describes session-based clients (protocol versions up to `2025-11-25`). With `MCP_GATEWAY_MODERN_PROTOCOL=on` the same endpoint also serves MCP `2026-07-28` clients, without sessions: see [MCP 2026-07-28 support](./mcp-2026-07-28.md#the-mcp-gateway).
 
 | | |
 |---|---|
-| Protocol versions | `2025-11-25` (latest), `2025-06-18` and `2025-03-26`. The server answers `initialize` with the client's version when supported, otherwise with the latest. |
+| Protocol versions | `2025-11-25`, `2025-06-18` and `2025-03-26`. The server answers `initialize` with the client's version when supported, otherwise with `2025-11-25`. `2026-07-28` is served per request when `MCP_GATEWAY_MODERN_PROTOCOL=on`. |
 | Methods | `initialize`, `notifications/initialized`, `ping`, `tools/list` (cursor pagination, 100 tools per page), `tools/call`, `notifications/cancelled`. |
 | Sessions | `initialize` returns an `Mcp-Session-Id` header; every later request must send it. `DELETE /mcp/<toolset>` with the header ends the session. Sessions are bound to the client and toolset that opened them. |
 | Responses | `application/json`, or a `text/event-stream` response when the request carries `_meta.progressToken` and the `Accept` header allows SSE. The stream carries `notifications/progress` messages and then the response. |
@@ -240,6 +240,10 @@ Audit events:
 | `MCP_GATEWAY_LISTEN_MAX_PER_CLIENT` | `4` | MCP 2026-07-28: open listen streams per client on one instance. |
 | `MCP_GATEWAY_LISTEN_CHECK_MS` | `30000` | MCP 2026-07-28: how often a stream that asked for `toolsListChanged` has its tool list re-checked, besides the change hints; `0` = hints only. |
 | `MCP_GATEWAY_APPROVAL_WINDOW_MS` | `900000` | How long after an approval the client can retry the identical call, once; also how long after a rejection the identical call is refused (10000 to 604800000). |
+| `MCP_GATEWAY_MODERN_PROTOCOL` | `off` | `on` also serves MCP `2026-07-28` clients, without sessions. See [MCP 2026-07-28 support](./mcp-2026-07-28.md#the-mcp-gateway). |
+| `MCP_GATEWAY_LIST_TTL_MS` | `60000` | With modern mode on: how long `2026-07-28` clients may cache `tools/list` and `server/discover` results (0 to 86400000). |
+| `MCP_GATEWAY_LISTEN_MAX_MS` | `600000` | With modern mode on: a `subscriptions/listen` stream ends gracefully after this long (1000 to 86400000). |
+| `MCP_GATEWAY_LISTEN_MAX_PER_CLIENT` | `4` | With modern mode on: open `subscriptions/listen` streams per client on one instance (1 to 1000). |
 
 ## API
 
@@ -250,4 +254,5 @@ Admin for writes, builder for reads. See the [endpoint reference](../api/endpoin
 - [Expose a workflow as an MCP tool](../runtime/workflow-as-mcp-tool)
 - [MCP server registry](./mcp-server-registry)
 - [MCP tool policy](./mcp-tool-policy)
+- [MCP 2026-07-28 support](./mcp-2026-07-28)
 - Concepts: [LLM gateway vs MCP gateway](../learn/operations/llm-gateway-vs-mcp-gateway), [MCP gateway](../glossary/mcp-gateway) (glossary)
