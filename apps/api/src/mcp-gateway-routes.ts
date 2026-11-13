@@ -726,11 +726,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     session.labels.raiseAudited = true;
   };
   /**
-   * A new legacy session on a tracking toolset starts from the client's stored mark. Results noted while the toolset
-   * did not track stay unobserved, so the session's first call counts them as outside content (and audits it).
+   * A new legacy session on a tracking toolset starts from the client's stored mark (already converted: results noted
+   * while the toolset did not track count as outside content). The stored raise is audited by the store's firstRaise,
+   * never again by the session.
    */
   const seedLegacySession = (session: GatewaySession, mark: McpGatewayLabelMark) => {
-    if (mark.unobserved) session.labels.unobserved = true;
     if (labelMarkRaised(mark)) mirrorStoredMark(session, mark);
   };
   const LEGACY_MARK_UNAVAILABLE_MESSAGE = "Outside-content labels could not be checked for this client, so the session was not opened. Try again.";
@@ -2046,19 +2046,31 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const protocolVersion = negotiateProtocolVersion(params.protocolVersion);
     const clientInfo = asRecord(params.clientInfo);
     // 12.2 — on a tracking toolset a new session starts from the client's stored mark (what its stateless calls
-    // collected on any instance), so opening a session never clears it. Unreadable: the session is not opened. Marks
-    // are only stored while modern mode is on; with it off nothing is read.
+    // collected on any instance before the session opened). Results the mark noted while the toolset did not track
+    // are converted in the store here, as a stateless call converts them, so they are counted and audited once.
+    // Unreadable or unwritable: the session is not opened. Marks are only stored while modern mode is on; with it off
+    // nothing is read.
     let storedMark: McpGatewayLabelMark | null = null;
+    let storedFirstRaise = false;
     if (toolset.trackSessionLabels && modernMode === "on") {
+      const clock = markClock();
+      const key: McpGatewayLabelMarkKey = { clientId: auth.client.id, toolsetId: toolset.id, scopeKey: auth.client.createdBy ?? "" };
       try {
-        storedMark = await store.readMcpGatewayLabelMark({ clientId: auth.client.id, toolsetId: toolset.id, scopeKey: auth.client.createdBy ?? "" }, markClock());
+        storedMark = await store.readMcpGatewayLabelMark(key, clock);
+        if (storedMark?.unobserved) {
+          const raised = await store.raiseMcpGatewayLabelMark({ ...key, provenance: [], dataClasses: [], convertUnobserved: true, now: clock.now, expiresAt: clock.expiresAt });
+          storedMark = raised.mark;
+          storedFirstRaise = raised.firstRaise;
+        }
       } catch (error) {
         app.log.warn(
           { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id },
           "MCP gateway could not read a client's label mark; the session was not opened"
         );
-        reply.code(503).header("retry-after", "5").send(rpcError(message.id, -32000, LEGACY_MARK_UNAVAILABLE_MESSAGE));
-        return;
+        const refusal = rpcError(message.id, -32000, LEGACY_MARK_UNAVAILABLE_MESSAGE);
+        reply.code(503).header("retry-after", "5").send(refusal);
+        // Returned so the request's span and metric record the refusal.
+        return refusal;
       }
     }
     let session: GatewaySession;
@@ -2074,12 +2086,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       });
     } catch (error) {
       if (error instanceof GatewaySessionLimitError) {
-        reply.code(503).header("retry-after", "30").send(rpcError(message.id, -32000, error.message));
-        return;
+        const refusal = rpcError(message.id, -32000, error.message);
+        reply.code(503).header("retry-after", "30").send(refusal);
+        return refusal;
       }
       throw error;
     }
-    if (storedMark) seedLegacySession(session, storedMark);
+    if (storedMark) {
+      seedLegacySession(session, storedMark);
+      if (storedFirstRaise) await auditStoredRaise(session, auth, toolset, null, "results_before_tracking", storedLabelsView(storedMark));
+    }
     await deps.auditRaw({
       category: "system",
       eventType: "mcp_gateway.session_started",

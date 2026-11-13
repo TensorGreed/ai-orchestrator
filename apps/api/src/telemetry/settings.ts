@@ -204,8 +204,10 @@ function requireHttpUrl(name: string, value: string): string {
 }
 
 /**
- * Resolves the OpenTelemetry settings. Throws, naming the setting, only for a bad L2M_OTEL_* value or for an endpoint
- * or protocol L2M is about to use; other unsupported values are ignored with a warning.
+ * Resolves the OpenTelemetry settings. Throws, naming the setting, only for a bad L2M_OTEL_* value, for an endpoint or
+ * protocol L2M is about to use, or for a TRACING_ENABLED, OTEL_HTTP_SERVER_SPANS, OTEL_METRICS_ENABLED or
+ * OTEL_METRICS_PUSH_INTERVAL_MS that does not parse while it would take effect; other unsupported values are ignored
+ * with a warning.
  */
 export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
   const warnings: string[] = [];

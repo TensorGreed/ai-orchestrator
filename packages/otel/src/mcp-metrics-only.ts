@@ -76,6 +76,8 @@ export function createMcpMetricsInstrumentation(meter: Meter, scrub: (text: stri
           return await fn(span);
         } catch (error) {
           span.recordError(error);
+          // A failed request is measured now, even if it was kept open: nobody owns it then (as with spans).
+          span.end();
           throw error;
         } finally {
           span.settle();

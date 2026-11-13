@@ -96,6 +96,17 @@ describe("metrics-only MCP instrumentation", () => {
     expect(await points("mcp.client.operation.duration")).toEqual([expect.objectContaining({ count: 1 })]);
   });
 
+  it("measures a kept-open request that fails at once (nobody owns it then)", async () => {
+    const { instrument, points } = setup();
+    await expect(
+      instrument.mcpRequest({ method: "tools/list", side: "client" }, async (span) => {
+        span.keepOpen();
+        throw new Error("transport closed");
+      })
+    ).rejects.toThrow("transport closed");
+    expect(await points("mcp.client.operation.duration")).toEqual([expect.objectContaining({ count: 1, attributes: expect.objectContaining({ "error.type": "Error" }) })]);
+  });
+
   it("injects no trace context and runs every other wrapper as the no-op does", async () => {
     const { instrument, points } = setup();
     const carrier: TraceCarrier = {};

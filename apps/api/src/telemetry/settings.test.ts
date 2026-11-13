@@ -68,6 +68,8 @@ describe("resolveTelemetrySettings", () => {
     expect(() => settings({ TRACING_ENABLED: "maybe" })).toThrow(/TRACING_ENABLED must be true or false/);
     expect(() => settings({ ...traces, OTEL_HTTP_SERVER_SPANS: "sometimes" })).toThrow(/OTEL_HTTP_SERVER_SPANS must be true or false/);
     expect(() => settings({ ...metrics, OTEL_METRICS_ENABLED: "maybe" })).toThrow(/OTEL_METRICS_ENABLED must be true or false/);
+    // The combined endpoint is a metrics endpoint too: `true` there would export metrics.
+    expect(() => settings({ ...traces, OTEL_METRICS_ENABLED: "maybe" })).toThrow(/OTEL_METRICS_ENABLED must be true or false/);
     expect(() => settings({ ...metrics, OTEL_METRICS_PUSH_INTERVAL_MS: "soon" })).toThrow(/OTEL_METRICS_PUSH_INTERVAL_MS must be a positive whole number/);
     // Valid values read as before.
     expect(settings({ ...metrics, OTEL_METRICS_PUSH_INTERVAL_MS: "15000", OTEL_HTTP_SERVER_SPANS: "no", TRACING_ENABLED: "yes" })).toMatchObject({

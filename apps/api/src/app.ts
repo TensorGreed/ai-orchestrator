@@ -7357,10 +7357,6 @@ export async function createApp(
   };
 
   /**
-   * 12.6 — a knowledge base's embedder sends text to a model, so the model allowlist of the knowledge base's project
-   * applies (a shared knowledge base: the default project's). The refusal message, or null when allowed.
-   */
-  /**
    * A knowledge base's embedder. While tracing or metrics are on, each call goes through the instrumented embedding
    * registry (an `embeddings` span and the token and duration metrics); the embedder itself is unchanged.
    */
@@ -7372,6 +7368,10 @@ export async function createApp(
       context: () => ({ resolveSecret: async (ref) => await secretService.resolveSecret(ref) })
     });
   };
+  /**
+   * 12.6 — a knowledge base's embedder sends text to a model, so the model allowlist of the knowledge base's project
+   * applies (a shared knowledge base: the default project's). The refusal message, or null when allowed.
+   */
   const kbEmbeddingRefusal = async (kb: { id: string; projectId?: string | null }, embedder: EmbeddingAdapter): Promise<string | null> => {
     const target = embedder.modelTarget;
     if (!target) return null;

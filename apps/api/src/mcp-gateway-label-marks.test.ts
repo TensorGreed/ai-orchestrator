@@ -315,11 +315,26 @@ describe("stored label marks of stateless callers", () => {
     const raised = await auditEvents(b.store, "mcp_gateway.session_labels_raised");
     expect(raised).toHaveLength(1);
     expect(raised[0]!.metadata).toMatchObject({ reason: "results_before_tracking", sessionId });
+    // The note was converted in the store when the session opened: the client's next stateless call, and a second
+    // session, are held too, and the same results are not audited again.
+    expect((await calc(fixture, b, "3+3")).error?.code).toBe(APPROVAL_PENDING);
+    const second = await legacySession(fixture, b);
+    expect((await legacyCall(fixture, b, second, "4+4")).error?.code).toBe(LEGACY_APPROVAL_PENDING);
+    expect(await auditEvents(b.store, "mcp_gateway.session_labels_raised")).toHaveLength(1);
+    const [stored] = await b.store.listMcpGatewayLabelMarks({ clientId: fixture.client.id }, new Date().toISOString());
+    expect(stored).toMatchObject({ unobserved: false, provenance: ["untrusted_external"] });
   });
 
   it("does not open a legacy session on a tracking toolset when the stored mark cannot be read", async () => {
     const fixture = await setup({ track: true });
     const a = fixture.instance;
+    // A note of untracked results that cannot be converted refuses the session too.
+    expect((await api(a, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { trackSessionLabels: false })).status).toBe(200);
+    await calc(fixture, a, "1+1");
+    expect((await api(a, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { trackSessionLabels: true })).status).toBe(200);
+    const convert = vi.spyOn(a.store, "raiseMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
+    expect((await initialize(fixture, a)).statusCode).toBe(503);
+    convert.mockRestore();
     const read = vi.spyOn(a.store, "readMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
     const refused = await initialize(fixture, a);
     expect(refused.statusCode).toBe(503);
