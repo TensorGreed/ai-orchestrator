@@ -171,6 +171,25 @@ function positiveInt(name: string, raw: string | undefined, fallback: number, wa
   return fallback;
 }
 
+/**
+ * A deferred switch from config (`deferredBooleanFromEnv`): the boolean, or the default when unset. A value that did
+ * not parse fails start-up only when `inEffect`; otherwise it is ignored like any setting of a signal that is off.
+ */
+function deferredFlag(name: string, value: boolean | string | undefined, fallback: boolean, inEffect: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (value === undefined) return fallback;
+  if (inEffect) throw new Error(`Invalid environment configuration: ${name} must be true or false (or empty for the default)`);
+  return fallback;
+}
+
+/** A deferred positive whole number from config (`deferredPositiveIntFromEnv`), checked the same way. */
+function deferredPositiveInt(name: string, value: number | string | undefined, fallback: number, inEffect: boolean): number {
+  if (typeof value === "number") return value;
+  if (value === undefined) return fallback;
+  if (inEffect) throw new Error(`Invalid environment configuration: ${name} must be a positive whole number (or empty for the default)`);
+  return fallback;
+}
+
 /** An endpoint L2M is about to use: it must be an absolute http(s) URL (start-up fails otherwise). */
 function requireHttpUrl(name: string, value: string): string {
   let ok = false;
@@ -201,9 +220,11 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
   const metricsSource = text(config.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT) ? "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" : "OTEL_EXPORTER_OTLP_ENDPOINT";
   const metricsEndpoint = signalEndpoint(text(config.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT), text(config.OTEL_EXPORTER_OTLP_ENDPOINT), "metrics") ?? null;
   const disabled = text(config.OTEL_SDK_DISABLED)?.toLowerCase() === "true";
-  const enabled = !disabled && (Boolean(tracesEndpoint) || config.TRACING_ENABLED);
+  // TRACING_ENABLED decides whether tracing is on unless the SDK is disabled.
+  const tracingEnabled = deferredFlag("TRACING_ENABLED", config.TRACING_ENABLED, false, !disabled);
+  const enabled = !disabled && (Boolean(tracesEndpoint) || tracingEnabled);
 
-  if (config.TRACING_ENABLED || text(config.TRACING_ENDPOINT)) {
+  if (tracingEnabled || text(config.TRACING_ENDPOINT)) {
     warnings.push(
       "TRACING_ENABLED and TRACING_ENDPOINT are deprecated: set OTEL_EXPORTER_OTLP_ENDPOINT (or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) instead"
     );
@@ -226,7 +247,9 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
   // The standard OTEL_* values are read only while they are used: an environment shared with other tools may hold
   // values L2M does not support, and those must not stop it. Unknown values fall back to the default with a warning,
   // as the specification asks; only an endpoint or protocol L2M is about to use fails start-up.
-  const metricsOn = !disabled && config.OTEL_METRICS_ENABLED;
+  // OTEL_METRICS_ENABLED matters only when a metrics endpoint is set, the push interval only when metrics export.
+  const metricsOn = !disabled && deferredFlag("OTEL_METRICS_ENABLED", config.OTEL_METRICS_ENABLED, false, !disabled && Boolean(metricsEndpoint));
+  const metricsIntervalMs = deferredPositiveInt("OTEL_METRICS_PUSH_INTERVAL_MS", config.OTEL_METRICS_PUSH_INTERVAL_MS, 60_000, metricsOn && Boolean(metricsEndpoint));
   // Settings shared by both signals (protocol, timeout) are checked when either one is exported.
   const exporting = enabled || (metricsOn && Boolean(metricsEndpoint));
   const used: string[] = enabled ? warnings : [];
@@ -285,7 +308,7 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
     enabled,
     tracesEndpoint: enabled ? tracesEndpoint : null,
     metricsEndpoint: metricsOn ? metricsEndpoint : null,
-    metricsIntervalMs: config.OTEL_METRICS_PUSH_INTERVAL_MS,
+    metricsIntervalMs,
     protocol,
     headers: parseOtelKeyValueList(config.OTEL_EXPORTER_OTLP_HEADERS),
     timeoutMs: positiveInt("OTEL_EXPORTER_OTLP_TIMEOUT", config.OTEL_EXPORTER_OTLP_TIMEOUT, 10_000, usedByExport),
@@ -308,7 +331,7 @@ export function resolveTelemetrySettings(config: AppConfig): TelemetrySettings {
       .split(",")
       .map((entry) => entry.trim())
       .filter(Boolean),
-    httpServerSpans: config.OTEL_HTTP_SERVER_SPANS !== false,
+    httpServerSpans: deferredFlag("OTEL_HTTP_SERVER_SPANS", config.OTEL_HTTP_SERVER_SPANS, true, enabled),
     trustInbound: config.L2M_OTEL_TRUST_INBOUND ?? "authenticated",
     trustedProxies,
     contentCapture,
