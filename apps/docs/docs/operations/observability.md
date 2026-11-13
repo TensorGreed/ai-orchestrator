@@ -326,7 +326,7 @@ POST /api/workflows/:id/enqueue         SERVER      (any instance)
 
 ## Trace id on runs
 
-While tracing is on, a run's history row stores the trace id of its run span (migration v70, SQLite and Postgres, nullable column). `GET /api/executions/:id` returns it as `traceId`; a run made while tracing was off has `traceId: null`, and nothing is stored or written for it. The run page shows **Copy trace id** for a run that has one. With `L2M_OTEL_TRACE_URL_TEMPLATE` set (for example `https://traces.example.com/trace/{traceId}`), the response also carries `traceUrl` and the run page shows an **Open trace** link. A run resumed after an approval is traced as a new run, so the stored id is the latest one. The column is removed with the run by retention and erasure, and the trace in your backend follows that backend's own retention.
+While tracing is on, a run's history row stores the trace id of its run span (migration v72, SQLite and Postgres, nullable column). `GET /api/executions/:id` returns it as `traceId`; a run made while tracing was off has `traceId: null`, and nothing is stored or written for it. The run page shows **Copy trace id** for a run that has one. With `L2M_OTEL_TRACE_URL_TEMPLATE` set (for example `https://traces.example.com/trace/{traceId}`), the response also carries `traceUrl` and the run page shows an **Open trace** link. A run resumed after an approval is traced as a new run, so the stored id is the latest one. The column is removed with the run by retention and erasure, and the trace in your backend follows that backend's own retention.
 
 ## Settings
 

@@ -4491,10 +4491,10 @@ export class SqliteStore implements Store {
     ensureSubjectSchema(this.db);
     // 13.3 (v69) — erasure tombstones.
     ensureErasureSchema(this.db);
-    // v70 — the trace id of the run's span (NULL while tracing is off).
-    this.ensureColumn("execution_history", "trace_id", "TEXT");
     // MCP 2026-07-28 (v71) — label marks of stateless gateway callers.
     ensureLabelMarkSchema(this.db);
+    // v72 — the trace id of the run's span (NULL while tracing is off).
+    this.ensureColumn("execution_history", "trace_id", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);

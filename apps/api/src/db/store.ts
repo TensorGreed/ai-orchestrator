@@ -494,7 +494,7 @@ export interface Store extends AiGatewayStore, SubjectStore {
   /** Phase 15.4 — the channel and published version a finished run ran on (null version: the draft). */
   setExecutionRelease(executionId: string, channel: "production" | "draft", version: number | null): Promise<void>;
   /**
-   * v70 — records the trace id of a run's span (only called while tracing is on). With `fence` (a queued run in
+   * v72 — records the trace id of a run's span (only called while tracing is on). With `fence` (a queued run in
    * cluster mode) it writes only while that claim still holds the queue item, like the run's history writes; false
    * when the claim was lost. True otherwise, also for a run with no history row (nothing to update).
    */
@@ -2099,7 +2099,7 @@ export interface Store extends AiGatewayStore, SubjectStore {
     customData: unknown;
     error: string | null;
     createdAt: string;
-    /** v70 — the trace id of the run's span; null when the run was made with tracing off. */
+    /** v72 — the trace id of the run's span; null when the run was made with tracing off. */
     traceId: string | null;
   } | null>;
   /**

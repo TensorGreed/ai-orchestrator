@@ -2277,7 +2277,7 @@ export async function createApp(
     entry.job.leaseLost(`${what} was refused`);
   };
 
-  // v70 — the trace id of each in-flight run's span (only while tracing is on). Bounded: a run whose history is never
+  // v72 — the trace id of each in-flight run's span (only while tracing is on). Bounded: a run whose history is never
   // persisted must not grow it forever. `stored` is set once the id is on the run's history row.
   const runTraceIds = new Map<string, { traceId: string; stored: boolean }>();
   const storeRunTraceId = async (executionId: string, phase: "progress" | "final") => {

@@ -12,7 +12,15 @@
  */
 const RESERVED_UNTIL_MERGED = new Set<number>([]);
 
+/**
+ * Versions no migration will ever use. v70 was reserved for the run trace id, which merged after v71 had shipped and
+ * so took v72 under the rule above; reusing 70 later would put a migration below versions databases already recorded.
+ */
+export const RETIRED_MIGRATION_VERSIONS: ReadonlySet<number> = new Set<number>([70]);
+
 export function contiguousMigrationVersions(versions: readonly number[]): number[] {
   const max = Math.max(0, ...versions);
-  return Array.from({ length: max }, (_, index) => index + 1).filter((version) => !RESERVED_UNTIL_MERGED.has(version) || versions.includes(version));
+  return Array.from({ length: max }, (_, index) => index + 1).filter(
+    (version) => !RETIRED_MIGRATION_VERSIONS.has(version) && (!RESERVED_UNTIL_MERGED.has(version) || versions.includes(version))
+  );
 }

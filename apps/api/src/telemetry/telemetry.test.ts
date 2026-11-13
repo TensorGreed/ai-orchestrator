@@ -356,7 +356,7 @@ describe("run spans and node metrics through the API", () => {
   });
 });
 
-describe("trace id on runs (v70)", () => {
+describe("trace id on runs (v72)", () => {
   const runnable = {
     id: "wf-otel-trace-id",
     name: "Trace id run",

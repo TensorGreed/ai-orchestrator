@@ -481,7 +481,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     if (!access.ok) return denyRunAccess(reply, access);
 
     const view = runViewHidesNodeData(user.role, access.run.triggerType, await responseRulesExist()) ? maskRunNodeData(access.run) : access.run;
-    // v70 — a link to the run's trace, only when an operator set L2M_OTEL_TRACE_URL_TEMPLATE and the run has a trace id.
+    // v72 — a link to the run's trace, only when an operator set L2M_OTEL_TRACE_URL_TEMPLATE and the run has a trace id.
     const traceUrl = traceUrlFor(config.L2M_OTEL_TRACE_URL_TEMPLATE, access.run.traceId);
     return traceUrl ? { ...view, traceUrl } : view;
   });

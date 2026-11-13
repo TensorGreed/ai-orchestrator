@@ -1,10 +1,10 @@
 /**
- * v70 — the trace id on a run's history row, on every store: SQLite always, Postgres when TEST_POSTGRES_URL is set.
+ * v72 — the trace id on a run's history row, on every store: SQLite always, Postgres when TEST_POSTGRES_URL is set.
  */
 import { expect, it } from "vitest";
 import { describeStoreContract } from "../test-support/test-store.js";
 
-describeStoreContract("run trace id (v70)", (ctx) => {
+describeStoreContract("run trace id (v72)", (ctx) => {
   const startedAt = new Date(Date.now() - 1_000).toISOString();
   const ID = "0123456789abcdef0123456789abcdef";
 

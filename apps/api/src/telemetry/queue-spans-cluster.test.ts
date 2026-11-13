@@ -183,7 +183,7 @@ run("trace context across replicas on one Postgres database", () => {
     expect(named(api, "process l2m.queue")).toHaveLength(0);
     expect(named(api, "invoke_workflow")).toHaveLength(0);
     const gateNode = named(worker, "l2m.node").find((span) => span.attributes["l2m.node.id"] === "gate")!;
-    // v70 — the worker wrote the trace id under its queue claim; the api replica reads it from the shared database.
+    // v72 — the worker wrote the trace id under its queue claim; the api replica reads it from the shared database.
     await until(async () => (await api.store.getExecutionHistory(executionId))?.traceId === REQUEST_TRACE, "the paused run's trace id");
 
     // The paused state, in the shared database, names the worker's gate node.
