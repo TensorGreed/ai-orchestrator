@@ -213,6 +213,50 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       expect(outcome.error).toContain("must live under");
     });
 
+    it("rejects a sibling of the root that shares its prefix, and symlinks that leave the root", async () => {
+      const safeRoot = path.join(tempDir, "safe");
+      const outside = path.join(tempDir, "outside");
+      fs.mkdirSync(safeRoot, { recursive: true });
+      fs.mkdirSync(outside, { recursive: true });
+      fs.symlinkSync(outside, path.join(safeRoot, "link-dir"));
+      fs.writeFileSync(path.join(outside, "target.ndjson"), "");
+      fs.symlinkSync(path.join(outside, "target.ndjson"), path.join(safeRoot, "link-file.ndjson"));
+      const cases: Array<[string, string, RegExp]> = [
+        ["axd_sibling", path.join(`${safeRoot}-x`, "audit.ndjson"), /must live under/],
+        ["axd_root", safeRoot, /must live under/],
+        ["axd_dotdot", path.join(safeRoot, "..", "outside", "a.ndjson"), /must live under/],
+        ["axd_link_dir", path.join(safeRoot, "link-dir", "nested", "a.ndjson"), /through a symlink/],
+        ["axd_link_file", path.join(safeRoot, "link-file.ndjson"), /symlink/]
+      ];
+      for (const [id, filePath] of cases) {
+        await store.createAuditExportDestination({ id, name: id, kind: "file", config: { path: filePath } });
+      }
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      const exporter = new AuditExportService(store, { batchSize: 100, safeFsRoot: safeRoot });
+      for (const [id, , error] of cases) {
+        const outcome = await exporter.runDestination(id);
+        expect(outcome.status, id).toBe("failure");
+        expect(outcome.error, id).toMatch(error);
+      }
+      expect(fs.existsSync(path.join(`${safeRoot}-x`, "audit.ndjson"))).toBe(false);
+      expect(fs.existsSync(path.join(outside, "nested"))).toBe(false);
+      expect(fs.readFileSync(path.join(outside, "target.ndjson"), "utf8")).toBe("");
+
+      // A path inside the root, in a directory that does not exist yet, still works.
+      await store.createAuditExportDestination({ id: "axd_ok", name: "ok", kind: "file", config: { path: path.join(safeRoot, "a", "b", "audit.ndjson") } });
+      expect((await exporter.runDestination("axd_ok")).status).toBe("success");
+      expect(fs.readFileSync(path.join(safeRoot, "a", "b", "audit.ndjson"), "utf8")).toContain('"eventType":"login"');
+    });
+
+    it("createDestination refuses a file path outside the root before storing it", async () => {
+      const safeRoot = path.join(tempDir, "safe");
+      const exporter = new AuditExportService(store, { safeFsRoot: safeRoot });
+      await expect(
+        exporter.createDestination({ id: "axd_x", name: "x", kind: "file", config: { path: path.join(`${safeRoot}-x`, "a.ndjson") } })
+      ).rejects.toThrow(/must live under/);
+      expect(await store.getAuditExportDestination("axd_x")).toBeNull();
+    });
+
     it("records a run row even when the destination is empty", async () => {
       await store.createAuditExportDestination({
         id: "axd_empty",

@@ -107,7 +107,7 @@ de-duplicate on `id`.
 | Kind | Config | Delivery |
 |---|---|---|
 | `http` | `url`, optional `headers` (for example an ingestion token) and `method` (default `POST`) | The batch as the request body, `content-type: application/x-ndjson`. Any answer other than 2xx is a failure. |
-| `file` | `path` | Appends the batch to the file, which must be under `AUDIT_EXPORT_FILE_ROOT`. Point a log shipper at it. |
+| `file` | `path` | Appends the batch to the file, which must be inside `AUDIT_EXPORT_FILE_ROOT` (checked when the destination is saved and at each delivery; a symlink that leads outside the root, or a file that is a symlink, is refused). Point a log shipper at it. |
 
 Create them under **Settings → Audit Log → Export destinations**, or with the API:
 

@@ -24,6 +24,7 @@
 
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import type { Store } from "../db/store.js";
 import type { SecretService } from "./secret-service.js";
@@ -200,6 +201,7 @@ export class AuditExportService {
     } else if (kind === "file") {
       if (typeof rest.path !== "string" || !rest.path) throw new AuditExportConfigError("file destination requires config.path");
       if (rawHeaders !== undefined) throw new AuditExportConfigError("file destination takes no headers");
+      this.lexicalTarget(rest.path);
       return rest;
     }
     if (rawHeaders === undefined) return rest;
@@ -394,17 +396,65 @@ export class AuditExportService {
     }
   }
 
+  /**
+   * Appends under the root only: the path must resolve inside it (a sibling such as `<root>-x` is outside), every
+   * directory on the way must stay inside it once symlinks are resolved, and the file itself must not be a symlink
+   * (opened with O_NOFOLLOW where the platform has it).
+   */
   private async deliverFile(config: AuditExportDestinationConfig, ndjson: string): Promise<void> {
     if (!config.path) throw new Error("file destination missing config.path");
-    const target = path.resolve(config.path);
-    if (!target.startsWith(this.safeFsRoot)) {
-      throw new Error(
+    const target = this.lexicalTarget(config.path);
+    await fs.mkdir(this.safeFsRoot, { recursive: true });
+    const realRoot = await fs.realpath(this.safeFsRoot);
+    // The deepest directory that exists must already be inside the root before anything is created under it.
+    let existing = path.dirname(target);
+    for (;;) {
+      try {
+        await fs.stat(existing);
+        break;
+      } catch {
+        const parent = path.dirname(existing);
+        if (parent === existing) break;
+        existing = parent;
+      }
+    }
+    this.assertInside(realRoot, await fs.realpath(existing), config.path);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    const realDir = await fs.realpath(path.dirname(target));
+    this.assertInside(realRoot, realDir, config.path);
+    const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | (fsConstants.O_NOFOLLOW ?? 0);
+    let handle: fs.FileHandle;
+    try {
+      handle = await fs.open(path.join(realDir, path.basename(target)), flags, 0o640);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ELOOP") throw new Error(`file destination path ${config.path} is a symlink; refusing to follow it`);
+      throw err;
+    }
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile()) throw new Error(`file destination path ${config.path} is not a regular file`);
+      await handle.appendFile(ndjson, "utf8");
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** `configured` resolved, and inside the root by path (no symlinks resolved yet); throws otherwise. */
+  private lexicalTarget(configured: string): string {
+    const target = path.resolve(configured);
+    if (!isInside(this.safeFsRoot, target)) {
+      throw new AuditExportConfigError(
         `file destination path must live under ${this.safeFsRoot} (got ${target}); ` +
           "this is a sandbox to prevent writes outside the data dir"
       );
     }
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.appendFile(target, ndjson, "utf8");
+    return target;
+  }
+
+  private assertInside(realRoot: string, realPath: string, configured: string): void {
+    if (realPath !== realRoot && !isInside(realRoot, realPath)) {
+      throw new Error(`file destination path ${configured} leaves ${this.safeFsRoot} through a symlink; refusing to write there`);
+    }
   }
 }
 
@@ -435,6 +485,12 @@ export function auditExportConfigSummary(config: Record<string, unknown>): Recor
     ...(urlHost ? { urlHost } : {}),
     ...(headers ? { headerNames: headers } : {})
   };
+}
+
+/** Whether `child` is strictly inside `parent` (both absolute and resolved): never `parent` itself or a sibling. */
+function isInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
