@@ -4,6 +4,19 @@
  */
 export { createOtelRuntime, OtelRuntime, buildPropagator, buildSampler, type LogTraceFields } from "./runtime.js";
 export { McpSpanHandle, OtelRunInstrumentation, OtelSpanHandle, cleanAttributes, conversationIdFor, errorTypeOf, type StartSpanSpec } from "./instrumentation.js";
+export {
+  ContentCaptureProcessor,
+  ContentDroppedError,
+  ContentPipeline,
+  INFERENCE_DETAILS_EVENT,
+  snapshotContent,
+  truncateContent,
+  type ContentCaptureMode,
+  type ContentCaptureOptions,
+  type ContentMaskPart,
+  type ContentMaskResult,
+  type ContentMasker
+} from "./content.js";
 export { McpMetrics, mcpSpanSpec, sanitizeResourceUri } from "./mcp.js";
 export {
   createMetricsPipeline,

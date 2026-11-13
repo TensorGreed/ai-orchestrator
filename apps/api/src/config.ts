@@ -716,6 +716,21 @@ const envSchema = z.object({
       })
       .optional()
   ),
+  /**
+   * Content capture on GenAI spans: NO_CONTENT (default), SPAN_ONLY, EVENT_ONLY or SPAN_AND_EVENT. When on, prompts,
+   * answers and tool arguments and results are secret-scrubbed, masked by content rules and truncated before export,
+   * and never exported for sensitive work. Read only while tracing is on; an unknown value means NO_CONTENT.
+   */
+  OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT: z.string().optional(),
+  /** Older name for the same switch (`true` = SPAN_ONLY); the variable above wins when both are set. */
+  OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: z.string().optional(),
+  /** Longest captured content attribute, in characters (256 to 1048576). Default 8192. */
+  L2M_OTEL_CONTENT_MAX_CHARS: blankAsUndefined(z.coerce.number().int().min(256).max(1_048_576).optional()),
+  /**
+   * `/v1` AI gateway requests capture content only when this is true as well as the switch above (default false).
+   * Workflow runs are not affected by it.
+   */
+  L2M_OTEL_CAPTURE_GATEWAY_CONTENT: optionalBooleanFromEnv,
 
   // Phase 8.2 — FinOps cost rollups.
   // JSON object overlaying `services/usage-service.ts` DEFAULT_PRICING. Same

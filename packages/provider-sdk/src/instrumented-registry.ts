@@ -14,6 +14,7 @@ import {
   type RunInstrumentation,
   type TraceCarrier
 } from "@ai-orchestrator/shared";
+import { StreamedAnswer, captureModelAnswer, captureModelRequest, genAiOutputMessages } from "./content-capture";
 import { providerServerEndpoint } from "./default-base-urls";
 import { EmbeddingProviderRegistry, type EmbeddingProviderAdapter, type EmbeddingResponse } from "./embeddings";
 import { ProviderRegistry } from "./registry";
@@ -24,8 +25,9 @@ import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderE
  *
  * An instrumented registry hands out adapters whose `generate`, `generateStream` and (for embeddings) `embed` run
  * inside a `chat {model}` / `embeddings {model}` CLIENT span of the given `RunInstrumentation`, and report each call to
- * `observe` when it ends (the GenAI duration and token metrics). Only ids, parameters and counts are recorded: never
- * the messages, the answer, tool arguments or the provider's error text (an error is its low-cardinality type).
+ * `observe` when it ends (the GenAI duration and token metrics). Only ids, parameters and counts are set on the span:
+ * never the provider's error text (an error is its low-cardinality type). The messages, tool definitions and answer are
+ * handed to the span only while it captures content (off by default), and its implementation masks them before export.
  *
  * Registries can be layered (an instrumented allowlist view over an instrumented base); the outermost layer records the
  * call and marks the context it passes on, so the layers below pass it through and each call is recorded once. The
@@ -182,11 +184,13 @@ class ModelCallRecorder {
     const outcome = await instrument.modelCall(description.info, async (span): Promise<{ response: LLMCallResponse } | { error: unknown; type: string }> => {
       const call = new CallContext(context, span, instrument);
       try {
+        captureModelRequest(span, request);
         const response = await adapter.generate(request, call.context);
         if (span.recording) {
           sharedEnd(span, call, reportedUsage(response.usage), responseIds(response.raw));
           if (response.finishReason) span.setAttributes({ [ATTR.RESPONSE_FINISH_REASONS]: [response.finishReason] });
         }
+        captureModelAnswer(span, () => genAiOutputMessages(response));
         return { response };
       } catch (error) {
         const type = modelCallErrorType(error);
@@ -227,6 +231,7 @@ class ModelCallRecorder {
       open.span = active;
       open.call = new CallContext(context, active, instrument);
       try {
+        captureModelRequest(active, request);
         open.iterator = stream(request, open.call.context)[Symbol.asyncIterator]();
         return { first: await open.iterator.next() };
       } catch (error) {
@@ -238,6 +243,7 @@ class ModelCallRecorder {
     let finishReason: LLMFinishReason | undefined;
     let innerDone = false;
     let failure: { error: unknown } | null = null;
+    const answer = span.capturesContent === true ? new StreamedAnswer() : null;
     try {
       if ("error" in opened) {
         innerDone = true;
@@ -249,6 +255,8 @@ class ModelCallRecorder {
         const chunk = result.value;
         if (chunk.type === "usage") usage = chunk.usage;
         else if (chunk.type === "finish") finishReason = chunk.reason;
+        else if (answer && chunk.type === "text_delta") answer.addText(chunk.textDelta);
+        else if (answer && chunk.type === "tool_call_delta") answer.addToolCall(chunk);
         try {
           yield chunk;
         } catch (error) {
@@ -293,6 +301,8 @@ class ModelCallRecorder {
           });
         }
         if (errorType) span.recordError("", { type: errorType });
+        // What the reader was given, also when it stopped early; a failed stream records no answer.
+        else if (answer) captureModelAnswer(span, () => answer.output(finishReason));
       } finally {
         span.end();
       }

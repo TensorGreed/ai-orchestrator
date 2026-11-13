@@ -290,6 +290,12 @@ export function withImpliedSensitive<T extends Pick<DataLabels, "provenance" | "
   return { ...labels, provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)) };
 }
 
+/** 12.2 — the labels mark sensitive data: the `sensitive` label, or any detected data class (see `withImpliedSensitive`). */
+export function labelsMarkSensitive(labels: Pick<DataLabels, "provenance" | "dataClasses"> | null | undefined): boolean {
+  if (!labels) return false;
+  return withImpliedSensitive(labels).provenance.includes("sensitive");
+}
+
 /** 12.6 — the custom-data key a workflow tool's run records its gateway Guard stack under. Only the gateway sets it. */
 export const GATEWAY_GUARD_CUSTOM_DATA_KEY = "gatewayGuard";
 

@@ -138,6 +138,11 @@ export interface AiGatewayDeps {
    * no-op: nothing is annotated. The model call's own span comes from the instrumented provider registry.
    */
   instrument?: RunInstrumentation;
+  /**
+   * While content capture is on: whether this gateway's requests record their (masked) model content as well
+   * (L2M_OTEL_CAPTURE_GATEWAY_CONTENT). Absent or false: they record none.
+   */
+  captureContent?: boolean;
   /** Mirrors the priced spend of a written usage row into the cost metric. Absent: nothing is reported. */
   recordCost?: (observation: ModelCostObservation) => void;
 }
@@ -1044,7 +1049,11 @@ export function registerAiGatewayRoutes(deps: AiGatewayDeps): void {
 
   const handle = (fn: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) => async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      return await fn(request, reply);
+      // Only with the gateway's own opt-in do a request's model calls record their (masked) content: the gateway has no
+      // sensitive marking of its own, so nothing here excludes it beyond what masking removes. Without the opt-in no
+      // content scope is opened, and spans outside one capture nothing.
+      const contentScope = deps.captureContent === true ? instrument?.withContentExclusion : undefined;
+      return contentScope ? await contentScope.call(instrument, () => false, () => fn(request, reply)) : await fn(request, reply);
     } catch (error) {
       if (reply.sent || reply.raw.headersSent) {
         if (!(error instanceof AiGatewayHttpError)) app.log.error({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "AI gateway request failed after the response started");

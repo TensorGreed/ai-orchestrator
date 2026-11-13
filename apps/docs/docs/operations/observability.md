@@ -188,7 +188,7 @@ POST /api/workflows/:id/execute         SERVER
 | `l2m.agent.iteration` | `l2m.agent.iteration`, `l2m.agent.final` |
 | `execute_tool` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type`, `l2m.tool.internal`, `l2m.tool.outcome`, `l2m.content_rules.outcome` |
 
-Spans carry ids and timings, not content: prompts, tool arguments and results stay in L2M's execution history. Use `l2m.execution.id` to go from a trace to the run in L2M.
+Spans carry ids and timings, not content: prompts, tool arguments and results stay in L2M's execution history, unless you turn on [content capture](#content-capture). Use `l2m.execution.id` to go from a trace to the run in L2M.
 
 ## Model spans
 
@@ -207,7 +207,7 @@ POST /v1/chat/completions               SERVER  l2m.gateway.* attributes
 - **Providers.** `gen_ai.provider.name` uses the well-known values: `openai` (also for OpenAI-compatible servers, whose L2M id stays in `l2m.provider.id`), `azure.ai.openai`, `anthropic`, `gcp.gemini` and `ollama`. `server.address` is the provider's host, never its URL.
 - **Streams.** A streamed answer's span stays open until the stream ends, and takes the usage and finish reason from its last chunks. When the reader stops early (the caller hung up, content rules cut the answer), the span ends then with `l2m.stream.closed_early`.
 - **Failures and refusals.** A failed call sets the span status to ERROR with its type as `error.type` (the L2M error category, such as `timeout` or `model_not_allowed`, else the error's class), never the provider's error text. A call the model allowlist refuses gets a span with `error.type=model_not_allowed`, though nothing was sent; it is left out of the metrics.
-- **No content.** Prompts, answers, tool definitions and tool arguments are never recorded on these spans.
+- **No content by default.** Prompts, answers, tool definitions and tool arguments are recorded on these spans only with [content capture](#content-capture) on, and then only masked.
 - **`/v1` requests.** The gateway puts its ids and outcome on the request's HTTP span: `l2m.gateway.request.id` (the id of the request's usage row), `l2m.gateway.route_set.id`, `l2m.gateway.route.alias`, `l2m.gateway.client.id`, `l2m.gateway.status` (the usage row's status, or the refusal: `rate_limited`, `budget_blocked`, `model_not_allowed`) and `l2m.content_rules.outcome` (`blocked` or `rewritten`). A refused request has no `chat` span: no model was called.
 - **Propagation.** L2M does not send `traceparent` to model providers by default: their endpoints are outside your trace domain. `L2M_OTEL_PROPAGATE_TO_PROVIDERS=true` adds it (and `tracestate`) to each provider request, for a provider or proxy you run yourself.
 
@@ -258,6 +258,53 @@ Each request to an MCP server carries the active span's trace context in `params
 ### Trace context the gateway receives
 
 A gateway client can send trace context in `params._meta`, in the HTTP headers, or both. The `_meta` context wins: it becomes the parent of the request's SERVER span, and the HTTP request's span is linked (`l2m.link.reason=transport`). Every request that reaches the gateway carries a valid client token, so its context is continued under `L2M_OTEL_TRUST_INBOUND=authenticated` (the default) and `all`; with `none` the span stays in the HTTP request's trace and only links the caller's (`l2m.link.reason=untrusted_inbound`). The servers behind the gateway never receive a caller's `_meta` as it was sent: they get the context of the gateway's own CLIENT span, which keeps the caller's trace (and its `tracestate`) only when the caller's context was continued. Baggage in a caller's `_meta` is not carried on. In `_meta`, `traceparent` and `tracestate` longer than 512 characters and `baggage` longer than 8192 are ignored.
+
+## Content capture
+
+Off by default. With `OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT` set (and tracing on), model and tool spans also carry the content of the call, after it was cleaned. It is for debugging and evaluating agents in a tracing backend you control; L2M's execution history stays the full record either way.
+
+| Value | What is recorded |
+|---|---|
+| `NO_CONTENT` (default) | Nothing. Any value L2M does not know means this too, with a start-up warning. |
+| `SPAN_ONLY` | Content attributes on the spans. |
+| `EVENT_ONLY` | A `gen_ai.client.inference.operation.details` span event on each `chat` span holding the model call's content. Tool spans get no content: the conventions define this event for model calls only. |
+| `SPAN_AND_EVENT` | Both. |
+
+The older `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is read when the new variable is unset (`true` means `SPAN_ONLY`). Capture needs `SECRET_MASTER_KEY_BASE64`; without it nothing is captured and start-up says so.
+
+**What is captured.** The GenAI conventions' opt-in content attributes, pinned at v1.41.0 and recorded as JSON text:
+
+| Span | Attributes |
+|---|---|
+| `chat {model}` | `gen_ai.system_instructions`, `gen_ai.input.messages`, `gen_ai.output.messages` (the answer as it was read, for a stream too), `gen_ai.tool.definitions` |
+| `execute_tool {tool}` | `gen_ai.tool.call.arguments` (as sent, after content rules and tool policy), `gen_ai.tool.call.result` (as the model sees it) |
+| `tools/call {tool}` (MCP CLIENT) | `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, for an MCP Tool node's call. An agent's call is recorded once, on its `execute_tool` span, as the agent kept it after its labels and content rules. |
+
+**Where.** Content is captured for workflow runs (their LLM Call nodes, agent loops and MCP Tool nodes, sub-workflows included). `/v1` AI gateway requests capture it only when `L2M_OTEL_CAPTURE_GATEWAY_CONTENT=true` is set as well: their prompts come from outside applications and the gateway has no sensitive marking of its own, so masking is all that protects them. Everything else records none, even with capture on: MCP gateway proxying (`subscriptions/listen` streams included), a tool tried from the server registry, eval and replay judges, MCP sampling, and provider connection tests.
+
+Images are named by type only, never copied. Not captured: embedding inputs, retrieval queries, memory records, error text from a provider or tool, and anything on run, node, agent or MCP gateway SERVER spans. A model call's content is recorded as it went to and came from the provider, including an answer that content rules then blocked or rewrote (cleaned as below). Earlier tool errors and content rule notices the model is shown are part of the next call's input messages.
+
+**How content is cleaned.** Nothing is set on a span as it was handed over. When the span ends it is held back from the exporter (and from **Settings → Observability**'s recent spans) while L2M, off the request path:
+
+1. removes secrets: credential fields and token shapes, and every secret value the deployment holds, as it is and URL- or base64-encoded (stored secrets, cached external secrets, values stored or read since start-up, credential environment variables, passwords in URL-valued environment variables and the OTLP header values). Values shorter than 6 characters are not matched, and a secret created on another instance is matched here within 30 seconds;
+2. masks what content rules detect, with stable keyed surrogates: the built-in data classes (emails, phone numbers, card numbers, national ids, ...) and the dictionaries of every content-rule profile. The same value gets the same surrogate on every span, so a backend can still group by it; the key is derived from the master key and differs from production capture's;
+3. cuts each attribute to `L2M_OTEL_CONTENT_MAX_CHARS` characters (default 8192, and never more than `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`), keeping valid JSON (long strings first, then the end of long lists, marked `…[truncated]`). Cutting happens after masking, so a cut never leaves part of a value unmasked;
+4. checks the result once more for secret values.
+
+**When content is left out.** The span is still exported, without any content, and `l2m.content.dropped` says why:
+
+| `l2m.content.dropped` | Why |
+|---|---|
+| `sensitive` | The work is sensitive: the run, or a sub-workflow it calls, has a node marked **Sensitive output** or uses a secret flagged so, or a registered MCP server it uses could not be checked when the run started (the whole run); a Reveal node revealed something (the rest of the run); or, on runs that track data labels, the node's input or what an agent loop has seen so far is labelled sensitive (which includes any detected data class). It is checked when content is handed over and again when the span ends. |
+| `masking_failed`, `masking_incomplete`, `unscannable` | Masking failed, could not replace a value everywhere, or the content is nested too deep to scan. |
+| `secret_detected` | The final check still found a secret value. |
+| `timeout` | Masking, or reading the secret values and dictionaries it needs, took more than 10 seconds. |
+| `backpressure` | More than 256 spans were waiting for masking. |
+| `too_large` | The span's content is over 8 times `L2M_OTEL_CONTENT_MAX_CHARS` of text (at least 64 KiB, at most 1 MiB). |
+
+`l2m_otel_content_dropped_total` (by `reason`) counts these on the metrics endpoint.
+
+**Visibility.** Start-up logs a warning and writes a `telemetry.content_capture_enabled` audit event while capture is on (both say whether `/v1` requests are included, as `gatewayContent`), and `GET /api/observability` reports `contentCapture`, `contentMaxChars` and `gatewayContentCapture`. Content capture is never on for a deployment that does not set the variable, and it changes nothing while tracing is off.
 
 ## Queues, clusters and approvals
 
@@ -314,6 +361,9 @@ While tracing is on, a run's history row stores the trace id of its run span (mi
 | `L2M_OTEL_TRACE_URL_TEMPLATE` | unset | An absolute http(s) URL containing `{traceId}`. The run page then links each traced run to it ("Open trace"). |
 | `L2M_OTEL_PROPAGATE_TO_PROVIDERS` | `false` | Send `traceparent` (and `tracestate`) to model providers. |
 | `L2M_OTEL_PROPAGATE_TO_MCP` | `true` | Send trace context to MCP servers (`_meta` and HTTP headers). A server can opt out in its connection settings. |
+| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT` | `NO_CONTENT` | `SPAN_ONLY`, `EVENT_ONLY` or `SPAN_AND_EVENT` record masked content. See [Content capture](#content-capture). |
+| `L2M_OTEL_CONTENT_MAX_CHARS` | `8192` | Longest captured content attribute (256 to 1048576). |
+| `L2M_OTEL_CAPTURE_GATEWAY_CONTENT` | `false` | `true` also captures content for `/v1` AI gateway requests, while content capture is on. Workflow runs do not depend on it. |
 
 The standard `OTEL_*` values are read only while they are used, so values meant for other tools sharing the environment never stop L2M. While tracing is on, an unsupported value (a sampler, propagator, protocol or number L2M cannot use) falls back to its default with a warning at start-up. Only these stop the API at start-up, with a message naming the setting: an endpoint L2M is about to use that is not an absolute `http://` or `https://` URL, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` with a traces endpoint set, and a bad `L2M_OTEL_*` value (such as a trusted-proxy entry that is not an IP address or CIDR range).
 
