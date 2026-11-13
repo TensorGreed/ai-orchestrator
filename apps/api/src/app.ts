@@ -4421,8 +4421,10 @@ export async function createApp(
     knowledgeBaseStoreFor: (projectId) => knowledgeBaseStoreForRun(projectId),
     sessions: {
       loadMemory: async (namespace, sessionId) => await store.loadSessionMemory(namespace, sessionId),
-      saveMemory: async (namespace, sessionId, messages, labels) => await store.saveSessionMemory(namespace, sessionId, messages, labels),
+      saveMemory: async (namespace, sessionId, messages, labels, options) =>
+        options ? await store.saveSessionMemory(namespace, sessionId, messages, labels, options) : await store.saveSessionMemory(namespace, sessionId, messages, labels),
       loadMemoryLabels: async (namespace, sessionId) => await store.loadSessionMemoryLabels(namespace, sessionId),
+      loadMemorySensitive: async (namespace, sessionId) => await store.loadSessionMemorySensitive(namespace, sessionId),
       saveToolCall: async (input) => await store.saveSessionToolCall(input),
       listToolCalls: async (input) => await store.listSessionToolCalls(input),
       getToolCall: async (input) => await store.getSessionToolCall(input),

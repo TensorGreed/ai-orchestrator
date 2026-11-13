@@ -132,8 +132,23 @@ export class MemorySeedCapture {
               return labels;
             }
           }
+        : {}),
+      ...(store.loadSensitive
+        ? {
+            // v73 — memory written by sensitive work stays marked in the seed, so a replay that reads it exports no content.
+            loadSensitive: async (namespace: string, sessionId: string) => {
+              const sensitive = await store.loadSensitive!(namespace, sessionId);
+              if (sensitive) this.captureSensitive(namespace, sessionId);
+              return sensitive;
+            }
+          }
         : {})
     };
+  }
+
+  private captureSensitive(namespace: string, sessionId: string): void {
+    const entry = this.sessions.get(`${namespace}\u0000${sessionId}`);
+    if (entry) entry.sensitive = true;
   }
 
   private captureLabels(namespace: string, sessionId: string, labels: DataLabels): void {

@@ -19,6 +19,7 @@ import {
 } from "@opentelemetry/api";
 import type {
   AgentIterationSpanInfo,
+  ContentSensitivity,
   InstrumentationContentKind,
   AgentSpanInfo,
   GenericSpanInfo,
@@ -333,7 +334,7 @@ export class OtelRunInstrumentation implements RunInstrumentation {
     return { pipeline, exclusion, inference: kind === "inference" };
   }
 
-  withContentExclusion<T>(isSensitive: () => boolean, fn: () => T): T {
+  withContentExclusion<T>(isSensitive: () => ContentSensitivity, fn: () => T): T {
     if (!this.deps.content) return fn();
     const active = this.deps.contextManager.active();
     return this.deps.contextManager.with(active.setValue(CONTENT_EXCLUSION_KEY, composeExclusion(isSensitive, exclusionIn(active))), fn);

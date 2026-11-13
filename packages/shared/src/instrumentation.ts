@@ -82,8 +82,23 @@ export const CONTENT_ATTRIBUTES: Readonly<Record<InstrumentationContentKind, str
   tool_call_result: "gen_ai.tool.call.result"
 });
 
-/** Set instead of content when content was withheld: `sensitive`, `masking_failed`, `timeout`, `backpressure`, ... */
+/**
+ * Set instead of content when content was withheld: `sensitive`, `sensitive_memory`, `masking_failed`, `timeout`,
+ * `backpressure`, ...
+ */
 export const CONTENT_DROPPED_ATTRIBUTE = "l2m.content.dropped";
+
+/**
+ * The drop reason of a run that read session memory, a session tool cache record or a session artifact written by
+ * sensitive work (v73 `sensitive` column): the rest of that run exports no content.
+ */
+export const CONTENT_DROPPED_SENSITIVE_MEMORY = "sensitive_memory";
+
+/**
+ * What a content exclusion check answers: false (not sensitive), true (sensitive, dropped as `sensitive`), or the drop
+ * reason to record (lower-case letters and underscores, at most 40; anything else is recorded as `sensitive`).
+ */
+export type ContentSensitivity = boolean | string;
 
 export interface RunSpanInfo {
   /** The run's execution id; a sub-workflow's child run has none of its own (its span is a child of the caller's). */
@@ -322,12 +337,12 @@ export interface RunInstrumentation {
   /** True while content capture is on (see `InstrumentationSpan.capturesContent`). Absent means false. */
   readonly capturesContent?: boolean;
   /**
-   * Runs `fn` with `isSensitive` checked for every span started inside it (and their children): while it returns true,
-   * or if it throws, those spans export no content. Callers whose work can hold sensitive data (a run with a
-   * sensitive-labelled node, an agent loop that read a sensitive result) wrap it in this. Checks nest: an outer one
-   * still applies inside an inner one.
+   * Runs `fn` with `isSensitive` checked for every span started inside it (and their children): while it returns true
+   * or a drop reason, or if it throws, those spans export no content. Callers whose work can hold sensitive data (a run
+   * with a sensitive-labelled node, an agent loop that read a sensitive result) wrap it in this. Checks nest: an outer
+   * one still applies inside an inner one.
    */
-  withContentExclusion?<T>(isSensitive: () => boolean, fn: () => T): T;
+  withContentExclusion?<T>(isSensitive: () => ContentSensitivity, fn: () => T): T;
 }
 
 const NOOP_SPAN: InstrumentationSpan = Object.freeze({
@@ -371,7 +386,7 @@ export const NOOP_RUN_INSTRUMENTATION: RunInstrumentation = Object.freeze({
   withNewTrace: <T>(fn: () => T): T => fn(),
   activeTraceIds: () => null,
   capturesContent: false,
-  withContentExclusion: <T>(_isSensitive: () => boolean, fn: () => T): T => fn()
+  withContentExclusion: <T>(_isSensitive: () => ContentSensitivity, fn: () => T): T => fn()
 });
 
 /** The no-op span, for callers that need one outside a wrapper. */

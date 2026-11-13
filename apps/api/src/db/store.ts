@@ -1857,13 +1857,19 @@ export interface Store extends AiGatewayStore, SubjectStore {
   /** Migration 37 — the labels stored with a session's memory; null when none were recorded. */
   loadSessionMemoryLabels(namespace: string, sessionId: string): Promise<DataLabels | null>;
   /**
+   * v73 — the memory was written by sensitive work (its `sensitive` mark) or its stored labels say sensitive; false
+   * when there is none. A run that reads such memory exports no content from then on.
+   */
+  loadSessionMemorySensitive(namespace: string, sessionId: string): Promise<boolean>;
+  /**
    * Saves a session's memory. `labels` (Phase 16) are given only while the
    * run tracks labels and are merged with the labels already stored; a save
    * without them (an untracked run) keeps the stored labels and adds
    * `untrusted_external` (it re-saves the old messages with a turn of unknown
-   * origin); a row with no labels stays without.
+   * origin); a row with no labels stays without. `options.sensitive` (v73)
+   * marks the row as written by sensitive work; a marked row stays marked.
    */
-  saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): Promise<void>;
+  saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels, options?: { sensitive?: boolean }): Promise<void>;
   saveSessionToolCall(input: {
     namespace: string;
     sessionId: string;
@@ -1875,6 +1881,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
     summary?: unknown;
     /** Phase 16 — given only while the run tracks labels. */
     labels?: DataLabels;
+    /** v73 — written by sensitive work. */
+    sensitive?: boolean;
   }): Promise<{
     id: string;
     namespace: string;
@@ -1886,6 +1894,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
     error?: string;
     summary?: unknown;
     labels?: DataLabels | null;
+    /** v73 — present (true) only on rows written by sensitive work. */
+    sensitive?: boolean;
     createdAt: string;
   }>;
   listSessionToolCalls(input: {
@@ -1903,6 +1913,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
     error?: string;
     summary?: unknown;
     labels?: DataLabels | null;
+    /** v73 — present (true) only on rows written by sensitive work. */
+    sensitive?: boolean;
     createdAt: string;
   }>>;
   getSessionToolCall(input: {
@@ -1920,6 +1932,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
     error?: string;
     summary?: unknown;
     labels?: DataLabels | null;
+    /** v73 — present (true) only on rows written by sensitive work. */
+    sensitive?: boolean;
     createdAt: string;
   } | null>;
   /**
@@ -1935,12 +1949,16 @@ export interface Store extends AiGatewayStore, SubjectStore {
     artifactKey: string;
     value: unknown;
     labels?: DataLabels;
+    /** v73 — written by sensitive work; a marked row stays marked. */
+    sensitive?: boolean;
   }): Promise<{
     namespace: string;
     sessionId: string;
     artifactKey: string;
     value: unknown;
     labels?: DataLabels | null;
+    /** v73 — present (true) only on rows written by sensitive work. */
+    sensitive?: boolean;
     createdAt: string;
     updatedAt: string;
   }>;
@@ -1954,6 +1972,8 @@ export interface Store extends AiGatewayStore, SubjectStore {
     artifactKey: string;
     value: unknown;
     labels?: DataLabels | null;
+    /** v73 — present (true) only on rows written by sensitive work. */
+    sensitive?: boolean;
     createdAt: string;
     updatedAt: string;
   } | null>;

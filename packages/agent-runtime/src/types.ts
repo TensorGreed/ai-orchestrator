@@ -186,10 +186,18 @@ export interface InternalToolResult {
 
 export interface AgentSessionMemoryStore {
   loadMessages(namespace: string, sessionId: string): Promise<ChatMessage[]>;
-  /** `options.labels` (Phase 16): stored with the messages; given only while the run tracks labels. */
-  saveMessages(namespace: string, sessionId: string, messages: ChatMessage[], options?: { labels?: DataLabels }): Promise<void>;
+  /**
+   * `options.labels` (Phase 16): stored with the messages; given only while the run tracks labels.
+   * `options.sensitive` (v73): the run writing it is sensitive work for content capture; once set, the row stays marked.
+   */
+  saveMessages(namespace: string, sessionId: string, messages: ChatMessage[], options?: { labels?: DataLabels; sensitive?: boolean }): Promise<void>;
   /** Phase 16 — the labels stored with this memory; null when none were recorded (older rows). */
   loadLabels?(namespace: string, sessionId: string): Promise<DataLabels | null>;
+  /**
+   * v73 — true when this memory was written by sensitive work (or its stored labels say sensitive): a run that reads
+   * it exports no content from then on. Absent: never sensitive.
+   */
+  loadSensitive?(namespace: string, sessionId: string): Promise<boolean>;
 }
 
 export interface AgentSessionToolRecord {
@@ -204,6 +212,8 @@ export interface AgentSessionToolRecord {
   summary?: unknown;
   /** Phase 16 — labels of the cached result; absent on rows written while labels were not tracked. */
   labels?: DataLabels | null;
+  /** v73 — written by sensitive work; present only when true. */
+  sensitive?: boolean;
   createdAt: string;
 }
 
@@ -219,6 +229,8 @@ export interface AgentSessionToolDataStore {
     summary?: unknown;
     /** Phase 16 — given only while the run tracks labels. */
     labels?: DataLabels;
+    /** v73 — the run writing it is sensitive work for content capture. */
+    sensitive?: boolean;
   }): Promise<AgentSessionToolRecord>;
   listToolCalls(input: {
     namespace: string;

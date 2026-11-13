@@ -176,6 +176,7 @@ import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffS
 import { executeGuardNodeStep } from "./guard-node";
 import { executeRevealNodeStep } from "./reveal-node";
 import { childGuardFor, redactingDependencies, redactingSessionStores, RevealRedactor } from "./reveal-redaction";
+import { SessionSensitivity, sensitivityTrackingSessionStores } from "./session-sensitivity";
 import { checkRunResponse, sealRunReply } from "./response-boundary";
 import {
   createGuardModelServices,
@@ -638,6 +639,11 @@ export interface WorkflowExecutionDependencies {
    * Reveal nodes revealed, put back as their tokens in everything the run hands outside (see reveal-redaction.ts).
    */
   revealRedactor?: RevealRedactor;
+  /**
+   * v73 — set by the engine for the duration of a run (not part of the caller contract): what the run read from and
+   * writes to session state written by sensitive work (see session-sensitivity.ts).
+   */
+  sessionSensitivity?: SessionSensitivity;
 }
 
 export interface McpToolPolicySnapshot {
@@ -659,6 +665,8 @@ export interface AgentSessionArtifactRecord {
   value: unknown;
   /** Phase 16 — labels of what the saving run put in the artifact; absent or null when it did not track labels. */
   labels?: DataLabels | null;
+  /** v73 — written by sensitive work; present only when true. */
+  sensitive?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -671,6 +679,8 @@ export interface AgentSessionArtifactStore {
     value: unknown;
     /** Phase 16 — given only while the run tracks labels; replaces the stored labels with the value. */
     labels?: DataLabels;
+    /** v73 — the run writing it is sensitive work for content capture; once set, the row stays marked. */
+    sensitive?: boolean;
   }): Promise<AgentSessionArtifactRecord>;
   loadArtifact(input: {
     namespace: string;
@@ -6291,8 +6301,8 @@ async function executeNodeHandler(
         value,
         ...(artifactLabels ? { labels: artifactLabels } : {})
       });
-      // Labels stay beside outputs, never inside them.
-      const { labels: _savedLabels, ...record } = saved;
+      // Labels and the sensitive mark stay beside outputs, never inside them.
+      const { labels: _savedLabels, sensitive: _savedSensitive, ...record } = saved;
       return {
         ...context.merged,
         namespace: record.namespace,
@@ -8769,8 +8779,21 @@ export async function executeWorkflow(
     const redactor = new RevealRedactor();
     const redacting = redactingDependencies(dependencies, redactor);
     const recorder = createNodeActivityRecorder(redacting.onNodeActivity);
-    const result = await runWithContentExclusion(request.resumeState?.workflow ?? request.workflow, dependencies, redactor, () =>
-      executeWorkflowRun(request, { ...redacting, activityRecorder: recorder, revealRedactor: redactor })
+    // Content capture and v73 marks share one check of the run's declared sensitive sources (made at most once).
+    let declaredCheck: Promise<boolean> | undefined;
+    const declared = () =>
+      (declaredCheck ??= workflowDeclaresSensitiveSource((request.resumeState?.workflow ?? request.workflow)?.nodes ?? [], dependencies, new Set(), 0, true).then(
+        (value) => value,
+        () => true
+      ));
+    const sensitivity = new SessionSensitivity({
+      declared,
+      workSensitive: () => redactor.active || labelsMarkSensitive(currentLabelScope()?.inputLabels()),
+      readBefore: request.resumeState?.sensitiveSessionRead === true
+    });
+    const tracking = { ...redacting, ...sensitivityTrackingSessionStores(redacting, sensitivity) };
+    const result = await runWithContentExclusion(declared, redactor, sensitivity, dependencies, () =>
+      executeWorkflowRun(request, { ...tracking, activityRecorder: recorder, revealRedactor: redactor, sessionSensitivity: sensitivity })
     );
     attachNodeActivity(result.nodeResults, recorder);
     const redacted = redactor.redact(result);
@@ -8798,25 +8821,24 @@ export async function executeWorkflow(
 /**
  * Content capture (OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT, off by default): the run's spans export no content while
  * the work is sensitive. That is the whole run when any node of it, or of a sub-workflow it calls, declares a sensitive
- * source (checked once, failing closed), the rest of the run once a Reveal node revealed something, and any call made
- * while the running node's input labels say sensitive (tracked runs). With capture off this only calls `fn`.
+ * source (checked once, failing closed), the rest of the run once a Reveal node revealed something or (v73) the run read
+ * session state written by sensitive work (dropped as `sensitive_memory`), and any call made while the running node's
+ * input labels say sensitive (tracked runs). With capture off this only calls `fn`.
  */
 async function runWithContentExclusion<T>(
-  workflow: Pick<Workflow, "nodes"> | undefined,
-  dependencies: WorkflowExecutionDependencies,
+  declaredCheck: () => Promise<boolean>,
   redactor: RevealRedactor,
+  sensitivity: SessionSensitivity,
+  dependencies: WorkflowExecutionDependencies,
   fn: () => Promise<T>
 ): Promise<T> {
   const instrument = dependencies.instrument;
   if (instrument?.capturesContent !== true || !instrument.withContentExclusion) return await fn();
-  let declared = true;
-  try {
-    declared = await workflowDeclaresSensitiveSource(workflow?.nodes ?? [], dependencies, new Set(), 0, true);
-  } catch {
-    declared = true;
-  }
+  const declared = await declaredCheck();
   return await instrument.withContentExclusion(() => {
     if (declared || redactor.active) return true;
+    const read = sensitivity.exclusion();
+    if (read) return read;
     const scope = currentLabelScope();
     return scope ? labelsMarkSensitive(scope.inputLabels()) : false;
   }, fn);
@@ -8842,8 +8864,11 @@ function childDependenciesFor(dependencies: WorkflowExecutionDependencies, child
   if (!dependencies.scopeSubWorkflow && !dependencies.guard) return dependencies;
   const scoped: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : { ...dependencies };
   const guard = scoped.guard ? childGuardFor(scoped.guard, child) : undefined;
-  const stores = dependencies.revealRedactor ? redactingSessionStores(scoped, dependencies.revealRedactor) : {};
-  return { ...scoped, ...stores, ...(guard ? { guard } : {}) };
+  const redacted: WorkflowExecutionDependencies = dependencies.revealRedactor ? { ...scoped, ...redactingSessionStores(scoped, dependencies.revealRedactor) } : scoped;
+  // v73 — the child's own scoped stores note and mark like the parent's (the parent's are already wrapped).
+  const stores =
+    dependencies.scopeSubWorkflow && dependencies.sessionSensitivity ? sensitivityTrackingSessionStores(redacted, dependencies.sessionSensitivity) : {};
+  return { ...redacted, ...stores, ...(guard ? { guard } : {}) };
 }
 
 /** Copies each node's recorded activity onto its results; nodes restored from a paused run keep theirs. */
@@ -9575,7 +9600,9 @@ async function executeWorkflowRun(
       ...(labelState.persists ? { dataLabels: labelState.toState() } : {}),
       // Phase 12 coverage — so the resumed run's model boundary splits earlier renderings as this part did.
       ...(boundaryRenderings ? { boundaryRenderings } : {}),
-      ...(boundaryCallerInput ? { boundaryCallerInput } : {})
+      ...(boundaryCallerInput ? { boundaryCallerInput } : {}),
+      // v73 — a resumed run that had read session state written by sensitive work stays sensitive.
+      ...(dependencies.sessionSensitivity?.readSensitive ? { sensitiveSessionRead: true } : {})
     };
 
     if (dependencies.persistPausedExecution) {

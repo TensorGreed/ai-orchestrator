@@ -282,7 +282,7 @@ The older `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is read when the 
 
 **Where.** Content is captured for workflow runs (their LLM Call nodes, agent loops and MCP Tool nodes, sub-workflows included). `/v1` AI gateway requests capture it only when `L2M_OTEL_CAPTURE_GATEWAY_CONTENT=true` is set as well: their prompts come from outside applications and the gateway has no sensitive marking of its own, so masking is all that protects them. Everything else records none, even with capture on: MCP gateway proxying (`subscriptions/listen` streams included), a tool tried from the server registry, eval and replay judges, MCP sampling, and provider connection tests.
 
-Images are named by type only, never copied. Not captured: embedding inputs, retrieval queries, memory records, error text from a provider or tool, and anything on run, node, agent or MCP gateway SERVER spans. A model call's content is recorded as it went to and came from the provider, including an answer that content rules then blocked or rewrote (cleaned as below). Earlier tool errors and content rule notices the model is shown are part of the next call's input messages.
+Images are named by type only, never copied. Not captured: embedding inputs, retrieval queries, memory records (memory a model call sends is part of its input messages), error text from a provider or tool, and anything on run, node, agent or MCP gateway SERVER spans. A model call's content is recorded as it went to and came from the provider, including an answer that content rules then blocked or rewrote (cleaned as below). Earlier tool errors and content rule notices the model is shown are part of the next call's input messages.
 
 **How content is cleaned.** Nothing is set on a span as it was handed over. When the span ends it is held back from the exporter (and from **Settings → Observability**'s recent spans) while L2M, off the request path:
 
@@ -296,6 +296,7 @@ Images are named by type only, never copied. Not captured: embedding inputs, ret
 | `l2m.content.dropped` | Why |
 |---|---|
 | `sensitive` | The work is sensitive: the run, or a sub-workflow it calls, has a node marked **Sensitive output** or uses a secret flagged so, or a registered MCP server it uses could not be checked when the run started (the whole run); a Reveal node revealed something (the rest of the run); or, on runs that track data labels, the node's input or what an agent loop has seen so far is labelled sensitive (which includes any detected data class). It is checked when content is handed over and again when the span ends. |
+| `sensitive_memory` | The run read session state written by sensitive work (the rest of the run): agent memory or a Simple Memory node, a tool cache record (`session_cache_list` / `session_cache_get`) or a Session Artifact Load node, from a row marked sensitive or stored with labels that say sensitive. See [Session state from sensitive runs](#session-state-from-sensitive-runs). |
 | `masking_failed`, `masking_incomplete`, `unscannable` | Masking failed, could not replace a value everywhere, or the content is nested too deep to scan. |
 | `secret_detected` | The final check still found a secret value. |
 | `timeout` | Masking, or reading the secret values and dictionaries it needs, took more than 10 seconds. |
@@ -303,6 +304,8 @@ Images are named by type only, never copied. Not captured: embedding inputs, ret
 | `too_large` | The span's content is over 8 times `L2M_OTEL_CONTENT_MAX_CHARS` of text (at least 64 KiB, at most 1 MiB). |
 
 `l2m_otel_content_dropped_total` (by `reason`) counts these on the metrics endpoint.
+
+**Session state from sensitive runs.** Session memory, the session tool cache and session artifacts outlive a run, and a later run can send them to a model. So a row written by sensitive work (as in the `sensitive` row above, or by a run that itself read such a row) is marked `sensitive` (migration v73, SQLite and Postgres, `INTEGER NOT NULL DEFAULT 0` on `session_memory`, `session_tool_cache` and `session_artifacts`). Marks are written whether or not capture is on, so turning capture on later does not export what sensitive runs stored before. A run that reads a marked row (or a row from before v73 whose stored labels say sensitive) exports no content from then on (`sensitive_memory`) and marks what it writes in turn; a run paused for an approval keeps this when it resumes. A mark stays until the row is deleted: retention, erasure and legal holds treat marked rows like any other, `db:export` / `db:import` and `db:copy` keep the column (the tool cache is not exported), and a replay's memory seed keeps the mark. Memory works as before either way; with capture off nothing is exported and the marks only wait.
 
 **Visibility.** Start-up logs a warning and writes a `telemetry.content_capture_enabled` audit event while capture is on (both say whether `/v1` requests are included, as `gatewayContent`), and `GET /api/observability` reports `contentCapture`, `contentMaxChars` and `gatewayContentCapture`. Content capture is never on for a deployment that does not set the variable, and it changes nothing while tracing is off.
 

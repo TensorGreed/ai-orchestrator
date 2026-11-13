@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KnowledgeBaseStore } from "@ai-orchestrator/workflow-engine";
+import { MemorySeedCapture } from "./mcp-cassette-service.js";
 import { createReplaySandbox, REPLAY_KB_WRITE_REFUSED } from "./replay-sandbox.js";
 
 describe("replay sandbox", () => {
@@ -50,5 +51,39 @@ describe("replay sandbox", () => {
     await sandbox.memoryStore.saveMessages("ns", "s1", [{ role: "user", content: "earlier" }, { role: "assistant", content: "now" }]);
     expect(seed.sessions[0]!.messages).toHaveLength(1);
     expect(await sandbox.memoryStore.loadMessages("ns", "s2")).toEqual([]);
+  });
+
+  it("v73: keeps the sensitive mark of seeded memory and of what the replay writes", async () => {
+    // The recorded run read marked memory: the seed says so, and the replay's memory reads as sensitive.
+    const capture = new MemorySeedCapture({ maxBytes: 100_000, scrub: (value) => value });
+    const recorded = capture.wrap({
+      loadMessages: async () => [{ role: "user", content: "card 4242" }],
+      saveMessages: async () => undefined,
+      loadSensitive: async (_namespace, sessionId) => sessionId === "marked"
+    });
+    await recorded.loadMessages("ns", "marked");
+    expect(await recorded.loadSensitive!("ns", "marked")).toBe(true);
+    await recorded.loadMessages("ns", "plain");
+    expect(await recorded.loadSensitive!("ns", "plain")).toBe(false);
+    const seed = capture.toSeed()!;
+    expect(seed.sessions.map((session) => [session.sessionId, session.sensitive === true])).toEqual([["marked", true], ["plain", false]]);
+
+    const sandbox = createReplaySandbox(seed);
+    expect(await sandbox.memoryStore.loadSensitive!("ns", "marked")).toBe(true);
+    expect(await sandbox.memoryStore.loadSensitive!("ns", "plain")).toBe(false);
+    // A marked save stays marked in the sandbox; a later unmarked one does not clear it (as in the store).
+    await sandbox.memoryStore.saveMessages("ns", "plain", [{ role: "user", content: "x" }], { sensitive: true });
+    await sandbox.memoryStore.saveMessages("ns", "plain", [{ role: "user", content: "y" }]);
+    expect(await sandbox.memoryStore.loadSensitive!("ns", "plain")).toBe(true);
+    // Sensitive labels count as a mark too.
+    await sandbox.memoryStore.saveMessages("ns", "labelled", [{ role: "user", content: "z" }], { labels: { provenance: ["sensitive"], dataClasses: [], source: "propagated" } });
+    expect(await sandbox.memoryStore.loadSensitive!("ns", "labelled")).toBe(true);
+
+    const tool = await sandbox.toolDataStore.saveToolCall({ namespace: "ns", sessionId: "s1", toolName: "t", args: {}, output: 1, sensitive: true });
+    expect((await sandbox.toolDataStore.listToolCalls({ namespace: "ns", sessionId: "s1" }))[0]?.sensitive).toBe(true);
+    expect((await sandbox.toolDataStore.getToolCall({ namespace: "ns", sessionId: "s1", id: tool.id }))?.sensitive).toBe(true);
+    await sandbox.sessionArtifactStore.saveArtifact({ namespace: "ns", sessionId: "s1", artifactKey: "a", value: 1, sensitive: true });
+    await sandbox.sessionArtifactStore.saveArtifact({ namespace: "ns", sessionId: "s1", artifactKey: "a", value: 2 });
+    expect((await sandbox.sessionArtifactStore.loadArtifact({ namespace: "ns", sessionId: "s1", artifactKey: "a" }))?.sensitive).toBe(true);
   });
 });
