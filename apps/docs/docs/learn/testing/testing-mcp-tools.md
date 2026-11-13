@@ -124,7 +124,7 @@ L2M has all three techniques built in, running on your own deployment. Each is o
 - **`l2m mcp check`.** Probes registered servers without storing anything, diffs them against their accepted snapshots, and checks <Term id="mcp-tool-policy">tool policy</Term> for every tool a workflow names. Exit code 0 is clean (additive changes are listed), 1 is a breaking change, an unreachable server or a policy-blocked tool (the last two can be allowed with `--allow-unreachable` and `--allow-policy-blocked`), 2 is a usage error. With `--snapshot` it compares a server to a committed snapshot file with no deployment at all ([what counts as a breaking change](/product/mcp-server-registry#what-counts-as-a-breaking-change)).
 - **Scheduled probes.** The registry flags the same breaking changes on the server's page. Optionally, **Block runs on breaking change** refuses runs that use the server until an admin accepts the change; it is off by default.
 
-The step-by-step setup, with commands for a CI job, is in [Test MCP servers in CI](/guides/test-mcp-servers-in-ci). To try an MCP agent with no keys and no real server, the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) runs with a built-in echo model and an in-process mock MCP server.
+The step-by-step setup, with commands for a CI job, is in [Test MCP servers in CI](/guides/test-mcp-servers-in-ci). To try an MCP agent with no keys and no real server, the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) runs with a built-in echo model and an in-process mock MCP server. Echo never asks for a tool, so that run shows the wiring and the tool list, not a call; attach a tool-calling model to record a cassette worth replaying.
 
 ## Further reading
 

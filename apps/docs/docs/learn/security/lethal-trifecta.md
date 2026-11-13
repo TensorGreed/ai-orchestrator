@@ -1,5 +1,5 @@
 ---
-title: "The lethal trifecta: private data, untrusted input"
+title: "The lethal trifecta: how AI agents leak data"
 sidebarTitle: "The lethal trifecta"
 description: "Why an agent with private data, untrusted content and a way to send data out is one prompt injection from a leak, and how to break the combination."
 level: intermediate

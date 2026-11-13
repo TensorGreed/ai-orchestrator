@@ -12,9 +12,9 @@ guide: [/learn/agents/supervisor-and-workers]
 
 **An agent whose tools include other agents: it splits a task, hands each part to a worker agent, and combines the answers into one reply.**
 
-The supervisor is the coordinator in a multi-agent system. It knows the overall goal and which specialist handles what, and it usually has few tools of its own. Each <Term id="worker-agent">worker</Term> has a narrow job, a short prompt and only the tools that job needs. Delegating is an ordinary <Term id="tool-calling">tool call</Term>, and the worker's answer comes back as the tool result.
+The supervisor is the coordinator in a multi-agent system. It holds the goal and the plan, and usually few tools of its own; each <Term id="worker-agent">worker</Term> is a specialist with its own prompt and tools. Delegating is an ordinary <Term id="tool-calling">tool call</Term>, and the worker's answer comes back as the tool result.
 
-Anthropic's guide to building agents calls this the orchestrator-workers workflow, in which "a central LLM dynamically breaks down tasks, delegates them to worker LLMs, and synthesizes their results". The supervisor decides at run time which workers to call, in what order and how often.
+Anthropic's guide to building agents names this pattern orchestrator-workers: "a central LLM dynamically breaks down tasks, delegates them to worker LLMs, and synthesizes their results". The split is not fixed in advance: the supervisor plans it for each request.
 
 The pattern has costs. Every delegation starts a whole <Term id="agent-loop">agent loop</Term>, so one request can turn into many model calls. Each worker's output is added to the supervisor's context. Mistakes stack up too: a worker's wrong answer is passed on as fact.
 
