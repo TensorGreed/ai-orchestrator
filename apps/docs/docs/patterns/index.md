@@ -162,14 +162,15 @@ Webhook Input ──▶ LLM Call ──▶ IF ──true──▶ Success Output
 
 **Topology**:
 ```
-Webhook Input ──▶ Chat Intent Router ──▶ {first-turn DAG ──▶ Session Artifact Save}
-                                        OR
-                                        {follow-up DAG ──▶ Session Artifact Load ──▶ ... }
+Webhook Input ──▶ Session Artifact Load ──▶ Agent ──▶ Output Parser ──▶ Chat Intent Router
+Chat Intent Router ├─ report  ──▶ PDF Output ──▶ Session Artifact Save ──▶ reply
+                   ├─ code    ──▶ reply
+                   └─ message ──▶ reply
 ```
 
 `Session Artifact Save` writes JSON keyed by `(namespace, session_id, artifact_key)`; `Session Artifact Load` retrieves it verbatim. Survives across requests.
 
-**Sample**: `Two-Turn Report + Code Helper` (`two-turn-report-code-helper-flow.json`) — first turn writes an MCP-backed report; follow-up turns load it byte-for-byte and pass it to a Python code node.
+**Sample**: `Two-Turn MCP Report + Code Helper` (`two-turn-report-code-helper-flow.json`) — first turn writes an MCP-backed report; follow-up turns load it byte-for-byte and give it to the agent, which writes a Python script from it. Walkthrough: [two-turn report and code helper recipe](/recipes/two-turn-report-helper).
 
 **Sharp edges**:
 - The artifact_key is per-session, so a single workflow can store multiple distinct artifact slots per session.

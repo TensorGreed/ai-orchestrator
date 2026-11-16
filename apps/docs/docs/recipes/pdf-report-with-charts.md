@@ -79,7 +79,7 @@ To open the report with a written summary, add a Prompt Template after **Sample 
 
 ## Make it yours
 
-- Replace **Sample Data** with real data: an [HTTP Request](/nodes/reference/connector), a database connector or an MCP tool, as long as the rows reach the charts under the names in `dataPath`.
+- Replace **Sample Data** with real data: an [HTTP Request](/nodes/reference/connector), a database connector or an MCP tool, as long as the rows reach the charts under the names in `dataPath`. The [branded PDF inventory report](/recipes/key-inventory-pdf-report) does this with an MCP tool and a Python step.
 - Brand it: change the colors in the specs (`mark.color`, `scale.scheme`), or pass a Vega `theme` object on each Chart node so every chart shares one style. The [brand extraction recipe](/recipes/brand-extraction-web) finds a site's logo and colors.
 - Run it on a schedule with a Schedule Trigger and send the PDF on with an email or storage node.
 
