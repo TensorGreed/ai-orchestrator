@@ -227,11 +227,14 @@ under `extra`.
 
 - `source` is `workflow`, `mcp_gateway` (`executionId` is the call's `mcpgw_*` id) or `ai_gateway` (the request's
   `aigw_*` id). `detector` is `null` for a check that found nothing.
-- `evidence` is the evidence the Security page shows, at most 5 pieces of at most 160 characters each, with a digest
-  of each piece for correlation. The content that was checked is never sent. Sensitive data detectors send the matched
-  value masked; pattern detectors send a short scrubbed excerpt (see
-  [what gets recorded](../product/content-rules.md#what-gets-recorded)); injection detectors send up to 80 characters
-  of the matched text and the hidden-text detector up to 60 characters of the decoded text.
+- `evidence` is the stored evidence ([what gets recorded](../product/content-rules.md#what-gets-recorded)), at most 5
+  pieces of at most 160 characters each, with a digest of each stored piece for correlation with the Security page.
+  The content that was checked is never sent. Sensitive data detectors store the matched value masked; injection and
+  hidden-text detectors keep a short excerpt of the matched or decoded text, so before it is sent every piece and its
+  message are masked again with the built-in data patterns: emails, phone numbers, payment cards, IBANs, keys, tokens
+  and credentials, built-in national ids, and URL query values. A word cut off at the end of an excerpt is dropped,
+  since the patterns could not recognise it. Custom terms and patterns from a rule set are not applied here, and text
+  the patterns do not recognise, such as the words of an injection attempt, is sent as it is.
 - For a run started from a sensitive run's content (copied node outputs, marked pinned data, or an error workflow of a
   sensitive run), and for the part of a run after an approval when the part before it read sensitive content,
   `evidenceWithheld` is `true` and each piece carries only its `digest` and `spanCount`. A run that becomes sensitive
