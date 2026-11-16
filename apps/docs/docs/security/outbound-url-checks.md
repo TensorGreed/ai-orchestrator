@@ -30,7 +30,9 @@ network layer (a firewall or an outbound proxy).
 
 - **Schemes.** Only `http:` and `https:` can be fetched. `file:`, `data:`,
   `javascript:` and anything else are refused, so one of these nodes can never
-  read the local disk or run inline script through a URL.
+  read the local disk or run inline script through a URL. Two exceptions are
+  inline content, not fetches: Chart image marks and the Web Browse page itself
+  may be `data:` URLs (see below).
 - **Always blocked.** Cloud metadata endpoints (`169.254.169.254`,
   `fd00:ec2::254`, `metadata.google.internal` and the like) and link-local,
   multicast, unspecified, reserved and documentation ranges. The allowlist
@@ -51,6 +53,12 @@ fails the node at once and is not retried.
 **Inline chart images.** A Chart spec may use `data:image/...` URLs for image
 marks; they are decoded locally and never fetched. Each one is capped at 2 MB
 (encoded). Other `data:` URLs and `file:` loads are refused.
+
+**Inline pages in Web Browse.** The Web Browse node also accepts a `data:` URL
+as the page to open, for example `data:text/html,...` built by an upstream
+node. The page is rendered from the URL itself, so nothing is fetched for it;
+everything the page then loads (`http:`/`https:` sub-resources, navigations
+and WebSockets) goes through the checks above. `file:` stays refused.
 
 **Credentials and node-supplied RAG endpoints.** When a RAG node names its own
 `endpoint` or `baseUrl`, only the node's own secret (`embeddingSecretRef`) is

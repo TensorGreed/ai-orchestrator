@@ -40,7 +40,7 @@ Within an entry, the importer accepts the common spellings of each setting:
 
 | Setting | Spellings |
 |---|---|
-| Local command | `command` (string, array, or `{ path, args, env }`), `args`, `env` or `environment`, `cwd` |
+| Local command | `command` (string, array, or `{ path, args, env }`), `args`, `env` or `environment`, `cwd`. Env vars inside the command object are imported like top-level ones; if a name is set in both places, the top-level value is used and the report lists the other as skipped. |
 | Remote URL | `url`, `serverUrl`, `httpUrl`, `endpoint`; `headers` |
 | Transport | `type` or `transport`: `stdio`, `local`, `http`, `streamable-http`, `remote`, `sse` |
 | Timeout | `timeout` in milliseconds (values under 1000 are read as seconds) |
@@ -52,9 +52,9 @@ An `mcpServers` example with a local server and a remote one:
 {
   "mcpServers": {
     "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_…", "GITHUB_API_URL": "https://api.github.example.com" }
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "-e", "GITHUB_HOST", "ghcr.io/github/github-mcp-server:v2.1.0"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_…", "GITHUB_HOST": "https://github.example.com" }
     },
     "docs-search": {
       "type": "http",

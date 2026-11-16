@@ -3,7 +3,7 @@
  * `POST /v1/embeddings`, for applications outside L2M.
  *
  * Callers authenticate with an MCP gateway client token (A1) and name a route alias as `model` (A2). Admission order:
- * client token (and its certificate and address pins) -> route granted to the client -> rate limit (the client's own, else the route set's default) ->
+ * client token (and its certificate and address pins) -> route granted to the client -> rate limits (the client's own and the route set's per-client limit; both apply) ->
  * budgets (the client's, the route set's project's, the deployment's) -> model allowlist -> Content rules on the prompt ->
  * provider -> Content rules on the answer -> usage row -> response. Errors use the OpenAI envelope (A9). Until an admin
  * creates a route set and grants it to a client (A12) no request finds a route: a bad token gets 401, every model name 404, and

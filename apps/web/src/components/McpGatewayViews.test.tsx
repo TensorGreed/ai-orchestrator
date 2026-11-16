@@ -754,7 +754,7 @@ describe("MCP gateway views", () => {
     const limits = within(governance).getByTestId("gateway-rate-limit-client");
     const rpm = within(limits).getByLabelText("Calls per minute");
     expect(rpm).toHaveValue(null);
-    expect(rpm).toHaveAccessibleDescription(/every toolset and replaces the toolset default entirely/);
+    expect(rpm).toHaveAccessibleDescription(/every toolset \(replacing each toolset.s default entirely\) and its \/v1 calls \(on top of each route set.s limit\)/);
     const save = within(limits).getByRole("button", { name: "Save" });
     expect(save).toBeDisabled();
     // A burst alone is refused before anything is sent.
