@@ -125,7 +125,8 @@ export async function keyBoundUser(
   now: number = Date.now()
 ): Promise<SafeUser | null> {
   const found = await store.getUserById(userId);
-  if (!found) return null;
+  // 13.2 (v75) — work a disabled user queued, started or decided does not go on as them.
+  if (!found || found.disabledAt) return null;
   const user: SafeUser = { id: found.id, email: found.email, role: found.role as UserRole, ...(found.kind === "service" ? { serviceAccount: true as const } : {}) };
   if (!apiKeyId) return user;
   const key = (await store.listApiKeys(found.id)).find((entry) => entry.id === apiKeyId && entry.userId === found.id);

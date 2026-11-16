@@ -2956,6 +2956,80 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE knowledge_base_chunks DROP COLUMN IF EXISTS sensitive;
       ALTER TABLE execution_history DROP COLUMN IF EXISTS sensitive;
     `
+  },
+  {
+    version: 75,
+    description: "13.2 — SCIM 2.0 provisioning: disabled users, provisioning tokens, provisioned users, groups and members",
+    // users.disabled_at: set when the identity provider deactivates or deletes a user; a disabled user cannot sign in
+    // (break-glass excepted) and its API keys stop working. The row and its history stay. scim_tokens holds the
+    // provisioning client's bearer tokens (sha256 of the secret only). scim_users links a users row to its SCIM
+    // userName and attributes, and records the roles its groups granted (grants_json) so they can be taken back.
+    // scim_groups and scim_group_members hold the provider's groups; a group grants roles only through an admin's
+    // mapping (sso_group_mappings, provider 'scim'). No foreign keys: deleting a user removes its rows explicitly.
+    up: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
+      CREATE TABLE IF NOT EXISTS scim_tokens (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        token_prefix TEXT NOT NULL UNIQUE,
+        token_hash TEXT NOT NULL,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        last_used_at TIMESTAMPTZ,
+        superseded_by TEXT
+      );
+      CREATE TABLE IF NOT EXISTS scim_users (
+        user_id TEXT PRIMARY KEY,
+        user_name TEXT NOT NULL,
+        user_name_key TEXT NOT NULL UNIQUE,
+        external_id TEXT,
+        display_name TEXT,
+        given_name TEXT,
+        family_name TEXT,
+        origin TEXT NOT NULL DEFAULT 'created',
+        grants_json TEXT NOT NULL DEFAULT '[]',
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_scim_users_external_id ON scim_users(external_id);
+      CREATE TABLE IF NOT EXISTS scim_groups (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        display_name_key TEXT NOT NULL UNIQUE,
+        external_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_scim_groups_external_id ON scim_groups(external_id);
+      CREATE TABLE IF NOT EXISTS scim_group_members (
+        group_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (group_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_scim_group_members_user ON scim_group_members(user_id);
+    `,
+    // A build before v75 knows nothing of disabled users: rolling back would let a deprovisioned user sign in again.
+    // The down migration closes that first: it ends their sessions, revokes their API keys and makes their password
+    // unusable, then drops the SCIM tables and the column. Role grants made through SCIM mappings stay (they are
+    // ordinary project roles); remove them by hand if the provider no longer grants them.
+    down: `
+      UPDATE sessions SET revoked_at = NOW(), ended_reason = 'admin'
+        WHERE revoked_at IS NULL AND user_id IN (SELECT id FROM users WHERE disabled_at IS NOT NULL);
+      UPDATE api_keys SET revoked_at = NOW()
+        WHERE revoked_at IS NULL AND user_id IN (SELECT id FROM users WHERE disabled_at IS NOT NULL);
+      UPDATE users SET password_hash = '!', updated_at = NOW() WHERE disabled_at IS NOT NULL;
+      DROP INDEX IF EXISTS idx_scim_group_members_user;
+      DROP TABLE IF EXISTS scim_group_members;
+      DROP INDEX IF EXISTS idx_scim_groups_external_id;
+      DROP TABLE IF EXISTS scim_groups;
+      DROP INDEX IF EXISTS idx_scim_users_external_id;
+      DROP TABLE IF EXISTS scim_users;
+      DROP TABLE IF EXISTS scim_tokens;
+      ALTER TABLE users DROP COLUMN IF EXISTS disabled_at;
+    `
   }
 ];
 

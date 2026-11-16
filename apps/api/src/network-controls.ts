@@ -125,6 +125,8 @@ export function classifyNetworkScope(input: ScopeRequest): NetworkScope[] {
   if (METRICS_PATHS.has(path) || path.startsWith("/api/docs/")) return ["metrics"];
   // `/v1/*` takes the same client tokens as `/mcp/*`, so it is the same scope.
   if (startsWithSegment(path, "/mcp") || isAiGatewayPath(path)) return ["mcp_gateway"];
+  // 13.2 — SCIM takes only its own bearer token (never a session or an API key).
+  if (startsWithSegment(path, "/scim")) return ["scim"];
   if (
     startsWithSegment(path, "/webhook") ||
     startsWithSegment(path, "/webhook-test") ||

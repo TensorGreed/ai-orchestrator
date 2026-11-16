@@ -183,6 +183,13 @@ const envSchema = z.object({
   API_KEY_DEFAULT_EXPIRY_DAYS: z.coerce.number().int().nonnegative().default(0),
   // 13.2 — a service account's keys expire within this many days (new keys and rotated ones). 0 or unset = no limit.
   SERVICE_ACCOUNT_KEY_MAX_AGE_DAYS: optionalIntFromEnv(0, 3650),
+  // 13.2 — SCIM 2.0 provisioning at /scim/v2 (users and groups from the identity provider). Off by default; the SCIM
+  // token is made by an admin under Settings > Provisioning (POST /api/scim/tokens).
+  SCIM_ENABLED: optionalBooleanFromEnv,
+  // 13.2 — which accounts that already exist SCIM may link by email when it provisions a user with that email:
+  // `non_admin` (default) links people who are not admins, `all` links admins too, `none` links nobody (the provider's
+  // user then gets 409 uniqueness). A linked account can be disabled and given roles by SCIM.
+  SCIM_LINK_EXISTING_USERS: z.enum(["none", "non_admin", "all"]).optional(),
   // MFA_ENABLED has no effect (TOTP is always available); a boot note says so when it is set.
   MFA_ENABLED: booleanFromEnv.default(false),
   // 13.2 — MFA_ENFORCE=true is an alias for MFA_REQUIRED_ROLES=admin (see resolveMfaPolicy).
@@ -843,6 +850,7 @@ const envSchema = z.object({
   NETWORK_ALLOW_PUBLIC: z.string().optional(),
   NETWORK_ALLOW_MCP_GATEWAY: z.string().optional(),
   NETWORK_ALLOW_METRICS: z.string().optional(),
+  NETWORK_ALLOW_SCIM: z.string().optional(),
   /** `enforce` (default) refuses a request no list admits; `report` admits it and records what would have been refused. */
   NETWORK_ALLOWLIST_MODE: z.preprocess(
     (value) => (typeof value === "string" ? (value.trim() === "" ? undefined : value.trim().toLowerCase()) : value),

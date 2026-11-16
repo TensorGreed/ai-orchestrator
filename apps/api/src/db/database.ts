@@ -4,6 +4,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import { ensureAiGatewaySchema, sqliteAiGatewayStore } from "./ai-gateway-sqlite.js";
+import { ensureScimSchema, sqliteScimStore } from "./scim-sqlite.js";
+import type { ScimStore, UserDisableOutcome } from "./scim-store.js";
 import { ensureErasureSchema, ensureSubjectSchema, sqliteSubjectStore } from "./subject-sqlite.js";
 import {
   LABEL_MARK_INSERT_EMPTY_SQL,
@@ -409,11 +411,12 @@ interface UserRow {
   kind?: string | null;
   description?: string | null;
   created_by?: string | null;
+  disabled_at?: string | null;
   created_at: string;
   updated_at: string;
 }
 
-const USER_COLUMNS = "id, email, password_hash, role, kind, description, created_by, created_at, updated_at";
+const USER_COLUMNS = "id, email, password_hash, role, kind, description, created_by, disabled_at, created_at, updated_at";
 
 function storedUserFromRow(row: UserRow): StoredUser {
   return {
@@ -425,6 +428,7 @@ function storedUserFromRow(row: UserRow): StoredUser {
     kind: row.kind === "human" ? "human" : "service",
     description: row.description ? toString(row.description) : null,
     createdBy: row.created_by ? toString(row.created_by) : null,
+    disabledAt: row.disabled_at ? toString(row.disabled_at) : null,
     createdAt: toString(row.created_at),
     updatedAt: toString(row.updated_at)
   };
@@ -4523,6 +4527,9 @@ export class SqliteStore implements Store {
     // v74 — runs and knowledge base chunks from sensitive work (content copied from them stays out of exported content).
     this.ensureColumn("execution_history", "sensitive", "INTEGER NOT NULL", "0");
     this.ensureColumn("knowledge_base_chunks", "sensitive", "INTEGER NOT NULL", "0");
+    // 13.2 (v75) — SCIM provisioning: disabled users, provisioning tokens, provisioned users, groups and members.
+    this.ensureColumn("users", "disabled_at", "TEXT");
+    ensureScimSchema(this.db);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -5239,15 +5246,15 @@ export class SqliteStore implements Store {
    * break-glass link) to run the deployment. Only people count: a service account can never sign in. Call it inside
    * an IMMEDIATE transaction, so two changes cannot both see two admins.
    */
-  private isLastHumanAdminSync(target: { role: unknown; kind: unknown }, id: string): boolean {
-    if (toString(target.role) !== "admin" || toString(target.kind) !== "human") return false;
+  private isLastHumanAdminSync(target: { role: unknown; kind: unknown; disabled_at?: unknown }, id: string): boolean {
+    if (toString(target.role) !== "admin" || toString(target.kind) !== "human" || target.disabled_at) return false;
     const accepted = (column: string) =>
       `(NOT EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NULL)
         OR EXISTS (SELECT 1 FROM user_invites i WHERE i.user_id = ${column} AND i.accepted_at IS NOT NULL))`;
     const targetAccepted = this.queryOne<{ ok: number }>(`SELECT ${accepted("?")} AS ok`, [id, id]);
     if (toNumber(targetAccepted?.ok ?? 0) !== 1) return false;
     const others = this.queryOne<{ count: number }>(
-      `SELECT COUNT(*) AS count FROM users u WHERE u.role = 'admin' AND u.kind = 'human' AND u.id <> ? AND ${accepted("u.id")}`,
+      `SELECT COUNT(*) AS count FROM users u WHERE u.role = 'admin' AND u.kind = 'human' AND u.disabled_at IS NULL AND u.id <> ? AND ${accepted("u.id")}`,
       [id]
     );
     return toNumber(others?.count ?? 0) === 0;
@@ -5257,7 +5264,7 @@ export class SqliteStore implements Store {
     // IMMEDIATE takes the write lock before the count, so two demotions cannot both see two admins.
     return this.db
       .transaction((): "updated" | "not_found" | "last_admin" => {
-        const target = this.queryOne<{ role: string; kind: string | null }>(`SELECT role, kind FROM users WHERE id = ?`, [id]);
+        const target = this.queryOne<{ role: string; kind: string | null; disabled_at: string | null }>(`SELECT role, kind, disabled_at FROM users WHERE id = ?`, [id]);
         if (!target) return "not_found";
         if (role !== "admin" && this.isLastHumanAdminSync(target, id)) return "last_admin";
         this.db.prepare(`UPDATE users SET role = ?, updated_at = ? WHERE id = ?`).run(role, new Date().toISOString(), id);
@@ -5270,7 +5277,7 @@ export class SqliteStore implements Store {
     // IMMEDIATE: the count and the delete happen under the write lock, so two deletes cannot both see two admins.
     const outcome = this.db
       .transaction((): "deleted" | "not_found" | "last_admin" => {
-        const target = this.queryOne<{ role: string; kind: string | null }>(`SELECT role, kind FROM users WHERE id = ?`, [id]);
+        const target = this.queryOne<{ role: string; kind: string | null; disabled_at: string | null }>(`SELECT role, kind, disabled_at FROM users WHERE id = ?`, [id]);
         if (!target) return "not_found";
         if (this.isLastHumanAdminSync(target, id)) return "last_admin";
         return this.deleteUserRowsSync(id) ? "deleted" : "not_found";
@@ -5278,6 +5285,35 @@ export class SqliteStore implements Store {
       .immediate();
     if (outcome === "deleted") this.persist();
     return outcome;
+  }
+
+  async setUserDisabled(id: string, input: { disabled: boolean; now: string }): Promise<UserDisableOutcome> {
+    // IMMEDIATE: the admin count and the writes happen under the write lock, so two disables cannot both see two admins.
+    return this.db
+      .transaction((): UserDisableOutcome => {
+        const target = this.queryOne<{ role: string; kind: string | null; disabled_at: string | null }>(
+          `SELECT role, kind, disabled_at FROM users WHERE id = ?`,
+          [id]
+        );
+        if (!target) return { status: "not_found" };
+        if (toString(target.kind) !== "human") return { status: "service_account" };
+        if (!input.disabled) {
+          this.db.prepare(`UPDATE users SET disabled_at = NULL, updated_at = ? WHERE id = ? AND disabled_at IS NOT NULL`).run(input.now, id);
+          return { status: "updated", sessionsEnded: 0, keysRevoked: 0 };
+        }
+        if (this.isLastHumanAdminSync(target, id)) return { status: "last_admin" };
+        this.db.prepare(`UPDATE users SET disabled_at = COALESCE(disabled_at, ?), updated_at = ? WHERE id = ?`).run(input.now, input.now, id);
+        // Break-glass sessions are left alone: break-glass is the recovery path, whatever the identity provider says.
+        const sessionsEnded = this.db
+          .prepare(
+            `UPDATE sessions SET revoked_at = ?, ip_address = NULL, user_agent = NULL, ended_reason = 'admin'
+             WHERE user_id = ? AND revoked_at IS NULL AND break_glass = 0`
+          )
+          .run(input.now, id).changes;
+        const keysRevoked = this.db.prepare(`UPDATE api_keys SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).run(input.now, id).changes;
+        return { status: "updated", sessionsEnded, keysRevoked };
+      })
+      .immediate();
   }
 
   async updateUserRole(id: string, role: string): Promise<boolean> {
@@ -5298,6 +5334,9 @@ export class SqliteStore implements Store {
    */
   /** The user row and everything that belongs to it; call inside a transaction. */
   private deleteUserRowsSync(id: string): boolean {
+    // 13.2 (v75) — the SCIM link and group memberships go with the user.
+    this.exec(`DELETE FROM scim_group_members WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM scim_users WHERE user_id = ?`, [id]);
     this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
     this.exec(`DELETE FROM api_keys WHERE user_id = ?`, [id]);
     this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [id]);
@@ -11664,6 +11703,36 @@ export class SqliteStore implements Store {
   subjectScanRow(...args: Parameters<SubjectStore["subjectScanRow"]>) { return this.subjects.subjectScanRow(...args); }
   memorySessionSubjectRows(...args: Parameters<SubjectStore["memorySessionSubjectRows"]>) { return this.subjects.memorySessionSubjectRows(...args); }
   staffSubjectRows(...args: Parameters<SubjectStore["staffSubjectRows"]>) { return this.subjects.staffSubjectRows(...args); }
+
+  private scimStore?: Omit<ScimStore, "setUserDisabled">;
+  private get scim(): Omit<ScimStore, "setUserDisabled"> {
+    return (this.scimStore ??= sqliteScimStore(this.db));
+  }
+  listScimTokens(...args: Parameters<ScimStore["listScimTokens"]>) { return this.scim.listScimTokens(...args); }
+  createScimToken(...args: Parameters<ScimStore["createScimToken"]>) { return this.scim.createScimToken(...args); }
+  findScimTokenByPrefix(...args: Parameters<ScimStore["findScimTokenByPrefix"]>) { return this.scim.findScimTokenByPrefix(...args); }
+  revokeScimToken(...args: Parameters<ScimStore["revokeScimToken"]>) { return this.scim.revokeScimToken(...args); }
+  rotateScimToken(...args: Parameters<ScimStore["rotateScimToken"]>) { return this.scim.rotateScimToken(...args); }
+  touchScimToken(...args: Parameters<ScimStore["touchScimToken"]>) { return this.scim.touchScimToken(...args); }
+  getScimUser(...args: Parameters<ScimStore["getScimUser"]>) { return this.scim.getScimUser(...args); }
+  findScimUserByUserName(...args: Parameters<ScimStore["findScimUserByUserName"]>) { return this.scim.findScimUserByUserName(...args); }
+  listScimUsers(...args: Parameters<ScimStore["listScimUsers"]>) { return this.scim.listScimUsers(...args); }
+  createScimUser(...args: Parameters<ScimStore["createScimUser"]>) { return this.scim.createScimUser(...args); }
+  updateScimUser(...args: Parameters<ScimStore["updateScimUser"]>) { return this.scim.updateScimUser(...args); }
+  setScimUserGrants(...args: Parameters<ScimStore["setScimUserGrants"]>) { return this.scim.setScimUserGrants(...args); }
+  updateScimUserEmail(...args: Parameters<ScimStore["updateScimUserEmail"]>) { return this.scim.updateScimUserEmail(...args); }
+  deleteScimUser(...args: Parameters<ScimStore["deleteScimUser"]>) { return this.scim.deleteScimUser(...args); }
+  getScimGroup(...args: Parameters<ScimStore["getScimGroup"]>) { return this.scim.getScimGroup(...args); }
+  listScimGroups(...args: Parameters<ScimStore["listScimGroups"]>) { return this.scim.listScimGroups(...args); }
+  createScimGroup(...args: Parameters<ScimStore["createScimGroup"]>) { return this.scim.createScimGroup(...args); }
+  updateScimGroup(...args: Parameters<ScimStore["updateScimGroup"]>) { return this.scim.updateScimGroup(...args); }
+  deleteScimGroup(...args: Parameters<ScimStore["deleteScimGroup"]>) { return this.scim.deleteScimGroup(...args); }
+  listScimGroupMembers(...args: Parameters<ScimStore["listScimGroupMembers"]>) { return this.scim.listScimGroupMembers(...args); }
+  countScimGroupMembers(...args: Parameters<ScimStore["countScimGroupMembers"]>) { return this.scim.countScimGroupMembers(...args); }
+  listScimGroupsOfUser(...args: Parameters<ScimStore["listScimGroupsOfUser"]>) { return this.scim.listScimGroupsOfUser(...args); }
+  addScimGroupMembers(...args: Parameters<ScimStore["addScimGroupMembers"]>) { return this.scim.addScimGroupMembers(...args); }
+  removeScimGroupMembers(...args: Parameters<ScimStore["removeScimGroupMembers"]>) { return this.scim.removeScimGroupMembers(...args); }
+  removeAllScimGroupMembers(...args: Parameters<ScimStore["removeAllScimGroupMembers"]>) { return this.scim.removeAllScimGroupMembers(...args); }
 
   private aiGatewayStore?: AiGatewayStore;
   private get aiGateway(): AiGatewayStore {

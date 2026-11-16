@@ -14,8 +14,9 @@ import { canonicalIpRange } from "./data-destinations";
  * - `public`: forms, chat, the widget and the helper chat
  * - `mcp_gateway`: `/mcp/*` and the `/v1/*` AI gateway (the same client tokens)
  * - `metrics`: `/metrics` and the API docs
+ * - `scim`: `/scim/v2/*`, the identity provider's SCIM provisioning client
  */
-export const NETWORK_SCOPES = ["ui", "api", "webhook", "public", "mcp_gateway", "metrics"] as const;
+export const NETWORK_SCOPES = ["ui", "api", "webhook", "public", "mcp_gateway", "metrics", "scim"] as const;
 export type NetworkScope = (typeof NETWORK_SCOPES)[number];
 
 /** The environment variable that holds each scope's list. */
@@ -25,7 +26,8 @@ export const NETWORK_SCOPE_ENV: Record<NetworkScope, string> = {
   webhook: "NETWORK_ALLOW_WEBHOOK",
   public: "NETWORK_ALLOW_PUBLIC",
   mcp_gateway: "NETWORK_ALLOW_MCP_GATEWAY",
-  metrics: "NETWORK_ALLOW_METRICS"
+  metrics: "NETWORK_ALLOW_METRICS",
+  scim: "NETWORK_ALLOW_SCIM"
 };
 
 export const NETWORK_ALLOWLIST_MODES = ["enforce", "report"] as const;

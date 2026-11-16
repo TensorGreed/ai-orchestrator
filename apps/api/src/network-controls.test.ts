@@ -90,6 +90,11 @@ describe("classifyNetworkScope: every route family", () => {
     ["/v1", "cookie", ["mcp_gateway"]],
     ["/%761/models", "bearer", ["mcp_gateway"]],
     ["http://x/v1/embeddings", "bearer", ["mcp_gateway"]],
+    // SCIM provisioning takes only its own token, whatever else comes with the request.
+    ["/scim/v2/Users", "none", ["scim"]],
+    ["/scim/v2/Groups/:id", "cookie", ["scim"]],
+    ["/scim", "bearer", ["scim"]],
+    ["/scimx/v2", "none", ["ui"]],
     // Metrics and API docs.
     ["/metrics", "none", ["metrics"]],
     ["/api/docs", "none", ["metrics"]],

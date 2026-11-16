@@ -65,6 +65,19 @@ export interface SessionRequestInfo {
   headers?: Record<string, unknown>;
 }
 
+/**
+ * 13.2 (v75) — a sign-in refused because SCIM disabled the account (deactivated or deprovisioned at the identity
+ * provider). Only a break-glass sign-in still issues a session for one. Answered as 403.
+ */
+export class AccountDisabledError extends Error {
+  readonly statusCode = 403;
+  readonly code = "account_disabled";
+  constructor() {
+    super("This account is disabled");
+    this.name = "AccountDisabledError";
+  }
+}
+
 export interface IssueSessionInput {
   /** The user signing in; with `role`, the session policy for that role applies (lifetime and session limit). */
   user: Pick<SafeUser, "id"> & { role?: UserRole };
@@ -249,6 +262,8 @@ export class SessionService {
     }
     const now = this.now();
     const breakGlass = input.method === "break_glass";
+    // 13.2 (v75) — every sign-in path issues its session here: a user SCIM disabled gets none (break-glass excepted).
+    if (!breakGlass && (await this.store.getUserById(input.user.id))?.disabledAt) throw new AccountDisabledError();
     const requested = input.ttlHours ?? absoluteHoursFor(this.policyValue, input.user.role);
     const ttlHours = breakGlass ? Math.min(requested, BREAK_GLASS_MAX_TTL_HOURS) : requested;
     const expiresAt = new Date(now + ttlHours * 60 * 60 * 1000).toISOString();

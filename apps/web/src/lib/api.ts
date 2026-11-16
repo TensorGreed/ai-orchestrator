@@ -154,6 +154,7 @@ import type {
   WorkflowValidationResult
 } from "@ai-orchestrator/shared";
 import type { ModelAllowlistDecision, ModelAllowlistEntry, ModelAllowlistEntryCreate } from "@ai-orchestrator/shared";
+import type { ScimGroupSummary, ScimSettingsView, ScimTokenSummary } from "@ai-orchestrator/shared";
 import { apiFetch, openEventSource } from "./transport";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -459,6 +460,37 @@ export interface DeploymentUserView {
   createdAt: string;
   pending?: boolean;
   inviteExpiresAt?: string;
+  /** 13.2 — set when SCIM disabled the user (deactivated or deprovisioned at the identity provider). */
+  disabledAt?: string;
+}
+
+/** Admin: enables a user that SCIM disabled. */
+export async function enableUser(userId: string) {
+  return apiRequest<{ ok: true; userId: string; enabled: boolean }>(`/api/users/${encodeURIComponent(userId)}/enable`, { method: "POST" });
+}
+
+/** 13.2 — SCIM provisioning (Settings > Provisioning). */
+export async function fetchScimSettings() {
+  return apiRequest<ScimSettingsView>("/api/scim");
+}
+
+export async function fetchScimGroups() {
+  return apiRequest<{ groups: ScimGroupSummary[] }>("/api/scim/groups");
+}
+
+export async function createScimToken(payload: { name: string; expiresInDays?: number }) {
+  return apiRequest<{ token: string; record: ScimTokenSummary }>("/api/scim/tokens", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function rotateScimToken(id: string, graceHours?: number) {
+  return apiRequest<{ token: string; record: ScimTokenSummary; previous: ScimTokenSummary }>(`/api/scim/tokens/${encodeURIComponent(id)}/rotate`, {
+    method: "POST",
+    body: JSON.stringify(graceHours === undefined ? {} : { graceHours })
+  });
+}
+
+export async function revokeScimToken(id: string) {
+  return apiRequest<{ ok: true }>(`/api/scim/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 /** Admin: the people on the deployment (service accounts are listed by fetchServiceAccounts). */
@@ -1702,7 +1734,7 @@ export async function revokeServiceAccountKey(id: string, keyId: string) {
 // Phase 5.1 — SSO group mappings
 // ---------------------------------------------------------------------------
 
-export type SsoProvider = "saml" | "ldap" | "oidc";
+export type SsoProvider = "saml" | "ldap" | "oidc" | "scim";
 
 export interface SsoGroupMapping {
   id: string;

@@ -6,10 +6,12 @@
  * - "Reset MFA" is for a user who lost their authenticator: it deletes the authenticator and backup codes and signs
  *   them out everywhere; their next sign-in sets MFA up again. It is refused on your own account.
  *
- * Both need a recent MFA check when step-up is on (the studio asks for a code and retries).
+ * - "Enable" turns back on a user that SCIM provisioning disabled (deactivated or removed at the identity provider).
+ *
+ * All need a recent MFA check when step-up is on (the studio asks for a code and retries).
  */
 import { useCallback, useEffect, useState } from "react";
-import { fetchDeploymentUsers, resetUserMfa, revokeUserSessions, type DeploymentUserView } from "../lib/api";
+import { enableUser, fetchDeploymentUsers, resetUserMfa, revokeUserSessions, type DeploymentUserView } from "../lib/api";
 
 function formatCreated(value: string): string {
   const date = new Date(value);
@@ -81,6 +83,22 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
     }
   };
 
+  const enable = async (user: DeploymentUserView) => {
+    if (!window.confirm(`Enable ${user.email}? If your identity provider still provisions them, its next update decides again.`)) return;
+    setBusyId(user.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await enableUser(user.id);
+      setNotice(`${user.email} can sign in again. Their revoked API keys stay revoked.`);
+      await refresh();
+    } catch (enableError) {
+      setError(enableError instanceof Error ? enableError.message : "Could not enable the user");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <div className="settings-section">
       <h3>Users</h3>
@@ -124,6 +142,11 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
                       {user.email}
                       {user.id === currentUserId && <span className="settings-chip">You</span>}
                       {user.pending && <span className="settings-chip">Invited</span>}
+                      {user.disabledAt && (
+                        <span className="settings-chip" title={`Disabled by SCIM provisioning on ${formatCreated(user.disabledAt)}`}>
+                          Disabled
+                        </span>
+                      )}
                     </td>
                     <td>{user.role}</td>
                     <td>{formatCreated(user.createdAt)}</td>
@@ -137,6 +160,17 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
                       >
                         Sign out everywhere
                       </button>
+                      {user.disabledAt && (
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          disabled={busyId !== null}
+                          onClick={() => void enable(user)}
+                          aria-label={`Enable ${user.email}`}
+                        >
+                          Enable
+                        </button>
+                      )}
                       {user.id !== currentUserId && !user.pending && (
                         <button
                           type="button"
