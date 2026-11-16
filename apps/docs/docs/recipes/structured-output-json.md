@@ -94,7 +94,7 @@ Later nodes read the fields by path. With the Output template set to `Sentiment:
 
 ## Make it yours
 
-- Edit the schema on the parser (a JSON string in **JSON Schema**) and the system prompt together: name the same fields and values in both.
+- Edit the schema on the parser (a JSON string in **JSON Schema (Required for strict mode)**) and the system prompt together: name the same fields and values in both.
 - Set **Parser Mode** to **Item List** (`item_list`) for a plain list, one item per line, returned as `items` and `count`.
 - Set **LLM Max Auto-Retries** (`maxRetries`) to 1 to limit the extra calls. A value of 0 is read as the default, 2, so retries cannot be turned off this way.
 

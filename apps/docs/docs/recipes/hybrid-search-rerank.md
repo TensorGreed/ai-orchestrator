@@ -31,7 +31,7 @@ related: ["hybrid-search","rag","vector-store","grounding"]
 1. Download <a href="/docs/recipes/files/rag-hybrid-rerank-flow.json" download>rag-hybrid-rerank-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-hybrid-rerank-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Create a knowledge base and add documents, as in the [knowledge base recipe](/recipes/rag-knowledge-base#create-a-knowledge-base-with-the-api), with the embedder the **Retrieve (hybrid)** node uses (`openai-embedder` as shipped). Put its id in place of `<your-kb-id>` (on the node, in **Vector Store Extra Config (JSON)**).
-4. Store your Cohere key as a [secret](/security/secrets). The Rerank form has no secret field, so put the secret's id in place of `<cohere-key-secret-id>` in the JSON file and import it again. Or delete `secretRef` from the file and set `COHERE_API_KEY` on the server. For Jina or Voyage, change `providerId` and the key.
+4. Store your Cohere key as a [secret](/security/secrets). The Rerank form has no secret field, so put the secret's id in place of `<cohere-key-secret-id>` in the JSON file and import it again. Or delete `secretRef` from the file and set `COHERE_API_KEY` on the server. For Jina or Voyage, change `providerId`, `model` and the key.
 5. Run it and open **Retrieve (hybrid)** and **Rerank** in the run to compare their order.
 
 ## How it works
@@ -82,7 +82,7 @@ Do not take hybrid or a reranker on faith: measure them on your own questions. B
 ## Make it yours
 
 - Tune `candidatesPerRanker`, `bm25Weight`, `vectorWeight` and `rrfK` in the retrieve node's config in the JSON file, then import it again; the node's form has no fields for them, nor for `searchMode`. See [hybrid search](/nodes/knowledge-bases#hybrid-search-phase-9-3).
-- Swap the reranker: `jina` (default model `jina-reranker-v2-base-multilingual`) or `voyage` (`rerank-2`), with `JINA_API_KEY` or `VOYAGE_API_KEY` or a secret.
+- Swap the reranker: `jina` (default model `jina-reranker-v2-base-multilingual`) or `voyage` (`rerank-2`), with `JINA_API_KEY` or `VOYAGE_API_KEY` or a secret. Change `model` too, or clear it to use the default: the sample's `rerank-english-v3.0` is a Cohere model and is sent as is.
 - The prompt asks the model to "Cite chunkIds inline", but the context numbers chunks `[1]`, `[2]`. Put <span v-pre>`{{citationInstructions}}`</span> in the prompt instead and add an Extract Citations step: see [RAG with citations](/recipes/rag-with-citations).
 
 ## Make it safer

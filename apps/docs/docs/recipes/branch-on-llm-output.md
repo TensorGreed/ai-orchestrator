@@ -75,7 +75,7 @@ So the false branch catches an empty answer, which is rare with a working model.
 
 The If node renders its condition as a template and reads the result as text. It is false when the text is empty, `false`, `0`, `null` or `undefined`, and true otherwise. That is why <span v-pre>`{{answer}}`</span> means "the model said something".
 
-Keep the whole expression inside the braces. Text outside them is not evaluated: a new If node's default condition, <span v-pre>`{{answer}} === 'true'`</span>, renders as text such as `Yes === 'true'`, which is never empty, so it is always true.
+Keep the whole expression inside the braces. Text outside them is not evaluated: a condition such as <span v-pre>`{{answer}} === 'true'`</span> renders as text such as `Yes === 'true'`, which is never empty, so it is always true.
 
 A condition can also be a JavaScript expression, run in a sandbox. With <span v-pre>`{{ answer.toLowerCase().includes("late") }}`</span>, "Is order 1042 late?" took the true branch and "Where is order 1042?" the false one. Two habits make conditions sturdier:
 

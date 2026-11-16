@@ -33,7 +33,7 @@ A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `
 
 1. Download <a href="/docs/recipes/files/agentic-mcp-flow.json" download>agentic-mcp-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/agentic-mcp-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. Open the chat model node and point it at a model you have: pull `qwen2.5:7b` into Ollama, type another model name, or switch the provider. In Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host. Then save. To check the webhook and memory first without a model, use echo: the **Provider** list has no echo entry, so set the chat model node's `providerId` to `echo` in the JSON file and import it again.
+3. Open the chat model node and point it at a model you have: pull `qwen2.5:7b` into Ollama, type another model name, or switch the provider. In Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `api` service). Then save. To check the webhook and memory first without a model, use echo: the **Provider** list has no echo entry, so set the chat model node's `providerId` to `echo` in the JSON file and import it again.
 4. Send a request:
 
    ```bash
