@@ -42,7 +42,7 @@ The app can then end the account's sessions and keys at once, without waiting fo
 
 ## In L2M
 
-L2M supports SCIM 2.0 provisioning as an opt-in: set `SCIM_ENABLED=true` (off by default) and your identity provider calls `/scim/v2` with a bearer token an admin creates in the studio ([SCIM provisioning](/security/scim)). Users and groups support `GET` with `eq` filters and paging, `POST`, `PUT`, `PATCH` and `DELETE`; bulk operations, sorting and ETags are not supported. `active: false` disables the account, ends all of its sessions and revokes all of its API keys in the same step, and `DELETE` also takes back the roles its groups gave while keeping the account and its history. New accounts start as `viewer`, and groups grant roles only through a mapping.
+L2M supports SCIM 2.0 provisioning as an opt-in: set `SCIM_ENABLED=true` (off by default) and your identity provider calls `/scim/v2` with a bearer token an admin creates in the studio ([SCIM provisioning](/security/scim)). Users and groups support `GET` with `eq` filters and paging, `POST`, `PUT`, `PATCH` and `DELETE`; bulk operations, sorting and ETags are not supported. `active: false` disables the account, ends its sessions (break-glass sessions excepted) and revokes all of its API keys in the same step, and `DELETE` also takes back the roles its groups gave while keeping the account and its history. New accounts start as `viewer`, and groups grant roles only through a mapping.
 
 Without SCIM, people get accounts and roles through [OIDC single sign-on](/security/auth-rbac#oidc-single-sign-on), [group-to-role mappings](/security/auth-rbac#group-to-role-mappings), [user invites](/security/auth-rbac#user-invites) and [service accounts](/security/service-accounts).
 

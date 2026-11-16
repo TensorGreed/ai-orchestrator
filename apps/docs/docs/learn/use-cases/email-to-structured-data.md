@@ -1,7 +1,7 @@
 ---
 title: "Turn emails into structured data with an AI agent"
 sidebarTitle: "Email to structured data"
-description: "Have a mail relay post emails to a webhook, extract fields into JSON with a schema, check them in code, write clean rows, send doubtful ones to a person."
+description: "Have a mail relay post emails to a webhook, extract fields into JSON with a schema, check them in code, write clean rows, route doubtful ones to a person."
 level: intermediate
 demo: wf-structured-output
 related: [indirect-prompt-injection, output-checks, approval-gate, golden-set, improper-output-handling]
