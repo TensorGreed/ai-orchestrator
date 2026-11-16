@@ -14,6 +14,12 @@
 
 import type { McpToolAnnotations } from "./types";
 
+/**
+ * The rounds an Agent Orchestrator or Supervisor runs when its config has no `maxIterations` (a stored or imported node
+ * without the field; new nodes start from their sample config). The editor shows this value for such a node.
+ */
+export const AGENT_DEFAULT_MAX_ITERATIONS = 4;
+
 export const BUILT_IN_TOOLS_ADAPTER_ID = "l2m-tools";
 
 export const BUILT_IN_TOOL_PROVIDERS = ["wikipedia", "searxng", "serpapi", "wolfram"] as const;

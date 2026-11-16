@@ -61,6 +61,7 @@ import {
   workflowMayCallMcpTools,
   recordedCallLabels,
   parseStoredDataLabels,
+  AGENT_DEFAULT_MAX_ITERATIONS,
   BUILT_IN_TOOLS_ADAPTER_ID,
   WORKFLOW_TOOL_ADAPTER_ID,
   deriveWorkflowToolDescriptor,
@@ -6677,7 +6678,7 @@ async function executeNodeHandler(
         assertChatModelCredentials(attachedModelNode, provider);
       }
 
-      const maxIterations = typeof config.maxIterations === "number" ? Math.max(1, Math.floor(config.maxIterations)) : 4;
+      const maxIterations = typeof config.maxIterations === "number" ? Math.max(1, Math.floor(config.maxIterations)) : AGENT_DEFAULT_MAX_ITERATIONS;
       const toolCallingEnabled = config.toolCallingEnabled !== false;
       const toOptionalPositiveInteger = (value: unknown): number | undefined => {
         const parsed = Number(value);
@@ -7320,13 +7321,17 @@ async function executeNodeHandler(
                   const workerNode = attachedWorkerNodes.find(wn => wn.id === workerId);
                   if (!workerNode) throw new Error(`Worker node ${workerId} not found.`);
                 
-                  const workerGlobals = { ...context.globals, user_prompt: String(args.task_prompt ?? "") };
+                  // The worker's user_prompt is the task the supervisor gave it, over an upstream node's user_prompt
+                  // (merged outputs win over globals in templates); the rest of the upstream data stays readable.
+                  const taskPrompt = String(args.task_prompt ?? "");
+                  const workerGlobals = { ...context.globals, user_prompt: taskPrompt };
                   // Phase 16 — the worker starts with what the supervisor's context holds at the call.
                   const workerScope = labelScope?.child(workerNode.id, workerNode.type, invocation?.labels ?? labelScope.inputLabels(), workerGlobals);
                   const workerContext: NodeRuntimeContext = {
                      ...context,
                      ...(writeToolSession ? { writeToolSession } : {}),
                      globals: workerGlobals,
+                     merged: { ...context.merged, user_prompt: taskPrompt },
                      parentOutputs: { ...context.parentOutputs },
                      callStack: [...context.callStack, node.id],
                      labelScope: workerScope

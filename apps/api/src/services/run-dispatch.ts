@@ -442,7 +442,7 @@ export class RunDispatcher {
    */
   async fire(
     spec: DispatchedRunSpec,
-    options: { pool: string; queueItemId?: string }
+    options: { pool: string; queueItemId?: string; enforceBackpressure?: boolean }
   ): Promise<{ queued: false; result: WorkflowExecutionResult; refused?: BudgetExceededError } | { queued: true; deduplicated: boolean }> {
     try {
       await this.deps.admit?.(spec);
@@ -455,6 +455,8 @@ export class RunDispatcher {
     if (!(await this.deps.gate.useQueue(options.pool, capabilitiesFor(spec)))) {
       return { queued: false, result: await this.deps.executeLocally(spec) };
     }
+    // A fire on behalf of an outside caller (a Slack event) is refused when the pool is full, like a run() is.
+    if (options.enforceBackpressure) await this.deps.checkBackpressure(options.pool);
     const added = await this.deps.enqueue(spec, {
       pool: options.pool,
       ...(options.queueItemId ? { queueItemId: options.queueItemId, dedupeWindowMs: FIRE_DEDUPE_WINDOW_MS } : {})

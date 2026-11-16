@@ -178,7 +178,7 @@ import {
 import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
 import { MfaGateCard } from "./components/MfaGateCard";
 import { StepUpPrompt } from "./components/StepUpPrompt";
-import { withAgentToolPresets } from "./lib/agent-tool-presets";
+import { isPaletteDefinition, withAgentToolPresets } from "./lib/agent-tool-presets";
 import { paletteKey } from "./components/NodePalette";
 import { BreakGlassBanner } from "./components/BreakGlassBanner";
 import { BreakGlassConfirmCard } from "./components/BreakGlassConfirmCard";
@@ -190,6 +190,8 @@ interface DefinitionNode {
   category: string;
   description: string;
   sampleConfig: Record<string, unknown>;
+  /** Set when the node cannot run in this build: it is left out of the palette (stored workflows keep it). */
+  unavailable?: string;
 }
 
 type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker" | "guard" | "protection";
@@ -1362,6 +1364,7 @@ function StudioApp() {
     const grouped = new Map<string, DefinitionNode[]>();
     // Phase 6.4 — the built-in tools are MCP Tool presets in the palette.
     for (const definition of withAgentToolPresets(definitions)) {
+      if (!isPaletteDefinition(definition)) continue;
       const list = grouped.get(definition.category) ?? [];
       list.push(definition);
       grouped.set(definition.category, list);

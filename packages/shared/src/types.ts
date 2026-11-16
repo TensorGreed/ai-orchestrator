@@ -329,6 +329,11 @@ export interface NodeDefinition {
    * effect outside the run. Unset means the node may read or consume from an external system.
    */
   effectFreeEntry?: boolean;
+  /**
+   * Optional: why this node cannot run in this build. Such a node is left out of the palette and the integrations
+   * list; a stored workflow that contains it still loads, and the node says so when it runs.
+   */
+  unavailable?: string;
 }
 
 export type NodeExecutionStatus =

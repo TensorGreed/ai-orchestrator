@@ -244,6 +244,47 @@ describe("approval gate node", () => {
     expect(last(approved, "on_rejected")?.status).toBe("skipped");
   });
 
+  it("puts every editable field's proposed value on the output of an approval without edits", async () => {
+    const config = {
+      ...GATE,
+      editableFields: [
+        ...GATE.editableFields,
+        // Not on the incoming item: only the field's template gives it a value.
+        { key: "subject", type: "string", valueTemplate: "Re: {{reply}}" },
+        { key: "cc", type: "string" }
+      ]
+    };
+    const { state } = await pauseGate(config);
+    const approved = await resumeWorkflowExecution({ executionId: "exec-gate", state, decision: "approve", actedBy: "lead@example.com" }, deps());
+    const output = last(approved, "gate")?.output as Record<string, any>;
+    expect(output._branchHandle).toBe("approved");
+    expect(output).toMatchObject({ reply: "Dear Ana", priority: "2", subject: "Re: Dear Ana" });
+    // A field with neither a template nor an edit adds nothing.
+    expect(output).not.toHaveProperty("cc");
+    expect(output.approval.editedFields).toEqual([]);
+
+    // Edits still win over the proposed values.
+    const again = await pauseGate(config);
+    const edited = await resumeWorkflowExecution(
+      { executionId: "exec-gate", state: again.state, decision: "approve", edits: { subject: "Thanks" }, editedFields: ["subject"] },
+      deps()
+    );
+    expect(last(edited, "gate")?.output).toMatchObject({ reply: "Dear Ana", subject: "Thanks" });
+  });
+
+  it("keeps an incoming value the approver did not change, even when the proposed value was rendered differently", async () => {
+    const config = { ...GATE, editableFields: [{ key: "reply", type: "string", valueTemplate: "{{reply}} (draft)" }] };
+    const { state } = await pauseGate(config);
+    const plain = await resumeWorkflowExecution({ executionId: "exec-gate", state, decision: "approve" }, deps());
+    expect((last(plain, "gate")?.output as Record<string, any>).reply).toBe("Dear Ana");
+    const again = await pauseGate(config);
+    const edited = await resumeWorkflowExecution(
+      { executionId: "exec-gate", state: again.state, decision: "approve", edits: { reply: "Hi" }, editedFields: ["reply"] },
+      deps()
+    );
+    expect((last(edited, "gate")?.output as Record<string, any>).reply).toBe("Hi");
+  });
+
   it("does not take approved edits on a rejection", async () => {
     const { state } = await pauseGate();
     const rejected = await resumeWorkflowExecution({ executionId: "exec-gate", state, decision: "reject", reason: "x", edits: { reply: "sneaky" } }, deps());

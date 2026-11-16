@@ -146,9 +146,9 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
   // 6.4 — an agent's call of another workflow goes through the MCP layer: the cassette answers it.
   workflow_tool: "mcp",
 
-  // User code: neither the JavaScript sandbox (a `vm` context, not an
-  // isolate) nor the Python subprocess is cut off from the network, so code
-  // nodes are answered from the recording.
+  // User code is answered from the recording: in-process JavaScript runs in
+  // QuickJS (no network, but the clock and random numbers), and a host Python
+  // subprocess can reach the network, so neither repeats reliably.
   code_node: "code",
 
   // Session state: replays get their own in-memory stores.

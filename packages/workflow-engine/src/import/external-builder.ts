@@ -984,9 +984,14 @@ const imapTrigger: NodeHandler = (source, ctx, scope) => {
   };
   if (secretRef) config.secretRef = secretRef;
   const node = baseNode(source, scope, "imap_email_trigger", config);
-  return approximated(node, [
-    "IMAP host, port and user live in the source credential and must be filled in after import."
-  ]);
+  // Kept as the node it will be (mailbox and credential included) but disabled: IMAP intake does not run yet.
+  node.disabled = true;
+  return {
+    node,
+    status: "unsupported",
+    reason:
+      "IMAP email intake is not supported yet: imported disabled, with its mailbox and credential kept. Forward mail to a Webhook Input instead; IMAP host, port and user live in the source credential."
+  };
 };
 
 // --- Core nodes -------------------------------------------------------------
@@ -1835,7 +1840,7 @@ const REGISTRATIONS: readonly HandlerRegistration[] = [
   { sourceType: `${BASE}errorTrigger`, targetType: "error_trigger", category: "trigger", notes: "", handler: errorTrigger },
   { sourceType: `${BASE}formTrigger`, targetType: "form_trigger", category: "trigger", notes: "File fields become text fields.", handler: formTrigger },
   { sourceType: `${BASE}rssFeedReadTrigger`, targetType: "rss_trigger", category: "trigger", notes: "Poll times become a poll interval in seconds.", handler: rssTrigger },
-  { sourceType: `${BASE}emailReadImap`, targetType: "imap_email_trigger", category: "trigger", notes: "Host, port and user live in the credential and must be filled in after import.", handler: imapTrigger },
+  { sourceType: `${BASE}emailReadImap`, targetType: "imap_email_trigger", category: "trigger", notes: "Not supported yet: imported disabled, with its mailbox and credential kept.", handler: imapTrigger },
   { sourceType: `${BASE}httpRequest`, targetType: "http_request", category: "core", notes: "Query parameters are appended to the URL; binary responses become text; auth becomes a secretRef placeholder.", handler: httpRequest },
   { sourceType: `${BASE}code`, targetType: "code_node", category: "core", notes: "JavaScript is wrapped in a compatibility shim; Python is kept verbatim.", handler: codeNode },
   { sourceType: `${BASE}function`, targetType: "code_node", category: "core", notes: "Legacy function code is wrapped in the same compatibility shim.", handler: codeNode },

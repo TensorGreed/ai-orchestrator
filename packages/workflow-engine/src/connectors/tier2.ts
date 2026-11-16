@@ -14,6 +14,7 @@ import crypto from "node:crypto";
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
 import type { SecretReference } from "@ai-orchestrator/shared";
 import { renderCheckedTemplate as renderTemplate } from "../template";
+import { renderIntegerField, renderRequiredString } from "./template-fields";
 
 export interface Tier2Context {
   templateData: Record<string, unknown>;
@@ -653,12 +654,14 @@ export async function executeStripeCreateCharge(
 ): Promise<unknown> {
   const NODE = "stripe_create_charge";
   const token = await requireSecret(ctx, config, NODE);
-  const amount = getNumber(config, "amount", 0);
+  // Amount, currency and customer take templates (an amount from the order that triggered the run); the amount must
+  // still be a positive whole number of the currency's smallest unit once rendered.
+  const amount = renderIntegerField(config, "amount", ctx.templateData, NODE) ?? 0;
   if (amount <= 0) {
-    throw new WorkflowError(`${NODE}: amount must be positive (in cents)`, ErrorCategory.NODE_CONFIG, false);
+    throw new WorkflowError(`${NODE}: amount must be a positive whole number (in cents)`, ErrorCategory.NODE_CONFIG, false);
   }
-  const currency = requireString(config, "currency", NODE);
-  const customerId = getString(config, "customerId");
+  const currency = renderRequiredString(config, "currency", ctx.templateData, NODE);
+  const customerId = renderTemplate(getString(config, "customerId"), ctx.templateData).trim();
   const description = renderTemplate(getString(config, "description"), ctx.templateData);
   const metadata = parseJsonField<Record<string, unknown>>(
     renderTemplate(getString(config, "metadataJson"), ctx.templateData),

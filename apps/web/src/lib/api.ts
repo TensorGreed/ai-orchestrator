@@ -1048,6 +1048,7 @@ export async function fetchDefinitions() {
       category: string;
       description: string;
       sampleConfig: Record<string, unknown>;
+      unavailable?: string;
     }>;
     providers: unknown[];
     connectors: unknown[];

@@ -4,6 +4,7 @@ import { beforeEach, vi } from "vitest";
 import type { Node } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
 import * as api from "../lib/api";
+import { AGENT_DEFAULT_MAX_ITERATIONS } from "@ai-orchestrator/shared";
 import { NodeConfigModal, NodeInspector, buildNodeTrace } from "./NodeConfigModal";
 
 vi.mock("../lib/api", async () => {
@@ -74,6 +75,30 @@ describe("NodeInspector", () => {
 
   it("keeps the NodeConfigModal alias pointing at the inspector", () => {
     expect(NodeConfigModal).toBe(NodeInspector);
+  });
+
+  it.each(["agent_orchestrator", "supervisor_node"] as const)("shows the runtime's default Max Iterations for a %s saved without one", (nodeType) => {
+    const node = makeAgentNode(nodeType);
+    node.data.config = { systemPrompt: "You coordinate." };
+    render(<NodeInspector {...makeProps({ node })} />);
+    expect(screen.getByRole("spinbutton", { name: /Max Iterations/ })).toHaveValue(AGENT_DEFAULT_MAX_ITERATIONS);
+    expect(AGENT_DEFAULT_MAX_ITERATIONS).toBe(4);
+  });
+
+  it("edits a GitHub issue number as a number or a template", async () => {
+    const onSave = vi.fn();
+    const node: Node<EditorNodeData> = {
+      id: "gh-1",
+      type: "workflowNode",
+      position: { x: 0, y: 0 },
+      data: { label: "GitHub", nodeType: "github_action", config: { owner: "o", repo: "r", operation: "commentIssue", issueNumber: 7 } }
+    };
+    render(<NodeInspector {...makeProps({ node, onSave })} />);
+    const field = screen.getByRole("textbox", { name: /Issue Number/ });
+    expect(field).toHaveValue("7");
+    await userEvent.clear(field);
+    await userEvent.type(field, "{{{{pull_request.number}}");
+    expect(field).toHaveValue("{{pull_request.number}}");
   });
 
   it("renders as a docked drawer with header, tabs and footer", () => {
