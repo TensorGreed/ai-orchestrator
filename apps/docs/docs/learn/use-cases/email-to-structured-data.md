@@ -31,7 +31,7 @@ This is a workflow with one model step, not an agent. The path is the same for e
 
 ### Getting the email in
 
-The node list has an **IMAP Email Trigger** (`imap_email_trigger`), but in this release it is a stub: a run that reaches it fails with a "not implemented" error (the `imapflow` library it needs is not a dependency, and the handler stops even when it is installed). Do not build on it yet.
+L2M cannot read a mailbox over IMAP in this release. The IMAP email trigger is not offered in the node list; a stored or imported workflow that still contains one loads, but a run that reaches it fails with "IMAP email intake is not supported yet".
 
 Use a **Webhook Input** instead. Have your mail system (a relay, your provider's inbound-mail feature, or a small script) post each message to the webhook as JSON with at least `from`, `subject` and `text`. The webhook's body becomes the node's output, filtered by **Pass-through Fields** when that list is not empty. A Webhook Input added in the editor starts with `system_prompt, user_prompt, session_id, variables` there, which would drop the email: clear the list or add `from, subject, text`. Then the prompt template reads <span v-pre>`{{from}}`</span>, <span v-pre>`{{subject}}`</span> and <span v-pre>`{{text}}`</span>. Set the webhook's auth to `bearer_token` or `hmac_sha256` so only your relay can post, and optionally restrict `allowedIps` to the relay's address. Strip quoted replies and long signatures before posting: every character goes into the prompt.
 

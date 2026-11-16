@@ -113,7 +113,7 @@ Credential references in the export become `secretRef` placeholders. The import 
 After importing:
 
 1. Create the secret under **Secrets** if it does not exist yet, then link it from the import checklist in the editor. Through the API, replace the placeholder `secretId` in each listed node's config with the stored secret's id.
-2. Fill in connection details that lived inside the source credential rather than the node, such as an IMAP host or an Azure OpenAI endpoint. The node's report reason says when this applies.
+2. Fill in connection details that lived inside the source credential rather than the node, such as an Azure OpenAI endpoint. The node's report reason says when this applies.
 3. Set the workflow variables listed in `report.variablesToSet`.
 
 ## Coverage

@@ -40,9 +40,7 @@ Three decisions shape it:
 
 Point a repository webhook at `/api/webhooks/github/<workflowId>` on your L2M, with the content type set to `application/json` and a secret. Store the same secret in L2M's secret store and pick it in the **GitHub Webhook Trigger** node's `secretRef`. The route computes `sha256=` plus the HMAC-SHA256 hex digest of the body with that secret and compares it with the `X-Hub-Signature-256` header in constant time, which is what GitHub's own guide asks for. A missing header gets 401, a wrong signature 401, and a node without a secret 500.
 
-::: warning Known issue
-In the build this page was checked against, the GitHub and Slack webhook routes compute the signature over an empty body instead of the raw request body, so real deliveries are refused with `401 GitHub signature mismatch`. Before you rely on the trigger, use **Redeliver** or a test delivery in the repository's webhook settings and check that it gets a 200.
-:::
+The signature is computed over the raw request body, the exact bytes GitHub signed. After you save the webhook, send a test delivery from the repository's webhook settings and check that it gets a 200.
 
 Two things the trigger does not do for you:
 
@@ -54,6 +52,8 @@ Two things the trigger does not do for you:
 
   Add cases `opened`, `synchronize` and `ready_for_review` that all lead to the agent, and leave the default branch unconnected. We checked this on a local L2M: a `ping` payload, an issue payload with `action: "opened"` and a pull request `closed` all stopped at the Switch, and only `synchronize` ran the agent. (`synchronize` means "A pull request's head branch was updated", so it fires on every push to the branch. Drop it if one review per pull request is enough.)
 - **It holds the delivery open.** The route answers GitHub when the run ends. GitHub expects a response "within 10 seconds", and "GitHub does not automatically redeliver failed deliveries", so a slow review shows as a failed delivery in GitHub even though the run went on and finished in L2M. Look at the run history in L2M, not GitHub's delivery log, to see whether a review happened.
+
+A delivery is taken once. The route remembers each `X-GitHub-Delivery` id for 10 minutes, so a **Redeliver** of a delivery whose run succeeded (or is waiting for an approval) answers `{"ok": true, "duplicate": true}` and starts no second review. A redelivery after a failed or refused run runs again, which is how you retry one. The memory is per L2M instance.
 
 In the agent's prompt, read the payload with templates such as <span v-pre>`{{webhook.pull_request.number}}`</span>, <span v-pre>`{{webhook.repository.full_name}}`</span> and <span v-pre>`{{webhook.pull_request.title}}`</span>. Write the system prompt on the node; never take instructions from the payload.
 
@@ -90,7 +90,7 @@ GitHub's REST API says "Every pull request is an issue, but not every issue is a
 
 The secret is sent as `Authorization: Bearer <token>`. `JSON.stringify` turns the agent's answer into a quoted JSON string, so quotes and newlines in the review do not break the body. We ran this shape against a local stand-in for the GitHub API: the URL was filled from the payload (`/repos/acme/app/issues/42/comments`) and an answer containing quotes arrived as valid JSON.
 
-Why not the **GitHub: Action** node? Its operations are `createIssue`, `commentIssue`, `closeIssue`, `createPr`, `listIssues`, `getFile`, `createOrUpdateFile` and `listCommits`, and `commentIssue` takes `issueNumber` only as a fixed number in the node's config. A template such as <span v-pre>`{{webhook.pull_request.number}}`</span> is not filled in; the run fails with `github_action.commentIssue: issueNumber required`. It can comment on one fixed issue, not on the pull request that started the run. Note also what it lacks: it has no approve or merge operation, so it cannot be used to do either.
+The **GitHub: Action** node can post the same comment. Its operations are `createIssue`, `commentIssue`, `closeIssue`, `createPr`, `listIssues`, `getFile`, `createOrUpdateFile` and `listCommits`, and its `owner`, `repo` and `issueNumber` fields take templates: set `owner` to <span v-pre>`{{webhook.repository.owner.login}}`</span>, `repo` to <span v-pre>`{{webhook.repository.name}}`</span>, `issueNumber` to <span v-pre>`{{webhook.pull_request.number}}`</span> and `body` to <span v-pre>`{{answer}}`</span> with the `commentIssue` operation. The issue number must render to a positive whole number, and the owner and repository to plain GitHub names, or the step fails before it calls GitHub. Note also what the node lacks: it has no approve or merge operation, so it cannot be used to do either.
 
 ## Keep approving and merging with people
 
