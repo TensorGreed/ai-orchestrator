@@ -85,6 +85,30 @@ describe("NodeInspector", () => {
     expect(AGENT_DEFAULT_MAX_ITERATIONS).toBe(4);
   });
 
+  it("starts an Agent Orchestrator saved without Max Iterations from the shown default, saved only on Save", async () => {
+    const onSave = vi.fn();
+    const node = makeAgentNode("agent_orchestrator");
+    node.data.config = { systemPrompt: "You help." };
+    render(<NodeInspector {...makeProps({ node, onSave })} />);
+    // Opening changes nothing stored: the node's own config is untouched and nothing was saved.
+    expect(node.data.config).toEqual({ systemPrompt: "You help." });
+    expect(onSave).not.toHaveBeenCalled();
+    // The fill is not an edit: closing does not ask about unsaved changes.
+    const save = screen.getByRole("button", { name: /Save changes/ });
+    expect(save).not.toHaveAttribute("data-dirty");
+    await userEvent.click(save);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0]![0].config).toMatchObject({ maxIterations: AGENT_DEFAULT_MAX_ITERATIONS });
+  });
+
+  it("leaves a Supervisor saved without Max Iterations on its schema default", async () => {
+    const onSave = vi.fn();
+    const node = makeAgentNode("supervisor_node");
+    node.data.config = { systemPrompt: "You coordinate." };
+    render(<NodeInspector {...makeProps({ node, onSave })} />);
+    expect(screen.getByRole("button", { name: /Save changes/ })).not.toHaveAttribute("data-dirty");
+  });
+
   it("edits a GitHub issue number as a number or a template", async () => {
     const onSave = vi.fn();
     const node: Node<EditorNodeData> = {

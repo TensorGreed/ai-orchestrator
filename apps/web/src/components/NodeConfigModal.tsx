@@ -1500,6 +1500,11 @@ export function NodeInspector({
           ...baseConnection
         }
       });
+    } else if (node.data.nodeType === "agent_orchestrator" && typeof initialConfig.maxIterations !== "number") {
+      // Validation requires maxIterations on an Agent Orchestrator: start from the value the field shows (also in place of
+      // a stored non-number, which the field cannot show either), so what the editor shows also validates once saved.
+      // The saved workflow changes only on Save, and the fill alone does not mark the node as edited (see isDirty).
+      setConfig({ ...initialConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS });
     } else {
       setConfig(initialConfig);
     }
@@ -9414,7 +9419,12 @@ export function NodeInspector({
   };
 
   const isDirty = useMemo(() => {
-    const savedConfig = asRecord(node.data.config);
+    const storedConfig = asRecord(node.data.config);
+    // The default filled in on open is not an edit of the user's.
+    const savedConfig =
+      node.data.nodeType === "agent_orchestrator" && typeof storedConfig.maxIterations !== "number"
+        ? { ...storedConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS }
+        : storedConfig;
     if (label !== node.data.label) return true;
     if (nodeDisabled !== Boolean(node.data.disabled)) return true;
     if ((nodeColor ?? undefined) !== (node.data.color ?? undefined)) return true;
