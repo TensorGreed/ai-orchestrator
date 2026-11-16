@@ -101,18 +101,28 @@ export function jsonLdBlocks(html) {
   return [...html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)].map((match) => match[1]);
 }
 
-/** The names in a page's visible breadcrumb trail (`<nav aria-label="Breadcrumb">`), or null without one. */
+/**
+ * The visible breadcrumb trails of a page (each `<nav aria-label="Breadcrumb">`): per trail, its items'
+ * names and link targets (`href` is undefined for the current page, which is not a link).
+ */
 export function visibleBreadcrumbs(html) {
-  const nav = html.match(/<nav\b[^>]*aria-label="Breadcrumb"[^>]*>([\s\S]*?)<\/nav>/i);
-  if (!nav) return null;
-  return [...nav[1].matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)].map((item) =>
-    decode(item[1].replace(/<svg\b[\s\S]*?<\/svg>/gi, "").replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim()
+  return [...html.matchAll(/<nav\b[^>]*aria-label="Breadcrumb"[^>]*>([\s\S]*?)<\/nav>/gi)].map((nav) =>
+    [...nav[1].matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)].map((item) => ({
+      name: decode(item[1].replace(/<svg\b[\s\S]*?<\/svg>/gi, "").replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim(),
+      href: tags(item[1], "a")[0]?.href
+    }))
   );
 }
 
 /** A W3C date or date-time (the forms sitemaps and schema.org dates use), as a Date; null when it is not one. */
 export function w3cDate(value) {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/.test(value)) return null;
+  const match = typeof value === "string" ? value.match(/^(\d{4})-(\d{2})-(\d{2})(T(\d{2}):(\d{2})(:(\d{2})(\.\d+)?)?(Z|[+-](\d{2}):(\d{2})))?$/) : null;
+  if (!match) return null;
+  const [, year, month, day, , hour = "0", minute = "0", , second = "0", , , offsetHours = "0", offsetMinutes = "0"] = match;
+  // A real calendar day (no 2026-02-30, which Date would roll over to March) and a real time of day.
+  const calendar = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (calendar.getUTCFullYear() !== Number(year) || calendar.getUTCMonth() !== Number(month) - 1 || calendar.getUTCDate() !== Number(day)) return null;
+  if (Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59 || Number(offsetHours) > 23 || Number(offsetMinutes) > 59) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
 }
@@ -120,6 +130,8 @@ export function w3cDate(value) {
 const ARTICLE_TYPES = new Set(["Article", "TechArticle", "BlogPosting", "NewsArticle"]);
 /** A day of leeway for dates in the future: build machines and git committers sit in different time zones. */
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Two dates of "the same day" may be up to 36 hours apart once time zones are counted (UTC-12 to UTC+14). */
+const SAME_DAY_MS = 36 * 60 * 60 * 1000;
 
 /**
  * The text a reader sees: the body without code, scripts, styles, SVG and comments, plus the
@@ -202,10 +214,10 @@ function references(html) {
 /**
  * The part of a page that counts for inbound links: a docs page's content area (#VPContent) up to
  * the doc footer (edit link, last-updated date, previous / next pager), without the breadcrumbs,
- * since those only repeat the sidebar and the nav; a landing page's whole body.
+ * since those only repeat the sidebar and the nav; a landing page's body without its header, nav and footer.
  */
 export function contentOf(web, html) {
-  if (!web.startsWith("docs/")) return html;
+  if (!web.startsWith("docs/")) return html.replace(/<(header|nav|footer)\b[\s\S]*?<\/\1>/gi, "");
   const start = html.indexOf('id="VPContent"');
   if (start < 0) return html;
   const ends = ['class="VPDocFooter', "<script"].map((marker) => html.indexOf(marker, start)).filter((index) => index > start);
@@ -310,6 +322,8 @@ export async function checkSeo(site, options = {}) {
     } else {
       jsonLdPages += 1;
       const types = [];
+      let articles = 0;
+      let breadcrumbLists = 0;
       for (const [index, block] of blocks.entries()) {
         let data;
         try {
@@ -325,6 +339,7 @@ export async function checkSeo(site, options = {}) {
           if (typeof item?.["@type"] !== "string" || item["@type"].trim() === "") fail(`${where}: JSON-LD block ${index + 1} has an item without @type`);
           else types.push(item["@type"]);
           if (ARTICLE_TYPES.has(item?.["@type"])) {
+            articles += 1;
             // Article dates: both present, real W3C dates, not in the future, and modified no earlier than published.
             const published = w3cDate(item.datePublished);
             const modified = w3cDate(item.dateModified);
@@ -338,7 +353,11 @@ export async function checkSeo(site, options = {}) {
           }
           if (item?.["@type"] === "BreadcrumbList") {
             const elements = Array.isArray(item.itemListElement) ? item.itemListElement : [];
-            jsonLdCrumbs.set(web, elements.map((element) => String(element?.name ?? "").trim()));
+            breadcrumbLists += 1;
+            jsonLdCrumbs.set(
+              web,
+              elements.map((element) => ({ name: String(element?.name ?? "").trim(), url: typeof element?.item === "string" ? element.item : element?.item?.["@id"] }))
+            );
             if (elements.length === 0) fail(`${where}: the BreadcrumbList has no items`);
             for (const [position, element] of elements.entries()) {
               if (element?.position !== position + 1) fail(`${where}: breadcrumb ${position + 1} has position ${element?.position}`);
@@ -351,18 +370,34 @@ export async function checkSeo(site, options = {}) {
         if (/aggregateRating|"review"/.test(block)) fail(`${where}: JSON-LD block ${index + 1} carries ratings or reviews`);
       }
       if (web !== "index.html" && !types.includes("BreadcrumbList")) fail(`${where}: no BreadcrumbList in its JSON-LD`);
+      // One trail and one article per page: a second one would contradict the first (and only one is checked).
+      if (breadcrumbLists > 1) fail(`${where}: has ${breadcrumbLists} BreadcrumbLists in its JSON-LD (one per page)`);
+      if (articles > 1) fail(`${where}: has ${articles} articles in its JSON-LD (one per page)`);
     }
 
-    // The docs show the trail their BreadcrumbList describes (structured data must match what the page
-    // shows). The visible trail leaves out the leading "L2M" crumb, which the landing's own header is.
-    // The docs home is the trail's start and shows none.
+    // The docs show exactly the trail their BreadcrumbList describes, once (structured data must match
+    // what the page shows): the same names in the same order, each link going where its JSON-LD item
+    // says. The docs home is where the trail starts and shows none.
     if (web.startsWith("docs/") && web !== "docs/index.html" && jsonLdCrumbs.has(web)) {
-      const shown = visibleBreadcrumbs(html);
+      const trails = visibleBreadcrumbs(html);
       const described = jsonLdCrumbs.get(web);
-      const expected = described[0] === "L2M" ? described.slice(1) : described;
-      if (!shown) fail(`${where}: shows no breadcrumb trail, but its JSON-LD has a BreadcrumbList`);
-      else if (shown.join(" › ") !== expected.join(" › ")) fail(`${where}: shows the breadcrumbs "${shown.join(" › ")}", but its JSON-LD says "${expected.join(" › ")}"`);
-      else breadcrumbPages += 1;
+      const names = (items) => items.map((item) => item.name);
+      if (trails.length === 0) fail(`${where}: shows no breadcrumb trail, but its JSON-LD has a BreadcrumbList`);
+      else if (trails.length > 1) fail(`${where}: shows ${trails.length} breadcrumb trails (one per page)`);
+      else if (JSON.stringify(names(trails[0])) !== JSON.stringify(names(described))) {
+        fail(`${where}: shows the breadcrumbs "${names(trails[0]).join(" › ")}", but its JSON-LD says "${names(described).join(" › ")}"`);
+      } else {
+        const wrong = trails[0].find((item, index) => {
+          if (item.href === undefined) return index !== trails[0].length - 1;
+          try {
+            return new URL(item.href, `${SITE}/${web}`).href !== described[index].url;
+          } catch {
+            return true;
+          }
+        });
+        if (wrong) fail(`${where}: the breadcrumb "${wrong.name}" links ${wrong.href ?? "nowhere"}, not where its JSON-LD item points`);
+        else breadcrumbPages += 1;
+      }
     }
 
     // Layout shift: every image carries its width and height, so the browser reserves its box.
@@ -399,7 +434,8 @@ export async function checkSeo(site, options = {}) {
   const inbound = new Map();
   for (const { web, html } of pages) {
     const base = addressesOf(web).at(-1);
-    const contentLinks = new Set(references(contentOf(web, html)));
+    // Only indexable pages give a page an inbound link: a 404 page or a noindex page passes nothing on.
+    const contentLinks = new Set(indexable.has(web) ? references(contentOf(web, html)) : []);
     for (const ref of new Set(references(html))) {
       if (/^(mailto|tel|javascript|data|blob):/i.test(ref)) continue;
       let url;
@@ -468,7 +504,7 @@ export async function checkSeo(site, options = {}) {
     const urls = [...sitemapXml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((match) => decode(match[1]));
     // <lastmod>: search engines use it only while it stays accurate. Every docs page has one (from git);
     // a landing page has one when git dated its file. Each is a W3C date, not in the future, and the
-    // same day as the page's own dateModified.
+    // same day as the page's own dateModified (within 36 hours, so time zones never make it fail).
     const lastmods = new Map();
     for (const [, entry] of sitemapXml.matchAll(/<url>([\s\S]*?)<\/url>/g)) {
       const loc = decode(entry.match(/<loc>\s*([^<\s]+)\s*<\/loc>/)?.[1] ?? "");
@@ -503,7 +539,7 @@ export async function checkSeo(site, options = {}) {
       else if (canonicals.get(web) && canonicals.get(web) !== url) fail(`sitemap lists ${url}, but the page's canonical is ${canonicals.get(web)}`);
       const modified = modifiedDates.get(web);
       const lastmod = lastmods.get(url);
-      if (modified && lastmod && Math.abs(modified.getTime() - lastmod.getTime()) >= DAY_MS) {
+      if (modified && lastmod && Math.abs(modified.getTime() - lastmod.getTime()) > SAME_DAY_MS) {
         fail(`sitemap lists ${url} as modified ${lastmod.toISOString()}, but its JSON-LD dateModified is ${modified.toISOString()}`);
       }
       listed.add(web);

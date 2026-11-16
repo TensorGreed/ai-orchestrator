@@ -1,4 +1,4 @@
-import { copyFileSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
@@ -6,6 +6,7 @@ import { firstPublished, hasIndex, pageExists, pageSocialCard, pagesIn, readingM
 import { FEED_PATH, writeFeed } from "./site/feed.js";
 import { INDEX_ENTRIES } from "./site/glossary-entries.js";
 import { breadcrumbsOf, defaultFolderLabel, docsUrl, hubSectionOf, pageKindOf, type Crumb } from "./site/sections.js";
+import { plainHeading } from "./site/headings.js";
 import { pageHeadTags, type HubPageData } from "./site/seo.js";
 import { blogPosts, blogSidebar, glossarySidebar, learnSidebar, recipesSidebar } from "./site/sidebars.js";
 import { LEVEL_LABELS, trackById, TRACKS } from "./site/tracks.js";
@@ -36,16 +37,10 @@ function folderLabel(folder: string): string {
   return track?.shortTitle ?? defaultFolderLabel(folder);
 }
 
-/** A page's first `# ` heading as plain text (no inline code, emphasis, links or `{#id}`), or "". */
-function plainHeading(source: string): string {
-  const body = source.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
-  const line = body.match(/^#\s+(.+)$/m)?.[1] ?? "";
-  return line
-    .replace(/\s*\{#[^}]*\}\s*$/, "")
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/[`*_]/g, "")
-    .replace(/<[^>]+>/g, "")
-    .trim();
+/** The modified time of a page git has no history for (a draft not committed yet), as ms; undefined if absent. */
+function uncommittedDate(relativePath: string): number | undefined {
+  const file = path.join(SRC_DIR, relativePath);
+  return existsSync(file) ? statSync(file).mtimeMs : undefined;
 }
 
 const crumbOf = (relativePath: string, name: string): Crumb => ({ name, url: docsUrl(`/${relativePath.replace(/\.md$/, "")}`) });
@@ -77,7 +72,15 @@ export default defineConfig({
   base: "/docs/",
   cleanUrls: true,
   // An empty blog index is thin content: it stays out of the sitemap and search until the first post.
-  sitemap: { hostname: "https://lsquarem.com/docs/", transformItems: (items) => (BLOG_IS_EMPTY ? items.filter((item) => item.url !== "blog/") : items) },
+  // A page git does not know yet (a draft not committed) gets its file's date, so a local build has a
+  // <lastmod> for every page; CI builds committed trees, where every date comes from git.
+  sitemap: {
+    hostname: "https://lsquarem.com/docs/",
+    transformItems: (items) =>
+      (BLOG_IS_EMPTY ? items.filter((item) => item.url !== "blog/") : items).map((item) =>
+        item.lastmod ? item : { ...item, lastmod: uncommittedDate(`${item.url.replace(/(^|\/)$/, "$1index")}.md`) }
+      )
+  },
   // Generated table pulled into product/importing-from-another-builder.md with @include; not a page of its own.
   srcExclude: ["product/external-import-coverage.md"],
   // The local search index (about 1 MB) is one chunk, loaded only when the search box opens.
@@ -136,8 +139,11 @@ export default defineConfig({
     if (kind === "learn" || kind === "post" || kind === "recipe") {
       extra.readingMinutes = readingMinutes(readFileSync(path.join(SRC_DIR, pageData.filePath), "utf8"));
     }
+    // A draft git does not know yet is dated by its file, so local builds pass the date checks too.
+    const draftDate = !pageData.lastUpdated || !Number.isFinite(pageData.lastUpdated) ? uncommittedDate(pageData.filePath) : undefined;
+    if (draftDate !== undefined) pageData.lastUpdated = draftDate;
     if (kind === "learn" || kind === "glossary" || kind === "recipe" || kind === "docs") {
-      const published = firstPublished(pageData.filePath);
+      const published = firstPublished(pageData.filePath) ?? (draftDate !== undefined ? new Date(draftDate).toISOString() : undefined);
       if (published) extra.datePublished = published;
     }
     if (kind === "hub-index" || kind === "track-index") extra.hasPart = partsOf(pageData.relativePath);
