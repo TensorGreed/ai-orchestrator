@@ -66,8 +66,8 @@ importers:
         specifier: ^13.2.0
         version: 13.2.0
       '@fastify/rate-limit':
-        specifier: ^10.2.2
-        version: 10.3.0
+        specifier: ^11.2.2
+        version: 11.2.2
       better-sqlite3:
         specifier: ^13.0.3
         version: 13.0.3
@@ -530,6 +530,10 @@ packages:
     resolution: {integrity: sha512-9NhCeYjq9+3uxgdtp20LSiJXJvN0FeCtNGpJxuMFZ1Kv3cWUNb6DOhJwUvcVCzKGR66cw4njwM6hrJLqgOwbcw==}
     engines: {node: '>=6.9.0'}
 
+  '@babel/code-frame@7.29.7':
+    resolution: {integrity: sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==}
+    engines: {node: '>=6.9.0'}
+
   '@babel/helper-string-parser@7.29.13':
     resolution: {integrity: sha512-fWegr+WsEsiMVW4KUNdIIzzMTZSzNiqhy0//6+2MRi2d5NFNsL/AYwBQW8eBnRbTBVRnDVzjaJEUqKaCWjMMdQ==}
     engines: {node: '>=6.9.0'}
@@ -546,6 +550,10 @@ packages:
     resolution: {integrity: sha512-fJM50YYjlTiBhgdkGmC1tBpv+FMAyo4annf2X6Aks+0yRlaiVkYW/3f07xAfVVkYIoZ9fFZp+mEThUFnuybhkQ==}
     engines: {node: '>=6.0.0'}
     hasBin: true
+
+  '@babel/runtime@7.29.14':
+    resolution: {integrity: sha512-Y5tqevQaUAZhhj82BpYMNC1ssvLQTVAfwKdm8iy8qwmhvC2/CpcAu8OC+QEtjM7pMk7knx83u1Qj8gzkicyelw==}
+    engines: {node: '>=6.9.0'}
 
   '@babel/runtime@7.29.2':
     resolution: {integrity: sha512-JiDShH45zKHWyGe4ZNVRrCjBz8Nh9TMmZG1kh4QTK8hCBTWBi8Da+i7s1fJw7/lYpM4ccepSNfqzZ/QvABBi5g==}
@@ -936,8 +944,8 @@ packages:
   '@fastify/proxy-addr@5.1.0':
     resolution: {integrity: sha512-INS+6gh91cLUjB+PVHfu1UqcB76Sqtpyp7bnL+FYojhjygvOPA9ctiD/JDKsyD9Xgu4hUhCSJBPig/w7duNajw==}
 
-  '@fastify/rate-limit@10.3.0':
-    resolution: {integrity: sha512-eIGkG9XKQs0nyynatApA3EVrojHOuq4l6fhB4eeCk4PIOeadvOJz9/4w3vGI44Go17uaXOWEcPkaD8kuKm7g6Q==}
+  '@fastify/rate-limit@11.2.2':
+    resolution: {integrity: sha512-Ynxk9BU82Y5Ux7NOk9NqyZpTMdFes8EY8quXrN6ePDsbtG4G9Afb3l9mD8Vw2nv0hXg0iFjV+gkdABReFPlShw==}
 
   '@hono/node-server@2.1.5':
     resolution: {integrity: sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q==}
@@ -1551,6 +1559,7 @@ packages:
   '@secretlint/secretlint-rule-preset-recommend@10.2.2':
     resolution: {integrity: sha512-K3jPqjva8bQndDKJqctnGfwuAxU2n9XNCPtbXVI5JvC7FnQiNg/yWlQPbMUlBXtBoBGFYp08A94m6fvtc9v+zA==}
     engines: {node: '>=20.0.0'}
+    deprecated: Built into secretlint v14 and later. Remove this package; the rule id still works. https://github.com/secretlint/secretlint/blob/HEAD/docs/rules/preset-recommend.md
 
   '@secretlint/source-creator@10.2.2':
     resolution: {integrity: sha512-h6I87xJfwfUTgQ7irWq7UTdq/Bm1RuQ/fYhA3dtTIAop5BwSFmZyrchph4WcoEvbN460BWKmk4RYSvPElIIvxw==}
@@ -2896,6 +2905,10 @@ packages:
     resolution: {integrity: sha512-DWBMKyeM25D70nrIiTkgQth59/G+naKOTep6huF9j+GmeK3DMD60Zvxg5d5qQnz+38AHgou6ean2LECX+lrKDg==}
     engines: {node: '>= 12'}
 
+  ip-address@10.7.6:
+    resolution: {integrity: sha512-00LYkM6byILa9eQIx6qoaXCM40xTLd56AZ4vyaPW3YTyb49VZYPo5xsiAq4tuQ54GH4R7gVdYScJ1B7B77PuTg==}
+    engines: {node: '>= 12'}
+
   ipaddr.js@1.9.1:
     resolution: {integrity: sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g==}
     engines: {node: '>= 0.10'}
@@ -4016,6 +4029,10 @@ packages:
     resolution: {integrity: sha512-/m8M+2BJUpoJdgAHoG+baCwBT+tf2VraSfkBgl0Y00qIWt41DJ8R5B8nsEw0I58YwF5IZH6z24/2TobDKnqSWw==}
     engines: {node: '>=12'}
 
+  toad-cache@3.7.4:
+    resolution: {integrity: sha512-m1TdR/rvT7kgGJZhspNtXdsdYk0fddFpJJFlG5s+UkPFo6lkLoZ3YLOaovPYjq1R75NP5JfeTlSHaOsE09peCg==}
+    engines: {node: '>=20'}
+
   toidentifier@1.0.1:
     resolution: {integrity: sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA==}
     engines: {node: '>=0.6'}
@@ -4755,6 +4772,12 @@ snapshots:
       js-tokens: 4.0.0
       picocolors: 1.1.1
 
+  '@babel/code-frame@7.29.7':
+    dependencies:
+      '@babel/helper-validator-identifier': 7.29.7
+      js-tokens: 4.0.0
+      picocolors: 1.1.1
+
   '@babel/helper-string-parser@7.29.13': {}
 
   '@babel/helper-validator-identifier@7.28.5': {}
@@ -4764,6 +4787,8 @@ snapshots:
   '@babel/parser@7.29.13':
     dependencies:
       '@babel/types': 7.29.11
+
+  '@babel/runtime@7.29.14': {}
 
   '@babel/runtime@7.29.2': {}
 
@@ -5017,11 +5042,12 @@ snapshots:
       '@fastify/forwarded': 3.0.1
       ipaddr.js: 2.3.0
 
-  '@fastify/rate-limit@10.3.0':
+  '@fastify/rate-limit@11.2.2':
     dependencies:
       '@lukeed/ms': 2.0.2
-      fastify-plugin: 5.1.0
-      toad-cache: 3.7.0
+      fastify-plugin: 6.0.1
+      ip-address: 10.7.6
+      toad-cache: 3.7.4
 
   '@hono/node-server@2.1.5(hono@4.13.13)':
     dependencies:
@@ -5676,8 +5702,8 @@ snapshots:
 
   '@testing-library/dom@10.4.1':
     dependencies:
-      '@babel/code-frame': 7.29.0
-      '@babel/runtime': 7.29.2
+      '@babel/code-frame': 7.29.7
+      '@babel/runtime': 7.29.14
       '@types/aria-query': 5.0.4
       aria-query: 5.3.0
       dom-accessibility-api: 0.5.16
@@ -7132,6 +7158,8 @@ snapshots:
 
   ip-address@10.7.4: {}
 
+  ip-address@10.7.6: {}
+
   ipaddr.js@1.9.1: {}
 
   ipaddr.js@2.3.0: {}
@@ -8285,6 +8313,8 @@ snapshots:
       is-number: 7.0.0
 
   toad-cache@3.7.0: {}
+
+  toad-cache@3.7.4: {}
 
   toidentifier@1.0.1: {}
 
