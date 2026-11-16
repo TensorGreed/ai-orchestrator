@@ -5,6 +5,7 @@ topic: agents
 definition: "A pattern that first retrieves documents relevant to a question and puts them in the prompt, so the model answers from that text instead of from memory alone."
 description: "RAG fetches relevant documents and puts them in the prompt so the model answers from them. The pipeline, citations, and where it goes wrong."
 related: [vector-store, hybrid-search, grounding, context-window, indirect-prompt-injection]
+guide: [/learn/agents/rag-vs-fine-tuning, /learn/agents/rag-vs-long-context]
 ---
 
 # RAG (retrieval-augmented generation)

@@ -55,7 +55,7 @@ Each entry below has four parts: what OWASP means, what it looks like in an agen
 
 **What it is.** Training, fine-tuning or embedding data is tampered with to plant backdoors, biases or wrong behaviour.
 
-**In an agent.** Most agent builders do not train models, so the practical version is poisoned retrieval data: a document in the knowledge base that carries false facts or hidden instructions, read by the agent as trusted context.
+**In an agent.** Most agent builders do not train models ([RAG vs fine-tuning](/learn/agents/rag-vs-fine-tuning) compares adding knowledge at query time with training the model), so the practical version is poisoned retrieval data: a document in the knowledge base that carries false facts or hidden instructions, read by the agent as trusted context.
 
 **A control.** Track where documents come from, limit who can add them, and treat retrieved text as outside content, not as instructions.
 

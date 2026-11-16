@@ -49,7 +49,7 @@ There are three kinds of grader, and most suites mix them.
 
 **Human graders** are the reference the other two are calibrated against: an expert reads the transcript and decides. They are slow and expensive, so use them to build and check the other graders, and to spot-check results.
 
-A practical rule: use a code grader wherever the answer has a checkable fact in it, a model grader only for qualities code cannot see, and a human to check both now and then.
+A practical rule: use a code grader wherever the answer has a checkable fact in it, a model grader only for qualities code cannot see, and a human to check both now and then. [LLM-as-judge vs deterministic checks](/learn/testing/llm-as-judge-vs-deterministic-checks) covers that choice in depth, including the known judge biases and how to calibrate a judge.
 
 ## Capability evals and regression evals
 

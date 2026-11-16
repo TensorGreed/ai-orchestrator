@@ -105,7 +105,7 @@ The specification describes how a client gets a token. It does not say whose tok
 - **One shared connection.** An admin connects the server once, and every workflow uses that token. Simple, and right for a service account that should act the same for everyone. But every user of the agent acts with that one account's rights.
 - **<Term id="delegated-credentials">Delegated credentials</Term>.** Each person connects their own account. An agent run started by Alice calls the server as Alice, so it sees only what Alice may see, and the server's audit log names her. Runs with no person behind them, such as a schedule or webhook, need an explicit rule for whose account to use.
 
-A good rule of thumb: if the server holds per-person data, use per-user connections, and never let a missing connection fall back to a shared one silently.
+A good rule of thumb: if the server holds per-person data, use per-user connections, and never let a missing connection fall back to a shared one silently. [OAuth vs API keys for MCP](/learn/security/oauth-vs-api-keys-for-mcp) covers when a static key is still the right choice.
 
 ## How L2M handles it
 
@@ -114,7 +114,7 @@ L2M is an MCP client toward the servers your agents call, and an MCP server towa
 **As a client (the [MCP server registry](/product/mcp-server-registry)).** An HTTP server registered with auth type **OAuth** is connected with the flow above:
 
 - L2M reads the `401` challenge, then the protected resource metadata, then the authorization server metadata (RFC 8414 or OpenID Connect discovery).
-- It uses a client id you entered (pre-registration) or, when you leave it empty, registers itself with <Term id="dynamic-client-registration">dynamic client registration</Term> as a public client. Client metadata documents are opt-in: when [enabled](/product/mcp-server-registry#client-metadata-document) and the authorization server supports them, L2M offers its document before it tries registration.
+- It uses a client id you entered (pre-registration). Otherwise, when the optional [client metadata document](/product/mcp-server-registry#client-metadata-document) is turned on (`MCP_OAUTH_CLIENT_METADATA_ENABLED`, off by default), the redirect base is a public `https` URL and the authorization server supports it, it uses that document; otherwise it registers itself with <Term id="dynamic-client-registration">dynamic client registration</Term> as a public client.
 - The sign-in uses PKCE with `S256`, and L2M refuses an authorization server that does not advertise it. It sends a random `state` and the `resource` parameter.
 - The scope is the one you set on the server, else the one from the challenge, else `scopes_supported`.
 - The `state` is single-use, expires after 10 minutes by default, and is bound to the sign-in session that started the connection. Discovery and token endpoints must use HTTPS, except on loopback addresses for local testing, and if the resource metadata names a resource, it must be on the server's own origin.
