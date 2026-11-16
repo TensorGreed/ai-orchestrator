@@ -80,7 +80,10 @@ compare with an exported copy to find what changed. The portable backup (`db:exp
 `db:import` refuses a restore whose chain does not match it (see [Backup and recovery](../operations/backup-and-recovery.md)).
 
 The check covers what is in the database. Someone who can write to the database could rebuild the whole chain after
-an edit, so keep a copy outside it as well, through an export destination (below).
+an edit, so keep a copy outside it as well, through an export destination (below). The chain on its own also does not
+detect deleted newest entries: L2M keeps no count or hash of the latest entry outside the chain, so deleting entries from
+the end (a truncated tail) leaves a shorter chain that still checks out. A copy outside the database, which already holds
+those entries, is how you notice.
 
 **Retention and the chain.** Entries older than `AUDIT_LOG_RETENTION_DAYS` are deleted, oldest first in the order
 they were written, up to the first entry inside the retention, so no gap opens in the middle of the chain. Each purge
