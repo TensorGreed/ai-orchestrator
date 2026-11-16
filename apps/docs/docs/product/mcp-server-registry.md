@@ -243,9 +243,24 @@ Tokens used by sampling are counted on the tool call that triggered them: the ro
 
 **Risk notes.** Turn sampling on only for servers you trust: the server chooses the prompt and reads the answer, and each request costs tokens on your provider account. Keep **Max requests per call** small, restrict **Allowed models** to cheap models where possible, and use a sampling policy rule to keep it away from unattended roles. L2M never forwards sampling to another instance or service; the model is always one configured in this deployment.
 
+## Environment of stdio servers on the host
+
+A stdio server started on the API host (no container sandbox) does not get the API's whole environment. It gets:
+
+- a short allowlist of the API's variables that programs need to start and reach the network: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `TERM`, the temp folders (`TMPDIR`, `TEMP`, `TMP`), the `XDG_*_HOME` folders and `XDG_RUNTIME_DIR`, proxies (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, also in lower case), certificates (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`), npm's cache, config file, proxy and certificate settings (for example `npm_config_cache`, `npm_config_userconfig`, `npm_config_https_proxy`), uv's and pip's cache, config file and certificate settings (`UV_CACHE_DIR`, `UV_CONFIG_FILE`, `PIP_CACHE_DIR`, `PIP_CONFIG_FILE`, `PIP_CERT` and a few more), and on Windows the system variables programs expect (`SystemRoot`, `windir`, `ComSpec`, `PATHEXT`, `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, `USERNAME`, `ProgramFiles` and the like; on Windows names match in any case);
+- the variables in its own `env`, and its secret (`secretEnvVar`, or each name of a secret bundle). These win over an allowlisted variable of the same name.
+
+Everything else stays out: `SECRET_MASTER_KEY_BASE64`, `DATABASE_URL` and other database settings, model provider keys, `NODE_OPTIONS`, and package index URLs (`npm_config_registry`, `PIP_INDEX_URL`, `UV_INDEX_URL`), which can carry credentials. Proxy URLs are passed as they are, so a proxy password in `HTTPS_PROXY` reaches the server too. npx, uvx and pip still read their own config files (`~/.npmrc`, `pip.conf`, `uv.toml`), because `HOME` and `APPDATA` are passed.
+
+**A server that needs another variable.** Put it in the server's `env` (or its secret, for a credential). To pass a variable from the API's own environment instead, list its name in `MCP_STDIO_ENV_PASSTHROUGH` (comma-separated; a trailing `*` matches a prefix of at least three characters, for example `JAVA_HOME,MY_TOOL_*`). The list never passes `SECRET_MASTER_KEY_BASE64`, and an entry with a value (`NAME=value`) stops the API at start-up. When a server exits early, the error says so. `MCP_STDIO_INHERIT_ENV=true` passes the API's whole environment again, as releases before this one did; keep it off unless every stdio server is your own.
+
+The same rules apply to `l2m check --stdio`, which reads both settings from its own environment.
+
+This keeps secrets out of what a server, its logs, its crash reports and the programs it starts can see in their environment. It is not isolation: a hostile server running as the API user can still read the API's files and, on Linux, `/proc/<api-pid>/environ`. Use a container sandbox, below, for servers you do not trust. A sandboxed server gets none of the API's variables, only its own `env` and secret.
+
 ## Sandboxed stdio servers
 
-A stdio server is a program L2M starts on the API host. By default it runs with the API's own permissions. To contain it, an admin sets the server's **Sandbox** to **Container**. L2M then starts the command inside a throwaway container with docker or podman, whichever the host has (`MCP_SANDBOX_RUNTIME` picks one).
+A stdio server is a program L2M starts on the API host. By default it runs with the API's own permissions and the [environment above](#environment-of-stdio-servers-on-the-host). To contain it, an admin sets the server's **Sandbox** to **Container**. L2M then starts the command inside a throwaway container with docker or podman, whichever the host has (`MCP_SANDBOX_RUNTIME` picks one).
 
 Every sandbox gets these settings, and none of them can be turned off:
 
@@ -351,6 +366,8 @@ Admins can restrict which tools of a server each role may use, per project, and 
 | `MCP_SANDBOX_REQUIRED` | `false` | Refuse every stdio server, inline ones included, that would run outside a container. |
 | `MCP_SANDBOX_ALLOWED_MOUNT_ROOTS` | empty | Comma-separated absolute host directories that sandbox mounts must resolve into. Empty means no mounts. |
 | `MCP_SANDBOX_RUNTIME` | `auto` | Container CLI: `auto` (docker, then podman), `docker` or `podman`. |
+| `MCP_STDIO_INHERIT_ENV` | `false` | Pass the API's whole environment to stdio servers on the host. Default: a [minimal allowlist](#environment-of-stdio-servers-on-the-host) plus each server's own variables. |
+| `MCP_STDIO_ENV_PASSTHROUGH` | empty | Comma-separated names of more API variables stdio servers on the host get; a trailing `*` matches a prefix. |
 
 Servers can override the interval (at least 10 seconds) or opt out of scheduled probing. In an HA deployment only the leader instance runs scheduled probes. stdio servers start a short-lived process for each probe, which is closed when the probe ends.
 

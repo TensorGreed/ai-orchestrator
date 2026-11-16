@@ -189,6 +189,19 @@ processes and network from host Python. Many distributions block them for
 unprivileged users (Ubuntu's `kernel.apparmor_restrict_unprivileged_userns`),
 so the API does not depend on them.
 
+## Local MCP servers
+
+A stdio MCP server is a program L2M starts on the API host, so it is third-party
+code too. Without a container sandbox it gets only a minimal allowlist of the
+API's environment (`PATH`, `HOME`, locale, temp folders, proxies and
+certificates) plus its own configured variables and secret. By default it
+never gets `SECRET_MASTER_KEY_BASE64`, database settings or provider keys. Like host
+Python, that is not isolation: it can still read what the API user can read,
+`/proc/<api-pid>/environ` included. See
+[Environment of stdio servers on the host](../product/mcp-server-registry.md#environment-of-stdio-servers-on-the-host)
+and, for servers you do not trust,
+[Sandboxed stdio servers](../product/mcp-server-registry.md#sandboxed-stdio-servers).
+
 ## Turning code nodes off
 
 Set `CODE_NODES_ENABLED=false` to disable code nodes entirely. Any code node

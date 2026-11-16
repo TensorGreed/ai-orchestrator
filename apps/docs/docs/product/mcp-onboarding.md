@@ -159,7 +159,7 @@ Set `MCP_CATALOG_FILE` to the path of a JSON file that lists the servers your de
       "adapter": "stdio_mcp",
       "connection": {
         "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "/srv/shared"]
+        "args": ["-y", "@modelcontextprotocol/server-filesystem@2.3.0", "/srv/shared"]
       },
       "tags": ["Files"],
       "approved": true

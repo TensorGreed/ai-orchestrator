@@ -48,6 +48,7 @@ import {
   normalizeToolSnapshot,
   parseCassette,
   parseSnapshotFile,
+  parseStdioEnvPassthrough,
   serveSnapshotMockOverStdio,
   SnapshotMockServer,
   StdioMCPServerAdapter,
@@ -202,7 +203,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 }
 
 /** Compare one live target, or a second snapshot file, with each accepted snapshot file. */
-async function offlineCheck(args: ParsedArgs, snapshots: McpSnapshotFile[]): Promise<McpCheckServerResult[]> {
+async function offlineCheck(args: ParsedArgs, snapshots: McpSnapshotFile[], io: CliIo): Promise<McpCheckServerResult[]> {
   const stdio = oneFlag(args, "stdio");
   const url = oneFlag(args, "url");
   const against = oneFlag(args, "against");
@@ -221,7 +222,15 @@ async function offlineCheck(args: ParsedArgs, snapshots: McpSnapshotFile[]): Pro
     if (stdio) {
       const [command, ...commandArgs] = splitCommand(stdio);
       if (!command) throw new UsageError("--stdio needs a command");
-      adapter = new StdioMCPServerAdapter();
+      // Like the API: the server gets a minimal part of this environment (not L2M_API_KEY, say) unless widened.
+      const passthrough = parseStdioEnvPassthrough(io.env.MCP_STDIO_ENV_PASSTHROUGH);
+      if (passthrough.problems.length > 0) throw new UsageError(`MCP_STDIO_ENV_PASSTHROUGH: ${passthrough.problems.join(" ")}`);
+      const inheritRaw = (io.env.MCP_STDIO_INHERIT_ENV ?? "").trim().toLowerCase();
+      if (inheritRaw && !["true", "1", "yes", "false", "0", "no"].includes(inheritRaw)) {
+        throw new UsageError("MCP_STDIO_INHERIT_ENV must be true or false");
+      }
+      const inherit = ["true", "1", "yes"].includes(inheritRaw);
+      adapter = new StdioMCPServerAdapter({ env: { inherit, passthrough: passthrough.names } });
       connection = { command, args: commandArgs, timeoutMs };
     } else {
       adapter = new HttpMCPServerAdapter();
@@ -270,7 +279,7 @@ async function runCheck(args: ParsedArgs, io: CliIo): Promise<number> {
 
   let report: McpCheckReport;
   if (snapshotFiles.length > 0) {
-    const servers = await offlineCheck(args, snapshotFiles.map(loadSnapshot));
+    const servers = await offlineCheck(args, snapshotFiles.map(loadSnapshot), io);
     const judged = judgeMcpCheck(servers, [], { failOnUnreachable });
     report = { ok: judged.ok, checkedAt: new Date().toISOString(), servers, blockedTools: [], failures: judged.failures };
   } else {

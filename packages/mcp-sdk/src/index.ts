@@ -8,6 +8,7 @@ import { MCPRegistry } from "./registry";
 import { withSecretBundle } from "./secret-bundle";
 import { withRuntimeLimits, type McpRuntimeGuard } from "./runtime-limits";
 import { ContainerSandboxLauncher, type McpSandboxPolicy, type StdioLauncher } from "./sandbox";
+import type { StdioEnvPolicy } from "./stdio-env";
 import { InstrumentedMCPRegistry } from "./tracing";
 import type { McpOAuthTokenProvider, MCPServerAdapter } from "./types";
 import type { RunInstrumentation } from "@ai-orchestrator/shared";
@@ -27,6 +28,7 @@ export * from "./gateway-naming";
 export * from "./secret-bundle";
 export * from "./errors";
 export * from "./sandbox";
+export * from "./stdio-env";
 export * from "./runtime-limits";
 export * from "./delegated";
 export * from "./cassette";
@@ -71,6 +73,11 @@ export interface DefaultMCPRegistryOptions {
    */
   stdioProtocol?: StdioMcpProtocolOptions;
   /**
+   * Which of this process's environment variables stdio servers started on the host get (MCP_STDIO_INHERIT_ENV,
+   * MCP_STDIO_ENV_PASSTHROUGH). Unset: a minimal allowlist plus each server's own variables.
+   */
+  stdioEnv?: StdioEnvPolicy;
+  /**
    * Tracing, passed only while it is on: every MCP operation gets a CLIENT span (`tools/call search`), and the HTTP
    * and stdio clients send the active trace context to the server (`params._meta` and, over HTTP, headers). Unset or
    * the no-op: no spans, nothing sent, the registry is a plain one.
@@ -106,6 +113,7 @@ export function createDefaultMCPRegistry(options?: DefaultMCPRegistryOptions): M
         new StdioMCPServerAdapter({
           ...(launcher ? { launcher } : {}),
           ...(options?.stdioProtocol ? { protocol: options.stdioProtocol } : {}),
+          ...(options?.stdioEnv ? { env: options.stdioEnv } : {}),
           ...(instrument ? { trace: instrument } : {})
         })
       )
