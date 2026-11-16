@@ -626,7 +626,9 @@ describe("stored label marks of stateless callers", () => {
     const a = fixture.instance;
     const sessionId = await legacySession(fixture, a);
     expect((await legacyCall(fixture, a, sessionId, "1+1")).result?.structuredContent?.result).toBe(2);
-    // The best-effort note of that result in the client's mark is gone (its write failed): only the session holds it.
+    // Only the session holds that result: the client's best-effort note of it is gone (as when the note's write fails).
+    // With the note in place, its conversion on the next read already stores the labels and the session's write is
+    // skipped as unchanged.
     await testSql(a.store).run(`DELETE FROM mcp_gateway_label_marks WHERE client_id = ?`, fixture.client.id);
     expect((await api(a, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { trackSessionLabels: true })).status).toBe(200);
     const raise = vi.spyOn(a.store, "raiseMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));

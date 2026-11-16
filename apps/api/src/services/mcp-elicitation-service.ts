@@ -408,7 +408,7 @@ export class McpElicitationService {
       throw new McpElicitationAnswerError(`This request was already ${record.status.replace("_", " ")}.`, 409);
     }
     if (!actor.answersOthers && record.createdBy && record.createdBy !== actor.userId) {
-      throw new McpElicitationAnswerError("Only the person who started the run, or an operator, can answer this request.", 403);
+      throw new McpElicitationAnswerError("Only the person who started the run, or someone who may run its workflow, can answer this request.", 403);
     }
     const entry = this.pending.get(id);
     if (!entry && !this.options.cluster) {

@@ -115,7 +115,8 @@ needs a role also accepts every role above it.
     the user's role in the run's project, as running the workflow does: anyone with `workflow:execute` there (global
     admins; project admins and editors, or a custom role that grants it; without a membership, operators, builders
     and admins) can do this. Others, such as project viewers and global viewers, see and answer only the questions of
-    runs they started (and of queued runs).
+    runs they started (and of queued runs). A workflow shared to another project for running counts too: members who
+    may run it there also see and answer its questions.
   - connect and disconnect their own account on MCP servers that use each user's own credentials (**My connections**,
     see [Delegated credentials](../product/mcp-server-registry.md#delegated-credentials))
 
