@@ -76,7 +76,7 @@ The 2025-11-25 authorization specification is short on this point:
 So a key is not forbidden. But when an HTTP server does use MCP authorization, the rules are strict:
 
 - The MCP server is an OAuth 2.1 resource server and publishes Protected Resource Metadata that names its authorization server.
-- Clients **MUST** use PKCE, with `S256` when they can, and **MUST** send the `resource` parameter, so an authorization server that supports resource indicators issues a token for that one server only. Either way, the server must check that the token was issued for it.
+- Clients **MUST** use PKCE, with `S256` when they can, and **MUST** send the `resource` parameter, so an authorization server that supports resource indicators issues a token for that one server only.
 - Tokens travel in the `Authorization: Bearer` header on every request. They "**MUST NOT** be included in the URI query string".
 - Servers **MUST** check that a token was issued for them, and "**MUST NOT** pass through the token it received from the MCP client" to an API behind them. That rule is the ban on <Term id="token-passthrough">token passthrough</Term>.
 - For public clients, authorization servers **MUST** rotate refresh tokens.

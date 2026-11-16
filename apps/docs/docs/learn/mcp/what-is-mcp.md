@@ -20,7 +20,7 @@ Before a shared protocol, every pairing of an AI app and a tool needed its own g
 
 MCP turns that into one contract on each side. A tool author writes one MCP server. An app author writes one MCP client. Any client can then talk to any server, because both speak the same messages: "what do you offer?", "run this tool with these arguments", "here is the result".
 
-That is the whole idea. MCP does not make models smarter. It makes tools portable. For when an agent should call an API through MCP and when a plain HTTP call is enough, see [MCP vs REST APIs](/learn/mcp/mcp-vs-rest-api).
+That is the whole idea. MCP does not make models smarter. It makes tools portable. To decide when an agent should reach an API through MCP and when a plain HTTP call is enough, see [MCP vs REST APIs](/learn/mcp/mcp-vs-rest-api).
 
 ## Hosts, clients and servers
 

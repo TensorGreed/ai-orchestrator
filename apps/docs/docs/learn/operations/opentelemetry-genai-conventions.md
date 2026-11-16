@@ -13,7 +13,7 @@ The <Term id="genai-semantic-conventions">OpenTelemetry GenAI semantic conventio
 
 ## Where the conventions live now
 
-Up to the v1.41 releases, the GenAI and MCP conventions were part of the main `open-telemetry/semantic-conventions` repository. Release v1.42.0 (12 June 2026) moved them to their own repository, `open-telemetry/semantic-conventions-genai`. In the main repository, every `gen_ai.*` attribute, metric, event and span is now marked deprecated, so if your tooling is built on semantic conventions 1.42 or later, it shows the GenAI names as deprecated even though nothing has replaced them. The GenAI pages on opentelemetry.io say: "This page has moved and is no longer maintained in this repository." When we checked on 16 November 2026, the new repository had no release yet. So the last released GenAI text is v1.41.0, and the newer text exists only on that repository's main branch.
+Up to the v1.41 releases, the GenAI and MCP conventions were part of the main `open-telemetry/semantic-conventions` repository. Release v1.42.0 (12 June 2026) moved them to their own repository, `open-telemetry/semantic-conventions-genai`. In the main repository, every `gen_ai.*` attribute, metric, event and span is now marked deprecated, so if your tooling is built on semantic conventions 1.42 or later, it shows the GenAI names as deprecated: they moved, they were not renamed. The GenAI pages on opentelemetry.io say: "This page has moved and is no longer maintained in this repository." When we checked on 16 November 2026, the new repository had no release yet. So the last released GenAI text is v1.41.0 (the v1.41.1 patch carries the same GenAI text), and the newer text exists only on that repository's main branch.
 
 The documents are split by signal:
 
@@ -26,7 +26,7 @@ The documents are split by signal:
 
 Each page is marked "Status: Development". OpenTelemetry's maturity levels describe Development as the stage where "Not all pieces of the component are in place yet", with none of the promises a Stable document makes about keeping names. The GenAI pages add a transition plan for instrumentation built on v1.36.0 or earlier. Such instrumentation "SHOULD NOT change the version of the GenAI conventions that they emit by default", and "SHOULD introduce an environment variable `OTEL_SEMCONV_STABILITY_OPT_IN`". One of its values, `gen_ai_latest_experimental`, means: "emit the latest experimental version of GenAI conventions (supported by the instrumentation) and do not emit the old one".
 
-In practice: the default names stay put until you ask for new ones, and you can ask with one setting.
+In practice: older instrumentation keeps its old names until you opt in with one setting. Newer instrumentation can change names in any release, so pin its version.
 
 ## The span names
 
@@ -38,9 +38,9 @@ In practice: the default names stay put until you ask for new ones, and you can 
 | An agent run, in your own process | `invoke_agent` | `invoke_agent {gen_ai.agent.name}` | INTERNAL |
 | An agent run on a remote agent service | `invoke_agent` | `invoke_agent {gen_ai.agent.name}` | CLIENT |
 | A process that coordinates several agents | `invoke_workflow` | `invoke_workflow {gen_ai.workflow.name}` | INTERNAL |
-| An MCP request | (MCP: `mcp.method.name`) | `{mcp.method.name} {target}`, such as `tools/call get_weather` | CLIENT, or SERVER on the server side |
+| An MCP request | `execute_tool` on `tools/call` (plus `mcp.method.name`) | `{mcp.method.name} {target}`, such as `tools/call get_weather` | CLIENT, or SERVER on the server side |
 
-On a model span, `gen_ai.operation.name` and `gen_ai.provider.name` are Required. `gen_ai.request.model` is Conditionally Required when it is available. `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and `gen_ai.response.finish_reasons` are Recommended. `error.type`, which is already Stable, is Conditionally Required "if the operation ended in an error". On a tool span, `gen_ai.tool.name` is Required; `gen_ai.tool.call.id` and `gen_ai.tool.type` are Recommended. The MCP page says its tool call spans "are compatible with GenAI execute_tool spans". It prefers one span per tool call: if the MCP instrumentation can tell that GenAI instrumentation is already tracing the tool call, it "SHOULD NOT create a separate span" and should add its MCP attributes to the existing `execute_tool` span. Only when it cannot tell does the `tools/call` CLIENT span sit as a child under `execute_tool`, as in the figure.
+On a model span, `gen_ai.operation.name` and `gen_ai.provider.name` are Required. `gen_ai.request.model` is Conditionally Required when it is available. `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and `gen_ai.response.finish_reasons` are Recommended. `error.type`, which is already Stable, is Conditionally Required "if the operation ended in an error". On a tool span, `gen_ai.tool.name` is Required; `gen_ai.tool.call.id` and `gen_ai.tool.type` are Recommended. The MCP page says its tool call spans "are compatible with GenAI execute_tool spans". It prefers one span per tool call: if the MCP instrumentation can tell that GenAI instrumentation is already tracing the tool call, it "SHOULD NOT create a separate span" and should add its MCP attributes to the existing `execute_tool` span. Only when it cannot tell does it create its own `tools/call` CLIENT span, which then sits under `execute_tool`, as in the figure.
 
 <figure>
 <svg viewBox="0 0 640 250" role="img" aria-labelledby="genai-fig-title genai-fig-desc" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-width:640px">
@@ -140,6 +140,7 @@ L2M's own steps that the conventions do not cover, such as workflow nodes and qu
 - [v1.41.0: GenAI metrics](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-metrics.md) and [MCP](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/mcp.md) (OpenTelemetry)
 - [v1.41.0: GenAI attribute registry](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/registry/attributes/gen-ai.md) (OpenTelemetry): deprecated attributes and their replacements
 - [Semantic conventions changelog](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/CHANGELOG.md) (OpenTelemetry): the 1.37.0 renames
+- [Semantic conventions v1.42.0 release](https://github.com/open-telemetry/semantic-conventions/releases/tag/v1.42.0) (OpenTelemetry): the move to `semantic-conventions-genai`
 - [open-telemetry/semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai) (OpenTelemetry): where the conventions are maintained now
 - [Maturity levels](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/maturity-levels.md) (OpenTelemetry specification): what Development means
 - L2M docs: [OpenTelemetry](/operations/opentelemetry), [Observability](/operations/observability)

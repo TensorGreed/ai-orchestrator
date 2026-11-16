@@ -12,7 +12,7 @@ guide: [/learn/operations/identity-for-ai-platforms, /learn/operations/sso-vs-sc
 
 **System for Cross-domain Identity Management: a standard HTTP and JSON protocol an identity provider uses to create, update and deactivate user accounts and groups in other apps.**
 
-<Term id="sso">Single sign-on</Term> answers "who is signing in right now?". It says nothing when someone leaves the company: their account in each app stays, and sessions or API keys already issued there can keep working. SCIM fills that gap. The identity provider (the SCIM client) pushes changes to each app (the service provider) as they happen: a new hire gets an account, a team change updates a group, a leaver is deactivated the same day.
+<Term id="sso">Single sign-on</Term> answers "who is signing in right now?". It says nothing when someone leaves the company: their account in each app stays, and sessions or API keys already issued there can keep working. SCIM fills that gap: it tells each app, which can then end them. The identity provider (the SCIM client) pushes changes to each app (the service provider) as they happen: a new hire gets an account, a team change updates a group, a leaver is deactivated the same day.
 
 SCIM 2.0 is specified in two IETF RFCs from 2015. RFC 7643 defines the schema: a core `User` (`urn:ietf:params:scim:schemas:core:2.0:User`) with attributes such as `userName`, `emails` and `active`, a `Group` with members, and an enterprise extension. RFC 7644 defines the protocol: JSON over HTTP (`application/scim+json`) on endpoints such as `/Users`, `/Groups`, `/Schemas` and `/ServiceProviderConfig`, with POST to create, GET with filters to search, PUT to replace, PATCH to change part of a resource, and DELETE.
 

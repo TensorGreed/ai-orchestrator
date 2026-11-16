@@ -9,7 +9,7 @@ related: [scim, sso, oidc, saml, rbac, service-account]
 
 # SSO vs SCIM
 
-<Term id="sso">Single sign-on</Term> and <Term id="scim">SCIM</Term> solve different problems, and an AI platform that many people use needs an answer to both. SSO, through <Term id="oidc">OpenID Connect</Term> or <Term id="saml">SAML 2.0</Term>, answers "who is this person, right now?" each time someone signs in. SCIM, the System for Cross-domain Identity Management, answers "which accounts and groups should exist in this app?" by letting your identity provider create, change and deactivate them over HTTP, whether or not anyone is signing in. SSO alone handles joiners well: an account can be created on the first sign-in. It does not handle leavers. Disabling someone in the directory stops their next sign-in. It does not remove the account, end the sessions they already hold or revoke the API keys they created. Removing those is provisioning. SCIM is the standard way for the identity provider to tell the app, and a well-built app then ends the sessions and keys too.
+<Term id="sso">Single sign-on</Term> and <Term id="scim">SCIM</Term> solve different problems, and an AI platform that many people use needs an answer to both. SSO, through <Term id="oidc">OpenID Connect</Term> or <Term id="saml">SAML 2.0</Term>, answers "who is this person, right now?" each time someone signs in. SCIM, the System for Cross-domain Identity Management, answers "which accounts and groups should exist in this app?" by letting your identity provider create, change and deactivate them over HTTP, whether or not anyone is signing in. SSO alone handles joiners well: an account can be created on the first sign-in. It does not handle leavers. Disabling someone in the directory stops their next sign-in. Unless the app and the provider both support single logout, it does not end the sessions they already hold, and it never removes the account or revokes the API keys they created. Removing those is provisioning. SCIM is the standard way for the identity provider to tell the app, and a well-built app then ends the sessions and keys too.
 
 ## Two questions, two protocols
 
@@ -21,7 +21,7 @@ related: [scim, sso, oidc, saml, rbac, service-account]
 | What travels | An ID token (a signed JWT) or a signed XML assertion | JSON resources: `User` and `Group`, over HTTP |
 | Direction | Identity provider to app, through the browser | Identity provider to app, server to server |
 | Standards | OpenID Connect Core 1.0; SAML 2.0 (OASIS) | RFC 7643 (schema) and RFC 7644 (protocol), IETF 2015 |
-| What it cannot do | Remove an account, or end sessions and keys already issued | Authenticate anyone |
+| What it cannot do | Remove an account or revoke API keys; ending existing sessions needs a logout extension both sides support | Authenticate anyone |
 
 <figure>
 <svg viewBox="0 0 640 260" role="img" aria-labelledby="scim-fig-title scim-fig-desc" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-width:640px">
@@ -112,11 +112,11 @@ L2M, a self-hosted workflow builder and agent runtime, supports OIDC, SAML 2.0 a
 - **Allow-lists on every sign-in.** `OIDC_ALLOWED_GROUPS` and `OIDC_ALLOWED_EMAIL_DOMAINS` (and the SAML equivalents) are checked on every login, for new and returning users, so removing someone from the allowed group at the identity provider refuses their next sign-in.
 - **Group mappings.** A mapping without a project sets the global role on each login but never lowers it; one with a project adds or updates a project membership ([group-to-role mappings](/security/auth-rbac#group-to-role-mappings)). Lowering a global role or removing a project membership is a manual change.
 - **Ending access now.** An admin can sign a user out everywhere from **Settings → Access control → Users**; that ends sessions only, and the user's API keys keep working. Deleting the user (`DELETE /api/users/:id`) removes the account with its sessions, API keys, SSO identities and project roles in one transaction.
-- **Shorter windows.** `SESSION_IDLE_TIMEOUT_MINUTES` and `SESSION_ABSOLUTE_TIMEOUT_HOURS` limit how long a session outlives its last use ([session policy](/security/auth-rbac#session-policy)).
+- **Shorter windows.** `SESSION_IDLE_TIMEOUT_MINUTES` and `SESSION_ABSOLUTE_TIMEOUT_HOURS` limit how long a session lasts after its last use, and in total ([session policy](/security/auth-rbac#session-policy)).
 - **Passwords next to SSO.** Accounts that SSO creates get a random password. L2M has no SSO-only switch, so an account that was given its own password, for example through an invite, can still use it until it is deleted.
 - **Automation off people.** [Service accounts](/security/service-accounts) cannot sign in and are not tied to an employee, so deleting a leaver does not break a pipeline that uses a service account key.
 
-So an L2M offboarding today is: disable the person at the identity provider, then delete the account in L2M. Signing it out everywhere is not enough on its own: it ends sessions, but the account's API keys keep working until you delete the account or revoke them. The [audit log](/security/audit-log) records the sign-out (`session.revoked`) and the deletion (`user.delete`).
+So an L2M offboarding today is: disable the person at the identity provider, then delete the account in L2M and revoke any MCP gateway clients they created (a client whose creator is deleted keeps working as viewer). Signing it out everywhere is not enough on its own: it ends sessions, but the account's API keys keep working until you delete the account or revoke them. The [audit log](/security/audit-log) records the sign-out (`session.revoked`) and the deletion (`user.delete`).
 
 ## Further reading
 

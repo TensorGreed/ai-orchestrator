@@ -1,7 +1,7 @@
 ---
 title: "MCP vs REST APIs: when an agent needs a protocol"
 sidebarTitle: "MCP vs REST APIs"
-description: "Why agents use MCP instead of calling REST APIs directly: discovery, schemas, auth and sessions compared, and when a plain HTTP tool is the better choice."
+description: "Why agents use MCP instead of calling REST APIs directly: discovery, schemas, auth and errors compared, and when a plain HTTP tool is the better choice."
 level: beginner
 about: model-context-protocol
 related: [model-context-protocol, mcp-server, mcp-tool, tool-calling, least-privilege, ssrf]
@@ -49,7 +49,7 @@ A REST API is a service's own interface: many URLs and HTTP methods, designed fo
 | Who reads the description? | A developer | The model, directly |
 | How do errors come back? | HTTP status codes and an API-specific body | A protocol error, or a tool result with `isError: true` and a message the model can act on |
 | How does auth work? | Whatever the API chose: API keys, OAuth, signed requests | Optional; for HTTP servers, an OAuth 2.1 based flow the spec defines; for local stdio servers, credentials from the environment |
-| How does a caller learn about changes? | Release notes and version numbers | `notifications/tools/list_changed` from servers that declare `listChanged` |
+| How does a caller learn about changes? | Release notes and version numbers | `notifications/tools/list_changed` from servers that declare `listChanged` (from 2026-07-28, to clients that subscribe) |
 | What carries it? | HTTP | JSON-RPC 2.0 over stdio or Streamable HTTP |
 
 The OpenAPI Specification calls itself "a standard, language-agnostic interface to HTTP APIs which allows both humans and computers to discover and understand the capabilities of the service". That is close to what MCP's `tools/list` does. The difference is the reader and the moment. An OpenAPI document describes every operation of an API for code generators and developers. An MCP tool list is a short menu, written for a model, served at the moment the agent needs it.
@@ -59,7 +59,7 @@ The OpenAPI Specification calls itself "a standard, language-agnostic interface 
 You can give a model a tool such as `http_request(method, url, headers, body)` and point it at any API. It works in a demo. In production, four things go wrong.
 
 1. **The action surface is the whole API.** A generic HTTP tool lets the model call any endpoint with any method. A `DELETE` is one token away from a `GET`. With an MCP server, or a narrow tool you write, the model can only call `search_tickets` and `create_ticket`, and each has a schema that can reject extra fields.
-2. **The credential has to go somewhere.** If the model builds the headers, the API key ends up in its context or in its tool arguments, where traces and logs can capture it. An MCP server holds its own credential and adds it itself. The model never sees it. See [OAuth vs API keys for MCP](/learn/security/oauth-vs-api-keys-for-mcp).
+2. **The credential has to go somewhere.** If the model builds the headers, the API key ends up in its context or in its tool arguments, where traces and logs can capture it. With MCP, the server or the host holds the credential (the host for an OAuth token, the server for the key to the API behind it); the model never sees it. See [OAuth vs API keys for MCP](/learn/security/oauth-vs-api-keys-for-mcp).
 3. **Any URL is reachable.** A tool that fetches whatever URL the model writes is a request-forgery risk: a prompt injection in a document can steer it to an internal address or to an attacker's server with your data in the query string. See <Term id="ssrf">SSRF</Term> and [the lethal trifecta](/learn/security/lethal-trifecta).
 4. **The model reads API docs badly at run time.** Long endpoint lists, pagination rules and status codes cost tokens and invite wrong calls. A few well-named tools with short descriptions work better. See [Too many tools](/learn/agents/too-many-tools).
 
