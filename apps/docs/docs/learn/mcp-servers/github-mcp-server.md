@@ -21,7 +21,7 @@ There are two projects with that name, and only one is maintained:
 | `github/github-mcp-server` | Maintained by GitHub. Latest release `v2.1.0`. | Docker image `ghcr.io/github/github-mcp-server`, a Go binary, or GitHub's hosted endpoint |
 | `@modelcontextprotocol/server-github` (npm) | Archived. The npm package is marked "Archived and unmaintained; no security guarantees" and its last version is `2025.4.8`. The source moved to `modelcontextprotocol/servers-archived`, whose README says development moved to `github/github-mcp-server`. | `npx` |
 
-Many older tutorials still show `npx -y @modelcontextprotocol/server-github`. Do not use it for new setups. If you start from L2M's built-in **GitHub** preset on the registration form, replace its `npx` command with the Docker command below: the preset still names the archived package.
+Many older tutorials still show `npx -y @modelcontextprotocol/server-github`. Do not use it for new setups. L2M's built-in **GitHub** preset on the registration form already runs GitHub's server in Docker (`ghcr.io/github/github-mcp-server:v2.1.0`), passing the token into the container by name; Docker must be installed on the API host.
 
 ## Local or remote
 

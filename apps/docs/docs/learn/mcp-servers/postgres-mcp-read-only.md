@@ -100,7 +100,7 @@ For anything near production, point the agent at a hot standby. The PostgreSQL d
 
 With the database locked down, the choice of MCP server matters less. Prefer a maintained server, pin its version, and read its tool list: many SQL servers ship write tools (`execute_sql`, `create_table`) alongside the read ones. Give it a connection string for `agent_ro`, never for the application role.
 
-Run it in a container so the process has no host access. If you start from the **PostgreSQL** preset on L2M's registration form, note that it fills in the archived `@modelcontextprotocol/server-postgres` package without a version, and its note calls the server read-only by design, which the bug above disproves. Replace the command with the maintained server you chose, pinned.
+Run it in a container so the process has no host access. L2M has no built-in PostgreSQL preset: the archived reference server was removed from the presets, so register the maintained server you chose, pinned.
 
 ## Attach it to an agent in L2M
 

@@ -95,7 +95,7 @@ L2M treats the memory server like any other stdio server. Everything below is op
 }
 ```
 
-Pin the version. With `MCP_CATALOG_ENFORCE=true`, an admin first adds an approved catalog entry with exactly this pinned package ([deployment catalog](/product/mcp-onboarding#deployment-catalog)). The registration form's **Knowledge Graph Memory** preset fills in the package without a version, so add one.
+Pin the version. With `MCP_CATALOG_ENFORCE=true`, an admin first adds an approved catalog entry with exactly this pinned package ([deployment catalog](/product/mcp-onboarding#deployment-catalog)). The registration form's **Knowledge Graph Memory** preset fills in the same pinned package; add `MEMORY_FILE_PATH` to its `env`.
 
 **Contain the process.** In a [container sandbox](/product/mcp-server-registry#sandboxed-stdio-servers), the root filesystem is read-only and there is no network, which suits this server: it needs neither. It does need one writable folder for its file. Allow a host folder in `MCP_SANDBOX_ALLOWED_MOUNT_ROOTS`, mount it with **Writable** ticked, and point `MEMORY_FILE_PATH` into it. The sandbox runs as user `65534` by default, so that folder must be writable by that user.
 

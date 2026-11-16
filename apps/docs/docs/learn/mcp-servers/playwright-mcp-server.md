@@ -94,7 +94,7 @@ Register it as an admin under **MCP → Servers → + Register server** as a std
 }
 ```
 
-`@playwright/mcp@0.0.85` counts as pinned for a [deployment catalog](/product/mcp-onboarding#deployment-catalog); `@latest` does not. Then attach an MCP Tool node for the server to the agent's `tool` port.
+`@playwright/mcp@0.0.85` counts as pinned for a [deployment catalog](/product/mcp-onboarding#deployment-catalog); `@latest` does not. The built-in **Playwright (Browser)** preset on the registration form fills in the same pinned package with `--headless --isolated`; add `--block-service-workers` and `--allowed-origins` yourself. A server on the API host gets only a [short allowlist](/product/mcp-server-registry#environment-of-stdio-servers-on-the-host) of the API's environment, so if you keep browsers in a custom folder through `PLAYWRIGHT_BROWSERS_PATH`, set it in the server's `env`. Then attach an MCP Tool node for the server to the agent's `tool` port.
 
 Three things to know about how it runs:
 

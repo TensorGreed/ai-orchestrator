@@ -77,7 +77,7 @@ These protections have been fixed and tightened through published advisories. Th
 
 That JSON is a `stdio_mcp` connection for the [MCP server registry](/product/mcp-server-registry). Register it under **MCP → Servers**:
 
-- **From the Git preset.** The preset on the registration form starts from an `npx` command; replace the command and arguments with the `uvx` line above, since the server is a Python package.
+- **From the Git preset.** The preset on the registration form fills in `uvx mcp-server-git==2026.11.11 --repository /path/to/repo`. Replace the path, and add the `env` block above. `uvx` has to be installed on the API host.
 - **From your catalog.** A [deployment catalog](/product/mcp-onboarding#deployment-catalog) entry pins `mcp-server-git==2026.11.11` the way the catalog expects for `uvx`. With `MCP_CATALOG_ENFORCE=true`, only that pinned package can be registered; the `--repository` path after it stays free.
 - **From a config file.** If the server is already in a client config, use [Import config](/learn/mcp-servers/import-mcp-json-config).
 
