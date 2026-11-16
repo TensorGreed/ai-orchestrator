@@ -179,7 +179,15 @@ export interface GuardRunContext {
    * fails the run's Guard resolution rather than running without it.
    */
   gatewayStack?: GatewayGuardProfileRef[];
+  /**
+   * 12.7 — the run started from a sensitive run's content (v74 `sensitiveInput`): its rule events go to log streams
+   * with evidence digests only, never the masked evidence.
+   */
+  sensitiveInput?: boolean;
 }
+
+/** 12.7 — where stored rule event rows go next (the log streams); called after the rows are written, never awaited. */
+export type GuardEventStream = (rows: GuardEventInsert[], options: { withholdEvidence: boolean }) => Promise<void>;
 
 /** 12.6 — what a gateway server tool call's Guard checks know about the call. */
 export interface GatewayGuardContext {
@@ -252,8 +260,29 @@ export class GuardService {
     private readonly options: GuardServiceOptions
   ) {}
 
+  private eventStream: GuardEventStream | null = null;
+
   get autoApply(): boolean {
     return this.options.autoApply;
+  }
+
+  /** 12.7 — sends stored rule events on (the log streams), set once the log streaming service exists. */
+  setEventStream(stream: GuardEventStream | null): void {
+    this.eventStream = stream;
+  }
+
+  /**
+   * 12.7 — hands written rows to the event stream without waiting for it: the stream only queues them, and nothing it
+   * does (or fails to do) can slow down or fail the check that recorded them. Eval runs and replay jobs are not streamed.
+   */
+  private streamEvents(rows: GuardEventInsert[], context: Pick<GuardRunContext, "runSource" | "sensitiveInput">): void {
+    const stream = this.eventStream;
+    if (!stream || rows.length === 0 || context.runSource === "eval") return;
+    void Promise.resolve()
+      .then(async () => await stream(rows, { withholdEvidence: context.sensitiveInput === true }))
+      .catch((error: unknown) => {
+        this.options.logger?.("Rule events could not be queued for log streams", { error: error instanceof Error ? error.message : String(error) });
+      });
   }
 
   // -------------------------------------------------------------------------
@@ -1205,7 +1234,9 @@ export class GuardService {
       await this.store.insertGuardEvents(rows);
     } catch (error) {
       this.options.logger?.("Guard events could not be written", { error: error instanceof Error ? error.message : String(error) });
+      return;
     }
+    this.streamEvents(rows, context);
   }
 
   /** Phase 12 coverage — runs that must never reveal: rule simulations, candidate rule set runs (replays) and eval runs. */
@@ -1294,7 +1325,9 @@ export class GuardService {
       },
       message: `Reveal node ${event.nodeId}: revealed ${event.revealed.reduce((total, entry) => total + entry.count, 0)}, refused ${event.refused.reduce((total, entry) => total + entry.count, 0)}`
     });
-    await this.store.insertGuardEvents([...event.revealed.map((entry) => row(entry, true)), ...event.refused.map((entry) => row(entry, false))]);
+    const rows = [...event.revealed.map((entry) => row(entry, true)), ...event.refused.map((entry) => row(entry, false))];
+    await this.store.insertGuardEvents(rows);
+    this.streamEvents(rows, context);
   }
 
   async listEvents(filters: GuardEventFilters & { limit?: number; offset?: number }): Promise<{ events: GuardEventView[]; total: number }> {

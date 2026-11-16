@@ -175,7 +175,9 @@ entry cannot be edited without breaking the chain: if a token was ever changed w
 
 A log stream sends audit events soon after they are written, to `syslog` (RFC 5424 over UDP or TCP), a `webhook`
 (JSON, optionally signed: `sha256=<hex HMAC-SHA256 of the body>` in `x-ao-signature` or a header you name) or `sentry`. A stream can be
-limited to some categories and to a minimum level: failures are `error`, denials `warn`, everything else `info`.
+limited to some categories and to a minimum level: failures are `error`, denials `warn`, everything else `info`. A
+stream with no categories gets every audit event; `*` also stands for every audit category, so it can be combined with
+`rule_events` (below).
 
 Create them under **Settings → Log Streams** or with `POST /api/log-streams`; **Test** sends one event, and the
 delivery history of the last `LOG_STREAM_EVENT_RETENTION_DAYS` (14) is listed per stream. A stream's config is stored
@@ -188,6 +190,85 @@ are sent. Every audit event goes to the log streams, once, whichever feature rec
 budgets and export destinations included), and so do the retention checkpoint and run outcomes (`execution.success`,
 `execution.error`, with the error redacted and cut to 2,000 characters). Use an export destination when every
 entry must arrive. Log streams still receive events when `AUDIT_LOG_ENABLED=false`.
+
+#### Rule events on log streams
+
+A stream can also receive [content rule](../product/content-rules.md#what-gets-recorded) events: one event per stored
+rule event, from workflow runs, MCP gateway calls and /v1 AI gateway requests. It is off for every stream until you
+add the `rule_events` category: under **Settings → Log Streams** pick **Audit and content rule events** or **Content
+rule events only** for a new stream, or use **Send content rule events** on an existing one. With the API, send
+`categories: ["*", "rule_events"]` for both, or `["rule_events"]` for rule events only. Rule events of eval runs and
+replay jobs are not streamed.
+
+Events are queued like audit events and sent by the same background flush, so a slow or unreachable stream never
+slows down or fails a run or a gateway call; a full buffer drops waiting rule events before audit events. Which
+streams asked for rule events is read at most every 5 seconds, so a change made on another API instance can take that
+long to apply there. A failed send is tried again on the next flush (each send to a webhook or Sentry gives up after
+10 seconds). Delivery is at least once: use `metadata.eventId` to drop duplicates. A send that finally fails is kept
+in the stream's delivery history without its evidence.
+
+Levels: `warn` when the effective action is `block`, `require_approval` or `review` (a refused reveal counts as
+`block`); `info` for any other finding (rewrites, shadow findings, reveals); `debug` for a check that found nothing, so
+a stream at the default `info` level leaves clean checks out.
+
+Every stream type carries the same event body: syslog puts it as JSON after the RFC 5424 header (`MSGID`
+`content_rules.event`; `createdAt` is in the JSON as well as the header), a webhook posts it, Sentry puts `metadata`
+under `extra`.
+
+```json
+{
+  "category": "rule_events",
+  "eventType": "content_rules.event",
+  "level": "warn",
+  "outcome": "denied",
+  "message": "Content rule block: dlp.patterns (email) on prompt at guard",
+  "actor": { "type": "system" },
+  "resourceType": "execution",
+  "resourceId": "exec_123",
+  "projectId": "default",
+  "createdAt": "2026-11-16T10:00:00.000Z",
+  "metadata": {
+    "schema": "l2m.rule_event",
+    "schemaVersion": 1,
+    "eventId": "…",
+    "verdictId": "…",
+    "source": "workflow",
+    "ruleSet": { "id": "default", "version": 3, "hash": "…" },
+    "detector": { "id": "dlp.patterns", "category": "pii", "dataClass": "email", "score": 0.9 },
+    "action": { "requested": "block", "effective": "block", "verdict": "block", "shadow": false },
+    "channel": "prompt",
+    "placement": "node",
+    "nodeId": "guard",
+    "toolName": null,
+    "iteration": null,
+    "executionId": "exec_123",
+    "workflowId": "wf_support",
+    "projectId": "default",
+    "latencyMs": 3,
+    "budgetExceeded": false,
+    "skippedDetectors": [],
+    "evidence": [{ "masked": "m***@e******.org", "digest": "sha256:5d41402abc4b2a76", "spanCount": 1, "message": "Email address" }],
+    "evidenceWithheld": false
+  }
+}
+```
+
+- `source` is `workflow`, `mcp_gateway` (`executionId` is the call's `mcpgw_*` id) or `ai_gateway` (the request's
+  `aigw_*` id). `detector` is `null` for a check that found nothing.
+- `evidence` is the stored evidence ([what gets recorded](../product/content-rules.md#what-gets-recorded)), at most 5
+  pieces of at most 160 characters each, with a digest of each stored piece for correlation with the Security page.
+  The content that was checked is never sent. Sensitive data detectors store the matched value masked; injection and
+  hidden-text detectors keep a short excerpt of the matched or decoded text, so before it is sent every piece and its
+  message are masked again with the built-in data patterns: emails, phone numbers, payment cards, IBANs, keys, tokens
+  and credentials, built-in national ids, and URL query values. A word cut off at the end of an excerpt is dropped,
+  since the patterns could not recognise it. Custom terms and patterns from a rule set are not applied here, and text
+  the patterns do not recognise, such as the words of an injection attempt, is sent as it is.
+- For a run started from a sensitive run's content (copied node outputs, marked pinned data, or an error workflow of a
+  sensitive run), and for the part of a run after an approval when the part before it read sensitive content,
+  `evidenceWithheld` is `true` and each piece carries only its `digest` and `spanCount`. A run that becomes sensitive
+  work while it runs (reading marked session rows or a declared sensitive source, a Reveal node) sends masked evidence
+  for its checks up to then; leave `rule_events` off a stream if that evidence must not leave the deployment.
+- Fields may be added within `schemaVersion` 1; a field renamed or removed raises the version.
 
 ## Settings
 

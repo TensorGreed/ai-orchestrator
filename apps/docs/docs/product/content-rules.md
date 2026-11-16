@@ -224,6 +224,7 @@ Rows never hold the content that was checked, the raw matched value, protection 
 - **Trace.** On the Runs page, an expanded run shows a **Content rules** panel: per Content Rules node and per agent step, the channel, tool, action, a shadow badge when shadow rules would have done more, masked evidence, the slowest detectors and the rule sets with their versions and source.
 - **Run tape.** Steps where the rules blocked, held for review, waited for approval or rewrote content carry a marker.
 - **Security page.** Verdict totals, verdicts per day by outcome, counts by action, category and channel, the detectors that fire most, what shadow rules would have blocked, and the latest events with links to their runs. Filter by project, workflow, rule set, source (workflow runs, responses to callers, incoming requests or MCP gateway calls) and window.
+- **Log streams.** A log stream that lists the `rule_events` category receives each rule event as it is recorded, from runs and from both gateways, with masked evidence only. See [rule events on log streams](../security/audit-log.md#rule-events-on-log-streams).
 - **Canvas.** Content Rules cards show their `pass`, `blocked` and `review` outputs and an empty protection slot; agents show a rules slot. The canvas key lists the rules and protection port colours.
 
 ## Limits and deployment notes

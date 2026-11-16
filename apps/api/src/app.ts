@@ -2649,7 +2649,15 @@ export async function createApp(
             ...(input.gatewayGuard ? { gatewayStack: input.gatewayGuard.profiles } : {}),
             ...(input.guardSimulation?.substitute ? { profileSubstitute: input.guardSimulation.substitute } : {}),
             ...(input.guardSimulation ? { simulation: { sink: input.guardSimulation.sink, vault: input.guardSimulation.vault } } : {}),
-            ...(input.guardSimulation?.destinationRows ? { destinationRows: input.guardSimulation.destinationRows } : {})
+            ...(input.guardSimulation?.destinationRows ? { destinationRows: input.guardSimulation.destinationRows } : {}),
+            // 12.7 — a run started from a sensitive run's content streams rule event digests, not masked evidence; so
+            // does the resumed part of a run whose paused part read sensitive content (or carried it in).
+            ...(input.sensitiveInput === true ||
+            (input.usePinnedData === true && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0) ||
+            input.resumeState?.sensitiveSessionRead === true ||
+            input.resumeState?.sensitiveSessionReadMarked === true
+              ? { sensitiveInput: true }
+              : {})
           }),
           replayNodeHook: input.replay?.hook,
           // 12.2 — secrets flagged "sensitive output" (none: no node config is walked).
@@ -2804,7 +2812,11 @@ export async function createApp(
                   ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
                   scopeSubWorkflow: modelScopedSubWorkflows(errorScoped.scopeSubWorkflow, baseProviderRegistry, errorModelRun),
                   // The error handler is guarded under its own bindings, like any other run.
-                  guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
+                  guard: guardService.runtimeFor({
+                    workflowId: errorWf.id,
+                    projectId: errorWf.projectId ?? "default",
+                    ...(payload.sensitive === true ? { sensitiveInput: true } : {})
+                  }),
                   loadMcpToolPolicy,
                   codeSandbox: codeSandboxPlan,
                   outboundGuard,
@@ -5373,6 +5385,8 @@ export async function createApp(
   // Every audit event goes to the log streams through this one path (AuditService.record), whichever helper or
   // service records it; nothing else dispatches audit events, so none is sent twice.
   auditService.setStream(async (event) => await logStreamingService.dispatchAudit(event));
+  // 12.7 — stored content rule events go to the destinations that list the `rule_events` category (none by default).
+  guardService.setEventStream(async (rows, options) => await logStreamingService.dispatchRuleEvents(rows, options));
 
   // 13.3 — the retention service: leader-only, one instance at a time (its lease), batched, recorded. Captured runs and
   // rule simulations register their steps further down, once their services exist.
