@@ -162,14 +162,15 @@ Webhook Input ──▶ LLM Call ──▶ IF ──true──▶ Success Output
 
 **Topology**:
 ```
-Webhook Input ──▶ Chat Intent Router ──▶ {first-turn DAG ──▶ Session Artifact Save}
-                                        OR
-                                        {follow-up DAG ──▶ Session Artifact Load ──▶ ... }
+Webhook Input ──▶ Session Artifact Load ──▶ Agent ──▶ Output Parser ──▶ Chat Intent Router
+Chat Intent Router ├─ report  ──▶ PDF Output ──▶ Session Artifact Save ──▶ reply
+                   ├─ code    ──▶ reply
+                   └─ message ──▶ reply
 ```
 
 `Session Artifact Save` writes JSON keyed by `(namespace, session_id, artifact_key)`; `Session Artifact Load` retrieves it verbatim. Survives across requests.
 
-**Sample**: `Two-Turn Report + Code Helper` (`two-turn-report-code-helper-flow.json`) — first turn writes an MCP-backed report; follow-up turns load it byte-for-byte and pass it to a Python code node.
+**Sample**: `Two-Turn MCP Report + Code Helper` (`two-turn-report-code-helper-flow.json`) — first turn writes an MCP-backed report; follow-up turns load it byte-for-byte and give it to the agent, which writes a Python script from it. Walkthrough: [two-turn report and code helper recipe](/recipes/two-turn-report-helper).
 
 **Sharp edges**:
 - The artifact_key is per-session, so a single workflow can store multiple distinct artifact slots per session.
@@ -234,6 +235,17 @@ Same shape as a basic flow, but the LLM Call is replaced with the dedicated Azur
 - Azure deployment names are not OpenAI model names. Set the deployment, not `gpt-4o-mini`.
 - Use `SecretService` for the API key and AAD client secret — never paste them into node config.
 - Region pinning matters for data-residency compliance; pin via the endpoint URL.
+
+---
+
+## Use cases built from these patterns
+
+The [AI agents by job](/learn/use-cases/) guides combine these patterns into designs for real jobs, each with its approvals, tests and costs, and say which parts the samples cover:
+
+- Webhook to agent with approvals: [support ticket triage](/learn/use-cases/support-ticket-triage-agent), [refunds with human approval](/learn/use-cases/refund-approval-agent), [code review for pull requests](/learn/use-cases/code-review-agent) and a [Slack assistant with MCP tools](/learn/use-cases/slack-assistant-with-tools).
+- Supervisor and workers: [incident triage](/learn/use-cases/incident-triage-agent) and a [research agent that cites its sources](/learn/use-cases/research-agent-with-citations).
+- RAG: an [internal docs Q&A agent](/learn/use-cases/internal-docs-qa-agent) and [security questionnaire answers](/learn/use-cases/security-questionnaire-agent).
+- Structured output and scheduled runs: [automated data reports](/learn/use-cases/data-reporting-agent), [emails to structured records](/learn/use-cases/email-to-structured-data), a [scheduled monitoring agent](/learn/use-cases/scheduled-monitoring-agent) and [CRM enrichment](/learn/use-cases/sales-crm-enrichment-agent).
 
 ---
 

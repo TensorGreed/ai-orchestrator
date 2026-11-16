@@ -4,7 +4,7 @@
   "workflow": {
     "id": "wf-key-inventory-report-flow",
     "name": "Key manager — Key Inventory Report (PDF, branded)",
-    "description": "End-to-end report pipeline that demonstrates the full Phase 9-11 stack composed together. Layout (left to right): manual_trigger fans out two parallel branches. (A) Branding: text_input → web_browse (headless Chromium fetches a brand site) → prompt_template + llm_call + output_parser distill the page into a JSON brand kit (primary color, accent color, logo URL, font, tagline). (B) Keys: mcp_tool calls the external key manager's `list_keys` → code_node (Python, stdlib-only) buckets the response by cloud / algorithm / age (<30d / 30-90d / 90-180d / 180-365d / >365d). The two branches merge into three chart nodes (Vega-Lite, server-side SVG) for keys-by-cloud (bar), keys-by-algorithm (donut), and key-aging (bar). A final prompt_template stitches the branding tokens + chart SVGs into one HTML body; pdf_output renders it via Chromium. Two things to wire before this works for real: (1) replace the `mcp_tool` connection block with your key manager's MCP server endpoint + secretRef, (2) set the `text_input` to your brand URL (defaults to https://example.com). The token-efficient companion workflow (\"generate the same report as a Python script, no L2M\") can re-use the same `session_id` — the agent's session_tool_cache holds the key manager's `list_keys` response from this run so a follow-up prompt reads from cache instead of re-fetching.",
+    "description": "End-to-end report pipeline. manual_trigger fans out two parallel branches. (A) Branding: text_input -> web_browse (headless Chromium loads a brand site) -> prompt_template + llm_call + output_parser turn the page's title, meta tags, image URLs and text into a JSON brand kit (brand, logo URL, primary and accent color, font, tagline). (B) Keys: mcp_tool calls the key service's `list_keys` tool -> code_node (Python, stdlib only) counts the keys by cloud, by algorithm and by age (<30d / 30-90d / 90-180d / 180-365d / >365d). The two branches meet at three chart nodes (Vega-Lite, server-side SVG): keys by cloud (bar), keys by algorithm (donut) and key aging (bar); the two bar charts take their colors from the brand kit. A final prompt_template places the brand values and the chart SVGs in one HTML page, pdf_output prints it with Chromium, and the Output returns the PDF as a data URL. Before it works for real: (1) point the mcp_tool connection at your key service's MCP server (add a secretRef if it needs one), (2) set the text_input to your brand URL (defaults to https://example.com), (3) give the llm_call a provider and key. A user_prompt sent with the run replaces the brand URL.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [
@@ -49,7 +49,7 @@
         "name": "Extract Branding Prompt",
         "position": { "x": 980, "y": 120 },
         "config": {
-          "template": "You are a brand-asset extractor. Examine the page below and produce a JSON object with the brand's primary identifiers.\n\nPAGE TITLE: {{title}}\n\nMETA OG IMAGE: {{meta.og:image}}\n\nKEY IMAGES (first 10):\n{{images}}\n\nPAGE TEXT (first 4000 chars):\n{{text}}\n\nReturn ONLY a JSON object on one line, no markdown:\n{\"brand\":\"<official brand name>\",\"primaryLogoUrl\":\"<URL of the main logo image>\",\"primaryColor\":\"<hex color you can infer from the page>\",\"accentColor\":\"<hex>\",\"fontFamily\":\"<best guess of the brand's typeface>\",\"tagline\":\"<short slogan if present>\"}",
+          "template": "You are a brand-asset extractor. Below is data extracted from one web page: its title, meta tags, image URLs and visible text. You cannot see the page's styles or a screenshot, so only report a color or a font when the data below states it (for example a theme-color meta tag or text that names it); otherwise use an empty string.\n\nPAGE TITLE: {{title}}\n\nMETA DESCRIPTION: {{ meta[\"description\"] }}\n\nMETA OG IMAGE: {{ meta[\"og:image\"] }}\n\nMETA THEME COLOR: {{ meta[\"theme-color\"] }}\n\nKEY IMAGES (first 10):\n{{ images.slice(0, 10) }}\n\nPAGE TEXT (first 4000 chars):\n{{ text.slice(0, 4000) }}\n\nReturn ONLY a JSON object on one line, no markdown:\n{\"brand\":\"<official brand name>\",\"primaryLogoUrl\":\"<URL of the main logo image, or empty>\",\"primaryColor\":\"<hex color stated in the data, or empty>\",\"accentColor\":\"<hex, or empty>\",\"fontFamily\":\"<typeface named in the data, or empty>\",\"tagline\":\"<short slogan if present>\"}",
           "outputKey": "brand_extraction_prompt"
         }
       },
@@ -87,7 +87,7 @@
         "name": "Key manager list_keys",
         "position": { "x": 360, "y": 520 },
         "config": {
-          "serverId": "key-manager",
+          "serverId": "http_mcp",
           "toolName": "list_keys",
           "argsTemplate": "{\"limit\":1000}",
           "connection": {
@@ -104,7 +104,7 @@
         "config": {
           "language": "python",
           "timeout": 5000,
-          "code": "from datetime import datetime, timezone\n\n# items is the upstream payload. Find the keys array wherever the MCP\n# server put it. Defaults handle a few common response shapes.\nsrc = items[0] if items else {}\nif isinstance(src, dict):\n    keys = src.get('keys') or src.get('resources') or src.get('result', {}).get('keys') or []\nelse:\n    keys = []\n\nby_cloud = {}\nby_algorithm = {}\nbuckets = ['<30d', '30-90d', '90-180d', '180-365d', '>365d']\nageing = {b: 0 for b in buckets}\nnow = datetime.now(timezone.utc)\n\nfor k in keys:\n    if not isinstance(k, dict):\n        continue\n    labels = k.get('labels') or k.get('metadata') or {}\n    cloud = (labels.get('cloud') if isinstance(labels, dict) else None) or k.get('cloud') or 'unknown'\n    algo = k.get('algorithm') or k.get('algo') or 'unknown'\n    by_cloud[cloud] = by_cloud.get(cloud, 0) + 1\n    by_algorithm[algo] = by_algorithm.get(algo, 0) + 1\n\n    created_raw = k.get('createdAt') or k.get('created_at') or k.get('creationDate') or ''\n    age_days = 0\n    try:\n        if isinstance(created_raw, str) and created_raw:\n            dt = datetime.fromisoformat(created_raw.replace('Z', '+00:00'))\n            age_days = (now - dt).days\n    except Exception:\n        age_days = 0\n    if age_days < 30:\n        ageing['<30d'] += 1\n    elif age_days < 90:\n        ageing['30-90d'] += 1\n    elif age_days < 180:\n        ageing['90-180d'] += 1\n    elif age_days < 365:\n        ageing['180-365d'] += 1\n    else:\n        ageing['>365d'] += 1\n\nlog({\n    'byCloud': [{'category': c, 'count': n} for c, n in sorted(by_cloud.items(), key=lambda x: -x[1])],\n    'byAlgorithm': [{'algorithm': a, 'count': n} for a, n in sorted(by_algorithm.items(), key=lambda x: -x[1])],\n    'ageing': [{'bucket': b, 'count': ageing[b]} for b in buckets],\n    'totalKeys': len(keys),\n    'generatedAt': now.isoformat()\n})\n"
+          "code": "from datetime import datetime, timezone\n\n# items[0] holds the MCP Tool node's output. tool_output is the tool's\n# text, usually JSON; structured is its structuredContent, when it sends one.\nsrc = items[0] if items else {}\npayload = src.get('structured') or src.get('tool_output') if isinstance(src, dict) else None\nif isinstance(payload, str):\n    try:\n        payload = json.loads(payload)\n    except ValueError:\n        payload = {}\nif isinstance(payload, list):\n    keys = payload\nelif isinstance(payload, dict):\n    keys = payload.get('keys') or payload.get('resources') or (payload.get('result') or {}).get('keys') or []\nelse:\n    keys = []\n\nby_cloud = {}\nby_algorithm = {}\nbuckets = ['<30d', '30-90d', '90-180d', '180-365d', '>365d']\nageing = {b: 0 for b in buckets}\nnow = datetime.now(timezone.utc)\n\nfor k in keys:\n    if not isinstance(k, dict):\n        continue\n    labels = k.get('labels') or k.get('metadata') or {}\n    cloud = (labels.get('cloud') if isinstance(labels, dict) else None) or k.get('cloud') or 'unknown'\n    algo = k.get('algorithm') or k.get('algo') or 'unknown'\n    by_cloud[cloud] = by_cloud.get(cloud, 0) + 1\n    by_algorithm[algo] = by_algorithm.get(algo, 0) + 1\n\n    created_raw = k.get('createdAt') or k.get('created_at') or k.get('creationDate') or ''\n    age_days = 0\n    try:\n        if isinstance(created_raw, str) and created_raw:\n            dt = datetime.fromisoformat(created_raw.replace('Z', '+00:00'))\n            age_days = (now - dt).days\n    except Exception:\n        age_days = 0\n    if age_days < 30:\n        ageing['<30d'] += 1\n    elif age_days < 90:\n        ageing['30-90d'] += 1\n    elif age_days < 180:\n        ageing['90-180d'] += 1\n    elif age_days < 365:\n        ageing['180-365d'] += 1\n    else:\n        ageing['>365d'] += 1\n\nresult = {\n    'byCloud': [{'category': c, 'count': n} for c, n in sorted(by_cloud.items(), key=lambda x: -x[1])],\n    'byAlgorithm': [{'algorithm': a, 'count': n} for a, n in sorted(by_algorithm.items(), key=lambda x: -x[1])],\n    'ageing': [{'bucket': b, 'count': ageing[b]} for b in buckets],\n    'totalKeys': len(keys),\n    'generatedAt': now.isoformat()\n}\n"
         }
       },
 
@@ -114,14 +114,7 @@
         "name": "Keys by Cloud",
         "position": { "x": 980, "y": 440 },
         "config": {
-          "spec": {
-            "mark": { "type": "bar", "cornerRadiusTopLeft": 3, "cornerRadiusTopRight": 3 },
-            "encoding": {
-              "x": { "field": "category", "type": "nominal", "title": "Cloud", "sort": "-y" },
-              "y": { "field": "count", "type": "quantitative", "title": "Keys" },
-              "color": { "value": "{{parsed.primaryColor}}" }
-            }
-          },
+          "specTemplate": "{\"mark\": {\"type\": \"bar\", \"cornerRadiusTopLeft\": 3, \"cornerRadiusTopRight\": 3}, \"encoding\": {\"x\": {\"field\": \"category\", \"type\": \"nominal\", \"title\": \"Cloud\", \"sort\": \"-y\"}, \"y\": {\"field\": \"count\", \"type\": \"quantitative\", \"title\": \"Keys\"}, \"color\": {\"value\": \"{{ parsed.primaryColor || '#4c78a8' }}\"}}}",
           "dataPath": "byCloud",
           "width": 380,
           "height": 220,
@@ -153,14 +146,7 @@
         "name": "Key Aging",
         "position": { "x": 980, "y": 960 },
         "config": {
-          "spec": {
-            "mark": { "type": "bar" },
-            "encoding": {
-              "x": { "field": "bucket", "type": "nominal", "sort": null, "title": "Age" },
-              "y": { "field": "count", "type": "quantitative", "title": "Keys" },
-              "color": { "value": "{{parsed.accentColor}}" }
-            }
-          },
+          "specTemplate": "{\"mark\": {\"type\": \"bar\"}, \"encoding\": {\"x\": {\"field\": \"bucket\", \"type\": \"nominal\", \"sort\": null, \"title\": \"Age\"}, \"y\": {\"field\": \"count\", \"type\": \"quantitative\", \"title\": \"Keys\"}, \"color\": {\"value\": \"{{ parsed.accentColor || '#f58518' }}\"}}}",
           "dataPath": "ageing",
           "width": 380,
           "height": 220,
@@ -188,7 +174,7 @@
           "inputKey": "html",
           "pageFormat": "A4",
           "printBackground": true,
-          "filenameTemplate": "{{parsed.brand}}-key-inventory-{{session_id}}.pdf",
+          "filenameTemplate": "{{results.brand_parse.parsed.brand}}-key-inventory-{{session_id}}.pdf",
           "outputKey": "pdf"
         }
       },
@@ -198,7 +184,8 @@
         "name": "PDF Report",
         "position": { "x": 1910, "y": 700 },
         "config": {
-          "outputKey": "pdf"
+          "responseTemplate": "{{pdf.downloadUrl}}",
+          "outputKey": "result"
         }
       }
     ],

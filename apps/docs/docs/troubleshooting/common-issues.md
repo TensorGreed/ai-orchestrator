@@ -5,6 +5,27 @@ description: "Fixes for common L2M problems: missing master key, webhook 404s, u
 
 # Common Issues
 
+## MCP and agent error messages
+
+These errors come from MCP servers, the protocol or the model, not from L2M's own setup. Each has its own page in the [troubleshooting track](/learn/troubleshooting/):
+
+- [MCP error -32000: Connection closed](/learn/troubleshooting/mcp-error-32000-connection-closed)
+- [spawn npx ENOENT](/learn/troubleshooting/spawn-npx-enoent)
+- [MCP server can't see API keys or env variables](/learn/troubleshooting/mcp-env-vars-not-passed)
+- [MCP server connected but no tools show up](/learn/troubleshooting/mcp-server-shows-no-tools)
+- [Session not found (HTTP 404)](/learn/troubleshooting/mcp-session-not-found-404)
+- [Request timed out](/learn/troubleshooting/mcp-request-timed-out)
+- [Unsupported protocol version](/learn/troubleshooting/mcp-unsupported-protocol-version)
+- [-32601 Method not found](/learn/troubleshooting/json-rpc-32601-method-not-found)
+- [-32602 Invalid params](/learn/troubleshooting/json-rpc-32602-invalid-params)
+- [Tool result too large](/learn/troubleshooting/mcp-tool-result-too-large)
+- [Filesystem server: path outside allowed directories](/learn/troubleshooting/filesystem-mcp-access-denied)
+- [OAuth invalid_client](/learn/troubleshooting/mcp-oauth-invalid-client)
+- [Failed to fetch authorization server metadata](/learn/troubleshooting/failed-to-fetch-authorization-server-metadata)
+- [403 insufficient_scope](/learn/troubleshooting/mcp-403-insufficient-scope)
+- [Model won't call tools](/learn/troubleshooting/model-does-not-call-tools)
+- [Agent stuck calling the same tool in a loop](/learn/troubleshooting/agent-stuck-in-tool-loop)
+
 ## A template renders empty two steps away
 
 <span v-pre>`{{nodeId.field}}`</span> and <span v-pre>`{{field}}`</span> read only the steps connected straight into the node. For a step further back, use <span v-pre>`{{results.<nodeId>.field}}`</span> (or <span v-pre>`{{ $node('<nodeId>').output.field }}`</span> in an expression), which reads any step that has already finished. A path that does not resolve renders empty with no warning, so also check the node id and the field path against the step's output. See [Templates and expressions](/runtime/templates-and-expressions).

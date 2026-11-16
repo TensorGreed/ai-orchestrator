@@ -125,7 +125,7 @@ Every replay job and eval run has a budget: a replay job's `maxCostUsd` (default
 
 ## Scorers
 
-Every scorer returns pass or fail, a score from 0 to 1 and a reason you can read. Scorers on a case take precedence over the job's scorers.
+Every scorer returns pass or fail and a reason you can read. The scorers in the table below also return a score from 0 to 1. Of the scorers from earlier releases (listed after the table), `exact_match`, `contains` and `regex` return pass or fail only, with no score; `context_precision`, `context_recall`, `faithfulness` and `answer_relevance` return a score when they get as far as scoring, and none when they fail before that (no retrieved context, no answer, a judge error). Scorers on a case take precedence over the job's scorers.
 
 | Scorer | Checks | Options |
 | --- | --- | --- |

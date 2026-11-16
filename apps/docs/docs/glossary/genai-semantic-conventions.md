@@ -5,6 +5,7 @@ topic: operations
 definition: "OpenTelemetry's shared names for the spans, attributes and metrics of model calls, agents and tool calls, such as `chat`, `invoke_agent` and `gen_ai.usage.input_tokens`."
 description: "The OpenTelemetry GenAI semantic conventions name model, agent and tool spans (gen_ai.*) so any backend can read them. Status, content capture, examples."
 related: [opentelemetry, trace-context-propagation, tool-call-telemetry, agent-loop, tool-calling]
+guide: [/learn/operations/opentelemetry-genai-conventions]
 ---
 
 # GenAI semantic conventions

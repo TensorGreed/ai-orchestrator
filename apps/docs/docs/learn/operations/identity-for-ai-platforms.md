@@ -25,7 +25,7 @@ Mixing them causes most of the trouble. A CI pipeline that uses a person's API k
 
 ## Single sign-on: OIDC, SAML and LDAP
 
-<Term id="sso">Single sign-on</Term> lets people use the accounts your organisation already manages, so leavers lose access when their directory account is disabled. Three protocols are common.
+<Term id="sso">Single sign-on</Term> lets people use the accounts your organisation already manages, so leavers can no longer sign in once their directory account is disabled. Three protocols are common.
 
 **OpenID Connect.** The specification calls <Term id="oidc">OIDC</Term> "a simple identity layer on top of the OAuth 2.0 protocol". After sign-in, the identity provider returns an ID token, "a security token that contains Claims about the Authentication of an End-User". The app must check that token: its issuer must match exactly, its audience must contain the app's client id, and when the app sent a nonce, the token must carry the same one.
 
@@ -33,11 +33,15 @@ Mixing them causes most of the trouble. A CI pipeline that uses a person's API k
 
 **LDAP.** Older directories are often reached over LDAP: the app checks the person's password against the directory and reads their groups.
 
+For how the first two differ in message format, signing and mobile use, see [SAML vs OIDC](/learn/operations/saml-vs-oidc).
+
 Whichever you use, decide three things up front:
 
 - **Who may sign in at all.** An identity provider shared with contractors, guests or other tenants will happily authenticate people you never meant to admit. Restrict by email domain or group, at the provider or in the app.
 - **How accounts are matched.** Matching an SSO login to an existing account by email is only safe when the provider has verified that email. Otherwise anyone who can set an address at the provider can take over the matching account.
 - **How groups become roles.** Map directory groups to roles, so access follows the directory instead of manual edits.
+
+Sign-in alone does not remove the accounts of people who leave; [SSO vs SCIM](/learn/operations/sso-vs-scim) explains the provisioning standard that does. L2M supports it as an opt-in ([SCIM provisioning](/security/scim)).
 
 ## MFA and step-up
 

@@ -9,6 +9,8 @@ The **MCP → Servers** page keeps one list of every MCP server your agents call
 
 Concepts: <Term id="tool-annotations">tool annotations</Term>, <Term id="rug-pull">rug pulls</Term>, [MCP authorization](/learn/mcp/authorization) for the OAuth flow, and [MCP tools, resources and prompts](/learn/mcp/tools-resources-prompts) for what each primitive is for.
 
+Guides for common open-source servers, from the [filesystem server](/learn/mcp-servers/filesystem-mcp-server) to the [GitHub server](/learn/mcp-servers/github-mcp-server) and [read-only SQL access](/learn/mcp-servers/postgres-mcp-read-only), are in the [MCP servers track](/learn/mcp-servers/).
+
 ## Why register a server
 
 An MCP Tool node can carry its own adapter, connection and secret. That works for one workflow, but it means the same server is configured in many places and nobody notices when it goes down or changes a tool. A registered server is configured once:

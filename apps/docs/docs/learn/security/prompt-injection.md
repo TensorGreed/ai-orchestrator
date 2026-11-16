@@ -77,7 +77,7 @@ If the runtime knows a step's input came from a web page, it can apply a stricte
 
 ### 5. Check what comes out
 
-Validate the model's output before anything uses it: a fixed JSON schema, an allow-list of actions, a check that a URL points to a domain you expect. OWASP lists "define and validate output formats" and "input and output filtering". Filters for known injection phrases catch the lazy attacks and are worth having as an alarm, but an attacker can always rephrase, so never make them the only control.
+Validate the model's output before anything uses it: a fixed JSON schema, an allow-list of actions, a check that a URL points to a domain you expect. OWASP lists "define and validate output formats" and "input and output filtering". Filters for known injection phrases catch the lazy attacks and are worth having as an alarm, but an attacker can always rephrase, so never make them the only control. [Checking model text vs controlling tool calls](/learn/security/input-output-checks-vs-tool-policies) explains why tool rules have to hold when a text check misses.
 
 ### 6. Test with attacks
 

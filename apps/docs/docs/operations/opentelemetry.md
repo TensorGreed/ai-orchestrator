@@ -522,6 +522,7 @@ The [changelog](https://github.com/TensorGreed/ai-orchestrator/blob/main/CHANGEL
 
 ## Related
 
+- [Send AI agent traces to an OpenTelemetry Collector](../learn/operations/opentelemetry-collector-for-agents): a Collector pipeline that drops prompt attributes, and an agent trace read span by span
 - [Observability](./observability.md): logs, the Prometheus `/metrics` page and SLO numbers
 - [MCP 2026-07-28 support](../product/mcp-2026-07-28.md): the MCP protocol eras the MCP spans cover
 - [MCP tool-call telemetry](../product/mcp-tool-call-telemetry.md): per-call records kept in L2M
