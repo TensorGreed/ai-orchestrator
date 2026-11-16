@@ -118,12 +118,16 @@ export function pageExists(docsPath: string): boolean {
 
 const firstCommitCache = new Map<string, string | undefined>();
 
-/** The date a page was first committed (ISO 8601), from git; undefined for a file git does not know yet. */
+/**
+ * The date a page was first committed (ISO 8601), from git; undefined for a file git does not know yet.
+ * It is the author date (`%aI`), the same field VitePress reads for lastUpdated (`%ai`), so a rebase,
+ * which moves committer dates only, can never date a page's change before its first publication.
+ */
 export function firstPublished(relativePath: string): string | undefined {
   if (!firstCommitCache.has(relativePath)) {
     let date: string | undefined;
     try {
-      const out = execFileSync("git", ["log", "--diff-filter=A", "--follow", "--format=%cI", "--", relativePath], { cwd: SRC_DIR, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      const out = execFileSync("git", ["log", "--diff-filter=A", "--follow", "--format=%aI", "--", relativePath], { cwd: SRC_DIR, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
       date = out.split("\n").filter(Boolean).at(-1);
     } catch {
       date = undefined;

@@ -1,4 +1,4 @@
-import { copyFileSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
@@ -6,6 +6,7 @@ import { firstPublished, hasIndex, pageExists, pageSocialCard, pagesIn, readingM
 import { FEED_PATH, writeFeed } from "./site/feed.js";
 import { INDEX_ENTRIES } from "./site/glossary-entries.js";
 import { breadcrumbsOf, defaultFolderLabel, docsUrl, hubSectionOf, pageKindOf, type Crumb } from "./site/sections.js";
+import { plainHeading } from "./site/headings.js";
 import { pageHeadTags, type HubPageData } from "./site/seo.js";
 import { blogPosts, blogSidebar, glossarySidebar, learnSidebar, recipesSidebar } from "./site/sidebars.js";
 import { LEVEL_LABELS, trackById, TRACKS } from "./site/tracks.js";
@@ -34,6 +35,12 @@ const REQUIRED_FRONTMATTER: Record<string, string[]> = {
 function folderLabel(folder: string): string {
   const track = folder.startsWith("learn/") ? trackById(folder.slice("learn/".length)) : undefined;
   return track?.shortTitle ?? defaultFolderLabel(folder);
+}
+
+/** The modified time of a page git has no history for (a draft not committed yet), as ms; undefined if absent. */
+function uncommittedDate(relativePath: string): number | undefined {
+  const file = path.join(SRC_DIR, relativePath);
+  return existsSync(file) ? statSync(file).mtimeMs : undefined;
 }
 
 const crumbOf = (relativePath: string, name: string): Crumb => ({ name, url: docsUrl(`/${relativePath.replace(/\.md$/, "")}`) });
@@ -65,7 +72,15 @@ export default defineConfig({
   base: "/docs/",
   cleanUrls: true,
   // An empty blog index is thin content: it stays out of the sitemap and search until the first post.
-  sitemap: { hostname: "https://lsquarem.com/docs/", transformItems: (items) => (BLOG_IS_EMPTY ? items.filter((item) => item.url !== "blog/") : items) },
+  // A page git does not know yet (a draft not committed) gets its file's date, so a local build has a
+  // <lastmod> for every page; CI builds committed trees, where every date comes from git.
+  sitemap: {
+    hostname: "https://lsquarem.com/docs/",
+    transformItems: (items) =>
+      (BLOG_IS_EMPTY ? items.filter((item) => item.url !== "blog/") : items).map((item) =>
+        item.lastmod ? item : { ...item, lastmod: uncommittedDate(`${item.url.replace(/(^|\/)$/, "$1index")}.md`) }
+      )
+  },
   // Generated table pulled into product/importing-from-another-builder.md with @include; not a page of its own.
   srcExclude: ["product/external-import-coverage.md"],
   // The local search index (about 1 MB) is one chunk, loaded only when the search box opens.
@@ -107,9 +122,11 @@ export default defineConfig({
       const absent = fmIn.related.map(String).filter((slug) => !pageExists(`/glossary/${slug}`) && !indexOnly.has(slug));
       if (absent.length > 0) console.warn(`[glossary] ${pageData.relativePath}: related terms not written yet (skipped): ${absent.join(", ")}`);
     }
-    // Breadcrumbs use the short label (sidebar title, term, section or track name), not the SEO title.
+    // Breadcrumbs use the short label (sidebar title, term, section or track name, or a docs page's
+    // own heading), not the SEO title.
     const section = hubSectionOf(pageData.relativePath);
     const fm = pageData.frontmatter as Record<string, unknown>;
+    const heading = kind === "docs" ? plainHeading(readFileSync(path.join(SRC_DIR, pageData.filePath), "utf8")) : "";
     const name =
       kind === "hub-index" && section
         ? section.label
@@ -117,13 +134,16 @@ export default defineConfig({
           ? folderLabel(pageData.relativePath.replace(/\/index\.md$/, ""))
           : kind === "docs-index"
             ? defaultFolderLabel(pageData.relativePath.replace(/\/index\.md$/, ""))
-            : String(fm.sidebarTitle ?? fm.term ?? pageData.title ?? "");
+            : String(fm.sidebarTitle ?? fm.term ?? (heading || pageData.title) ?? "");
     const extra: HubPageData = { breadcrumbs: breadcrumbsOf(pageData.relativePath, name, hasIndex, folderLabel) };
     if (kind === "learn" || kind === "post" || kind === "recipe") {
       extra.readingMinutes = readingMinutes(readFileSync(path.join(SRC_DIR, pageData.filePath), "utf8"));
     }
+    // A draft git does not know yet is dated by its file, so local builds pass the date checks too.
+    const draftDate = !pageData.lastUpdated || !Number.isFinite(pageData.lastUpdated) ? uncommittedDate(pageData.filePath) : undefined;
+    if (draftDate !== undefined) pageData.lastUpdated = draftDate;
     if (kind === "learn" || kind === "glossary" || kind === "recipe" || kind === "docs") {
-      const published = firstPublished(pageData.filePath);
+      const published = firstPublished(pageData.filePath) ?? (draftDate !== undefined ? new Date(draftDate).toISOString() : undefined);
       if (published) extra.datePublished = published;
     }
     if (kind === "hub-index" || kind === "track-index") extra.hasPart = partsOf(pageData.relativePath);

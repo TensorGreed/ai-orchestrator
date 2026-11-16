@@ -53,7 +53,7 @@ covers what a templated field can read from earlier steps.
 - `http_request`
 - `code_node`
 - `pdf_output`
-- `chart`
+- `chart` ([Chart node](/nodes/chart): Vega-Lite specs to SVG)
 - `execute_workflow`
 
 ## Output

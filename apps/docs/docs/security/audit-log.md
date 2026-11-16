@@ -307,3 +307,4 @@ All admin-only.
 - [Data retention](../operations/data-retention.md)
 - [Backup and recovery](../operations/backup-and-recovery.md)
 - [Authentication and RBAC](./auth-rbac.md)
+- Background: [A tamper-evident audit log that can still delete](../blog/tamper-evident-audit-log) (blog)

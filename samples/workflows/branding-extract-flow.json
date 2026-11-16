@@ -4,7 +4,7 @@
   "workflow": {
     "id": "wf-branding-extract-flow",
     "name": "Brand Extraction (Web Browse)",
-    "description": "Text Input -> Web Browse -> Prompt Template -> LLM (extract brand colors / logo URL / fonts as JSON) -> Output Parser -> Output. Fetches a website with a real headless browser so JS-rendered pages work, then asks the LLM to extract structured branding data. Drop-in pattern for the key-inventory report step where the user said 'use the branding from example.com' — the LLM sees the real page (HTML + screenshot + meta tags) and pulls colors / logo / typography. Replace the inline url with a parameter for full automation.",
+    "description": "Text Input -> Web Browse -> Prompt Template -> LLM (extract brand name / logo URL / colors / font / tagline as JSON) -> Output Parser -> Output. Fetches a website with a real headless browser so JS-rendered pages work, then asks the LLM to extract structured branding data from the page title, meta tags, image URLs and text. The model does not see the screenshot or the page's CSS, so it reports colors and fonts only when the page data states them. A user_prompt sent with the run replaces the inline URL.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [
@@ -41,7 +41,7 @@
         "name": "Extract Branding",
         "position": { "x": 670, "y": 220 },
         "config": {
-          "template": "You are a brand-asset extractor. Examine the page below and produce a JSON object with the brand's primary identifiers.\n\nPAGE TITLE: {{title}}\n\nMETA OG IMAGE: {{meta.og:image}}\n\nKEY IMAGES (first 10):\n{{images}}\n\nPAGE TEXT (first 4000 chars):\n{{text}}\n\nReturn ONLY a JSON object on one line, no markdown:\n{\"brand\":\"<official brand name>\",\"primaryLogoUrl\":\"<URL of the main logo image>\",\"primaryColor\":\"<hex color you can infer from the page>\",\"accentColor\":\"<hex>\",\"fontFamily\":\"<best guess of the brand's typeface>\",\"tagline\":\"<short slogan if present>\"}",
+          "template": "You are a brand-asset extractor. Below is data extracted from one web page: its title, meta tags, image URLs and visible text. You cannot see the page's styles or a screenshot, so only report a color or a font when the data below states it (for example a theme-color meta tag or text that names it); otherwise use an empty string.\n\nPAGE TITLE: {{title}}\n\nMETA DESCRIPTION: {{ meta[\"description\"] }}\n\nMETA OG IMAGE: {{ meta[\"og:image\"] }}\n\nMETA THEME COLOR: {{ meta[\"theme-color\"] }}\n\nKEY IMAGES (first 10):\n{{ images.slice(0, 10) }}\n\nPAGE TEXT (first 4000 chars):\n{{ text.slice(0, 4000) }}\n\nReturn ONLY a JSON object on one line, no markdown:\n{\"brand\":\"<official brand name>\",\"primaryLogoUrl\":\"<URL of the main logo image, or empty>\",\"primaryColor\":\"<hex color stated in the data, or empty>\",\"accentColor\":\"<hex, or empty>\",\"fontFamily\":\"<typeface named in the data, or empty>\",\"tagline\":\"<short slogan if present>\"}",
           "outputKey": "prompt"
         }
       },
@@ -68,7 +68,7 @@
         "config": {
           "mode": "json_schema",
           "inputKey": "branding",
-          "jsonSchema": "{\"type\":\"object\",\"properties\":{\"brand\":{\"type\":\"string\"},\"primaryLogoUrl\":{\"type\":\"string\"},\"primaryColor\":{\"type\":\"string\"},\"accentColor\":{\"type\":\"string\"},\"fontFamily\":{\"type\":\"string\"},\"tagline\":{\"type\":\"string\"}}}",
+          "jsonSchema": "{\"type\":\"object\",\"properties\":{\"brand\":{\"type\":\"string\"},\"primaryLogoUrl\":{\"type\":\"string\"},\"primaryColor\":{\"type\":\"string\"},\"accentColor\":{\"type\":\"string\"},\"fontFamily\":{\"type\":\"string\"},\"tagline\":{\"type\":\"string\"}},\"required\":[\"brand\",\"primaryLogoUrl\"]}",
           "parsingMode": "lenient"
         }
       },
@@ -78,6 +78,7 @@
         "name": "Output",
         "position": { "x": 1600, "y": 220 },
         "config": {
+          "responseTemplate": "{{parsed}}",
           "outputKey": "parsed"
         }
       }
