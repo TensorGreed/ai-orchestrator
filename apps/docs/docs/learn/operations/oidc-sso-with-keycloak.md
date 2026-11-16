@@ -165,7 +165,7 @@ To make every user set up OTP, add **Configure OTP** as a required action for th
 ## Logout and offboarding
 
 - **Signing out of L2M ends the L2M session only.** Keycloak's session stays (in our realm, 30 minutes idle and 10 hours at most by default), so clicking **Sign in with SSO** again goes straight through without a password. On a shared machine, sign out of Keycloak too, from its account console.
-- **Disabling a user in Keycloak stops new sign-ins.** An L2M session already issued lasts until it expires (`SESSION_TTL_HOURS`, 168 by default) or is ended. For a leaver, disable the Keycloak user and end their sessions in L2M as well.
+- **Disabling a user in Keycloak stops new sign-ins.** An L2M session already issued lasts until it expires (`SESSION_TTL_HOURS`, 168 by default) or is ended. For a leaver, disable the Keycloak user and end their sessions in L2M as well. If your identity provider can send SCIM, L2M's opt-in [SCIM provisioning](/security/scim) ends the sessions and revokes the API keys when the user is deactivated.
 - **Removing someone from a group does not lower their global role.** Mappings raise roles; they never lower them. Change the role in L2M by hand when someone moves to a smaller role.
 
 ## Troubleshooting

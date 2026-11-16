@@ -106,17 +106,23 @@ Decide which side owns roles. If groups arrive both in tokens at sign-in and thr
 
 ## In L2M
 
-L2M, a self-hosted workflow builder and agent runtime, supports OIDC, SAML 2.0 and LDAP sign-in, all optional. It has no SCIM endpoint. Accounts come from OIDC, SAML or LDAP sign-ins, invites or an admin. What it does today:
+L2M, a self-hosted workflow builder and agent runtime, supports OIDC, SAML 2.0 and LDAP sign-in, and SCIM 2.0 provisioning, all optional. With [SCIM provisioning](/security/scim) turned on (`SCIM_ENABLED=true`; off by default), your identity provider manages accounts and groups at `/scim/v2` with a bearer token an admin creates in the studio:
+
+- **Deactivation closes the gap.** `active: false` disables the account: no new password or SSO sign-in, all of its sessions end and all of its API keys are revoked in the same step, and MCP gateway clients it created drop to `viewer`. Workflows it owns keep their schedules and webhooks, so hand them over or turn them off. `DELETE` on the user also takes back the roles its groups gave and keeps the account and its history.
+- **New accounts start low.** A SCIM-created account gets the `viewer` role and an unusable password, so the person signs in through SSO. An existing account with the same email is linked rather than duplicated (by default not an admin's; `SCIM_LINK_EXISTING_USERS` decides).
+- **Roles follow groups.** A group grants roles only through a mapping with the provider **SCIM groups**. Mappings raise roles; when the person leaves the group, the role they had before comes back. SCIM never disables or demotes the last enabled admin.
+
+With or without SCIM, accounts can also come from OIDC, SAML or LDAP sign-ins, invites or an admin, and these apply:
 
 - **Accounts on first sign-in.** An OIDC or SAML sign-in that matches no account creates one, with role `viewer` unless a group mapping says otherwise ([OIDC single sign-on](/security/auth-rbac#oidc-single-sign-on)).
 - **Allow-lists on every sign-in.** `OIDC_ALLOWED_GROUPS` and `OIDC_ALLOWED_EMAIL_DOMAINS` (and the SAML equivalents) are checked on every login, for new and returning users, so removing someone from the allowed group at the identity provider refuses their next sign-in.
 - **Group mappings.** A mapping without a project sets the global role on each login but never lowers it; one with a project adds or updates a project membership ([group-to-role mappings](/security/auth-rbac#group-to-role-mappings)). Lowering a global role or removing a project membership is a manual change.
 - **Ending access now.** An admin can sign a user out everywhere from **Settings → Access control → Users**; that ends sessions only, and the user's API keys keep working. Deleting the user (`DELETE /api/users/:id`) removes the account with its sessions, API keys, SSO identities and project roles in one transaction.
 - **Shorter windows.** `SESSION_IDLE_TIMEOUT_MINUTES` and `SESSION_ABSOLUTE_TIMEOUT_HOURS` limit how long a session lasts after its last use, and in total ([session policy](/security/auth-rbac#session-policy)).
-- **Passwords next to SSO.** Accounts that SSO creates get a random password. L2M has no SSO-only switch, so an account that was given its own password, for example through an invite, can still use it until it is deleted.
+- **Passwords next to SSO.** Accounts that SSO creates get a random password. L2M has no SSO-only switch, so an account that was given its own password, for example through an invite, can still use it until it is deleted or SCIM disables it.
 - **Automation off people.** [Service accounts](/security/service-accounts) cannot sign in and are not tied to an employee, so deleting a leaver does not break a pipeline that uses a service account key.
 
-So an L2M offboarding today is: disable the person at the identity provider, then delete the account in L2M and revoke any MCP gateway clients they created (a client whose creator is deleted keeps working as viewer). Signing it out everywhere is not enough on its own: it ends sessions, but the account's API keys keep working until you delete the account or revoke them. The [audit log](/security/audit-log) records the sign-out (`session.revoked`) and the deletion (`user.delete`).
+So without SCIM, an L2M offboarding is: disable the person at the identity provider, then delete the account in L2M and revoke any MCP gateway clients they created (a client whose creator is deleted keeps working as viewer). Signing it out everywhere is not enough on its own: it ends sessions, but the account's API keys keep working until you delete the account or revoke them. The [audit log](/security/audit-log) records the sign-out (`session.revoked`) and the deletion (`user.delete`). With SCIM on, the identity provider's deactivation does the sign-out and the key revocation for you, and is audited as `scim.user.deactivate` with the number of sessions ended and keys revoked.
 
 ## Further reading
 

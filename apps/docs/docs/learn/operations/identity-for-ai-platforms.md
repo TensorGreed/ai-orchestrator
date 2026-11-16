@@ -41,7 +41,7 @@ Whichever you use, decide three things up front:
 - **How accounts are matched.** Matching an SSO login to an existing account by email is only safe when the provider has verified that email. Otherwise anyone who can set an address at the provider can take over the matching account.
 - **How groups become roles.** Map directory groups to roles, so access follows the directory instead of manual edits.
 
-Sign-in alone does not remove the accounts of people who leave; [SSO vs SCIM](/learn/operations/sso-vs-scim) explains the provisioning standard that does.
+Sign-in alone does not remove the accounts of people who leave; [SSO vs SCIM](/learn/operations/sso-vs-scim) explains the provisioning standard that does. L2M supports it as an opt-in ([SCIM provisioning](/security/scim)).
 
 ## MFA and step-up
 
