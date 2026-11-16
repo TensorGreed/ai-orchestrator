@@ -39,7 +39,7 @@ Nobody has to write "retry with plain arithmetic" into the program: a capable mo
 
 ## What makes it an agent
 
-A single model call answers from what it already knows and what is in the prompt. An agent can look things up, compute, or change something in another system, and it decides the order itself.
+A single model call answers from what it already knows and what is in the prompt. An agent can look things up, compute, or change something in another system, and it decides the order itself. [AI agent vs chatbot](/learn/agents/agent-vs-chatbot) covers what that changes for risk, testing and cost.
 
 A useful line comes from Anthropic's guide to building agents: workflows are "systems where LLMs and tools are orchestrated through predefined code paths", while agents are "systems where LLMs dynamically direct their own processes and tool usage". A fixed workflow runs the same steps every time; an agent picks its next step from what it just learned.
 

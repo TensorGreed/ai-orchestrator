@@ -26,7 +26,7 @@ Anthropic's "Building effective agents" calls this one of the basic augmentation
 | Saved values | Exact data a workflow stored on purpose, such as a report it built | One session, or longer |
 | Knowledge (retrieval) | Documents searched at question time | As long as the knowledge base |
 
-Retrieval is not memory in this sense. A knowledge base is shared and curated; memory is per conversation and written by the run itself.
+Retrieval is not memory in this sense. A knowledge base is shared and curated; memory is per conversation and written by the run itself. Whether to retrieve at all, or put whole documents in the prompt, is its own trade-off: see [RAG vs long context](/learn/agents/rag-vs-long-context).
 
 ## Session memory keyed by session
 

@@ -30,7 +30,7 @@ Anthropic's guide to building agents describes it as the orchestrator-workers wo
 
 ## Workers as tools: what the supervisor sees
 
-The supervisor does not need a special protocol to delegate. It already knows how to call tools, so each worker is presented to its model as one more tool. In L2M a worker named `researcher` whose system prompt starts "Answer factual questions with the lookup_kb tool." becomes this tool (the demo's own worker prompt starts with a `[researcher]` tag used by its scripted model):
+The supervisor does not need a special protocol to delegate. (Agent-to-agent protocols exist for agents in other systems; see [MCP vs A2A](/learn/mcp/mcp-vs-a2a).) It already knows how to call tools, so each worker is presented to its model as one more tool. In L2M a worker named `researcher` whose system prompt starts "Answer factual questions with the lookup_kb tool." becomes this tool (the demo's own worker prompt starts with a `[researcher]` tag used by its scripted model):
 
 ```json
 {

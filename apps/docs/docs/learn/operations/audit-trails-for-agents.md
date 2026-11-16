@@ -42,7 +42,7 @@ Think of one run as the unit of evidence. For each run, keep:
 
 Two kinds of thing stay out. **Secrets**: record which credential was used (its id), never its value. **Bulky or sensitive payloads**: put a digest in the record and keep the payload beside it, so the record stays small and can be shared without the content.
 
-Alongside the per-run record, keep an <Term id="audit-log">audit log</Term> of actions people and keys take on the platform itself: sign-ins, role changes, new API keys, edits to rules and secrets, exports. A run record says what the agent did; the audit log says who changed the system it ran on.
+Alongside the per-run record, keep an <Term id="audit-log">audit log</Term> of actions people and keys take on the platform itself: sign-ins, role changes, new API keys, edits to rules and secrets, exports. A run record says what the agent did; the audit log says who changed the system it ran on. Process logs and traces are a third kind of record, for operating the system; [tracing vs logging](/learn/operations/tracing-vs-logging-for-llm-apps) compares them.
 
 ## Tamper evidence: hashes and signatures
 

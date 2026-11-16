@@ -33,11 +33,15 @@ Mixing them causes most of the trouble. A CI pipeline that uses a person's API k
 
 **LDAP.** Older directories are often reached over LDAP: the app checks the person's password against the directory and reads their groups.
 
+For how the first two differ in message format, signing and mobile use, see [SAML vs OIDC](/learn/operations/saml-vs-oidc).
+
 Whichever you use, decide three things up front:
 
 - **Who may sign in at all.** An identity provider shared with contractors, guests or other tenants will happily authenticate people you never meant to admit. Restrict by email domain or group, at the provider or in the app.
 - **How accounts are matched.** Matching an SSO login to an existing account by email is only safe when the provider has verified that email. Otherwise anyone who can set an address at the provider can take over the matching account.
 - **How groups become roles.** Map directory groups to roles, so access follows the directory instead of manual edits.
+
+Sign-in alone does not remove the accounts of people who leave; [SSO vs SCIM](/learn/operations/sso-vs-scim) explains the provisioning standard that does.
 
 ## MFA and step-up
 

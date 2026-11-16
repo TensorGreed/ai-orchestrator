@@ -105,7 +105,7 @@ The specification describes how a client gets a token. It does not say whose tok
 - **One shared connection.** An admin connects the server once, and every workflow uses that token. Simple, and right for a service account that should act the same for everyone. But every user of the agent acts with that one account's rights.
 - **<Term id="delegated-credentials">Delegated credentials</Term>.** Each person connects their own account. An agent run started by Alice calls the server as Alice, so it sees only what Alice may see, and the server's audit log names her. Runs with no person behind them, such as a schedule or webhook, need an explicit rule for whose account to use.
 
-A good rule of thumb: if the server holds per-person data, use per-user connections, and never let a missing connection fall back to a shared one silently.
+A good rule of thumb: if the server holds per-person data, use per-user connections, and never let a missing connection fall back to a shared one silently. [OAuth vs API keys for MCP](/learn/security/oauth-vs-api-keys-for-mcp) covers when a static key is still the right choice.
 
 ## How L2M handles it
 
