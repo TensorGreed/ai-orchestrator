@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -247,6 +248,65 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       await store.createAuditExportDestination({ id: "axd_ok", name: "ok", kind: "file", config: { path: path.join(safeRoot, "a", "b", "audit.ndjson") } });
       expect((await exporter.runDestination("axd_ok")).status).toBe("success");
       expect(fs.readFileSync(path.join(safeRoot, "a", "b", "audit.ndjson"), "utf8")).toContain('"eventType":"login"');
+    });
+
+    it("refuses to write when a directory on the way is swapped for a symlink between the check and the open", async () => {
+      const safeRoot = path.join(tempDir, "safe");
+      const outside = path.join(tempDir, "outside");
+      fs.mkdirSync(path.join(safeRoot, "d"), { recursive: true });
+      fs.mkdirSync(outside, { recursive: true });
+      await store.createAuditExportDestination({ id: "axd_swap", name: "swap", kind: "file", config: { path: path.join(safeRoot, "d", "audit.ndjson") } });
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      const exporter = new AuditExportService(store, { batchSize: 100, safeFsRoot: safeRoot });
+      const realOpen = fsp.open.bind(fsp);
+      /** The swap happens after every path check, right before the file is opened. */
+      const swapOnOpen = () =>
+        vi.spyOn(fsp, "open").mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+          if (String(args[0]).endsWith(path.join("d", "audit.ndjson")) && !fs.lstatSync(path.join(safeRoot, "d")).isSymbolicLink()) {
+            fs.renameSync(path.join(safeRoot, "d"), path.join(safeRoot, "d-moved"));
+            fs.symlinkSync(outside, path.join(safeRoot, "d"));
+          }
+          return await realOpen(...args);
+        });
+      const undoSwap = () => {
+        fs.unlinkSync(path.join(safeRoot, "d"));
+        fs.renameSync(path.join(safeRoot, "d-moved"), path.join(safeRoot, "d"));
+      };
+
+      // The descriptor's own path (Linux), or the re-check elsewhere.
+      swapOnOpen();
+      const outcome = await exporter.runDestination("axd_swap");
+      expect(outcome.status).toBe("failure");
+      expect(outcome.error).toMatch(process.platform === "linux" ? /changed while it was opened/ : /through a symlink|changed while it was opened/);
+      expect(fs.existsSync(path.join(outside, "audit.ndjson")) ? fs.readFileSync(path.join(outside, "audit.ndjson"), "utf8") : "").toBe("");
+      vi.restoreAllMocks();
+      undoSwap();
+      fs.rmSync(path.join(outside, "audit.ndjson"), { force: true });
+
+      // Without /proc (another platform, or not mounted): the re-check of the directory and the file name.
+      const realReadlink = fsp.readlink.bind(fsp);
+      const noProc = () =>
+        vi.spyOn(fsp, "readlink").mockImplementation(async (...args: Parameters<typeof fsp.readlink>) => {
+          if (String(args[0]).startsWith("/proc/self/fd/")) throw Object.assign(new Error("no /proc"), { code: "ENOENT" });
+          return await realReadlink(...args);
+        });
+      noProc();
+      swapOnOpen();
+      const fallback = await exporter.runDestination("axd_swap");
+      expect(fallback.status).toBe("failure");
+      expect(fallback.error).toMatch(/through a symlink|changed while it was opened/);
+      expect(fs.existsSync(path.join(outside, "audit.ndjson")) ? fs.readFileSync(path.join(outside, "audit.ndjson"), "utf8") : "").toBe("");
+      vi.restoreAllMocks();
+      undoSwap();
+
+      // With nothing swapped, both checks let the write through.
+      noProc();
+      expect((await exporter.runDestination("axd_swap")).status).toBe("success");
+      vi.restoreAllMocks();
+      await audit.record({ category: "auth", eventType: "logout", action: "auth", outcome: "success" });
+      expect((await exporter.runDestination("axd_swap")).status).toBe("success");
+      const lines = fs.readFileSync(path.join(safeRoot, "d", "audit.ndjson"), "utf8").trim().split("\n");
+      expect(lines.map((line) => (JSON.parse(line) as { eventType: string }).eventType)).toEqual(["login", "logout"]);
     });
 
     it("createDestination refuses a file path outside the root before storing it", async () => {

@@ -480,7 +480,9 @@ export class AuditExportService {
   /**
    * Appends under the root only: the path must resolve inside it (a sibling such as `<root>-x` is outside), every
    * directory on the way must stay inside it once symlinks are resolved, and the file itself must not be a symlink
-   * (opened with O_NOFOLLOW where the platform has it).
+   * (opened with O_NOFOLLOW where the platform has it). Node has no openat, so a directory on the way could be swapped
+   * for a symlink between the check and the open; the opened file is therefore checked again before anything is
+   * written (see assertOpenedInside).
    */
   private async deliverFile(config: AuditExportDestinationConfig, ndjson: string): Promise<void> {
     if (!config.path) throw new Error("file destination missing config.path");
@@ -516,12 +518,55 @@ export class AuditExportService {
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error(`file destination path ${config.path} is not a regular file`);
+      await this.assertOpenedInside(handle, stat, realRoot, realDir, path.basename(target), config.path);
       // A hard link inside the root could name a file outside it.
       if (stat.nlink > 1) throw new Error(`file destination path ${config.path} has other hard links; refusing to write there`);
       await handle.appendFile(ndjson, "utf8");
     } finally {
       await handle.close();
     }
+  }
+
+  /**
+   * The file just opened is the one the checked path names, so a directory swapped for a symlink after the check is
+   * refused before anything is written. On Linux, the kernel's own path of the open descriptor (`/proc/self/fd/<fd>`)
+   * must be exactly the checked directory plus the file name: there is no window left. Elsewhere, or where /proc is
+   * not mounted, the directory is resolved again and must be unchanged, and the name in it must still be the opened
+   * file (same device and inode); a swap that is undone between the open and this re-check is not caught there.
+   * In both cases an O_CREAT through a swapped directory can leave an empty file behind; nothing is written to it.
+   */
+  private async assertOpenedInside(
+    handle: fs.FileHandle,
+    opened: { dev: number; ino: number },
+    realRoot: string,
+    realDir: string,
+    name: string,
+    configured: string
+  ): Promise<void> {
+    const expected = path.join(realDir, name);
+    const changed = () => new Error(`file destination path ${configured} changed while it was opened; refusing to write there`);
+    if (process.platform === "linux") {
+      let fdPath: string | null = null;
+      try {
+        fdPath = await fs.readlink(`/proc/self/fd/${handle.fd}`);
+      } catch {
+        fdPath = null;
+      }
+      if (fdPath !== null) {
+        if (fdPath !== expected) throw changed();
+        return;
+      }
+    }
+    let dirNow: string;
+    let named: { dev: number; ino: number };
+    try {
+      dirNow = await fs.realpath(realDir);
+      named = await fs.lstat(expected);
+    } catch {
+      throw changed();
+    }
+    this.assertInside(realRoot, dirNow, configured);
+    if (dirNow !== realDir || named.dev !== opened.dev || named.ino !== opened.ino) throw changed();
   }
 
   /** `configured` resolved, and inside the root by path (no symlinks resolved yet); throws otherwise. */

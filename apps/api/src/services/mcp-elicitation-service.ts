@@ -48,16 +48,6 @@ import type { Store } from "../db/store.js";
 import type { ClusterBus, ClusterMessage } from "./cluster-bus.js";
 import type { ChallengeSealer } from "./challenge-store.js";
 
-const ELICITATION_ROLE_RANK: Record<string, number> = { viewer: 1, operator: 2, builder: 3, admin: 4 };
-
-/**
- * Whether a user of this role sees and may answer an MCP elicitation from a run someone else started: operator and
- * above by rank (operator, builder, admin), as for the other operator actions. An unknown role does not.
- */
-export function seesOthersElicitations(role: string): boolean {
-  return (ELICITATION_ROLE_RANK[role] ?? 0) >= ELICITATION_ROLE_RANK.operator!;
-}
-
 /** Trigger types where a person is in front of the run and can answer. */
 export const ATTENDED_TRIGGER_TYPES = new Set(["manual", "manual_stream", "manual_retry", "approval_resume"]);
 
@@ -400,13 +390,15 @@ export class McpElicitationService {
 
   /**
    * A person's answer. Accepts validate the content against the requested
-   * schema; the first answer wins. Only the person whose run it is, or an
-   * operator or admin, may answer.
+   * schema; the first answer wins. Only the person whose run it is may
+   * answer, or someone the caller vouches for with `answersOthers`: a user
+   * who may run the request's workflow in its project (see
+   * elicitationVisibleTo in run-access.ts).
    */
   async answer(
     id: string,
     answer: { action: McpElicitationAction; content?: Record<string, unknown> },
-    actor: { userId: string; email: string; role: string }
+    actor: { userId: string; email: string; answersOthers: boolean }
   ): Promise<McpElicitationRecord> {
     const record = await this.store.getMcpElicitation(id);
     if (!record) {
@@ -415,7 +407,7 @@ export class McpElicitationService {
     if (record.status !== "pending") {
       throw new McpElicitationAnswerError(`This request was already ${record.status.replace("_", " ")}.`, 409);
     }
-    if (!seesOthersElicitations(actor.role) && record.createdBy && record.createdBy !== actor.userId) {
+    if (!actor.answersOthers && record.createdBy && record.createdBy !== actor.userId) {
       throw new McpElicitationAnswerError("Only the person who started the run, or an operator, can answer this request.", 403);
     }
     const entry = this.pending.get(id);

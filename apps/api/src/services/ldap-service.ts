@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import type { UserRole } from "./auth-service";
 import type { Store } from "../db/store.js";
@@ -59,6 +60,21 @@ export class LdapAuthError extends Error {
 function isInvalidCredentials(error: unknown): boolean {
   const err = error as { name?: unknown; code?: unknown };
   return err?.name === "InvalidCredentialsError" || err?.code === 49;
+}
+
+/**
+ * The bind DN used when the search found no user: a fresh random name under the base DN, which no directory entry has,
+ * so the directory refuses it as it refuses a wrong password (and cannot answer it from a cache of an earlier one).
+ */
+function unknownUserDn(baseDn: string): string {
+  return `cn=l2m-no-such-user-${randomBytes(12).toString("hex")},${baseDn}`;
+}
+
+/** The refusal when the search gave no usable entry: no user, or an entry without a DN (a directory problem). */
+function refusalForMissingEntry(entry: Record<string, unknown> | undefined): LdapAuthError {
+  return entry
+    ? new LdapAuthError("directory_error", "LDAP entry is missing dn")
+    : new LdapAuthError("user_not_found", "User not found in LDAP directory");
 }
 
 function loadLdapts(): LdaptsModule | null {
@@ -131,27 +147,24 @@ export class LdapService {
         attributes: ["dn", "mail", "cn", "displayName", this.config.groupsAttribute]
       });
 
-      if (!searchEntries.length) {
-        throw new LdapAuthError("user_not_found", "User not found in LDAP directory");
-      }
-
       const entry = searchEntries[0];
-      const userDn = typeof entry.dn === "string" ? entry.dn : "";
-      if (!userDn) {
-        throw new LdapAuthError("directory_error", "LDAP entry is missing dn");
-      }
+      const userDn = entry && typeof entry.dn === "string" ? entry.dn : "";
 
-      // Rebind as the user to verify password.
+      // Rebind to verify the password: as the user, or, when the search found no one, as a DN that does not exist, so
+      // an unknown email costs the same steps on this side as a wrong password (a new connection and a refused bind)
+      // and cannot be told apart by how long the refusal takes. The dummy bind's outcome is ignored.
       await client.unbind();
       const verifyClient = new mod.Client({ url: this.config.url });
       try {
-        await verifyClient.bind(userDn, password);
+        await verifyClient.bind(userDn || unknownUserDn(this.config.baseDn), password);
       } catch (error) {
+        if (!userDn) throw refusalForMissingEntry(entry);
         if (isInvalidCredentials(error)) throw new LdapAuthError("invalid_credentials", "The directory refused the password");
         throw error;
       } finally {
         await verifyClient.unbind().catch(() => undefined);
       }
+      if (!userDn) throw refusalForMissingEntry(entry);
 
       const groups = normalizeStringArray(entry[this.config.groupsAttribute]);
       return {

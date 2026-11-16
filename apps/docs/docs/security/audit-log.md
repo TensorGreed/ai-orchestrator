@@ -112,6 +112,22 @@ de-duplicate on `id`.
 | `http` | `url`, optional `headers` (for example an ingestion token) and `method` (default `POST`) | The batch as the request body, `content-type: application/x-ndjson`. Any answer other than 2xx is a failure. |
 | `file` | `path` | Appends the batch to the file, which must be inside `AUDIT_EXPORT_FILE_ROOT` (checked when the destination is saved and at each delivery; a symlink that leads outside the root, or a file that is a symlink, is refused). Point a log shipper at it. |
 
+**How a `file` destination stays inside the root.** At each delivery L2M resolves every directory on the path and
+refuses one that leads outside `AUDIT_EXPORT_FILE_ROOT` through a symlink. It opens the file without following a
+symlink, and refuses anything other than a regular file with a single link (a hard link could name a file outside the
+root). Node.js cannot open a file relative to an already checked directory, so a process that can write inside the
+root could swap a directory for a symlink between that check and the open. The opened file is therefore checked
+again before anything is written:
+
+- On Linux, the path the kernel reports for the open file (`/proc/self/fd/<fd>`) must be the checked directory plus
+  the file name, so a swap is always caught.
+- On other systems, or where `/proc` is not mounted, L2M resolves the directory again and checks that it has not
+  changed and that the file name still names the file it opened. A swap that is undone in the short time between the
+  open and this check is not caught. Keep the root writable by the API's user only.
+
+In both cases the batch is not written and the run fails with "changed while it was opened". A swap can still leave
+an empty file where the symlink pointed, because the open creates the file before the check runs.
+
 Create them under **Settings → Audit Log → Export destinations**, or with the API:
 
 ```bash
