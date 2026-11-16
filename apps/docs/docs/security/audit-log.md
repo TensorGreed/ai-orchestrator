@@ -125,8 +125,20 @@ again before anything is written:
   changed and that the file name still names the file it opened. A swap that is undone in the short time between the
   open and this check is not caught. Keep the root writable by the API's user only.
 
-In both cases the batch is not written and the run fails with "changed while it was opened". A swap can still leave
-an empty file where the symlink pointed, because the open creates the file before the check runs.
+In both cases the batch is not written and the run fails with "changed while it was opened".
+
+L2M opens an existing file without creating anything, and creates a missing one only with an exclusive create, which
+never opens a file, FIFO or device that already exists. If the check then refuses a file this delivery created, L2M
+removes it again, but only when it is still an empty regular file with the same device and inode, and only when it
+sits in a directory nobody else can change: every directory from it up to `/` belongs to the API's user or root and
+no one else may write to it (a sticky directory such as `/tmp` is allowed). Elsewhere someone could re-point a
+directory between the check and the removal and have a different file removed, so L2M leaves the empty file. What
+remains:
+
+- A swap can still lead L2M to open an existing file outside the root (never as a controlling terminal). Nothing is
+  written to it, but opening a FIFO or device can have effects of its own.
+- An empty file can be left where the symlink pointed: in a directory others can write to (including a group-writable
+  one, as a umask of `002` creates), on Windows, or when the file was changed before it could be removed.
 
 Create them under **Settings → Audit Log → Export destinations**, or with the API:
 
