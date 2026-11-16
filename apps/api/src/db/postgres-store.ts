@@ -30,6 +30,8 @@ import * as replay from "./postgres/replay.js";
 import * as retention from "./postgres/retention.js";
 import * as legalHolds from "./postgres/legal-holds.js";
 import * as schedules from "./postgres/schedules.js";
+import { pgScimStore } from "./postgres/scim.js";
+import type { ScimStore } from "./scim-store.js";
 import * as secrets from "./postgres/secrets.js";
 import * as subject from "./postgres/subject.js";
 import * as erasure from "./postgres/erasure.js";
@@ -1153,6 +1155,89 @@ export class PostgresStore implements Store {
   }
   async staffSubjectRows(...args: Parameters<Store["staffSubjectRows"]>): ReturnType<Store["staffSubjectRows"]> {
     return subject.staffSubjectRows(this.ctx, ...args);
+  }
+  // 13.2 (v75) — SCIM provisioning (postgres/scim.ts; setUserDisabled in postgres/auth.ts).
+  private scimStore?: Omit<ScimStore, "setUserDisabled">;
+  private get scim(): Omit<ScimStore, "setUserDisabled"> {
+    return (this.scimStore ??= pgScimStore(this.ctx));
+  }
+  async listScimTokens(...args: Parameters<Store["listScimTokens"]>): ReturnType<Store["listScimTokens"]> {
+    return this.scim.listScimTokens(...args);
+  }
+  async createScimToken(...args: Parameters<Store["createScimToken"]>): ReturnType<Store["createScimToken"]> {
+    return this.scim.createScimToken(...args);
+  }
+  async findScimTokenByPrefix(...args: Parameters<Store["findScimTokenByPrefix"]>): ReturnType<Store["findScimTokenByPrefix"]> {
+    return this.scim.findScimTokenByPrefix(...args);
+  }
+  async revokeScimToken(...args: Parameters<Store["revokeScimToken"]>): ReturnType<Store["revokeScimToken"]> {
+    return this.scim.revokeScimToken(...args);
+  }
+  async rotateScimToken(...args: Parameters<Store["rotateScimToken"]>): ReturnType<Store["rotateScimToken"]> {
+    return this.scim.rotateScimToken(...args);
+  }
+  async touchScimToken(...args: Parameters<Store["touchScimToken"]>): ReturnType<Store["touchScimToken"]> {
+    return this.scim.touchScimToken(...args);
+  }
+  async getScimUser(...args: Parameters<Store["getScimUser"]>): ReturnType<Store["getScimUser"]> {
+    return this.scim.getScimUser(...args);
+  }
+  async findScimUserByUserName(...args: Parameters<Store["findScimUserByUserName"]>): ReturnType<Store["findScimUserByUserName"]> {
+    return this.scim.findScimUserByUserName(...args);
+  }
+  async listScimUsers(...args: Parameters<Store["listScimUsers"]>): ReturnType<Store["listScimUsers"]> {
+    return this.scim.listScimUsers(...args);
+  }
+  async createScimUser(...args: Parameters<Store["createScimUser"]>): ReturnType<Store["createScimUser"]> {
+    return this.scim.createScimUser(...args);
+  }
+  async updateScimUser(...args: Parameters<Store["updateScimUser"]>): ReturnType<Store["updateScimUser"]> {
+    return this.scim.updateScimUser(...args);
+  }
+  async setScimUserGrants(...args: Parameters<Store["setScimUserGrants"]>): ReturnType<Store["setScimUserGrants"]> {
+    return this.scim.setScimUserGrants(...args);
+  }
+  async updateScimUserEmail(...args: Parameters<Store["updateScimUserEmail"]>): ReturnType<Store["updateScimUserEmail"]> {
+    return this.scim.updateScimUserEmail(...args);
+  }
+  async deleteScimUser(...args: Parameters<Store["deleteScimUser"]>): ReturnType<Store["deleteScimUser"]> {
+    return this.scim.deleteScimUser(...args);
+  }
+  async getScimGroup(...args: Parameters<Store["getScimGroup"]>): ReturnType<Store["getScimGroup"]> {
+    return this.scim.getScimGroup(...args);
+  }
+  async listScimGroups(...args: Parameters<Store["listScimGroups"]>): ReturnType<Store["listScimGroups"]> {
+    return this.scim.listScimGroups(...args);
+  }
+  async createScimGroup(...args: Parameters<Store["createScimGroup"]>): ReturnType<Store["createScimGroup"]> {
+    return this.scim.createScimGroup(...args);
+  }
+  async updateScimGroup(...args: Parameters<Store["updateScimGroup"]>): ReturnType<Store["updateScimGroup"]> {
+    return this.scim.updateScimGroup(...args);
+  }
+  async deleteScimGroup(...args: Parameters<Store["deleteScimGroup"]>): ReturnType<Store["deleteScimGroup"]> {
+    return this.scim.deleteScimGroup(...args);
+  }
+  async listScimGroupMembers(...args: Parameters<Store["listScimGroupMembers"]>): ReturnType<Store["listScimGroupMembers"]> {
+    return this.scim.listScimGroupMembers(...args);
+  }
+  async countScimGroupMembers(...args: Parameters<Store["countScimGroupMembers"]>): ReturnType<Store["countScimGroupMembers"]> {
+    return this.scim.countScimGroupMembers(...args);
+  }
+  async listScimGroupsOfUser(...args: Parameters<Store["listScimGroupsOfUser"]>): ReturnType<Store["listScimGroupsOfUser"]> {
+    return this.scim.listScimGroupsOfUser(...args);
+  }
+  async addScimGroupMembers(...args: Parameters<Store["addScimGroupMembers"]>): ReturnType<Store["addScimGroupMembers"]> {
+    return this.scim.addScimGroupMembers(...args);
+  }
+  async removeScimGroupMembers(...args: Parameters<Store["removeScimGroupMembers"]>): ReturnType<Store["removeScimGroupMembers"]> {
+    return this.scim.removeScimGroupMembers(...args);
+  }
+  async removeAllScimGroupMembers(...args: Parameters<Store["removeAllScimGroupMembers"]>): ReturnType<Store["removeAllScimGroupMembers"]> {
+    return this.scim.removeAllScimGroupMembers(...args);
+  }
+  async setUserDisabled(...args: Parameters<Store["setUserDisabled"]>): ReturnType<Store["setUserDisabled"]> {
+    return auth.setUserDisabled(this.ctx, ...args);
   }
   // 12.6b — the /v1 AI gateway tables (postgres/ai-gateway.ts).
   async listAiGatewayRouteSets(...args: Parameters<Store["listAiGatewayRouteSets"]>): ReturnType<Store["listAiGatewayRouteSets"]> {

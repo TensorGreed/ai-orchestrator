@@ -139,7 +139,7 @@ import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
 import { EVAL_RUN_STALE_MS, EvalService, REPLAY_JOB_MAX_EXECUTIONS_DEFAULT, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
 import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
-import { AuthService, isServiceAccountEmail, type SafeUser, type UserRole } from "./services/auth-service";
+import { AccountDisabledError, AuthService, isServiceAccountEmail, type SafeUser, type UserRole } from "./services/auth-service";
 import { isBackgroundRequest, isPolicyExempt, sessionHandle } from "./services/session-service.js";
 import { SchedulerService } from "./services/scheduler-service";
 import { RunWriteChains } from "./services/run-write-chains.js";
@@ -275,6 +275,10 @@ import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGate
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
 import { registerServiceAccountRoutes } from "./service-account-routes.js";
+import { registerScimRoutes } from "./scim-routes.js";
+import { registerScimAdminRoutes } from "./scim-admin-routes.js";
+import { ScimProvisioningService, type ScimActor } from "./services/scim-provisioning-service.js";
+import { ScimTokenService } from "./services/scim-token-service.js";
 import { asRecord, isExecutionTimeoutAbort, normalizeExecutionTimeoutMs, normalizeSessionId, retryAfterSeconds } from "./run-helpers.js";
 import { registerReleaseRoutes } from "./release-routes.js";
 import { registerGateAdmissionRoutes } from "./gate-admission-routes.js";
@@ -6081,7 +6085,8 @@ export async function createApp(
     const verified = await apiKeyService.verify(token);
     if (!verified) return null;
     const owner = await store.getUserById(verified.userId);
-    if (!owner) return null;
+    // 13.2 (v75) — a disabled user's keys do not authenticate (they are also revoked when SCIM disables the user).
+    if (!owner || owner.disabledAt) return null;
     const keyScope = parseKeyScopes(verified.scopes);
     return {
       user: scopedKeyUser({ id: owner.id, email: owner.email, role: safeUserRole(owner.role), ...(owner.kind === "service" ? { serviceAccount: true as const } : {}) }, keyScope, verified.keyId),
@@ -6401,6 +6406,10 @@ export async function createApp(
     // 13.2 — a service account never signs in (SSO, LDAP or otherwise); only its API keys authenticate.
     if (storeUser?.kind === "service" || (!storeUser && isServiceAccountEmail(normalizedEmail))) {
       throw new Error("Service accounts cannot sign in");
+    }
+    // 13.2 (v75) — a user SCIM disabled cannot sign in (break-glass is the only way in for one).
+    if (storeUser?.disabledAt) {
+      throw new AccountDisabledError();
     }
     let created = false;
     const ssoRoles = input.provider === "saml" ? samlService : input.provider === "ldap" ? ldapService : oidcService;
@@ -9343,11 +9352,93 @@ export async function createApp(
   });
 
   // ---------------------------------------------------------------------------
+  // 13.2 — SCIM 2.0 provisioning (scim-routes.ts, scim-admin-routes.ts; off unless SCIM_ENABLED=true)
+  // ---------------------------------------------------------------------------
+
+  const scimTokenService = new ScimTokenService(store);
+  const scimProvisioning = new ScimProvisioningService({
+    store,
+    linkExisting: config.SCIM_LINK_EXISTING_USERS ?? "non_admin",
+    addProjectMember: async (input) => await rbacService.addMember(input),
+    log: { warn: (fields, message) => app.log.warn(fields, message) },
+    audit: async (actor, event) => {
+      await auditService.record({
+        category: "auth",
+        eventType: event.eventType,
+        action: event.action,
+        outcome: event.outcome ?? "success",
+        actor: { type: "system", email: `scim:${actor.tokenName}`, ipAddress: actor.ipAddress, userAgent: actor.userAgent },
+        resourceType: event.resourceType,
+        resourceId: event.resourceId,
+        metadata: { ...event.metadata, scimTokenId: actor.tokenId }
+      });
+    }
+  });
+
+  /** Re-applies every SCIM user's group roles after an admin creates or deletes a SCIM mapping (audited as the admin). */
+  const resyncScimGrants = async (request: FastifyRequest, user: SafeUser, change: { mappingId: string; change: "create" | "delete" }) => {
+    const userAgent = request.headers["user-agent"];
+    const actor: ScimActor = {
+      tokenId: "",
+      tokenName: `mapping-${change.change}:${user.email}`,
+      ipAddress: request.ip ?? null,
+      userAgent: typeof userAgent === "string" ? userAgent.slice(0, 512) : null
+    };
+    const users = await scimProvisioning.resyncAll(actor);
+    await audit(request, user, {
+      category: "rbac",
+      eventType: "scim.mapping_applied",
+      action: "update",
+      resourceType: "sso_group_mapping",
+      resourceId: change.mappingId,
+      metadata: { change: change.change, users }
+    });
+  };
+
+  registerScimAdminRoutes({
+    app,
+    store,
+    tokens: scimTokenService,
+    enabled: config.SCIM_ENABLED === true,
+    publicUrl: config.APP_PUBLIC_URL ?? null,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: async (request, reply) => await requireStepUp(request, reply, "scim_token.change"),
+    audit: async (request, user, event) => await audit(request, user, event)
+  });
+
+  if (config.SCIM_ENABLED === true) {
+    // A refused token is audited at most once a minute per address (a misconfigured connector retries constantly).
+    const scimRefusals = new Map<string, number>();
+    registerScimRoutes({
+      app,
+      tokens: scimTokenService,
+      provisioning: scimProvisioning,
+      publicUrl: config.APP_PUBLIC_URL ?? null,
+      onRefused: async (request, reason) => {
+        const key = `${request.ip}|${reason}`;
+        const now = Date.now();
+        const last = scimRefusals.get(key);
+        if (last !== undefined && now - last < 60_000) return;
+        if (scimRefusals.size >= 10_000) scimRefusals.clear();
+        scimRefusals.set(key, now);
+        await audit(request, null, {
+          category: "auth",
+          eventType: "scim.auth_failed",
+          action: "authenticate",
+          outcome: "failure",
+          resourceType: "scim_token",
+          metadata: { reason }
+        });
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Phase 5.1 — SSO group-to-role mappings
   // ---------------------------------------------------------------------------
 
   const ssoMappingSchema = z.object({
-    provider: z.enum(["saml", "ldap", "oidc"]),
+    provider: z.enum(["saml", "ldap", "oidc", "scim"]),
     groupName: z.string().min(1).max(200),
     projectId: z.string().min(1).max(120).nullable().optional(),
     role: z.string().min(1).max(60),
@@ -9377,6 +9468,8 @@ export async function createApp(
       role: parsed.data.role,
       customRoleId: parsed.data.customRoleId ?? null
     });
+    // 13.2 — a SCIM mapping applies at once to the users already in the group.
+    if (parsed.data.provider === "scim") await resyncScimGrants(request, user, { mappingId: id, change: "create" });
     return { id };
   });
 
@@ -9384,11 +9477,14 @@ export async function createApp(
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     if (!await requireStepUp(request, reply, "sso_mapping.change")) return;
+    const wasScim = (await rbacService.listSsoGroupMappings("scim")).some((mapping) => mapping.id === request.params.id);
     const ok = await rbacService.deleteSsoGroupMapping(request.params.id);
     if (!ok) {
       reply.code(404);
       return { error: "SSO mapping not found" };
     }
+    // 13.2 — the roles a deleted SCIM mapping granted are taken back at once.
+    if (wasScim) await resyncScimGrants(request, user, { mappingId: request.params.id, change: "delete" });
     return { ok: true };
   });
 
@@ -15179,7 +15275,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         if (confirmer?.role !== "admin") return "Only an admin can erase a staff member who has an account.";
         if (target.role === "admin" && target.kind === "human") {
           const pending = new Set((await store.listOpenUserInvites()).map((invite) => invite.userId));
-          const otherAdmins = (await store.listUsers({ kind: "human" })).filter((u) => u.role === "admin" && u.id !== target.id && !pending.has(u.id));
+          const otherAdmins = (await store.listUsers({ kind: "human" })).filter((u) => u.role === "admin" && !u.disabledAt && u.id !== target.id && !pending.has(u.id));
           if (!pending.has(target.id) && otherAdmins.length === 0) return "This is the only admin who can sign in. Make another person an admin first.";
         }
         return null;
@@ -15882,9 +15978,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const pageRequest = pageRequestFromQuery(request.query);
     // Roadmap 7.3 — an invited user who has not accepted yet carries `pending` and its invite's expiry.
     const invites = new Map((await store.listOpenUserInvites()).map((invite) => [invite.userId, invite]));
-    const userView = (u: { id: string; email: string; role: string; createdAt: string }) => {
+    const userView = (u: { id: string; email: string; role: string; createdAt: string; disabledAt?: string | null }) => {
       const invite = invites.get(u.id);
-      return { id: u.id, email: u.email, role: u.role, createdAt: u.createdAt, ...(invite ? { pending: true, inviteExpiresAt: invite.expiresAt } : {}) };
+      return {
+        id: u.id,
+        email: u.email,
+        role: u.role,
+        createdAt: u.createdAt,
+        ...(invite ? { pending: true, inviteExpiresAt: invite.expiresAt } : {}),
+        // 13.2 (v75) — disabled by SCIM (deactivated or deprovisioned): cannot sign in, keys revoked.
+        ...(u.disabledAt ? { disabledAt: u.disabledAt } : {})
+      };
     };
     // 13.2 — people by default; `?kind=service` lists the service accounts.
     const kind = asRecord(request.query).kind === "service" ? "service" : "human";
@@ -15953,7 +16057,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     };
     if (targetUser.role === "admin" && targetUser.kind === "human") {
       const pending = new Set((await store.listOpenUserInvites()).map((invite) => invite.userId));
-      const otherAdmins = (await store.listUsers({ kind: "human" })).filter((u) => u.role === "admin" && u.id !== targetUser.id && !pending.has(u.id));
+      const otherAdmins = (await store.listUsers({ kind: "human" })).filter((u) => u.role === "admin" && u.id !== targetUser.id && !u.disabledAt && !pending.has(u.id));
       if (!pending.has(targetUser.id) && otherAdmins.length === 0) return lastAdminAnswer(reply);
     }
     // Phase 10.7 — a deleted user's own MCP connections (and their tokens) go with them.
@@ -16006,6 +16110,34 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       metadata: { email: targetUser.email, role: targetUser.role, hadMfa, sessionsEnded }
     });
     return { ok: true, userId: targetUser.id, hadMfa, sessionsEnded };
+  });
+
+  // 13.2 (v75) — an admin enables a user SCIM disabled (for instance after turning SCIM off). While the identity provider
+  // still provisions the user, its next update decides again.
+  app.post<{ Params: { id: string } }>("/api/users/:id/enable", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    if (!await requireStepUp(request, reply, "user.enable", { targetUserId: request.params.id })) return;
+    const targetUser = await store.getUserById(request.params.id);
+    if (!targetUser || targetUser.kind !== "human") {
+      reply.code(404);
+      return { error: "User not found" };
+    }
+    if (!targetUser.disabledAt) return { ok: true, userId: targetUser.id, enabled: false };
+    const outcome = await store.setUserDisabled(targetUser.id, { disabled: false, now: new Date().toISOString() });
+    if (outcome.status !== "updated") {
+      reply.code(404);
+      return { error: "User not found" };
+    }
+    await audit(request, user, {
+      category: "auth",
+      eventType: "user.enable",
+      action: "update",
+      resourceType: "user",
+      resourceId: targetUser.id,
+      metadata: { email: targetUser.email, disabledAt: targetUser.disabledAt }
+    });
+    return { ok: true, userId: targetUser.id, enabled: true };
   });
 
   // ── Phase 7.4: Workflow Templates & Sharing ───────────────────────────

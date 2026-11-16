@@ -892,6 +892,7 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Delete a user | `DELETE /api/users/:id`, `DELETE /api/service-accounts/:id` |
 | Reset a user's MFA | `POST /api/users/:id/mfa/reset` |
 | Sign another user out | `POST /api/users/:id/sessions/revoke` (not when it names your own account) |
+| Enable a user that SCIM disabled | `POST /api/users/:id/enable` |
 | Turn your own MFA off | `POST /api/auth/mfa/disable` |
 | Create an API key | `POST /api/auth/api-keys`, `POST /api/service-accounts/:id/keys` |
 | Rotate an API key | `POST /api/auth/api-keys/:id/rotate`, `POST /api/service-accounts/:id/keys/:keyId/rotate` |
@@ -899,6 +900,7 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Rotate a gateway client's token | `POST /api/mcp/clients/:id/rotate` |
 | Create, change or delete a secret | `POST /api/secrets`, `PUT /api/secrets/:id/sensitive-output`, `POST /api/secrets/:id/shares`, `DELETE /api/secrets/:id/shares/:projectId`, `DELETE /api/secrets/:id` |
 | Change SSO group mappings | `POST /api/auth/sso/mappings`, `DELETE /api/auth/sso/mappings/:id` |
+| Create, rotate or revoke a SCIM token | `POST /api/scim/tokens`, `POST /api/scim/tokens/:id/rotate`, `DELETE /api/scim/tokens/:id` |
 | Change notification channels | `POST /api/notifications`, `DELETE /api/notifications/:id` |
 | Change audit export destinations and log streams | `POST`, `PUT`, `DELETE` on `/api/audit-export/destinations` and `/api/log-streams` |
 | Import MCP servers (creates secrets) | `POST /api/mcp/servers/import` |

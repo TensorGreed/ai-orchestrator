@@ -682,6 +682,56 @@ export const openApiSpec = {
         responses: { "200": { description: "Revoked" }, "404": { description: "Service account or key not found" } }
       }
     },
+    "/api/users/{id}/enable": {
+      post: {
+        tags: ["Users"],
+        summary: "Enable a user that SCIM provisioning disabled (admin). Revoked API keys stay revoked. Needs step-up when it is on (user.enable).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ ok, userId, enabled }" }, "403": { description: "Step-up required (code: step_up_required)" }, "404": { description: "User not found" } }
+      }
+    },
+    "/api/scim": {
+      get: {
+        tags: ["Users"],
+        summary: "SCIM provisioning settings (admin): whether SCIM_ENABLED is on, the base URL, the tokens (never their secret) and counts",
+        responses: { "200": { description: "{ enabled, baseUrl, tokens, provisionedUsers, disabledUsers, groups }" } }
+      }
+    },
+    "/api/scim/groups": {
+      get: {
+        tags: ["Users"],
+        summary: "Groups provisioned over SCIM (admin), with member counts and the SCIM group mappings that name each",
+        responses: { "200": { description: "{ groups }" } }
+      }
+    },
+    "/api/scim/tokens": {
+      post: {
+        tags: ["Users"],
+        summary: "Create a SCIM bearer token (admin; returned once, stored hashed). Needs step-up when it is on (scim_token.change).",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["name"], properties: { name: { type: "string" }, expiresInDays: { type: "integer" } } } } }
+        },
+        responses: { "201": { description: "{ token, record }" }, "400": { description: "Invalid payload" }, "403": { description: "Step-up required" } }
+      }
+    },
+    "/api/scim/tokens/{id}/rotate": {
+      post: {
+        tags: ["Users"],
+        summary: "Rotate a SCIM token (admin): a new token (returned once); the old one works for graceHours (default 24, 0 ends it now)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { $ref: "#/components/schemas/CredentialRotate" } } } },
+        responses: { "200": { description: "{ token, record, previous }" }, "409": { description: "Not found, already rotated, revoked or expired" } }
+      }
+    },
+    "/api/scim/tokens/{id}": {
+      delete: {
+        tags: ["Users"],
+        summary: "Revoke a SCIM token (admin), with the token it replaced if still in its grace window",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Revoked" }, "404": { description: "Not found or already revoked" } }
+      }
+    },
     "/api/service-accounts/{id}/keys/{keyId}/rotate": {
       post: {
         tags: ["Users"],

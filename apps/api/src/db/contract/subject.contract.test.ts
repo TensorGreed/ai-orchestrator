@@ -231,6 +231,9 @@ describeStoreContract("store contract: data-subject requests", (ctx) => {
     await seed([
       `INSERT INTO users (id, email, password_hash, role, created_at, updated_at) VALUES ('u1', 'Ana@Example.com', 'secret-hash', 'builder', '${AT}', '${AT}')`,
       `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, created_at) VALUES ('k1', 'u1', 'ci', 'ao_ab', 'key-hash', '${AT}')`,
+      `INSERT INTO scim_users (user_id, user_name, user_name_key, external_id, origin, created_at, updated_at) VALUES ('u1', 'Ana@Example.com', 'ana@example.com', 'ext-ana', 'adopted', '${AT}', '${AT}')`,
+      `INSERT INTO scim_groups (id, display_name, display_name_key, created_at, updated_at) VALUES ('scg_1', 'Eng', 'eng', '${AT}', '${AT}')`,
+      `INSERT INTO scim_group_members (group_id, user_id, created_at) VALUES ('scg_1', 'u1', '${AT}')`,
       `INSERT INTO execution_history (id, workflow_id, status, started_at, triggered_by) VALUES ('run-1', 'wf', 'success', '${AT}', 'ana@example.com')`,
       `INSERT INTO audit_logs (id, event_type, category, action, outcome, actor_user_id, actor_email, created_at) VALUES ('a1', 'auth.login', 'auth', 'login', 'success', 'u1', 'ana@example.com', '${AT}')`
     ]);
@@ -239,6 +242,8 @@ describeStoreContract("store contract: data-subject requests", (ctx) => {
     expect(JSON.stringify(rows)).not.toContain("secret-hash");
     expect(JSON.stringify(rows)).not.toContain("key-hash");
     expect(rows.apiKeys.map((row) => row.id)).toEqual(["k1"]);
+    expect(rows.scimIdentity).toMatchObject([{ user_name: "Ana@Example.com", external_id: "ext-ana", origin: "adopted" }]);
+    expect(rows.scimGroups).toMatchObject([{ id: "scg_1", display_name: "Eng" }]);
     expect(rows.runsTriggered.map((row) => row.id)).toEqual(["run-1"]);
     expect(rows.auditEntries.map((row) => row.id)).toEqual(["a1"]);
     // Typed with capitals: every authored section still matches.

@@ -3,6 +3,8 @@ import { nanoid } from "nanoid";
 import type { LoginSession, Store, StoredUserKind } from "../db/store.js";
 import { SessionService, type SessionRejectReason, type SessionRequestInfo } from "./session-service.js";
 
+export { AccountDisabledError } from "./session-service.js";
+
 export type UserRole = "admin" | "builder" | "operator" | "viewer";
 
 export interface SafeUser {
@@ -155,8 +157,9 @@ export class AuthService {
   async verifyCredentials(emailInput: string, password: string): Promise<SafeUser> {
     const email = normalizeEmail(emailInput);
     const user = await this.store.getUserByEmail(email);
-    // A service account never signs in (its hash matches no password; the kind check makes that explicit).
-    if (!user || user.kind === "service" || !verifyPassword(password, user.passwordHash)) {
+    // A service account never signs in (its hash matches no password; the kind check makes that explicit). 13.2 (v75):
+    // neither does a disabled user; the answer is the same as for a wrong password, so it tells nothing about the account.
+    if (!user || user.kind === "service" || user.disabledAt || !verifyPassword(password, user.passwordHash)) {
       throw new Error("Invalid email or password");
     }
     return this.toSafeUser(user);
@@ -205,6 +208,11 @@ export class AuthService {
     const stored = await this.store.getUserById(session.userId);
     // 13.2 — service accounts have no sign-in sessions; a row naming one is not honoured.
     const user = stored && stored.kind !== "service" ? this.toSafeUser(stored) : null;
+    // 13.2 (v75) — a disabled user's session ends (break-glass sessions excepted: the recovery path stays open).
+    if (stored?.disabledAt && !session.breakGlass) {
+      await this.sessions.endSession(session.id, "admin");
+      return { ok: false, reason: "admin" };
+    }
     const verdict = this.sessions.verdict(session, user?.role);
     if (verdict) {
       await this.sessions.endSession(session.id, verdict);
@@ -228,7 +236,7 @@ export class AuthService {
     if (!session || session.revokedAt) return false;
     const stored = await this.store.getUserById(session.userId);
     const user = stored && stored.kind !== "service" ? this.toSafeUser(stored) : null;
-    if (!user) return false;
+    if (!user || (stored?.disabledAt && !session.breakGlass)) return false;
     return this.sessions.verdict(session, user.role) === null;
   }
 

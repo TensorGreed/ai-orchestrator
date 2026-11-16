@@ -58,6 +58,13 @@ rotated service-account key expire within that many days.
 use as its grace window ends) to the channels set in the environment; off by
 default. See [Rotating keys](../security/service-accounts.md#rotating-keys).
 
+`SCIM_ENABLED=true` (off by default) serves SCIM 2.0 at `/scim/v2`, so your
+identity provider creates, updates, deactivates and removes users and groups.
+A user it deactivates or removes is disabled at once: their sessions end and
+their API keys are revoked. `SCIM_LINK_EXISTING_USERS` (`non_admin` by default,
+or `all` or `none`) decides which existing accounts a provisioned user with the
+same email is linked to. See [SCIM provisioning](../security/scim.md).
+
 ## Rate limits (on by default)
 
 `RATE_LIMIT_ENABLED=true` (the default) limits requests per client address in
@@ -115,7 +122,7 @@ caller arrives from an address you may trust.
 ### Network controls (optional)
 
 Address allowlists per scope (`NETWORK_ALLOW_UI`, `NETWORK_ALLOW_API`, `NETWORK_ALLOW_WEBHOOK`,
-`NETWORK_ALLOW_PUBLIC`, `NETWORK_ALLOW_MCP_GATEWAY`, `NETWORK_ALLOW_METRICS`), `NETWORK_ALLOWLIST_MODE`
+`NETWORK_ALLOW_PUBLIC`, `NETWORK_ALLOW_MCP_GATEWAY`, `NETWORK_ALLOW_METRICS`, `NETWORK_ALLOW_SCIM`), `NETWORK_ALLOWLIST_MODE`
 (`enforce` or `report`), `NETWORK_BREAK_GLASS_CIDRS`, and the forwarded client certificate settings for the MCP
 gateway (`MCP_GATEWAY_CLIENT_CERT_HEADER`, `MCP_GATEWAY_CLIENT_CERT_PROXIES`). All unset by default, so every scope is
 open. They are checked against the client address above, and refused with `TRUST_PROXY=true`. See

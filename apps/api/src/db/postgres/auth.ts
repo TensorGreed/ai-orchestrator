@@ -21,6 +21,7 @@ import {
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { withReferenceCheck } from "../store-errors.js";
+import type { UserDisableOutcome } from "../scim-store.js";
 
 export async function countUsers(ctx: PgContext): Promise<number> {
   const row = await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM users`);
@@ -35,11 +36,12 @@ type UserRow = {
   kind: string | null;
   description: string | null;
   created_by: string | null;
+  disabled_at?: string | null;
   created_at: string;
   updated_at: string;
 };
 
-const USER_COLUMNS = "id, email, password_hash, role, kind, description, created_by, created_at, updated_at";
+const USER_COLUMNS = "id, email, password_hash, role, kind, description, created_by, disabled_at, created_at, updated_at";
 
 function storedUserFromRow(row: UserRow): StoredUser {
   return {
@@ -51,6 +53,7 @@ function storedUserFromRow(row: UserRow): StoredUser {
     kind: row.kind === "human" ? "human" : "service",
     description: row.description ? toStr(row.description) : null,
     createdBy: row.created_by ? toStr(row.created_by) : null,
+    disabledAt: row.disabled_at ? toStr(row.disabled_at) : null,
     createdAt: toStr(row.created_at),
     updatedAt: toStr(row.updated_at)
   };
@@ -273,20 +276,22 @@ type PgClient = Parameters<Parameters<PgContext["withTransaction"]>[0]>[0];
  * the only accepted admin who is a person (who could still sign in, or get a break-glass link). Only people count: a
  * service account can never sign in. A second change waits for the lock and then counts again.
  */
-async function lockAndCheckLastHumanAdmin(client: PgClient, id: string): Promise<{ lastAdmin: boolean; role: string } | null> {
+async function lockAndCheckLastHumanAdmin(client: PgClient, id: string): Promise<{ lastAdmin: boolean; role: string; kind: string } | null> {
   await client.query(`SELECT id FROM users WHERE role = 'admin' OR id = $1 ORDER BY id FOR UPDATE`, [id]);
-  const target = await client.query<{ role: string; kind: string | null; accepted: boolean }>(
-    `SELECT u.role, u.kind, ${acceptedUser("u.id")} AS accepted FROM users u WHERE u.id = $1`,
+  const target = await client.query<{ role: string; kind: string | null; accepted: boolean; disabled_at: string | null }>(
+    `SELECT u.role, u.kind, u.disabled_at, ${acceptedUser("u.id")} AS accepted FROM users u WHERE u.id = $1`,
     [id]
   );
   const row = target.rows[0];
   if (!row) return null;
-  if (toStr(row.role) !== "admin" || toStr(row.kind) !== "human" || !row.accepted) return { lastAdmin: false, role: toStr(row.role) };
+  const kind = toStr(row.kind);
+  // 13.2 (v75) — a disabled admin cannot sign in, so it neither is nor counts as the admin who could.
+  if (toStr(row.role) !== "admin" || kind !== "human" || !row.accepted || row.disabled_at) return { lastAdmin: false, role: toStr(row.role), kind };
   const others = await client.query<{ count: string | number }>(
-    `SELECT COUNT(*) AS count FROM users u WHERE u.role = 'admin' AND u.kind = 'human' AND u.id <> $1 AND ${acceptedUser("u.id")}`,
+    `SELECT COUNT(*) AS count FROM users u WHERE u.role = 'admin' AND u.kind = 'human' AND u.disabled_at IS NULL AND u.id <> $1 AND ${acceptedUser("u.id")}`,
     [id]
   );
-  return { lastAdmin: toNum(others.rows[0]?.count ?? 0) === 0, role: toStr(row.role) };
+  return { lastAdmin: toNum(others.rows[0]?.count ?? 0) === 0, role: toStr(row.role), kind };
 }
 
 export async function updateUserRoleKeepingAdmin(ctx: PgContext, id: string, role: string): Promise<"updated" | "not_found" | "last_admin"> {
@@ -296,6 +301,30 @@ export async function updateUserRoleKeepingAdmin(ctx: PgContext, id: string, rol
     if (role !== "admin" && checked.lastAdmin) return "last_admin";
     await client.query(`UPDATE users SET role = $1, updated_at = $2 WHERE id = $3`, [role, new Date().toISOString(), id]);
     return "updated";
+  });
+}
+
+/** 13.2 (v75) — see Store.setUserDisabled: the last-admin check, the flag and the revocations in one transaction. */
+export async function setUserDisabled(ctx: PgContext, id: string, input: { disabled: boolean; now: string }): Promise<UserDisableOutcome> {
+  return ctx.withTransaction(async (client): Promise<UserDisableOutcome> => {
+    // Locks the admin rows and the target, so two disables cannot both see two admins.
+    const checked = await lockAndCheckLastHumanAdmin(client, id);
+    if (!checked) return { status: "not_found" };
+    if (checked.kind !== "human") return { status: "service_account" };
+    if (!input.disabled) {
+      await client.query(`UPDATE users SET disabled_at = NULL, updated_at = $2 WHERE id = $1 AND disabled_at IS NOT NULL`, [id, input.now]);
+      return { status: "updated", sessionsEnded: 0, keysRevoked: 0 };
+    }
+    if (checked.lastAdmin) return { status: "last_admin" };
+    await client.query(`UPDATE users SET disabled_at = COALESCE(disabled_at, $2), updated_at = $2 WHERE id = $1`, [id, input.now]);
+    // Break-glass sessions are left alone: break-glass is the recovery path, whatever the identity provider says.
+    const sessions = await client.query(
+      `UPDATE sessions SET revoked_at = $2, ip_address = NULL, user_agent = NULL, ended_reason = 'admin'
+        WHERE user_id = $1 AND revoked_at IS NULL AND break_glass = 0`,
+      [id, input.now]
+    );
+    const keys = await client.query(`UPDATE api_keys SET revoked_at = $2 WHERE user_id = $1 AND revoked_at IS NULL`, [id, input.now]);
+    return { status: "updated", sessionsEnded: sessions.rowCount ?? 0, keysRevoked: keys.rowCount ?? 0 };
   });
 }
 
@@ -336,6 +365,9 @@ export async function deleteUserKeepingAdmin(ctx: PgContext, id: string): Promis
 }
 
 async function deleteUserRows(client: PgClient, id: string): Promise<boolean> {
+  // 13.2 (v75) — the SCIM link and group memberships go with the user.
+  await client.query(`DELETE FROM scim_group_members WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM scim_users WHERE user_id = $1`, [id]);
   await client.query(`DELETE FROM sessions WHERE user_id = $1`, [id]);
   await client.query(`DELETE FROM api_keys WHERE user_id = $1`, [id]);
   await client.query(`DELETE FROM mfa_secrets WHERE user_id = $1`, [id]);

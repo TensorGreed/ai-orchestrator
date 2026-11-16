@@ -141,6 +141,7 @@ import { NetworkSettingsTab } from "./NetworkSettingsTab";
 import { DataProtectionTab } from "./DataProtectionTab";
 import { ProjectRetentionTab } from "./ProjectRetentionTab";
 import { ServiceAccountsTab } from "./ServiceAccountsTab";
+import { ScimProvisioningTab } from "./ScimProvisioningTab";
 import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
 import { describeKeyScopes } from "../lib/key-scopes";
 import { SignedInSessionsCard } from "./SignedInSessionsCard";
@@ -157,6 +158,7 @@ type SettingsTab =
   | "external-secrets"
   | "network"
   | "service-accounts"
+  | "provisioning"
   | "data-protection"
   | "audit-log"
   | "audit-signing"
@@ -231,6 +233,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
         { id: "network", label: "Network", restricted: !isAdmin },
         { id: "service-accounts", label: "Service Accounts", restricted: !isAdmin },
+        { id: "provisioning", label: "Provisioning (SCIM)", restricted: !isAdmin },
         { id: "data-protection", label: "Data protection", restricted: !isAdmin }
       ]
     },
@@ -321,6 +324,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         )}
         {tab === "network" && isAdmin && <NetworkSettingsTab />}
         {tab === "service-accounts" && isAdmin && <ServiceAccountsTab projects={projects} />}
+        {tab === "provisioning" && isAdmin && <ScimProvisioningTab />}
         {tab === "data-protection" && isAdmin && <DataProtectionTab />}
         {tab === "audit-log" && isAdmin && <AuditLogTab />}
         {tab === "audit-signing" && isAdmin && <AuditSigningKeysSection />}
@@ -1205,6 +1209,8 @@ function SsoMappingsTab({ projects }: { projects: Project[] }) {
       <p className="settings-help">
         When users log in via SAML, LDAP or OIDC, their group memberships are matched against these rules. A mapping without
         a project assigns a global role; a mapping with a project creates a project-level membership on first login.
+        SCIM group mappings apply as soon as your identity provider changes a group (by group name, SCIM id or external
+        id), and their roles are taken back when a user leaves the group.
       </p>
       {error && <div className="settings-error">{error}</div>}
 
@@ -1219,6 +1225,7 @@ function SsoMappingsTab({ projects }: { projects: Project[] }) {
           <option value="saml">SAML</option>
           <option value="ldap">LDAP</option>
           <option value="oidc">OIDC</option>
+          <option value="scim">SCIM groups</option>
         </select>
         <label htmlFor="sso-group">Group name</label>
         <input

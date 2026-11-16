@@ -338,6 +338,8 @@ export function sqliteSubjectStore(db: BetterSqlite3Database): SubjectStore {
       const rows: StaffSubjectRows = {
         user: user ? plainRow(user) : null,
         ssoIdentities: byUser(STAFF_SECTION_SQL.ssoIdentities),
+        scimIdentity: byUser(STAFF_SECTION_SQL.scimIdentity),
+        scimGroups: byUser(STAFF_SECTION_SQL.scimGroups),
         projectRoles: byUser(STAFF_SECTION_SQL.projectRoles),
         apiKeys: byUser(STAFF_SECTION_SQL.apiKeys),
         runsTriggered: all(STAFF_SECTION_SQL.runsTriggered, [...emails, cap]).map(plainRow),

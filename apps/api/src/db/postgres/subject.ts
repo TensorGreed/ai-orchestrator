@@ -339,6 +339,8 @@ export async function staffSubjectRows(ctx: PgContext, email: string): Promise<S
   return {
     user: user ? plainRow(user) : null,
     ssoIdentities: await byUser(STAFF_SECTION_SQL.ssoIdentities),
+    scimIdentity: await byUser(STAFF_SECTION_SQL.scimIdentity),
+    scimGroups: await byUser(STAFF_SECTION_SQL.scimGroups),
     projectRoles: await byUser(STAFF_SECTION_SQL.projectRoles),
     apiKeys: await byUser(STAFF_SECTION_SQL.apiKeys),
     runsTriggered: await all(STAFF_SECTION_SQL.runsTriggered, [...emails, cap]),
