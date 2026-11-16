@@ -4,6 +4,18 @@
 
 🌐 **[lsquarem.com](https://lsquarem.com/)** · 📚 [Docs](https://lsquarem.com/docs/) · 🚀 [5-minute tutorial](https://lsquarem.com/docs/getting-started/build-your-first-mcp-agent) · 🧩 [Patterns](https://lsquarem.com/docs/patterns/) · 🔬 [Sample projects](https://github.com/TensorGreed/l2m-samples)
 
+## Learn MCP and AI agents
+
+Free guides on [lsquarem.com/docs/learn](https://lsquarem.com/docs/learn/), written from building L2M. They're useful whether or not you use it:
+
+- [What is MCP?](https://lsquarem.com/docs/learn/mcp/what-is-mcp): hosts, clients, servers, tools and transports
+- [What is an AI agent?](https://lsquarem.com/docs/learn/agents/what-is-an-ai-agent): the tool-calling loop, step by step
+- [Prompt injection](https://lsquarem.com/docs/learn/security/prompt-injection) and [MCP security risks](https://lsquarem.com/docs/learn/security/mcp-security-risks)
+- [Regression testing agents](https://lsquarem.com/docs/learn/testing/regression-testing-agents) from recorded runs
+- [LLM gateway vs MCP gateway](https://lsquarem.com/docs/learn/operations/llm-gateway-vs-mcp-gateway)
+
+Also: the [Glossary](https://lsquarem.com/docs/glossary/), ready-to-import [Recipes](https://lsquarem.com/docs/recipes/) and the [Blog](https://lsquarem.com/docs/blog/).
+
 ## What makes it different
 
 - **MCP-first.** Wire any MCP server into an agent as a tool. The runtime compacts tool descriptions and schemas, and caches full tool outputs across multi-turn sessions so models stay grounded without re-calling expensive endpoints. You can also expose your own workflows back out as MCP tools that other agents invoke (`mcp_server_trigger`).
