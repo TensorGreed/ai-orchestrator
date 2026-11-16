@@ -18,7 +18,7 @@ import { nodeDefinitions, workflowNodeSchema, type AgentRunRequest, type AgentRu
 import { executeCodeNodeSandbox, executeWorkflow } from "../executor";
 import { IN_PROCESS_CODE_SANDBOX } from "../code-sandbox";
 import { validateWorkflowGraph } from "../validation";
-import { renderExternalImportCoverageMarkdown } from "./coverage-markdown";
+import { publicSourceType, renderExternalImportCoverageMarkdown } from "./coverage-markdown";
 import {
   EXTERNAL_IMPORT_COVERAGE,
   EXTERNAL_IMPORT_SUPPORTED_TYPES,
@@ -854,11 +854,24 @@ describe("external workflow import — additional node variants", () => {
     });
   });
 
+  it("shows source types without the vendor package prefix", () => {
+    for (const entry of EXTERNAL_IMPORT_COVERAGE) {
+      expect(publicSourceType(entry.sourceType)).not.toMatch(/n8n/i);
+    }
+    expect(publicSourceType(EXTERNAL_IMPORT_COVERAGE.find((entry) => entry.targetType === "manual_trigger")!.sourceType)).toBe("manualTrigger");
+    expect(publicSourceType("@acme/acme-nodes-langchain.lmChat*")).toBe("langchain.lmChat*");
+    expect(publicSourceType("acme-nodes-base.webhook")).toBe("webhook");
+    expect(publicSourceType("custom.thing")).toBe("custom.thing");
+  });
+
   it("keeps the checked-in docs coverage table in sync with the converter", () => {
     const docsPath = join(FIXTURE_DIR, "..", "..", "apps", "docs", "docs", "product", "external-import-coverage.md");
     const checkedIn = readFileSync(docsPath, "utf8");
     const rendered = renderExternalImportCoverageMarkdown();
-    expect(rendered).toContain("| `n8n-nodes-base.httpRequest` | `http_request` |");
+    expect(rendered).toContain("| `httpRequest` | `http_request` |");
+    expect(rendered).toContain("| `langchain.agent` | `agent_orchestrator` |");
+    // The public table names source types without the vendor's package prefix.
+    expect(rendered).not.toMatch(/n8n/i);
     expect(checkedIn).toBe(rendered);
   });
 });

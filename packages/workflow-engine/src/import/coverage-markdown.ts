@@ -22,9 +22,22 @@ function escapeCell(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
 
+/**
+ * The source type as the public table shows it: without the vendor's package prefix. Types from the core package
+ * (`<vendor>-nodes-base.webhook`) show as the bare type (`webhook`); types from another node package
+ * (`@<vendor>/<vendor>-nodes-langchain.agent`) keep the package's short name (`langchain.agent`). The registration
+ * table and the importer keep the full ids.
+ */
+export function publicSourceType(sourceType: string): string {
+  const match = /^(?:@[^/]+\/)?[^./]*-nodes-([^./]+)\.(.+)$/.exec(sourceType);
+  if (!match) return sourceType;
+  const [, packageName, type] = match;
+  return packageName === "base" ? type! : `${packageName}.${type}`;
+}
+
 function renderRows(entries: readonly ExternalImportCoverageEntry[]): string {
   return entries
-    .map((entry) => `| \`${escapeCell(entry.sourceType)}\` | \`${entry.targetType}\` | ${escapeCell(entry.notes) || "Direct mapping."} |`)
+    .map((entry) => `| \`${escapeCell(publicSourceType(entry.sourceType))}\` | \`${entry.targetType}\` | ${escapeCell(entry.notes) || "Direct mapping."} |`)
     .join("\n");
 }
 
