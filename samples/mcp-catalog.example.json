@@ -20,7 +20,7 @@
       "name": "Time",
       "description": "Time and timezone conversion. No credentials.",
       "adapter": "stdio_mcp",
-      "connection": { "command": "uvx", "args": ["mcp-server-time==0.6.2"], "timeoutMs": 30000 },
+      "connection": { "command": "uvx", "args": ["mcp-server-time==2026.11.11"], "timeoutMs": 30000 },
       "tags": ["Utilities"],
       "approved": true
     },

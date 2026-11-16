@@ -353,7 +353,7 @@ describe("MCP catalog", () => {
     expect(update.statusCode).toBe(403);
 
     const imported = await importConfig(context, admin, {
-      content: { mcpServers: { rogue: { command: "npx", args: ["-y", "rogue-mcp"] }, time: { command: "uvx", args: ["mcp-server-time==0.6.2"] } } },
+      content: { mcpServers: { rogue: { command: "npx", args: ["-y", "rogue-mcp"] }, time: { command: "uvx", args: ["mcp-server-time==2026.11.11"] } } },
       probe: false
     });
     expect(imported.body.entries.map((entry) => entry.result?.action)).toEqual(["skipped", "created"]);
