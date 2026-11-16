@@ -237,6 +237,17 @@ Same shape as a basic flow, but the LLM Call is replaced with the dedicated Azur
 
 ---
 
+## Use cases built from these patterns
+
+The [AI agents by job](/learn/use-cases/) guides combine these patterns into designs for real jobs, each with its approvals, tests and costs, and say which parts the samples cover:
+
+- Webhook to agent with approvals: [support ticket triage](/learn/use-cases/support-ticket-triage-agent), [refunds with human approval](/learn/use-cases/refund-approval-agent), [code review for pull requests](/learn/use-cases/code-review-agent) and a [Slack assistant with MCP tools](/learn/use-cases/slack-assistant-with-tools).
+- Supervisor and workers: [incident triage](/learn/use-cases/incident-triage-agent) and a [research agent that cites its sources](/learn/use-cases/research-agent-with-citations).
+- RAG: an [internal docs Q&A agent](/learn/use-cases/internal-docs-qa-agent) and [security questionnaire answers](/learn/use-cases/security-questionnaire-agent).
+- Structured output and scheduled runs: [automated data reports](/learn/use-cases/data-reporting-agent), [emails to structured records](/learn/use-cases/email-to-structured-data), a [scheduled monitoring agent](/learn/use-cases/scheduled-monitoring-agent) and [CRM enrichment](/learn/use-cases/sales-crm-enrichment-agent).
+
+---
+
 ## What's not here
 
 - **Approval-gated tool calls** — not a separate pattern: turn on [Ask before write tools](/product/approvals#approval-before-write-tools) for the workflow, or add a `require_approval` rule in the [MCP tool policy](/product/mcp-tool-policy#require-approval). The run pauses before the call until a person decides. To pause a run between steps, use an [Approval Gate](/product/approvals) node.
