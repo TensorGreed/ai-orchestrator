@@ -126,7 +126,7 @@ Cost scales with three things: how many pull request events reach the agent, how
 Ways to cap it:
 
 - **Fewer runs.** Review on `opened` and `ready_for_review` only, or skip drafts. Every push with `synchronize` is a new review.
-- **Fewer rounds.** Set `maxIterations` on the agent (an agent with no value uses 4).
+- **Fewer rounds.** Set `maxIterations` on the agent (it is required on the Agent Orchestrator; new nodes start at 6).
 - **Smaller tool results.** `toolMessageMaxChars` (default 6,000 characters) caps each tool result in the model's context; a longer one is compacted, then cut to a preview. Raising it lets the agent see bigger diffs and costs more on every round. Tell the agent to list files first and read the ones that matter.
 - **A budget.** A workflow [budget](/product/budgets) with the **Block** action refuses new runs once the period's (day, week or month) spend or token cap is used up. Budgets are optional.
 
