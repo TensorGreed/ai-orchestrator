@@ -100,6 +100,13 @@ To build the same shape yourself, follow the [supervisor and worker agents recip
 
 See also: [LLM cost control](/learn/operations/llm-cost-control) covers where agent spend comes from and how to cap it with budgets.
 
+## Common errors
+
+- [MCP server shows no tools](/learn/troubleshooting/mcp-server-shows-no-tools): the server connects but the agent sees nothing.
+- [Tool result too large](/learn/troubleshooting/mcp-tool-result-too-large): one tool response fills the context window.
+- [Model won't call tools](/learn/troubleshooting/model-does-not-call-tools): the model answers in text instead.
+- [Agent stuck in a tool loop](/learn/troubleshooting/agent-stuck-in-tool-loop): the same call repeats until max iterations.
+
 ## Further reading
 
 - [MCP specification 2025-11-25: Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) (modelcontextprotocol.io): tool definitions, `tools/list` and the tool name rules

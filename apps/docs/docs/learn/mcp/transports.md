@@ -147,6 +147,13 @@ For local use, bind the API to `127.0.0.1` with `API_HOST`. The [endpoint refere
 
 See also: [MCP security risks](/learn/security/mcp-security-risks), for the attacks these transport rules defend against and what L2M does about each.
 
+## Common errors
+
+- [MCP error -32000: Connection closed](/learn/troubleshooting/mcp-error-32000-connection-closed): a stdio server exited or wrote non-JSON to stdout.
+- [spawn npx ENOENT](/learn/troubleshooting/spawn-npx-enoent): the client could not find the server's command.
+- [Session not found (HTTP 404)](/learn/troubleshooting/mcp-session-not-found-404): a Streamable HTTP server forgot the session.
+- [Unsupported protocol version](/learn/troubleshooting/mcp-unsupported-protocol-version): client and server speak different revisions.
+
 ## Further reading
 
 - [MCP specification, 2025-11-25: Transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) (modelcontextprotocol.io)
