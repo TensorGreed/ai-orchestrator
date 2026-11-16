@@ -2,7 +2,7 @@
   "workflow": {
     "id": "wf-import-feedback_intake_mixed",
     "name": "Feedback intake (mixed)",
-    "description": "Imported from an external workflow export (6 mapped, 5 approximated, 2 unsupported).",
+    "description": "Imported from an external workflow export (6 mapped, 4 approximated, 3 unsupported).",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "variables": {
@@ -271,7 +271,8 @@
           "secretRef": {
             "secretId": "import-imap-support_inbox"
           }
-        }
+        },
+        "disabled": true
       },
       {
         "id": "top_ratings",
@@ -473,8 +474,8 @@
         "sourceId": "f-12",
         "targetNodeId": "email_trigger_imap",
         "targetType": "imap_email_trigger",
-        "status": "approximated",
-        "reason": "IMAP host, port and user live in the source credential and must be filled in after import."
+        "status": "unsupported",
+        "reason": "IMAP email intake is not supported yet: imported disabled, with its mailbox and credential kept. Forward mail to a Webhook Input instead; IMAP host, port and user live in the source credential."
       },
       {
         "sourceName": "Top ratings",
@@ -563,8 +564,8 @@
     "summary": {
       "total": 13,
       "mapped": 6,
-      "approximated": 5,
-      "unsupported": 2
+      "approximated": 4,
+      "unsupported": 3
     }
   }
 }

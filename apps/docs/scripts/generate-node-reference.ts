@@ -77,6 +77,8 @@ function asArrayOfStrings(value: unknown): string[] {
 }
 
 function describeType(prop: Record<string, unknown>): string {
+  // A field that takes either type (a number or a {{ }} template) lists both.
+  if (Array.isArray(prop.type)) return asArrayOfStrings(prop.type).join(" or ") || "any";
   const t = typeof prop.type === "string" ? prop.type : "";
   if (t === "array") {
     const items = asRecord(prop.items);

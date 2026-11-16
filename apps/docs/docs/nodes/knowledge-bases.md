@@ -27,7 +27,7 @@ POST   /api/knowledge-bases/:id/search            Standalone similarity search (
 DELETE /api/knowledge-bases/:id/sources/:sourceId Drop all chunks from one source (admin)
 ```
 
-The Studio UI under **KB** in the left sidebar drives all of the above through forms — no curl needed.
+The Studio UI under **Knowledge** in the left sidebar drives all of the above through forms — no curl needed.
 
 ## Creating a KB
 

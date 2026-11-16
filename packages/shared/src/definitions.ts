@@ -1,6 +1,7 @@
 import type { NodeDefinition } from "./types";
 import { withCredentialSpecs } from "./node-credentials";
 import { CONTENT_SAFETY_CATEGORY_VALUES, OUTPUT_GUARDRAIL_CHECK_VALUES } from "./guard";
+import { AGENT_DEFAULT_MAX_ITERATIONS } from "./agent-tools";
 
 const baseNodeDefinitions: NodeDefinition[] = [
   {
@@ -586,7 +587,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         systemPromptTemplate: { type: "string" },
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
-        maxIterations: { type: "number" },
+        // What a stored node without the field runs with (the editor shows it too).
+        maxIterations: { type: "number", default: AGENT_DEFAULT_MAX_ITERATIONS },
         /** Phase 6.4 — offer the supervisor the internal Think tool (off by default). */
         thinkTool: { type: "boolean" },
         toolMessageMaxChars: { type: "number" },
@@ -2168,7 +2170,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     label: "Slack Trigger",
     category: "Input",
     effectFreeEntry: true,
-    description: "Webhook-based trigger that validates Slack signing secret. Point Slack Events at /api/webhooks/slack/:workflowId.",
+    description: "Webhook-based trigger that validates Slack signing secret. Point Slack Events at /api/webhooks/slack/:workflowId. Slack gets its answer at once and the run goes on in the background (see the run history); a retried event (same event_id) within 10 minutes starts no second run.",
     configSchema: {
       type: "object",
       properties: {
@@ -2218,7 +2220,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "imap_email_trigger",
     label: "IMAP Email Trigger",
     category: "Input",
-    description: "Poll an IMAP inbox for new messages (requires imapflow — stubbed if missing).",
+    description: "Poll an IMAP inbox for new messages. Not supported yet: this node does not run in this build.",
+    unavailable: "IMAP email intake is not supported yet. Forward mail to a Webhook Input (most mail providers can post incoming mail to a URL) instead.",
     configSchema: {
       type: "object",
       properties: {
@@ -2515,7 +2518,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
             "listCommits"
           ]
         },
-        issueNumber: { type: "number" },
+        issueNumber: { type: ["integer", "string"], description: "A whole number or a {{ }} template, such as {{pull_request.number}}." },
         title: { type: "string" },
         body: { type: "string" },
         head: { type: "string" },
@@ -2539,7 +2542,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     label: "GitHub Webhook Trigger",
     category: "Input",
     effectFreeEntry: true,
-    description: "Webhook trigger that validates the X-Hub-Signature-256 header.",
+    description: "Webhook trigger that validates the X-Hub-Signature-256 header. Point a GitHub webhook at /api/webhooks/github/:workflowId. A redelivery (same X-GitHub-Delivery) within 10 minutes starts no second run.",
     configSchema: {
       type: "object",
       properties: {
@@ -2624,7 +2627,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     label: "Chat Trigger",
     category: "Input",
     effectFreeEntry: true,
-    description: "Receive chat messages via POST /api/chat/:workflowId. Pairs naturally with agent_orchestrator.",
+    description: "Receive chat messages via POST /api/chat/:workflowId. Pairs naturally with agent_orchestrator. authMode: session (signed-in users who can read the workflow), bearer (a stored secret) or public (anyone). A new node starts at session; a node saved without authMode is public.",
     configSchema: {
       type: "object",
       properties: {
@@ -3145,7 +3148,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
       type: "object",
       properties: {
         secretRef: { type: "object" },
-        amount: { type: "number" },
+        amount: { type: ["integer", "string"], description: "In the currency's smallest unit (cents): a whole number or a {{ }} template." },
         currency: { type: "string" },
         customerId: { type: "string" },
         description: { type: "string" },

@@ -14,7 +14,7 @@
 | `n8n-nodes-base.errorTrigger` | `error_trigger` | Direct mapping. |
 | `n8n-nodes-base.formTrigger` | `form_trigger` | File fields become text fields. |
 | `n8n-nodes-base.rssFeedReadTrigger` | `rss_trigger` | Poll times become a poll interval in seconds. |
-| `n8n-nodes-base.emailReadImap` | `imap_email_trigger` | Host, port and user live in the credential and must be filled in after import. |
+| `n8n-nodes-base.emailReadImap` | `imap_email_trigger` | Not supported yet: imported disabled, with its mailbox and credential kept. |
 
 ### Core nodes
 

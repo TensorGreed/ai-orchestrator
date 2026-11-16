@@ -10,6 +10,7 @@ import type {
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
 import {
+  AGENT_DEFAULT_MAX_ITERATIONS,
   BUILT_IN_TOOL_PROVIDERS,
   BUILT_IN_TOOL_PROVIDER_INFO,
   BUILT_IN_TOOLS_ADAPTER_ID,
@@ -22,6 +23,7 @@ import {
   triggerTrustState
 } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
+import { isNumberOrTemplateSchema, numberOrTemplateText, parseNumberOrTemplate } from "../lib/number-or-template";
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
@@ -313,10 +315,11 @@ function humanizeFieldKey(key: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-type SchemaFieldKind = "text" | "number" | "boolean" | "select" | "json";
+type SchemaFieldKind = "text" | "number" | "numberOrTemplate" | "boolean" | "select" | "json";
 
 function schemaFieldKind(propSchema: Record<string, unknown>): SchemaFieldKind {
   if (Array.isArray(propSchema.enum) && propSchema.enum.length > 0) return "select";
+  if (isNumberOrTemplateSchema(propSchema)) return "numberOrTemplate";
   const typeRaw = propSchema.type;
   const type = Array.isArray(typeRaw) ? typeRaw[0] : typeRaw;
   switch (type) {
@@ -2872,7 +2875,7 @@ export function NodeInspector({
         <div className="cfg-grid-2">
           <NumberField
             label="Max Iterations"
-            value={toNumberValue(config.maxIterations, 6)}
+            value={toNumberValue(config.maxIterations, AGENT_DEFAULT_MAX_ITERATIONS)}
             min={1}
             step={1}
             onChange={(next) => setConfig((current) => ({ ...current, maxIterations: next }))}
@@ -5894,8 +5897,19 @@ export function NodeInspector({
               <NumberField
                 key={key}
                 label={label}
-                value={toNumberValue(raw, 0)}
+                value={toNumberValue(raw, typeof propSchema.default === "number" ? propSchema.default : 0)}
                 onChange={(next) => setConfig((current) => ({ ...current, [key]: next }))}
+              />
+            );
+          }
+          if (kind === "numberOrTemplate") {
+            return (
+              <TextField
+                key={key}
+                label={label}
+                value={numberOrTemplateText(raw)}
+                placeholder="A number or {{ template }}"
+                onChange={(next) => setConfig((current) => ({ ...current, [key]: parseNumberOrTemplate(next) }))}
               />
             );
           }
@@ -8127,6 +8141,7 @@ export function NodeInspector({
             <TextField
               label="Thread TS (optional)"
               value={toStringValue(config.threadTs)}
+              placeholder="{{event.ts}}"
               onChange={(next) => setConfig((current) => ({ ...current, threadTs: next }))}
             />
           </>
@@ -8285,7 +8300,7 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, pollIntervalSeconds: next }))}
             />
             <div className="cfg-tip">
-              IMAP polling requires <code>imapflow</code>. When not installed this trigger emits a <code>NOT_IMPLEMENTED</code> error.
+              IMAP email intake is not supported yet: this trigger does not run. Forward mail to a Webhook Input instead.
             </div>
           </>
         );
@@ -8668,11 +8683,11 @@ export function NodeInspector({
               rows={4}
             />
             <div className="cfg-grid-2">
-              <NumberField
+              <TextField
                 label="Issue Number"
-                value={toNumberValue(config.issueNumber, 0)}
-                min={0}
-                onChange={(next) => setConfig((current) => ({ ...current, issueNumber: next }))}
+                value={numberOrTemplateText(config.issueNumber)}
+                placeholder="42 or {{pull_request.number}}"
+                onChange={(next) => setConfig((current) => ({ ...current, issueNumber: parseNumberOrTemplate(next) }))}
               />
               <TextField
                 label="Base Branch"

@@ -440,7 +440,7 @@ describe("external workflow import — unsupported nodes and odd expressions", (
     expect(calculator.config.importedFrom).toMatchObject({ type: "@n8n/n8n-nodes-langchain.toolCalculator" });
     expect(reportFor(conversion, "Calculator")).toMatchObject({ status: "unsupported", targetType: "noop_node" });
     expect(reportFor(conversion, "Embeddings OpenAI").status).toBe("unsupported");
-    expect(conversion.report.summary).toEqual({ total: 13, mapped: 6, approximated: 5, unsupported: 2 });
+    expect(conversion.report.summary).toEqual({ total: 13, mapped: 6, approximated: 4, unsupported: 3 });
   });
 
   it("maps the chat and sheet app nodes in the mixed flow without echoing credential ids", () => {
@@ -514,7 +514,8 @@ describe("external workflow import — unsupported nodes and odd expressions", (
     const imap = nodeById(conversion, "email_trigger_imap");
     expect(imap.type).toBe("imap_email_trigger");
     expect(imap.config).toMatchObject({ mailbox: "INBOX", secretRef: { secretId: "import-imap-support_inbox" } });
-    expect(reportFor(conversion, "Email Trigger (IMAP)").status).toBe("approximated");
+    expect(imap.disabled).toBe(true);
+    expect(reportFor(conversion, "Email Trigger (IMAP)")).toMatchObject({ status: "unsupported", reason: expect.stringContaining("not supported yet") });
   });
 
   it("keeps Python code verbatim and maps the filter", () => {

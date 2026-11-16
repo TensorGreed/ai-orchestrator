@@ -2038,7 +2038,7 @@ describe("Phase 3.1 Tier 1 integrations surface", () => {
       headers: { cookie }
     });
     expect(defResp.statusCode).toBe(200);
-    const defBody = defResp.json<{ nodes: Array<{ type: string }> }>();
+    const defBody = defResp.json<{ nodes: Array<{ type: string; unavailable?: string }> }>();
     const nodeTypes = new Set(defBody.nodes.map((n) => n.type));
     const expectedNodeTypes = [
       "slack_send_message",
@@ -2076,7 +2076,6 @@ describe("Phase 3.1 Tier 1 integrations surface", () => {
       "http",
       "slack",
       "smtp",
-      "imap",
       "gmail",
       "google-sheets",
       "postgresql",
@@ -2088,6 +2087,10 @@ describe("Phase 3.1 Tier 1 integrations surface", () => {
     for (const id of expectedIds) {
       expect(ids.has(id), `missing integration ${id}`).toBe(true);
     }
+    // IMAP intake cannot run in this build, so no integration offers it; its definition stays for stored workflows.
+    expect(ids.has("imap")).toBe(false);
+    expect(intBody.integrations.flatMap((i) => i.nodeTypes)).not.toContain("imap_email_trigger");
+    expect(defBody.nodes.find((n) => n.type === "imap_email_trigger")).toMatchObject({ unavailable: expect.stringContaining("not supported yet") });
     for (const integration of intBody.integrations) {
       expect(integration.logoPath).toMatch(/^\/logos\/.+\.svg$/);
       expect(integration.nodeTypes.length).toBeGreaterThan(0);

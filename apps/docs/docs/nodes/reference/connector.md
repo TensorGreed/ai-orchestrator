@@ -393,7 +393,7 @@ Execute a GitHub REST API operation (issues, PRs, files, commits).
 | `owner` | `string` | yes | — |
 | `repo` | `string` | yes | — |
 | `operation` | `string` | yes | `createIssue` \| `commentIssue` \| `closeIssue` \| `createPr` \| `listIssues` \| `getFile` \| `createOrUpdateFile` \| `listCommits` |
-| `issueNumber` | `number` | no | — |
+| `issueNumber` | `integer or string` | no | — |
 | `title` | `string` | no | — |
 | `body` | `string` | no | — |
 | `head` | `string` | no | — |
@@ -1078,7 +1078,7 @@ Create a Stripe PaymentIntent (the modern replacement for Charges).
 | Field | Type | Required | Values |
 |---|---|---|---|
 | `secretRef` | `object` | yes | — |
-| `amount` | `number` | yes | — |
+| `amount` | `integer or string` | yes | — |
 | `currency` | `string` | yes | — |
 | `customerId` | `string` | no | — |
 | `description` | `string` | no | — |

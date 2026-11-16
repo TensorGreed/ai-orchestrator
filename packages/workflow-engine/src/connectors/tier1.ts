@@ -12,6 +12,7 @@
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
 import type { SecretReference } from "@ai-orchestrator/shared";
 import { renderCheckedTemplate as renderTemplate } from "../template";
+import { renderIntegerField, renderRequiredString } from "./template-fields";
 
 export interface Tier1Context {
   templateData: Record<string, unknown>;
@@ -134,7 +135,8 @@ export async function executeSlackSendMessage(
   const authType = getString(config, "authType", "webhook");
   const text = renderTemplate(getString(config, "text"), ctx.templateData);
   const channel = renderTemplate(getString(config, "channel"), ctx.templateData);
-  const threadTs = getString(config, "threadTs") || undefined;
+  // A template, so a reply can go to the thread of the message that triggered the run ({{event.ts}}).
+  const threadTs = renderTemplate(getString(config, "threadTs"), ctx.templateData).trim() || undefined;
   const blocksRaw = getString(config, "blocks");
   let blocks: unknown;
   if (blocksRaw.trim()) {
@@ -300,26 +302,12 @@ export async function executeImapEmailTrigger(
   config: Record<string, unknown>,
   _ctx: Tier1Context
 ): Promise<unknown> {
-  // Prefer a graceful NOT_IMPLEMENTED error so UI can show a clear message.
-  // If imapflow is installed, replace this with a polling implementation.
-  try {
-    // attempt dynamic import to detect if imapflow is present (feature-flag style).
-    // Wrapped in a specifier-builder so TypeScript doesn't try to resolve the type.
-    const specifier = "imapflow";
-    await import(/* @vite-ignore */ specifier);
-  } catch {
-    throw new WorkflowError(
-      "imap_email_trigger: 'imapflow' is not installed. Install it in apps/api or packages/workflow-engine to enable IMAP polling.",
-      ErrorCategory.NOT_IMPLEMENTED,
-      false,
-      { host: getString(config, "host") }
-    );
-  }
-  // If we get here imapflow is available — still stub (full implementation deferred).
+  // IMAP intake is not supported yet; the node is kept so stored and imported workflows that contain it still load.
   throw new WorkflowError(
-    "imap_email_trigger: not yet implemented.",
+    "imap_email_trigger: IMAP email intake is not supported yet. Forward mail to a Webhook Input instead.",
     ErrorCategory.NOT_IMPLEMENTED,
-    false
+    false,
+    { host: getString(config, "host") }
   );
 }
 
@@ -770,8 +758,15 @@ export async function executeGitHubAction(
   config: Record<string, unknown>,
   ctx: Tier1Context
 ): Promise<unknown> {
-  const owner = requireString(config, "owner", "github_action");
-  const repo = requireString(config, "repo", "github_action");
+  // Owner, repo and issue number take templates, so a run can act on the repository and issue or PR that triggered it.
+  const owner = renderRequiredString(config, "owner", ctx.templateData, "github_action");
+  const repo = renderRequiredString(config, "repo", ctx.templateData, "github_action");
+  // A rendered name comes from run data: only a plain GitHub owner or repository name (no "." / ".." path segment).
+  for (const [key, value] of [["owner", owner], ["repo", repo]] as const) {
+    if (!/^[A-Za-z0-9._-]+$/.test(value) || value === "." || value === "..") {
+      throw new WorkflowError(`github_action: '${key}' is not a valid GitHub name: '${value.slice(0, 60)}'`, ErrorCategory.NODE_CONFIG, false);
+    }
+  }
   const operation = requireString(config, "operation", "github_action");
   const token = await resolveSecretOptional(ctx, config);
   if (!token) {
@@ -824,13 +819,13 @@ export async function executeGitHubAction(
       return call("POST", "/issues", { title, body });
     }
     case "commentIssue": {
-      const num = getNumber(config, "issueNumber", 0);
-      if (!num) throw new WorkflowError("github_action.commentIssue: issueNumber required", ErrorCategory.NODE_CONFIG, false);
+      const num = renderIntegerField(config, "issueNumber", td, "github_action.commentIssue");
+      if (!num || num < 1) throw new WorkflowError("github_action.commentIssue: issueNumber required (a positive whole number)", ErrorCategory.NODE_CONFIG, false);
       return call("POST", `/issues/${num}/comments`, { body: render(config.body) });
     }
     case "closeIssue": {
-      const num = getNumber(config, "issueNumber", 0);
-      if (!num) throw new WorkflowError("github_action.closeIssue: issueNumber required", ErrorCategory.NODE_CONFIG, false);
+      const num = renderIntegerField(config, "issueNumber", td, "github_action.closeIssue");
+      if (!num || num < 1) throw new WorkflowError("github_action.closeIssue: issueNumber required (a positive whole number)", ErrorCategory.NODE_CONFIG, false);
       return call("PATCH", `/issues/${num}`, { state: "closed" });
     }
     case "createPr": {
