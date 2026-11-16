@@ -22,7 +22,7 @@ The cost is trust. A stdio server is a program on your machine with your rights.
 
 ```json
 { "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "/srv/shared"],
+  "args": ["-y", "@modelcontextprotocol/server-filesystem@2.3.0", "/srv/shared"],
   "env": { "LOG_LEVEL": "info" } }
 ```
 

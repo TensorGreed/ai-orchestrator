@@ -84,7 +84,7 @@ export interface AiGatewayRouteSet {
   /** The project that owns the set: its budgets and model allowlist apply, and its enforced rule set on top of a bound one. Null = deployment only. */
   projectId: string | null;
   enabled: boolean;
-  /** The default rate limit for each client of the set (a client's own limit replaces it). */
+  /** The rate limit for each client of the set, counted per client. A client's own limit also applies: a request must pass both. */
   rateLimit: McpGatewayRateLimit | null;
   createdBy: string | null;
   createdAt: string;

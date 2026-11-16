@@ -3552,7 +3552,7 @@ export const openApiSpec = {
       },
       put: {
         tags: ["AI gateway"],
-        summary: "Update a route set: name, project, enabled, default rate limit (admin)",
+        summary: "Update a route set: name, project, enabled, per-client rate limit (admin)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
         responses: { "200": { description: "OK" }, "404": { description: "Not found" } }

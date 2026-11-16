@@ -18,6 +18,15 @@ export interface McpPreset {
   sandbox?: McpSandboxSettings;
 }
 
+/**
+ * Built-in presets for the registration form. Every package and image is
+ * pinned to an exact published version, so a preset starts the same server
+ * build every time and satisfies a catalog that enforces pinning. Bump the
+ * versions deliberately; `mcp-presets.test.ts` checks the shape.
+ *
+ * Python reference servers run through `uvx` (from uv), and the GitHub server
+ * through Docker; their notes say so.
+ */
 export const MCP_PRESETS: McpPreset[] = [
   {
     id: "filesystem",
@@ -29,10 +38,10 @@ export const MCP_PRESETS: McpPreset[] = [
     serverAdapter: "stdio_mcp",
     connection: {
       command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      args: ["-y", "@modelcontextprotocol/server-filesystem@2.3.0", "/tmp"],
       timeoutMs: 60000
     },
-    notes: "Replace '/tmp' with the directories you want to expose. You can pass multiple paths."
+    notes: "Needs Node.js (npx) on the L2M host. Replace '/tmp' with the directories you want to expose. You can pass multiple paths."
   },
   {
     id: "git",
@@ -42,23 +51,24 @@ export const MCP_PRESETS: McpPreset[] = [
     source: "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
     serverAdapter: "stdio_mcp",
     connection: {
-      command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-git", "--repository", "/path/to/repo"],
+      command: "uvx",
+      args: ["mcp-server-git==2026.11.11", "--repository", "/path/to/repo"],
       timeoutMs: 60000
     },
-    notes: "Replace '/path/to/repo' with the absolute path to a git repository on the host."
+    notes:
+      "A Python server: needs uv (uvx) on the L2M host. Replace '/path/to/repo' with the absolute path to a git repository on the host."
   },
   {
     id: "github",
     name: "GitHub",
     category: "Dev tools",
     description:
-      "Search code, list issues and pull requests, read repos, comment, and create issues against the GitHub API.",
-    source: "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
+      "GitHub's own MCP server: search code, read repos, and work with issues and pull requests through the GitHub API.",
+    source: "https://github.com/github/github-mcp-server",
     serverAdapter: "stdio_mcp",
     connection: {
-      command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-github"],
+      command: "docker",
+      args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server:v2.1.0"],
       secretEnvVar: "GITHUB_PERSONAL_ACCESS_TOKEN",
       timeoutMs: 60000
     },
@@ -66,56 +76,30 @@ export const MCP_PRESETS: McpPreset[] = [
       envVar: "GITHUB_PERSONAL_ACCESS_TOKEN",
       secretEnvVar: "GITHUB_PERSONAL_ACCESS_TOKEN",
       description:
-        "Create a fine-grained or classic Personal Access Token at github.com/settings/tokens with the scopes you need (e.g. repo, issues, pull_requests)."
-    }
-  },
-  {
-    id: "postgres",
-    name: "PostgreSQL",
-    category: "Databases",
-    description: "Read-only SQL access to a PostgreSQL database. Inspects schema and runs SELECT queries.",
-    source: "https://github.com/modelcontextprotocol/servers/tree/main/src/postgres",
-    serverAdapter: "stdio_mcp",
-    connection: {
-      command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@host:5432/db"],
-      timeoutMs: 60000
+        "Create a fine-grained Personal Access Token at github.com/settings/tokens with only the repositories and permissions the agent needs (read-only where possible)."
     },
     notes:
-      "Replace the DSN with your database connection string. The server is read-only by design — it cannot mutate data."
-  },
-  {
-    id: "sqlite",
-    name: "SQLite",
-    category: "Databases",
-    description: "Query and inspect a local SQLite database file. Useful for exploring local data with an agent.",
-    source: "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
-    serverAdapter: "stdio_mcp",
-    connection: {
-      command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-sqlite", "--db-path", "/path/to/database.db"],
-      timeoutMs: 60000
-    },
-    notes: "Replace '/path/to/database.db' with the absolute path to a SQLite file."
+      "Runs in Docker: needs Docker on the L2M host. The token is passed into the container by name (-e), never on the command line. The project also publishes a standalone binary; to use it, set the command to the binary with the argument 'stdio'."
   },
   {
     id: "brave-search",
     name: "Brave Search",
     category: "Search",
-    description: "Run web and local search queries via the Brave Search API.",
-    source: "https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search",
+    description: "Run web, news, image and local search queries via the Brave Search API.",
+    source: "https://github.com/brave/brave-search-mcp-server",
     serverAdapter: "stdio_mcp",
     connection: {
       command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-brave-search"],
+      args: ["-y", "@brave/brave-search-mcp-server@2.1.4", "--transport", "stdio"],
       secretEnvVar: "BRAVE_API_KEY",
       timeoutMs: 60000
     },
     credentialHint: {
       envVar: "BRAVE_API_KEY",
       secretEnvVar: "BRAVE_API_KEY",
-      description: "Get an API key from api.search.brave.com. The free tier is sufficient for casual use."
-    }
+      description: "Get an API key from api.search.brave.com."
+    },
+    notes: "Needs Node.js (npx) on the L2M host."
   },
   {
     id: "fetch",
@@ -125,10 +109,12 @@ export const MCP_PRESETS: McpPreset[] = [
     source: "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
     serverAdapter: "stdio_mcp",
     connection: {
-      command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-fetch"],
+      command: "uvx",
+      args: ["mcp-server-fetch==2026.11.11"],
       timeoutMs: 60000
-    }
+    },
+    notes:
+      "A Python server: needs uv (uvx) on the L2M host. It refuses private and loopback addresses by default and obeys robots.txt for model-initiated fetches."
   },
   {
     id: "time",
@@ -138,10 +124,11 @@ export const MCP_PRESETS: McpPreset[] = [
     source: "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
     serverAdapter: "stdio_mcp",
     connection: {
-      command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-time"],
+      command: "uvx",
+      args: ["mcp-server-time==2026.11.11"],
       timeoutMs: 30000
-    }
+    },
+    notes: "A Python server: needs uv (uvx) on the L2M host."
   },
   {
     id: "memory",
@@ -153,9 +140,10 @@ export const MCP_PRESETS: McpPreset[] = [
     serverAdapter: "stdio_mcp",
     connection: {
       command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-memory"],
+      args: ["-y", "@modelcontextprotocol/server-memory@2.1.1"],
       timeoutMs: 60000
-    }
+    },
+    notes: "Needs Node.js (npx) on the L2M host. Set MEMORY_FILE_PATH in env to choose where the graph is stored."
   },
   {
     id: "sequential-thinking",
@@ -167,46 +155,26 @@ export const MCP_PRESETS: McpPreset[] = [
     serverAdapter: "stdio_mcp",
     connection: {
       command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      args: ["-y", "@modelcontextprotocol/server-sequential-thinking@2.1.1"],
       timeoutMs: 60000
-    }
+    },
+    notes: "Needs Node.js (npx) on the L2M host."
   },
   {
-    id: "puppeteer",
-    name: "Puppeteer (Browser)",
+    id: "playwright",
+    name: "Playwright (Browser)",
     category: "Productivity",
     description:
-      "Drive a headless Chrome browser. Navigate URLs, take screenshots, fill forms, and scrape JavaScript-heavy pages.",
-    source: "https://github.com/modelcontextprotocol/servers/tree/main/src/puppeteer",
+      "Drive a headless browser through its accessibility tree: navigate URLs, click, fill forms, and read JavaScript-heavy pages.",
+    source: "https://github.com/microsoft/playwright-mcp",
     serverAdapter: "stdio_mcp",
     connection: {
       command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-puppeteer"],
+      args: ["-y", "@playwright/mcp@0.0.85", "--headless", "--isolated"],
       timeoutMs: 120000
     },
-    notes: "First run downloads Chromium (~150 MB). Subsequent runs reuse the cached browser."
-  },
-  {
-    id: "slack",
-    name: "Slack",
-    category: "Productivity",
-    description:
-      "Read channels and messages, post messages, and search Slack via a bot token. Great for ops and notification workflows.",
-    source: "https://github.com/modelcontextprotocol/servers/tree/main/src/slack",
-    serverAdapter: "stdio_mcp",
-    connection: {
-      command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-slack"],
-      env: { SLACK_TEAM_ID: "T01234567" },
-      secretEnvVar: "SLACK_BOT_TOKEN",
-      timeoutMs: 60000
-    },
-    credentialHint: {
-      envVar: "SLACK_BOT_TOKEN",
-      secretEnvVar: "SLACK_BOT_TOKEN",
-      description:
-        "Create a Slack app at api.slack.com/apps, add bot scopes (channels:read, chat:write, etc.), install to your workspace, and copy the Bot User OAuth Token (xoxb-...). Replace the placeholder SLACK_TEAM_ID in env."
-    }
+    notes:
+      "Needs Node.js (npx) and Google Chrome on the L2M host. '--isolated' keeps each session's profile in memory."
   },
   {
     id: "everything",
@@ -218,8 +186,9 @@ export const MCP_PRESETS: McpPreset[] = [
     serverAdapter: "stdio_mcp",
     connection: {
       command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-everything"],
+      args: ["-y", "@modelcontextprotocol/server-everything@2.3.0"],
       timeoutMs: 60000
-    }
+    },
+    notes: "Needs Node.js (npx) on the L2M host."
   }
 ];

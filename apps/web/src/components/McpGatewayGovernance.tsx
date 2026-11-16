@@ -250,8 +250,8 @@ const RATE_LIMIT_FIELDS: Array<{ field: RateLimitField; label: string }> = [
 ];
 
 const RATE_LIMIT_HELP: Record<Scope, string> = {
-  client: "Caps this client's tool calls on every toolset and replaces the toolset default entirely. Leave a field empty for no limit there.",
-  ai_route_set: "Caps each client's /v1 calls to this set's models. A client's own limit replaces this default entirely. Leave a field empty for no limit there.",
+  client: "Caps this client's tool calls on every toolset (replacing each toolset's default entirely) and its /v1 calls (on top of each route set's limit). Leave a field empty for no limit there.",
+  ai_route_set: "Caps each client's /v1 calls to this set's models. A client's own limit also applies; a request must pass both. Leave a field empty for no limit there.",
   toolset: "Caps each client's calls to this toolset. A client's own limit replaces this default entirely. Leave a field empty for no limit there."
 };
 

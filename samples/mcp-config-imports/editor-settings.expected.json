@@ -47,10 +47,21 @@
         "command": "/usr/local/bin/translator-mcp",
         "args": [
           "--stdio"
-        ]
+        ],
+        "secretEnvVar": "TRANSLATOR_AUTH"
       },
-      "secretMode": "none",
-      "slots": [],
+      "secretMode": "single",
+      "slots": [
+        {
+          "id": "env:TRANSLATOR_AUTH",
+          "kind": "secret",
+          "target": "env",
+          "name": "TRANSLATOR_AUTH",
+          "origin": "literal",
+          "needsValue": false,
+          "provided": false
+        }
+      ],
       "report": [
         {
           "field": "settings",
@@ -61,6 +72,11 @@
           "field": "command",
           "status": "mapped",
           "message": "/usr/local/bin/translator-mcp --stdio"
+        },
+        {
+          "field": "env.TRANSLATOR_AUTH",
+          "status": "mapped",
+          "message": "Credential moved to a secret; the value is not kept in the connection."
         }
       ],
       "status": "approximated",
@@ -87,9 +103,12 @@
         "command": "/usr/local/bin/translator-mcp",
         "args": [
           "--stdio"
-        ]
+        ],
+        "secretEnvVar": "TRANSLATOR_AUTH"
       },
-      "secretNames": [],
+      "secretNames": [
+        "TRANSLATOR_AUTH"
+      ],
       "missing": []
     }
   }

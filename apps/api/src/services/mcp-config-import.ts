@@ -720,7 +720,20 @@ function convertEntry(
       });
     }
     const env: Record<string, string> = {};
-    const rawEnv = stringRecord(value.env ?? value.environment);
+    // The context_servers shape nests env inside the command object
+    // ({ command: { path, args, env } }). A top-level env wins on a name clash.
+    const nestedEnv = isRecord(value.command) ? stringRecord(value.command.env) : {};
+    const topEnv = stringRecord(value.env ?? value.environment);
+    for (const name of Object.keys(nestedEnv)) {
+      if (name in topEnv && topEnv[name] !== nestedEnv[name]) {
+        report.push({
+          field: `command.env.${name}`,
+          status: "skipped",
+          message: `${name} is set both in the command object and in the entry's env; the entry's env value is used.`
+        });
+      }
+    }
+    const rawEnv = { ...nestedEnv, ...topEnv };
     for (const [name, envValue] of Object.entries(rawEnv)) {
       const classified = classifyValue("env", name, envValue, inputs, report);
       if ("plain" in classified) env[name] = classified.plain;

@@ -32,7 +32,7 @@ A **route** maps a public model name to a provider. Callers send that name as `m
 | API key | A stored secret, by reference. The key is never shown or returned; without one the provider's environment key applies. |
 | Defaults | Optional temperature, max tokens and top_p, used when a request leaves them out. |
 
-Routes are grouped in **route sets**. A route set belongs to a project: the project's budgets count its requests, its routes may use the project's secrets, and its project-enforced rule set applies. A route set can also carry a rule set and a default rate limit of its own.
+Routes are grouped in **route sets**. A route set belongs to a project: the project's budgets count its requests, its routes may use the project's secrets, and its project-enforced rule set applies. A route set can also carry a rule set and a rate limit of its own, counted per client on top of each client's own limit.
 
 Admins manage route sets under **MCP → AI routes**, and see their usage there. Builders see the route sets and routes, read only; usage is spend across every project, so it stays with admins, as on the Usage pages.
 

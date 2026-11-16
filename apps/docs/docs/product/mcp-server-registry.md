@@ -30,6 +30,25 @@ Admins register servers from **MCP servers → + Register server**:
 
 The server is probed once straight away unless probing is turned off for it.
 
+### Built-in presets
+
+Each preset pins an exact package or image version, so it starts the same server build every time. The runner has to be installed where the API runs. The stock API image has Node.js (`npx`) only: for the `uvx` presets, install uv in a custom image or run the API on a host that has it, and the GitHub preset needs a Docker CLI with access to a Docker daemon.
+
+| Preset | Runs with | Notes |
+|---|---|---|
+| Filesystem | `npx` (Node.js) | Replace `/tmp` with the directories to expose. |
+| Git | `uvx` (uv) | A Python server. Set `--repository` to a local repository. |
+| GitHub | `docker` | GitHub's own server. The token goes into the container by name (`-e GITHUB_PERSONAL_ACCESS_TOKEN`); pick it as the server's secret. GitHub also publishes a standalone binary, run as `github-mcp-server stdio`. |
+| Brave Search | `npx` | Needs a Brave Search API key as the secret (`BRAVE_API_KEY`). |
+| Fetch | `uvx` | A Python server. Refuses private and loopback addresses by default. |
+| Time | `uvx` | A Python server. No credentials. |
+| Knowledge Graph Memory | `npx` | Set `MEMORY_FILE_PATH` in `env` to choose where the graph is stored. |
+| Sequential Thinking | `npx` | No credentials. |
+| Playwright (Browser) | `npx` | Headless, with an in-memory profile. Needs Chrome on the host. |
+| Everything (test server) | `npx` | The MCP test server, for checking your wiring. |
+
+There is no PostgreSQL, SQLite or Slack preset: the reference servers for them are archived and unmaintained. To give an agent SQL access, register a maintained server of your choice and connect it with a database role that can only read (`GRANT SELECT` on the tables it needs, nothing else); do not rely on a server's own read-only mode. With an [approved catalog](./mcp-onboarding.md), your own entries appear as presets too.
+
 ## Using a registered server on a node
 
 Open an MCP Tool node and pick it under **Registered server**. The inline adapter, connection and secret fields disappear, because the registry entry owns them. The tool list comes from the server's latest snapshot, so opening the node never starts or calls the server. Pick **None, configure on this node** to go back to inline configuration.
@@ -231,17 +250,17 @@ A server can ask the client to run a completion on its behalf (`sampling/createM
 
 | Setting (server registry, **Sampling**) | Default | Meaning |
 |---|---|---|
-| Allow sampling | off | Servers are refused with "Sampling is off for MCP server …" until an admin turns it on. |
-| Max tokens | 1024 | Upper bound on `maxTokens` per request; larger requests are clamped. |
-| Allowed models | empty (any) | Model names the server may ask for in `modelPreferences.hints`. The first allowed hint wins; with no usable hint the attached node's model answers. |
-| Max requests per call | 3 | Requests one tool call may make; the next one is refused with "Sampling budget exhausted". |
-| Default model | none | Provider and model used when no chat model is attached: direct MCP Tool nodes and gateway calls. Without it those calls refuse sampling. |
+| Let this server ask the attached chat model to generate text during a tool call | off | Servers are refused with "Sampling is off for MCP server …" until an admin turns it on. |
+| Max tokens per request | 1024 | Upper bound on `maxTokens` per request; larger requests are clamped. |
+| Models the server may ask for | empty (only the attached model) | Model names the server may ask for in `modelPreferences.hints`. The first allowed hint wins; with no usable hint, or an empty list, the attached node's model answers. |
+| Max requests per tool call | 3 | Requests one tool call may make; the next one is refused with "Sampling budget exhausted". |
+| Default model provider / Default model | none | Provider and model used when no chat model is attached: direct MCP Tool nodes and gateway calls. Without it those calls refuse sampling. |
 
 Inside an agent or supervisor, requests are fulfilled by the chat model attached to the node, within the model's own provider and secret. Tool policy evaluates a rule of kind **sampling** with the model name as the pattern, so admins can deny sampling for a role or allow only certain models. Prompts the server sends are passed to the model as they are; they are not combined with the agent's system message.
 
 Tokens used by sampling are counted on the tool call that triggered them: the row in `mcp_tool_calls` carries `sampling_requests`, `sampling_input_tokens` and `sampling_output_tokens`, the server page's totals include them, and the run's usage adds them to the node's `_telemetry` (`samplingUsage`, `samplingRequests`). Each request, with the model that answered or the reason it was refused, is on the node's output under `_mcpSampling` and in the inspector's Trace tab.
 
-**Risk notes.** Turn sampling on only for servers you trust: the server chooses the prompt and reads the answer, and each request costs tokens on your provider account. Keep **Max requests per call** small, restrict **Allowed models** to cheap models where possible, and use a sampling policy rule to keep it away from unattended roles. L2M never forwards sampling to another instance or service; the model is always one configured in this deployment.
+**Risk notes.** Turn sampling on only for servers you trust: the server chooses the prompt and reads the answer, and each request costs tokens on your provider account. Keep **Max requests per tool call** small, restrict **Models the server may ask for** to cheap models where possible, and use a sampling policy rule to keep it away from unattended roles. L2M never forwards sampling to another instance or service; the model is always one configured in this deployment.
 
 ## Sandboxed stdio servers
 
