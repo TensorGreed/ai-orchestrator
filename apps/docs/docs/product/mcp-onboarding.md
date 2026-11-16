@@ -264,6 +264,19 @@ The playground has a panel per server capability. **Resources** lists what the s
 
 If a tool asks a question while you call it from the playground, the request is declined: the playground does not pause for input. Run the workflow from the editor to answer such questions.
 
+## Guides for common servers
+
+Step-by-step guides for running open-source servers under an agent, each with a pinned command, a least-privilege setup and a test:
+
+- [The mcpServers JSON config format, explained](/learn/mcp-servers/import-mcp-json-config): every field the importer reads, and moving servers between clients without leaking secrets
+- [Filesystem](/learn/mcp-servers/filesystem-mcp-server), [Git](/learn/mcp-servers/git-mcp-server) and [GitHub](/learn/mcp-servers/github-mcp-server) servers
+- [Read-only SQL access over MCP](/learn/mcp-servers/postgres-mcp-read-only)
+- [Fetch](/learn/mcp-servers/fetch-mcp-server) and [Playwright](/learn/mcp-servers/playwright-mcp-server) for web pages and browsers
+- [Memory server vs built-in agent memory](/learn/mcp-servers/memory-mcp-server)
+- [Test a client with the time and everything servers](/learn/mcp-servers/time-and-everything-servers), and [build a minimal server](/learn/mcp-servers/build-a-minimal-mcp-server) of your own
+
+All of them are in the [MCP servers track](/learn/mcp-servers/).
+
 ## Configuration
 
 | Variable | Default | Meaning |

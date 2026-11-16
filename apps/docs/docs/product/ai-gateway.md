@@ -180,6 +180,7 @@ See the [API endpoints](../api/endpoints#v1-ai-gateway) for the admin API.
 
 ## Concepts
 
+- [Move OpenAI-style clients to a governed gateway](../learn/operations/openai-compatible-api-gateway): a migration checklist for apps that already call an OpenAI-compatible API
 - [LLM gateway vs MCP gateway: what each one governs](../learn/operations/llm-gateway-vs-mcp-gateway)
 - [Controlling LLM and agent costs](../learn/operations/llm-cost-control)
 - [LLM gateway](../glossary/llm-gateway) (glossary)
