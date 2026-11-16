@@ -127,12 +127,21 @@ import {
   type AuditChainStatus,
   type AuditExportDestination
 } from "../lib/api";
+import {
+  LOG_STREAM_EVENT_CHOICES,
+  categoriesFor,
+  describeCategories,
+  sendsRuleEvents,
+  withRuleEvents,
+  type LogStreamEventsChoice
+} from "../lib/log-stream-categories";
 import { CredentialExpiry, RotateCredentialButton, rotatedNotice } from "./CredentialRotation";
 import { AuditSigningKeysSection } from "./AuditSigningKeysSection";
 import { NetworkSettingsTab } from "./NetworkSettingsTab";
 import { DataProtectionTab } from "./DataProtectionTab";
 import { ProjectRetentionTab } from "./ProjectRetentionTab";
 import { ServiceAccountsTab } from "./ServiceAccountsTab";
+import { ScimProvisioningTab } from "./ScimProvisioningTab";
 import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
 import { describeKeyScopes } from "../lib/key-scopes";
 import { SignedInSessionsCard } from "./SignedInSessionsCard";
@@ -149,6 +158,7 @@ type SettingsTab =
   | "external-secrets"
   | "network"
   | "service-accounts"
+  | "provisioning"
   | "data-protection"
   | "audit-log"
   | "audit-signing"
@@ -223,6 +233,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
         { id: "network", label: "Network", restricted: !isAdmin },
         { id: "service-accounts", label: "Service Accounts", restricted: !isAdmin },
+        { id: "provisioning", label: "Provisioning (SCIM)", restricted: !isAdmin },
         { id: "data-protection", label: "Data protection", restricted: !isAdmin }
       ]
     },
@@ -313,6 +324,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         )}
         {tab === "network" && isAdmin && <NetworkSettingsTab />}
         {tab === "service-accounts" && isAdmin && <ServiceAccountsTab projects={projects} />}
+        {tab === "provisioning" && isAdmin && <ScimProvisioningTab />}
         {tab === "data-protection" && isAdmin && <DataProtectionTab />}
         {tab === "audit-log" && isAdmin && <AuditLogTab />}
         {tab === "audit-signing" && isAdmin && <AuditSigningKeysSection />}
@@ -1197,6 +1209,8 @@ function SsoMappingsTab({ projects }: { projects: Project[] }) {
       <p className="settings-help">
         When users log in via SAML, LDAP or OIDC, their group memberships are matched against these rules. A mapping without
         a project assigns a global role; a mapping with a project creates a project-level membership on first login.
+        SCIM group mappings apply as soon as your identity provider changes a group (by group name, SCIM id or external
+        id), and their roles are taken back when a user leaves the group.
       </p>
       {error && <div className="settings-error">{error}</div>}
 
@@ -1211,6 +1225,7 @@ function SsoMappingsTab({ projects }: { projects: Project[] }) {
           <option value="saml">SAML</option>
           <option value="ldap">LDAP</option>
           <option value="oidc">OIDC</option>
+          <option value="scim">SCIM groups</option>
         </select>
         <label htmlFor="sso-group">Group name</label>
         <input
@@ -2143,6 +2158,7 @@ function LogStreamsTab() {
   const [type, setType] = useState<LogStreamDestinationType>("webhook");
   const [minLevel, setMinLevel] = useState<LogLevel>("info");
   const [categoriesInput, setCategoriesInput] = useState<string[]>([]);
+  const [eventsChoice, setEventsChoice] = useState<LogStreamEventsChoice>("audit");
   const [configJson, setConfigJson] = useState(
     LOG_STREAM_TYPES.find((t) => t.value === "webhook")!.sampleConfig
   );
@@ -2199,17 +2215,33 @@ function LogStreamsTab() {
         name: name.trim(),
         type,
         minLevel,
-        categories: categoriesInput,
+        categories: categoriesFor(eventsChoice, categoriesInput),
         config: parsedConfig
       });
       setName("");
       setCategoriesInput([]);
+      setEventsChoice("audit");
       if (typeMeta) setConfigJson(typeMeta.sampleConfig);
       await refresh();
     } catch (err) {
       setError(formatError(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleRuleEvents = async (dest: LogStreamDestination) => {
+    setError(null);
+    const categories = withRuleEvents(dest.categories, !sendsRuleEvents(dest.categories));
+    if (!categories) {
+      setError("This destination sends content rule events only. Disable or delete it instead.");
+      return;
+    }
+    try {
+      await updateLogStreamDestination(dest.id, { categories });
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
     }
   };
 
@@ -2273,7 +2305,8 @@ function LogStreamsTab() {
       <p className="settings-help">
         Forward audit, workflow, and system events to external log systems. Every destination encrypts
         its config at rest, streams asynchronously, and tracks success/failure counters plus recent
-        delivery events for debugging. Leave categories empty to send every event.
+        delivery events for debugging. Leave categories empty to send every audit event. Content rule
+        events are sent only to destinations that ask for them.
       </p>
       {error && <div className="settings-error">{error}</div>}
 
@@ -2303,24 +2336,36 @@ function LogStreamsTab() {
           <option value="warn">warn</option>
           <option value="error">error</option>
         </select>
-        <label>Categories</label>
-        <div className="settings-permissions-grid">
-          {LOG_STREAM_CATEGORIES.map((category) => (
-            <label key={category} className="settings-permission-option">
-              <input
-                type="checkbox"
-                checked={categoriesInput.includes(category)}
-                onChange={() => toggleCategory(category)}
-              />
-              {category}
-            </label>
+        <label htmlFor="lsd-events">Events to send</label>
+        <select id="lsd-events" value={eventsChoice} onChange={(event) => setEventsChoice(event.target.value as LogStreamEventsChoice)}>
+          {LOG_STREAM_EVENT_CHOICES.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
           ))}
-        </div>
-        <p className="settings-muted" style={{ fontSize: "0.75rem" }}>
-          {categoriesInput.length === 0
-            ? "No filter — all categories will be forwarded."
-            : `Filtering to ${categoriesInput.length} categor${categoriesInput.length === 1 ? "y" : "ies"}.`}
-        </p>
+        </select>
+        {eventsChoice !== "rules" && (
+          <>
+            <label>Audit categories</label>
+            <div className="settings-permissions-grid">
+              {LOG_STREAM_CATEGORIES.map((category) => (
+                <label key={category} className="settings-permission-option">
+                  <input
+                    type="checkbox"
+                    checked={categoriesInput.includes(category)}
+                    onChange={() => toggleCategory(category)}
+                  />
+                  {category}
+                </label>
+              ))}
+            </div>
+            <p className="settings-muted" style={{ fontSize: "0.75rem" }}>
+              {categoriesInput.length === 0
+                ? "No filter — all audit categories will be forwarded."
+                : `Filtering to ${categoriesInput.length} categor${categoriesInput.length === 1 ? "y" : "ies"}.`}
+            </p>
+          </>
+        )}
         <label htmlFor="lsd-config">Config JSON</label>
         <textarea
           id="lsd-config"
@@ -2372,11 +2417,7 @@ function LogStreamsTab() {
                       <td>{dest.type}</td>
                       <td>{dest.minLevel}</td>
                       <td>
-                        {dest.categories.length === 0 ? (
-                          <span className="settings-muted">all</span>
-                        ) : (
-                          <span className="settings-muted">{dest.categories.join(", ")}</span>
-                        )}
+                        <span className="settings-muted">{describeCategories(dest.categories)}</span>
                       </td>
                       <td>
                         {dest.dispatchedCount} / {dest.failedCount}
@@ -2396,6 +2437,9 @@ function LogStreamsTab() {
                       <td>
                         <button className="mini-btn" onClick={() => handleToggle(dest)}>
                           {dest.enabled ? "Disable" : "Enable"}
+                        </button>
+                        <button className="mini-btn" onClick={() => handleRuleEvents(dest)}>
+                          {sendsRuleEvents(dest.categories) ? "Stop content rule events" : "Send content rule events"}
                         </button>
                       </td>
                       <td>

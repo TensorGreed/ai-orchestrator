@@ -5,6 +5,8 @@ import { nanoid } from "nanoid";
 import type { LogStreamDestinationRecord } from "../db/database";
 import type { AuditEventInput } from "./audit-service";
 import type { Store } from "../db/store.js";
+import type { GuardEventInsert } from "../db/database";
+import { RULE_EVENTS_CATEGORY, ruleEventToLogStreamEvent, type RuleEventStreamOptions } from "./rule-event-stream.js";
 
 export type LogStreamDestinationType = "syslog" | "webhook" | "sentry";
 
@@ -121,6 +123,14 @@ interface QueueEntry {
   attempts: number;
 }
 
+const RULE_DESTINATIONS_TTL_MS = 5000;
+
+function withoutRuleEvidence(event: LogStreamEvent): LogStreamEvent {
+  if (event.category !== RULE_EVENTS_CATEGORY || !event.metadata || typeof event.metadata !== "object") return event;
+  const { evidence: _evidence, ...metadata } = event.metadata as Record<string, unknown>;
+  return { ...event, metadata };
+}
+
 export class LogStreamingService {
   private readonly key: Buffer;
   private readonly adapters: Map<string, LogStreamAdapter> = new Map();
@@ -136,6 +146,11 @@ export class LogStreamingService {
   private flushTimer: NodeJS.Timeout | null = null;
   private pruneTimer: NodeJS.Timeout | null = null;
   private flushInFlight: Promise<void> | null = null;
+  private flushGeneration = 0;
+  /** Failed sends wait for the next flush, so one failing destination does not hold the others up in a tight loop. */
+  private readonly retryLater: QueueEntry[] = [];
+  /** 12.7 — destinations listing `rule_events`, read at most every few seconds (cleared on any destination change). */
+  private ruleDestinations: { at: number; destinations: LogStreamDestinationRecord[] } | null = null;
   private stopped = false;
 
   constructor(
@@ -220,6 +235,7 @@ export class LogStreamingService {
     this.validateType(input.type);
     this.validateConfig(input.type, input.config);
     const id = `lsd_${nanoid(12)}`;
+    this.ruleDestinations = null;
     const encrypted = this.encryptConfig(input.config);
     await this.store.upsertLogStreamDestination({
       id,
@@ -250,6 +266,7 @@ export class LogStreamingService {
   ): Promise<LogStreamDestinationPublic | null> {
     const existing = await this.store.getLogStreamDestination(id);
     if (!existing) return null;
+    this.ruleDestinations = null;
     let mergedConfig: Record<string, unknown> | null = null;
     if (patch.config !== undefined) {
       const currentConfig = this.decryptConfig(existing);
@@ -296,6 +313,7 @@ export class LogStreamingService {
   }
 
   async deleteDestination(id: string): Promise<boolean> {
+    this.ruleDestinations = null;
     return await this.store.deleteLogStreamDestination(id);
   }
 
@@ -329,17 +347,50 @@ export class LogStreamingService {
     await this.dispatch(logEvent);
   }
 
+  /**
+   * 12.7 — content rule event rows (category `rule_events`), queued for the destinations that opted in. Only queues:
+   * the flush timer sends them, so a slow or unreachable destination never holds up the check that recorded them.
+   */
+  async dispatchRuleEvents(rows: GuardEventInsert[], options: RuleEventStreamOptions = {}): Promise<void> {
+    if (!this.enabled || rows.length === 0) return;
+    if (!this.ruleDestinations || Date.now() - this.ruleDestinations.at > RULE_DESTINATIONS_TTL_MS) {
+      const destinations = (await this.store.listLogStreamDestinations()).filter(
+        (dest) => dest.enabled && dest.categories.includes(RULE_EVENTS_CATEGORY)
+      );
+      this.ruleDestinations = { at: Date.now(), destinations };
+    }
+    const destinations = this.ruleDestinations.destinations;
+    if (destinations.length === 0) return;
+    for (const row of rows) this.enqueue(destinations, ruleEventToLogStreamEvent(row, options));
+  }
+
   async dispatch(event: LogStreamEvent): Promise<void> {
     if (!this.enabled) return;
-    const destinations = await this.store.listLogStreamDestinations();
+    this.enqueue(await this.store.listLogStreamDestinations(), event);
+  }
+
+  private enqueue(destinations: LogStreamDestinationRecord[], event: LogStreamEvent): void {
     for (const dest of destinations) {
       if (!dest.enabled) continue;
       if (!this.matches(dest, event)) continue;
-      if (this.queue.length >= this.bufferSize) {
-        this.queue.shift();
-      }
+      if (this.queue.length >= this.bufferSize && !this.makeRoomFor(event)) continue;
       this.queue.push({ destinationId: dest.id, event, attempts: 0 });
     }
+  }
+
+  /**
+   * A full buffer drops the oldest content rule event first, so a busy rule event stream cannot push audit events
+   * out; a rule event arriving at a buffer holding audit events only is dropped itself. False: drop the incoming one.
+   */
+  private makeRoomFor(event: LogStreamEvent): boolean {
+    const oldestRuleEvent = this.queue.findIndex((entry) => entry.event.category === RULE_EVENTS_CATEGORY);
+    if (oldestRuleEvent >= 0) {
+      this.queue.splice(oldestRuleEvent, 1);
+      return true;
+    }
+    if (event.category === RULE_EVENTS_CATEGORY) return false;
+    this.queue.shift();
+    return true;
   }
 
   /**
@@ -349,7 +400,7 @@ export class LogStreamingService {
    */
   flush(): Promise<void> {
     if (this.flushInFlight) return this.flushInFlight;
-    this.flushInFlight = (async () => {
+    const drain = async () => {
       try {
         while (this.queue.length > 0) {
           const entry = this.queue.shift();
@@ -357,9 +408,15 @@ export class LogStreamingService {
           await this.send(entry);
         }
       } finally {
-        this.flushInFlight = null;
+        this.queue.push(...this.retryLater.splice(0));
       }
-    })();
+    };
+    // Cleared in a later microtask, after the assignment below: a drain that finishes at once (an empty queue) used
+    // to clear the slot before it was set, so the settled promise stayed in place and no later flush sent anything.
+    const generation = ++this.flushGeneration;
+    this.flushInFlight = drain().finally(() => {
+      if (this.flushGeneration === generation) this.flushInFlight = null;
+    });
     return this.flushInFlight;
   }
 
@@ -445,8 +502,17 @@ export class LogStreamingService {
     }
   }
 
+  /**
+   * Categories: none listed sends every audit event (as before). `rule_events` is never implied: only a destination
+   * that lists it gets content rule events. `*` stands for every audit category, so `["*", "rule_events"]` sends both
+   * and `["rule_events"]` sends rule events only.
+   */
   private matches(dest: LogStreamDestinationRecord, event: LogStreamEvent): boolean {
-    if (dest.categories.length > 0 && !dest.categories.includes(event.category)) return false;
+    if (event.category === RULE_EVENTS_CATEGORY) {
+      if (!dest.categories.includes(RULE_EVENTS_CATEGORY)) return false;
+    } else if (dest.categories.length > 0 && !dest.categories.includes("*") && !dest.categories.includes(event.category)) {
+      return false;
+    }
     const minLevel = isLogLevel(dest.minLevel) ? dest.minLevel : "info";
     return LEVEL_RANK[event.level] >= LEVEL_RANK[minLevel];
   }
@@ -477,7 +543,7 @@ export class LogStreamingService {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (entry.attempts < this.retryMaxAttempts && !this.stopped) {
-        this.queue.push(entry);
+        this.retryLater.push(entry);
       } else {
         await this.writeDelivery(entry, "failed", message);
         await this.store.recordLogStreamDispatch({ destinationId: record.id, success: false, error: message });
@@ -496,7 +562,8 @@ export class LogStreamingService {
         status,
         attempts: entry.attempts,
         error,
-        payload: status === "failed" ? entry.event : undefined
+        // A rule event's evidence stays in rule events (their own retention), not in the delivery history.
+        payload: status === "failed" ? withoutRuleEvidence(entry.event) : undefined
       });
     } catch {
       // swallow — never cascade from logging
@@ -605,7 +672,8 @@ function formatSyslogMessage(event: LogStreamEvent, config: SyslogConfig): strin
     resourceType: event.resourceType ?? null,
     resourceId: event.resourceId ?? null,
     projectId: event.projectId ?? null,
-    metadata: event.metadata ?? null
+    metadata: event.metadata ?? null,
+    createdAt: event.createdAt
   });
   return `<${pri}>1 ${event.createdAt} ${hostname} ${appName} ${procId} ${msgId} ${structured} ${payload}`;
 }
@@ -644,6 +712,9 @@ const syslogAdapter: LogStreamAdapter = {
   }
 };
 
+/** A destination that accepts the connection but never answers fails the send, so it cannot hold up the queue for good. */
+const HTTP_SEND_TIMEOUT_MS = 10000;
+
 const webhookAdapter: LogStreamAdapter = {
   type: "webhook",
   async send(event, rawConfig) {
@@ -674,7 +745,7 @@ const webhookAdapter: LogStreamAdapter = {
       headers[header.toLowerCase()] = `sha256=${sig}`;
     }
     const method = config.method ?? "POST";
-    const response = await fetch(config.url, { method, headers, body });
+    const response = await fetch(config.url, { method, headers, body, signal: AbortSignal.timeout(HTTP_SEND_TIMEOUT_MS) });
     if (!response.ok) {
       throw new Error(`webhook responded ${response.status}`);
     }
@@ -736,7 +807,8 @@ const sentryAdapter: LogStreamAdapter = {
         "content-type": "application/json",
         "x-sentry-auth": auth
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(HTTP_SEND_TIMEOUT_MS)
     });
     if (!response.ok) {
       throw new Error(`sentry responded ${response.status}`);

@@ -30,6 +30,7 @@ Each request falls in one scope by its path and credential. A scope without a li
 | Webhook | `NETWORK_ALLOW_WEBHOOK` | `/webhook/*`, `/webhook-test/*`, provider webhooks (`/api/webhooks/slack/*` and the others), `/api/mcp-server/*` (with or without an API key) |
 | Public | `NETWORK_ALLOW_PUBLIC` | Forms (`/api/forms/*`), chat (`/api/chat/*`), `/widget.js`, `/helper-chat` |
 | MCP gateway | `NETWORK_ALLOW_MCP_GATEWAY` | `/mcp/*` and the `/v1/*` AI gateway, which takes the same client tokens |
+| SCIM provisioning | `NETWORK_ALLOW_SCIM` | `/scim/v2/*`, your identity provider's provisioning client (see [SCIM provisioning](./scim.md)) |
 | Metrics | `NETWORK_ALLOW_METRICS` | `/metrics`, `/api/docs`, `/api/openapi.json` |
 
 `/health`, `/ready` and the SAML metadata (`/api/auth/saml/metadata`, which the identity provider fetches) are never
@@ -272,7 +273,7 @@ nobody, and the editor flags an invalid entry.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NETWORK_ALLOW_UI`, `NETWORK_ALLOW_API`, `NETWORK_ALLOW_WEBHOOK`, `NETWORK_ALLOW_PUBLIC`, `NETWORK_ALLOW_MCP_GATEWAY`, `NETWORK_ALLOW_METRICS` | unset (open) | Addresses allowed on each scope |
+| `NETWORK_ALLOW_UI`, `NETWORK_ALLOW_API`, `NETWORK_ALLOW_WEBHOOK`, `NETWORK_ALLOW_PUBLIC`, `NETWORK_ALLOW_MCP_GATEWAY`, `NETWORK_ALLOW_METRICS`, `NETWORK_ALLOW_SCIM` | unset (open) | Addresses allowed on each scope |
 | `NETWORK_ALLOWLIST_MODE` | `enforce` | `report` admits and records would-be refusals |
 | `NETWORK_BREAK_GLASS_CIDRS` | loopback | Always admitted on UI and API (matched on the connecting address too), audited and alerted; `none` turns it off |
 | `MCP_GATEWAY_CLIENT_CERT_HEADER` | unset (off) | Header a TLS proxy forwards the verified client certificate in |

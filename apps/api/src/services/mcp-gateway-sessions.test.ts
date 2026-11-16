@@ -252,6 +252,9 @@ describe("MCP client policy subject", () => {
     const asBuilder = resolveMcpClientSubject({ getUserById: async () => ({ id: "usr_1", email: "a@example.com", role: "builder" }) }, client);
     expect(await asBuilder).toMatchObject({ role: "builder", source: "client", clientId: "mcc_1", clientName: "IDE" });
     expect((await resolveMcpClientSubject({ getUserById: async () => null }, client)).role).toBe("viewer");
+    // 13.2 — a creator SCIM disabled no longer lends the client their role.
+    const disabled = { id: "usr_1", email: "a@example.com", role: "admin", disabledAt: "2026-11-16T00:00:00.000Z" };
+    expect((await resolveMcpClientSubject({ getUserById: async () => disabled }, client)).role).toBe("viewer");
   });
 });
 

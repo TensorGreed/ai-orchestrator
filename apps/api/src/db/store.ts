@@ -107,6 +107,7 @@ import type {
 } from "./database.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
+import type { ScimStore } from "./scim-store.js";
 import type { SubjectStore } from "./subject-store.js";
 import type { LegalHoldItemView, LegalHoldRef, LegalHoldStatus, LegalHoldView, RetentionDataClass, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
 import type { RetentionScope, RetentionTable } from "./retention-tables.js";
@@ -167,6 +168,11 @@ export interface StoredUser {
   description: string | null;
   /** Service accounts: the admin who created it (kept as text; deleting that admin leaves the account working). */
   createdBy: string | null;
+  /**
+   * 13.2 (v75) — when the user was disabled (SCIM deactivation or deprovisioning); null or absent = enabled. A disabled
+   * user cannot sign in (break-glass excepted) and its API keys do not authenticate. The row and its history stay.
+   */
+  disabledAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -466,7 +472,7 @@ export interface UserInviteCreate {
   expiresAt: string;
 }
 
-export interface Store extends AiGatewayStore, SubjectStore {
+export interface Store extends AiGatewayStore, SubjectStore, ScimStore {
   // ---- Store lifecycle
 
   /** Phase 10.7 — where the database lives (a file path, or ":memory:"); names this deployment's sandbox containers. */

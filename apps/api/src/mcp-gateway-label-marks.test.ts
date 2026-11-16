@@ -554,6 +554,52 @@ describe("stored label marks of stateless callers", () => {
     expect(raised.find((entry) => (entry.metadata as { sessionId?: string }).sessionId === sessionId)!.metadata).toMatchObject({ reason: "tool_result", tool: "mock_tools__calculator" });
   });
 
+  it("skips a legacy session's mark write the stored mark already holds, for at most half an idle window", async () => {
+    const fixture = await setup({ track: true });
+    const a = fixture.instance;
+    const idle = a.config.MCP_GATEWAY_SESSION_IDLE_MS;
+    const sessionId = await legacySession(fixture, a);
+    const raise = vi.spyOn(a.store, "raiseMcpGatewayLabelMark");
+    const timeCall = async () => {
+      const response = await a.app.inject({
+        method: "POST",
+        url: `/mcp/${fixture.toolset.slug}`,
+        headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${fixture.token}`, "mcp-session-id": sessionId },
+        payload: JSON.stringify({ jsonrpc: "2.0", id: (nextId += 1), method: "tools/call", params: { name: "mock_tools__get_current_time", arguments: {} } })
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      const body = response.json<{ result?: { isError?: boolean }; error?: unknown }>();
+      expect(body.error, response.body).toBeUndefined();
+      expect(body.result?.isError).not.toBe(true);
+    };
+    // The first raising result is written, and lasts one and a half idle windows.
+    const before = Date.now();
+    await timeCall();
+    expect(raise).toHaveBeenCalledTimes(1);
+    const [first] = await a.store.listMcpGatewayLabelMarks({ clientId: fixture.client.id }, new Date().toISOString());
+    expect(Date.parse(first!.expiresAt)).toBeGreaterThanOrEqual(before + Math.ceil(idle * 1.5));
+    // The same labels again, soon after: the stored mark holds them and lives on, so nothing is written.
+    await timeCall();
+    await timeCall();
+    expect(raise).toHaveBeenCalledTimes(1);
+    // Half a window later (the stored mark has one window or less to live), the next result renews it.
+    await testSql(a.store).run(
+      `UPDATE mcp_gateway_label_marks SET expires_at = ? WHERE client_id = ?`,
+      new Date(Date.now() + idle - 1_000).toISOString(),
+      fixture.client.id
+    );
+    await timeCall();
+    expect(raise).toHaveBeenCalledTimes(2);
+    const [renewed] = await a.store.listMcpGatewayLabelMarks({ clientId: fixture.client.id }, new Date().toISOString());
+    expect(Date.parse(renewed!.expiresAt)).toBeGreaterThan(Date.now() + idle);
+    // A mark that lost its labels (deleted, then re-created empty elsewhere) is read again before the call: written.
+    await testSql(a.store).run(`DELETE FROM mcp_gateway_label_marks WHERE client_id = ?`, fixture.client.id);
+    await timeCall();
+    expect(raise).toHaveBeenCalledTimes(3);
+    const [rewritten] = await a.store.listMcpGatewayLabelMarks({ clientId: fixture.client.id }, new Date().toISOString());
+    expect(rewritten).toMatchObject({ provenance: ["untrusted_external"] });
+  });
+
   it("withholds a legacy session's result whose labels cannot be stored in the client's mark", async () => {
     const fixture = await setup({ track: true });
     const a = fixture.instance;
@@ -580,6 +626,10 @@ describe("stored label marks of stateless callers", () => {
     const a = fixture.instance;
     const sessionId = await legacySession(fixture, a);
     expect((await legacyCall(fixture, a, sessionId, "1+1")).result?.structuredContent?.result).toBe(2);
+    // Only the session holds that result: the client's best-effort note of it is gone (as when the note's write fails).
+    // With the note in place, its conversion on the next read already stores the labels and the session's write is
+    // skipped as unchanged.
+    await testSql(a.store).run(`DELETE FROM mcp_gateway_label_marks WHERE client_id = ?`, fixture.client.id);
     expect((await api(a, fixture.cookie, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { trackSessionLabels: true })).status).toBe(200);
     const raise = vi.spyOn(a.store, "raiseMcpGatewayLabelMark").mockRejectedValue(new Error("connection reset"));
     const refused = await legacyCall(fixture, a, sessionId, "2+2");

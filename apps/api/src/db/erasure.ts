@@ -461,7 +461,7 @@ export async function reapplyErasures(exec: ErasureExecutor, subjectKey: Buffer 
   if (staff.size > 0) {
     // A staff member whose email has an account created after the erasure was re-hired: their tombstone is left out
     // (their rows are theirs again). The others' accounts are deleted, unless one is the only admin who can sign in.
-    const users = await exec.all("SELECT id, email, role, kind, created_at FROM users", []);
+    const users = await exec.all("SELECT id, email, role, kind, disabled_at, created_at FROM users", []);
     const rehired = new Set<string>();
     for (const user of users) {
       const id = staffTombstoneId(subjectKey, String(user.email));
@@ -492,7 +492,7 @@ export async function reapplyErasures(exec: ErasureExecutor, subjectKey: Buffer 
     // As the live check counts them: human admins without an open invite (one who has not accepted cannot sign in).
     const invited = new Set((await exec.all("SELECT user_id FROM user_invites WHERE accepted_at IS NULL", [])).map((row) => String(row.user_id)));
     const isSignInAdmin = (user: Record<string, unknown>) =>
-      user.role === "admin" && (user.kind ?? "human") === "human" && !invited.has(String(user.id));
+      user.role === "admin" && (user.kind ?? "human") === "human" && !user.disabled_at && !invited.has(String(user.id));
     let admins = users.filter(isSignInAdmin).length;
     for (const user of users) {
       if (!staff.has(staffTombstoneId(subjectKey, String(user.email)))) continue;
@@ -513,7 +513,18 @@ export async function reapplyErasures(exec: ErasureExecutor, subjectKey: Buffer 
 export function userErasureStatements(userId: string): ErasureStatement[] {
   const id = [userId];
   return [
-    ...["sessions", "api_keys", "mfa_secrets", "sso_identities", "user_project_roles", "user_invites", "mcp_user_oauth_connections"].map((table) => ({
+    ...[
+      "sessions",
+      "api_keys",
+      "mfa_secrets",
+      "sso_identities",
+      "user_project_roles",
+      "user_invites",
+      "mcp_user_oauth_connections",
+      // 13.2 (v75) — the SCIM link (userName, names, external id) and group memberships.
+      "scim_group_members",
+      "scim_users"
+    ].map((table) => ({
       sql: `DELETE FROM ${table} WHERE user_id = ?`,
       params: id
     })),

@@ -75,4 +75,76 @@ describe("LdapService.authenticate", () => {
     await expect(refused).rejects.toBeInstanceOf(LdapAuthError);
     await expect(refused).rejects.toMatchObject({ reason: "invalid_credentials" });
   });
+
+  /** A directory that records every step this side takes, and refuses every bind but `accept`'s. */
+  function recordingService(found: Array<Record<string, unknown>>, accept?: { dn: string; password: string }) {
+    const steps: string[] = [];
+    const bindDns: string[] = [];
+    const client = (): LdapClientLike => {
+      steps.push("connect");
+      return {
+        async bind(dn: string, password: string) {
+          steps.push("bind");
+          bindDns.push(dn);
+          if (accept === undefined || dn !== accept.dn || password !== accept.password) {
+            throw Object.assign(new Error("Invalid Credentials"), { name: "InvalidCredentialsError", code: 49 });
+          }
+        },
+        async search() {
+          steps.push("search");
+          return { searchEntries: found };
+        },
+        async unbind() {
+          steps.push("unbind");
+        }
+      };
+    };
+    const ldap = new LdapService({} as Store, {
+      enabled: true,
+      url: "ldaps://directory.example.test",
+      baseDn: "dc=example,dc=test",
+      userFilter: "(mail={{email}})",
+      groupsAttribute: "memberOf"
+    }, { loadClient: () => ({ Client: class { constructor() { return client(); } } as never }) });
+    return { ldap, steps, bindDns };
+  }
+
+  it("takes the same steps for an unknown user as for a wrong password: a second connection and a refused bind", async () => {
+    const unknown = recordingService([]);
+    await expect(unknown.ldap.authenticate("nobody@example.com", "pw")).rejects.toMatchObject({ reason: "user_not_found" });
+    const wrong = recordingService([{ dn: "uid=lia,dc=example,dc=test" }], { dn: "uid=lia,dc=example,dc=test", password: "right" });
+    await expect(wrong.ldap.authenticate("lia@example.com", "bad")).rejects.toMatchObject({ reason: "invalid_credentials" });
+    expect(unknown.steps).toEqual(wrong.steps);
+    expect(unknown.steps).toEqual(["connect", "search", "unbind", "connect", "bind", "unbind", "unbind"]);
+    // The dummy bind names no real entry, and a fresh one each time.
+    const again = recordingService([]);
+    await again.ldap.authenticate("nobody@example.com", "pw").catch(() => undefined);
+    expect(unknown.bindDns[0]).toMatch(/^cn=l2m-no-such-user-[0-9a-f]{24},dc=example,dc=test$/);
+    expect(again.bindDns[0]).not.toBe(unknown.bindDns[0]);
+  });
+
+  it("refuses an unknown user even when the directory accepts the dummy bind", async () => {
+    const accepting = new LdapService({} as Store, {
+      enabled: true,
+      url: "ldaps://directory.example.test",
+      baseDn: "dc=example,dc=test",
+      userFilter: "(mail={{email}})",
+      groupsAttribute: "memberOf"
+    }, {
+      loadClient: () => ({
+        Client: class {
+          constructor() {
+            return { bind: async () => undefined, search: async () => ({ searchEntries: [] }), unbind: async () => undefined } satisfies LdapClientLike;
+          }
+        } as never
+      })
+    });
+    await expect(accepting.authenticate("nobody@example.com", "pw")).rejects.toMatchObject({ reason: "user_not_found" });
+  });
+
+  it("still reports an entry without a DN as a directory problem, after the same steps", async () => {
+    const broken = recordingService([{ mail: "lia@example.com" }]);
+    await expect(broken.ldap.authenticate("lia@example.com", "pw")).rejects.toMatchObject({ reason: "directory_error" });
+    expect(broken.steps).toEqual(["connect", "search", "unbind", "connect", "bind", "unbind", "unbind"]);
+  });
 });

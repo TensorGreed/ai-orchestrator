@@ -41,16 +41,17 @@ export type McpClientVerification =
   | { ok: false; reason: "malformed" | "unknown" | "revoked" | "expired" };
 
 export interface McpClientSubjectStore {
-  getUserById(id: string): Promise<{ id: string; email: string; role: string } | null>;
+  getUserById(id: string): Promise<{ id: string; email: string; role: string; disabledAt?: string | null } | null>;
 }
 
 /**
  * Policy subject for a gateway call: the client's role capped at its
- * creator's current role; viewer when the creator no longer exists.
+ * creator's current role; viewer when the creator no longer exists or is
+ * disabled (13.2: SCIM deactivated or deprovisioned them).
  */
 export async function resolveMcpClientSubject(store: McpClientSubjectStore, client: McpClient): Promise<McpToolPolicySubject> {
   const creator = client.createdBy ? await store.getUserById(client.createdBy) : null;
-  const creatorRole = asPolicyRole(creator?.role) ?? "viewer";
+  const creatorRole = creator?.disabledAt ? "viewer" : (asPolicyRole(creator?.role) ?? "viewer");
   return {
     role: capRole(client.role, creatorRole),
     source: "client",

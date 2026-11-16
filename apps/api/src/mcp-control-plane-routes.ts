@@ -18,7 +18,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { McpPolicyRole, McpRuntimeStateView, McpToolAnnotations } from "@ai-orchestrator/shared";
 import type { McpServerProbeRecord, McpServerRecord, McpServerStatus } from "./db/database.js";
-import type { RunAccess } from "./run-access.js";
+import { elicitationVisibleTo, type RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { McpOAuthService } from "./services/mcp-oauth-service.js";
 import { deriveStatus } from "./services/mcp-probe-service.js";
@@ -31,8 +31,7 @@ import {
   type McpTelemetryWindow
 } from "./services/mcp-tool-telemetry.js";
 import type { Store } from "./db/store.js";
-import { mapAsync } from "./async-array.js";
-import { seesOthersElicitations } from "./services/mcp-elicitation-service.js";
+import { filterAsync, mapAsync } from "./async-array.js";
 
 export interface McpControlPlaneDeps {
   app: FastifyInstance;
@@ -641,9 +640,19 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
       .sort((a, b) => b.errorRate - a.errorRate || b.errors - a.errors || a.toolName.localeCompare(b.toolName))
       .slice(0, 5);
 
-    const visibleElicitation = (record: { createdBy: string | null }) =>
-      seesOthersElicitations(user.role) || !record.createdBy || record.createdBy === user.id;
-    const openQuestions = (await store.listMcpElicitations({ status: "pending", limit: 500 })).filter(visibleElicitation);
+    // Counted as the elicitation list shows them: per workflow, by the user's role in its project.
+    const verdicts = new Map<string, Promise<boolean>>();
+    const visibleElicitation = async (record: { createdBy: string | null; workflowId: string }) => {
+      const own = !record.createdBy || record.createdBy === user.id;
+      const key = `${own ? "own" : "other"}:${record.workflowId}`;
+      let verdict = verdicts.get(key);
+      if (!verdict) {
+        verdict = elicitationVisibleTo(deps.runAccess, user, record);
+        verdicts.set(key, verdict);
+      }
+      return await verdict;
+    };
+    const openQuestions = await filterAsync(await store.listMcpElicitations({ status: "pending", limit: 500 }), visibleElicitation);
 
     const clientUsage = new Map((await store.summarizeMcpClientUsage(since)).map((row) => [row.clientId, row]));
     const clients = await store.listMcpClients();

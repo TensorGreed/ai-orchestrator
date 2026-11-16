@@ -434,7 +434,9 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
       const settled = await deps.elicitations.answer(
         request.params.id,
         { action: parsed.data.action, ...(parsed.data.content ? { content: parsed.data.content } : {}) },
-        { userId: user.id, email: user.email, role: user.role }
+        // Reaching here needs `workflow:execute` on the request's workflow (checked above): what lets a user answer a
+        // request from a run someone else started.
+        { userId: user.id, email: user.email, answersOthers: true }
       );
       // Phase 13.1 — cluster mode: the answer went to the instance running the request, which has not settled it yet.
       if (settled.status === "pending") {

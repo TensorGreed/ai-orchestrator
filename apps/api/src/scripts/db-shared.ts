@@ -103,6 +103,11 @@ export const EXPORTED_TABLES = [
   "mfa_secrets",
   "sso_identities",
   "sso_group_mappings",
+  // 13.2 (v75) — SCIM provisioning tokens (hashes only), provisioned users, groups and members
+  "scim_tokens",
+  "scim_users",
+  "scim_groups",
+  "scim_group_members",
   // Org
   "projects",
   "folders",

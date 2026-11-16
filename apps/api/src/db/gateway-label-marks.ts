@@ -116,6 +116,27 @@ export function mergeLabelMark(existing: McpGatewayLabelMark | null, input: McpG
   };
 }
 
+/**
+ * Whether a raise can be left unwritten because the stored mark already holds it: `seen` is the client's live mark as
+ * this instance last read or wrote it, and the raise would add no label, class or note to it and not be its first raise.
+ * A live mark only ever gains labels until it expires (or is deleted with its client or toolset), so while `seen` still
+ * has more than `minRemainingMs` to live, the stored mark holds every label of `input` and lives at least that long.
+ * Never true for a write that would raise the mark.
+ */
+export function labelMarkRaiseHeld(
+  seen: McpGatewayLabelMark | null | undefined,
+  input: McpGatewayLabelMarkRaise,
+  nowMs: number,
+  minRemainingMs: number
+): boolean {
+  if (!seen) return false;
+  if (!(Date.parse(seen.expiresAt) - nowMs > minRemainingMs)) return false;
+  const { next, firstRaise } = mergeLabelMark(seen, input);
+  if (firstRaise || next.unobserved !== seen.unobserved) return false;
+  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((entry, index) => entry === b[index]);
+  return same(next.provenance, seen.provenance) && same(next.dataClasses, [...seen.dataClasses].sort());
+}
+
 function jsonList(value: unknown): string[] {
   if (typeof value !== "string") return [];
   try {

@@ -22,7 +22,6 @@
 import { DEFAULT_PROJECT_ID, type Workflow } from "@ai-orchestrator/shared";
 import type { SafeUser } from "./services/auth-service.js";
 import { filterAsync } from "./async-array.js";
-import { seesOthersElicitations } from "./services/mcp-elicitation-service.js";
 
 export type RunPermission = "workflow:read" | "workflow:write" | "workflow:execute" | "workflow:delete" | "workflow:publish";
 
@@ -71,19 +70,20 @@ const notFound = (what: string): RunAccessDenial => ({ ok: false, status: 404, e
 const forbidden = (permission: RunPermission): RunAccessDenial => ({ ok: false, status: 403, error: `Permission '${permission}' required for this workflow` });
 
 /**
- * Who sees an MCP elicitation (the elicitation API and a run's event streams): like approvals, users who can read the
- * run's workflow, and of those only operator and above (by rank: operators, builders, admins) and the user who started
- * the run (anyone when nobody did).
+ * Who sees an MCP elicitation (the elicitation API, a run's event streams and the MCP overview count): like approvals,
+ * users who can read the run's workflow. A request from a run someone else started is shown only to users who may also
+ * run that workflow (`workflow:execute`), judged in the workflow's project as every other run action is: global admins
+ * always, otherwise the user's membership role there (project admins and editors yes, project viewers no, custom roles
+ * by what they grant), and without a membership the global role where isolation allows it (operators, builders and
+ * admins yes, viewers no). The user who started the run, or anyone who can read it when nobody did, sees it too.
  */
 export async function elicitationVisibleTo(
   runAccess: RunAccess,
   user: SafeUser,
   record: { createdBy: string | null; workflowId: string }
 ): Promise<boolean> {
-  return (
-    (seesOthersElicitations(user.role) || !record.createdBy || record.createdBy === user.id) &&
-    (await runAccess.workflow(user, record.workflowId, "workflow:read")).ok
-  );
+  const own = !record.createdBy || record.createdBy === user.id;
+  return (await runAccess.workflow(user, record.workflowId, own ? "workflow:read" : "workflow:execute")).ok;
 }
 
 export function createRunAccess(deps: RunAccessDeps): RunAccess {

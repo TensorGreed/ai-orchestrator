@@ -41,6 +41,7 @@ import {
   type ProvenanceLabel
 } from "@ai-orchestrator/shared";
 import type { McpProtocolVersion } from "./mcp-gateway-protocol.js";
+import type { McpGatewayLabelMark } from "../db/gateway-label-marks.js";
 
 /** A modern protocol version (2026-07-28 and later); modern callers have principal states, not sessions. */
 export type McpModernGatewayVersion = string;
@@ -79,6 +80,11 @@ export interface GatewaySession {
    * was audited (`mcp_gateway.session_labels_inherited`, once per session).
    */
   inheritedLabelsAudited?: boolean;
+  /**
+   * Legacy only (12.2, modern mode on): the client's stored mark as this session last read it (before each call) or
+   * wrote it. Lets a result whose labels the mark already holds skip the write (see storeLegacySessionRaise).
+   */
+  clientMarkSeen?: McpGatewayLabelMark;
   clientId: string;
   toolsetId: string;
   /** A legacy session's negotiated version; a principal state's version of its latest request. */

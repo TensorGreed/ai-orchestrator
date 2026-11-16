@@ -310,6 +310,7 @@ export default defineConfig({
         items: [
           { text: "Auth + RBAC", link: "/security/auth-rbac" },
           { text: "Service Accounts + API Keys", link: "/security/service-accounts" },
+          { text: "SCIM Provisioning", link: "/security/scim" },
           { text: "Secrets", link: "/security/secrets" },
           { text: "Secure Webhooks", link: "/security/secure-webhooks" },
           { text: "Audit Log", link: "/security/audit-log" },

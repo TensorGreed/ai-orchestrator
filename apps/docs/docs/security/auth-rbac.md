@@ -111,9 +111,12 @@ needs a role also accepts every role above it.
     (see [Approvals](../product/approvals.md)). Release requests in the same inbox need `workflow:publish`, which
     operators do not have. A gate that lists the `viewer` role or a viewer by name lets that viewer decide too.
   - see and answer an MCP server's question (elicitation) from a run someone else started (see
-    [Elicitation](../product/mcp-server-registry.md#elicitation-a-server-asks-the-person-a-question)). Operator and
-    above by rank (operators, builders and admins) can do this; viewers see and answer only the questions of runs they
-    started (and of queued runs).
+    [Elicitation](../product/mcp-server-registry.md#elicitation-a-server-asks-the-person-a-question)). This follows
+    the user's role in the run's project, as running the workflow does: anyone with `workflow:execute` there (global
+    admins; project admins and editors, or a custom role that grants it; without a membership, operators, builders
+    and admins) can do this. Others, such as project viewers and global viewers, see and answer only the questions of
+    runs they started (and of queued runs). A workflow shared to another project for running counts too: members who
+    may run it there also see and answer its questions.
   - connect and disconnect their own account on MCP servers that use each user's own credentials (**My connections**,
     see [Delegated credentials](../product/mcp-server-registry.md#delegated-credentials))
 
@@ -223,7 +226,7 @@ on top of the global role:
 | Save or delete a golden run / replay one | `workflow:write` / `workflow:execute` |
 | Read or search a knowledge base / ingest into one | `workflow:read` / `workflow:write` in the KB's project |
 | Read MCP cassettes (list, detail, export) | `workflow:read` on the recorded workflow |
-| Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`; a request from a run someone else started is shown only to that person and to operator and above (operators, builders, admins), except for queued runs, whose requests anyone who can read the workflow sees) |
+| Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`; a request from a run someone else started is shown only to that person and to users with `workflow:execute` in the workflow's project, except for queued runs, whose requests anyone who can read the workflow sees) |
 | Eval datasets and fixtures: list or read / create, add, delete | `workflow:read` / `workflow:write` in the dataset's project |
 | Compat webhook API (`/api/webhooks/execute`, `/stream`) | `workflow:execute` on the selected workflow |
 | Create a template from a workflow / use a template | `workflow:write` on the source / `workflow:write` in the target project |
@@ -693,8 +696,10 @@ the CAs Node trusts; for a private CA set `NODE_EXTRA_CA_CERTS` on the API.
 `POST /api/auth/ldap/login` with `{ "email": "...", "password": "..." }`:
 
 1. L2M binds as `LDAP_BIND_DN` (when set) and searches below `LDAP_BASE_DN`, in the whole subtree, with
-   `LDAP_USER_FILTER`. The first entry found is the user. No entry: `401`.
-2. It binds again as that entry's DN with the password the user gave. A wrong password: `401`.
+   `LDAP_USER_FILTER`. The first entry found is the user.
+2. It opens a new connection and binds as that entry's DN with the password the user gave. A wrong password: `401`.
+   When the search found no entry, it does the same with a random DN under `LDAP_BASE_DN` that no entry has (the
+   directory refuses it), then answers `401`, so an unknown email takes the same steps as a wrong password.
 3. The account is found by the entry's `mail` attribute (else the email the user typed). An L2M user with that email
    is signed in; otherwise a new user is created. An existing account is linked by email alone, so connect only a
    directory whose users cannot set their own `mail` value.
@@ -713,7 +718,11 @@ A user who has an authenticator set up gets `{ mfaChallenge, expiresInSeconds }`
 Without `email` or `password` the route answers `400`. Any other failure answers `401` "Invalid credentials", the same
 for every reason (an unknown user, a wrong password, a directory that cannot be reached, a certificate error, a wrong
 `LDAP_BIND_DN` password, or an account that cannot sign in), so the answer does not tell a caller whether an account
-exists. Service accounts cannot sign in through LDAP. The route counts against the sign-in rate limit
+exists. It also takes about as long: L2M makes the same requests for an unknown user as for a wrong password. What
+it cannot even out is the directory's own time. A directory may refuse a DN that does not exist faster than it checks
+a real user's password hash, and it may log or count the dummy binds (some directories record them as failed binds
+for a missing entry; none locks an account for them, since none exists). If that matters for your directory, keep the
+sign-in rate limit low and put the route behind your own login page. Service accounts cannot sign in through LDAP. The route counts against the sign-in rate limit
 (`RATE_LIMIT_AUTH_MAX`).
 
 Every LDAP sign-in is audited as `user.login` with `method: "ldap"`, like the other sign-in methods. A success records
@@ -883,6 +892,7 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Delete a user | `DELETE /api/users/:id`, `DELETE /api/service-accounts/:id` |
 | Reset a user's MFA | `POST /api/users/:id/mfa/reset` |
 | Sign another user out | `POST /api/users/:id/sessions/revoke` (not when it names your own account) |
+| Enable a user that SCIM disabled | `POST /api/users/:id/enable` |
 | Turn your own MFA off | `POST /api/auth/mfa/disable` |
 | Create an API key | `POST /api/auth/api-keys`, `POST /api/service-accounts/:id/keys` |
 | Rotate an API key | `POST /api/auth/api-keys/:id/rotate`, `POST /api/service-accounts/:id/keys/:keyId/rotate` |
@@ -890,6 +900,7 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Rotate a gateway client's token | `POST /api/mcp/clients/:id/rotate` |
 | Create, change or delete a secret | `POST /api/secrets`, `PUT /api/secrets/:id/sensitive-output`, `POST /api/secrets/:id/shares`, `DELETE /api/secrets/:id/shares/:projectId`, `DELETE /api/secrets/:id` |
 | Change SSO group mappings | `POST /api/auth/sso/mappings`, `DELETE /api/auth/sso/mappings/:id` |
+| Create, rotate or revoke a SCIM token | `POST /api/scim/tokens`, `POST /api/scim/tokens/:id/rotate`, `DELETE /api/scim/tokens/:id` |
 | Change notification channels | `POST /api/notifications`, `DELETE /api/notifications/:id` |
 | Change audit export destinations and log streams | `POST`, `PUT`, `DELETE` on `/api/audit-export/destinations` and `/api/log-streams` |
 | Import MCP servers (creates secrets) | `POST /api/mcp/servers/import` |

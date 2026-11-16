@@ -12,6 +12,7 @@ export * from "./data-destinations";
 export * from "./network-controls";
 export * from "./break-glass";
 export * from "./credential-rotation";
+export * from "./scim";
 export * from "./destination-rules";
 
 export * from "./node-credentials";

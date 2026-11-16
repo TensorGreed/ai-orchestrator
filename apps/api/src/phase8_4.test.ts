@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,17 @@ import { testSql } from "./test-support/test-sql.js";
 import { AuditService } from "./services/audit-service.js";
 import { AuditExportBusyError, AuditExportService, type AuditExportLock } from "./services/audit-export-service.js";
 import { AuditExportCursorMovedError } from "./db/store-errors.js";
+
+/** Mirrors the exporter's removal rule: every directory up to `/` owned by this user or root, writable by no one else unless sticky. */
+function onlyThisUserCanChange(dir: string): boolean {
+  if (typeof process.getuid !== "function") return false;
+  for (let current = fs.realpathSync(dir); ; current = path.dirname(current)) {
+    const stat = fs.lstatSync(current);
+    if (stat.uid !== process.getuid() && stat.uid !== 0) return false;
+    if ((stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0) return false;
+    if (path.dirname(current) === current) return true;
+  }
+}
 
 describe("Phase 8.4 — audit hash chain + export", () => {
   let tempDir: string;
@@ -22,6 +34,7 @@ describe("Phase 8.4 — audit hash chain + export", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     try { await store.close(); } catch { /* may already be closed by tampering test */ }
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -247,6 +260,141 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       await store.createAuditExportDestination({ id: "axd_ok", name: "ok", kind: "file", config: { path: path.join(safeRoot, "a", "b", "audit.ndjson") } });
       expect((await exporter.runDestination("axd_ok")).status).toBe("success");
       expect(fs.readFileSync(path.join(safeRoot, "a", "b", "audit.ndjson"), "utf8")).toContain('"eventType":"login"');
+    });
+
+    it("refuses to write when a directory on the way is swapped for a symlink between the check and the open", async () => {
+      const safeRoot = path.join(tempDir, "safe");
+      const outside = path.join(tempDir, "outside");
+      fs.mkdirSync(path.join(safeRoot, "d"), { recursive: true });
+      // Only this user can change it (a umask of 002 would leave it group-writable, where nothing is removed).
+      fs.mkdirSync(outside, { recursive: true, mode: 0o755 });
+      fs.chmodSync(outside, 0o755);
+      await store.createAuditExportDestination({ id: "axd_swap", name: "swap", kind: "file", config: { path: path.join(safeRoot, "d", "audit.ndjson") } });
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      const exporter = new AuditExportService(store, { batchSize: 100, safeFsRoot: safeRoot });
+      const realOpen = fsp.open.bind(fsp);
+      /** The swap happens after every path check, right before the file is opened. */
+      const swapOnOpen = () =>
+        vi.spyOn(fsp, "open").mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+          if (String(args[0]).endsWith(path.join("d", "audit.ndjson")) && !fs.lstatSync(path.join(safeRoot, "d")).isSymbolicLink()) {
+            fs.renameSync(path.join(safeRoot, "d"), path.join(safeRoot, "d-moved"));
+            fs.symlinkSync(outside, path.join(safeRoot, "d"));
+          }
+          return await realOpen(...args);
+        });
+      const undoSwap = () => {
+        fs.unlinkSync(path.join(safeRoot, "d"));
+        fs.renameSync(path.join(safeRoot, "d-moved"), path.join(safeRoot, "d"));
+      };
+
+      // The descriptor's own path (Linux), or the re-check elsewhere.
+      swapOnOpen();
+      const outcome = await exporter.runDestination("axd_swap");
+      expect(outcome.status).toBe("failure");
+      expect(outcome.error).toMatch(process.platform === "linux" ? /changed while it was opened/ : /through a symlink|changed while it was opened/);
+      // The file this delivery created outside (O_EXCL) is removed again (where only this user can change the directory).
+      expect(fs.existsSync(path.join(outside, "audit.ndjson"))).toBe(!onlyThisUserCanChange(outside));
+      vi.restoreAllMocks();
+      undoSwap();
+
+      // A file that already existed where the symlink leads is opened (never created), refused, and left alone.
+      fs.writeFileSync(path.join(outside, "audit.ndjson"), "theirs\n");
+      swapOnOpen();
+      const existing = await exporter.runDestination("axd_swap");
+      expect(existing.status).toBe("failure");
+      expect(fs.readFileSync(path.join(outside, "audit.ndjson"), "utf8")).toBe("theirs\n");
+      vi.restoreAllMocks();
+      undoSwap();
+      fs.rmSync(path.join(outside, "audit.ndjson"), { force: true });
+
+      // Without /proc (another platform, or not mounted): the re-check of the directory and the file name.
+      const realReadlink = fsp.readlink.bind(fsp);
+      const noProc = () =>
+        vi.spyOn(fsp, "readlink").mockImplementation(async (...args: Parameters<typeof fsp.readlink>) => {
+          if (String(args[0]).startsWith("/proc/self/fd/")) throw Object.assign(new Error("no /proc"), { code: "ENOENT" });
+          return await realReadlink(...args);
+        });
+      noProc();
+      swapOnOpen();
+      const fallback = await exporter.runDestination("axd_swap");
+      expect(fallback.status).toBe("failure");
+      expect(fallback.error).toMatch(/through a symlink|changed while it was opened/);
+      expect(fs.existsSync(path.join(outside, "audit.ndjson"))).toBe(!onlyThisUserCanChange(outside));
+      fs.rmSync(path.join(outside, "audit.ndjson"), { force: true });
+      vi.restoreAllMocks();
+      undoSwap();
+
+      // With nothing swapped, both checks let the write through.
+      noProc();
+      expect((await exporter.runDestination("axd_swap")).status).toBe("success");
+      vi.restoreAllMocks();
+      await audit.record({ category: "auth", eventType: "logout", action: "auth", outcome: "success" });
+      expect((await exporter.runDestination("axd_swap")).status).toBe("success");
+      const lines = fs.readFileSync(path.join(safeRoot, "d", "audit.ndjson"), "utf8").trim().split("\n");
+      expect(lines.map((line) => (JSON.parse(line) as { eventType: string }).eventType)).toEqual(["login", "logout"]);
+    });
+
+    it("removes a refused file it created only when it is still empty and in a directory only this user can change", async () => {
+      const safeRoot = path.join(tempDir, "safe");
+      const outside = path.join(tempDir, "outside");
+      fs.mkdirSync(path.join(safeRoot, "d"), { recursive: true });
+      // Only this user can change it (a umask of 002 would leave it group-writable, where nothing is removed).
+      fs.mkdirSync(outside, { recursive: true, mode: 0o755 });
+      fs.chmodSync(outside, 0o755);
+      await store.createAuditExportDestination({ id: "axd_keep", name: "keep", kind: "file", config: { path: path.join(safeRoot, "d", "audit.ndjson") } });
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      const exporter = new AuditExportService(store, { batchSize: 100, safeFsRoot: safeRoot });
+      const realOpen = fsp.open.bind(fsp);
+      const target = path.join(outside, "audit.ndjson");
+      /** Swaps `d` for a symlink to `outside` on the first open; `afterCreate` runs once the exclusive create opened. */
+      const swap = (afterCreate?: () => void) =>
+        vi.spyOn(fsp, "open").mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+          if (String(args[0]).endsWith(path.join("d", "audit.ndjson")) && !fs.lstatSync(path.join(safeRoot, "d")).isSymbolicLink()) {
+            fs.renameSync(path.join(safeRoot, "d"), path.join(safeRoot, "d-moved"));
+            fs.symlinkSync(outside, path.join(safeRoot, "d"));
+          }
+          const handle = await realOpen(...args);
+          if (typeof args[1] === "number" && (args[1] & fs.constants.O_EXCL) !== 0) afterCreate?.();
+          return handle;
+        });
+      const undo = () => {
+        vi.restoreAllMocks();
+        fs.unlinkSync(path.join(safeRoot, "d"));
+        fs.renameSync(path.join(safeRoot, "d-moved"), path.join(safeRoot, "d"));
+      };
+
+      // Written to by someone else after the create: no longer empty, so it is not ours to remove.
+      swap(() => fs.appendFileSync(target, "someone else\n"));
+      expect((await exporter.runDestination("axd_keep")).status).toBe("failure");
+      expect(fs.readFileSync(target, "utf8")).toBe("someone else\n");
+      undo();
+      fs.rmSync(target);
+
+      if (typeof process.getuid === "function") {
+        // A directory others may write to (not sticky): someone could re-point it before the unlink, so the file stays.
+        fs.chmodSync(outside, 0o777);
+        swap();
+        expect((await exporter.runDestination("axd_keep")).status).toBe("failure");
+        expect(fs.existsSync(target)).toBe(true);
+        expect(fs.readFileSync(target, "utf8")).toBe("");
+        undo();
+        fs.rmSync(target);
+        fs.chmodSync(outside, 0o755);
+      }
+
+      // Created by someone else between the two opens (EEXIST): opened as an existing file and delivered to.
+      let raced = false;
+      vi.spyOn(fsp, "open").mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+        if (!raced && typeof args[1] === "number" && (args[1] & fs.constants.O_EXCL) !== 0) {
+          raced = true;
+          fs.writeFileSync(path.join(safeRoot, "d", "audit.ndjson"), "");
+        }
+        return await realOpen(...args);
+      });
+      expect((await exporter.runDestination("axd_keep")).status).toBe("success");
+      expect(raced).toBe(true);
+      expect(fs.readFileSync(path.join(safeRoot, "d", "audit.ndjson"), "utf8")).toContain('"eventType":"login"');
+      vi.restoreAllMocks();
     });
 
     it("createDestination refuses a file path outside the root before storing it", async () => {

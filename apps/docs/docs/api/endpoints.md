@@ -117,7 +117,7 @@ See [MCP server registry](../product/mcp-server-registry.md).
 - `POST /api/mcp/servers/:id/resources/read` (builder; `{ uri, projectId? }`; 413 over `MCP_RESOURCE_MAX_BYTES`)
 - `GET /api/mcp/servers/:id/prompts?projectId=&refresh=` (builder)
 - `POST /api/mcp/servers/:id/prompts/get` (builder; `{ name, arguments?, projectId? }`)
-- `GET /api/mcp/elicitations?status=&executionId=` (viewer; own runs below operator)
+- `GET /api/mcp/elicitations?status=&executionId=` (viewer; users without `workflow:execute` in a run's project see only their own runs)
 - `GET /api/mcp/elicitations/:id` (viewer)
 - `POST /api/mcp/elicitations/:id/answer` (viewer; `{ action: "accept" | "decline" | "cancel", content? }`; 409 once settled)
 - Run stream event `mcp_elicitation` (`{ phase: "created" | "settled", elicitation }`) on `POST /api/workflows/:id/execute/stream`

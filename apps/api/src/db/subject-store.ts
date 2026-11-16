@@ -136,6 +136,8 @@ export interface SubjectExportRecord {
 export interface StaffSubjectRows {
   user: Record<string, unknown> | null;
   ssoIdentities: Array<Record<string, unknown>>;
+  scimIdentity: Array<Record<string, unknown>>;
+  scimGroups: Array<Record<string, unknown>>;
   projectRoles: Array<Record<string, unknown>>;
   apiKeys: Array<Record<string, unknown>>;
   runsTriggered: Array<Record<string, unknown>>;
@@ -390,7 +392,12 @@ export function scanRowParams(kind: SubjectScanKind, id: string): string[] | nul
 
 /** Columns of each staff section (never a password hash, key hash or secret). */
 export const STAFF_SECTION_SQL = {
-  user: "SELECT id, email, role, kind, description, created_by, created_at, updated_at FROM users WHERE lower(email) = lower(?)",
+  user: "SELECT id, email, role, kind, description, created_by, disabled_at, created_at, updated_at FROM users WHERE lower(email) = lower(?)",
+  // 13.2 (v75) — what the identity provider sent about them over SCIM, and the SCIM groups they are in.
+  scimIdentity:
+    "SELECT user_name, external_id, display_name, given_name, family_name, origin, created_at, updated_at FROM scim_users WHERE user_id = ? LIMIT ?",
+  scimGroups:
+    "SELECT g.id, g.display_name, g.external_id, m.created_at FROM scim_group_members m JOIN scim_groups g ON g.id = m.group_id WHERE m.user_id = ? ORDER BY g.display_name LIMIT ?",
   ssoIdentities: "SELECT id, provider, subject, email, attributes_json, created_at, updated_at FROM sso_identities WHERE user_id = ? ORDER BY created_at LIMIT ?",
   projectRoles: "SELECT project_id, role, custom_role_id, created_at, updated_at FROM user_project_roles WHERE user_id = ? ORDER BY project_id LIMIT ?",
   apiKeys: "SELECT id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at LIMIT ?",
