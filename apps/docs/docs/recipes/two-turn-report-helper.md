@@ -81,7 +81,7 @@ We ran it on a local install with two stand-ins: a local MCP server whose one to
 
 **A new session asking for code** had no saved report, so the stand-in returned `status: "needs_more_info"` with a question, as the system prompt asks.
 
-**With the echo provider**, the agent's answer is its own prompt. The parser asked once more (`maxRetries: 1`), then gave `parsed: null`, and the router fell back to keywords: "report" picked the report branch. The PDF held only the request text, and the saved report had empty fields. On the router, `intentSource: "explicit"` means the agent's intent was used, `keyword` means the fallback matched a keyword, and `default` means nothing matched.
+**With the echo provider**, the agent's answer is its own prompt. The parser asked once more (`maxRetries: 1`), then gave `parsed: null`, and the router fell back to keywords: "report" picked the report branch. The PDF held only the request text, and every field of the saved report was null. On the router, `intentSource: "explicit"` means the agent's intent was used, `keyword` means the fallback matched a keyword, and `default` means nothing matched.
 
 ## Memory, artifacts and the tool cache
 
