@@ -34,7 +34,7 @@ const question = {
   createdBy: "u-owner"
 };
 
-const owner = { userId: "u-owner", email: "owner@example.com", role: "builder" };
+const owner = { userId: "u-owner", email: "owner@example.com", answersOthers: false };
 
 describe("MCP elicitations across instances", () => {
   let testStore: TestStore | undefined;
@@ -81,7 +81,7 @@ describe("MCP elicitations across instances", () => {
 
     // Validation happens where the answer lands.
     await expect(b.answer(pending.id, { action: "accept", content: { region: "mars" } }, owner)).rejects.toMatchObject({ statusCode: 400 });
-    await expect(b.answer(pending.id, { action: "accept", content: { region: "eu" } }, { userId: "someone", email: "s@example.com", role: "viewer" })).rejects.toMatchObject({ statusCode: 403 });
+    await expect(b.answer(pending.id, { action: "accept", content: { region: "eu" } }, { userId: "someone", email: "s@example.com", answersOthers: false })).rejects.toMatchObject({ statusCode: 403 });
 
     const settled = await b.answer(pending.id, { action: "accept", content: { region: "eu" } }, owner);
     expect(settled).toMatchObject({ id: pending.id, status: "accepted", answeredBy: owner.email });

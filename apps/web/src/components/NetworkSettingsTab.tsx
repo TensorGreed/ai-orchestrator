@@ -13,7 +13,8 @@ const SCOPE_LABELS: Record<NetworkScope, { label: string; hint: string }> = {
   webhook: { label: "Webhooks", hint: "/webhook/*, provider webhooks, workflow MCP endpoints" },
   public: { label: "Public", hint: "Forms, chat, the widget" },
   mcp_gateway: { label: "MCP gateway", hint: "/mcp/*, /v1/*" },
-  metrics: { label: "Metrics", hint: "/metrics and the API docs" }
+  metrics: { label: "Metrics", hint: "/metrics and the API docs" },
+  scim: { label: "SCIM provisioning", hint: "/scim/v2/*, your identity provider's provisioning client" }
 };
 
 function formatError(err: unknown): string {

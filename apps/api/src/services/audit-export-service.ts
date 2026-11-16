@@ -480,7 +480,9 @@ export class AuditExportService {
   /**
    * Appends under the root only: the path must resolve inside it (a sibling such as `<root>-x` is outside), every
    * directory on the way must stay inside it once symlinks are resolved, and the file itself must not be a symlink
-   * (opened with O_NOFOLLOW where the platform has it).
+   * (opened with O_NOFOLLOW where the platform has it). Node has no openat, so a directory on the way could be swapped
+   * for a symlink between the check and the open; the opened file is therefore checked again before anything is
+   * written (see assertOpenedInside).
    */
   private async deliverFile(config: AuditExportDestinationConfig, ndjson: string): Promise<void> {
     if (!config.path) throw new Error("file destination missing config.path");
@@ -504,24 +506,90 @@ export class AuditExportService {
     const realDir = await fs.realpath(path.dirname(target));
     this.assertInside(realRoot, realDir, config.path);
     // O_NONBLOCK: a FIFO placed at the path must not hang the exporter (it fails as "not a regular file" below).
-    const flags =
-      fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
-    let handle: fs.FileHandle;
-    try {
-      handle = await fs.open(path.join(realDir, path.basename(target)), flags, 0o640);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ELOOP") throw new Error(`file destination path ${config.path} is a symlink; refusing to follow it`);
-      throw err;
-    }
+    const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOCTTY ?? 0);
+    const filePath = path.join(realDir, path.basename(target));
+    const opened = await this.openExportFile(filePath, flags, config.path);
+    const { handle, created } = opened;
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error(`file destination path ${config.path} is not a regular file`);
+      try {
+        await this.assertOpenedInside(handle, stat, realRoot, realDir, path.basename(target), config.path);
+      } catch (error) {
+        if (created) await removeCreatedFile(handle, stat, filePath);
+        throw error;
+      }
       // A hard link inside the root could name a file outside it.
       if (stat.nlink > 1) throw new Error(`file destination path ${config.path} has other hard links; refusing to write there`);
       await handle.appendFile(ndjson, "utf8");
     } finally {
       await handle.close();
     }
+  }
+
+  /**
+   * Opens an existing export file, and creates it only when it is missing, with O_EXCL: a create never opens a file
+   * (or FIFO or device) that already exists, and `created` says this call made it, so a create the post-open check
+   * refuses can be removed again. A file created by someone else between the two opens is opened as an existing one.
+   */
+  private async openExportFile(filePath: string, flags: number, configured: string): Promise<{ handle: fs.FileHandle; created: boolean }> {
+    const symlinkRefused = (err: unknown) =>
+      (err as NodeJS.ErrnoException).code === "ELOOP" ? new Error(`file destination path ${configured} is a symlink; refusing to follow it`) : err;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return { handle: await fs.open(filePath, flags), created: false };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw symlinkRefused(err);
+      }
+      try {
+        return { handle: await fs.open(filePath, flags | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o640), created: true };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw symlinkRefused(err);
+      }
+    }
+    throw new Error(`file destination path ${configured} keeps changing while it is opened; refusing to write there`);
+  }
+
+  /**
+   * The file just opened is the one the checked path names, so a directory swapped for a symlink after the check is
+   * refused before anything is written. On Linux, the kernel's own path of the open descriptor (`/proc/self/fd/<fd>`)
+   * must be exactly the checked directory plus the file name: there is no window left. Elsewhere, or where /proc is
+   * not mounted, the directory is resolved again and must be unchanged, and the name in it must still be the opened
+   * file (same device and inode); a swap that is undone between the open and this re-check is not caught there.
+   * When this delivery created the file and the check refuses it, the file is removed again (removeCreatedFile).
+   */
+  private async assertOpenedInside(
+    handle: fs.FileHandle,
+    opened: { dev: number; ino: number },
+    realRoot: string,
+    realDir: string,
+    name: string,
+    configured: string
+  ): Promise<void> {
+    const expected = path.join(realDir, name);
+    const changed = () => new Error(`file destination path ${configured} changed while it was opened; refusing to write there`);
+    if (process.platform === "linux") {
+      let fdPath: string | null = null;
+      try {
+        fdPath = await fs.readlink(`/proc/self/fd/${handle.fd}`);
+      } catch {
+        fdPath = null;
+      }
+      if (fdPath !== null) {
+        if (fdPath !== expected) throw changed();
+        return;
+      }
+    }
+    let dirNow: string;
+    let named: { dev: number; ino: number };
+    try {
+      dirNow = await fs.realpath(realDir);
+      named = await fs.lstat(expected);
+    } catch {
+      throw changed();
+    }
+    this.assertInside(realRoot, dirNow, configured);
+    if (dirNow !== realDir || named.dev !== opened.dev || named.ino !== opened.ino) throw changed();
   }
 
   /** `configured` resolved, and inside the root by path (no symlinks resolved yet); throws otherwise. */
@@ -540,6 +608,51 @@ export class AuditExportService {
     if (realPath !== realRoot && !isInside(realRoot, realPath)) {
       throw new Error(`file destination path ${configured} leaves ${this.safeFsRoot} through a symlink; refusing to write there`);
     }
+  }
+}
+
+/**
+ * Removes a file this delivery created (O_EXCL) whose post-open check failed. Only a still-empty regular file with the
+ * created file's device and inode is removed, and only in a directory nobody else can change: every directory from it
+ * to `/`, symlinks resolved, must belong to this process's user or root and be writable by no one else (a sticky
+ * directory such as /tmp counts when root or this user owns it). Elsewhere someone could re-point a directory between
+ * the inode check and the unlink and have another file removed, so the empty file is left. Not on Windows (no owner
+ * check), where it is left too. Candidates: where the kernel says the descriptor is (Linux), then the checked path.
+ */
+async function removeCreatedFile(handle: fs.FileHandle, created: { dev: number; ino: number }, checkedPath: string): Promise<void> {
+  if (typeof process.getuid !== "function") return;
+  const candidates: string[] = [];
+  if (process.platform === "linux") {
+    const fdPath = await fs.readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
+    if (fdPath && !fdPath.endsWith(" (deleted)")) candidates.push(fdPath);
+  }
+  candidates.push(checkedPath);
+  for (const candidate of candidates) {
+    try {
+      const dir = await fs.realpath(path.dirname(candidate));
+      if (!(await onlyThisUserCanChange(dir, process.getuid()))) continue;
+      const resolved = path.join(dir, path.basename(candidate));
+      const found = await fs.lstat(resolved);
+      if (found.isFile() && found.size === 0 && found.dev === created.dev && found.ino === created.ino) {
+        await fs.unlink(resolved);
+        return;
+      }
+    } catch {
+      // Not there (any more), or not ours to remove.
+    }
+  }
+}
+
+/** Every directory from `dir` (already resolved) up to `/` is owned by `uid` or root and writable by no one else. */
+async function onlyThisUserCanChange(dir: string, uid: number): Promise<boolean> {
+  for (let current = dir; ; current = path.dirname(current)) {
+    const stat = await fs.lstat(current);
+    if (!stat.isDirectory()) return false;
+    const ownerTrusted = stat.uid === uid || stat.uid === 0;
+    const othersWrite = (stat.mode & 0o022) !== 0;
+    const sticky = (stat.mode & 0o1000) !== 0;
+    if (!ownerTrusted || (othersWrite && !sticky)) return false;
+    if (path.dirname(current) === current) return true;
   }
 }
 

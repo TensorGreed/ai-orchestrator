@@ -347,6 +347,10 @@ describe("MCP control plane routes", () => {
     expect(empty.body.changes).toEqual([]);
 
     const { mockId } = await seed(context, admin);
+    // Open questions are counted as the elicitation list shows them: only for workflows the user can read.
+    const hiddenCount = await call<{ elicitations: { pending: number } }>(context, "GET", "/api/mcp/overview?window=24h", builder);
+    expect(hiddenCount.body.elicitations.pending).toBe(0);
+    await context.store.upsertWorkflow(workflowUsing(mockId));
     type Overview = {
       servers: { total: number; byStatus: Record<string, number> };
       sampling: Array<{ serverId: string }>;

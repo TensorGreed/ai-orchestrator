@@ -363,7 +363,11 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "POST", url: "/api/legal-holds/lh_x/release", payload: { reason: "r" } },
       { method: "POST", url: "/api/data-protection/requests", payload: { type: "export", value: "ana@example.com", revealTokens: true } },
       { method: "GET", url: "/api/data-protection/requests/dsr_x/export" },
-      { method: "POST", url: "/api/data-protection/requests/dsr_x/confirm", payload: {} }
+      { method: "POST", url: "/api/data-protection/requests/dsr_x/confirm", payload: {} },
+      { method: "POST", url: `/api/users/${other.id}/enable` },
+      { method: "POST", url: "/api/scim/tokens", payload: { name: "idp" } },
+      { method: "POST", url: "/api/scim/tokens/sct_x/rotate", payload: {} },
+      { method: "DELETE", url: "/api/scim/tokens/sct_x" }
     ];
     const seen = new Set<string>();
     for (const route of routes) {
