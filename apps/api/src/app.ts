@@ -326,6 +326,7 @@ import {
   type DispatchedRunSpec
 } from "./services/run-dispatch.js";
 import { DeliveryDedupe } from "./services/delivery-dedupe.js";
+import { acceptSlackEvent } from "./services/slack-intake.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
 import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
@@ -12045,6 +12046,9 @@ export async function createApp(
   const MAX_BACKGROUND_SLACK_RUNS = 100;
   const SLACK_CLOSE_WAIT_MS = 10_000;
   const backgroundSlackRuns = new Set<Promise<void>>();
+  // Slack events between the checks below and their answer (start awaits the budget check and the queue).
+  let slackStartsInFlight = 0;
+  const slackEventsStarting = new Set<string>();
   app.addHook("onClose", async () => {
     if (backgroundSlackRuns.size === 0) return;
     let timer: NodeJS.Timeout | undefined;
@@ -12112,20 +12116,31 @@ export async function createApp(
       // was late. Without an event_id, a retry is still one Slack says it sent before.
       const eventId = body && typeof body.event_id === "string" && body.event_id.length > 0 ? body.event_id : null;
       const dedupeKey = eventId ? `${workflow.id}:${eventId}` : null;
+      // A retry while the first delivery is still being started: its outcome is not known yet (it may be refused and
+      // forgotten), so this one is not acknowledged; Slack sends it again.
+      if (dedupeKey && slackEventsStarting.has(dedupeKey)) {
+        reply.code(503);
+        return { error: "This Slack event is still being started; Slack will retry it." };
+      }
       if (dedupeKey ? slackEventDedupe.seen(dedupeKey) : getHeaderValue(request.headers, "x-slack-retry-num") !== "") {
         return { ok: true, duplicate: true };
       }
 
-      if (backgroundSlackRuns.size >= MAX_BACKGROUND_SLACK_RUNS) {
+      // Slots are held from here, before any await, so a burst cannot pass the check together.
+      if (backgroundSlackRuns.size + slackStartsInFlight >= MAX_BACKGROUND_SLACK_RUNS) {
         if (dedupeKey) slackEventDedupe.forget(dedupeKey);
         reply.code(503);
         return { error: "Too many Slack events are running; Slack will retry this one." };
       }
+      slackStartsInFlight += 1;
+      if (dedupeKey) slackEventsStarting.add(dedupeKey);
 
-      // Answered at once (Slack waits 3 seconds); the run goes on in the background and is in the run history.
+      // Queue dispatch answers once the queue took the job; inline answers at once and runs in the background (Slack
+      // waits 3 seconds). A refusal answers 5xx so Slack sends the event again.
       const executionId = crypto.randomUUID();
-      const started = runDispatcher
-        .fire(
+      let answer: Awaited<ReturnType<typeof acceptSlackEvent>>;
+      try {
+        answer = await acceptSlackEvent(
           {
             v: DISPATCH_SPEC_VERSION,
             run: {
@@ -12139,23 +12154,30 @@ export async function createApp(
             progress: { requestInput: body ?? {} },
             history: { requestInput: body ?? {} }
           },
-          { pool: dispatchPoolOf(workflow), enforceBackpressure: true, ...(eventId ? { queueItemId: `slack:${workflow.id}:${eventId}` } : {}) }
-        )
-        .then(
-          () => undefined,
-          (error: unknown) => {
-            // Refused or failed (the budgets could not be read, the queue was full, the run threw): a redelivery of
-            // the event may try again.
-            if (dedupeKey) slackEventDedupe.forget(dedupeKey);
-            app.log.error(
-              { workflowId: workflow.id, executionId, err: secretService.redact(error instanceof Error ? error.message : String(error)) },
-              "A Slack event's run was refused or failed"
-            );
+          { pool: dispatchPoolOf(workflow), ...(eventId ? { queueItemId: `slack:${workflow.id}:${eventId}` } : {}) },
+          {
+            dispatcher: runDispatcher,
+            track: (run) => {
+              backgroundSlackRuns.add(run);
+              void run.finally(() => backgroundSlackRuns.delete(run));
+            },
+            onNotTaken: (error) => {
+              // Refused before the answer (the budgets could not be read, the queue was full or failed): Slack gets a 5xx
+              // and its redelivery runs. An inline run that failed after the answer is only logged.
+              if (dedupeKey) slackEventDedupe.forget(dedupeKey);
+              app.log.error(
+                { workflowId: workflow.id, executionId, err: secretService.redact(error instanceof Error ? error.message : String(error)) },
+                "A Slack event's run was refused or failed"
+              );
+            }
           }
         );
-      backgroundSlackRuns.add(started);
-      void started.finally(() => backgroundSlackRuns.delete(started));
-      return { ok: true, accepted: true, executionId };
+      } finally {
+        slackStartsInFlight -= 1;
+        if (dedupeKey) slackEventsStarting.delete(dedupeKey);
+      }
+      reply.code(answer.status);
+      return answer.body;
     }
   );
 
