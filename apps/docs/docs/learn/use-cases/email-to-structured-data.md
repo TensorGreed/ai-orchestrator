@@ -1,15 +1,15 @@
 ---
-title: "Turn incoming emails into structured records"
+title: "Turn emails into structured data with an AI agent"
 sidebarTitle: "Email to structured data"
-description: "Extract fields from incoming email into JSON with a schema, validate them in code, write clean rows to a sheet and send doubtful ones to a person first."
+description: "Have a mail relay post emails to a webhook, extract fields into JSON with a schema, check them in code, write clean rows, send doubtful ones to a person."
 level: intermediate
 demo: wf-structured-output
 related: [indirect-prompt-injection, output-checks, approval-gate, golden-set, improper-output-handling]
 ---
 
-# Turn incoming emails into structured records
+# Turn emails into structured data with an AI agent
 
-An email-extraction workflow takes each incoming message, asks a model to pull out the fields you care about (vendor, invoice number, date, total), checks the answer against a schema and your own business rules, and writes a row to a sheet or a system of record. The key safety choice is that the extracting model has no tools and its output is treated as untrusted data: nothing is written until a parser and a code check accept it, and anything doubtful goes to a person. L2M has the extraction pieces (LLM Call, Output Parser with schema retries, Code, If, Approval Gate, Google Sheets: Append); the mail intake you connect yourself, through a webhook.
+An email-extraction workflow takes each message your mail system forwards to it, asks a model to pull out the fields you care about (vendor, invoice number, date, total), checks the answer against a schema and your own business rules, and writes a row to a sheet or a system of record. The key safety choice is that the extracting model has no tools and its output is treated as untrusted data: nothing is written until a parser and a code check accept it, and anything doubtful goes to a person. L2M has the extraction pieces (LLM Call, Output Parser with schema retries, Code, If, Approval Gate, Google Sheets: Append); the mail intake you connect yourself, through a webhook.
 
 ## The job
 
