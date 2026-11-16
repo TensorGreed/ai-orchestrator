@@ -142,6 +142,59 @@ describe("rule events on log streams", () => {
     expect(sent.map((entry) => entry.event.eventType)).toEqual(["a1", "a2", "a3"]);
   });
 
+  it("retries a failed send on the next flush, and keeps rule event evidence out of the delivery history", async () => {
+    const { service, store, destination } = await setup();
+    const attempts: string[] = [];
+    service.registerAdapter({
+      type: "syslog",
+      async send(_event, config) {
+        attempts.push(String(config.host));
+        if (config.host === "down") throw new Error("connection refused");
+      }
+    });
+    const down = await destination("down", ["rule_events"]);
+    await destination("up", ["rule_events"]);
+    await service.dispatchRuleEvents([row()]);
+    await service.flush();
+    // retryMaxAttempts is 1 here: the failure is final and recorded without the evidence.
+    expect(attempts.sort()).toEqual(["down", "up"]);
+    const history = await store.listLogStreamEvents({ destinationId: down.id, limit: 10 });
+    expect(history).toHaveLength(1);
+    expect(history[0]!.status).toBe("failed");
+    const payload = JSON.stringify(history[0]!.payload);
+    expect(payload).toContain("l2m.rule_event");
+    expect(payload).not.toContain("m***@");
+  });
+
+  it("puts a failed send behind the other destinations' sends until the next flush", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-rule-retry-"));
+    const store: Store = await openTestStore(path.join(dir, "db.sqlite"));
+    const service = new LogStreamingService(store, crypto.randomBytes(32).toString("base64"), { retryMaxAttempts: 3 });
+    cleanups.push(async () => {
+      await service.stop();
+      try {
+        await store.close();
+      } catch {
+        // Already closed.
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    const attempts: string[] = [];
+    service.registerAdapter({
+      type: "syslog",
+      async send(_event, config) {
+        attempts.push(String(config.host));
+        if (config.host === "down") throw new Error("connection refused");
+      }
+    });
+    for (const host of ["down", "up"]) await service.createDestination({ name: host, type: "syslog", categories: ["rule_events"], config: { host, port: 514 } });
+    await service.dispatchRuleEvents([row()]);
+    await service.flush();
+    expect(attempts.sort()).toEqual(["down", "up"]);
+    await service.flush();
+    expect(attempts.filter((host) => host === "down")).toHaveLength(2);
+  });
+
   it("queues without sending: a destination that hangs does not hold up the caller", async () => {
     const { service, destination } = await setup();
     let release: () => void = () => {};

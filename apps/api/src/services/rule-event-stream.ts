@@ -85,8 +85,10 @@ function digestOf(value: string): string {
   return `sha256:${createHash("sha256").update(value).digest("hex").slice(0, 16)}`;
 }
 
+/** Cut by code point, so a surrogate pair is never split. */
 function capped(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  const points = Array.from(value);
+  return points.length > max ? `${points.slice(0, max).join("")}…` : value;
 }
 
 export function toRuleStreamEvent(row: GuardEventInsert, options: RuleEventStreamOptions = {}): RuleStreamEvent {

@@ -123,6 +123,14 @@ interface QueueEntry {
   attempts: number;
 }
 
+const RULE_DESTINATIONS_TTL_MS = 5000;
+
+function withoutRuleEvidence(event: LogStreamEvent): LogStreamEvent {
+  if (event.category !== RULE_EVENTS_CATEGORY || !event.metadata || typeof event.metadata !== "object") return event;
+  const { evidence: _evidence, ...metadata } = event.metadata as Record<string, unknown>;
+  return { ...event, metadata };
+}
+
 export class LogStreamingService {
   private readonly key: Buffer;
   private readonly adapters: Map<string, LogStreamAdapter> = new Map();
@@ -139,6 +147,10 @@ export class LogStreamingService {
   private pruneTimer: NodeJS.Timeout | null = null;
   private flushInFlight: Promise<void> | null = null;
   private flushGeneration = 0;
+  /** Failed sends wait for the next flush, so one failing destination does not hold the others up in a tight loop. */
+  private readonly retryLater: QueueEntry[] = [];
+  /** 12.7 — destinations listing `rule_events`, read at most every few seconds (cleared on any destination change). */
+  private ruleDestinations: { at: number; destinations: LogStreamDestinationRecord[] } | null = null;
   private stopped = false;
 
   constructor(
@@ -223,6 +235,7 @@ export class LogStreamingService {
     this.validateType(input.type);
     this.validateConfig(input.type, input.config);
     const id = `lsd_${nanoid(12)}`;
+    this.ruleDestinations = null;
     const encrypted = this.encryptConfig(input.config);
     await this.store.upsertLogStreamDestination({
       id,
@@ -253,6 +266,7 @@ export class LogStreamingService {
   ): Promise<LogStreamDestinationPublic | null> {
     const existing = await this.store.getLogStreamDestination(id);
     if (!existing) return null;
+    this.ruleDestinations = null;
     let mergedConfig: Record<string, unknown> | null = null;
     if (patch.config !== undefined) {
       const currentConfig = this.decryptConfig(existing);
@@ -299,6 +313,7 @@ export class LogStreamingService {
   }
 
   async deleteDestination(id: string): Promise<boolean> {
+    this.ruleDestinations = null;
     return await this.store.deleteLogStreamDestination(id);
   }
 
@@ -338,9 +353,13 @@ export class LogStreamingService {
    */
   async dispatchRuleEvents(rows: GuardEventInsert[], options: RuleEventStreamOptions = {}): Promise<void> {
     if (!this.enabled || rows.length === 0) return;
-    const destinations = (await this.store.listLogStreamDestinations()).filter(
-      (dest) => dest.enabled && dest.categories.includes(RULE_EVENTS_CATEGORY)
-    );
+    if (!this.ruleDestinations || Date.now() - this.ruleDestinations.at > RULE_DESTINATIONS_TTL_MS) {
+      const destinations = (await this.store.listLogStreamDestinations()).filter(
+        (dest) => dest.enabled && dest.categories.includes(RULE_EVENTS_CATEGORY)
+      );
+      this.ruleDestinations = { at: Date.now(), destinations };
+    }
+    const destinations = this.ruleDestinations.destinations;
     if (destinations.length === 0) return;
     for (const row of rows) this.enqueue(destinations, ruleEventToLogStreamEvent(row, options));
   }
@@ -382,10 +401,14 @@ export class LogStreamingService {
   flush(): Promise<void> {
     if (this.flushInFlight) return this.flushInFlight;
     const drain = async () => {
-      while (this.queue.length > 0) {
-        const entry = this.queue.shift();
-        if (!entry) break;
-        await this.send(entry);
+      try {
+        while (this.queue.length > 0) {
+          const entry = this.queue.shift();
+          if (!entry) break;
+          await this.send(entry);
+        }
+      } finally {
+        this.queue.push(...this.retryLater.splice(0));
       }
     };
     // Cleared in a later microtask, after the assignment below: a drain that finishes at once (an empty queue) used
@@ -520,7 +543,7 @@ export class LogStreamingService {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (entry.attempts < this.retryMaxAttempts && !this.stopped) {
-        this.queue.push(entry);
+        this.retryLater.push(entry);
       } else {
         await this.writeDelivery(entry, "failed", message);
         await this.store.recordLogStreamDispatch({ destinationId: record.id, success: false, error: message });
@@ -539,7 +562,8 @@ export class LogStreamingService {
         status,
         attempts: entry.attempts,
         error,
-        payload: status === "failed" ? entry.event : undefined
+        // A rule event's evidence stays in rule events (their own retention), not in the delivery history.
+        payload: status === "failed" ? withoutRuleEvidence(entry.event) : undefined
       });
     } catch {
       // swallow — never cascade from logging
@@ -648,7 +672,8 @@ function formatSyslogMessage(event: LogStreamEvent, config: SyslogConfig): strin
     resourceType: event.resourceType ?? null,
     resourceId: event.resourceId ?? null,
     projectId: event.projectId ?? null,
-    metadata: event.metadata ?? null
+    metadata: event.metadata ?? null,
+    createdAt: event.createdAt
   });
   return `<${pri}>1 ${event.createdAt} ${hostname} ${appName} ${procId} ${msgId} ${structured} ${payload}`;
 }

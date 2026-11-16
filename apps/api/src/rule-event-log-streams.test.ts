@@ -228,6 +228,7 @@ describe("content rule events on log streams", () => {
     });
     expect(run.statusCode, run.body).toBe(200);
     await until(() => ruleEvents(sink.received).length > 0);
+    expect(ruleEvents(sink.received).some((entry) => entry.body.metadata!.evidence.length > 0)).toBe(true);
     for (const entry of ruleEvents(sink.received)) {
       expect(entry.body.metadata!.evidenceWithheld).toBe(true);
       for (const piece of entry.body.metadata!.evidence) {
@@ -240,6 +241,46 @@ describe("content rule events on log streams", () => {
     expect(stored.events.some((event) => event.evidence.some((piece) => piece.evidence))).toBe(true);
     for (const entry of sink.received) {
       expect(entry.raw).not.toContain(SECRET);
+      expect(entry.raw).not.toContain(EMAIL);
+    }
+  });
+
+  it("the resumed part of a run started from a sensitive run's content still sends digests only", async () => {
+    const sink = await receiver();
+    const { app, store, login } = await boot();
+    const admin = await login("admin");
+    const builder = await login("builder");
+    const created = await app.inject({ method: "POST", url: "/api/log-streams", headers: { cookie: admin }, payload: { name: "rules", type: "webhook", categories: ["rule_events"], config: { url: sink.url } } });
+    expect(created.statusCode, created.body).toBe(200);
+    const document = {
+      id: "approve-email",
+      name: "Approve email",
+      version: "1",
+      channels: { prompt: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { email: { action: "require_approval" } }, defaultAction: { action: "allow" } } }
+    };
+    expect((await app.inject({ method: "POST", url: "/api/guard/profiles", headers: { cookie: builder }, payload: { document } })).statusCode).toBe(201);
+    const workflow = guardWorkflow("wf-resume");
+    workflow.nodes[1]!.config = { profileId: "approve-email" };
+    workflow.nodes.push({ id: "after", type: "guard", name: "After approval", position: { x: 600, y: 0 }, config: { profileId: "default" } } as Workflow["nodes"][number]);
+    workflow.edges.push({ id: "e4", source: "pass", target: "after" } as Workflow["edges"][number]);
+    await store.upsertWorkflow(workflow);
+    const finished = { workflowId: "wf-resume", status: "success", startedAt: "2026-11-13T00:00:00.000Z", completedAt: "2026-11-13T00:00:01.000Z", inputJson: { input: {} }, nodeResultsJson: [] };
+    await store.saveExecutionHistory({ id: "run-marked", ...finished, sensitive: true });
+
+    const run = (
+      await app.inject({
+        method: "POST",
+        url: "/api/workflows/wf-resume/execute",
+        headers: { cookie: builder },
+        payload: { user_prompt: `Write to ${EMAIL}`, sourceExecutionId: "run-marked" }
+      })
+    ).json<{ status: string; executionId: string }>();
+    expect(run.status).toBe("waiting_approval");
+    const approved = (await app.inject({ method: "POST", url: `/api/approvals/${run.executionId}/approve`, headers: { cookie: admin }, payload: {} })).json<{ status: string }>();
+    expect(approved.status).toBe("success");
+    await until(() => ruleEvents(sink.received).some((entry) => entry.body.metadata!.nodeId === "after"));
+    for (const entry of ruleEvents(sink.received)) {
+      expect(entry.body.metadata!.evidenceWithheld).toBe(true);
       expect(entry.raw).not.toContain(EMAIL);
     }
   });

@@ -2650,8 +2650,12 @@ export async function createApp(
             ...(input.guardSimulation?.substitute ? { profileSubstitute: input.guardSimulation.substitute } : {}),
             ...(input.guardSimulation ? { simulation: { sink: input.guardSimulation.sink, vault: input.guardSimulation.vault } } : {}),
             ...(input.guardSimulation?.destinationRows ? { destinationRows: input.guardSimulation.destinationRows } : {}),
-            // 12.7 — a run started from a sensitive run's content streams rule event digests, not masked evidence.
-            ...(input.sensitiveInput === true || (input.usePinnedData === true && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0)
+            // 12.7 — a run started from a sensitive run's content streams rule event digests, not masked evidence; so
+            // does the resumed part of a run whose paused part read sensitive content (or carried it in).
+            ...(input.sensitiveInput === true ||
+            (input.usePinnedData === true && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0) ||
+            input.resumeState?.sensitiveSessionRead === true ||
+            input.resumeState?.sensitiveSessionReadMarked === true
               ? { sensitiveInput: true }
               : {})
           }),
