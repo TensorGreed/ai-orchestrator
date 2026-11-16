@@ -41,6 +41,7 @@ updates:
     groups:
       docker-base-images:
         patterns: ["*"]
+        exclude-patterns: ["ghcr.io/astral-sh/uv"]
         update-types: [minor, patch]
     commit-message:
       prefix: "docker"

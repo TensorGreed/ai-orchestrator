@@ -56,7 +56,7 @@ export const MCP_PRESETS: McpPreset[] = [
       timeoutMs: 60000
     },
     notes:
-      "A Python server: needs uv (uvx) on the L2M host. Replace '/path/to/repo' with the absolute path to a git repository on the host."
+      "A Python server: needs uv (uvx) and git on the L2M host (the stock image has both). Replace '/path/to/repo' with the absolute path to a git repository on the host."
   },
   {
     id: "github",
@@ -114,7 +114,7 @@ export const MCP_PRESETS: McpPreset[] = [
       timeoutMs: 60000
     },
     notes:
-      "A Python server: needs uv (uvx) on the L2M host. It refuses private and loopback addresses by default and obeys robots.txt for model-initiated fetches."
+      "A Python server: needs uv (uvx) on the L2M host (the stock image has it). It refuses private and loopback addresses by default and obeys robots.txt for model-initiated fetches."
   },
   {
     id: "time",
@@ -128,7 +128,7 @@ export const MCP_PRESETS: McpPreset[] = [
       args: ["mcp-server-time==2026.11.11"],
       timeoutMs: 30000
     },
-    notes: "A Python server: needs uv (uvx) on the L2M host."
+    notes: "A Python server: needs uv (uvx) on the L2M host (the stock image has it)."
   },
   {
     id: "memory",

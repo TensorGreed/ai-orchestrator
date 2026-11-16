@@ -148,6 +148,7 @@ check_uv() {
   version="$(docker exec "$run_id-api" uvx --version)" || fail "uvx does not run in the image"
   python="$(docker exec "$run_id-api" uv python find)" || fail "uv finds no Python in the image"
   [ "$(docker exec "$run_id-api" printenv UV_PYTHON_DOWNLOADS)" = "never" ] || fail "UV_PYTHON_DOWNLOADS is not never"
+  [ "$(docker exec "$run_id-api" printenv UV_PYTHON_PREFERENCE)" = "only-system" ] || fail "UV_PYTHON_PREFERENCE is not only-system"
   pass "uv: $version, Python at $python"
 }
 
