@@ -91,7 +91,7 @@ Register it once under **MCP → Servers → + Register server** as a stdio serv
 }
 ```
 
-`uvx` has to be installed on the API host (the stock L2M container image ships Node.js only). L2M's built-in **Fetch** preset fills in `uvx mcp-server-fetch==2026.11.11`; add the `--allowed-hosts` arguments yourself. With a [deployment catalog](/product/mcp-onboarding#deployment-catalog) enforced, `mcp-server-fetch==2026.11.11` counts as pinned; `mcp-server-fetch` without a version does not.
+`uvx` has to be installed on the API host; the stock L2M container image includes it, with a system Python. L2M's built-in **Fetch** preset fills in `uvx mcp-server-fetch==2026.11.11`; add the `--allowed-hosts` arguments yourself. With a [deployment catalog](/product/mcp-onboarding#deployment-catalog) enforced, `mcp-server-fetch==2026.11.11` counts as pinned; `mcp-server-fetch` without a version does not.
 
 ### What L2M checks, and what it does not
 

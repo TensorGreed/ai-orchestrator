@@ -116,6 +116,8 @@ export const STDIO_ENV_ALLOWLIST: readonly string[] = Object.freeze([
   "UV_TOOL_DIR",
   "UV_TOOL_BIN_DIR",
   "UV_PYTHON_INSTALL_DIR",
+  "UV_PYTHON_PREFERENCE",
+  "UV_PYTHON_DOWNLOADS",
   "UV_NATIVE_TLS",
   "UV_CONFIG_FILE",
   "PIP_CACHE_DIR",

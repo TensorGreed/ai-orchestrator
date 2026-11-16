@@ -33,6 +33,15 @@
 # Base images are pinned by digest (the multi-arch index, so amd64 and arm64
 # builds use the same release), keeping release builds reproducible;
 # Dependabot (.github/dependabot.yml) proposes digest updates weekly.
+#
+# uv and uvx (static musl binaries, copied from the official image pinned by
+# version and digest), Alpine's python3 and git (the Git server shells out to it) are in the runtime stage so the
+# built-in Git, Fetch and Time presets (`uvx mcp-server-...==...`) start
+# without extra setup. uv is told to use the system Python and never to download
+# one, so nothing fetches an interpreter at run time. Its cache and tool
+# folders are under the data volume (the one writable path of a hardened,
+# read-only-root deployment); only the server package itself is downloaded the
+# first time a preset starts.
 
 FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS toolchain
 WORKDIR /app
@@ -67,18 +76,27 @@ FROM toolchain AS prod-deps
 RUN pnpm install --prod --frozen-lockfile --filter "@ai-orchestrator/api..."
 
 # ---------- runtime stage ----------
+FROM ghcr.io/astral-sh/uv:0.13.8@sha256:5cc1805e2426484abca4ad46ea783bab281fdb225fd82d8ce6d66a81254bac85 AS uv
+
 FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS runtime
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    UV_PYTHON_PREFERENCE=only-system \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_CACHE_DIR=/app/apps/api/data/.uv/cache \
+    UV_TOOL_DIR=/app/apps/api/data/.uv/tools \
+    UV_TOOL_BIN_DIR=/app/apps/api/data/.uv/bin
 WORKDIR /app
 # The node:26 image ships no corepack, so it is installed from npm (pinned) before `corepack enable`.
 # zlib from the Alpine repository: the base image ships 1.3.2-r1, affected by
 # CVE-2026-4738 (critical, fixed in 1.4-r0). Drop once the pinned base has it.
 RUN apk upgrade --no-cache zlib \
-    && apk add --no-cache wget tini \
+    && apk add --no-cache wget tini python3 git \
     && npm install --global corepack@0.36.0 \
     && corepack enable \
     && addgroup -S nodeuser \
     && adduser -S nodeuser -G nodeuser
+
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 # Production node_modules (root virtual store plus each package's links), then
 # the type-checked sources from the build stage on top.

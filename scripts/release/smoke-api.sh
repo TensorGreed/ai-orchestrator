@@ -8,6 +8,7 @@
 #     node succeeding
 #   - scripts/release/smoke-workflow.json runs a JavaScript code node (QuickJS sandbox) and a guard node: a plain
 #     prompt passes, a prompt injection is blocked
+#   - uvx runs and finds the image's Python (the Git, Fetch and Time presets need it)
 #   - community nodes: disabled by default with a clear 503, and loading (200, enabled) when switched on
 #
 # Prints the image size. Exits non-zero, with the container logs, on the first failed check.
@@ -140,6 +141,16 @@ check_code_sandbox_notice() {
   pass "code sandbox: $mode"
 }
 
+check_uv() {
+  # uvx runs the Python presets (Git, Fetch, Time): it and a system Python must be in the image, and uv
+  # must be set not to download an interpreter.
+  local version python
+  version="$(docker exec "$run_id-api" uvx --version)" || fail "uvx does not run in the image"
+  python="$(docker exec "$run_id-api" uv python find)" || fail "uv finds no Python in the image"
+  [ "$(docker exec "$run_id-api" printenv UV_PYTHON_DOWNLOADS)" = "never" ] || fail "UV_PYTHON_DOWNLOADS is not never"
+  pass "uv: $version, Python at $python"
+}
+
 wait_healthy() {
   local status
   for _ in $(seq 1 30); do
@@ -161,6 +172,7 @@ start_api "SQLite (temporary volume), community nodes enabled" \
 check_api
 check_community enabled
 check_code_sandbox_notice
+check_uv
 wait_healthy
 
 docker run -d --name "$run_id-pg" --network "$network" \
