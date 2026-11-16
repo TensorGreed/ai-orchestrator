@@ -100,3 +100,4 @@ Every top-level field of the template data whose name is a valid JavaScript name
 - [Code execution](/security/code-execution): the sandbox, its limits and the Code node.
 - [Data labels](/product/data-labels-and-destinations): a template read carries the labels of the step it reads.
 - [Common issues](/troubleshooting/common-issues#a-template-renders-empty-two-steps-away): a template two steps away renders empty.
+- Background: [Why a workflow template renders empty two steps away](/blog/workflow-templates-two-steps-away) (blog).

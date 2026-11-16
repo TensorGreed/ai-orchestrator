@@ -527,3 +527,4 @@ The [changelog](https://github.com/TensorGreed/ai-orchestrator/blob/main/CHANGEL
 - [MCP tool-call telemetry](../product/mcp-tool-call-telemetry.md): per-call records kept in L2M
 - [Queue and workers](./queue-and-workers.md), [Cluster operations](./cluster.md)
 - Concepts: [OpenTelemetry](../glossary/index.md#opentelemetry) (glossary)
+- Background: [Tracing AI agents with OpenTelemetry, end to end](../blog/opentelemetry-tracing-for-ai-agents) and [Keeping sensitive data out of traces across runs](../blog/keeping-sensitive-data-out-of-traces) (blog)
