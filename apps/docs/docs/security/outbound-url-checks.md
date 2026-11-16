@@ -6,7 +6,7 @@ description: "L2M outbound URL checks cover every URL that HTTP Request, Web Bro
 # Outbound URL checks
 
 Nodes that fetch a URL the workflow author or upstream data supplies —
-**HTTP Request**, **Web Browse**, the **Chart** node's `data.url`, the
+**HTTP Request**, [**Web Browse**](/nodes/web-browse), the [**Chart**](/nodes/chart) node's `data.url`, the
 **PDF** node in HTML-render mode (including every sub-resource and WebSocket
 the page opens), and **RAG** endpoints set on a node (a vector store's
 `endpoint`, an embedder's `baseUrl`, the Azure OpenAI embeddings node's
