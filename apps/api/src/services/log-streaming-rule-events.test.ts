@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GuardVerdictEvent } from "@ai-orchestrator/workflow-engine";
 import type { GuardEventInsert } from "../db/database";
 import type { Store } from "../db/store.js";
@@ -212,10 +212,17 @@ describe("rule events on log streams", () => {
     await service.dispatchRuleEvents([row(), row()]);
     expect(Date.now() - started).toBeLessThan(1000);
     const draining = service.flush();
-    // Still queued behind the stuck send, and the caller already returned.
-    await service.dispatchRuleEvents([row()]);
-    expect(sends).toBe(1);
-    release();
+    try {
+      // The first send starts after the destination is read from the store (slower on Postgres), then hangs.
+      await vi.waitFor(() => expect(sends).toBe(1), { timeout: 5000 });
+      // Still queued behind the stuck send, and the caller already returned.
+      const queuedAt = Date.now();
+      await service.dispatchRuleEvents([row()]);
+      expect(Date.now() - queuedAt).toBeLessThan(1000);
+      expect(sends).toBe(1);
+    } finally {
+      release();
+    }
     await draining;
     expect(sends).toBe(3);
   });

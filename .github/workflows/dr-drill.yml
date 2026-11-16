@@ -31,7 +31,8 @@ concurrency:
 jobs:
   dr-drill:
     name: Backup and restore drill
-    runs-on: ubuntu-latest
+    # Pinned: the apt archive of newer runner images has no postgresql-16, which must match the service below.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:

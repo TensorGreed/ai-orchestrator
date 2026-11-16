@@ -1,5 +1,5 @@
 ---
-title: "SCIM provisioning: users and groups from your identity provider"
+title: "SCIM provisioning from your identity provider"
 description: "SCIM 2.0 provisioning and deprovisioning of users and groups, group-to-role mappings, and immediate sign-out of deactivated users."
 ---
 
