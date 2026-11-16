@@ -559,9 +559,16 @@ describe("elicitation", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let timedOut: Awaited<ReturnType<McpElicitationService["ask"]>>;
     try {
-      const timedOutAsk = service.ask({ ...base, executionId: "exec_t", timeoutMs: 1 });
+      let settled = false;
+      const timedOutAsk = service.ask({ ...base, executionId: "exec_t", timeoutMs: 1 }).finally(() => {
+        settled = true;
+      });
       await waitForEvent(() => events.includes("created:pending"));
-      await vi.advanceTimersByTimeAsync(1_000);
+      // On a slow store the timer can be armed a little after the announcement: keep advancing until the ask settles.
+      for (let i = 0; i < 50 && !settled; i += 1) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        if (!settled) await new Promise<void>((resolve) => setImmediate(resolve));
+      }
       timedOut = await timedOutAsk;
     } finally {
       vi.useRealTimers();
