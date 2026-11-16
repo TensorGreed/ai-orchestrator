@@ -2,13 +2,14 @@
 // The page's breadcrumb trail (computed in the config, the same trail as its BreadcrumbList JSON-LD).
 import { computed } from "vue";
 import { useData } from "vitepress";
-import { hubSectionOf, type Crumb } from "../../site/sections.js";
+import type { Crumb } from "../../site/sections.js";
 import { sitePath } from "../hub.js";
 
 const { page } = useData();
 const crumbs = computed(() => ((page.value as { breadcrumbs?: Crumb[] }).breadcrumbs ?? []) as Crumb[]);
-// Hub pages always show their trail; a docs page only when it has more than Docs › page.
-const visible = computed(() => crumbs.value.length >= (hubSectionOf(page.value.relativePath) ? 2 : 3));
+// Every page but the docs home shows its trail, so the visible trail matches the page's
+// BreadcrumbList JSON-LD (search engines expect structured data to describe what the page shows).
+const visible = computed(() => crumbs.value.length >= 2);
 </script>
 
 <template>

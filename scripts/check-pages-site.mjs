@@ -1,7 +1,9 @@
 // Checks the assembled lsquarem.com site (see scripts/assemble-pages-site.mjs). First the static
-// checks in scripts/pages-seo-checks.mjs (robots.txt, sitemap.xml, title, description, their length
-// and canonical on every indexable page, JSON-LD and breadcrumbs, internal links and fragments across
-// the landing and the docs, the blog feed, banned words in visible text, noindex on /demo/), then in
+// checks in scripts/pages-seo-checks.mjs (robots.txt, sitemap.xml and its <lastmod> dates, title,
+// description, their length and canonical on every indexable page, JSON-LD with its article dates
+// and breadcrumbs, the visible breadcrumb trail, image sizes and off-origin stylesheets, internal links
+// and fragments across the landing and the docs, orphan pages, the blog feed and the links to it,
+// banned words in visible text, noindex on /demo/), then in
 // a real browser:
 //   - the hero's primary button goes to /demo/ and the demo loads;
 //   - the nav's "Live demo" button is visible at 360 px and 1440 px;

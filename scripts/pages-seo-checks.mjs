@@ -19,10 +19,18 @@
 //     page of the landing and the docs resolves the way GitHub Pages serves it, and every #fragment
 //     names an id on the target page;
 //   - links to a section index end in "/" (without it GitHub Pages answers with a redirect);
-//   - every page under /docs/learn/, /docs/glossary/, /docs/recipes/ and /docs/blog/ is linked from
-//     the content of another page (an orphan reached only from the nav or sidebar fails);
-//   - each sitemap URL is its page's canonical URL;
-//   - the docs blog has its Atom feed at /docs/blog/feed.xml, and every post it links is in the sitemap;
+//   - every docs page but the docs home shows a breadcrumb trail with the same names as its
+//     BreadcrumbList (less the leading "L2M" crumb);
+//   - every article in the JSON-LD (TechArticle, BlogPosting) has a datePublished and a dateModified
+//     that are W3C dates, not in the future, modified no earlier than published;
+//   - every image has a width and a height (no layout shift), and no page loads a stylesheet, font or
+//     preconnect from another origin;
+//   - every indexable page but the landing is linked from the content of another page (an orphan
+//     reached only from the nav or sidebar fails);
+//   - each sitemap URL is its page's canonical URL; every docs URL has a <lastmod>, each <lastmod> is
+//     a W3C date, not in the future, and the same day as the page's JSON-LD dateModified;
+//   - the docs blog has its Atom feed at /docs/blog/feed.xml, every post it links is in the sitemap,
+//     and the landing and every blog page link it from their head;
 //   - no page shows a banned word (see BANNED_WORDS: the old names of content rules and data rules,
 //     an external key manager's vendor name, and a competing workflow tool's name) in its visible text, title, description or
 //     alt/aria-label/title attributes. Code is exempt: text inside <code>, <pre>, <kbd>, <samp>,
@@ -92,6 +100,26 @@ export function pageHead(html) {
 export function jsonLdBlocks(html) {
   return [...html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)].map((match) => match[1]);
 }
+
+/** The names in a page's visible breadcrumb trail (`<nav aria-label="Breadcrumb">`), or null without one. */
+export function visibleBreadcrumbs(html) {
+  const nav = html.match(/<nav\b[^>]*aria-label="Breadcrumb"[^>]*>([\s\S]*?)<\/nav>/i);
+  if (!nav) return null;
+  return [...nav[1].matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)].map((item) =>
+    decode(item[1].replace(/<svg\b[\s\S]*?<\/svg>/gi, "").replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim()
+  );
+}
+
+/** A W3C date or date-time (the forms sitemaps and schema.org dates use), as a Date; null when it is not one. */
+export function w3cDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/.test(value)) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+const ARTICLE_TYPES = new Set(["Article", "TechArticle", "BlogPosting", "NewsArticle"]);
+/** A day of leeway for dates in the future: build machines and git committers sit in different time zones. */
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The text a reader sees: the body without code, scripts, styles, SVG and comments, plus the
@@ -231,8 +259,13 @@ export async function checkSeo(site, options = {}) {
   const seenLong = { title: new Set(), description: new Set() };
   const brokenLinks = [];
   let linkCount = 0;
+  let breadcrumbPages = 0;
   let jsonLdPages = 0;
   const pages = [];
+  /** Per indexable page: the names in its JSON-LD BreadcrumbList and its article's dateModified. */
+  const jsonLdCrumbs = new Map();
+  const modifiedDates = new Map();
+  const now = options.now ?? Date.now();
   for (const file of await htmlFiles(site)) {
     const web = file.split(path.sep).join("/");
     const html = await fs.readFile(path.join(site, file), "utf8");
@@ -291,8 +324,21 @@ export async function checkSeo(site, options = {}) {
         for (const item of items) {
           if (typeof item?.["@type"] !== "string" || item["@type"].trim() === "") fail(`${where}: JSON-LD block ${index + 1} has an item without @type`);
           else types.push(item["@type"]);
+          if (ARTICLE_TYPES.has(item?.["@type"])) {
+            // Article dates: both present, real W3C dates, not in the future, and modified no earlier than published.
+            const published = w3cDate(item.datePublished);
+            const modified = w3cDate(item.dateModified);
+            if (!published) fail(`${where}: the ${item["@type"]} has no valid datePublished (${item.datePublished ?? "missing"})`);
+            if (!modified) fail(`${where}: the ${item["@type"]} has no valid dateModified (${item.dateModified ?? "missing"})`);
+            for (const [name, date] of [["datePublished", published], ["dateModified", modified]]) {
+              if (date && date.getTime() > now + DAY_MS) fail(`${where}: the ${item["@type"]}'s ${name} ${date.toISOString()} is in the future`);
+            }
+            if (published && modified && modified.getTime() + DAY_MS < published.getTime()) fail(`${where}: the ${item["@type"]} was modified (${item.dateModified}) before it was published (${item.datePublished})`);
+            if (modified) modifiedDates.set(web, modified);
+          }
           if (item?.["@type"] === "BreadcrumbList") {
             const elements = Array.isArray(item.itemListElement) ? item.itemListElement : [];
+            jsonLdCrumbs.set(web, elements.map((element) => String(element?.name ?? "").trim()));
             if (elements.length === 0) fail(`${where}: the BreadcrumbList has no items`);
             for (const [position, element] of elements.entries()) {
               if (element?.position !== position + 1) fail(`${where}: breadcrumb ${position + 1} has position ${element?.position}`);
@@ -306,6 +352,35 @@ export async function checkSeo(site, options = {}) {
       }
       if (web !== "index.html" && !types.includes("BreadcrumbList")) fail(`${where}: no BreadcrumbList in its JSON-LD`);
     }
+
+    // The docs show the trail their BreadcrumbList describes (structured data must match what the page
+    // shows). The visible trail leaves out the leading "L2M" crumb, which the landing's own header is.
+    // The docs home is the trail's start and shows none.
+    if (web.startsWith("docs/") && web !== "docs/index.html" && jsonLdCrumbs.has(web)) {
+      const shown = visibleBreadcrumbs(html);
+      const described = jsonLdCrumbs.get(web);
+      const expected = described[0] === "L2M" ? described.slice(1) : described;
+      if (!shown) fail(`${where}: shows no breadcrumb trail, but its JSON-LD has a BreadcrumbList`);
+      else if (shown.join(" › ") !== expected.join(" › ")) fail(`${where}: shows the breadcrumbs "${shown.join(" › ")}", but its JSON-LD says "${expected.join(" › ")}"`);
+      else breadcrumbPages += 1;
+    }
+
+    // Layout shift: every image carries its width and height, so the browser reserves its box.
+    for (const attrs of tags(html, "img")) {
+      if (!attrs.width || !attrs.height) fail(`${where}: <img src="${attrs.src ?? ""}"> has no width and height (it shifts the layout when it loads)`);
+    }
+    // Render-blocking: no stylesheet or font from another origin (fonts are self-hosted).
+    for (const attrs of tags(html, "link")) {
+      const rel = (attrs.rel ?? "").toLowerCase();
+      if (!/\bstylesheet\b|\bpreload\b|\bpreconnect\b/.test(rel) || !attrs.href) continue;
+      let url;
+      try {
+        url = new URL(attrs.href, `${SITE}/${web}`);
+      } catch {
+        continue;
+      }
+      if (url.origin !== SITE) fail(`${where}: loads ${rel} ${attrs.href} from another origin (self-host it)`);
+    }
   }
   if (!existsSync(path.join(site, "demo", "index.html"))) fail("/demo/index.html is missing");
   for (const [title, where] of titles) if (where.length > 1) fail(`the title "${title}" is used by ${where.join(", ")}`);
@@ -316,7 +391,8 @@ export async function checkSeo(site, options = {}) {
     }
   }
   pass(`${indexable.size} indexable pages checked for lang, title, description, canonical and length`);
-  if (jsonLdPages > 0) pass(`JSON-LD parses on ${jsonLdPages} pages, with a BreadcrumbList on all but the landing`);
+  if (jsonLdPages > 0) pass(`JSON-LD parses on ${jsonLdPages} pages, with a BreadcrumbList on all but the landing, and valid article dates`);
+  if (breadcrumbPages > 0) pass(`${breadcrumbPages} docs pages show the breadcrumb trail their JSON-LD describes`);
   if (warnings.length > 0) pass(`${warnings.length} long title(s) or description(s) are on the baseline (warnings)`);
 
   // Internal links and assets, with fragments; links in the canonical form; inbound links for orphans.
@@ -362,11 +438,11 @@ export async function checkSeo(site, options = {}) {
   for (const message of brokenLinks) fail(`broken link: ${message}`);
   pass(`${linkCount} internal links and assets checked on ${pages.length} pages`);
 
-  // Orphans: every page of the knowledge hub is linked from the content of another page, not only
-  // from the nav and sidebar.
-  const hubPages = [...indexable.keys()].filter((web) => /^docs\/(learn|glossary|recipes|blog)\//.test(web));
-  for (const web of hubPages) if (!inbound.has(web)) fail(`/${web} is an orphan: no other page links to it from its content (nav and sidebar do not count)`);
-  if (hubPages.length > 0) pass(`${hubPages.length} knowledge-hub pages checked for inbound links`);
+  // Orphans: every indexable page but the landing is linked from the content of another page, not
+  // only from the nav and sidebar (search engines find and weigh pages through links in content).
+  const linkedPages = [...indexable.keys()].filter((web) => web !== "index.html");
+  for (const web of linkedPages) if (!inbound.has(web)) fail(`/${web} is an orphan: no other page links to it from its content (nav and sidebar do not count)`);
+  if (linkedPages.length > 0) pass(`${linkedPages.length} pages checked for inbound links from content`);
 
   // The blog's feed.
   const feed = path.join(site, "docs", "blog", "feed.xml");
@@ -374,6 +450,13 @@ export async function checkSeo(site, options = {}) {
     if (!existsSync(feed)) fail("the blog has no feed at /docs/blog/feed.xml");
     else if (!/^<\?xml[^>]*\?>\s*<feed\s+xmlns="http:\/\/www\.w3\.org\/2005\/Atom"/.test(await fs.readFile(feed, "utf8"))) fail("/docs/blog/feed.xml is not an Atom feed");
     else pass("/docs/blog/feed.xml is an Atom feed");
+    // Feed readers find the feed from the landing and from the blog's pages.
+    const feedUrl = `${SITE}/docs/blog/feed.xml`;
+    for (const { web, html } of pages) {
+      if (web !== "index.html" && !web.startsWith("docs/blog/")) continue;
+      const links = tags(html.slice(0, Math.max(html.search(/<\/head>/i), 0)), "link").filter((attrs) => attrs.rel?.toLowerCase() === "alternate" && /application\/(atom|rss)\+xml/i.test(attrs.type ?? ""));
+      if (!links.some((attrs) => new URL(attrs.href ?? "", `${SITE}/${web}`).href === feedUrl)) fail(`/${web}: no <link rel="alternate" type="application/atom+xml"> to ${feedUrl} in its head`);
+    }
   }
 
   // sitemap.xml
@@ -381,7 +464,24 @@ export async function checkSeo(site, options = {}) {
   if (!existsSync(sitemapFile)) {
     fail("sitemap.xml is missing from the site root");
   } else {
-    const urls = [...(await fs.readFile(sitemapFile, "utf8")).matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((match) => decode(match[1]));
+    const sitemapXml = await fs.readFile(sitemapFile, "utf8");
+    const urls = [...sitemapXml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((match) => decode(match[1]));
+    // <lastmod>: search engines use it only while it stays accurate. Every docs page has one (from git);
+    // a landing page has one when git dated its file. Each is a W3C date, not in the future, and the
+    // same day as the page's own dateModified.
+    const lastmods = new Map();
+    for (const [, entry] of sitemapXml.matchAll(/<url>([\s\S]*?)<\/url>/g)) {
+      const loc = decode(entry.match(/<loc>\s*([^<\s]+)\s*<\/loc>/)?.[1] ?? "");
+      const raw = entry.match(/<lastmod>\s*([^<\s]+)\s*<\/lastmod>/)?.[1];
+      if (raw === undefined) {
+        if (loc.startsWith(`${SITE}/docs/`)) fail(`sitemap entry ${loc} has no <lastmod>`);
+        continue;
+      }
+      const date = w3cDate(raw);
+      if (!date) fail(`sitemap entry ${loc} has a <lastmod> that is not a W3C date: ${raw}`);
+      else if (date.getTime() > now + DAY_MS) fail(`sitemap entry ${loc} has a <lastmod> in the future: ${raw}`);
+      else lastmods.set(loc, date);
+    }
     if (urls.length === 0) fail("sitemap.xml lists no URLs");
     const listed = new Set();
     for (const url of urls) {
@@ -401,6 +501,11 @@ export async function checkSeo(site, options = {}) {
       const web = path.relative(site, file).split(path.sep).join("/");
       if (!indexable.has(web)) fail(`sitemap lists a page that is not indexable: ${url}`);
       else if (canonicals.get(web) && canonicals.get(web) !== url) fail(`sitemap lists ${url}, but the page's canonical is ${canonicals.get(web)}`);
+      const modified = modifiedDates.get(web);
+      const lastmod = lastmods.get(url);
+      if (modified && lastmod && Math.abs(modified.getTime() - lastmod.getTime()) >= DAY_MS) {
+        fail(`sitemap lists ${url} as modified ${lastmod.toISOString()}, but its JSON-LD dateModified is ${modified.toISOString()}`);
+      }
       listed.add(web);
     }
     for (const web of indexable.keys()) if (!listed.has(web)) fail(`/${web} is indexable but not in sitemap.xml`);

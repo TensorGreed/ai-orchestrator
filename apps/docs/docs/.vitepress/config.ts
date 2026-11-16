@@ -36,6 +36,18 @@ function folderLabel(folder: string): string {
   return track?.shortTitle ?? defaultFolderLabel(folder);
 }
 
+/** A page's first `# ` heading as plain text (no inline code, emphasis, links or `{#id}`), or "". */
+function plainHeading(source: string): string {
+  const body = source.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+  const line = body.match(/^#\s+(.+)$/m)?.[1] ?? "";
+  return line
+    .replace(/\s*\{#[^}]*\}\s*$/, "")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[`*_]/g, "")
+    .replace(/<[^>]+>/g, "")
+    .trim();
+}
+
 const crumbOf = (relativePath: string, name: string): Crumb => ({ name, url: docsUrl(`/${relativePath.replace(/\.md$/, "")}`) });
 
 /** The pages an index lists, for its CollectionPage, DefinedTermSet or Blog JSON-LD. */
@@ -107,9 +119,11 @@ export default defineConfig({
       const absent = fmIn.related.map(String).filter((slug) => !pageExists(`/glossary/${slug}`) && !indexOnly.has(slug));
       if (absent.length > 0) console.warn(`[glossary] ${pageData.relativePath}: related terms not written yet (skipped): ${absent.join(", ")}`);
     }
-    // Breadcrumbs use the short label (sidebar title, term, section or track name), not the SEO title.
+    // Breadcrumbs use the short label (sidebar title, term, section or track name, or a docs page's
+    // own heading), not the SEO title.
     const section = hubSectionOf(pageData.relativePath);
     const fm = pageData.frontmatter as Record<string, unknown>;
+    const heading = kind === "docs" ? plainHeading(readFileSync(path.join(SRC_DIR, pageData.filePath), "utf8")) : "";
     const name =
       kind === "hub-index" && section
         ? section.label
@@ -117,7 +131,7 @@ export default defineConfig({
           ? folderLabel(pageData.relativePath.replace(/\/index\.md$/, ""))
           : kind === "docs-index"
             ? defaultFolderLabel(pageData.relativePath.replace(/\/index\.md$/, ""))
-            : String(fm.sidebarTitle ?? fm.term ?? pageData.title ?? "");
+            : String(fm.sidebarTitle ?? fm.term ?? (heading || pageData.title) ?? "");
     const extra: HubPageData = { breadcrumbs: breadcrumbsOf(pageData.relativePath, name, hasIndex, folderLabel) };
     if (kind === "learn" || kind === "post" || kind === "recipe") {
       extra.readingMinutes = readingMinutes(readFileSync(path.join(SRC_DIR, pageData.filePath), "utf8"));
