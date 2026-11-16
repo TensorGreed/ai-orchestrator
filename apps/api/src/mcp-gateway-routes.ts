@@ -172,7 +172,7 @@ import {
 } from "./services/mcp-gateway-list-changed.js";
 import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
-import { labelMarkRaised, type McpGatewayLabelMark, type McpGatewayLabelMarkKey } from "./db/gateway-label-marks.js";
+import { labelMarkRaiseHeld, labelMarkRaised, type McpGatewayLabelMark, type McpGatewayLabelMarkKey } from "./db/gateway-label-marks.js";
 import { filterAsync, mapAsync } from "./async-array.js";
 import { pageOfById, pageRequestFromQuery } from "./pagination.js";
 
@@ -762,6 +762,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
    * mark, as a stateless call's raise does (the same merge, and it renews the mark), so the client's later calls without
    * a session start from them on any instance, however long the session worked without any. The stored mark's first
    * raise is audited once (`firstRaise`), naming this session. Throws when the mark cannot be written.
+   *
+   * The write is skipped when it would change nothing: the client's mark as this session last read or wrote it (this
+   * call's read before the tool ran, or its own last write) already holds every label of the result, and it still has
+   * more than one idle window to live. A session's write lasts one and a half idle windows, so it is skipped for at most
+   * half a window after a write, and the mark always lives at least one idle window past every result. A write that
+   * would add a label, a class or the mark's first raise always goes through.
    */
   const storeLegacySessionRaise = async (
     session: GatewaySession,
@@ -772,13 +778,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     labels: Pick<DataLabels, "provenance" | "dataClasses">
   ): Promise<void> => {
     const clock = markClock();
-    const raised = await store.raiseMcpGatewayLabelMark({
+    const input = {
       ...clientMarkKey(auth, toolset),
       provenance: labels.provenance,
       dataClasses: labels.dataClasses,
       now: clock.now,
-      expiresAt: clock.expiresAt
-    });
+      expiresAt: new Date(clock.nowMs + Math.ceil(markIdleMs * 1.5)).toISOString()
+    };
+    if (labelMarkRaiseHeld(session.clientMarkSeen, input, clock.nowMs, markIdleMs)) return;
+    const raised = await store.raiseMcpGatewayLabelMark(input);
+    session.clientMarkSeen = raised.mark;
     if (raised.firstRaise) {
       mirrorStoredMark(session, raised.mark);
       await auditStoredRaise(session, auth, toolset, tool, reason, storedLabelsView(raised.mark));
@@ -920,8 +929,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, sessionId: session.id },
         "MCP gateway could not read a client's label mark for a session call; the call was refused"
       );
+      session.clientMarkSeen = undefined;
       throw new LabelMarkUnavailableError();
     }
+    session.clientMarkSeen = stored.mark ?? undefined;
     await takeUpClientStoredMark(session, auth, toolset, stored, "tool_call");
   };
   const LEGACY_MARK_UNAVAILABLE_MESSAGE = "Outside-content labels could not be checked for this client, so the session was not opened. Try again.";

@@ -112,6 +112,34 @@ de-duplicate on `id`.
 | `http` | `url`, optional `headers` (for example an ingestion token) and `method` (default `POST`) | The batch as the request body, `content-type: application/x-ndjson`. Any answer other than 2xx is a failure. |
 | `file` | `path` | Appends the batch to the file, which must be inside `AUDIT_EXPORT_FILE_ROOT` (checked when the destination is saved and at each delivery; a symlink that leads outside the root, or a file that is a symlink, is refused). Point a log shipper at it. |
 
+**How a `file` destination stays inside the root.** At each delivery L2M resolves every directory on the path and
+refuses one that leads outside `AUDIT_EXPORT_FILE_ROOT` through a symlink. It opens the file without following a
+symlink, and refuses anything other than a regular file with a single link (a hard link could name a file outside the
+root). Node.js cannot open a file relative to an already checked directory, so a process that can write inside the
+root could swap a directory for a symlink between that check and the open. The opened file is therefore checked
+again before anything is written:
+
+- On Linux, the path the kernel reports for the open file (`/proc/self/fd/<fd>`) must be the checked directory plus
+  the file name, so a swap is always caught.
+- On other systems, or where `/proc` is not mounted, L2M resolves the directory again and checks that it has not
+  changed and that the file name still names the file it opened. A swap that is undone in the short time between the
+  open and this check is not caught. Keep the root writable by the API's user only.
+
+In both cases the batch is not written and the run fails with "changed while it was opened".
+
+L2M opens an existing file without creating anything, and creates a missing one only with an exclusive create, which
+never opens a file, FIFO or device that already exists. If the check then refuses a file this delivery created, L2M
+removes it again, but only when it is still an empty regular file with the same device and inode, and only when it
+sits in a directory nobody else can change: every directory from it up to `/` belongs to the API's user or root and
+no one else may write to it (a sticky directory such as `/tmp` is allowed). Elsewhere someone could re-point a
+directory between the check and the removal and have a different file removed, so L2M leaves the empty file. What
+remains:
+
+- A swap can still lead L2M to open an existing file outside the root (never as a controlling terminal). Nothing is
+  written to it, but opening a FIFO or device can have effects of its own.
+- An empty file can be left where the symlink pointed: in a directory others can write to (including a group-writable
+  one, as a umask of `002` creates), on Windows, or when the file was changed before it could be removed.
+
 Create them under **Settings → Audit Log → Export destinations**, or with the API:
 
 ```bash

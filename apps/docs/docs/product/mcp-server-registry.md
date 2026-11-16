@@ -219,7 +219,7 @@ Agent, Supervisor, LLM Call and the chat model nodes have a **Server prompt** pi
 
 A server can pause a tool call and ask for input (`elicitation/create`) with a message and a flat schema of string, number, boolean and enum fields. L2M advertises the capability to every server it connects to and handles the request by trigger type:
 
-- **Attended runs** (started from the editor, Chat, a retry or a resumed approval) pause the tool call and show a form to the person who started the run, in the Chat bubble and under **Waiting for you** on the Runs page. Operators and admins can answer any pending request; other users only the ones from their own runs. **Send answer** validates the values against the schema and accepts, **Decline** and **Cancel** send only the action. The tool call then continues with the server's reply.
+- **Attended runs** (started from the editor, Chat, a retry or a resumed approval) pause the tool call and show a form to the person who started the run, in the Chat bubble and under **Waiting for you** on the Runs page. Users who may run the workflow in its project (`workflow:execute`: admins, project admins and editors, and without a project membership operators and builders) can answer any pending request of that workflow; other users only the ones from their own runs. **Send answer** validates the values against the schema and accepts, **Decline** and **Cancel** send only the action. The tool call then continues with the server's reply.
 - **Unattended runs** (webhooks, schedules, queue workers, the gateway, the public chat widget) are declined at once, with a note in the trace saying why.
 - **Credential-looking requests** are refused regardless of the trigger: a schema with a field named like a token, key, password, cookie or similar is never shown as a form. Secrets go on the server's registry entry, not through a question to the user.
 
@@ -363,7 +363,7 @@ Servers can override the interval (at least 10 seconds) or opt out of scheduled 
 | Connect, refresh and disconnect OAuth | admin, from a signed-in browser session |
 | List a server's resources and prompts | builder and above |
 | Read a resource, fetch a prompt | builder and above, with permission to run workflows in the project |
-| Answer a server's question | the user whose run asked, or operator and above (operators, builders and admins) |
+| Answer a server's question | the user whose run asked, or anyone with `workflow:execute` in the run's project (see [roles](../security/auth-rbac.md)) |
 | Sampling settings | admin (edit the server) |
 | Sandbox, limits, breaker settings and credential mode | admin (edit the server) |
 | Reset a breaker, list and revoke users' connections | admin |
@@ -395,9 +395,9 @@ Deleting a server that nodes still use is refused with the list of those nodes, 
 - `POST /api/mcp/servers/:id/resources/read`: `{ uri, projectId? }`; returns `contents`, `bytes` and `durationMs`. 403 when policy blocks it, 404 when the server has no such resource, 413 over `MCP_RESOURCE_MAX_BYTES`
 - `GET /api/mcp/servers/:id/prompts?projectId=&refresh=true`: prompts with their arguments and `access` marks
 - `POST /api/mcp/servers/:id/prompts/get`: `{ name, arguments?, projectId? }`; returns the rendered `prompt` with its messages. 400 when a required argument is missing, 403 when blocked, 404 when unknown
-- `GET /api/mcp/elicitations?status=pending|accepted|declined|cancelled|expired|auto_declined|all&executionId=`: a server's questions; users below operator see their own runs only
+- `GET /api/mcp/elicitations?status=pending|accepted|declined|cancelled|expired|auto_declined|all&executionId=`: a server's questions; users without `workflow:execute` in a run's project see their own runs only
 - `GET /api/mcp/elicitations/:id`: one question
-- `POST /api/mcp/elicitations/:id/answer`: `{ action: "accept" | "decline" | "cancel", content? }`; 403 for someone else's run below operator, 409 when already settled
+- `POST /api/mcp/elicitations/:id/answer`: `{ action: "accept" | "decline" | "cancel", content? }`; 404 for someone else's run without `workflow:execute` in its project (403 for your own run without it), 409 when already settled
 - `GET /api/mcp/servers/:id/runtime`: breaker state, calls in flight and queued, refused-call counts on this instance (the last failure for admins only)
 - `POST /api/mcp/servers/:id/breaker/reset`: close the breaker now (admin)
 - `GET /api/mcp/servers/:id/connections`: who has connected their own account to a delegated server; never tokens (admin)

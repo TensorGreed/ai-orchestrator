@@ -854,6 +854,53 @@ describe("project authorization: lists, deletes and elicitations (M2, M3, M4)", 
   });
 });
 
+describe("MCP elicitations from others' runs follow the user's role in the run's project", () => {
+  it("shows and lets answer by the project role, not the global role, in the list, the answer route and the overview count", async () => {
+    const { context, admin, builder, viewer } = await seed();
+    // The global viewer is an editor in project "team"; the global builder only a viewer there.
+    await context.store.upsertProject({ id: "team", name: "team" });
+    await context.store.upsertProjectRole({ userId: viewer.id, projectId: "team", role: "editor" });
+    await context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "viewer" });
+    await context.store.upsertWorkflow(simpleWorkflow("wf-team", "team"));
+    const owner = await login(context, "operator", "owner");
+    const ask = async (id: string, workflowId: string, createdBy: string | null) =>
+      await context.store.createMcpElicitation({
+        id,
+        executionId: `exec-${id}`,
+        workflowId,
+        workflowName: workflowId,
+        nodeId: "tool",
+        serverId: "mock-mcp",
+        toolName: "ask",
+        message: `question-${id}`,
+        requestedSchema: { type: "object", properties: {} } as never,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        createdBy,
+        triggerType: "manual"
+      });
+    await ask("el-team-other", "wf-team", owner.id);
+    await ask("el-team-own", "wf-team", builder.id);
+    await ask("el-open-other", "wf-open", owner.id);
+    const listed = async (cookie: string) =>
+      (await call(context, "GET", "/api/mcp/elicitations", cookie)).json<{ items: Array<{ id: string }> }>().items.map((item) => item.id).sort();
+    // Global viewer, project editor: sees another's request in that project, not in the default project (global role).
+    expect(await listed(viewer.cookie)).toEqual(["el-team-other", "el-team-own"]);
+    // Global builder, project viewer: only its own request in that project, and others' in the default project.
+    expect(await listed(builder.cookie)).toEqual(["el-open-other", "el-team-own"]);
+    expect(await listed(admin.cookie)).toEqual(["el-open-other", "el-team-other", "el-team-own"]);
+    expect((await call(context, "GET", "/api/mcp/elicitations/el-team-other", builder.cookie)).statusCode).toBe(404);
+    // The overview counts what the list shows.
+    const count = async (cookie: string) =>
+      (await call(context, "GET", "/api/mcp/overview", cookie)).json<{ elicitations: { pending: number } }>().elicitations.pending;
+    expect(await count(builder.cookie)).toBe(2);
+    expect(await count(admin.cookie)).toBe(3);
+    // Answering: the builder cannot answer another's request in "team"; the viewer-turned-editor reaches the service
+    // (no instance holds the request here, so it answers 409, not 403 or 404).
+    expect((await call(context, "POST", "/api/mcp/elicitations/el-team-other/answer", builder.cookie, { action: "decline" })).statusCode).toBe(404);
+    expect((await call(context, "POST", "/api/mcp/elicitations/el-team-other/answer", viewer.cookie, { action: "decline" })).statusCode).toBe(409);
+  });
+});
+
 describe("project authorization: eval datasets (M6) and eval runs", () => {
   it("datasets, fixtures and eval runs follow the dataset's and workflow's project", async () => {
     const { context, admin, builder, viewer } = await seed();
