@@ -464,7 +464,7 @@
           "body": "To open the report with a written summary, add a Prompt Template after **Sample Data** that asks for a short summary of the rows (for example with <span v-pre>`{{byCloud}}`</span> and <span v-pre>`{{ageing}}`</span>), then an LLM Call, and connect the LLM Call to **HTML Report** next to the charts. Then put its answer into the template as <span v-pre>`{{answer}}`</span>. The model only writes text; the numbers in the charts still come from the data."
         }
       ],
-      "makeItYours": "- Replace **Sample Data** with real data: an [HTTP Request](/nodes/reference/connector), a database connector or an MCP tool, as long as the rows reach the charts under the names in `dataPath`.\n- Brand it: change the colors in the specs (`mark.color`, `scale.scheme`), or pass a Vega `theme` object on each Chart node so every chart shares one style. The [brand extraction recipe](/recipes/brand-extraction-web) finds a site's logo and colors.\n- Run it on a schedule with a Schedule Trigger and send the PDF on with an email or storage node.",
+      "makeItYours": "- Replace **Sample Data** with real data: an [HTTP Request](/nodes/reference/connector), a database connector or an MCP tool, as long as the rows reach the charts under the names in `dataPath`. The [branded PDF inventory report](/recipes/key-inventory-pdf-report) does this with an MCP tool and a Python step.\n- Brand it: change the colors in the specs (`mark.color`, `scale.scheme`), or pass a Vega `theme` object on each Chart node so every chart shares one style. The [brand extraction recipe](/recipes/brand-extraction-web) finds a site's logo and colors.\n- Run it on a schedule with a Schedule Trigger and send the PDF on with an email or storage node.",
       "makeItSafer": "- If any HTML comes from user input or a model, turn on `OUTBOUND_DENY_PRIVATE` (off by default) so the page cannot load internal URLs: see [outbound URL checks](/security/outbound-url-checks#configuration).\n- The PDF travels as base64 inside the run result and is stored with the run, so anyone who can read the run can read the report.",
       "related": [
         "workflow-dag"
@@ -868,6 +868,154 @@
         {
           "text": "Pattern library",
           "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "key-inventory-report-flow.json",
+      "slug": "key-inventory-pdf-report",
+      "title": "Branded PDF inventory report with charts and MCP",
+      "description": "Import a workflow that reads a brand from a web page with a model, counts records from an MCP tool, draws three charts and prints a branded PDF.",
+      "keys": "services",
+      "keysNote": "A model key, an MCP server, Chromium and a Python sandbox",
+      "time": "30 minutes",
+      "tags": [
+        "reports",
+        "charts",
+        "pdf",
+        "mcp",
+        "web"
+      ],
+      "whatYouGet": "A two-page A4 PDF in a website's colors and logo, with three charts of records counted from an MCP tool's answer.",
+      "summary": "One **Manual Trigger** starts two branches. The brand branch loads a URL with **Web Browse** in headless Chromium, and a **Prompt Template**, an **LLM Call** and an **Output Parser** turn the page's title, meta tags, image URLs and text into a brand kit: name, logo URL, two colors, a font and a tagline. The data branch calls a `list_keys` tool with an **MCP Tool** node, and a Python **Code Node** counts the records by cloud, by algorithm and by age. Three **Chart** nodes draw the counts as SVG, the two bar charts in the brand colors, a second Prompt Template builds one HTML page, and **PDF Output** prints it. The sample counts encryption keys, but any MCP tool that returns a JSON list works. It combines two smaller recipes: [brand extraction](/recipes/brand-extraction-web) and [PDF report with charts](/recipes/pdf-report-with-charts).",
+      "steps": [
+        "Install Chromium for Playwright on the API host once: `pnpm exec playwright install chromium` from the repo root, or point `PDF_CHROMIUM_EXECUTABLE_PATH` at a Chromium you have. Web Browse and PDF Output both need it.",
+        "Let Python code run. With the default `CODE_SANDBOX_MODE=auto`, **Aggregate Keys** runs in a throwaway container when docker or podman is installed and both sandbox images are present locally. Without a container, Python code nodes are off by default and the node fails. See [code execution](/security/code-execution#code-nodes).",
+        "Point **Key manager list_keys** at your MCP server: set `connection.endpoint` to its streamable HTTP URL (`http://key-manager-mcp.internal/mcp` is a placeholder). For a token, set `connection.authType` to `bearer` and a `secretRef` to a stored [secret](/security/secrets), or register the server in the [MCP server registry](/product/mcp-server-registry) and set `registryServerId`.",
+        "Give **Distill Branding** a model: pick a stored secret with your OpenAI API key under **API Key Secret** (or set `OPENAI_API_KEY` on the API server), or switch the provider. To try it without a key, set its `providerId` to `echo` in the JSON file and import it again: the **Provider** list has no echo entry.",
+        "Set **Brand URL** to your site, or send a `user_prompt` with the run: it replaces the Text Input's URL. Run it, open the run and click **Render PDF**: `pdf.downloadUrl` holds the file as a `data:application/pdf;base64,...` URL, and the **PDF Report** output returns it as `result`."
+      ],
+      "sections": [
+        {
+          "heading": "What a run does",
+          "body": "We ran it on a local install with three stand-ins, so nothing left the machine: a brand page served on localhost (a title, an `og:image` logo, a `theme-color` tag and text naming two colors and a font), a local MCP server whose `list_keys` returned 12 keys, and a scripted OpenAI-compatible model that answered the brand prompt with one JSON object. Python ran in a container (we set `CODE_SANDBOX_PYTHON_IMAGE` to a stock `python:3-alpine` image).\n\n- **With the stand-ins**, the run took about 1.7 seconds: about 0.65 s each for Web Browse and the PDF, 0.3 s for the Python step (mostly starting the container) and 6 to 12 ms per chart. The PDF was 55,555 bytes on two A4 pages: the logo, brand name and tagline, a box with the total (12), the cloud bar chart in the page's primary color and the algorithm donut on page 1, and the age chart in the accent color on page 2. The age chart's heading was left at the foot of page 1; add `h2{break-after:avoid}.chart{break-inside:avoid}` to the template's CSS to keep headings with their charts.\n- **With the echo provider**, the model only repeats the prompt. The parser picked up the image list from the echoed text, so every brand field was empty: the PDF had no brand name, tagline or logo, and the bar charts used default colors. The run still succeeded, so check the brand values.\n- **With the MCP endpoint as shipped**, **Key manager list_keys** failed with `fetch failed` after about 8 seconds. The nodes that had not run yet, Web Browse included, were skipped, and the run ended with an error.\n\nThe file name template is <span v-pre>`{{results.brand_parse.parsed.brand}}-key-inventory-{{session_id}}.pdf`</span>: a run with `session_id: \"q4-review\"` gave the stand-in's brand name followed by `-key-inventory-q4-review.pdf` (spaces in the brand name are kept), and without a session the name ends in `-.pdf`. The stand-in shows the plumbing; how well a real model fills in the brand kit depends on the model and the page."
+        },
+        {
+          "heading": "How the branches meet",
+          "body": "A node sees the outputs of the nodes that point at it. The three Chart nodes have edges from both **Aggregate Keys** and **Parse Brand JSON**, so they wait for both branches. **Compose Branded HTML** has edges from the parser, the Python step, the Text Input and the charts, so its template can use <span v-pre>`{{parsed.brand}}`</span>, <span v-pre>`{{totalKeys}}`</span> and <span v-pre>`{{cloudChart.svg}}`</span>. **Render PDF** has only the HTML node as a parent, so its file name reads the brand with <span v-pre>`{{results.brand_parse.parsed.brand}}`</span>, which reaches any finished node.\n\nA Chart node fills in placeholders only in `specTemplate`, a JSON string, not in an inline `spec` object. The two bar charts use `specTemplate` with <span v-pre>`{{ parsed.primaryColor || '#4c78a8' }}`</span> as the bar color, so a missing color falls back to a default. The result must still be valid JSON: a color value with a quote in it fails the node. Each chart's `dataPath` (`byCloud`, `byAlgorithm`, `ageing`) names a list from the Python step. See the [Chart node](/nodes/chart) for the other fields."
+        },
+        {
+          "heading": "The Python step",
+          "body": "**Aggregate Keys** gets the MCP Tool node's output as `items[0]`: the tool's text in `tool_output`, and its `structuredContent` in `structured` when the server sends one. The script prefers `structured`, parses `tool_output` as JSON otherwise, and accepts a list or an object with a `keys` list. It reads each record's `algorithm`, `labels.cloud` (or `cloud`) and `createdAt`. Missing values count as `unknown`, and a record without a readable date counts as under 30 days old.\n\nA Python code node returns what the script assigns to `result`; `log()` only adds a line to `code_logs`. Here `result` is a dictionary (`byCloud`, `byAlgorithm`, `ageing`, `totalKeys`, `generatedAt`), and its keys also appear at the top level for the next nodes. `generatedAt` goes into the report as a raw ISO timestamp; format it in the script if you want a plain date."
+        },
+        {
+          "heading": "Outbound requests and untrusted input",
+          "body": "Web Browse loads the page and everything it pulls in, and PDF Output loads whatever the HTML references, here the logo URL. Both go through L2M's [outbound URL checks](/security/outbound-url-checks): cloud metadata and link-local addresses are always refused, while private ranges and localhost are allowed by default, which is why our localhost page worked.\n\nThe brand values come from a web page through a model and go into the HTML without escaping, and Chromium renders that HTML with scripts on. Treat the brand URL as untrusted input. The counts have no model in their path: the charts come straight from the tool's answer."
+        }
+      ],
+      "makeItYours": "- Count something else: change the tool name and `argsTemplate` on the MCP Tool node, then the field names in the Python step. Keep the `byCloud`, `byAlgorithm` and `ageing` names, or change each chart's `dataPath`.\n- Skip the model: delete the four brand nodes and put fixed colors in the chart specs and the HTML template.\n- Let a chat follow up on a report: the [two-turn report and code helper](/recipes/two-turn-report-helper) saves a report per session and writes a script from it on the next turn.",
+      "makeItSafer": "- If people you do not control choose the brand URL, turn on `OUTBOUND_DENY_PRIVATE` (off by default): see [outbound URL checks](/security/outbound-url-checks#configuration).\n- Keep Python in the container sandbox, not on the host: see [code execution](/security/code-execution#python-on-the-host).\n- Give the workflow an MCP token that can only read. An optional [MCP tool policy](/glossary/mcp-tool-policy) can also refuse tools you did not mean to allow.\n- The PDF is stored with the run as base64, so anyone who can read the run can read the report.",
+      "related": [
+        "mcp-tool",
+        "streamable-http",
+        "ssrf",
+        "indirect-prompt-injection",
+        "workflow-dag"
+      ],
+      "docs": [
+        {
+          "text": "Chart node",
+          "link": "/nodes/chart"
+        },
+        {
+          "text": "Web Browse node",
+          "link": "/nodes/web-browse"
+        },
+        {
+          "text": "Code execution",
+          "link": "/security/code-execution"
+        },
+        {
+          "text": "Outbound URL checks",
+          "link": "/security/outbound-url-checks"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "two-turn-report-code-helper-flow.json",
+      "slug": "two-turn-report-helper",
+      "title": "Two-turn report and code helper with session artifacts",
+      "description": "Import a chat workflow that remembers artifacts between turns, routes follow-up intents and returns a PDF or code help on request.",
+      "keys": "model",
+      "keysNote": "A model with tool calling (local Ollama as shipped) and an MCP server",
+      "time": "20 minutes",
+      "tags": [
+        "agent",
+        "mcp",
+        "memory",
+        "pdf"
+      ],
+      "whatYouGet": "A chat endpoint that builds a PDF report from MCP data on one turn, saves it for the session, and writes a Python script from that saved report on a later turn.",
+      "summary": "A **Webhook Input** at `POST /webhook/two-turn-report-code-helper` takes a `user_prompt` and a `session_id`. **Session Artifact Load** reads the report saved earlier in that session, if any. An **Agent Orchestrator** with a chat model, a **Simple Memory** and every tool of one MCP server answers with one JSON object: `status`, `intent`, `final_html`, `python_code`, `follow_up_question`, `chart_data` and `artifact_context`. An **Output Parser** checks it, and a **Chat Intent Router** picks a branch. A report turn prints `final_html` to PDF, saves the report with **Session Artifact Save** and returns it with the PDF attached. A code turn returns the script. Anything else returns a message. As shipped, the chat model is `qwen2.5:7b` on a local Ollama server, the MCP endpoint is a placeholder, and the webhook has no authentication.",
+      "steps": [
+        "Point **Chat Model** at a model that can call tools and keep to a JSON format: pull `qwen2.5:7b` into Ollama, or switch the provider and pick a stored key. To check the plumbing without a model, set its `providerId` to `echo` in the JSON file and import it again (the **Provider** list has no echo entry). Echo never calls a tool.",
+        "Point **MCP Tools** at your MCP server: set `connection.endpoint` to its streamable HTTP URL (`http://127.0.0.1:7001/mcp` is a placeholder). `toolName: \"__all__\"` gives the agent every tool the server lists. For a token, set `connection.authType` to `bearer` and a `secretRef`, or register the server in the [MCP server registry](/product/mcp-server-registry) and set `registryServerId`.",
+        "Install Chromium for Playwright for the PDF: `pnpm exec playwright install chromium` from the repo root, or set `PDF_CHROMIUM_EXECUTABLE_PATH`.",
+        "Ask for a report, with a session id:\n\n   ```bash\n   curl -X POST http://localhost:4000/webhook/two-turn-report-code-helper \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"user_prompt\": \"Build a PDF report of our keys by cloud\", \"session_id\": \"team-a-1\"}'\n   ```",
+        "Ask for the code in the same session: send `\"user_prompt\": \"Now give me a Python script that regenerates it nightly without AI\"` with the same `session_id`.",
+        "Read `output.result`. A report turn has the PDF in `attachments` (`filename`, `sizeBytes` and a `data:` URL in `downloadUrl`). A code turn has `{ language, source }` in `codes`. When the agent needs more, `status` is `needs_more_info` and `follow_up_question` says what."
+      ],
+      "sections": [
+        {
+          "heading": "What a run does",
+          "body": "We ran it on a local install with two stand-ins: a local MCP server whose one tool, `list_keys`, returned 12 keys, and a scripted OpenAI-compatible model written to follow the system prompt. A real model's answers depend on the model.\n\n**Turn 1**, \"Build a PDF report of our keys by cloud\", session `t1`. The Load node found nothing. The agent was offered `session_cache_list`, `session_cache_get`, `agent_clarify` and `http_mcp__list_keys`, called `list_keys`, then answered with a report object. The parser accepted it, and the router took the agent's own `intent: \"report\"`. **PDF Output** printed a one-page A4 file, `mcp-report-t1.pdf` (15,717 bytes), the Save node stored five fields as `latest_report`, and the reply carried the PDF in `attachments`. The run took about 0.7 seconds.\n\n**Turn 2**, \"Now give me a Python script that regenerates it nightly without AI\", same session. The Load node found the report, and the agent's prompt held it as JSON. Memory added the first turn's question and answer, but not the tool result (**Persist Tool Messages** is off). The agent called no tool and answered with `intent: \"code\"`; the reply carried the script in `codes`, and the PDF and Save nodes were skipped.\n\n**A new session asking for code** had no saved report, so the stand-in returned `status: \"needs_more_info\"` with a question, as the system prompt asks.\n\n**With the echo provider**, the agent's answer is its own prompt. The parser asked once more (`maxRetries: 1`), then gave `parsed: null`, and the router fell back to keywords: \"report\" picked the report branch. The PDF held only the request text, and every field of the saved report was null. On the router, `intentSource: \"explicit\"` means the agent's intent was used, `keyword` means the fallback matched a keyword, and `default` means nothing matched."
+        },
+        {
+          "heading": "Memory, artifacts and the tool cache",
+          "body": "The workflow keeps three things per session, under the namespace `two-turn-report-code-helper`:\n\n- **Memory**: the last 20 messages (`maxMessages`), what the user asked and what the agent answered.\n- **The artifact**: one exact JSON value under the key `latest_report`, which the next turn sees word for word instead of a summary. Each report turn replaces it.\n- **The session tool cache**: each tool result from the agent's turns. With a `session_id`, the agent gets `session_cache_list` and `session_cache_get`, so it can reuse an earlier `list_keys` answer. In our runs each report turn stored one `list_keys` entry for its session.\n\nAll three need a `session_id`; without one, nothing is loaded or saved. They stay in the L2M database until you set `AGENT_MEMORY_RETENTION_DAYS` (by default they are kept): see [data retention](/operations/data-retention#what-each-setting-deletes) and [agent memory](/learn/agents/agent-memory)."
+        },
+        {
+          "heading": "How the router decides",
+          "body": "The **Chat Intent Router** reads `parsed.intent` first: `report`, `code`, `message` or a synonym such as `pdf` or `python`. If that is missing, it searches the request for its keywords: code words (`python`, `script`, `nightly` ...) beat report words (`report`, `pdf`, `chart` ...), and neither means a message.\n\nWith `requireArtifactForCode` on, a code request with no saved report takes a fourth branch, `missing_context`. The sample does not wire it, and with nothing there the run ends with no output, so add a reply node first. The router finds the report through `artifactPath`, <span v-pre>`results.load_report_artifact.latest_report`</span>, because its own input comes from the parser."
+        },
+        {
+          "heading": "What to check before you rely on it",
+          "body": "The agent writes `final_html`, and Chromium renders it with scripts on; the URLs it loads go through the [outbound URL checks](/security/outbound-url-checks). The agent also writes the Python script. The prompt asks for direct REST calls, secrets from environment variables and no invented endpoints, but treat the script as a draft and read it before you run it.\n\nIf the MCP server is down, the run does not fail. With our server stopped, the agent saw only the three built-in tools, its `list_keys` call came back as `Tool 'list_keys' does not exist`, and it answered without data. Check `_mcpTools` on the Agent node when a report comes back empty."
+        }
+      ],
+      "makeItYours": "- Use your own data: the prompt names no product, so any MCP server with read tools works. Edit its report rules to name the tools and fields you want.\n- Change what is kept: edit the Save node's `fields` list, and the next turn sees exactly those.\n- Build the report from fixed nodes instead of model-written HTML: the [branded PDF inventory report](/recipes/key-inventory-pdf-report) draws charts from an MCP tool's answer with no model in the data path.",
+      "makeItSafer": "- Secure the webhook before anyone else can reach it, with a bearer token or an HMAC signature: see [webhook auth modes](/security/secure-webhooks#webhook-auth-modes).\n- The agent gets every tool the server lists. Give it a token that can only read, and optionally hold tool calls for a person: see [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).\n- Turn on `OUTBOUND_DENY_PRIVATE` (off by default) so model-written HTML cannot load internal URLs: see [outbound URL checks](/security/outbound-url-checks#configuration).\n- Cap spend with a workflow [budget](/product/budgets).",
+      "related": [
+        "agent-memory",
+        "ai-agent",
+        "mcp-tool",
+        "tool-calling",
+        "max-iterations"
+      ],
+      "docs": [
+        {
+          "text": "Agent memory",
+          "link": "/learn/agents/agent-memory"
+        },
+        {
+          "text": "Utility nodes reference",
+          "link": "/nodes/reference/utility"
+        },
+        {
+          "text": "Output nodes reference",
+          "link": "/nodes/reference/output"
+        },
+        {
+          "text": "Secure webhooks",
+          "link": "/security/secure-webhooks"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/#_7-multi-turn-helper-with-session-artifacts"
         }
       ]
     }

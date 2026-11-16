@@ -4,7 +4,7 @@ sidebarTitle: "MCP authorization"
 description: "How a remote MCP server asks for OAuth: the 401 challenge, resource metadata, PKCE, the resource parameter, and why tokens must never be passed through."
 level: intermediate
 about: oauth-2-1
-related: [oauth-2-1, pkce, token-passthrough, confused-deputy, delegated-credentials]
+related: [oauth-2-1, pkce, protected-resource-metadata, dynamic-client-registration, resource-indicator, token-passthrough, confused-deputy, delegated-credentials]
 socialCard: true
 ---
 
@@ -41,13 +41,13 @@ WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/
                          scope="files:read"
 ```
 
-**2. Protected resource metadata.** The client fetches that URL. The document follows RFC 9728 and must list at least one entry in `authorization_servers`. If the header carries no URL, the client tries the well-known paths: first the one built from the MCP endpoint's path, then the root `/.well-known/oauth-protected-resource`.
+**2. Protected resource metadata.** The client fetches that URL. The document follows RFC 9728 (see <Term id="protected-resource-metadata">protected resource metadata</Term>) and must list at least one entry in `authorization_servers`. If the header carries no URL, the client tries the well-known paths: first the one built from the MCP endpoint's path, then the root `/.well-known/oauth-protected-resource`.
 
 **3. Authorization server metadata.** The client fetches the authorization server's metadata from the well-known locations of RFC 8414 or OpenID Connect discovery, in the order the specification gives. The metadata names the authorization and token endpoints, and whether the server supports PKCE, client metadata documents or registration.
 
 **4. A client id.** The client needs an identity at that authorization server (see the next section).
 
-**5. Sign-in.** The client opens the person's browser at the authorization endpoint with a PKCE challenge, a `state` value, the scope, and the `resource` parameter naming the MCP server. The person signs in and consents. The authorization server sends the browser back to the client's redirect URI with a code.
+**5. Sign-in.** The client opens the person's browser at the authorization endpoint with a <Term id="pkce">PKCE</Term> challenge, a `state` value, the scope, and the `resource` parameter naming the MCP server (a <Term id="resource-indicator">resource indicator</Term>). The person signs in and consents. The authorization server sends the browser back to the client's redirect URI with a code.
 
 **6. Token.** The client exchanges the code, the PKCE verifier and the same `resource` value for an access token, and often a refresh token.
 
@@ -114,7 +114,7 @@ L2M is an MCP client toward the servers your agents call, and an MCP server towa
 **As a client (the [MCP server registry](/product/mcp-server-registry)).** An HTTP server registered with auth type **OAuth** is connected with the flow above:
 
 - L2M reads the `401` challenge, then the protected resource metadata, then the authorization server metadata (RFC 8414 or OpenID Connect discovery).
-- It uses a client id you entered (pre-registration) or, when you leave it empty, registers itself with dynamic client registration as a public client. It does not support client metadata documents yet.
+- It uses a client id you entered (pre-registration) or, when you leave it empty, registers itself with <Term id="dynamic-client-registration">dynamic client registration</Term> as a public client. Client metadata documents are opt-in: when [enabled](/product/mcp-server-registry#client-metadata-document) and the authorization server supports them, L2M offers its document before it tries registration.
 - The sign-in uses PKCE with `S256`, and L2M refuses an authorization server that does not advertise it. It sends a random `state` and the `resource` parameter.
 - The scope is the one you set on the server, else the one from the challenge, else `scopes_supported`.
 - The `state` is single-use, expires after 10 minutes by default, and is bound to the sign-in session that started the connection. Discovery and token endpoints must use HTTPS, except on loopback addresses for local testing, and if the resource metadata names a resource, it must be on the server's own origin.
