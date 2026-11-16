@@ -39,7 +39,7 @@ export const TRACKS: Track[] = [
     shortTitle: "MCP fundamentals",
     summary: "What MCP is, its host, client and server roles, tools, resources and prompts, the transports, OAuth for remote servers, and tool annotations.",
     level: "beginner",
-    pages: ["what-is-mcp", "hosts-clients-servers", "tools-resources-prompts", "transports", "authorization", "tool-annotations"],
+    pages: ["what-is-mcp", "hosts-clients-servers", "tools-resources-prompts", "transports", "authorization", "tool-annotations", "mcp-vs-function-calling", "mcp-vs-rest-api", "mcp-vs-a2a"],
     next: "/learn/security/mcp-security-risks"
   },
   {
@@ -48,7 +48,7 @@ export const TRACKS: Track[] = [
     shortTitle: "AI agents",
     summary: "The tool-calling loop, when a fixed workflow beats an agent, supervisor and worker agents, memory, long tool lists and human approval.",
     level: "beginner",
-    pages: ["what-is-an-ai-agent", "workflows-vs-agents", "supervisor-and-workers", "agent-memory", "too-many-tools", "human-in-the-loop"],
+    pages: ["what-is-an-ai-agent", "workflows-vs-agents", "supervisor-and-workers", "agent-memory", "too-many-tools", "human-in-the-loop", "agent-vs-chatbot", "rag-vs-fine-tuning", "rag-vs-long-context"],
     next: "security"
   },
   {
@@ -57,7 +57,7 @@ export const TRACKS: Track[] = [
     shortTitle: "Agent security",
     summary: "Prompt injection, the OWASP Top 10 for LLM apps, the lethal trifecta, MCP risks, least privilege, and keeping personal data out of prompts.",
     level: "intermediate",
-    pages: ["prompt-injection", "owasp-llm-top-10", "lethal-trifecta", "mcp-security-risks", "least-privilege-for-agents", "sensitive-data-in-prompts"],
+    pages: ["prompt-injection", "owasp-llm-top-10", "lethal-trifecta", "mcp-security-risks", "least-privilege-for-agents", "sensitive-data-in-prompts", "oauth-vs-api-keys-for-mcp", "input-output-checks-vs-tool-policies"],
     next: "testing"
   },
   {
@@ -66,7 +66,7 @@ export const TRACKS: Track[] = [
     shortTitle: "Testing agents",
     summary: "Evals, regression tests built from recorded runs, testing MCP tool calls, and release gates that ship only what passed.",
     level: "intermediate",
-    pages: ["agent-evals", "regression-testing-agents", "testing-mcp-tools", "release-gates", "from-production-to-tests", "observing-agents"],
+    pages: ["agent-evals", "regression-testing-agents", "testing-mcp-tools", "release-gates", "from-production-to-tests", "observing-agents", "evals-vs-unit-tests", "llm-as-judge-vs-deterministic-checks"],
     next: "operations"
   },
   {
@@ -75,7 +75,34 @@ export const TRACKS: Track[] = [
     shortTitle: "Running in production",
     summary: "LLM and MCP gateways, cost caps, self-hosting, retention and erasure, audit trails, and identity: SSO, MFA, roles and keys.",
     level: "intermediate",
-    pages: ["llm-gateway-vs-mcp-gateway", "llm-cost-control", "self-hosting-ai-agents", "ai-data-retention-and-erasure", "audit-trails-for-agents", "identity-for-ai-platforms"],
+    pages: ["llm-gateway-vs-mcp-gateway", "llm-cost-control", "self-hosting-ai-agents", "ai-data-retention-and-erasure", "audit-trails-for-agents", "identity-for-ai-platforms", "opentelemetry-genai-conventions", "opentelemetry-collector-for-agents", "tracing-vs-logging-for-llm-apps", "rate-limits-vs-budgets", "openai-compatible-api-gateway", "sso-vs-scim", "saml-vs-oidc", "oidc-sso-with-keycloak", "saml-sso-setup"],
+    next: "mcp-servers"
+  },
+  {
+    id: "mcp-servers",
+    title: "MCP servers with an agent",
+    shortTitle: "MCP servers",
+    summary: "Run open-source MCP servers under an agent: filesystem, GitHub, Postgres, browser and more, with allow-lists, approvals and tests.",
+    level: "intermediate",
+    pages: ["import-mcp-json-config", "filesystem-mcp-server", "github-mcp-server", "postgres-mcp-read-only", "fetch-mcp-server", "git-mcp-server", "playwright-mcp-server", "memory-mcp-server", "time-and-everything-servers", "build-a-minimal-mcp-server"],
+    next: "use-cases"
+  },
+  {
+    id: "use-cases",
+    title: "AI agents by job",
+    shortTitle: "Use cases",
+    summary: "Agent patterns for real jobs: ticket and incident triage, reporting, docs Q&A, reviews and approvals, each with a sample to import.",
+    level: "intermediate",
+    pages: ["support-ticket-triage-agent", "incident-triage-agent", "data-reporting-agent", "internal-docs-qa-agent", "security-questionnaire-agent", "code-review-agent", "refund-approval-agent", "research-agent-with-citations", "email-to-structured-data", "scheduled-monitoring-agent", "slack-assistant-with-tools", "sales-crm-enrichment-agent", "brand-and-web-extraction", "agent-as-mcp-tool-for-ide"],
+    next: "troubleshooting"
+  },
+  {
+    id: "troubleshooting",
+    title: "Troubleshooting MCP and agents",
+    shortTitle: "Troubleshooting",
+    summary: "What common MCP and agent errors mean, which side causes them, and how to fix them, from connection closed to invalid params.",
+    level: "intermediate",
+    pages: ["mcp-error-32000-connection-closed", "spawn-npx-enoent", "mcp-env-vars-not-passed", "mcp-server-shows-no-tools", "mcp-session-not-found-404", "mcp-request-timed-out", "mcp-unsupported-protocol-version", "json-rpc-32601-method-not-found", "json-rpc-32602-invalid-params", "mcp-tool-result-too-large", "filesystem-mcp-access-denied", "mcp-oauth-invalid-client", "failed-to-fetch-authorization-server-metadata", "mcp-403-insufficient-scope", "model-does-not-call-tools", "agent-stuck-in-tool-loop"],
     next: "/recipes/"
   }
 ];
