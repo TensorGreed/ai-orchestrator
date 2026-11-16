@@ -72,7 +72,7 @@ One trap: day of month and day of week combine differently from POSIX cron. POSI
 
 ## Follow-up questions: the agent part
 
-For ad-hoc questions, attach a read-only SQL tool to an **Agent Orchestrator** through an MCP server that exposes your database. **Agent type** `sql` adds instructions such as "Only execute SELECT queries", but that is a prompt, not enforcement. The guarantees come from:
+For ad-hoc questions, attach a read-only SQL tool to an **Agent Orchestrator** through an MCP server that exposes your database ([read-only SQL access over MCP](/learn/mcp-servers/postgres-mcp-read-only) covers the database role and the choice of server). **Agent type** `sql` adds instructions such as "Only execute SELECT queries", but that is a prompt, not enforcement. The guarantees come from:
 
 - The MCP server connects as the same read-only database user.
 - In the [MCP tool policy](/product/mcp-tool-policy#read-only-classification), an admin marks the query tool read-only and marks or denies any tool that writes; the workflow's **No write tools** switch then blocks every write tool. The switch trusts a server's own `readOnlyHint` unless an admin's mark overrides it, which is why the marks matter.
@@ -102,7 +102,7 @@ Code nodes are answered from the recording in a replay, so the **Check numbers**
 
 The scheduled report makes one model call per run; the query, charts and PDF use no tokens. The prompt is the instruction plus the figures: five numbers cost a fraction of five hundred rows. Each week costs about the same, so it is easy to cap with a workflow <Term id="budget">budget</Term> using the **block** action ([budgets](/product/budgets)). A scheduled run that a used-up budget refuses is recorded once per period as a failed run, not on every fire.
 
-The follow-up agent is where cost varies: each iteration resends the conversation, and query results come back as tool messages. Keep **Max iterations** low (an Agent Orchestrator added in the editor starts at 6), make the SQL tool return few rows (a `LIMIT` in the server or the view), and keep the agent's tool message limit at its default of 6,000 characters or lower. See [controlling LLM and agent costs](/learn/operations/llm-cost-control).
+The follow-up agent is where cost varies: each iteration resends the conversation, and query results come back as tool messages. Keep **Max iterations** low (an Agent Orchestrator added in the editor starts at 6), make the SQL tool return few rows (a `LIMIT` in the server or the view), and keep the agent's tool message limit at its default of 6,000 characters or lower. See [controlling LLM and agent costs](/learn/operations/llm-cost-control). If the agent keeps rerunning the same query, see [agent stuck in a tool loop](/learn/troubleshooting/agent-stuck-in-tool-loop).
 
 ## Starting point, honestly
 

@@ -75,7 +75,7 @@ Research answers vary in wording, so test what must not vary: which sources are 
 | Not in the sources | A question no passage answers | Says the sources do not cover it; no marker |
 | Planted conflict | Two passages that disagree on a date | Cites both and names the conflict |
 
-Score with `status` (a grounding failure fails the run, so a case that starts inventing sources fails here), `regex` or `contains` for required source ids, and an `llm_judge` rubric for the brief's quality. `faithfulness` asks a judge model whether each claim is supported by the retrieved passages. A replay of a recorded run answers the retrieval and the MCP calls from the recording and reruns the models, so it isolates a prompt or model change ([regression testing agents](/learn/testing/regression-testing-agents)).
+Score with `status` (a grounding failure fails the run, so a case that starts inventing sources fails here), `regex` or `contains` for required source ids, and an `llm_judge` rubric for the brief's quality (see [LLM as judge](/glossary/llm-as-judge) for its biases and how to calibrate it). `faithfulness` asks a judge model whether each claim is supported by the retrieved passages. A replay of a recorded run answers the retrieval and the MCP calls from the recording and reruns the models, so it isolates a prompt or model change ([regression testing agents](/learn/testing/regression-testing-agents)).
 
 ## What it costs to run
 

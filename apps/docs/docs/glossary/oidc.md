@@ -41,7 +41,7 @@ The flow is picked by `response_type`: `code` for the authorization code flow, t
 
 ## In L2M
 
-[OIDC single sign-on](/security/auth-rbac#oidc-single-sign-on) is opt-in (`OIDC_ENABLED`). L2M uses the code flow with PKCE (S256), `state` and `nonce`. It accepts only asymmetrically signed ID tokens, and checks `iss`, `aud`, `azp`, `exp`, `iat` and `nonce`. It stores each identity under issuer plus `sub`, and links by email only when the email is verified, unless `OIDC_REQUIRE_EMAIL_VERIFIED=false` ([Linking accounts](/security/auth-rbac#linking-accounts)). Group claims can map to roles ([group-to-role mappings](/security/auth-rbac#group-to-role-mappings)).
+[OIDC single sign-on](/security/auth-rbac#oidc-single-sign-on) is opt-in (`OIDC_ENABLED`). L2M uses the code flow with PKCE (S256), `state` and `nonce`. It accepts only asymmetrically signed ID tokens, and checks `iss`, `aud`, `azp`, `exp`, `iat` and `nonce`. It stores each identity under issuer plus `sub`, and links by email only when the email is verified, unless `OIDC_REQUIRE_EMAIL_VERIFIED=false` ([Linking accounts](/security/auth-rbac#linking-accounts)). Group claims can map to roles ([group-to-role mappings](/security/auth-rbac#group-to-role-mappings)). For a worked setup, see [OIDC sign-in with Keycloak](/learn/operations/oidc-sso-with-keycloak); for how sign-in differs from provisioning, see [SSO vs SCIM](/learn/operations/sso-vs-scim).
 
 ## Further reading
 

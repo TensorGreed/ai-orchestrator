@@ -74,7 +74,7 @@ A ticket that needs one lookup costs two model calls (one to ask for the lookup,
 
 - **Ticket length.** The agent runtime cuts the user prompt to 3,000 characters, so a long email thread is truncated anyway. Strip quoted history before the agent sees it.
 - **Tool results.** Each result is capped by the agent's `toolMessageMaxChars` (default 6,000 characters). Return short snippets from your article search, not whole pages.
-- **Iterations.** `maxIterations` caps the loop per ticket.
+- **Iterations.** `maxIterations` caps the loop per ticket. If tickets keep reaching it, see [agent stuck in a tool loop](/learn/troubleshooting/agent-stuck-in-tool-loop).
 
 Set a workflow [budget](/product/budgets) with the block action. When it is used up, new webhook calls get HTTP 402 before any model call, so your help desk must retry later or queue the ticket for a person.
 

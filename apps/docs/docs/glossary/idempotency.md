@@ -33,7 +33,7 @@ Idempotent is not read-only. A read-only tool changes nothing; an idempotent <Te
 
 ## In L2M
 
-L2M's MCP clients follow a [safe re-send rule](/product/mcp-2026-07-28#the-safe-re-send-rule). After a broken connection, a timeout or a response stream that ended early, a tool call is sent again only when the tool counts as read-only (by an admin's mark in [tool policy](/product/mcp-tool-policy#read-only-classification), or else the server's `readOnlyHint`) or the server sets `idempotentHint: true`. A tool with no mark and no annotations counts as unsafe. Any other call fails with the error kind `outcome_unknown` (or `timeout` after a timeout), which says the tool may or may not have run, so a workflow can decide what to do. The rule is always on for 2026-07-28 servers; for older servers it is on by default.
+L2M's MCP clients follow a [safe re-send rule](/product/mcp-2026-07-28#the-safe-re-send-rule). After a broken connection, a timeout or a response stream that ended early, a tool call is sent again only when the tool counts as read-only (by an admin's mark in [tool policy](/product/mcp-tool-policy#read-only-classification), or else the server's `readOnlyHint`) or the server sets `idempotentHint: true`. A tool with no mark and no annotations counts as unsafe. Any other call fails with the error kind `outcome_unknown` (or `timeout` after a timeout), which says the tool may or may not have run, so a workflow can decide what to do. The rule is always on for 2026-07-28 servers; for older servers it is on by default. [MCP error -32000: Connection closed](/learn/troubleshooting/mcp-error-32000-connection-closed) shows where this comes up.
 
 ## Further reading
 

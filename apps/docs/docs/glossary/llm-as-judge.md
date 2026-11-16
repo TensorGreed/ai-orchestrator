@@ -30,7 +30,7 @@ A pairwise judge compares a new reply with the golden reply twice, swapping the 
 
 ## Common confusion
 
-A judge's score is easy to mistake for ground truth, but it is a measurement with its own errors. Calibrate it first: have people grade a sample, run the judge on the same sample and check that they agree. Judges can also be steered by text inside the output they grade, so keep code checks for anything that can be checked exactly.
+A judge's score is easy to mistake for ground truth, but it is a measurement with its own errors. Calibrate it first: have people grade a sample, run the judge on the same sample and check that they agree. Judges can also be steered by text inside the output they grade, so keep code checks for anything that can be checked exactly. [LLM-as-judge vs deterministic checks](/learn/testing/llm-as-judge-vs-deterministic-checks) covers which to use where.
 
 ## In L2M
 

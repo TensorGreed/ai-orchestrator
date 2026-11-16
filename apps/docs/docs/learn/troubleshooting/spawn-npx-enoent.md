@@ -103,7 +103,7 @@ Where the server starts decides which `PATH` applies:
 
 On Linux and macOS, a missing `cwd` also produces "was not found" naming the command, as in Node.js, so check the folder when the command looks right.
 
-Related errors: [MCP error -32000: Connection closed](/learn/troubleshooting/mcp-error-32000-connection-closed) for servers that start and then exit, and [MCP server can't see API keys or env variables](/learn/troubleshooting/mcp-env-vars-not-passed) for environment problems after the server starts. [MCP transports](/learn/mcp/transports) explains how stdio servers are launched.
+Related errors: [MCP error -32000: Connection closed](/learn/troubleshooting/mcp-error-32000-connection-closed) for servers that start and then exit, and [MCP server can't see API keys or env variables](/learn/troubleshooting/mcp-env-vars-not-passed) for environment problems after the server starts. [MCP transports](/learn/mcp/transports) explains how stdio servers are launched, and [the mcpServers JSON config format](/learn/mcp-servers/import-mcp-json-config) what `command`, `args` and `env` mean when you move a server from a client config file.
 
 ## Further reading
 

@@ -41,7 +41,7 @@ DCR is not the only way to get a client id. MCP lists three: pre-registration, C
 
 ## In L2M
 
-When you leave the client id empty on an [OAuth server](/product/mcp-server-registry#oauth-for-remote-servers), L2M asks to register as a public client (no secret, PKCE), with `application_type` `native` for a loopback redirect URL and `web` otherwise, and reuses that registration only with the authorization server that issued it. With `MCP_OAUTH_CLIENT_METADATA_ENABLED=true` (off by default) and a public `https` base URL, it offers a [client metadata document](/product/mcp-server-registry#client-metadata-document) first to authorization servers that support it. A client id you enter always wins.
+When you leave the client id empty on an [OAuth server](/product/mcp-server-registry#oauth-for-remote-servers), L2M asks to register as a public client (no secret, PKCE), with `application_type` `native` for a loopback redirect URL and `web` otherwise, and reuses that registration only with the authorization server that issued it. With `MCP_OAUTH_CLIENT_METADATA_ENABLED=true` (off by default) and a public `https` base URL, it offers a [client metadata document](/product/mcp-server-registry#client-metadata-document) first to authorization servers that support it. A client id you enter always wins. If the authorization server rejects the registration or a stored client id, see [MCP OAuth invalid_client](/learn/troubleshooting/mcp-oauth-invalid-client).
 
 ## Further reading
 

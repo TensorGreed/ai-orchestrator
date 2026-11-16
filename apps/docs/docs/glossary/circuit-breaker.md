@@ -29,7 +29,7 @@ A ticket-search server stops answering. Five calls in a row time out, and the br
 
 The hard part is deciding which errors count. Fowler notes that not all errors should trip the circuit. A server that answers "invalid arguments" or "no such ticket" is healthy: the model made a bad call. Counting those would let one confused agent shut a working server off for everyone. Only signs that the server itself is failing (no connection, broken protocol, timeouts) should count.
 
-A breaker is also not a <Term id="rate-limit">rate limit</Term>. A rate limit caps traffic to a healthy server; a breaker reacts to an unhealthy one.
+A breaker is also not a <Term id="rate-limit">rate limit</Term>. A rate limit caps traffic to a healthy server; a breaker reacts to an unhealthy one. A server that keeps dropping its connection is a typical trigger: see [MCP error -32000: Connection closed](/learn/troubleshooting/mcp-error-32000-connection-closed).
 
 ## In L2M
 

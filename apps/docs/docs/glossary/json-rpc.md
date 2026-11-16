@@ -35,6 +35,8 @@ JSON-RPC reserves -32768 to -32000 for predefined errors:
 
 MCP 2026-07-28 splits that server range: -32020 to -32099 is reserved for codes the MCP specification defines (such as -32022, unsupported protocol version), and -32000 to -32019 is legacy, where receivers must not assume a meaning, except -32002 (resource not found in older revisions).
 
+The two codes people hit most with tools have their own guides: [-32602 Invalid params](/learn/troubleshooting/json-rpc-32602-invalid-params) and [-32601 Method not found](/learn/troubleshooting/json-rpc-32601-method-not-found).
+
 ## Example
 
 ```json

@@ -94,7 +94,7 @@ Test the parts separately:
 
 The schedule, fetches and comparison cost no tokens. The model runs only on the changed branch, so cost follows the number of changes, not ticks: a 15-minute monitor that sees two changes a day makes two model calls a day. Send the model the diff, not the fetched pages.
 
-If you use an agent for the check itself, every tick costs tokens. Keep <Term id="max-iterations">max iterations</Term> low (an Agent Orchestrator added in the editor starts at 6), keep tool results small, and cap the workflow with a <Term id="budget">budget</Term> using the **block** action ([budgets](/product/budgets)). When a budget refuses a scheduled run, L2M records one failed run per schedule, budget and period, not one per tick.
+If you use an agent for the check itself, every tick costs tokens. Keep <Term id="max-iterations">max iterations</Term> low (an Agent Orchestrator added in the editor starts at 6), keep tool results small, and cap the workflow with a <Term id="budget">budget</Term> using the **block** action ([budgets](/product/budgets)). When a budget refuses a scheduled run, L2M records one failed run per schedule, budget and period, not one per tick. An agent that reaches its iteration limit on every tick is usually stuck on the same call ([agent stuck in a tool loop](/learn/troubleshooting/agent-stuck-in-tool-loop)).
 
 ## Starting point, honestly
 

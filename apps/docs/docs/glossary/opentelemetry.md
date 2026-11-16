@@ -38,7 +38,7 @@ OpenTelemetry is not a backend. It produces and moves telemetry; storing, search
 
 ## In L2M
 
-[OpenTelemetry export](/operations/opentelemetry) is off by default: with none of its settings set, the API loads no OpenTelemetry code. Set `OTEL_EXPORTER_OTLP_ENDPOINT` and L2M exports traces over OTLP/HTTP (protobuf or JSON; gRPC is not shipped), and metrics too with `OTEL_METRICS_ENABLED=true`. It does not export logs over OTLP. The [traced spans](/operations/opentelemetry#what-is-traced) cover HTTP requests, runs, nodes, agent loops, model calls and MCP calls. Spans carry names, timings and token counts, not prompts or tool results, unless you turn on [content capture](/operations/opentelemetry#content-capture).
+[OpenTelemetry export](/operations/opentelemetry) is off by default: with none of its settings set, the API loads no OpenTelemetry code. Set `OTEL_EXPORTER_OTLP_ENDPOINT` and L2M exports traces over OTLP/HTTP (protobuf or JSON; gRPC is not shipped), and metrics too with `OTEL_METRICS_ENABLED=true`. It does not export logs over OTLP. The [traced spans](/operations/opentelemetry#what-is-traced) cover HTTP requests, runs, nodes, agent loops, model calls and MCP calls. Spans carry names, timings and token counts, not prompts or tool results, unless you turn on [content capture](/operations/opentelemetry#content-capture). To route them through a Collector, see [Send AI agent traces to an OpenTelemetry Collector](/learn/operations/opentelemetry-collector-for-agents); for how the span names compare with the GenAI semantic conventions, see [Map agent traces to OpenTelemetry GenAI conventions](/learn/operations/opentelemetry-genai-conventions).
 
 ## Further reading
 

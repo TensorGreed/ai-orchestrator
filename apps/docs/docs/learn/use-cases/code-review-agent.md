@@ -59,7 +59,7 @@ In the agent's prompt, read the payload with templates such as <span v-pre>`{{we
 
 ## Read the diff with read-only MCP tools
 
-The agent reads code through an <Term id="mcp-server">MCP server</Term> for GitHub. The open-source GitHub MCP server is one option. Its `pull_request_read` tool takes a `method` such as `get_diff`, `get_files` or `get_review_comments`, and the server has a read-only mode: "write tools are skipped if `--read-only` is set". Register it in L2M's [MCP server registry](/product/mcp-server-registry) (over stdio or HTTP), give it a token that can only read the one repository, and run it with `--read-only`.
+The agent reads code through an <Term id="mcp-server">MCP server</Term> for GitHub. The open-source GitHub MCP server is one option. Its `pull_request_read` tool takes a `method` such as `get_diff`, `get_files` or `get_review_comments`, and the server has a read-only mode: "write tools are skipped if `--read-only` is set". Register it in L2M's [MCP server registry](/product/mcp-server-registry) (over stdio or HTTP), give it a token that can only read the one repository, and run it with `--read-only`. The [GitHub MCP server guide](/learn/mcp-servers/github-mcp-server) covers the token, the toolsets and read-only mode in detail.
 
 On the agent, attach one **MCP Tool** node per tool you want it to have, with that tool's name in `toolName`. An MCP Tool node with a tool name exposes only that tool to the agent; leaving the name empty (or `__all__`) exposes every tool on the server. For a reviewer, a good starting set is:
 
