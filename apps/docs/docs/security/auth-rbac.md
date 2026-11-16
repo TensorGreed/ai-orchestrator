@@ -507,6 +507,8 @@ lowering it); one with a project adds a project membership.
 
 ### Setting up an IdP
 
+For a full walkthrough with an open-source identity provider, see [OIDC sign-in with Keycloak](/learn/operations/oidc-sso-with-keycloak).
+
 Register a web application (confidential client) or a single-page/native
 application (public client), allow the Authorization Code grant, and add the
 redirect URL. Then:
@@ -558,6 +560,8 @@ same `SECRET_MASTER_KEY_BASE64`: the short-lived login cookie that carries the
 login can start on one instance and finish on another.
 
 ## SAML single sign-on
+
+A worked setup, from metadata to group mappings, is in [SAML single sign-on: a working setup](/learn/operations/saml-sso-setup).
 
 SAML 2.0 login is off unless `SAML_ENABLED=true` with `SAML_ENTRY_POINT`,
 `SAML_ISSUER` (L2M's own entity ID), `SAML_CALLBACK_URL` and `SAML_IDP_CERT`. It
