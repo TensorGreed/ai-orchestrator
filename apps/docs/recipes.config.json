@@ -17,7 +17,7 @@
       "whatYouGet": "One agent with a chat model and two MCP tools, a clock and a calculator, that runs on a fresh install.",
       "summary": "A manual trigger starts one Agent Orchestrator node. Its chat model is the built-in echo provider, and its tools come from the mock MCP server that runs inside L2M: `get_current_time` and `calculator`. Nothing needs a key, a network connection or a separate server. Echo is not a real model: it repeats the prompt back and never asks for a tool, so a local run makes one model call and ends. That proves the wiring works. To see the agent call tools, attach a real chat model.",
       "steps": [
-        "Click **Run** in the editor, or call the run API with your own question. The API takes an API key from **Settings → Account → API Keys**:\n\n   ```bash\n   curl -X POST http://localhost:4000/api/workflows/wf-mcp-agent-quickstart/execute \\\n     -H \"Authorization: Bearer $L2M_API_KEY\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"user_prompt\": \"What is 2340 * 0.17?\"}'\n   ```",
+        "Click **Run** in the editor, or call the run API with your own question. The API takes an API key from **Settings \u2192 Account \u2192 API Keys**:\n\n   ```bash\n   curl -X POST http://localhost:4000/api/workflows/wf-mcp-agent-quickstart/execute \\\n     -H \"Authorization: Bearer $L2M_API_KEY\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"user_prompt\": \"What is 2340 * 0.17?\"}'\n   ```",
         "Open the run in the execution history and click the **Agent** node to read its trace.",
         "Then change one thing at a time (see below)."
       ],
@@ -74,7 +74,7 @@
       "whatYouGet": "An agent behind a webhook URL, with per-session memory and two MCP tools, that any app can call with a question and a session id.",
       "summary": "A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `user_prompt` and `session_id` from the request body to an Agent Orchestrator. The agent has a chat model, a **Simple Memory** node keyed by the session id, and two tools from the mock MCP server built into L2M. As shipped, the chat model points at a local Ollama server (`http://localhost:11434/v1`, model `qwen2.5:7b`), so you need that model, or you point the node at another one. As shipped, the webhook also has no authentication: secure it before you expose it.",
       "steps": [
-        "Open the chat model node and point it at a model you have: pull `qwen2.5:7b` into Ollama, type another model name, or switch the provider. In Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host. To check the webhook and memory first without a model, set the provider to echo. Save.",
+        "Open the chat model node and point it at a model you have: pull `qwen2.5:7b` into Ollama, type another model name, or switch the provider. In Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host. Then save. To check the webhook and memory first without a model, use echo: the **Provider** list has no echo entry, so set the chat model node's `providerId` to `echo` in the JSON file and import it again.",
         "Send a request:\n\n   ```bash\n   curl -X POST http://localhost:4000/webhook/agent-demo \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"system_prompt\": \"You are a helpful assistant.\", \"user_prompt\": \"What is 12 * 7?\", \"session_id\": \"demo-2\"}'\n   ```",
         "Send a second request with the same `session_id` and a follow-up question. The agent now sees the first exchange.",
         "Before anyone else can reach the URL, secure it (see below)."
@@ -190,8 +190,8 @@
       "whatYouGet": "A workflow that any MCP client can list and call as one tool, `answer_from_kb`, through L2M's MCP gateway.",
       "summary": "An **Expose as MCP Tool** trigger turns the workflow into a tool named `answer_from_kb`, with one required argument, `question`. Inside, an agent with the echo model and the mock `lookup_kb` tool answers it. Put the workflow in a toolset on the [MCP gateway](/product/mcp-gateway) and any MCP client holding a client token can list the tool and call it; each call runs the whole workflow. It runs with no API key. With echo, the answer is the question repeated back.",
       "steps": [
-        "As an admin, open **MCP → Toolsets** in the sidebar, create a toolset and add the workflow. Its endpoint is `/mcp/<slug>` (we named ours `kb-helper`).",
-        "Open **MCP → Clients**, create a client for that toolset (admin; you may be asked to confirm your identity again) and copy its token. It is shown once.",
+        "As an admin, open **MCP \u2192 Toolsets** in the sidebar, create a toolset and add the workflow. Its endpoint is `/mcp/<slug>` (we named ours `kb-helper`).",
+        "Open **MCP \u2192 Clients**, create a client for that toolset (admin; you may be asked to confirm your identity again) and copy its token. It is shown once.",
         "Call the tool with curl (below), or paste the client's configuration snippet into your MCP client."
       ],
       "sections": [
@@ -258,7 +258,7 @@
       "sections": [
         {
           "heading": "Create a knowledge base with the API",
-          "body": "```bash\n# An admin's API key, from Settings → Account → API Keys.\nexport L2M_API_KEY=ao_...\n\n# Create a knowledge base. The response holds its id: kb_...\ncurl -X POST http://localhost:4000/api/knowledge-bases \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"name\": \"Helpdesk FAQ\", \"embedderId\": \"token-embedder\", \"embedderConfig\": {}}'\n\n# Load, chunk, embed and store a Markdown file in one call.\nexport KB_ID=kb_...   # the id from the response above\ncurl -X POST http://localhost:4000/api/knowledge-bases/$KB_ID/upload \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"filename\": \"helpdesk-faq.md\", \"sourceId\": \"helpdesk-faq-v1\",\n       \"content\": \"# Helpdesk FAQ\\n\\n## Reset your password\\nTo reset your password, open the sign-in page, choose Forgot password, and enter your work email. The reset link is valid for 30 minutes.\\n\\n## Change your billing plan\\nAdmins can change the billing plan under Settings, then Billing. Changes apply from the next invoice.\\n\\n## Export your data\\nGo to Settings, then Data, and choose Export. You get a ZIP file with one CSV per table.\",\n       \"chunking\": {\"strategy\": \"recursive\", \"chunkSize\": 300, \"chunkOverlap\": 0}}'\n```\n\nOn our install the upload answered `{\"sourceId\":\"helpdesk-faq-v1\",\"documentsLoaded\":1,\"chunksInserted\":2,\"dimensions\":64}`. The embedder you create the knowledge base with must match the `embedderId` on the RAG Retrieve node, or the question and the chunks are not compared in the same space."
+          "body": "```bash\n# An admin's API key, from Settings \u2192 Account \u2192 API Keys.\nexport L2M_API_KEY=ao_...\n\n# Create a knowledge base. The response holds its id: kb_...\ncurl -X POST http://localhost:4000/api/knowledge-bases \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"name\": \"Helpdesk FAQ\", \"embedderId\": \"token-embedder\", \"embedderConfig\": {}}'\n\n# Load, chunk, embed and store a Markdown file in one call.\nexport KB_ID=kb_...   # the id from the response above\ncurl -X POST http://localhost:4000/api/knowledge-bases/$KB_ID/upload \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"filename\": \"helpdesk-faq.md\", \"sourceId\": \"helpdesk-faq-v1\",\n       \"content\": \"# Helpdesk FAQ\\n\\n## Reset your password\\nTo reset your password, open the sign-in page, choose Forgot password, and enter your work email. The reset link is valid for 30 minutes.\\n\\n## Change your billing plan\\nAdmins can change the billing plan under Settings, then Billing. Changes apply from the next invoice.\\n\\n## Export your data\\nGo to Settings, then Data, and choose Export. You get a ZIP file with one CSV per table.\",\n       \"chunking\": {\"strategy\": \"recursive\", \"chunkSize\": 300, \"chunkOverlap\": 0}}'\n```\n\nOn our install the upload answered `{\"sourceId\":\"helpdesk-faq-v1\",\"documentsLoaded\":1,\"chunksInserted\":2,\"dimensions\":64}`. The embedder you create the knowledge base with must match the `embedderId` on the RAG Retrieve node, or the question and the chunks are not compared in the same space."
         },
         {
           "heading": "What a run does",
@@ -284,6 +284,586 @@
         {
           "text": "Vector stores",
           "link": "/nodes/vector-stores"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "agent-clarify-flow.json",
+      "slug": "agent-asks-a-question",
+      "title": "Let an AI agent ask a clarifying question",
+      "description": "A chat agent that pauses to ask the user a question when a request is ambiguous, then picks up where it stopped when the user replies.",
+      "keys": "model",
+      "keysNote": "OpenAI API key, or any model with tool calling",
+      "time": "10 minutes",
+      "tags": [
+        "agent",
+        "chat",
+        "human-in-the-loop"
+      ],
+      "whatYouGet": "A chat agent that asks one focused question instead of guessing, and carries on with the answer.",
+      "summary": "A **Chat** trigger sends each message to one Agent Orchestrator with a chat model and session memory. Every agent in L2M has a built-in tool, `agent_clarify`, that the model can call when it cannot finish without something only the user knows. The agent then stops with the question as its answer, and the chat shows it as a question. The user's next message in the same session goes back to the agent as the answer to that question, and the agent carries on. The sample's system prompt tells the model to ask only when the ambiguity changes the answer. As shipped, the chat model is OpenAI `gpt-4o-mini`; any chat model that supports tool calling works.",
+      "steps": [
+        "Open the **GPT-4o-mini** chat model node and pick a stored secret that holds your OpenAI API key (or set `OPENAI_API_KEY` on the API server). Save the node and the workflow. Without a key the run fails with `Chat model node \"GPT-4o-mini\" (model_1) has no OpenAI API key`. To use another model, replace the node with any chat model node on the agent's `chat_model` port.",
+        "On the **Workflows** page, open the workflow's menu and choose **Chat**.",
+        "Send a request that is missing something, such as \"Book me a table for Friday\". If the model decides to ask, the reply bubble is labelled **Assistant is asking**.",
+        "Answer in the same chat. The agent resumes with your answer and replies normally."
+      ],
+      "sections": [
+        {
+          "heading": "How agent_clarify pauses a run",
+          "body": "The runtime adds `agent_clarify` to every agent's tools, next to any MCP tools, and adds one line to the system prompt: call it with a focused question when you cannot finish without the user, and not to confirm something that is already clear. The tool takes a required `question` and an optional `reason`. It is only offered while tool calling is on, as it is in the sample.\n\nWhen the model calls it, nothing runs. The runtime:\n\n1. stops the agent loop without running the tool, and records the step;\n2. saves the conversation to session memory, ending with the model's unanswered `agent_clarify` call;\n3. ends the agent with `stopReason: \"clarification_requested\"`, the question as its `answer`, and a `clarification` object (`question`, `reason`, `toolCallId`) on the node output.\n\nThe workflow does not stop there. Later nodes run as usual, so the sample's **Output** node returns the question as `result`. The run counts as a success, and the run result also carries a top-level `clarification` field with the same question, the reason and the id of the agent node. That field is how a caller can tell that the answer is a question and not the final reply. See [mid-turn clarification](/runtime/agent-loop#mid-turn-clarification-agent-clarify) for the reference."
+        },
+        {
+          "heading": "How the reply resumes it",
+          "body": "There is no special resume call. The next run with the same `session_id` and a non-empty message loads session memory, finds the unanswered `agent_clarify` call at the end, and hands the new message to the model as that call's result, `{\"ok\":true,\"output\":{\"user_reply\":\"...\"}}`, instead of as a new user message. Model APIs expect every tool call to be followed by its result, so the conversation stays valid and the model reads the reply as the answer to its own question.\n\nMemory normally leaves tool results out (the sample's memory node keeps the default), but `agent_clarify` results are always saved. Without that, the next message would find the old question still open and be treated as another answer.\n\nIn the studio's chat, every message in a chat session sends the same `session_id`, so this happens by itself. A webhook or API caller does the same thing by hand: when the result has `clarification`, show the question, then call the workflow again with the same `session_id` and the user's reply as `user_prompt`."
+        },
+        {
+          "heading": "What a run does",
+          "body": "We ran the sample on a fresh install without a model key, in two ways.\n\n**With the echo provider.** Echo repeats the prompt and never calls a tool, so it never asks. `Book me a table for Friday` came back as `Echo: Book me a table for Friday` with `stopReason: \"final_answer\"` after one model call. A second message in the same session showed the first exchange in the agent's messages: memory works, but this says nothing about the question itself.\n\n**With a scripted stand-in model.** To watch the pause and the resume, we pointed the chat model at a small local OpenAI-compatible server that answers the first message with an `agent_clarify` call and answers a tool result with text. The model was offered `session_cache_list`, `session_cache_get` and `agent_clarify`. Then:\n\n- Run 1, `Book me a table for Friday`: the agent stopped after 1 iteration with `stopReason: \"clarification_requested\"`. Output `result` was `Which restaurant, and for how many people?`, and the run result carried `clarification` with that question, the reason `The booking depends on both.`, the tool call id and `nodeId: \"agent_1\"`.\n- Run 2, same session, `Luigi's, four people`: the model received no new user message. Its last message was the tool result `{\"ok\":true,\"output\":{\"user_reply\":\"Luigi's, four people\"}}` for the same call id, and the agent ended normally with `stopReason: \"final_answer\"`.\n\nThe scripted server shows the mechanism, not judgment: whether a real model asks, and when, depends on the model and the prompt. The demo has no copy of this workflow."
+        },
+        {
+          "heading": "Ask or guess?",
+          "body": "A question costs the user a turn, so ask only when the answer would change what the agent does: \"email him\" with no name, \"the report\" when there are three. Let the agent infer what it reasonably can, and do not use the clarify tool as a confirmation step. A clarifying question is not an approval either: nobody approves anything, and the reply is just more input. To make a person approve an action before it runs, use [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls). [Human in the loop](/learn/agents/human-in-the-loop) compares the two."
+        }
+      ],
+      "makeItYours": "- Attach MCP tools on the agent's `tool` port. The agent can then look things up first and ask only about what the tools cannot answer.\n- Tune the system prompt: name the details that are worth a question in your domain (a customer id, a date range) and the ones the agent should assume.\n- Call it from your own app: put a [Webhook Input](/nodes/reference/input) trigger in place of the Chat trigger, pass `user_prompt` and `session_id`, and check the result for `clarification`.",
+      "makeItSafer": "- Cap model spend per workflow with a [budget](/product/budgets).\n- Keep `maxIterations` low (5 in the sample) so a confused agent stops early.\n- When you add tools that change things, require a person's approval before they run: see [human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls).",
+      "related": [
+        "human-in-the-loop",
+        "ai-agent",
+        "agent-memory",
+        "tool-calling"
+      ],
+      "docs": [
+        {
+          "text": "Agent loop: mid-turn clarification",
+          "link": "/runtime/agent-loop#mid-turn-clarification-agent-clarify"
+        },
+        {
+          "text": "Built-in agent tools",
+          "link": "/runtime/built-in-agent-tools"
+        },
+        {
+          "text": "Human in the loop for AI agents",
+          "link": "/learn/agents/human-in-the-loop"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "branding-extract-flow.json",
+      "slug": "brand-extraction-web",
+      "title": "Extract a brand's name, logo and colors from a website",
+      "description": "Load a web page in headless Chromium, then have an LLM return the brand name, logo URL, colors, font and tagline as JSON. A small web-to-data workflow.",
+      "keys": "model",
+      "keysNote": "OpenAI API key and Playwright Chromium",
+      "time": "15 minutes",
+      "tags": [
+        "web",
+        "extraction",
+        "json"
+      ],
+      "whatYouGet": "A workflow that turns a website URL into one JSON object: brand name, logo URL, primary and accent color, font and tagline.",
+      "summary": "A **Text Input** holds the URL (`https://example.com` as shipped). **Web Browse** opens it in headless Chromium, waits for the network to go quiet, and extracts the title, text, meta tags, images and a screenshot. A **Prompt Template** puts the title, the description, Open Graph image and theme-color meta tags, the first 10 images and the first 4,000 characters of text into an extraction prompt. An **LLM Call** answers it, an **Output Parser** checks the JSON, and the **Output** returns it. It needs an OpenAI key as shipped and Chromium for Playwright on the API host. Read [what the model really sees](#what-the-model-really-sees) before you rely on colors and fonts.",
+      "steps": [
+        "Install Chromium for Playwright on the API host once: `pnpm exec playwright install chromium` from the repo root (Playwright itself comes with the workflow engine). Or point `PDF_CHROMIUM_EXECUTABLE_PATH` at a Chromium you already have.",
+        "Open the **LLM** node and pick a stored secret with your OpenAI API key under **API Key Secret** (or set `OPENAI_API_KEY` on the API server), or switch the provider. Save. Without a key the **LLM** node fails with `Provider openai requires an API key via secretRef or OPENAI_API_KEY`.",
+        "Run it. A `user_prompt` sent with the run replaces the Text Input's URL, so you can try other sites without editing the workflow. Put an API key from **Settings \u2192 Account \u2192 API Keys** in `L2M_API_KEY`:\n\n   ```bash\n   curl -X POST http://localhost:4000/api/workflows/wf-branding-extract-flow/execute \\\n     -H \"Authorization: Bearer $L2M_API_KEY\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"user_prompt\": \"https://www.wikipedia.org\"}'\n   ```",
+        "Open the run: **Parse JSON** holds the object, and the **Output** returns it as a JSON string in `result`."
+      ],
+      "sections": [
+        {
+          "heading": "Web Browse: pages that need JavaScript",
+          "body": "A plain HTTP request gets the HTML a server sends. Many sites build the page in the browser, so that HTML is nearly empty. [Web Browse](/nodes/web-browse) loads the page in headless Chromium through Playwright, runs its scripts and reads the result. The sample waits for `networkidle`, allows 45 seconds, and uses a 1440 x 900 viewport. Besides the nested `brandSite` object, it puts `url`, `title`, `text`, `html`, `screenshot`, `meta`, `links` and `images` at the top level for the next node. Each call starts and closes its own browser, so keep it to low-volume flows.\n\nWithout Chromium the run fails at this node. We pointed `PDF_CHROMIUM_EXECUTABLE_PATH` at a missing file to check: **Fetch Brand Site** failed with `browserType.launch: Failed to launch chromium because executable doesn't exist at ...`, the later nodes were skipped, and the run ended with an error."
+        },
+        {
+          "heading": "What a run does",
+          "body": "We ran it with Chromium installed and no model key. On `https://example.com` the browse step took about 0.9 seconds and returned the title `Example Domain`, the page text and a screenshot, with no images and no Open Graph tags. On `https://www.wikipedia.org` it took about 1.5 seconds and found an `og:image`, a description and a list of image URLs, the Wikipedia logo first. The prompt then held the title, the description, the `og:image` URL, an empty theme color (the page sets none), the images and the first 4,000 of 4,077 characters of text.\n\n- **With the echo provider**, the model only repeats the prompt, so there is nothing real to parse. The parser picked up the image list from the echoed prompt (see below), and the Output returned that list.\n- **With a scripted stand-in model** that answers with one JSON object (the page title as `brand`, the `og:image` URL as the logo, empty colors and font), the parser accepted it on the first try, and the Output returned `{\"brand\":\"Wikipedia\",\"primaryLogoUrl\":\"https://upload.wikimedia.org/...\",\"primaryColor\":\"\",...}` as `result`.\n\nThe stand-in shows the plumbing. How well a real model fills in each field depends on the model and the page."
+        },
+        {
+          "heading": "What the model really sees",
+          "body": "The prompt gives the model the page title, three meta tags (`description`, `og:image`, `theme-color`), up to 10 image URLs and up to 4,000 characters of visible text. It does not send the screenshot, the HTML or any CSS, so the model never sees a color or a font on the page. The prompt says so, and asks for a color or font only when the data states it, such as a `theme-color` meta tag, and an empty string otherwise. Expect empty colors on many sites. The brand name, the logo URL and the tagline come from real page data and are the reliable part.\n\nThe template reads meta tags with <span v-pre>`{{ meta[\"og:image\"] }}`</span>: a simple path such as `meta.og:image` cannot hold a colon, and would render empty. It trims lists with <span v-pre>`{{ images.slice(0, 10) }}`</span> and <span v-pre>`{{ text.slice(0, 4000) }}`</span>. The browse node keeps the screenshot in the run so you can check the page yourself; set `screenshot: false` if you do not need it."
+        },
+        {
+          "heading": "Parsing and the final output",
+          "body": "The **Parse JSON** node runs in `json_schema` mode with `lenient` parsing: it reads the first JSON value it finds in the reply. The schema requires `brand` and `primaryLogoUrl`. If the value fails the check, the node asks the same model up to 2 more times to fix it, then fails. The checks apply only when the value is an object: an array passes as it is. That is how the echo run passed with the image list. A real model that follows the prompt returns one object, but if it adds a list before the object, the parser takes the list. Check `parserTrace` on the node when the result looks wrong.\n\nThe **Output** node's response template is <span v-pre>`{{parsed}}`</span>, so the run returns the object as a JSON string in `result`."
+        },
+        {
+          "heading": "Outbound URL checks",
+          "body": "The URL can come from whoever calls the workflow, so it is checked. Web Browse refuses `file:` URLs, and every request the page makes, including redirects and images, goes through L2M's [outbound URL checks](/security/outbound-url-checks): cloud metadata addresses and link-local ranges are always refused. Private ranges and localhost are allowed by default. Set `OUTBOUND_DENY_PRIVATE=true` if callers must not reach your internal network through this node. Page text is untrusted input: a page can carry instructions aimed at the model, so do not give this workflow tools that act on what a page says."
+        }
+      ],
+      "makeItYours": "- Take the URL from a webhook: replace the Text Input with a [Webhook Input](/nodes/reference/input); the browse node's URL template is already <span v-pre>`{{user_prompt}}`</span>.\n- Set `screenshot: false` on the browse node: the prompt does not use it, and it adds a large base64 image to every run.\n- Feed the JSON to a report: the [PDF report with charts recipe](/recipes/pdf-report-with-charts) builds an HTML page and a PDF, and can take colors from here.\n- Swap OpenAI for another provider on the LLM node.",
+      "makeItSafer": "- Turn on `OUTBOUND_DENY_PRIVATE` and list the internal hosts you do want in `OUTBOUND_ALLOWLIST`: see [outbound URL checks](/security/outbound-url-checks#configuration).\n- Cap model spend with a [budget](/product/budgets).\n- Read [prompt injection](/learn/security/prompt-injection) before you add tools to any workflow that reads web pages.",
+      "related": [
+        "ssrf",
+        "indirect-prompt-injection",
+        "workflow-dag"
+      ],
+      "docs": [
+        {
+          "text": "Web Browse node",
+          "link": "/nodes/web-browse"
+        },
+        {
+          "text": "Outbound URL checks",
+          "link": "/security/outbound-url-checks"
+        },
+        {
+          "text": "Prompt injection",
+          "link": "/learn/security/prompt-injection"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "report-with-charts-flow.json",
+      "slug": "pdf-report-with-charts",
+      "title": "Generate a PDF report with charts from data",
+      "description": "Render Vega-Lite charts to SVG on the server, place them in an HTML template and print it to PDF with headless Chromium. No model and no API key needed.",
+      "keys": "none",
+      "keysNote": "No API key; Playwright Chromium for the PDF",
+      "time": "10 minutes",
+      "tags": [
+        "reports",
+        "charts",
+        "pdf"
+      ],
+      "whatYouGet": "A two-page A4 PDF with three charts (a bar chart, a donut and an ageing histogram), built from data in the workflow.",
+      "summary": "A **Set** node holds three small data sets: key counts by cloud, by algorithm and by age. Three **Chart** nodes turn them into SVG from [Vega-Lite](https://vega.github.io/vega-lite/) specs, on the server, with no browser. A **Prompt Template** places the SVGs in an HTML page, and **PDF Output** prints that page to A4 with headless Chromium. No model is involved, so it runs without a key. Swap the Set node for real data, such as an HTTP request, a database query or an MCP tool, and the rest stays the same.",
+      "steps": [
+        "Install Chromium for Playwright on the API host once: `pnpm exec playwright install chromium` from the repo root. Or point `PDF_CHROMIUM_EXECUTABLE_PATH` at a Chromium you already have.",
+        "Run it. Open the run and click **PDF**: the node output has the file as `pdf.downloadUrl` (a `data:application/pdf;base64,...` URL) and `pdf.base64`. The **Output** node returns that URL as `result`.",
+        "Save the PDF from the URL, or run the workflow from the studio's chat, which shows a **Download PDF** link when the answer is a PDF data URL."
+      ],
+      "sections": [
+        {
+          "heading": "What a run does",
+          "body": "On our install the whole run took about 1.2 seconds. The three charts took 10 to 30 ms each, and the PDF step about 1.1 seconds, most of it starting Chromium. The PDF was 34,859 bytes, two A4 pages titled `Key Inventory Report`: the cloud bar chart and the algorithm donut on page 1, and the age histogram on page 2, below a heading left at the foot of page 1. Add `h2{break-after:avoid}.chart{break-inside:avoid}` to the template's CSS to keep each heading with its chart.\n\nThe file name came out as `key-report-.pdf`: its template is <span v-pre>`key-report-{{session_id}}.pdf`</span> and a run without a session has an empty `session_id`. Pass a `session_id`, or use another value in the name.\n\n**Without Chromium.** We pointed `PDF_CHROMIUM_EXECUTABLE_PATH` at a missing file. The three charts and the HTML still rendered, then the **PDF** node failed with `browserType.launch: Failed to launch chromium because executable doesn't exist at ...` and the run ended with an error. Chart rendering never needs the browser; only the HTML-to-PDF step does."
+        },
+        {
+          "heading": "The chart specs",
+          "body": "Each Chart node holds a Vega-Lite spec without data. Vega-Lite describes a chart as a `mark` (bar, arc, line...) and an `encoding` that maps data fields to channels such as `x`, `y`, `theta` and `color`. The node's `dataPath` (`byCloud`, `byAlgorithm`, `ageing`) points at rows from the earlier node and fills in the data. The Set node's values are JSON strings, and the run turned them into arrays of rows.\n\nThe age chart sets `\"sort\": null` on its x axis so the buckets keep their order (`<30d`, `30-90d` and so on) instead of sorting by name. `width` and `height` on the node are defaults; a size in the spec wins. Each chart's `outputKey` (`cloudChart` and so on) holds `svg` and a `dataUrl`. The node also puts `svg`, `dataUrl` and a ready `imgTag` at the top level, but three charts feed one template here and those top-level keys overwrite each other, so the template uses <span v-pre>`{{cloudChart.svg}}`</span> to inline each SVG. See the [Chart node](/nodes/chart) for every field, and use `specTemplate` when the spec itself depends on the data."
+        },
+        {
+          "heading": "HTML template and PDF output",
+          "body": "The **HTML Report** node is a Prompt Template used as an HTML template: a full page with inline CSS and the three SVGs. Nothing in it calls a model. **PDF Output** in `html` render mode reads the `html` key, loads it in Chromium, waits for the network to go quiet (up to 45 seconds) and prints with `printBackground` on and the `A4` page size (`Letter`, `Legal`, `A3` and `A5` also work).\n\nAnything the HTML loads from the web, such as a font or an image URL, goes through the [outbound URL checks](/security/outbound-url-checks). The inline SVGs load nothing. PDF Output also has a `text` mode that writes plain text into a PDF without a browser, but it cannot show charts."
+        },
+        {
+          "heading": "Add an LLM summary (optional)",
+          "body": "To open the report with a written summary, add a Prompt Template after **Sample Data** that asks for a short summary of the rows (for example with <span v-pre>`{{byCloud}}`</span> and <span v-pre>`{{ageing}}`</span>), then an LLM Call, and connect the LLM Call to **HTML Report** next to the charts. Then put its answer into the template as <span v-pre>`{{answer}}`</span>. The model only writes text; the numbers in the charts still come from the data."
+        }
+      ],
+      "makeItYours": "- Replace **Sample Data** with real data: an [HTTP Request](/nodes/reference/connector), a database connector or an MCP tool, as long as the rows reach the charts under the names in `dataPath`.\n- Brand it: change the colors in the specs (`mark.color`, `scale.scheme`), or pass a Vega `theme` object on each Chart node so every chart shares one style. The [brand extraction recipe](/recipes/brand-extraction-web) finds a site's logo and colors.\n- Run it on a schedule with a Schedule Trigger and send the PDF on with an email or storage node.",
+      "makeItSafer": "- If any HTML comes from user input or a model, turn on `OUTBOUND_DENY_PRIVATE` (off by default) so the page cannot load internal URLs: see [outbound URL checks](/security/outbound-url-checks#configuration).\n- The PDF travels as base64 inside the run result and is stored with the run, so anyone who can read the run can read the report.",
+      "related": [
+        "workflow-dag"
+      ],
+      "docs": [
+        {
+          "text": "Chart node",
+          "link": "/nodes/chart"
+        },
+        {
+          "text": "Output nodes reference",
+          "link": "/nodes/reference/output"
+        },
+        {
+          "text": "Outbound URL checks",
+          "link": "/security/outbound-url-checks"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "vscode-l2m-coding-agent-flow.json",
+      "slug": "vscode-coding-agent",
+      "title": "A coding agent in VS Code backed by your own workflow",
+      "description": "Connect the L2M VS Code extension to a workflow that returns chat, code blocks, patch previews and commands that run only after you approve them.",
+      "keys": "model",
+      "keysNote": "A model (local Ollama as shipped) and the VS Code extension",
+      "time": "20 minutes",
+      "tags": [
+        "agent",
+        "coding",
+        "vscode"
+      ],
+      "whatYouGet": "A chat panel in VS Code whose answers come from an L2M workflow you can edit: code blocks, file patches you preview and apply, and commands you approve.",
+      "summary": "The L2M VS Code extension sends each chat message, with a bounded bundle of workspace context, to an L2M workflow. This workflow is the server side: a **Webhook Input** with the path `vscode-l2m-agent`, an Agent Orchestrator with a chat model and session memory, an **Output Parser** that checks the reply against a JSON contract, and an **Output**. The extension turns the reply into chat text, code blocks and actions. It changes files or runs commands only after you approve each one in a modal dialog. The model and the prompt live in the workflow, so you can switch models without touching the editor. As shipped, the chat model is `qwen2.5:7b` on a local Ollama server.",
+      "steps": [
+        "Point the **Chat Model** node at a model you have: pull `qwen2.5:7b` into Ollama, or switch the provider to OpenAI, Anthropic or any OpenAI-compatible endpoint with its key as a stored secret. A larger model follows the JSON contract more reliably. Save.",
+        "Create an API key in **Settings \u2192 Account \u2192 API Keys** (a builder role or above can run workflows). It is shown once.",
+        "Install the extension. Build the `.vsix` from `apps/vscode-l2m-agent` or take it from a CI run, then `code --install-extension vscode-l2m-agent.vsix`. See [VS Code extension](/getting-started/vscode-extension#install-development-build).",
+        "In VS Code settings, set `l2mAgent.apiBaseUrl` (default `http://localhost:4000`), `l2mAgent.workflowId` to `wf-vscode-l2m-coding-agent` (or leave it empty to find the workflow by its webhook path), and `l2mAgent.authToken` to the key. Put the key in your user settings, not in a workspace `settings.json` that might be committed.",
+        "Open **L2M Agent** in the Activity Bar and ask for a change in the open file."
+      ],
+      "sections": [
+        {
+          "heading": "The request and the contract",
+          "body": "The extension calls `POST /api/webhooks/execute/stream` (or `/api/webhooks/execute` with streaming off) with the API key as a bearer token. The body has `user_prompt`, `session_id`, its own `system_prompt`, and `variables` with the workspace context: the active file and selection, open editors, diagnostics, git status and diffs, pinned files, the extension's compacted memory, recent turns, and `actionResults`, which says which earlier patches and commands you approved. The [settings](/getting-started/vscode-extension#context-budget-tuning) cap each part, for example 12,000 characters per file and 60,000 in all.\n\nThe agent's system prompt asks for exactly one JSON object: `status` (`complete` or `needs_more_info`), `message`, `actions` (patches with a single-file unified diff, or commands), `codes`, `attachments`, `context_update` and `follow_up_question`. It also says never to claim a change unless `actionResults` shows it was approved. **Contract Parser** checks the reply in `anything_goes` mode: the required top-level fields, the `status` values and the string fields' types, not the items inside the arrays. It asks the model once to fix a bad reply, and if that fails too it returns `parsed: null` with a warning instead of failing the run."
+        },
+        {
+          "heading": "What a run does",
+          "body": "We sent the extension's request shape to a fresh install with a request to add a docstring, without VS Code and without a model key.\n\n**With the echo provider**, the agent echoed the prompt back, the parser found no `status` field even after one retry (`Output parsing failed: Missing required field: status`), and the workflow returned an empty `result`. The streaming route sent `execution_started`, `node_start`, `node_activity`, `node_complete` and a final `result` event.\n\n**With a scripted stand-in model** that answers with a valid contract, the parser accepted it on the first try. The workflow returned the object as a JSON string in `result`, with a `patch` action for `src/math.py`, its unified diff, and a `context_update`. We did not drive the VS Code side; the rest of this page describes it from the extension's source."
+        },
+        {
+          "heading": "Safety model",
+          "body": "The extension, not the workflow, decides what touches your machine:\n\n- **Patches.** **Preview** opens a diff view of the result before anything is written. **Apply** asks again in a modal dialog, then writes the file. A patch must be a single-file unified diff whose target matches the action's file. The path is resolved against the first workspace folder and refused if it ends up outside it, whether through `..` or an absolute path. The check works on the path text; it does not resolve symbolic links.\n- **Commands.** **Preview** shows the command and its working directory. **Run** asks in a modal dialog, then types the command into a new VS Code terminal named **L2M Agent Action**, where you can watch it. The working directory must also be inside the workspace. The extension never runs a command on its own, and it asks for approval even when the workflow sets `requiresApproval: false`.\n- **Results.** Each approval, rejection or failure is saved with the session and sent back in `actionResults` on the next request. A command's terminal output is not sent back.\n\nThe workflow sees only what the extension sends. The sample attaches no tools, so the agent cannot read other files or run anything itself. If you attach MCP tools, those run on the L2M server under your tool rules, outside this approval flow."
+        },
+        {
+          "heading": "The webhook path is open as shipped",
+          "body": "The extension uses the signed-in `/api/webhooks/execute` routes: they check your API key and do not look at the node's auth settings. The **Webhook Input** node also serves `POST /webhook/vscode-l2m-agent`, and the sample sets no auth mode on it. On our install that URL ran the workflow with no credentials. If others can reach your L2M, open the node and set **Auth Mode** to **Bearer Token** or **HMAC SHA256**; the extension keeps working. Clearing the **Path** does not close the URL: an empty path falls back to the node id, so the workflow answers at `/webhook/webhook_1` instead. It also stops the extension from finding the workflow, unless `l2mAgent.workflowId` is set. See [Secure webhooks](/security/secure-webhooks#webhook-auth-modes)."
+        }
+      ],
+      "makeItYours": "- Rewrite the system prompt for your stack: test commands, code style, the files that matter.\n- Lower the context limits in the extension settings for small local models, or raise them for large-context models.\n- Attach read-only MCP tools (a repository search, docs lookup) on the agent's `tool` port so it can look things up on the server.\n- Each chat session sends its own `session_id`, and the workflow's memory keeps the last 24 messages of it (`maxMessages`); the extension also sends its own compacted memory.",
+      "makeItSafer": "- Set an auth mode on the Webhook Input (above), so its public URL does not run the workflow for anyone who can reach L2M.\n- Give the extension a key of its own, so you can revoke it alone.\n- Cap model spend with a [budget](/product/budgets).\n- If you attach tools that change things, set [tool policy](/product/mcp-tool-policy) rules or require [approval](/guides/human-approval-for-agent-tool-calls) for them.",
+      "related": [
+        "human-in-the-loop",
+        "ai-agent",
+        "approval-gate",
+        "agent-memory"
+      ],
+      "docs": [
+        {
+          "text": "VS Code extension",
+          "link": "/getting-started/vscode-extension"
+        },
+        {
+          "text": "Secure webhooks",
+          "link": "/security/secure-webhooks"
+        },
+        {
+          "text": "Human in the loop for AI agents",
+          "link": "/learn/agents/human-in-the-loop"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "rag-with-citations-flow.json",
+      "slug": "rag-with-citations",
+      "title": "RAG with citations: answers that show their sources",
+      "description": "Have the model mark each claim with [N], resolve every marker to the chunk and document it came from, and check that the cited sources back the claims.",
+      "keys": "model",
+      "keysNote": "An OpenAI key as shipped; none with the demo embedder and echo",
+      "time": "15 minutes",
+      "tags": [
+        "rag",
+        "knowledge-base",
+        "citations"
+      ],
+      "whatYouGet": "A RAG workflow whose answer carries [1]-style markers, each resolved to the chunk id, source id and score of the document it cites.",
+      "summary": "**Retrieve** runs a hybrid search over a built-in knowledge base and returns the four best chunks as numbered context. It also emits `citationInstructions`, a short instruction that tells the model to end each claim with the number of its source, such as `[2]`. The **Grounded Prompt** puts both into the prompt, the **LLM** answers, and **Extract Citations** finds every marker in the answer and maps it back to its chunk. As shipped, retrieval uses `openai-embedder` and the LLM uses `gpt-4o-mini`, both with the server's `OPENAI_API_KEY`. To try the wiring without a key, switch to the `token-embedder` demo embedder and the echo model.",
+      "steps": [
+        "Create a knowledge base and add a document, as in the [knowledge base recipe](/recipes/rag-knowledge-base#create-a-knowledge-base-with-the-api). Create it with the embedder the **Retrieve** node uses: `openai-embedder` as shipped, or `token-embedder` to start with no key.",
+        "With no OpenAI key, use echo for the **LLM** node. The **Provider** list has no echo entry, so set the node's `providerId` to `echo` in the JSON file and import it again before you edit the nodes below.",
+        "Open **Retrieve** and replace `<your-kb-id>` with the knowledge base id, in **Vector Store Extra Config (JSON)**. If you used `token-embedder`, set **Embedder** to **Token Based (Local Demo)**. Leave **Vector Store** alone: its list has no entry for the built-in knowledge base, so it may show another store, but the saved `knowledge-base` value stays. Save.",
+        "Run it, then open the run and click **Extract Citations** to read the resolved citations."
+      ],
+      "sections": [
+        {
+          "heading": "What a run does",
+          "body": "We ran the sample on a fresh install against a knowledge base holding a short helpdesk FAQ in 4 chunks (password reset, billing, data export and an error code).\n\n**As shipped, with no OpenAI key**, the run stops at **Retrieve**: `OpenAI Embedding API error: Unauthorized`. The question has to be embedded before anything is searched.\n\n**With `token-embedder` and echo**, the run succeeded. Retrieve returned all 4 chunks, the password-reset chunk first, each with its `chunkId`, `sourceId`, `similarityScore` and `retrieval.mode: \"hybrid\"`. Echo answered with the whole prompt, so the answer contained `[1]` to `[4]` from the numbered context and `[1]`, `[2]` and `[3]` from the citation instructions' own examples. Extract Citations found 8 markers and `hasCitations: true`. That shows the plumbing, not a model citing: a check that only asks \"are there citations?\" passes a prompt echoed back.\n\n**With a scripted stand-in model.** To see real resolution without a provider key, we pointed the LLM node at a small local OpenAI-compatible server that returns a fixed answer: \"Open the sign-in page, choose Forgot password and enter your work email [1]. The reset link is valid for 30 minutes [1]. If sign-in fails with E1042, your session expired: retry in a new tab [3].\" Extract Citations returned 3 citations covering 2 documents (`uniqueCitedDocuments: 2`). Each one carries the marker, the 1-based `index`, the `chunkId`, `sourceId`, `knowledgeBaseId`, the chunk text, the score and the marker's `startIndex` and `endIndex` in the answer. An answer with no markers returned `hasCitations: false` and an empty list. A marker that matches no document, such as `[7]` with four documents, is skipped.\n\nThe **Output** node returns only <span v-pre>`{{answer}}`</span>, the text with its markers. The citations stay in the Extract Citations output. The studio's chat panel reads them from there and shows each marker as a link to a footnote. An app calling the workflow through the API gets only the text unless you add <span v-pre>`{{citations}}`</span> to the Output template, which renders the list as JSON."
+        },
+        {
+          "heading": "Check that the citations hold up",
+          "body": "A citation proves which chunk the model pointed at, not that the chunk says what the model claims. To check that, add an **Output Guardrail** node after Extract Citations with the **Grounded in sources** check (`grounding`) and **On Fail** left at **Stop with Error**. It splits the answer into claims and looks for each claim's words in the documents it cites. See [grounding in sources](/product/content-rules-output-checks#grounding-in-sources).\n\nWe tried it with the stand-in model. The answer above passed. \"The reset link is valid for 24 hours and arrives by text message [2].\" failed the run with `Output guardrail checks failed: grounding (block: ungrounded (output.grounding))`, because document 2 is the billing chunk. An answer with no markers passed by default, since its words appear in the documents; with **Every claim must cite a source** (`requireCitations`) turned on, it failed too.\n\nThe check is lexical. It catches a claim that cites the wrong chunk or says something no chunk says. A paraphrase in new words can read as unsupported, and a changed figure inside an otherwise matching sentence can slip through. It is optional; simple workflows need none of it."
+        },
+        {
+          "heading": "Score answers in evals",
+          "body": "To test a change to the prompt, the chunking or the embedder, run fixtures through the eval framework with the RAG scorers in [Knowledge bases](/nodes/knowledge-bases#rag-specific-eval-scorers-phase-9-5). `context_precision` and `context_recall` are programmatic and cost nothing per fixture. `faithfulness` and `answer_relevance` call a judge model with the server's provider keys, so they need both `EVAL_JUDGE_ENABLED=true` and `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true`. The scorers read `documents` and `answer` from the run's output. This sample's output is only `result`, the answer text, so the context scorers find no chunks. In the copy you evaluate, delete the Output node: the run's output is then the Extract Citations output, which carries both `answer` and `documents`."
+        }
+      ],
+      "makeItYours": "- Use any chat model on the **LLM** node. Run the grounding check above on a few answers to see how well your model cites.\n- Write your own instructions in place of the citation instructions, but keep the numbered form `[1]`: that is what Extract Citations resolves first. It also accepts a chunk id in brackets, such as `[kbc_...]`.\n- Lower `topK` (4 in the sample) to keep the prompt short, or add a **Rerank** step before the prompt: see [hybrid search and reranking](/recipes/hybrid-search-rerank).",
+      "makeItSafer": "- Retrieved chunks are outside content and can carry instructions for the model. [Content rules](/product/content-rules#outside-content-at-the-model-boundary) can check each retrieved document before it reaches the model.\n- Tell readers when an answer has no citations: branch on `hasCitations` with an If node.\n- Cap model spend with a [budget](/product/budgets).",
+      "related": [
+        "grounding",
+        "rag",
+        "hybrid-search",
+        "output-checks",
+        "misinformation"
+      ],
+      "docs": [
+        {
+          "text": "Knowledge bases: citations",
+          "link": "/nodes/knowledge-bases#citations-phase-9-4"
+        },
+        {
+          "text": "Output checks: grounding in sources",
+          "link": "/product/content-rules-output-checks#grounding-in-sources"
+        },
+        {
+          "text": "OWASP Top 10 for LLM applications",
+          "link": "/learn/security/owasp-llm-top-10"
+        },
+        {
+          "text": "OWASP LLM09:2025 Misinformation",
+          "link": "https://genai.owasp.org/llmrisk/llm092025-misinformation/"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "rag-hybrid-rerank-flow.json",
+      "slug": "hybrid-search-rerank",
+      "title": "Hybrid search and reranking for better RAG",
+      "description": "Fuse BM25 keyword and vector search with reciprocal rank fusion, then rerank the top chunks, so RAG finds exact error codes and paraphrases alike.",
+      "keys": "services",
+      "keysNote": "A rerank key (Cohere, Jina or Voyage) and an OpenAI key",
+      "time": "15 minutes",
+      "tags": [
+        "rag",
+        "knowledge-base",
+        "search"
+      ],
+      "whatYouGet": "A RAG workflow that takes 20 candidates from keyword and vector search combined, reranks them, and answers from the best 3.",
+      "summary": "**Retrieve (hybrid)** searches a built-in knowledge base two ways at once: BM25 keyword search and vector search, 50 candidates each. It merges the two lists with reciprocal rank fusion and keeps the top 20. **Rerank** sends those 20 to a hosted reranking model (Cohere as shipped), which scores each chunk against the question and keeps the best 3. The **Grounded Prompt** and **LLM** answer from those. As shipped it needs a Cohere key for the rerank and an OpenAI key for the embedder and the model. Without them you can still compare the search modes with the demo embedder.",
+      "steps": [
+        "Create a knowledge base and add documents, as in the [knowledge base recipe](/recipes/rag-knowledge-base#create-a-knowledge-base-with-the-api), with the embedder the **Retrieve (hybrid)** node uses (`openai-embedder` as shipped). Put its id in place of `<your-kb-id>` (on the node, in **Vector Store Extra Config (JSON)**).",
+        "Store your Cohere key as a [secret](/security/secrets). The Rerank form has no secret field, so put the secret's id in place of `<cohere-key-secret-id>` in the JSON file and import it again. Or delete `secretRef` from the file and set `COHERE_API_KEY` on the server. For Jina or Voyage, change `providerId` and the key.",
+        "Run it and open **Retrieve (hybrid)** and **Rerank** in the run to compare their order."
+      ],
+      "sections": [
+        {
+          "heading": "Why hybrid",
+          "body": "Vector search matches meaning: \"I forgot my login\" finds a chunk about resetting a password. It is weaker on exact strings such as error codes, product ids and rare names. Keyword search is the reverse. Hybrid runs both and merges the two ranked lists with reciprocal rank fusion (RRF): each list gives a chunk `1 / (k + rank)`, and the sums decide the order. A chunk near the top of both lists wins. The sample uses `k = 60`, the constant from the paper that introduced RRF, which found it near-optimal but not critical.\n\nHybrid and `bm25` modes work only with the built-in knowledge base. With an external vector store the node falls back to vector search without an error. If keyword search finds no chunk at all, hybrid returns the vector results unchanged."
+        },
+        {
+          "heading": "What a run does",
+          "body": "We ran the sample on a fresh install with no provider keys, against a knowledge base holding a short helpdesk FAQ in 4 chunks, one of them about error code E1042.\n\n**As shipped**, the run stops at the first step that needs a key. With `openai-embedder` and no key, that is **Retrieve**: `OpenAI Embedding API error: Unauthorized`. With the `token-embedder` demo embedder, retrieval succeeds and **Rerank** stops: `Reranker \"cohere\" requires an API key \u2014 pass via secretRef or set COHERE_API_KEY`. Note that while the node holds a `secretRef`, even a placeholder one, it uses only that secret and never reads `COHERE_API_KEY`. Delete the `secretRef` to use the environment key.\n\n**The search modes, compared.** We removed the Rerank node and ran the retrieve step in each mode with `topK: 3`:\n\n| Question | `vector` | `bm25` | `hybrid` |\n| --- | --- | --- | --- |\n| What does E1042 mean? | E1042 chunk first, then billing, then reset | the E1042 chunk only | E1042 chunk first (both rankers), then billing, then reset |\n| How do I reset my password? | reset chunk first | the reset chunk only | reset chunk first (both rankers) |\n\nKeyword search returns only chunks that share a word with the question; vector search always fills `topK`. In hybrid mode each chunk records which rankers found it (`retrieval.rankers`) and its `rrfScore`: 0.0328 for a chunk ranked first by both (2/61), 0.0161 and 0.0159 for chunks only vector search found (1/62, 1/63). With 4 small chunks the order barely moves. Hybrid matters more on larger collections, where an exact code can sit far down a vector ranking; measure it on yours (below).\n\n**The rerank step was not observed**, as we had no rerank key. From the code: Rerank sends the question and the text of each upstream chunk to the provider (Cohere's `top_n` is `topN`), keeps the order the provider returns, and adds `rerankerScore` and `reranker: { providerId, model }` to each chunk's metadata. It returns `documents`, a numbered `context` and the same `citationInstructions` as Retrieve. With no upstream chunks it returns an empty list and makes no call. A provider error fails the run with the provider's status, such as `Cohere rerank 401: ...`."
+        },
+        {
+          "heading": "Measure the difference",
+          "body": "Do not take hybrid or a reranker on faith: measure them on your own questions. Build a few fixtures (a question and the answer you expect), then score each variant with `context_precision` (how much of what was retrieved is relevant) and `context_recall` (how much of the expected answer the retrieved text covers). Both are programmatic and free per fixture. They read `documents` from the run's output, and this sample's output is only the answer text, so evaluate a copy that ends at the step you are measuring, **Retrieve (hybrid)** or **Rerank**. See [RAG-specific eval scorers](/nodes/knowledge-bases#rag-specific-eval-scorers-phase-9-5) and [golden sets](/product/golden-sets) for running them on every change."
+        }
+      ],
+      "makeItYours": "- Tune `candidatesPerRanker`, `bm25Weight`, `vectorWeight` and `rrfK` in the retrieve node's config in the JSON file, then import it again; the node's form has no fields for them, nor for `searchMode`. See [hybrid search](/nodes/knowledge-bases#hybrid-search-phase-9-3).\n- Swap the reranker: `jina` (default model `jina-reranker-v2-base-multilingual`) or `voyage` (`rerank-2`), with `JINA_API_KEY` or `VOYAGE_API_KEY` or a secret.\n- The prompt asks the model to \"Cite chunkIds inline\", but the context numbers chunks `[1]`, `[2]`. Put <span v-pre>`{{citationInstructions}}`</span> in the prompt instead and add an Extract Citations step: see [RAG with citations](/recipes/rag-with-citations).",
+      "makeItSafer": "- A reranker is one more service that receives your documents' text. Keep it in mind when you choose which documents to index.\n- Retrieved chunks can carry instructions for the model: [content rules](/product/content-rules#outside-content-at-the-model-boundary) can check them before they reach the model.\n- The rerank provider bills you directly, and L2M budgets do not count rerank calls. Cap the model side with a [budget](/product/budgets).",
+      "related": [
+        "hybrid-search",
+        "rag",
+        "vector-store",
+        "grounding"
+      ],
+      "docs": [
+        {
+          "text": "Knowledge bases: hybrid search",
+          "link": "/nodes/knowledge-bases#hybrid-search-phase-9-3"
+        },
+        {
+          "text": "Knowledge bases: reranker node",
+          "link": "/nodes/knowledge-bases#reranker-node-phase-9-3"
+        },
+        {
+          "text": "Golden sets, replay jobs and scorers",
+          "link": "/product/golden-sets"
+        },
+        {
+          "text": "Cormack, Clarke and B\u00fcttcher, \"Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods\" (SIGIR 2009)",
+          "link": "http://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf"
+        }
+      ]
+    },
+    {
+      "sample": "structured-output-flow.json",
+      "slug": "structured-output-json",
+      "title": "Extract structured JSON from text with an LLM",
+      "description": "Turn free text into JSON that matches a schema with the Output Parser node, retry when the model's JSON is invalid, and use the fields in later steps.",
+      "keys": "model",
+      "keysNote": "A model: local Ollama as shipped, or a provider key",
+      "time": "10 minutes",
+      "tags": [
+        "json",
+        "parsing",
+        "starter"
+      ],
+      "whatYouGet": "A workflow that asks a model for a sentiment label and returns it as checked JSON: `{\"name\": ..., \"sentiment\": \"positive\"}`.",
+      "summary": "A **System Prompt** tells the model to answer only with JSON that has `name` and `sentiment` fields. The **LLM Call** answers the text from **Text Input**, and the **Output Parser** reads the answer as JSON and checks it against a schema: both fields required, `sentiment` one of `positive`, `negative` or `neutral`. If the check fails, the parser asks the same model to fix its answer, up to 2 times, and fails the run if it still does not match. As shipped, the model is `llama3.1` on a local Ollama server (`http://localhost:11434/v1`).",
+      "steps": [
+        "Open the **LLM Call** node and point it at a model you have: pull `llama3.1` into Ollama, or switch the provider and store its key as a [secret](/security/secrets). In Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host. On Linux that name resolves only if the `api` service has `extra_hosts: [\"host.docker.internal:host-gateway\"]`, which the repo's `docker-compose.yml` does not set. Save.",
+        "Run it, then open the run and click **Output Parser** to see `parsed`, `retries` and `parserTrace`.",
+        "Change the text on **Text Input** and run it again."
+      ],
+      "sections": [
+        {
+          "heading": "What a run does",
+          "body": "We did not run the sample against Ollama. We ran it with the echo model and with a small local stand-in server that returns fixed answers, to see each parser path:\n\n| The model answered | Result |\n| --- | --- |\n| `{\"name\": \"product review\", \"sentiment\": \"positive\"}` | Success, `retries: 0`, strategy `json_parse` |\n| The same JSON inside a ```` ```json ```` block, after \"Here is the result:\" | Success, `retries: 0` |\n| `\"sentiment\": \"very happy\"`, then valid JSON on the retry | Success, `retries: 1` |\n| `\"sentiment\": \"very happy\"` every time | Run fails: `Output Parser failed after 2 retries: Field 'sentiment' value 'very happy' not in enum: positive, negative, neutral` |\n| \"The sentiment is clearly positive.\" every time | Run fails: `Output Parser failed after 2 retries: Invalid JSON (strict): ...` |\n\nEach retry is a separate call to the same model, with the system prompt \"You are a JSON formatting assistant. Output ONLY valid JSON.\" and a message that names the error, the schema and the original answer. Retries cost tokens like any other call.\n\nWith **echo**, the run fails, and it is worth knowing why. Echo's answer is the prompt, not JSON, so the parser retries, and echo repeats the correction message back. That message contains the schema, which is a JSON object, so the parser finds it, and rejects it: `Missing required field: name`. The parser looks for JSON anywhere in the text, so prose that quotes JSON can parse to something you did not mean.\n\nOn success, the **Output** node's <span v-pre>`{{parsed}}`</span> renders the object as a JSON string: `{\"name\":\"product review\",\"sentiment\":\"positive\"}`."
+        },
+        {
+          "heading": "What the schema check covers",
+          "body": "In `json_schema` mode the parser checks the top level of the object only: each field in `required` is present, a field typed `string`, `number` or `boolean` has that type, and a field with `enum` holds one of the listed values. Nested objects, arrays, `integer` and formats are not checked. For a full JSON Schema check, add an **Output Guardrail** node with the **Matches a JSON Schema** check and a schema, or an answer schema [output check](/product/content-rules-output-checks#answer-schema). Both are optional.\n\nThe LLM Call node does not ask the provider for a JSON mode; the JSON comes from the system prompt. That is why the parser and its retries are there."
+        },
+        {
+          "heading": "When parsing fails",
+          "body": "Set **Parsing Strictness** (`parsingMode`) on the parser:\n\n- `strict` (default): the answer, a fenced block in it, or the first complete object in it must be valid JSON.\n- `lenient`: also repairs common slips such as single quotes, trailing commas, unquoted keys and Python literals.\n- `anything_goes`: also reads simple `key: value` lines. When parsing or the schema check still fails after the retries, the run does not fail: the parser returns `parsed: null` and a `warning`. We saw this with the prose answer above, so check for `null` before you use the result.\n\n`parserTrace` in the node output lists each strategy tried and why it failed. See [Output Parser fails with Invalid JSON](/troubleshooting/common-issues#output-parser-fails-with-invalid-json-even-though-response-includes-json)."
+        },
+        {
+          "heading": "Use the result downstream",
+          "body": "Later nodes read the fields by path. With the Output template set to `Sentiment: ` followed by <span v-pre>`{{parsed.sentiment}}`</span>, our run returned `Sentiment: positive`. To route on a field, put an If node after the parser with a condition such as <span v-pre>`{{ parsed.sentiment === \"negative\" }}`</span>: see [branch a workflow on an LLM result](/recipes/branch-on-llm-output)."
+        }
+      ],
+      "makeItYours": "- Edit the schema on the parser (a JSON string in **JSON Schema**) and the system prompt together: name the same fields and values in both.\n- Set **Parser Mode** to **Item List** (`item_list`) for a plain list, one item per line, returned as `items` and `count`.\n- Set **LLM Max Auto-Retries** (`maxRetries`) to 1 to limit the extra calls. A value of 0 is read as the default, 2, so retries cannot be turned off this way.",
+      "makeItSafer": "- Treat parsed fields as untrusted input, especially when the source text came from outside: validate them before they reach a database, a shell or a URL.\n- Cap model spend, retries included, with a [budget](/product/budgets).",
+      "related": [
+        "output-checks",
+        "improper-output-handling",
+        "structured-tool-output"
+      ],
+      "docs": [
+        {
+          "text": "Core nodes: Output Parser",
+          "link": "/nodes/core-nodes#output-parser-output-parser"
+        },
+        {
+          "text": "Output checks: answer schema",
+          "link": "/product/content-rules-output-checks#answer-schema"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        },
+        {
+          "text": "OWASP LLM05:2025 Improper Output Handling",
+          "link": "https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/"
+        }
+      ]
+    },
+    {
+      "sample": "conditional-flow.json",
+      "slug": "branch-on-llm-output",
+      "title": "Branch a workflow on an LLM result",
+      "description": "Send a webhook payload through a model, test the answer with an If node, and route it to one of two outputs. Plus what to do when the model call fails.",
+      "keys": "model",
+      "keysNote": "A model: local Ollama as shipped, or a provider key",
+      "time": "10 minutes",
+      "tags": [
+        "webhook",
+        "branching",
+        "starter"
+      ],
+      "whatYouGet": "A webhook workflow that asks a model, checks the answer with an If node, and returns either the answer or \"No answer generated\".",
+      "summary": "A **Webhook Input** at `POST /webhook/conditional-demo` passes `user_prompt`, `system_prompt` and `session_id` from the request body to an **LLM Call**. The **Check Answer** If node tests <span v-pre>`{{answer}}`</span>: if the model said anything, the **Success Output** returns it; if not, the **Error Output** returns \"No answer generated\". Only one output runs. As shipped, the model is `llama3.1` on a local Ollama server, and the webhook has no authentication.",
+      "steps": [
+        "Open the **LLM Call** node and point it at a model you have: pull `llama3.1` into Ollama, or switch the provider. In Docker, use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: [\"host.docker.internal:host-gateway\"]` to the `api` service). Save. To check the branching first without a model, use echo: the **Provider** list has no echo entry, so set the node's `providerId` to `echo` in the JSON file and import it again.",
+        "Send a request:\n\n   ```bash\n   curl -X POST http://localhost:4000/webhook/conditional-demo \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"user_prompt\": \"Is order 1042 late?\"}'\n   ```",
+        "Open the run and click **Check Answer** to see `evaluatedValue` and which branch it took."
+      ],
+      "sections": [
+        {
+          "heading": "What a run does",
+          "body": "We ran it on a fresh install with the echo model and with a local stand-in server:\n\n- **Echo.** The webhook answered `{\"output\":{\"result\":\"Echo: Is order 1042 late?\"}}`. Check Answer evaluated to that text, took the `true` branch, and the Error Output was marked **skipped**.\n- **No `user_prompt` in the body.** Echo still answers, with a hint: \"Echo provider received no user message. Wire a Text Input or Prompt Template into this LLM Call to see the echo.\" The true branch ran. A real model would get an empty message instead.\n- **An empty answer.** With a stand-in model that returns an empty string, the run took the `false` branch and returned `{\"output\":{\"result\":\"No answer generated\"}}`.\n- **The model is down.** With the model's server unreachable, the run failed at the LLM Call after 4 attempts, the If node never ran, and the caller got HTTP 400 with `{\"output\":null,\"error\":\"openai_compatible request failed after 4 attempt(s): fetch failed\"}`. The message names the node's provider; our stand-in used `openai_compatible`.\n\nSo the false branch catches an empty answer, which is rare with a working model. A model error, a bad key or a timeout fails the run before the If node. Handle those with an error workflow (below)."
+        },
+        {
+          "heading": "Write a better condition",
+          "body": "The If node renders its condition as a template and reads the result as text. It is false when the text is empty, `false`, `0`, `null` or `undefined`, and true otherwise. That is why <span v-pre>`{{answer}}`</span> means \"the model said something\".\n\nKeep the whole expression inside the braces. Text outside them is not evaluated: a new If node's default condition, <span v-pre>`{{answer}} === 'true'`</span>, renders as text such as `Yes === 'true'`, which is never empty, so it is always true.\n\nA condition can also be a JavaScript expression, run in a sandbox. With <span v-pre>`{{ answer.toLowerCase().includes(\"late\") }}`</span>, \"Is order 1042 late?\" took the true branch and \"Where is order 1042?\" the false one. Two habits make conditions sturdier:\n\n- **Ask the model for a label, not prose.** Tell it to answer with one word, such as `refund` or `question`, or parse JSON first with an Output Parser and test <span v-pre>`{{parsed.intent}}`</span>. See [extract structured JSON](/recipes/structured-output-json).\n- **Use a Switch node for more than two paths.** It compares one value with a list of cases and routes to the first match, or to `default`."
+        },
+        {
+          "heading": "Handle failures with an error workflow",
+          "body": "Build a second workflow that starts with an **Error Trigger** and import it. Then add `\"settings\": { \"errorWorkflowId\": \"<its id>\" }` to this workflow's JSON, inside `workflow`, and import it again; the editor has no field for this setting. When a run fails, L2M starts it with the failed run's details: `source_workflow_id`, `source_workflow_name`, `execution_id`, `error`, `error_stack` and `timestamp`.\n\nWe tested it with an error workflow whose HTTP Request step posts those fields to a local server. With the model down, it received `{\"wf\":\"Conditional Branching Flow\",\"err\":\"openai_compatible request failed after 4 attempt(s): fetch failed\",\"exec\":\"...\"}`. The caller of the webhook still gets the 400 error; the error workflow runs on the side, for alerts or clean-up."
+        }
+      ],
+      "makeItYours": "- Write the system prompt on the LLM Call node instead of taking `system_prompt` from the request, so callers cannot rewrite the model's instructions.\n- Replace the two Output nodes with real work on each branch: a reply on one, a ticket or an approval on the other. End with a **Merge / Join** node if the branches should meet again.",
+      "makeItSafer": "- Secure the webhook before anyone else can reach it: a bearer token or an HMAC signature, and idempotency for retried calls. See [Secure webhooks](/security/secure-webhooks).\n- A model's answer is untrusted text. Branch on a fixed label, not on free text that a caller can steer.\n- Cap what callers can spend with a [budget](/product/budgets).",
+      "related": [
+        "workflow-dag",
+        "improper-output-handling"
+      ],
+      "docs": [
+        {
+          "text": "Utility nodes: IF and Switch",
+          "link": "/nodes/reference/utility"
+        },
+        {
+          "text": "Secure webhooks",
+          "link": "/security/secure-webhooks"
+        },
+        {
+          "text": "Workflows vs agents",
+          "link": "/learn/agents/workflows-vs-agents"
+        },
+        {
+          "text": "Pattern library",
+          "link": "/patterns/"
+        }
+      ]
+    },
+    {
+      "sample": "azure-openai-flow.json",
+      "slug": "azure-openai-workflow",
+      "title": "Use Azure OpenAI in a self-hosted workflow",
+      "description": "Call an Azure OpenAI deployment from an L2M workflow, with the API key stored as an encrypted secret and only its id in the workflow file.",
+      "keys": "services",
+      "keysNote": "An Azure OpenAI resource, deployment and key",
+      "time": "10 minutes",
+      "tags": [
+        "azure",
+        "model",
+        "secrets"
+      ],
+      "whatYouGet": "A workflow that sends a prompt to your Azure OpenAI deployment, with the key held by L2M's secret store, never in the workflow.",
+      "summary": "A **Text Input** and a **Prompt Template** build the prompt, the **Azure OpenAI Chat Model** node sends it to your deployment, and the **Output** returns the answer. The node has fields for the resource endpoint, the deployment name, the API version (`2024-10-21` as shipped) and the key, which is a reference to a stored secret. The workflow file holds only the secret's id. You need an Azure OpenAI resource with a chat deployment; there is no keyless way to run this one.",
+      "steps": [
+        "Store the key as a secret. In the node's config, open **Azure OpenAI Secret** and choose **+ Add New Credential...** (the provider is already set to Azure OpenAI), name it and paste the key. Or use the API (below).",
+        "On the **Azure OpenAI Chat Model** node, set **Endpoint** to `https://<your-resource>.openai.azure.com`, **Deployment** to your deployment's name (not the model's name, unless you named it after the model) and pick the secret under **Azure OpenAI Secret**. Save.",
+        "Run it. The answer is in the run's output as `result`."
+      ],
+      "sections": [
+        {
+          "heading": "Store the key as a secret",
+          "body": "```bash\n# An API key with builder rights, from Settings \u2192 Account \u2192 API Keys.\ncurl -X POST http://localhost:4000/api/secrets \\\n  -H \"Authorization: Bearer $L2M_API_KEY\" -H \"Content-Type: application/json\" \\\n  -d '{\"name\": \"azure-openai-prod\", \"provider\": \"azure_openai\", \"value\": \"<your-azure-openai-key>\", \"projectId\": \"<your-project>\"}'\n```\n\nThe answer holds the secret's `id` (`sec_...`) and never the value; no API returns the value again. It is encrypted at rest with AES-256-GCM under `SECRET_MASTER_KEY_BASE64`. Without `projectId` the secret lands in the default project and the answer carries a warning saying so. See [Secrets](/security/secrets).\n\nThe value can be the raw key, or JSON such as `{\"apiKey\": \"...\"}` (or `accessToken`). L2M sends it in the `api-key` header. A value with three dot-separated parts, or starting with `Bearer `, is sent as `Authorization: Bearer ...` instead, for Microsoft Entra ID tokens. L2M does not fetch or refresh such tokens itself."
+        },
+        {
+          "heading": "What a run does",
+          "body": "We had no Azure resource, so we ran the sample two ways on a fresh install.\n\n**As shipped**, the run fails at the Azure node: `Provider azure_openai requires an API key via secretRef or AZURE_OPENAI_API_KEY.` The placeholder secret id does not exist, and a missing secret does not fail on its own: the node falls back to the server's `AZURE_OPENAI_API_KEY`. If that is set, a workflow with a wrong secret id quietly uses the server's key.\n\n**Against a local stand-in** for the Azure endpoint, with a stored secret, the node sent one request to `POST /openai/deployments/gpt-4o-mini/chat/completions?api-version=2024-10-21` with the key in the `api-key` header. The body held the prompt as the only message (the sample has no System Prompt node, so no system message is sent), `temperature: 0.2`, `max_tokens: 1024` and `stream: true` with `stream_options.include_usage`. The answer came back as `result`, and the node recorded the token usage the endpoint reported. With a key the endpoint refused, the run failed with `Provider azure_openai stream request failed (401): ...` and the endpoint's own message.\n\nA real Azure endpoint was not called, so this page does not show Azure's own errors, content filtering or quotas."
+        },
+        {
+          "heading": "Costs",
+          "body": "Workflow runs record tokens for Azure calls but no cost: the built-in price list has no Azure prices for runs, so Azure spend does not count toward a USD [budget](/product/budgets). To price it, add your deployment to `LLM_PRICING_OVERRIDES_JSON` under the provider id `azure_openai`, keyed by the deployment name, for example `{\"azure_openai\":{\"gpt-4o-mini\":{\"inputUsdPer1M\":0.15,\"outputUsdPer1M\":0.6}}}` (use your contract's prices)."
+        },
+        {
+          "heading": "Serve the deployment to other apps (optional)",
+          "body": "The node calls Azure directly from the workflow. To let applications outside L2M use the same deployment with L2M's client tokens, budgets and audit, add a route on the [/v1 AI gateway](/product/ai-gateway): provider `azure_openai`, the deployment name as the upstream model, your endpoint as the base URL and the same stored secret as the key. Apps then call `POST /v1/chat/completions` with a public model name. Unlike workflow runs, `/v1` traffic to a deployment named `gpt-4o` or `gpt-4o-mini` is priced by default. The gateway is off until you add a route set."
+        }
+      ],
+      "makeItYours": "- Add a **System Prompt** node before the Azure node; it reads `system_prompt`.\n- Use the same node as the chat model of an agent, on its `chat_model` port.\n- For embeddings, use the **Embeddings Azure OpenAI** node or the `azure-openai-embedder` in RAG Retrieve.",
+      "makeItSafer": "- Keep one secret per environment and per project, and share a default-project secret with other projects only on purpose: see [project scope](/security/secrets#project-scope).\n- Restrict which deployments workflows may call with a [model allowlist](/security/model-allowlists).",
+      "related": [
+        "secret-reference",
+        "master-key",
+        "openai-compatible-api",
+        "llm-gateway"
+      ],
+      "docs": [
+        {
+          "text": "Azure nodes",
+          "link": "/nodes/azure-nodes"
+        },
+        {
+          "text": "Secrets",
+          "link": "/security/secrets"
+        },
+        {
+          "text": "/v1 AI gateway",
+          "link": "/product/ai-gateway"
         },
         {
           "text": "Pattern library",
