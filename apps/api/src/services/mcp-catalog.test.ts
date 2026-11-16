@@ -78,7 +78,7 @@ describe("checkCommandAgainstCatalog", () => {
   const entries = parseMcpCatalog(fs.readFileSync(exampleFile, "utf8")).entries;
 
   it("allows approved pinned packages with any trailing arguments", () => {
-    expect(checkCommandAgainstCatalog("npx", ["-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "/data"], entries)).toBeNull();
+    expect(checkCommandAgainstCatalog("npx", ["-y", "@modelcontextprotocol/server-filesystem@2.3.0", "/data"], entries)).toBeNull();
     expect(checkCommandAgainstCatalog("uvx", ["mcp-server-time==0.6.2"], entries)).toBeNull();
     expect(checkCommandAgainstCatalog("node", ["samples/mcp-echo-server/server.mjs"], entries)).toBeNull();
   });

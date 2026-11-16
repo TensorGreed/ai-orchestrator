@@ -22,6 +22,7 @@ import {
   detectContainerRuntime,
   hashMcpToolPolicyRule,
   invokeDirectMCPTool,
+  parseStdioEnvPassthrough,
   policyReadsOpenWorld,
   sweepSandboxContainers,
   validateSandboxMounts,
@@ -1992,6 +1993,11 @@ export async function createApp(
       legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE,
       probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS,
       toolReadOnlyOverride: readOnlyMarks.lookup
+    },
+    // Host-launched stdio servers get a minimal allowlist of this process's environment unless the operator widens it.
+    stdioEnv: {
+      inherit: config.MCP_STDIO_INHERIT_ENV === true,
+      passthrough: parseStdioEnvPassthrough(config.MCP_STDIO_ENV_PASSTHROUGH ?? "").names
     },
     // Tracing (only while it is on): a CLIENT span per MCP operation, and trace context sent to MCP servers in
     // `_meta` and HTTP headers unless L2M_OTEL_PROPAGATE_TO_MCP=false or the server's connection opts out. With only a
