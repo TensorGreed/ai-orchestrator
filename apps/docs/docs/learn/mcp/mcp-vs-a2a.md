@@ -11,7 +11,7 @@ related: [model-context-protocol, mcp-tool, supervisor-agent, worker-agent, ai-a
 
 # MCP vs A2A
 
-The <Term id="model-context-protocol">Model Context Protocol</Term> (MCP) connects an AI application to tools and data: the application lists a server's tools and calls them, one request and one result at a time. The Agent2Agent protocol (A2A) connects one agent to another agent that it treats as an independent peer: the caller finds the remote agent through a published Agent Card, sends it a message, and follows a task that can run for a long time, ask for more input and produce artifacts. The A2A specification puts it plainly: "A2A and MCP are complementary protocols designed for different aspects of agentic systems." A tool is something your agent uses. A remote agent is something your agent asks. L2M implements MCP; it does not implement A2A.
+The <Term id="model-context-protocol">Model Context Protocol</Term> (MCP) connects an AI application to tools and data: the application lists a server's tools and calls them, one request and one result at a time. The Agent2Agent protocol (A2A) connects one agent to another agent that it treats as an independent peer: the caller finds the remote agent through a published Agent Card, sends it a message, and usually follows a task that can run for a long time, ask for more input and produce artifacts. The A2A specification puts it plainly: "A2A and MCP are complementary protocols designed for different aspects of agentic systems." A tool is something your agent uses. A remote agent is something your agent asks. L2M implements MCP; it does not implement A2A.
 
 ## What sits on the other end
 
@@ -59,7 +59,7 @@ The quickest way to tell the two apart is to ask what the caller is talking to.
 | What does the caller send? | A tool name and JSON arguments (`tools/call`) | A message made of one or more parts |
 | What comes back? | A tool result: content items, optional structured content, `isError` | A task with a state, messages and artifacts |
 | Long-running work | Progress notifications; tasks were added as experimental in 2025-11-25 and moved to an extension in 2026-07-28 | Built in: task states, streaming updates and push notifications to a webhook |
-| Asking the caller for more | Elicitation, or the input-required retry pattern in 2026-07-28 | The task enters `TASK_STATE_INPUT_REQUIRED` |
+| Asking the caller for more | Elicitation (carried by the input-required retry pattern from 2026-07-28) | The task enters `TASK_STATE_INPUT_REQUIRED` |
 | Wire format | JSON-RPC 2.0 over stdio or Streamable HTTP | JSON-RPC 2.0 over HTTP(S), gRPC, or HTTP+JSON/REST bindings |
 | Authentication | Optional; an OAuth 2.1 based flow for HTTP servers, the environment for stdio | Schemes declared in the Agent Card: API key, HTTP auth, OAuth 2.0, OpenID Connect or mutual TLS |
 | Who decides what happens? | The caller's model picks the tool and arguments | The remote agent decides how to do the task |
@@ -93,12 +93,12 @@ There is also a simpler bridge that only needs MCP: **wrap an agent as an MCP to
 
 ## In L2M
 
-L2M does not implement A2A. It does not publish Agent Cards, does not serve A2A endpoints and cannot call A2A agents. Agent-to-agent work in L2M goes through two mechanisms, both built on tools:
+L2M does not implement A2A. It does not publish Agent Cards or serve A2A endpoints, and it has no A2A client: it cannot discover A2A agents or follow their tasks. Agent-to-agent work in L2M goes through two mechanisms, both built on tools:
 
 - **Inside one workflow: supervisor and workers.** A Supervisor node's `worker` port takes Agent Orchestrator or Supervisor nodes. Each worker reaches the supervisor's model as a synthetic tool, `delegate_to_<worker name>`, with one argument, `task_prompt`. Calling it runs the worker's own agent loop with its own chat model, tools and memory, and the worker's output comes back as the tool result. No protocol is involved: the runtime routes the call in process.
 - **Across systems: workflows as MCP tools.** An **Expose as MCP Tool** trigger turns a workflow, agents inside included, into an MCP tool that the [MCP gateway](/product/mcp-gateway) serves to other MCP clients, such as an IDE agent or another L2M instance ([workflow as an MCP tool](/runtime/workflow-as-mcp-tool)). Each caller uses its own client token. This is the "wrap an agent as an MCP tool" bridge from the previous section, with its limits: one call is one run, and the caller gets the workflow's output as the tool result.
 
-In the other direction, an L2M agent reaches a remote agent only if that agent is served as an MCP tool. Attach it as an MCP Tool node, and it is governed like any other tool: [tool policy](/product/mcp-tool-policy) can deny it or require approval, and calls are recorded in [tool-call telemetry](/product/mcp-tool-call-telemetry).
+In the other direction, an L2M agent can reach a remote agent in two ways. If the agent is served as an MCP tool, attach it as an MCP Tool node. If it has an HTTP API, wrap the call in a small workflow with an HTTP Request node and attach that workflow with a [Workflow Tool](/runtime/workflow-tool) node; each call is then one request and one response, with none of A2A's task handling. Either way it is governed like any other tool: [tool policy](/product/mcp-tool-policy) can deny it or require approval, and calls are recorded in [tool-call telemetry](/product/mcp-tool-call-telemetry).
 
 ## Try it in L2M
 

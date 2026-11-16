@@ -13,14 +13,14 @@ The <Term id="genai-semantic-conventions">OpenTelemetry GenAI semantic conventio
 
 ## Where the conventions live now
 
-Until release v1.41.0, the GenAI and MCP conventions were part of the main `open-telemetry/semantic-conventions` repository. They have since moved to their own repository, `open-telemetry/semantic-conventions-genai`, and the GenAI pages on opentelemetry.io now say: "This page has moved and is no longer maintained in this repository." When we checked on 16 November 2026, the new repository had no release yet. So the last released text is v1.41.0, and the newer text exists only on that repository's main branch.
+Up to the v1.41 releases, the GenAI and MCP conventions were part of the main `open-telemetry/semantic-conventions` repository. Release v1.42.0 (12 June 2026) moved them to their own repository, `open-telemetry/semantic-conventions-genai`. In the main repository, every `gen_ai.*` attribute, metric, event and span is now marked deprecated, so if your tooling is built on semantic conventions 1.42 or later, it shows the GenAI names as deprecated even though nothing has replaced them. The GenAI pages on opentelemetry.io say: "This page has moved and is no longer maintained in this repository." When we checked on 16 November 2026, the new repository had no release yet. So the last released GenAI text is v1.41.0, and the newer text exists only on that repository's main branch.
 
 The documents are split by signal:
 
 - **Model spans**: inference (chat, text completion), embeddings, retrieval and tool execution.
 - **Agent spans**: `create_agent`, `invoke_agent` and `invoke_workflow`.
 - **Metrics**: client metrics such as token usage and operation duration, and server metrics such as time to first token.
-- **Events**: the opt-in content of a model call.
+- **Events**: the opt-in content of a model call (`gen_ai.client.inference.operation.details`) and evaluation results (`gen_ai.evaluation.result`).
 - **MCP**: spans and metrics for Model Context Protocol requests.
 - **Provider pages**: extra attributes for some providers, such as OpenAI, Anthropic, Azure AI Inference and AWS Bedrock.
 
@@ -40,7 +40,7 @@ In practice: the default names stay put until you ask for new ones, and you can 
 | A process that coordinates several agents | `invoke_workflow` | `invoke_workflow {gen_ai.workflow.name}` | INTERNAL |
 | An MCP request | (MCP: `mcp.method.name`) | `{mcp.method.name} {target}`, such as `tools/call get_weather` | CLIENT, or SERVER on the server side |
 
-On a model span, `gen_ai.operation.name` and `gen_ai.provider.name` are Required. `gen_ai.request.model` is Conditionally Required when it is available. `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and `gen_ai.response.finish_reasons` are Recommended. `error.type`, which is already Stable, is Required whenever the call failed. On a tool span, `gen_ai.tool.name` is Required; `gen_ai.tool.call.id` and `gen_ai.tool.type` are Recommended. The MCP page says its tool call spans "are compatible with GenAI execute_tool spans", so an agent's `execute_tool` span can sit directly above the `tools/call` CLIENT span to the MCP server.
+On a model span, `gen_ai.operation.name` and `gen_ai.provider.name` are Required. `gen_ai.request.model` is Conditionally Required when it is available. `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and `gen_ai.response.finish_reasons` are Recommended. `error.type`, which is already Stable, is Conditionally Required "if the operation ended in an error". On a tool span, `gen_ai.tool.name` is Required; `gen_ai.tool.call.id` and `gen_ai.tool.type` are Recommended. The MCP page says its tool call spans "are compatible with GenAI execute_tool spans". It prefers one span per tool call: if the MCP instrumentation can tell that GenAI instrumentation is already tracing the tool call, it "SHOULD NOT create a separate span" and should add its MCP attributes to the existing `execute_tool` span. Only when it cannot tell does the `tools/call` CLIENT span sit as a child under `execute_tool`, as in the figure.
 
 <figure>
 <svg viewBox="0 0 640 250" role="img" aria-labelledby="genai-fig-title genai-fig-desc" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-width:640px">
@@ -53,19 +53,19 @@ On a model span, `gen_ai.operation.name` and `gen_ai.provider.name` are Required
     <rect x="50" y="65" width="230" height="34" rx="6" fill="none" stroke="currentColor"/>
     <text x="62" y="87">chat gpt-4o</text>
     <text x="270" y="87" text-anchor="end" font-size="12">CLIENT</text>
-    <rect x="290" y="115" width="300" height="34" rx="6" fill="none" stroke="currentColor"/>
-    <text x="302" y="137">execute_tool lookup_order</text>
-    <text x="580" y="137" text-anchor="end" font-size="12">INTERNAL</text>
-    <rect x="320" y="165" width="270" height="34" rx="6" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
-    <text x="332" y="187">tools/call lookup_order</text>
-    <text x="580" y="187" text-anchor="end" font-size="12">CLIENT · mcp.*</text>
+    <rect x="50" y="115" width="300" height="34" rx="6" fill="none" stroke="currentColor"/>
+    <text x="62" y="137">execute_tool lookup_order</text>
+    <text x="340" y="137" text-anchor="end" font-size="12">INTERNAL</text>
+    <rect x="80" y="165" width="270" height="34" rx="6" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+    <text x="92" y="187">tools/call lookup_order</text>
+    <text x="340" y="187" text-anchor="end" font-size="12">CLIENT</text>
     <rect x="50" y="210" width="230" height="34" rx="6" fill="none" stroke="currentColor"/>
     <text x="62" y="232">chat gpt-4o</text>
     <text x="270" y="232" text-anchor="end" font-size="12">CLIENT</text>
     <path d="M40 49 L40 82 L50 82" stroke="currentColor" fill="none"/>
-    <path d="M40 82 L40 132 L290 132" stroke="currentColor" fill="none"/>
+    <path d="M40 82 L40 132 L50 132" stroke="currentColor" fill="none"/>
     <path d="M40 132 L40 227 L50 227" stroke="currentColor" fill="none"/>
-    <path d="M305 149 L305 182 L320 182" stroke="currentColor" fill="none"/>
+    <path d="M65 149 L65 182 L80 182" stroke="currentColor" fill="none"/>
   </g>
 </svg>
 <figcaption>Time runs downwards. The model asks for a tool, the agent runs it through an MCP server, and a second model call writes the answer. Each box is one span; the dashed one follows the MCP conventions.</figcaption>
@@ -87,24 +87,24 @@ Most confusion comes from guides and dashboards written against older releases. 
 
 The `gen_ai.system` change is the one most readers trip over. The registry now lists it as deprecated, with the note "Deprecated, use `gen_ai.provider.name` instead." Under the transition plan above, instrumentation built on 1.36.0 or earlier keeps emitting `gen_ai.system` by default, and switches to `gen_ai.provider.name` only when you set `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`. If a dashboard groups by `gen_ai.system` and shows nothing, check which version your instrumentation emits before you suspect the export.
 
-`gen_ai.provider.name` is a best guess by the instrumentation. The registry says it "may differ from the actual model provider". A call to a self-hosted server that speaks the OpenAI API is usually reported as `openai`, and `gen_ai.request.model`, `gen_ai.response.model` and `server.address` tell the real target apart. Well-known values include `openai`, `anthropic`, `azure.ai.openai`, `gcp.gemini`, `gcp.vertex_ai`, `aws.bedrock`, `mistral_ai` and `cohere`.
+`gen_ai.provider.name` is a best guess by the instrumentation. The registry says it "may differ from the actual model provider". A call to a self-hosted server that speaks the OpenAI API is often reported as `openai` by OpenAI client instrumentation, and `gen_ai.request.model`, `gen_ai.response.model` and `server.address` tell the real target apart. Well-known values include `openai`, `anthropic`, `azure.ai.openai`, `gcp.gemini`, `gcp.vertex_ai`, `aws.bedrock`, `mistral_ai` and `cohere`.
 
 ## Metrics: two generations
 
-In v1.41.0 a client reports two histograms:
+In v1.41.0 the two core client histograms are:
 
-- `gen_ai.client.token.usage`, unit `{token}`, with `gen_ai.token.type` set to `input` or `output`. The conventions say an instrumentation that cannot get the counts "MUST NOT report usage metric", and that when a provider reports both used and billable tokens it "MUST report billable tokens".
+- `gen_ai.client.token.usage`, unit `{token}`, with `gen_ai.token.type` set to `input` or `output`. The conventions say an instrumentation that cannot get the counts "MAY allow users to enable offline token counting", and otherwise "MUST NOT report usage metric"; and that when a provider reports both used and billable tokens it "MUST report billable tokens".
 - `gen_ai.client.operation.duration`, in seconds.
 
 Both carry `gen_ai.operation.name`, `gen_ai.provider.name` and, when known, `gen_ai.request.model`, `gen_ai.response.model` and `server.address`. Release 1.41.0 also added streaming histograms for time to first chunk and time per output chunk.
 
 The genai repository's main branch reorganises these. Inference durations move to `gen_ai.client.inference.duration`, and tokens become counters such as `gen_ai.client.inference.usage.input_tokens` and `gen_ai.client.inference.usage.output_tokens`, plus histograms per operation. Embeddings get their own `gen_ai.client.embeddings.duration`. Nothing from that branch has been released, so build on the v1.41.0 names and treat the new ones as an opt-in to test.
 
-Keep ids off metrics. Execution, session and user ids on a metric create one series per run; put them on spans instead.
+Keep ids off metrics: an execution, session or user id on a metric creates one series per run, session or user. The [tracing vs logging guide](/learn/operations/tracing-vs-logging-for-llm-apps#what-to-capture-and-what-to-keep-out) covers what goes where.
 
 ## Content is opt-in
 
-Prompts and answers are not part of the default telemetry. Release 1.37.0 moved them to opt-in attributes (`gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.tool.definitions`) and said they "are not recorded by default when content capturing is disabled". Tool arguments and results (`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`) are opt-in too. If you turn content on, prompts with customer data leave your service for the tracing backend. Mask them first: [keeping personal data out of prompts, logs and traces](/learn/security/sensitive-data-in-prompts) covers how.
+Prompts and answers are not part of the default telemetry. Release 1.37.0 moved them to opt-in attributes (`gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`) and said they "are not recorded by default when content capturing is disabled". Release 1.38.0 added `gen_ai.tool.definitions` and the opt-in tool arguments and results (`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`). Since 1.41.0, tool definitions may be recorded in a simplified form even with content capture off. If you turn content on, prompts with customer data leave your service for the tracing backend. Mask them first: [keeping personal data out of prompts, logs and traces](/learn/security/sensitive-data-in-prompts) covers how.
 
 ## How to map your own traces
 
@@ -122,16 +122,16 @@ Two cautions. Do not run a GenAI auto-instrumentation library over a client that
 
 ## In L2M
 
-L2M's OpenTelemetry export is optional and off by default. With an OTLP endpoint set, it emits these conventions itself, pinned at **v1.41.0**, with spans under the scope `l2m` and the schema URL `https://opentelemetry.io/schemas/1.41.0`. All the names live in one module of its `otel` package. What it emits ([OpenTelemetry](/operations/opentelemetry)):
+L2M's OpenTelemetry export is optional and off by default. With an OTLP endpoint for traces set, it emits these conventions itself, pinned at **v1.41.0**, with spans under the scope `l2m` and the schema URL `https://opentelemetry.io/schemas/1.41.0`. All the names live in one module of its `otel` package. What it emits ([OpenTelemetry](/operations/opentelemetry)):
 
 - **Model calls**: `chat {model}` and `embeddings {model}` CLIENT spans, from one place in front of the provider adapters. The provider goes in `gen_ai.provider.name`, never `gen_ai.system`: `openai` (also for OpenAI-compatible servers, whose L2M id stays in `l2m.provider.id`), `azure.ai.openai`, `anthropic`, `gcp.gemini` and `ollama`; other providers use their L2M id ([model spans](/operations/opentelemetry#model-spans)).
-- **Agents and tools**: `invoke_workflow` per run, `invoke_agent` per agent loop and `execute_tool` per tool call, with `gen_ai.tool.type` set to `extension` for an MCP server's tool and `function` for one that runs inside L2M. The workflow's name goes in `l2m.workflow.name`; L2M does not set `gen_ai.workflow.name`. MCP requests get `tools/call {tool}` CLIENT spans under the `execute_tool` span, and the MCP gateway gets SERVER spans.
-- **Metrics**: `gen_ai.client.operation.duration` and `gen_ai.client.token.usage` by default. `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` switches to the main-branch names, such as `gen_ai.client.inference.duration`. Spend goes in L2M's own `l2m.gen_ai.cost` counter ([GenAI and cost metrics](/operations/opentelemetry#genai-and-cost-metrics)).
+- **Agents and tools**: `invoke_workflow` per run, `invoke_agent` per agent loop and `execute_tool` per tool call, with `gen_ai.tool.type` set to `extension` for an MCP server's tool and `function` for one that runs inside L2M. The workflow's name goes in `l2m.workflow.name`; L2M does not set `gen_ai.workflow.name`. MCP requests get a separate `tools/call {tool}` CLIENT span as a child of the `execute_tool` span (the conventions' fallback layout, not the single merged span they prefer), and the MCP gateway gets SERVER spans.
+- **Metrics**: with `OTEL_METRICS_ENABLED=true` and a metrics endpoint (tracing need not be on), `gen_ai.client.operation.duration` and `gen_ai.client.token.usage`; an endpoint alone exports no metrics. `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` switches the metric names, not the span names, to the main-branch names, such as `gen_ai.client.inference.duration`. Spend goes in L2M's own `l2m.gen_ai.cost` counter ([GenAI and cost metrics](/operations/opentelemetry#genai-and-cost-metrics)).
 - **Content**: none by default. `OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT` turns on the opt-in content attributes, masked and cut to size before export ([content capture](/operations/opentelemetry#content-capture)).
 
 L2M's own steps that the conventions do not cover, such as workflow nodes and queue jobs, use `l2m.*` names. The [OpenTelemetry tracing post](/blog/opentelemetry-tracing-for-ai-agents) explains why the spans are cut this way.
 
-**Try it.** Follow the [quick start with a local collector](/operations/opentelemetry#quick-start-with-a-local-collector): start the collector, run the zero-key MCP Agent Quickstart template, and read the span and metric names in `ops/otel/otel-data/traces.jsonl`. Its echo model makes no tool calls, so you will see `invoke_agent`, `chat` and the MCP `tools/list` span, but no `execute_tool`.
+**Try it.** Follow the [quick start with a local collector](/operations/opentelemetry#quick-start-with-a-local-collector): start the collector, run the zero-key MCP Agent Quickstart template, and read the span names in `ops/otel/otel-data/traces.jsonl` and, with `OTEL_METRICS_ENABLED=true`, the metric names in `ops/otel/otel-data/metrics.jsonl`. Its echo model makes no tool calls, so you will see `invoke_agent`, `chat` and the MCP `tools/list` span, but no `execute_tool`.
 
 ## Further reading
 

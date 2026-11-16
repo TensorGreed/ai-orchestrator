@@ -56,6 +56,8 @@ Anthropic's guide to building agents describes this middle ground for support: i
     <path d="M320 140 L380 140" stroke="currentColor" fill="none"/>
     <path d="M245 160 L245 175" stroke="currentColor" fill="none"/>
     <path d="M275 175 L275 160" stroke="currentColor" fill="none"/>
+    <text x="240" y="171" text-anchor="end" font-size="11">tool call</text>
+    <text x="280" y="171" font-size="11">result</text>
     <path d="M320 193 L380 193" stroke="currentColor" fill="none"/>
   </g>
 </svg>
@@ -74,11 +76,11 @@ A chatbot's worst case is a bad answer: wrong, rude, leaking something it was gi
 
 You test a chatbot by its answers: given this question and these documents, is the reply correct, grounded and safe? One input, one output, judged on its own.
 
-An agent needs that, plus a check on what it did. Two runs can reach the same correct answer by different paths, and one of them may have called a tool it should never touch. Agent tests therefore also assert on the calls: which tools ran, in what order, with which arguments, and which tools must never appear. Because the model chooses the path, run each case more than once; a single pass proves little. [Agent evals](/learn/testing/agent-evals) covers how to build such a test set.
+An agent needs that, plus a check on what it did. One run may reach the right answer through a tool it should never touch, so agent tests also assert on the calls: which tools ran, in what order, with which arguments, and which tools must never appear. Because the model chooses the path, run each case more than once; a single pass proves little. [Agent evals](/learn/testing/agent-evals) covers how to build such a test set.
 
 ### Cost and latency: one call vs several
 
-A chatbot turn is one model call. An agent turn is as many calls as the loop takes, and each call resends the conversation, the tool definitions and earlier tool results. A question a chatbot answers in one call might take an agent four, each larger than the last. Agents need a stop: an iteration limit per run, and budgets per user or team ([LLM cost control](/learn/operations/llm-cost-control)).
+A chatbot turn is one model call. An agent turn is as many calls as the loop takes, and each call resends the conversation, the tool definitions and earlier tool results. [Workflows vs agents](/learn/agents/workflows-vs-agents) covers the same cost for fixed steps against model-chosen ones. Agents need a stop: an iteration limit per run, and budgets per user or team ([LLM cost control](/learn/operations/llm-cost-control)).
 
 ### Operations: what you must record
 
@@ -109,7 +111,7 @@ L2M builds both shapes on one canvas.
 
 - **A chatbot** is a short workflow: a **Chat Trigger** or webhook, optionally **RAG Retrieve** for documents, a **Prompt Template** and one **LLM Call**. There is no loop and no tool call; the [RAG knowledge base recipe](/recipes/rag-knowledge-base) is this shape, with a fixed question as its input.
 - **An agent** is an **Agent Orchestrator** node with a chat model on its `chat_model` port and MCP Tool or Workflow Tool nodes on its `tool` port. `maxIterations` is required and new nodes start at 6 ([agent loop](/runtime/agent-loop)).
-- **Controls on actions** are optional and off until you set them: [MCP tool policy](/product/mcp-tool-policy) rules allow, deny or require approval per tool and per argument, and a workflow's **Ask before write tools** switch pauses the run before each <Term id="write-tool">write tool</Term> call for an <Term id="approval-gate">approval</Term> ([human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls)).
+- **Controls on actions:** tool policy and the write-tool switch are optional and off until you set them (built-in [content rules](/product/content-rules) do check an agent's tool arguments by default). [MCP tool policy](/product/mcp-tool-policy) rules allow, deny or require approval per tool and per argument, and a workflow's **Ask before write tools** switch pauses an agent before each <Term id="write-tool">write tool</Term> call for an <Term id="approval-gate">approval</Term> ([human approval for agent tool calls](/guides/human-approval-for-agent-tool-calls)).
 - **Tests on the path.** [Golden sets](/product/golden-sets) can score an agent's tool calls with the `tool_sequence` scorer, including tools that must never be called, not only its final answer.
 
 ## Try it in L2M

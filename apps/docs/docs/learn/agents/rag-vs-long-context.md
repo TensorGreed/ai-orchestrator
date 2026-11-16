@@ -92,7 +92,7 @@ RAG puts the decision before the prompt: search only the collection, or the filt
 
 **Do both** for a common middle case: retrieve to pick the right few documents, then send those documents whole rather than as small chunks. The search does the narrowing, and the model gets enough surrounding text to reason about each one.
 
-And for agents, there is a third option for live data: neither copy it into the prompt nor into an index, but give the agent a tool that fetches exactly the record it needs. Large tool results raise the same cost and middle-of-the-input questions as long context, so return what the model needs, not everything.
+And for agents, there is another option for live data: neither copy it into the prompt nor into an index, but give the agent a tool that fetches exactly the record it needs. Large tool results raise the same cost and middle-of-the-input questions as long context, so return what the model needs, not everything.
 
 ### An example
 
@@ -103,7 +103,7 @@ A legal team asks questions about 4,000 contracts. Sending all of them is not po
 L2M supports both shapes in a workflow.
 
 - **Long context.** A **Prompt Template** node can place a whole document from an earlier step in the prompt with <span v-pre>`{{results.<nodeId>.field}}`</span> ([templates and expressions](/runtime/templates-and-expressions)), and an **LLM Call** node sends that prompt without shortening it; the window limit is the provider's. Agents are different: the agent loop caps its system prompt at 8,000 characters and the user prompt and each kept message at 3,000 ([agent loop limits](/runtime/agent-loop)). For one long document, use an LLM Call step, not an agent's prompt.
-- **Retrieval.** **RAG Retrieve** searches a [knowledge base](/nodes/knowledge-bases) or an external [vector store](/nodes/vector-stores) by vector, keyword or hybrid search and returns `topK` passages, 3 by default, as `documents` and a numbered `context` for the prompt. A **Rerank** node can reorder a larger candidate list and keep the best few.
+- **Retrieval.** **RAG Retrieve** searches a [knowledge base](/nodes/knowledge-bases) by vector, keyword or hybrid search, or an external [vector store](/nodes/vector-stores) by vector search, and returns `topK` passages, 3 by default, as `documents` and a numbered `context` for the prompt. A **Rerank** node can reorder a larger candidate list and keep the best few.
 - **Tool results in agents.** The agent loop also caps each tool result it sends to the model (`toolMessageMaxChars`, 6,000 characters by default) and compacts larger results first, so an agent reads documents through retrieval or tools in small pieces. With a session id, full results stay in the session tool cache instead of the prompt.
 - **Cost.** Each model call's token counts show on the node's trace, and optional [budgets](/product/budgets) cap spend or tokens per scope. Comparing the same question both ways on the trace is a quick way to see what long context costs you.
 
@@ -113,7 +113,7 @@ The [RAG knowledge base recipe](/recipes/rag-knowledge-base) runs retrieval with
 
 ## Further reading
 
-- [Liu et al., Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172) (arXiv 2307.03172; TACL, 2023)
+- [Liu et al., Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172) (arXiv 2307.03172, 2023; TACL, 2024)
 - [Lewis et al., Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://arxiv.org/abs/2005.11401) (arXiv 2005.11401, 2020)
 - [Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) (Anthropic docs): prefix caching, cache lifetime and pricing
 - In L2M: [Knowledge bases](/nodes/knowledge-bases), [Agent loop](/runtime/agent-loop), [LLM cost control](/learn/operations/llm-cost-control)

@@ -9,11 +9,11 @@ related: [rag, vector-store, grounding, hybrid-search, eval, context-window]
 
 # RAG vs fine-tuning
 
-<Term id="rag">Retrieval-augmented generation (RAG)</Term> and fine-tuning solve different problems. RAG looks up documents when a question arrives and puts the relevant passages in the prompt, so the model answers from text you control and can cite. Fine-tuning trains an existing model further on your examples, so its weights change and it behaves differently on every call: a fixed output format, a house tone, a narrow classification task done reliably by a smaller model. Use RAG when the model needs to *know* something that changes, is private, or must be traceable to a source. Use fine-tuning when the model needs to *do* something in a consistent way that prompting alone does not get right. Many teams need neither, and some need both.
+<Term id="rag">Retrieval-augmented generation (RAG)</Term> and fine-tuning solve different problems. RAG looks up documents when a question arrives and puts the relevant passages in the prompt, so the model answers from text you control and can cite. Fine-tuning trains an existing model further on your examples, so its weights change and it behaves differently on every later call: a fixed output format, a house tone, a narrow classification task done reliably by a smaller model. Use RAG when the model needs to *know* something that changes, is private, or must be traceable to a source. Use fine-tuning when the model needs to *do* something in a consistent way that prompting alone does not get right. Many teams need neither, and some need both.
 
 ## Two places to put knowledge
 
-The original RAG paper (Lewis et al., 2020) frames the choice well. A pre-trained model stores facts in its weights, its "parametric" memory. RAG adds a second, "non-parametric" memory: in the paper, "a dense vector index of Wikipedia, accessed with a pre-trained neural retriever". The authors point at the weakness of weights alone: "providing provenance for their decisions and updating their world knowledge remain open research problems."
+The original RAG paper (Lewis et al., 2020) frames the two kinds of memory well. A pre-trained model stores facts in its weights, its "parametric" memory. RAG adds a second, "non-parametric" memory: in the paper, "a dense vector index of Wikipedia, accessed with a pre-trained neural retriever". (In the paper, retriever and generator are fine-tuned together; RAG as most teams build it today retrieves for a model they do not train.) The authors point at the weakness of weights alone: "providing provenance for their decisions and updating their world knowledge remain open research problems."
 
 That sentence is the core of the comparison. Facts held in weights cannot point to where they came from, and changing them means training again. Facts held in an index can be cited, replaced and deleted one document at a time.
 
@@ -59,9 +59,9 @@ Provider documentation is consistent about what fine-tuning does well, and it is
 - OpenAI's model optimization guide says fine-tuning can "enable a model to consistently format responses in a certain way", and that you can "train a smaller, cheaper, faster model to excel at a particular task". It also names shorter prompts as a benefit, since examples baked into the weights no longer need to be sent on each call.
 - Google's Vertex AI tuning guide recommends supervised fine-tuning for "Strict output formatting, classification, sentiment analysis, entity extraction, and domain-specific style or tone", and says it suits cases where "the output of your model isn't complex". Its typical dataset size is "Hundreds to thousands of labeled examples".
 
-Both guides put evaluation and prompting first. OpenAI's describes optimization as "a combination of evals, prompt engineering, and fine-tuning" and starts with evals that establish a baseline; it also notes that "The prompt engineering process may be all you need". Provider offerings change, too: as of November 2026 that same guide says "OpenAI is winding down the fine-tuning platform" and that it is closed to new users. Check what your provider offers before you plan around it.
+Both guides put prompting first, and OpenAI's starts with evals. OpenAI's describes optimization as "a combination of evals, prompt engineering, and fine-tuning" and starts with evals that establish a baseline; it also notes that "The prompt engineering process may be all you need". Provider offerings change, too; check what your provider offers before you plan around it.
 
-Neither guide presents fine-tuning as a way to load a knowledge base into a model. That is the job RAG was designed for.
+Neither guide recommends fine-tuning to keep a body of facts current or citable. That is the job RAG was designed for.
 
 ## The comparison
 
@@ -71,10 +71,10 @@ Neither guide presents fine-tuning as a way to load a knowledge base into a mode
 | What it is good at | Facts, documents, policies, anything you must cite | Format, tone, classification, a narrow task done by a smaller model |
 | Updating a fact | Re-ingest or delete one document; live on the next query | Build new examples, train again, re-test, redeploy |
 | Showing the source | Each passage carries its document id, so answers can cite | Weights cannot say where an answer came from |
-| Who may see what | Retrieval can be limited per audience; text never enters the model | Anything trained in is available to everyone who can call the model |
+| Who may see what | Retrieval can be limited per audience; text never enters the weights | Anything trained in may be extractable by anyone who can call the model |
 | Removing data | Delete the chunks | Retrain without them; the old model may still be deployed |
 | Up-front work | Ingest, chunk, embed, tune retrieval | Collect and label hundreds of examples or more, run training |
-| Cost per call | Extra input tokens for the passages, plus a search | Often lower: shorter prompts, possibly a smaller model |
+| Cost per call | Extra input tokens for the passages, plus a search | Can be lower: shorter prompts, possibly a smaller model |
 | What to evaluate | Retrieval (did the right passage come back?) and the answer | The answer, against a baseline of the untuned model |
 | Failure mode | The right passage is not found, or the model ignores it | The model learns the wrong habit, or forgets a general skill |
 
@@ -109,15 +109,15 @@ RAG and fine-tuning combine without conflict. A model fine-tuned to answer in yo
 
 ## RAG in L2M (L2M does not fine-tune)
 
-L2M runs RAG pipelines; it does not train or fine-tune models. A model you fine-tuned with a provider is, to L2M, a model like any other: a chat model node calls it by the model id or Azure deployment name your provider gives it, and [model allowlists](/security/model-allowlists) can limit which models workflows may use.
+L2M runs RAG pipelines; it does not train or fine-tune models. A fine-tuned model that your provider serves under a model id or an Azure OpenAI deployment, or that an OpenAI-compatible server serves, is to L2M a model like any other: a chat model node calls it by that id or deployment name, and [model allowlists](/security/model-allowlists) can limit which models workflows may use.
 
 For the retrieval side:
 
-- **[Knowledge bases](/nodes/knowledge-bases)** are a built-in <Term id="vector-store">vector store</Term> in the L2M database. Upload text, Markdown, HTML, CSV or JSON; L2M chunks and embeds it. Deleting a source (`DELETE /api/knowledge-bases/:id/sources/:sourceId`) removes its chunks, so a corrected document is a re-upload, not a training run.
-- **RAG Retrieve** searches a knowledge base by vector, keyword (BM25) or <Term id="hybrid-search">hybrid</Term> search, returns `topK` passages (3 by default) as `documents` and a numbered `context`, and can feed a **Rerank** node. External stores such as Qdrant, pgvector and Azure AI Search plug into the same node.
+- **[Knowledge bases](/nodes/knowledge-bases)** are a built-in <Term id="vector-store">vector store</Term> in the L2M database. Upload text, Markdown, HTML, CSV or JSON; L2M chunks and embeds it. Deleting a source (`DELETE /api/knowledge-bases/:id/sources/:sourceId`) removes its chunks, so correcting a document means deleting its source (an admin action) and uploading the new version, not a training run.
+- **RAG Retrieve** searches a knowledge base by vector, keyword (BM25) or <Term id="hybrid-search">hybrid</Term> search, returns `topK` passages (3 by default) as `documents` and a numbered `context`, and can feed a **Rerank** node. External stores such as Qdrant, pgvector and Azure AI Search plug into the same node for vector search.
 - **Citations.** RAG Retrieve also emits `citationInstructions` for the prompt, and the **Extract Citations** node maps `[N]` markers in the answer back to chunk and source ids.
-- **Access.** A knowledge base that belongs to a project can only be used by workflows in that project ([project access](/security/auth-rbac#project-access)). Within one knowledge base, a search covers every chunk; there is no per-chunk filter. Give each audience its own knowledge base, or use an external store whose filter you set on the node (Qdrant's `filter`).
-- **Evaluation.** RAG-aware scorers check retrieval and answers separately: `context_precision` and `context_recall` are programmatic, and `faithfulness` and `answer_relevance` use a judge model (see [agent evals](/learn/testing/agent-evals)).
+- **Access.** A knowledge base that belongs to a project can only be used by workflows in that project ([project access](/security/auth-rbac#project-access)); one with no project is shared across the deployment. Within one knowledge base, a search covers every chunk; there is no per-chunk filter. Give each audience its own knowledge base, or use an external store whose filter you set on the node (Qdrant's `filter`).
+- **Evaluation.** RAG-aware scorers check retrieval and answers separately: `context_precision` and `context_recall` are programmatic, and `faithfulness` and `answer_relevance` use a judge model once judges are turned on ([RAG scorers](/nodes/knowledge-bases#rag-specific-eval-scorers-phase-9-5); see also [agent evals](/learn/testing/agent-evals)).
 
 ## Try it in L2M
 
@@ -126,6 +126,6 @@ The [RAG knowledge base recipe](/recipes/rag-knowledge-base) builds a knowledge 
 ## Further reading
 
 - [Lewis et al., Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://arxiv.org/abs/2005.11401) (arXiv 2005.11401, 2020): parametric and non-parametric memory
-- [Model optimization](https://developers.openai.com/api/docs/guides/model-optimization) (OpenAI API docs): evals, prompting and fine-tuning, and the fine-tuning platform's status
+- [Model optimization](https://developers.openai.com/api/docs/guides/model-optimization) (OpenAI API docs): evals, prompting and fine-tuning
 - [Tune Gemini models](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/tune-models) (Google Cloud Vertex AI docs): when supervised fine-tuning fits and how much data it needs
 - In L2M: [Knowledge bases](/nodes/knowledge-bases), [Vector stores](/nodes/vector-stores), glossary: <Term id="grounding">grounding</Term>, <Term id="context-window">context window</Term>

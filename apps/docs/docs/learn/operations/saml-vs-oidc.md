@@ -9,7 +9,7 @@ related: [saml, oidc, sso, mfa, pkce, oauth-2-1]
 
 # SAML vs OIDC
 
-<Term id="saml">SAML 2.0</Term> and <Term id="oidc">OpenID Connect</Term> (OIDC) do the same job: they let people sign in to an app with the account your identity provider already holds, which is <Term id="sso">single sign-on</Term>. They differ in how. SAML is an OASIS standard built on XML. The identity provider signs an XML assertion with XML Signature, and the browser carries it to the app in a form post. OIDC is "a simple identity layer on top of the OAuth 2.0 protocol". The browser carries only a short code, and the app swaps it for an ID token, a signed JSON Web Token, over a direct HTTPS call. For a browser sign-in either one is fine, and many organisations have years of SAML set-up. For mobile apps, command-line tools and anything that also calls APIs, OIDC fits better. A self-hosted AI platform that has to fit into many organisations should offer both.
+<Term id="saml">SAML 2.0</Term> and <Term id="oidc">OpenID Connect</Term> (OIDC) do the same job: they let people sign in to an app with the account your identity provider already holds, which is <Term id="sso">single sign-on</Term>. They differ in how. SAML is an OASIS standard built on XML. The identity provider signs an XML assertion with XML Signature, and the browser carries it to the app in a form post. OIDC is "a simple identity layer on top of the OAuth 2.0 protocol". In the Authorization Code flow, the browser carries only a short code, and the app swaps it for an ID token, a signed JSON Web Token, over a direct HTTPS call. For a browser sign-in either one is fine, and many organisations have years of SAML set-up. For mobile apps, command-line tools and anything that also calls APIs, OIDC fits better. A self-hosted AI platform that has to fit into many organisations should offer both.
 
 ## Side by side
 
@@ -23,7 +23,7 @@ related: [saml, oidc, sso, mfa, pkce, oauth-2-1]
 | Key rotation | A new certificate in each app, by hand or from refreshed metadata | The app re-reads the provider's published keys (`jwks_uri`) |
 | Proof of the email | No standard "verified" flag; the app trusts the identity provider | `email_verified` claim |
 | Proof of MFA | `AuthnContextClassRef` in the assertion | `amr` and `acr` claims in the ID token |
-| Native, mobile and CLI apps | Awkward: the flow assumes a browser | Supported, with PKCE for public clients |
+| Native, mobile and CLI apps | Awkward: Web Browser SSO assumes a browser; the Enhanced Client or Proxy (ECP) profile covers other clients, but your provider may not support it | Supported, with PKCE for public clients |
 | Calling APIs afterwards | Not covered by browser SSO | OAuth 2.0 access tokens come from the same flow |
 | Logout | A Single Logout protocol | Separate specifications, such as RP-Initiated Logout 1.0 |
 
@@ -51,7 +51,8 @@ related: [saml, oidc, sso, mfa, pkce, oauth-2-1]
     <text x="545" y="195" text-anchor="middle">App</text>
     <path d="M170 190 L245 190" stroke="currentColor" fill="none"/>
     <path d="M395 190 L470 190" stroke="currentColor" fill="none"/>
-    <text x="320" y="182" text-anchor="middle" font-size="12">code</text>
+    <text x="207" y="182" text-anchor="middle" font-size="12">code</text>
+    <text x="432" y="182" text-anchor="middle" font-size="12">code</text>
     <path d="M545 212 L545 245 L95 245 L95 212" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="2" fill="none" stroke-dasharray="5 3"/>
     <text x="320" y="262" text-anchor="middle" font-size="12">app swaps the code for a signed ID token, server to server</text>
   </g>
@@ -69,11 +70,11 @@ SAML also allows identity-provider-initiated sign-in. The person clicks the app'
 
 ## How an OIDC sign-in works
 
-With the Authorization Code flow, the app redirects the browser to the identity provider with its client id, the scopes it wants (at least `openid`), a `state` value and a `nonce`. After sign-in, the provider redirects back with a short-lived code. The app sends that code, from its server, to the provider's token endpoint and receives the ID token. The core specification defines it as "a security token that contains Claims about the Authentication of an End-User", represented as a JWT and signed with JWS.
+With the Authorization Code flow, the app redirects the browser to the identity provider with its client id, the scopes it wants (at least `openid`), a `state` value and a `nonce`. After sign-in, the provider redirects back with a short-lived code. The app sends that code, from its server, to the provider's token endpoint and receives the ID token. The core specification defines it as a JSON Web Token, signed with JWS.
 
 The app then validates the token. The issuer must match exactly, the audience must contain the app's client id, the token must not be expired, and the `nonce` must equal the one the app sent. The signature is checked against keys the app fetches from the provider's `jwks_uri`, which Discovery 1.0 describes as containing "the signing key(s) the RP uses to validate signatures from the OP". When the provider rotates keys, the app picks up the new ones without anyone pasting a certificate.
 
-For apps that cannot keep a secret, such as single-page apps, mobile apps and command-line tools, OIDC adds PKCE. RFC 7636 says public clients using the code grant "are susceptible to the authorization code interception attack" and defines Proof Key for Code Exchange to stop it. Because OIDC is OAuth 2.0 underneath, the same sign-in can also return an access token that lets the app call APIs on the user's behalf. SAML browser SSO has no equivalent.
+For apps that cannot keep a secret, such as single-page apps, mobile apps and command-line tools, OIDC clients use OAuth's PKCE. RFC 7636 says public clients using the code grant "are susceptible to the authorization code interception attack" and defines Proof Key for Code Exchange to stop it. Because OIDC is OAuth 2.0 underneath, the same sign-in can also return an access token that lets the app call APIs on the user's behalf. SAML browser SSO has no equivalent.
 
 ## Where each one goes wrong
 
@@ -81,7 +82,7 @@ Both are safe when implemented well. They fail in different places.
 
 **SAML's risks sit in XML.** Signature checking must cover the assertion the app actually reads, not a different element elsewhere in the document. Each assertion should be accepted only once, so a captured response cannot be replayed. Use a maintained library rather than a hand-written XML parser. And there is no `email_verified`: the app trusts whatever email the identity provider asserts, so only connect a provider whose users cannot choose an arbitrary address.
 
-**OIDC's risks sit in token validation.** Refuse unsigned tokens (`alg: none`) and symmetric algorithms an attacker could sign with the provider's public key. Check `iss`, `aud`, `nonce` and expiry on every token. Check `state` on every callback. Do not link an existing account by an email the provider has not verified; the specification says a true `email_verified` means "the OP took affirmative steps to ensure that this e-mail address was controlled by the End-User".
+**OIDC's risks sit in token validation.** Refuse unsigned tokens (`alg: none`). Refuse symmetric (HS\*) algorithms too, unless you deliberately use the client secret as the HMAC key; otherwise an attacker may sign a token with the provider's public key as the secret. Check `iss`, `aud`, `nonce` and expiry on every token. Check `state` on every callback. Do not link an existing account by an email the provider has not verified; the specification says a true `email_verified` means "the OP took affirmative steps to ensure that this e-mail address was controlled by the End-User".
 
 Both need the same policy decisions on top: who may sign in at all, how groups become roles, and whether the sign-in must include MFA. Those are covered in [identity for AI platforms](/learn/operations/identity-for-ai-platforms).
 
@@ -105,7 +106,7 @@ An app can offer both and let each organisation pick. A few rules keep that safe
 
 L2M, a self-hosted workflow builder and agent runtime, supports both, and both are off by default. With neither set, people sign in with email and password ([Authentication and RBAC](/security/auth-rbac)).
 
-- **OIDC** (`OIDC_ENABLED=true`) uses the Authorization Code flow with PKCE (S256), `state` and `nonce`. The ID token must be signed with RS\*, PS\* or ES\*; `none` and HS\* are refused. `iss`, `aud`, `azp`, `exp`, `iat` and `nonce` are checked. Discovery and the provider's keys are cached for an hour, and a token signed with an unknown key id refetches them, so key rotation needs no restart. An unverified email never links to an existing account unless you set `OIDC_REQUIRE_EMAIL_VERIFIED=false` ([OIDC single sign-on](/security/auth-rbac#oidc-single-sign-on)).
+- **OIDC** (`OIDC_ENABLED=true`) uses the Authorization Code flow with PKCE (S256), `state` and `nonce`. The ID token must be signed with RS\*, PS\* or ES\*; `none` and HS\* are refused outright. `iss`, `aud`, `azp`, `exp`, `iat` and `nonce` are checked. Discovery and the provider's keys are cached for an hour, and a token signed with an unknown key id refetches them, so key rotation needs no restart. An unverified email never links to an existing account unless you set `OIDC_REQUIRE_EMAIL_VERIFIED=false` ([OIDC single sign-on](/security/auth-rbac#oidc-single-sign-on)).
 - **SAML 2.0** (`SAML_ENABLED=true`) needs the optional `@node-saml/node-saml` package, a 5.x release, added to the API; without it the SAML routes answer that SAML is not configured. The response arrives only by HTTP POST. Each assertion is accepted once, and with `SAML_REQUIRE_IN_RESPONSE_TO=true` only answers to a sign-in started from L2M in the same browser are accepted, which closes the login CSRF gap at the cost of portal sign-in. The configured provider is trusted for the email it asserts, because its certificate is pinned in `SAML_IDP_CERT` ([SAML single sign-on](/security/auth-rbac#saml-single-sign-on)).
 - **Shared rules.** Email-domain and group allow-lists, group-to-role mappings and the `SSO_MFA` setting work for both. MFA is read from `amr` or `acr` in the ID token, or from the assertion's `AuthnContextClassRef` ([MFA on SSO](/security/auth-rbac#mfa-on-sso)).
 - **Logout** ends the L2M session only, not the session at the identity provider.

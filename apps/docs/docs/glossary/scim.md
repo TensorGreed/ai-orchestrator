@@ -5,7 +5,7 @@ topic: operations
 definition: "System for Cross-domain Identity Management: a standard HTTP and JSON protocol an identity provider uses to create, update and deactivate user accounts and groups in other apps."
 description: "SCIM (RFC 7643 and 7644) lets an identity provider create, update and deactivate users and groups in an app over HTTP. How it differs from SSO."
 related: [sso, oidc, saml, rbac, service-account]
-guide: [/learn/operations/identity-for-ai-platforms]
+guide: [/learn/operations/identity-for-ai-platforms, /learn/operations/sso-vs-scim]
 ---
 
 # SCIM

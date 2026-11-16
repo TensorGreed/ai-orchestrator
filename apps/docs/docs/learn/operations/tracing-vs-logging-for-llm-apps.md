@@ -76,7 +76,7 @@ An agent's run is a chain of decisions, and its cost and latency come from that 
 - **Where the time went.** Was the run slow because of the model, a tool, the MCP server behind the tool, or a queue wait?
 - **Where the tokens went.** With the token counts on each model call span, you can see which turn of the loop used the most context.
 - **Which call caused which.** The model asked for a tool, the tool called a server, and the server's error came back as the next prompt. Parent and child spans show this order.
-- **Work that leaves the process.** With W3C Trace Context, which "defines standard HTTP headers and a value format to propagate context information", the trace continues into an MCP server or a queue worker that supports it. Work that resumes much later, such as a run continued after an approval, joins with a span link rather than a parent.
+- **Work that leaves the process.** With W3C Trace Context, which "defines standard HTTP headers and a value format to propagate context information", the trace continues into an MCP server or a queue worker that supports it: each hop's `traceparent` header carries the same trace id. Work that resumes much later, such as a run continued after an approval, joins with a span link rather than a parent.
 
 The OpenTelemetry <Term id="genai-semantic-conventions">GenAI semantic conventions</Term> give these spans shared names, such as `chat {model}`, `execute_tool {tool}` and `invoke_agent {agent}`, so any tracing backend can draw an agent timeline. [Mapping your traces to them](/learn/operations/opentelemetry-genai-conventions) covers the names in detail.
 
@@ -103,7 +103,7 @@ Logs are usually all kept, filtered by level. Traces are often sampled. OpenTele
 
 ## How they combine
 
-The join is the trace id. OpenTelemetry's logging guidance says the SDK can "automatically correlate your existing logs with any active trace and span", which means each log line written inside a span carries `trace_id` and `span_id`. In practice:
+The join is the trace id. OpenTelemetry's logging guidance says that with its SDK or auto-instrumentation in place, OpenTelemetry can "automatically correlate your existing logs with any active trace and span", which means each log line written inside a span carries `trace_id` and `span_id`. In practice:
 
 1. Every log line written inside a request or run carries `trace_id` and `span_id`.
 2. Your run records store the trace id, and the screen that shows a run links to its trace.

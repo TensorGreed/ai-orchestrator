@@ -114,7 +114,7 @@ L2M is an MCP client toward the servers your agents call, and an MCP server towa
 **As a client (the [MCP server registry](/product/mcp-server-registry)).** An HTTP server registered with auth type **OAuth** is connected with the flow above:
 
 - L2M reads the `401` challenge, then the protected resource metadata, then the authorization server metadata (RFC 8414 or OpenID Connect discovery).
-- It uses a client id you entered (pre-registration) or, when you leave it empty, registers itself with dynamic client registration as a public client. It does not support client metadata documents yet.
+- It uses a client id you entered (pre-registration). Otherwise, when the optional [client metadata document](/product/mcp-server-registry#client-metadata-document) is turned on (`MCP_OAUTH_CLIENT_METADATA_ENABLED`, off by default), the redirect base is a public `https` URL and the authorization server supports it, it uses that document; otherwise it registers itself with dynamic client registration as a public client.
 - The sign-in uses PKCE with `S256`, and L2M refuses an authorization server that does not advertise it. It sends a random `state` and the `resource` parameter.
 - The scope is the one you set on the server, else the one from the challenge, else `scopes_supported`.
 - The `state` is single-use, expires after 10 minutes by default, and is bound to the sign-in session that started the connection. Discovery and token endpoints must use HTTPS, except on loopback addresses for local testing, and if the resource metadata names a resource, it must be on the server's own origin.

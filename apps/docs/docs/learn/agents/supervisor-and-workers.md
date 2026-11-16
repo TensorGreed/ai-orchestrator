@@ -30,7 +30,7 @@ Anthropic's guide to building agents describes it as the orchestrator-workers wo
 
 ## Workers as tools: what the supervisor sees
 
-The supervisor does not need a special protocol to delegate. (Agent-to-agent protocols exist for agents in other systems; see [MCP vs A2A](/learn/mcp/mcp-vs-a2a).) It already knows how to call tools, so each worker is presented to its model as one more tool. In L2M a worker named `researcher` whose system prompt starts "Answer factual questions with the lookup_kb tool." becomes this tool (the demo's own worker prompt starts with a `[researcher]` tag used by its scripted model):
+The supervisor does not need a special protocol to delegate. It already knows how to call tools, so each worker is presented to its model as one more tool. In L2M a worker named `researcher` whose system prompt starts "Answer factual questions with the lookup_kb tool." becomes this tool (the demo's own worker prompt starts with a `[researcher]` tag used by its scripted model):
 
 ```json
 {
@@ -49,7 +49,7 @@ The supervisor does not need a special protocol to delegate. (Agent-to-agent pro
 }
 ```
 
-The hint is the first 100 characters of the worker's system prompt as written, with placeholders not filled in, so start that prompt with what the worker is for. A worker left on the default prompt template gives the supervisor a useless hint. When the supervisor's model calls the tool, the `task_prompt` it wrote becomes the worker's user prompt, and the worker runs a full agent loop. The worker's output goes back to the supervisor as the tool result.
+The hint is the first 100 characters of the worker's system prompt as written, with placeholders not filled in, so start that prompt with what the worker is for. A worker left on the default prompt template gives the supervisor a useless hint. When the supervisor's model calls the tool, the `task_prompt` it wrote becomes the worker's user prompt, and the worker runs a full agent loop. The worker's output goes back to the supervisor as the tool result. Agent-to-agent protocols exist for agents that run in other systems; see [MCP vs A2A](/learn/mcp/mcp-vs-a2a).
 
 Two things follow from this design:
 

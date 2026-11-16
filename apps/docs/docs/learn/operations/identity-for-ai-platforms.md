@@ -25,7 +25,7 @@ Mixing them causes most of the trouble. A CI pipeline that uses a person's API k
 
 ## Single sign-on: OIDC, SAML and LDAP
 
-<Term id="sso">Single sign-on</Term> lets people use the accounts your organisation already manages, so leavers lose access when their directory account is disabled. Three protocols are common.
+<Term id="sso">Single sign-on</Term> lets people use the accounts your organisation already manages, so leavers can no longer sign in once their directory account is disabled. Three protocols are common.
 
 **OpenID Connect.** The specification calls <Term id="oidc">OIDC</Term> "a simple identity layer on top of the OAuth 2.0 protocol". After sign-in, the identity provider returns an ID token, "a security token that contains Claims about the Authentication of an End-User". The app must check that token: its issuer must match exactly, its audience must contain the app's client id, and when the app sent a nonce, the token must carry the same one.
 

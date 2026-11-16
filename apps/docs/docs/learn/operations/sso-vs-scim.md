@@ -9,7 +9,7 @@ related: [scim, sso, oidc, saml, rbac, service-account]
 
 # SSO vs SCIM
 
-<Term id="sso">Single sign-on</Term> and <Term id="scim">SCIM</Term> solve different problems, and an AI platform that many people use needs an answer to both. SSO, through <Term id="oidc">OpenID Connect</Term> or <Term id="saml">SAML 2.0</Term>, answers "who is this person, right now?" each time someone signs in. SCIM, the System for Cross-domain Identity Management, answers "which accounts and groups should exist in this app?" by letting your identity provider create, change and deactivate them over HTTP, whether or not anyone is signing in. SSO alone handles joiners well: an account can be created on the first sign-in. It does not handle leavers. Disabling someone in the directory stops their next sign-in. It does not remove the account, end the sessions they already hold or revoke the API keys they created. Removing those is provisioning, and SCIM is the standard way to do it.
+<Term id="sso">Single sign-on</Term> and <Term id="scim">SCIM</Term> solve different problems, and an AI platform that many people use needs an answer to both. SSO, through <Term id="oidc">OpenID Connect</Term> or <Term id="saml">SAML 2.0</Term>, answers "who is this person, right now?" each time someone signs in. SCIM, the System for Cross-domain Identity Management, answers "which accounts and groups should exist in this app?" by letting your identity provider create, change and deactivate them over HTTP, whether or not anyone is signing in. SSO alone handles joiners well: an account can be created on the first sign-in. It does not handle leavers. Disabling someone in the directory stops their next sign-in. It does not remove the account, end the sessions they already hold or revoke the API keys they created. Removing those is provisioning. SCIM is the standard way for the identity provider to tell the app, and a well-built app then ends the sessions and keys too.
 
 ## Two questions, two protocols
 
@@ -36,7 +36,7 @@ related: [scim, sso, oidc, saml, rbac, service-account]
     <text x="320" y="45" text-anchor="middle">Person's browser</text>
     <path d="M150 105 L250 60" stroke="currentColor" fill="none"/>
     <path d="M390 60 L490 105" stroke="currentColor" fill="none"/>
-    <text x="320" y="85" text-anchor="middle" font-size="12">SSO: ID token or assertion, at sign-in</text>
+    <text x="320" y="100" text-anchor="middle" font-size="12">SSO: token or assertion, at sign-in</text>
     <path d="M190 210 L450 210" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="2" fill="none" stroke-dasharray="5 3"/>
     <path d="M105 155 L105 210 L190 210" stroke="currentColor" fill="none"/>
     <path d="M450 210 L535 210 L535 155" stroke="currentColor" fill="none"/>
@@ -81,7 +81,7 @@ Content-Type: application/scim+json
   "Operations": [ { "op": "remove", "path": "members[value eq \"2819c223\"]" } ] }
 ```
 
-Two details matter for offboarding. A user's `active` attribute is "a Boolean value indicating the user's administrative status", and RFC 7643 leaves its exact meaning to the service provider, so setting it to `false` may mean "suspended" in one app and "deleted" in another. And SCIM does not define how the client authenticates: the RFC says the protocol "does not itself define a SCIM-specific scheme for authentication and authorization". It says bearer tokens "MAY be used when combined with TLS and a token framework such as OAuth 2.0", and many apps issue the identity provider one long-lived token. Whoever holds that token can create accounts and change groups, so protect it like an admin credential.
+Two details matter for offboarding. A user's `active` attribute is defined as "A Boolean value indicating the user's administrative status", and RFC 7643 leaves its exact meaning to the service provider, so setting it to `false` may mean "suspended" in one app and "disabled" in another. And SCIM does not define how the client authenticates: the RFC says the protocol "does not itself define a SCIM-specific scheme for authentication and authorization". It says bearer tokens "MAY be used when combined with TLS and a token framework such as OAuth 2.0", and many apps issue the identity provider one long-lived token. Whoever holds that token can create accounts and change groups, so protect it like an admin credential.
 
 ## The offboarding gap, step by step
 
@@ -106,17 +106,17 @@ Decide which side owns roles. If groups arrive both in tokens at sign-in and thr
 
 ## In L2M
 
-L2M, a self-hosted workflow builder and agent runtime, supports OIDC, SAML 2.0 and LDAP sign-in, all optional. It has no SCIM endpoint. Accounts come from SSO sign-ins, invites or an admin. What it does today:
+L2M, a self-hosted workflow builder and agent runtime, supports OIDC, SAML 2.0 and LDAP sign-in, all optional. It has no SCIM endpoint. Accounts come from OIDC, SAML or LDAP sign-ins, invites or an admin. What it does today:
 
 - **Accounts on first sign-in.** An OIDC or SAML sign-in that matches no account creates one, with role `viewer` unless a group mapping says otherwise ([OIDC single sign-on](/security/auth-rbac#oidc-single-sign-on)).
 - **Allow-lists on every sign-in.** `OIDC_ALLOWED_GROUPS` and `OIDC_ALLOWED_EMAIL_DOMAINS` (and the SAML equivalents) are checked on every login, for new and returning users, so removing someone from the allowed group at the identity provider refuses their next sign-in.
-- **Group mappings.** A mapping without a project sets the global role on each login but never lowers it; one with a project adds a project membership ([group-to-role mappings](/security/auth-rbac#group-to-role-mappings)). Lowering a role or removing a membership is a manual change.
-- **Ending access now.** An admin can sign a user out everywhere from **Settings → Access control → Users**. Deleting the user (`DELETE /api/users/:id`) removes the account with its sessions, API keys, SSO identities and project roles in one transaction.
+- **Group mappings.** A mapping without a project sets the global role on each login but never lowers it; one with a project adds or updates a project membership ([group-to-role mappings](/security/auth-rbac#group-to-role-mappings)). Lowering a global role or removing a project membership is a manual change.
+- **Ending access now.** An admin can sign a user out everywhere from **Settings → Access control → Users**; that ends sessions only, and the user's API keys keep working. Deleting the user (`DELETE /api/users/:id`) removes the account with its sessions, API keys, SSO identities and project roles in one transaction.
 - **Shorter windows.** `SESSION_IDLE_TIMEOUT_MINUTES` and `SESSION_ABSOLUTE_TIMEOUT_HOURS` limit how long a session outlives its last use ([session policy](/security/auth-rbac#session-policy)).
 - **Passwords next to SSO.** Accounts that SSO creates get a random password. L2M has no SSO-only switch, so an account that was given its own password, for example through an invite, can still use it until it is deleted.
 - **Automation off people.** [Service accounts](/security/service-accounts) cannot sign in and are not tied to an employee, so deleting a leaver does not break a pipeline that uses a service account key.
 
-So an L2M offboarding today is: disable the person at the identity provider, then delete the account in L2M (or at least sign it out everywhere). The [audit log](/security/audit-log) records the sign-out (`session.revoked`) and the deletion (`user.delete`).
+So an L2M offboarding today is: disable the person at the identity provider, then delete the account in L2M. Signing it out everywhere is not enough on its own: it ends sessions, but the account's API keys keep working until you delete the account or revoke them. The [audit log](/security/audit-log) records the sign-out (`session.revoked`) and the deletion (`user.delete`).
 
 ## Further reading
 

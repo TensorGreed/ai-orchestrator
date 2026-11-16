@@ -59,7 +59,7 @@ Text checks are useful, and for a chatbot they may be most of what you need. For
 
 **A miss is silent.** When a filter fails, nothing marks the miss. The action runs, and you learn about it afterwards.
 
-OWASP's guidance on <Term id="excessive-agency">excessive agency</Term> points the same way: "Implement authorization in downstream systems rather than relying on an LLM to decide". A text check that asks a model whether a call looks safe is still relying on a model to decide.
+OWASP's guidance on <Term id="excessive-agency">excessive agency</Term> points the same way: "Implement authorization in downstream systems rather than relying on an LLM to decide if an action is allowed or not." A text check that asks a model whether a call looks safe is still relying on a model to decide.
 
 ## Why tool policy alone is not enough either
 
@@ -76,7 +76,7 @@ A tool policy has the opposite blind spot. It sees the shape of a call, not the 
 | What does it look at? | Strings: prompts, documents, tool results, arguments, answers | A structured call: tool, server, argument values, caller, workflow |
 | How does it decide? | Patterns, classifiers or a judge model; a score or a match | Fixed rules: allow, deny or require approval |
 | Same input, same answer? | Not always, for model-based checks | Yes |
-| Can wording get around it? | Yes: paraphrase, encoding, splitting | No: the rule never reads the wording |
+| Can wording get around it? | Yes: paraphrase, encoding, splitting | Not the prompt's wording. A deny-list on argument values can be dodged by spelling; an allow-list cannot |
 | Knows who is calling? | No | Yes: role, client, project |
 | Catches a secret in an allowed call? | Yes, if it matches a detector | No |
 | Catches a harmful answer with no tool call? | Yes | No |
@@ -86,23 +86,21 @@ A tool policy has the opposite blind spot. It sees the shape of a call, not the 
 
 Treat the tool policy as the boundary and text checks as the filters inside it.
 
-1. **Decide the actions first.** List what the agent must be able to do and allow only that: these tools, these argument values, for these callers. Everything else is denied, whatever the model is persuaded to try. The design patterns paper by Beurer-Kellner et al. (2025) takes this approach. It calls detection-based defenses "fundamentally heuristic", and argues that once an agent has read untrusted input, "it must be constrained so that it is impossible for that input to trigger any consequential actions".
+1. **Decide the actions first.** List what the agent must be able to do and allow only that: these tools, these argument values, for these callers. Where your policy engine allows anything no rule matches, deny by default with one broad deny rule, then carve out narrower allow rules; the calls you did not foresee are then refused, whatever the model is persuaded to try. The design patterns paper by Beurer-Kellner et al. (2025) explains why text checks cannot be the boundary: it calls detection-based defenses "fundamentally heuristic".
 2. **Hold the calls that matter for a person.** Writes above a threshold, sends to outside addresses and deletes go to an approval. A person sees the actual call, with its arguments, not the model's description of it.
 3. **Add text checks where meaning matters.** Detect secrets and personal data in arguments and answers, flag likely injection in retrieved text, and check answers against their sources. These catch what rules cannot express.
-4. **Let what the run has read narrow what it may do.** Once a run has read untrusted content or sensitive data, tighten the tool rules for the rest of the run. This joins the two: content decides the labels, and the policy acts on them.
+4. **Let what the run has read narrow what it may do.** Once a run has read untrusted content or sensitive data, tighten the tool rules for the rest of the run. The same paper puts the principle plainly: once an agent has read untrusted input, "it must be constrained so that it is impossible for that input to trigger any consequential actions". This joins the two: content decides the labels, and the policy acts on them.
 
 Then measure both. For tool rules, check how many real calls each rule would have changed before you enforce it. For text checks, track false positives and known misses against a test set.
 
 ## In L2M
 
-Both controls are optional in L2M, and a simple workflow needs neither.
+Tool policy is off until an admin adds a rule: a tool call that no rule matches is allowed. Text checks are on by default for agents: an agent with no rule set of its own, its workflow's or its project's uses the built-in default rule set, unless an admin turns auto-apply off. Neither needs any setup for a simple workflow.
 
-- **[MCP tool policy](/product/mcp-tool-policy)** rules allow, deny or require approval by project, role, server and tool name, and optionally by the call's argument values, the run's data labels, the workflow and the gateway client. Precedence is deny, then require approval, then allow. Denied tools are removed from the agent's tool list before the model sees them, and every call is checked again when it is made, so a model that names a hidden tool is still refused.
-- **Conditions fail closed.** A missing, oddly typed or oversized argument can cause an extra deny or approval, never a wider allow, and allow-lists (`one_of`) avoid the spelling tricks that beat deny-lists.
-- **Approvals.** A `require_approval` rule pauses the run before the call and puts a request in the **Approvals** inbox naming the tool, the rule and the matched conditions. A workflow's **Ask before write tools** switch does the same for every <Term id="write-tool">write tool</Term>, and a **No write tools** switch blocks them outright.
-- **Labels from content.** Rules can match `label_present` or `label_absent` on the run's [data labels](/product/data-labels-and-destinations), so a send tool can be denied once untrusted or sensitive data is in the run.
-- **Text checks.** Optional [content rules](/product/content-rules) check prompts, tool arguments, tool results and answers, and can block, rewrite or pause at each point.
-- **Shadow mode and simulation.** Any policy rule can run in shadow mode, and admins can simulate a draft rule on recorded calls before enforcing it.
+- **[MCP tool policy](/product/mcp-tool-policy)** rules allow, deny or require approval by project, role, server, tool name and, optionally, argument values and the run's [data labels](/product/data-labels-and-destinations). A tool that an unconditional deny blocks is removed from the agent's tool list; rules with conditions are decided at call time, with the call's arguments. [Least privilege for agents](/learn/security/least-privilege-for-agents) covers precedence, conditions that fail closed, and testing rules before you enforce them.
+- **Text checks.** [Content rules](/product/content-rules) check prompts, tool arguments, tool results and answers, and can block, rewrite or pause at each point.
+- **The order between them.** Policy is checked first: a call a rule denies or holds for approval never reaches the argument checks. A workflow's **Ask before write tools** switch, on its own, runs after the argument checks, so a call they block is never put to a person, and the person approves the arguments that got through. The switch covers tools on an agent's `tool` port; a direct MCP Tool node needs an Approval Gate in front of it.
+- **Labels join the two.** A rule can match `label_present` on the run's data labels, so a send tool can be denied or held once untrusted data is in the run (or sensitive data, when label tracking is on in a rule set).
 
 ## Try it in L2M
 
@@ -111,6 +109,6 @@ The [govern MCP tools guide](/guides/govern-mcp-tools) walks through a first set
 ## Further reading
 
 - [LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) (OWASP Gen AI Security Project): why prevention is uncertain, and the layered mitigations
-- [LLM06:2025 Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/) (OWASP Gen AI Security Project): least functionality, least permission, complete mediation
+- [LLM06:2025 Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/) (OWASP Gen AI Security Project): minimize extension functionality and permissions, complete mediation
 - [Beurer-Kellner et al., Design Patterns for Securing LLM Agents against Prompt Injections](https://arxiv.org/abs/2506.08837) (arXiv 2506.08837, 2025)
 - In L2M: [MCP tool policy](/product/mcp-tool-policy), glossary: <Term id="least-privilege">least privilege</Term>, <Term id="output-checks">output checks</Term>

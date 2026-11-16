@@ -46,7 +46,7 @@ Take a support agent that handles refund requests. One test case asks it to refu
 <figure>
 <svg viewBox="0 0 640 268" role="img" aria-labelledby="judge-fig-title judge-fig-desc" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-width:640px">
   <title id="judge-fig-title">Layered grading of one agent run</title>
-  <desc id="judge-fig-desc">An agent run flows left to right through two layers. First, deterministic checks: status, tool calls and arguments, schema and fields, budget. A failure there ends the case. Only runs that pass reach the second layer, an LLM judge with a rubric, whose score is compared with a threshold. A side note shows the judge calibrated against a sample of human labels.</desc>
+  <desc id="judge-fig-desc">An agent run flows left to right through two layers. First, deterministic checks: status, tool calls and arguments, forbidden tools, schema and fields, budget. A failure there ends the case. Only runs that pass reach the second layer, an LLM judge with a rubric, whose score is compared with a threshold. A side note shows the judge calibrated against a sample of human labels.</desc>
   <g font-family="inherit" font-size="13" fill="currentColor">
     <rect x="10" y="100" width="110" height="44" rx="8" fill="none" stroke="currentColor"/>
     <text x="65" y="126" text-anchor="middle">Agent run</text>
@@ -91,12 +91,12 @@ The weakness is brittleness. An exact match on the whole reply fails every rewor
 
 ## What a judge adds, and how it goes wrong
 
-A judge is the right tool when the quality has no single correct form: faithfulness to retrieved documents, relevance, tone, completeness. The cost is that it brings model failure modes into your test suite. Zheng et al. 2023 ("Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena") studied this directly. Strong judges reached "over 80% agreement" with human preferences, about the level humans reach with each other, and the paper also measured these problems:
+A judge is the right tool when the quality has no single correct form: faithfulness to retrieved documents, relevance, tone, completeness. The cost is that it brings model failure modes into your test suite. Zheng et al. 2023 ("Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena") studied this directly. On votes that were not ties, GPT-4 as a judge agreed with human experts 85% of the time, slightly above the 81% the experts reached with each other (66% and 63% when ties are counted), and the paper also measured these problems:
 
 - **Position bias**: "a propensity to favor certain positions over others." Shown two answers, a judge may prefer whichever comes first (or second) regardless of content. The authors report that all the judges they tested "exhibit strong position bias."
 - **Verbosity bias**: favouring "longer, verbose responses". Their "repetitive list" test padded answers with a rephrased copy of their own list, adding no information; some judges preferred the padded answer in most cases.
 - **Self-enhancement bias**: a judge may favour answers written by its own model. The authors write that their study "cannot determine whether the models exhibit a self-enhancement bias", but the risk is a reason not to grade a model with itself when you can avoid it.
-- **Limited reasoning**: judges made mistakes grading math and reasoning questions, even ones they could solve when asked separately; the answers being graded misled them. Their fix: the judge first answers the question on its own, then grades with that answer shown as a reference. On their 10 math questions, the judge's failure rate fell from 70% to 15%.
+- **Limited reasoning**: judges made mistakes grading math and reasoning questions, even ones they could solve when asked separately; the answers being graded misled them. Their fix: the judge first answers the question on its own, then grades with that answer shown as a reference. On their 10 math questions, judged in both orders, failures fell from 14 of 20 judgements (70%) to 3 of 20 (15%).
 
 Two more problems matter for agent tests in particular:
 
@@ -108,7 +108,7 @@ Two more problems matter for agent tests in particular:
 1. **Write a rubric a stranger could apply.** "Is the answer good?" invites the judge's own taste. "States the refund amount and the order number; does not promise a date" can be checked line by line.
 2. **One quality per judge.** Separate judges for faithfulness, relevance and tone give scores you can act on. One judge grading everything returns a blend you cannot debug.
 3. **Give the judge a reference.** In the paper the reference is the judge's own answer, produced first. In a regression test, a known-good answer such as the golden run's output plays the same role.
-4. **Compare instead of scoring, when the question is "better or worse".** A pairwise judge answers "is the new output at least as good as the old one?", which is what a regression test asks. Ask in both orders and only count a win when the judge prefers the same answer both times; the paper's rule is to call an inconsistent pair a tie.
+4. **Compare instead of scoring, when the question is "better or worse".** A pairwise judge answers "is the new output at least as good as the old one?", which is what a regression test asks. Ask in both orders and only count a win when the judge prefers the same answer both times; the paper's conservative rule is to call an inconsistent pair a tie.
 5. **Take several votes.** Averaging a few independent votes smooths out single-sample noise. Several votes at temperature 0 are mostly the same answer repeated, so sample them.
 6. **Give it a way out.** Let the judge say "cannot tell" instead of forcing a score; treat that as inconclusive rather than pass or fail.
 7. **Calibrate against people, and pin the judge model.** Label a sample of cases by hand, run the judge on them and look at where it disagrees. Scores move when the judge model changes even though the agent did not (the paper notes absolute scores are likely to fluctuate more than pairwise ones), so recalibrate after changing the judge model or the rubric, and read a shift then as a judge change, not an agent change.
@@ -126,20 +126,19 @@ Two more problems matter for agent tests in particular:
 
 ## How they combine
 
-A good case uses both, in layers. For the refund agent at the top of this page, the five deterministic checks run first, and only a run that passes them reaches the judge with its rubric, scored against the reference reply with three votes. The checks decide most failures at no cost and with an exact reason; the judge covers the one thing they cannot. When a case fails, you know from which layer: a broken fact, or a judgement call worth reading.
-
-It also keeps costs down: 200 cases with deterministic checks cost nothing to grade, while one judge with three pairwise votes adds 1,200 model calls.
+A good case uses both, in layers, as in the figure. For the refund agent at the top of this page, the five deterministic checks decide most failures with an exact reason, and the judge, with its rubric, the reference reply and three votes, covers the one thing they cannot. When a case fails, you know from which layer: a broken fact, or a judgement call worth reading. Cost is the other reason to keep judges narrow: 200 cases with deterministic checks cost nothing to grade, while one judge with three pairwise votes adds 1,200 model calls.
 
 ## In L2M
 
-L2M, a self-hosted workflow builder and agent runtime, grades <Term id="golden-set">golden set</Term> cases with [scorers](/product/golden-sets#scorers). Each returns pass or fail, a score from 0 to 1 and a readable reason, and a case passes only when every scorer passes.
+L2M, a self-hosted workflow builder and agent runtime, grades <Term id="golden-set">golden set</Term> cases with [scorers](/product/golden-sets#scorers). Each returns pass or fail and a readable reason, most also return a score from 0 to 1, and a case passes only when every scorer passes.
 
-- **Deterministic scorers:** `status`, `json_equal` (against an expected value or the golden run's output, with ignore paths and a number tolerance), `json_schema`, `exact_match`, `contains`, `regex`, `budget` (absolute limits or a percentage increase over the golden run), and `tool_sequence`. `tool_sequence` compares tool calls in order or as a set, optionally with arguments, and fails a case that called a tool in `forbiddenTools`.
+- **Deterministic scorers:** `status`, `json_equal` (against an expected value or the golden run's output, with ignore paths and a number tolerance), `json_schema`, `exact_match`, `contains`, `regex`, `budget` (absolute limits or a percentage increase over the golden run), `context_precision` and `context_recall` (token overlap, with the same caveat as below), and `tool_sequence`. `tool_sequence` compares tool calls in order or as a set, optionally with arguments, and fails a case that called a tool in `forbiddenTools`.
 - **`text_similarity`** is Jaccard word overlap with a default threshold of 0.8, so the refunded / not refunded pair above passes it. Pair it with a fact check.
 - **`llm_judge`** takes a rubric, `absolute` or `pairwise` mode, 1 to 5 votes and a threshold (default 0.7 absolute, 0.5 pairwise, meaning "at least as good as the golden run"). Pairwise asks in both orders, so a judge that always picks one position scores a tie. Details in [LLM judge](/product/golden-sets#llm-judge).
-- **`faithfulness`** and **`answer_relevance`** are ready-made judge scorers for RAG answers.
+- **`faithfulness`** and **`answer_relevance`** are ready-made judge scorers for RAG answers. They take no `secretRef`, so they run only when the operator allows the server's own provider keys (see below).
 - **Injection framing:** the graded text sits in randomly tagged data blocks the judge is told never to follow, which reduces steering but is no guarantee.
-- **Off until you turn it on.** All judge scorers need `EVAL_JUDGE_ENABLED`, which is `false` by default; until then they fail. A judge's credentials come from the secret store through a `secretRef`; the server's own provider keys are used only if an operator sets `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true`. Each judge call is priced and counts toward the replay job's budget.
+- **Off until you turn it on.** All judge scorers need `EVAL_JUDGE_ENABLED`, which is `false` by default; until then they fail. A judge's credentials come from the secret store through a `secretRef`; the server's own provider keys are used only if an operator sets `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true`. Each judge call is priced, when its model has a price, and counts toward the replay job's budget.
+- **No short-circuit.** L2M runs all of a case's scorers on every run, so a judge is called even when a deterministic scorer has already failed the case. Keep judges to the cases that need them, and cap spend with the job budget and the per-case limit of 50 judge calls.
 
 Without any scorers, a replay job uses `status` plus `json_equal` against the golden run's output. In the live demo, an FAQ workflow's new version adds a prefix to every answer, and that strict default fails all three cases.
 

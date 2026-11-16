@@ -9,7 +9,7 @@ related: [model-context-protocol, mcp-server, mcp-tool, tool-calling, least-priv
 
 # MCP vs REST APIs
 
-A REST API is a service's own interface: many URLs and HTTP methods, designed for programs that a developer writes after reading the documentation. The <Term id="model-context-protocol">Model Context Protocol</Term> (MCP) is one fixed interface for AI applications: a client asks any server "which tools do you have?" (`tools/list`) and "run this one with these arguments" (`tools/call`), and gets back descriptions written for a model. They are not rivals. Most MCP servers that talk to a SaaS product call its REST API underneath. The real choice for an agent is how it reaches that API: through a generic HTTP tool, through a narrow tool you wrap yourself, or through an MCP server.
+A REST API is a service's own interface: many URLs and HTTP methods, designed for programs that a developer writes after reading the documentation. The <Term id="model-context-protocol">Model Context Protocol</Term> (MCP) is one fixed interface for AI applications: a client asks any server "which tools do you have?" (`tools/list`) and "run this one with these arguments" (`tools/call`), and gets back descriptions written for a model. They are not rivals. Many MCP servers that talk to a SaaS product call its REST API underneath. The real choice for an agent is how it reaches that API: through a generic HTTP tool, through a narrow tool you wrap yourself, or through an MCP server.
 
 ## The same API, two ways in
 
@@ -45,10 +45,10 @@ A REST API is a service's own interface: many URLs and HTTP methods, designed fo
 | --- | --- | --- |
 | Who is it designed for? | Developers writing client code | AI applications that list and call tools at run time |
 | How many operations does a caller learn? | Every endpoint, method, header and status code of that API | Two core methods for tools, the same on every server |
-| How is it described? | Optionally by an OpenAPI document, read at build time | By `tools/list` at run time: a `name`, a `description` and an `inputSchema` per tool |
+| How is it described? | Optionally by an OpenAPI document, usually read by developers and code generators | By `tools/list` at run time: a `name`, a `description` and an `inputSchema` per tool |
 | Who reads the description? | A developer | The model, directly |
 | How do errors come back? | HTTP status codes and an API-specific body | A protocol error, or a tool result with `isError: true` and a message the model can act on |
-| How does auth work? | Whatever the API chose: API keys, OAuth, signed requests | For HTTP servers, an OAuth 2.1 based flow the spec defines; for local stdio servers, credentials from the environment |
+| How does auth work? | Whatever the API chose: API keys, OAuth, signed requests | Optional; for HTTP servers, an OAuth 2.1 based flow the spec defines; for local stdio servers, credentials from the environment |
 | How does a caller learn about changes? | Release notes and version numbers | `notifications/tools/list_changed` from servers that declare `listChanged` |
 | What carries it? | HTTP | JSON-RPC 2.0 over stdio or Streamable HTTP |
 
@@ -58,7 +58,7 @@ The OpenAPI Specification calls itself "a standard, language-agnostic interface 
 
 You can give a model a tool such as `http_request(method, url, headers, body)` and point it at any API. It works in a demo. In production, four things go wrong.
 
-1. **The action surface is the whole API.** A generic HTTP tool lets the model call any endpoint with any method. A `DELETE` is one token away from a `GET`. With an MCP server, or a narrow tool you write, the model can only call `search_tickets` and `create_ticket`, and each has a schema that rejects extra fields.
+1. **The action surface is the whole API.** A generic HTTP tool lets the model call any endpoint with any method. A `DELETE` is one token away from a `GET`. With an MCP server, or a narrow tool you write, the model can only call `search_tickets` and `create_ticket`, and each has a schema that can reject extra fields.
 2. **The credential has to go somewhere.** If the model builds the headers, the API key ends up in its context or in its tool arguments, where traces and logs can capture it. An MCP server holds its own credential and adds it itself. The model never sees it. See [OAuth vs API keys for MCP](/learn/security/oauth-vs-api-keys-for-mcp).
 3. **Any URL is reachable.** A tool that fetches whatever URL the model writes is a request-forgery risk: a prompt injection in a document can steer it to an internal address or to an attacker's server with your data in the query string. See <Term id="ssrf">SSRF</Term> and [the lethal trifecta](/learn/security/lethal-trifecta).
 4. **The model reads API docs badly at run time.** Long endpoint lists, pagination rules and status codes cost tokens and invite wrong calls. A few well-named tools with short descriptions work better. See [Too many tools](/learn/agents/too-many-tools).
@@ -72,7 +72,7 @@ Not every API call needs a model to decide it, and not every call needs a protoc
 - **The call is fixed.** "When a form is submitted, post it to the CRM" is a workflow step. No model chooses anything, so a plain HTTP request with a reviewed URL template is simpler and cheaper.
 - **There is one endpoint, and it is yours.** Wrapping your own internal service in an MCP server just to call one route adds a process to run and monitor.
 - **The data is large or binary.** Moving a file between two systems is better done by a step that streams it than by a model reading it as a tool result.
-- **Latency matters.** Every tool call an agent makes costs at least one more model call to read the result. A fixed step costs none.
+- **Latency matters.** Every round of tool calls an agent makes costs at least one more model call to read the results. A fixed step costs none.
 
 A good rule: if the model must decide **whether** and **with what arguments** to call, give it a narrow tool (MCP or your own function). If nothing needs deciding, use a plain HTTP step.
 
@@ -81,16 +81,16 @@ A good rule: if the model must decide **whether** and **with what arguments** to
 The usual architecture uses both, in layers:
 
 - **An MCP server wraps a REST API.** The server picks the operations an agent needs, names them clearly, writes short descriptions, holds the API credential and returns compact results. The REST API is unchanged.
-- **OpenAPI as a starting point.** An OpenAPI document already lists operations with a unique `operationId` and their parameters, so some teams generate MCP tools from it. Generate, then cut: an API with eighty operations should not become eighty tools.
+- **OpenAPI as a starting point.** An OpenAPI document already lists operations and their parameters, and an operation's optional `operationId` must be unique when present, so some teams generate MCP tools from it. Generate, then cut: an API with eighty operations should not become eighty tools.
 - **Fixed calls stay plain HTTP.** Steps that always happen, such as logging a result or sending a webhook, stay outside the agent.
 
 ## In L2M
 
 L2M has both paths, and keeps them apart:
 
-- **The HTTP Request node** is a workflow step: a method (`GET`, `POST`, `PUT`, `PATCH` or `DELETE`), a URL template, a headers template, a body template and an optional secret, which L2M sends as `Authorization: Bearer <secret>`. The secret is stored encrypted and the workflow holds only a reference to it ([secrets](/security/secrets)). Its URL goes through [outbound URL checks](/security/outbound-url-checks), which always block cloud metadata addresses and can block private ranges. It is not attached to an agent's `tool` port, so a model never writes its URL.
+- **The HTTP Request node** is a workflow step: a method (`GET`, `POST`, `PUT`, `PATCH` or `DELETE`), a URL template, a headers template, a body template and an optional secret, which L2M sends as `Authorization: Bearer <secret>`. The secret is stored encrypted and the workflow holds only a reference to it ([secrets](/security/secrets)). Its URL goes through [outbound URL checks](/security/outbound-url-checks), which always block cloud metadata addresses and can block private ranges. It is not attached to an agent's `tool` port. Its URL template can render `{{ }}` values from earlier steps, so a model does not choose the URL unless your template puts a model's output there.
 - **MCP Tool nodes** on an agent's `tool` port are the agent's tools. Register each server once in the [MCP server registry](/product/mcp-server-registry), with its endpoint and credential, and pick the tools an agent may see.
-- **A narrow tool from your own HTTP call.** To let an agent decide when to call a REST endpoint without writing an MCP server, put the HTTP Request node in a small workflow and attach that workflow to the agent with a [Workflow Tool](/runtime/workflow-tool) node. The agent sees one tool whose arguments come from the child workflow's trigger (its input schema, or one free-text `input`), and the URL and secret stay in the child. Workflow tools are governed like MCP tools: tool rules can deny them or require approval, and each call is recorded in tool-call telemetry.
+- **A narrow tool from your own HTTP call.** To let an agent decide when to call a REST endpoint without writing an MCP server, put the HTTP Request node in a small workflow and attach that workflow to the agent with a [Workflow Tool](/runtime/workflow-tool) node. The agent sees one tool whose arguments come from the child workflow's trigger (its input schema, or one free-text `input`), and the URL and secret stay in the child. Keep the host fixed in the child's URL template: put the agent's arguments in the path, query or body, never in the host. Workflow tools are governed like MCP tools: tool rules can deny them or require approval, and each call is recorded in tool-call telemetry.
 
 The reverse also works. An **Expose as MCP Tool** trigger turns a whole workflow, HTTP calls included, into an MCP tool that other agents call through the [MCP gateway](/product/mcp-gateway) ([workflow as an MCP tool](/runtime/workflow-as-mcp-tool)).
 
