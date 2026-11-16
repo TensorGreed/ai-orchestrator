@@ -48,7 +48,7 @@ The extension talks to L2M over the standard webhook routes (no special server c
 
 Open the L2M web UI → **Templates** → click **Use Template** on **VS Code L2M Coding Agent Flow** (in the **Agents** category). Save it. Note the resulting workflow ID (visible in the editor URL or the workflow header).
 
-The template implements the full structured-response contract the extension expects: `message`, `actions[]` (patch + command), `codes[]`, `attachments[]`, `context_update`, `follow_up_question`. It uses the built-in echo provider by default — replace the LLM Call provider with OpenAI / Anthropic / Ollama once you've verified the wiring.
+The template implements the full structured-response contract the extension expects: `message`, `actions[]` (patch + command), `codes[]`, `attachments[]`, `context_update`, `follow_up_question`. As shipped, its chat model is `qwen2.5:7b` on a local Ollama server (`http://localhost:11434/v1`): pull that model, or switch the Chat Model node to OpenAI, Anthropic or another provider.
 
 ### 2. Mint an API key
 
@@ -98,7 +98,7 @@ Lower these for small-context local models (8B Llama, etc.).
 By design:
 
 - **No file edit happens without explicit user approval.** Every patch action shows a preview with the diff and the target file path. Approval is a modal dialog, not a notification toast.
-- **Patches cannot write outside the workspace.** Paths are validated against the workspace root; absolute paths and `..` segments are rejected.
+- **Patches cannot write outside the workspace.** Each path is resolved against the first workspace folder, and a path that ends up outside it (through `..` or an absolute path) is rejected. The check works on the path text; it does not resolve symbolic links.
 - **Commands are visible and approved before execution.** The agent's suggested command renders in the chat with a Run button; clicking it runs in a VS Code terminal you can watch. The extension never auto-runs.
 
 ## Troubleshooting

@@ -3,7 +3,7 @@ layout: page
 sidebar: false
 titleTemplate: false
 title: "AI agent recipes: runnable L2M workflows"
-description: "Ready-to-import L2M workflows from the sample library, from a zero-key MCP agent to supervisor and worker agents: a diagram, the JSON and a demo link."
+description: "Ready-to-import L2M workflows: a zero-key MCP agent, a supervisor and workers, RAG with citations, a workflow served as an MCP tool, and more."
 ---
 
 <div class="hub-page">

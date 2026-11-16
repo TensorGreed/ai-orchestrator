@@ -21,11 +21,8 @@
         "name": "GPT-4o-mini",
         "position": { "x": 70, "y": 380 },
         "config": {
-          "provider": {
-            "providerId": "openai",
-            "model": "gpt-4o-mini",
-            "temperature": 0.1
-          }
+          "model": "gpt-4o-mini",
+          "temperature": 0.1
         }
       },
       {
@@ -64,8 +61,8 @@
     ],
     "edges": [
       { "id": "edge_1", "source": "trigger_1", "target": "agent_1" },
-      { "id": "edge_2", "source": "model_1", "target": "agent_1", "sourceHandle": "chat_model", "targetHandle": "chat_model" },
-      { "id": "edge_3", "source": "memory_1", "target": "agent_1", "sourceHandle": "memory", "targetHandle": "memory" },
+      { "id": "edge_2", "source": "agent_1", "target": "model_1", "sourceHandle": "chat_model" },
+      { "id": "edge_3", "source": "agent_1", "target": "memory_1", "sourceHandle": "memory" },
       { "id": "edge_4", "source": "agent_1", "target": "output_1" }
     ]
   },
