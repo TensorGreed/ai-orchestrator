@@ -147,7 +147,9 @@ entry cannot be edited without breaking the chain: if a token was ever changed w
 
 A log stream sends audit events soon after they are written, to `syslog` (RFC 5424 over UDP or TCP), a `webhook`
 (JSON, optionally signed: `sha256=<hex HMAC-SHA256 of the body>` in `x-ao-signature` or a header you name) or `sentry`. A stream can be
-limited to some categories and to a minimum level: failures are `error`, denials `warn`, everything else `info`.
+limited to some categories and to a minimum level: failures are `error`, denials `warn`, everything else `info`. A
+stream with no categories gets every audit event; `*` also stands for every audit category, so it can be combined with
+`rule_events` (below).
 
 Create them under **Settings → Log Streams** or with `POST /api/log-streams`; **Test** sends one event, and the
 delivery history of the last `LOG_STREAM_EVENT_RETENTION_DAYS` (14) is listed per stream. A stream's config is stored
@@ -160,6 +162,72 @@ are sent. Every audit event goes to the log streams, once, whichever feature rec
 budgets and export destinations included), and so do the retention checkpoint and run outcomes (`execution.success`,
 `execution.error`, with the error redacted and cut to 2,000 characters). Use an export destination when every
 entry must arrive. Log streams still receive events when `AUDIT_LOG_ENABLED=false`.
+
+#### Rule events on log streams
+
+A stream can also receive [content rule](../product/content-rules.md#what-gets-recorded) events: one event per stored
+rule event, from workflow runs, MCP gateway calls and /v1 AI gateway requests. It is off for every stream until you
+add the `rule_events` category: under **Settings → Log Streams** pick **Audit and content rule events** or **Content
+rule events only** for a new stream, or use **Send content rule events** on an existing one. With the API, send
+`categories: ["*", "rule_events"]` for both, or `["rule_events"]` for rule events only. Rule events of eval runs and
+replay jobs are not streamed.
+
+Events are queued like audit events and sent by the same background flush, so a slow or unreachable stream never
+slows down or fails a run or a gateway call; a full buffer drops waiting rule events before audit events.
+
+Levels: `warn` when the effective action is `block`, `require_approval` or `review`; `info` for any other finding
+(rewrites, shadow findings, reveals); `debug` for a check that found nothing, so a stream at the default `info` level
+leaves clean checks out.
+
+Every stream type carries the same event body: syslog puts it as JSON after the RFC 5424 header (`MSGID`
+`content_rules.event`), a webhook posts it, Sentry puts `metadata` under `extra`.
+
+```json
+{
+  "category": "rule_events",
+  "eventType": "content_rules.event",
+  "level": "warn",
+  "outcome": "denied",
+  "message": "Content rule block: dlp.patterns (email) on prompt at guard",
+  "actor": { "type": "system" },
+  "resourceType": "execution",
+  "resourceId": "exec_123",
+  "projectId": "default",
+  "createdAt": "2026-11-16T10:00:00.000Z",
+  "metadata": {
+    "schema": "l2m.rule_event",
+    "schemaVersion": 1,
+    "eventId": "…",
+    "verdictId": "…",
+    "source": "workflow",
+    "ruleSet": { "id": "default", "version": 3, "hash": "…" },
+    "detector": { "id": "dlp.patterns", "category": "pii", "dataClass": "email", "score": 0.9 },
+    "action": { "requested": "block", "effective": "block", "verdict": "block", "shadow": false },
+    "channel": "prompt",
+    "placement": "node",
+    "nodeId": "guard",
+    "toolName": null,
+    "iteration": null,
+    "executionId": "exec_123",
+    "workflowId": "wf_support",
+    "projectId": "default",
+    "latencyMs": 3,
+    "budgetExceeded": false,
+    "skippedDetectors": [],
+    "evidence": [{ "masked": "m***@e******.org", "digest": "sha256:5d41402abc4b2a76", "spanCount": 1, "message": "Email address" }],
+    "evidenceWithheld": false
+  }
+}
+```
+
+- `source` is `workflow`, `mcp_gateway` (`executionId` is the call's `mcpgw_*` id) or `ai_gateway` (the request's
+  `aigw_*` id). `detector` is `null` for a check that found nothing.
+- `evidence` is the masked evidence the Security page shows, at most 5 pieces of at most 160 characters each, with a
+  digest of each piece for correlation. The content that was checked and the raw matched value are never sent: rule
+  events never hold them.
+- For a run started from a sensitive run's content (copied node outputs, marked pinned data, or an error workflow of a
+  sensitive run), `evidenceWithheld` is `true` and each piece carries only its `digest` and `spanCount`.
+- Fields may be added within `schemaVersion` 1; a field renamed or removed raises the version.
 
 ## Settings
 
