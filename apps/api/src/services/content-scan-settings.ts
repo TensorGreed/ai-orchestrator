@@ -1,7 +1,7 @@
 /**
  * A rule set's data scan settings for the content rules tools and document scans. Stored `data.entities` options that
- * do not parse (only a hand-edited stored row can hold them: saving validates them) are ignored, so the check's
- * defaults apply to the classes a call names; the server log gets one warning per rule set version.
+ * do not parse (only a hand-edited stored row can hold them: saving validates them) are ignored, and the check runs
+ * with its default options for the classes they list; the server log gets one warning per rule set version.
  */
 
 import { sensitiveScanSettingsOf, type GuardProfile, type SensitiveScanSettings } from "@ai-orchestrator/guard-sdk";

@@ -50,7 +50,8 @@ export interface SensitiveScanSettings {
   entities?: GuardEntitiesOptions;
   /**
    * The rule set runs `data.entities` with stored options that do not parse (only a hand-edited stored row can, since
-   * saving validates them): they are ignored, so the check's defaults apply to the classes a call names. Hosts warn.
+   * saving validates them): they are ignored, and the check runs with its default options for the classes the stored
+   * options list (when those parse) or that a call names. Hosts warn.
    */
   entitiesOptionsInvalid?: true;
 }
@@ -58,8 +59,8 @@ export interface SensitiveScanSettings {
 /**
  * What a rule set says about the data scan: its dictionaries and allow-list, the data detector options (`include`,
  * `disable`, `entropyThreshold`) of the first channel that runs it, and the `data.entities` options of the first
- * channel that runs that (options that do not parse are ignored and flagged with `entitiesOptionsInvalid`). No rule
- * set: the built-in defaults (no names or addresses).
+ * channel that runs that (options that do not parse are replaced by the defaults for their classes and flagged with
+ * `entitiesOptionsInvalid`). No rule set: the built-in defaults (no names or addresses).
  */
 export function sensitiveScanSettingsOf(profile: GuardProfile | null | undefined): SensitiveScanSettings {
   if (!profile) return { dictionaries: [] };
@@ -73,10 +74,13 @@ export function sensitiveScanSettingsOf(profile: GuardProfile | null | undefined
   const entitiesEntry = Object.values(profile.channels)
     .flatMap((channel) => channel?.detectors ?? [])
     .find((detector) => detector.id === ENTITIES_DETECTOR_ID);
-  const entities = entitiesEntry ? guardEntitiesOptionsOrNull(entitiesEntry.options) : null;
+  const parsed = entitiesEntry ? guardEntitiesOptionsOrNull(entitiesEntry.options) : null;
+  // Stored options that do not parse: the defaults for the classes they list, so the rule set's check stays on.
+  const fallback = entitiesEntry && !parsed ? guardEntitiesOptionsOrNull({ classes: (entitiesEntry.options as Record<string, unknown> | undefined)?.classes }) : null;
+  const entities = parsed ?? fallback;
   return {
     ...(entities ? { entities } : {}),
-    ...(entitiesEntry && !entities ? { entitiesOptionsInvalid: true as const } : {}),
+    ...(entitiesEntry && !parsed ? { entitiesOptionsInvalid: true as const } : {}),
     dictionaries: profile.dictionaries,
     ...(profile.allowList ? { allowList: profile.allowList } : {}),
     ...(include ? { include } : {}),
@@ -179,11 +183,7 @@ export async function scanSensitiveTextAsync(
   const options = settings.entities ? { ...settings.entities, classes } : defaultEntitiesOptions(classes);
   let found: Awaited<ReturnType<typeof findEntities>>;
   try {
-    found = await findEntities(text, options, {
-      ...(context.recognizer ? { recognizer: context.recognizer } : {}),
-      ...(context.signal ? { signal: context.signal } : {}),
-      ...(context.maxChars !== undefined ? { maxChars: context.maxChars } : {})
-    });
+    found = await findEntitiesInChunks(text, options, context);
   } catch (error) {
     throw new EntityScanError(error);
   }
@@ -194,6 +194,52 @@ export async function scanSensitiveTextAsync(
     .map((match) => ({ dataClass: match.dataClass, span: { start: match.start, end: match.end }, score: match.score, message: ENTITY_LABELS[match.dataClass] }));
   if (entities.length === 0) return base;
   return disjointResult(text, [...base.matches, ...entities]);
+}
+
+/** Names and addresses are looked for in pieces of this many characters at most, so a long text does not hold the event loop. */
+export const ENTITY_SCAN_CHUNK_CHARS = 20_000;
+/** Pieces overlap by this much; a span is taken from the piece that has at least half of it as context on each side. */
+const ENTITY_SCAN_CHUNK_OVERLAP = 2_000;
+
+const nextTurn = () => new Promise<void>((resolve) => (typeof setImmediate === "function" ? setImmediate(resolve) : setTimeout(resolve, 0)));
+
+/**
+ * `findEntities` over a long text in overlapping pieces, yielding to the event loop between them and stopping when
+ * `signal` aborts. A text over the limit (the context's `maxChars`, else the options') still fails as a whole.
+ */
+async function findEntitiesInChunks(text: string, options: GuardEntitiesOptions, context: SensitiveScanContext): Promise<Awaited<ReturnType<typeof findEntities>>> {
+  const findContext = {
+    ...(context.recognizer ? { recognizer: context.recognizer } : {}),
+    ...(context.signal ? { signal: context.signal } : {}),
+    ...(context.maxChars !== undefined ? { maxChars: context.maxChars } : {})
+  };
+  const limit = context.maxChars ?? options.maxChars;
+  if (text.length <= ENTITY_SCAN_CHUNK_CHARS || text.length > limit) return await findEntities(text, options, findContext);
+  const step = ENTITY_SCAN_CHUNK_CHARS - ENTITY_SCAN_CHUNK_OVERLAP;
+  const half = ENTITY_SCAN_CHUNK_OVERLAP / 2;
+  const out: Awaited<ReturnType<typeof findEntities>> = [];
+  for (let start = 0; start < text.length; start += step) {
+    if (start > 0) await nextTurn();
+    if (context.signal?.aborted) throw new Error("The names and addresses check was cancelled");
+    const end = Math.min(text.length, start + ENTITY_SCAN_CHUNK_CHARS);
+    const last = end === text.length;
+    // This piece owns spans that start in [from, to): the overlap is split in the middle between neighbours.
+    const from = start === 0 ? 0 : start + half;
+    const to = last ? text.length : start + step + half;
+    for (const match of await findEntities(text.slice(start, end), options, findContext)) {
+      const at = match.start + start;
+      if (at >= from && at < to) out.push({ ...match, start: at, end: match.end + start });
+    }
+    if (last) break;
+  }
+  // Pieces are in order, so spans are in start order; one that crosses into the next piece's first span keeps the earlier.
+  const disjoint: typeof out = [];
+  for (const match of out) {
+    const previous = disjoint[disjoint.length - 1];
+    if (previous && match.start < previous.end) continue;
+    disjoint.push(match);
+  }
+  return disjoint;
 }
 
 /** A filter for spans in start order: false for one that overlaps a match (matches disjoint, in start order). */

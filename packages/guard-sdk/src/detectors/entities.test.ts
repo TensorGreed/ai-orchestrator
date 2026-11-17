@@ -316,13 +316,35 @@ describe("content tools with names and addresses", () => {
     expect(riskLevelOf(configured.findings)).toBe("medium");
   });
 
-  it("flags stored data.entities options that do not parse and ignores them", () => {
+  it("flags stored data.entities options that do not parse and uses the defaults for their classes", () => {
     expect(sensitiveScanSettingsOf(profileWith({ classes: ["street_address"] })).entitiesOptionsInvalid).toBeUndefined();
     const broken = sensitiveScanSettingsOf(profileWith({ classes: ["street_address"], endpoint: "http://10.0.0.1/ner" }));
     expect(broken.entitiesOptionsInvalid).toBe(true);
-    expect(broken.entities).toBeUndefined();
+    expect(broken.entities).toEqual(parseEntitiesOptions({ classes: ["street_address"] }));
+    expect(entityClassesFor(broken, {})).toEqual(["street_address"]);
     expect(entityClassesFor(broken, { entityTypes: ["person_name"] })).toEqual(["person_name"]);
+    // Classes that do not parse either: nothing from the rule set, a call can still name classes.
+    const unreadable = sensitiveScanSettingsOf(profileWith({ classes: ["nickname"], endpoint: "http://10.0.0.1/ner" }));
+    expect(unreadable.entitiesOptionsInvalid).toBe(true);
+    expect(entityClassesFor(unreadable, {})).toEqual([]);
     expect(sensitiveScanSettingsOf(null).entitiesOptionsInvalid).toBeUndefined();
+  });
+
+  it("looks for names and addresses in a long text piece by piece, with the same spans as one pass", async () => {
+    const sentence = (i: number) => `Ticket ${i}: Dear Mr. Alan Doyle, the parcel goes to 42 Dunmore Street, Springfield, IL 62704. Thanks, Maria Lopez.\n`;
+    let text = "";
+    for (let i = 0; text.length < 95_000; i += 1) text += sentence(i) + "x".repeat(i % 37);
+    const options = parseEntitiesOptions({ classes: ["person_name", "street_address"] });
+    const whole = (await findEntities(text, options, { maxChars: 200_000 })).filter((match) => match.score >= match.minScore);
+    const settings = { dictionaries: [], entities: options };
+    const { findings } = await scanSensitiveTextAsync(text, settings, {}, { maxChars: 200_000 });
+    expect(findings.length).toBeGreaterThan(1_000);
+    expect(findings.map((finding) => [finding.start, finding.end, finding.dataClass])).toEqual(whole.map((match) => [match.start, match.end, match.dataClass]));
+    // Over the limit still fails as a whole; an aborted scan stops between pieces.
+    await expect(scanSensitiveTextAsync(text, settings, {}, { maxChars: 50_000 })).rejects.toBeInstanceOf(EntityScanError);
+    const gone = new AbortController();
+    gone.abort();
+    await expect(scanSensitiveTextAsync(text, settings, {}, { maxChars: 200_000, signal: gone.signal })).rejects.toBeInstanceOf(EntityScanError);
   });
 
   it("wraps recognizer failures in EntityScanError and leaves other scans alone", async () => {

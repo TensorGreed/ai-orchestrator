@@ -214,6 +214,11 @@ export class ContentRulesToolsService {
     return loaded;
   }
 
+  /** A cancelled call stops before it keeps a redaction or records findings: its answer is never sent. */
+  private static stopIfCancelled(call: ContentToolCall): void {
+    if (call.signal?.aborted) throw new ContentToolError("The call was cancelled");
+  }
+
   private settingsOf(ruleSet: ResolvedGuardProfile | null): SensitiveScanSettings {
     return this.scanSettings.settingsOf(ruleSet ? { id: ruleSet.profileId, version: ruleSet.version, profile: ruleSet.profile } : null);
   }
@@ -389,6 +394,7 @@ export class ContentRulesToolsService {
       ...(args.allow_list ? { allowList: args.allow_list } : {}),
       ...(call.signal ? { signal: call.signal } : {})
     });
+    ContentRulesToolsService.stopIfCancelled(call);
     await this.options.guard.recordGatewayToolEvents(this.findingRows(call, scanned, ruleSet, "allow"));
     const riskLevel = highestRiskLevel(scanned.map((input) => input.riskLevel));
     const total = scanned.reduce((sum, input) => sum + input.strings.reduce((count, entry) => count + entry.findings.length, 0), 0);
@@ -455,6 +461,7 @@ export class ContentRulesToolsService {
     } else redacted = await mapStrings(args.value, async (text, path) => await rewrite(0, text, path));
 
     const findings = scanned.flatMap((input) => input.strings.flatMap((entry) => entry.findings));
+    ContentRulesToolsService.stopIfCancelled(call);
     const { redactionId, expiresAt } = await this.keepRedaction(call, scope, style, book, tokens, args.ttl_seconds);
     const action = style === "mask" ? "mask" : style === "placeholder" ? "redact" : "protect";
     await this.options.guard.recordGatewayToolEvents(this.findingRows(call, scanned, ruleSet, action));
@@ -565,6 +572,8 @@ export class ContentRulesToolsService {
             protector?.protect,
             call.signal
           );
+          // A cancelled call keeps nothing and records no findings (its answer is never sent); the audit says cancelled.
+          if (call.signal?.aborted) throw new DocumentError("cancelled", "The scan was cancelled");
           const kept = style && protector ? await this.keepRedaction(call, scope, style, protector.book, protector.tokens, args.ttl_seconds) : {};
           const result: DocumentScanResult = documentScanResult(
             extracted,

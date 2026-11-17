@@ -87,6 +87,8 @@ export function registerGuardDocumentRoutes(deps: GuardDocumentRoutesDeps): void
       if (!reply.raw.writableFinished) disconnect.abort();
     };
     reply.raw.on("close", onClose);
+    // A connection that closed while the rule set loaded has already sent its close event.
+    if (reply.raw.destroyed && !reply.raw.writableFinished) disconnect.abort();
     try {
       const { result, total } = await documents.testScan(body, ruleSet, user, disconnect.signal);
       await auditScan("success", {

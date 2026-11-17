@@ -492,4 +492,32 @@ describe("the scan_document gateway tool", () => {
     const audit = JSON.stringify((await stored(fixture.context.store)).audit);
     expect(audit).toContain("cancelled");
   });
+
+  it("keeps no redaction and records no findings for a call cancelled while the document is read", async () => {
+    let cancel!: () => Promise<unknown>;
+    const fetchImpl = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            controller.enqueue(new TextEncoder().encode("Mail ana@example.com or call 415-555-0134.\n"));
+            await cancel();
+            controller.close();
+          }
+        }),
+        { status: 200, headers: { "content-type": "text/plain" } }
+      )) as typeof fetch;
+    const resolver = async () => ["93.184.216.34"];
+    const fixture = await gateway({}, { documentScanNetwork: { resolver, fetchImpl } }, { enabled: true, allowUrls: true, allowedHosts: ["docs.example.test"] });
+    const initialize = await rpc(fixture, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "docs-test", version: "1" } } });
+    const session = initialize.headers["mcp-session-id"] as string;
+    const id = (requestId += 1);
+    cancel = async () => await rpc(fixture, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "not needed" } }, session);
+    const response = await rpc(fixture, { jsonrpc: "2.0", id, method: "tools/call", params: { name: "scan_document", arguments: { url: "https://docs.example.test/doc", redact_style: "token" } } }, session);
+    expect(response.body).not.toContain("redaction_id");
+    const { events, audit } = await stored(fixture.context.store);
+    expect(events).toEqual([]);
+    expect(audit.map((row) => row.outcome)).toEqual(["failure"]);
+    expect(JSON.stringify(audit)).toContain("cancelled");
+    expect(await testSql(fixture.context.store).all("SELECT id FROM content_redactions")).toEqual([]);
+  });
 });
