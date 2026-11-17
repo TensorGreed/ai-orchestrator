@@ -2147,7 +2147,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return rpcResult(request.id, toolError(error.message));
     }
     // The built-in content rules tools: their own rule events and audit; the toolset's rule sets do not check them.
-    // Closing the connection (modern HTTP) or notifications/cancelled stops a document fetch and the scan; nothing is sent.
+    // Closing the connection (modern HTTP) or notifications/cancelled (session-based) stops a document fetch and the scan.
+    // A cancelled session-based call answered as plain JSON gets "Request cancelled."; otherwise nothing is sent.
     if (tool.kind === "content_rules") {
       if (modern?.disconnect.aborted) return SUPPRESSED;
       const key = modern ? modern.inFlightKey : requestKey(request.id);
