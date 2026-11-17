@@ -98,8 +98,8 @@ export class GuardBenchmarkService {
         ...(request.categories ? { categories: request.categories } : {}),
         clock: () => this.now(),
         pause: yieldToEventLoop,
-        // The deployment's recognizer for names and addresses, as the rule set runs with it.
-        ...(this.guard.detectors.entityRecognizer ? { entityRecognizer: this.guard.detectors.entityRecognizer } : {})
+        // The deployment's one detector registry, so its recognizer for names and addresses is what is measured.
+        entityRegistry: this.guard.detectors.registry
       });
       // Report the stored id and version, not the document's own fields (a draft keeps its rule set's id).
       report.profile = { ...report.profile, id: profileId, version: draft ? "draft" : String(profile.version) };

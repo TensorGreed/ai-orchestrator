@@ -255,6 +255,31 @@ describe("POST /api/guard/profiles/:id/benchmark", () => {
     expect(list.every((entry) => entry.splits.length === 2)).toBe(true);
   }, 60_000);
 
+  it("measures names, places and street addresses when the rule set lists data.entities, and stores the table", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const names = {
+      id: "names",
+      name: "Names",
+      version: "1",
+      channels: { prompt: { detectors: [{ id: "data.entities", threshold: 0.5, options: { classes: ["person_name", "street_address"] } }], defaultAction: { action: "allow" } } }
+    };
+    expect((await call(context, "POST", "/api/guard/profiles", admin, { document: names })).statusCode).toBe(201);
+    const response = await call(context, "POST", "/api/guard/profiles/names/benchmark", admin, {});
+    expect(response.statusCode, response.body).toBe(200);
+    const body = response.json<GuardBenchmarkResponse>();
+    expect(body.report.entities).toMatchObject({ detectorId: "data.entities", classes: ["person_name", "street_address"] });
+    expect(body.report.entities?.corpus.splits).toEqual(["main", "heldout"]);
+    const measured = body.report.entities!.results.filter((result) => result.dataClass === "street_address" && result.split === "main");
+    expect(measured).toHaveLength(1);
+    expect(measured[0]!.overlap.recall).toBeGreaterThan(0);
+    // Stored with the report; the default rule set (no data.entities) gets no table.
+    const stored = await call(context, "GET", `/api/guard/benchmarks/${body.stored!.id}`, admin);
+    expect(stored.json<{ report: { entities?: { classes: string[] } } }>().report.entities?.classes).toEqual(["person_name", "street_address"]);
+    const builtIn = (await call(context, "POST", "/api/guard/profiles/default/benchmark", admin, { splits: ["heldout"] })).json<GuardBenchmarkResponse>();
+    expect(builtIn.report.entities).toBeUndefined();
+  }, 120_000);
+
   it("runs one benchmark at a time", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");

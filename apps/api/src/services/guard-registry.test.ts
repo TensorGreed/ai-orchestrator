@@ -13,6 +13,7 @@ import { runGuardCheck, type GuardRuntimeDependencies } from "@ai-orchestrator/w
 import type { Store } from "../db/store.js";
 import { openTestStore } from "../test-support/test-store.js";
 import { createDeploymentGuardRegistry } from "./guard-registry.js";
+import { GuardBenchmarkService } from "./guard-benchmark-service.js";
 import { GuardService, GuardValidationError } from "./guard-service.js";
 import { SecretService } from "./secret-service.js";
 
@@ -102,6 +103,25 @@ describe("deployment guard registry", () => {
     const gateway = await check(guard.gatewayRuntime({ executionId: "mcpgw_2", toolsetId: "ts", clientId: "c", projectId: null }, resolution), "Ship it to Oslo");
     expect(gateway.content).toBe("Ship it to [REDACTED:location]");
   });
+
+  it("measures the deployment's recognizer in the benchmark, on the entity corpus and in the red-team suites", async () => {
+    const seen: string[] = [];
+    const counting: GuardEntityRecognizer = {
+      ...placesRecognizer,
+      recognize: async (texts, request) => {
+        seen.push(...texts);
+        return await placesRecognizer.recognize(texts, request);
+      }
+    };
+    const { store, guard } = await setup({ recognizer: counting });
+    const benchmarks = new GuardBenchmarkService(store, guard);
+    const admin = { id: "u1", email: "admin@example.com", role: "admin" } as Parameters<GuardBenchmarkService["run"]>[2];
+    const { report } = await benchmarks.run("places", { splits: ["heldout"] }, admin);
+    expect(report.entities?.classes).toEqual(["location"]);
+    expect(seen.length).toBeGreaterThan(0);
+    // The red-team corpus's prompts reach the recognizer too, not only the entity corpus.
+    expect(seen.length).toBeGreaterThan(report.entities!.corpus.items);
+  }, 60_000);
 
   it("gives the same verdicts as the engine's default registry when no recognizer is set up", async () => {
     const { guard } = await setup();

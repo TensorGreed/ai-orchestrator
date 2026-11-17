@@ -19,7 +19,6 @@ import type { DnsResolver } from "./detectors/egress-guard";
 import type { RealpathFn } from "./detectors/path-guard";
 import { evaluateGuard } from "./evaluate";
 import { createDefaultGuardRegistry } from "./index";
-import type { GuardEntityRecognizer } from "./detectors/entities";
 import { hashGuardProfile, type GuardProfile } from "./profile";
 import type { GuardRegistry } from "./registry";
 import { GUARD_CHANNELS, stableStringify, type GuardAction, type GuardChannel, type GuardInput, type GuardToolContext, type GuardVerdict } from "./types";
@@ -158,8 +157,8 @@ export function benchmarkResolver(corpus: GuardCorpus): DnsResolver {
 export const benchmarkRealpath: RealpathFn = async (path) => path;
 
 /** The built-in detectors with the benchmark's deterministic DNS and paths. */
-export function createBenchmarkGuardRegistry(corpus: GuardCorpus = loadGuardCorpus(), options: { entityRecognizer?: GuardEntityRecognizer } = {}): GuardRegistry {
-  return createDefaultGuardRegistry({ resolver: benchmarkResolver(corpus), realpath: benchmarkRealpath, ...(options.entityRecognizer ? { entityRecognizer: options.entityRecognizer } : {}) });
+export function createBenchmarkGuardRegistry(corpus: GuardCorpus = loadGuardCorpus()): GuardRegistry {
+  return createDefaultGuardRegistry({ resolver: benchmarkResolver(corpus), realpath: benchmarkRealpath });
 }
 
 export interface RunGuardBenchmarkOptions {

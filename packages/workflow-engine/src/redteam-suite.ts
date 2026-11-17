@@ -10,10 +10,10 @@ import {
   type GuardCorpusFile,
   type GuardCorpusItem,
   type GuardProfile,
+  ENTITIES_DETECTOR_ID,
   entityDetectorEntry,
   runEntityBenchmark,
   type EntityCorpus,
-  type GuardEntityRecognizer,
   type GuardRegistry
 } from "@ai-orchestrator/guard-sdk";
 import { MCPRegistry, SnapshotMockMCPServerAdapter, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
@@ -285,8 +285,19 @@ export interface RunReferenceWorkflowSuiteOptions {
   signal?: AbortSignal;
   /** Awaited between scenarios, so a host can yield to its event loop. */
   pause?: () => Promise<void>;
-  /** The deployment's recognizer for names and addresses (`data.entities`); the built-in rules when absent. */
-  entityRecognizer?: GuardEntityRecognizer;
+  /** The host's detector registry: its `data.entities` check stands in for the built-in one. Default: the built-in detectors. */
+  entityRegistry?: GuardRegistry;
+}
+
+/**
+ * The benchmark registry (deterministic DNS and paths), with the host's `data.entities` check when one is given, so a
+ * deployment's recognizer for names and addresses is what the rule set is measured with.
+ */
+function benchmarkRegistryFor(corpus: GuardCorpus, entityRegistry: GuardRegistry | undefined): GuardRegistry {
+  const registry = createBenchmarkGuardRegistry(corpus);
+  const entities = entityRegistry?.get(ENTITIES_DETECTOR_ID);
+  if (entities) registry.replace(entities);
+  return registry;
 }
 
 const ratio = (part: number, whole: number, empty: number) => (whole > 0 ? part / whole : empty);
@@ -294,7 +305,7 @@ const ratio = (part: number, whole: number, empty: number) => (whole > 0 ? part 
 /** Run every tool-result item of the corpus through the reference workflow, per configuration and split. */
 export async function runReferenceWorkflowSuite(options: RunReferenceWorkflowSuiteOptions): Promise<GuardWorkflowSuiteReport> {
   const corpus = options.corpus ?? loadGuardCorpus();
-  const registry = createBenchmarkGuardRegistry(corpus, options.entityRecognizer ? { entityRecognizer: options.entityRecognizer } : {});
+  const registry = benchmarkRegistryFor(corpus, options.entityRegistry);
   const splits = options.splits ?? GUARD_BENCHMARK_SPLITS;
   const files: GuardCorpusFile[] = corpus.files.filter((file) => file.channel === "tool_result" && splits.includes(file.split));
   const profile: ResolvedGuardProfile = {
@@ -373,13 +384,14 @@ export interface RunGuardBenchmarkSuitesOptions {
   corpus?: GuardCorpus;
   /** The entity corpus, measured when the rule set lists the `data.entities` check. Default: the shipped one. */
   entityCorpus?: EntityCorpus;
-  /** The registry the `data.entities` check runs from (the host's, so its recognizer is measured). Default: the built-in detectors. */
+  /**
+   * The host's detector registry. Its `data.entities` check is measured on the entity corpus and stands in for the
+   * built-in one in the red-team suites, so the deployment's recognizer is what is measured. Default: the built-in detectors.
+   */
   entityRegistry?: GuardRegistry;
   clock?: () => Date;
   signal?: AbortSignal;
   pause?: () => Promise<void>;
-  /** The deployment's recognizer for names and addresses (`data.entities`); the built-in rules when absent. */
-  entityRecognizer?: GuardEntityRecognizer;
 }
 
 /** One report for the requested suites: the rule set suite's rates, and the workflow suite's when asked. */
@@ -394,7 +406,7 @@ export async function runGuardBenchmarkSuites(options: RunGuardBenchmarkSuitesOp
     ...(options.clock ? { clock: options.clock } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.pause ? { pause: options.pause } : {}),
-    ...(options.entityRecognizer ? { registry: createBenchmarkGuardRegistry(corpus, { entityRecognizer: options.entityRecognizer }) } : {})
+    ...(options.entityRegistry ? { registry: benchmarkRegistryFor(corpus, options.entityRegistry) } : {})
   });
   // Names, places and street addresses: measured on their own corpus when the rule set lists the check (not on a category filter).
   if (suites.includes("profile") && !options.categories?.length && entityDetectorEntry(options.profile)) {
@@ -417,7 +429,7 @@ export async function runGuardBenchmarkSuites(options: RunGuardBenchmarkSuitesOp
     ...(options.splits ? { splits: options.splits } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.pause ? { pause: options.pause } : {}),
-    ...(options.entityRecognizer ? { entityRecognizer: options.entityRecognizer } : {})
+    ...(options.entityRegistry ? { entityRegistry: options.entityRegistry } : {})
   });
   return { ...report, workflow };
 }
