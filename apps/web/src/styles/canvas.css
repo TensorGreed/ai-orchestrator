@@ -2984,3 +2984,73 @@ button.wf-mcp-chip:focus-visible {
 .run-tape-now {
   font-style: italic;
 }
+
+/* ---- run data on canvas cards ------------------------------------------ */
+.wf-node-debug-preview > .wf-node-run-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg);
+}
+
+.wf-node-run-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--fg-faint);
+}
+
+.wf-node-run-meta-success .wf-node-run-dot { background: var(--ok); }
+.wf-node-run-meta-error .wf-node-run-dot { background: var(--err); }
+.wf-node-run-meta-running .wf-node-run-dot { background: var(--running); }
+.wf-node-run-meta-skipped .wf-node-run-dot,
+.wf-node-run-meta-canceled .wf-node-run-dot { background: var(--skipped); }
+
+.wf-node-run-pinned {
+  color: var(--warn);
+}
+
+.wf-node-debug-preview > .wf-node-debug-out {
+  color: var(--fg);
+}
+
+.wf-node-run-used-by,
+.wf-satellite-used-by {
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.wf-satellite-used-by {
+  display: block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+}
+
+/* Run picker in the canvas toolbar. */
+.run-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.run-picker-select {
+  max-width: 260px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--bg-input);
+  color: var(--fg);
+  font: 500 var(--fs-xs) / 1.2 var(--font-body);
+}
+.run-picker-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

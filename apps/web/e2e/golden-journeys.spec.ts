@@ -98,6 +98,18 @@ test.describe("golden journeys", () => {
       )
       .toBeGreaterThan(0);
 
+    // The run's data is on the canvas without opening anything, and opening the node shows that run's output.
+    const runPreview = userPromptNode.getByTestId("node-run-preview");
+    await expect(runPreview).toContainText("success", { timeout: 60_000 });
+    await expect(runPreview).toContainText(/item/);
+    await userPromptNode.dblclick();
+    await expect(inspector).toBeVisible();
+    const outputPane = inspector.getByTestId("run-data-status");
+    await expect(outputPane).toContainText("success");
+    await expect(inspector.getByRole("navigation", { name: "Run steps" })).toContainText(/Step \d+ of \d+/);
+    await page.keyboard.press("Escape");
+    await expect(inspector).toBeHidden();
+
     // Inspect history in the Runs workspace.
     await sidebarItem(page, "Runs").click();
     await expect(page.getByRole("heading", { name: "Runs" })).toBeVisible();

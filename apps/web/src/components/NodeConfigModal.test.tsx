@@ -518,3 +518,96 @@ describe("NodeInspector", () => {
     expect(await screen.findByRole("option", { name: "Claude Haiku 4.5" })).toBeInTheDocument();
   });
 });
+
+describe("NodeInspector run data", () => {
+  const T0 = "2026-01-01T00:00:00.000Z";
+  const runResult = {
+    workflowId: "wf-1",
+    executionId: "exec-1",
+    status: "success" as const,
+    startedAt: T0,
+    completedAt: T0,
+    nodeResults: [
+      { nodeId: "start", status: "success" as const, startedAt: T0, durationMs: 1, input: { user_prompt: "chat prompt", parent_outputs: {} }, output: { text: "hello" } },
+      {
+        nodeId: "node-1",
+        status: "success" as const,
+        startedAt: "2026-01-01T00:00:01.000Z",
+        durationMs: 7,
+        input: { user_prompt: "chat prompt", start: { text: "hello" }, text: "hello", parent_outputs: { start: { text: "hello" } } },
+        output: { result: "HELLO" }
+      },
+      { nodeId: "end", status: "success" as const, startedAt: "2026-01-01T00:00:02.000Z", durationMs: 2, output: { done: true } }
+    ]
+  };
+  const nodeLabels = new Map([
+    ["start", "Start"],
+    ["node-1", "User Prompt"],
+    ["end", "Finish"]
+  ]);
+
+  beforeEach(() => {
+    try {
+      window.localStorage.clear();
+    } catch {
+      // jsdom storage may be unavailable in some environments
+    }
+  });
+
+  it("opens on the run's output and shows the input the node received, not the chat prompt", async () => {
+    const user = userEvent.setup();
+    render(<NodeInspector {...makeProps({ executionResult: runResult, showRuntimeInspection: true, nodeLabels, onNavigateNode: vi.fn() })} />);
+    expect(screen.getByRole("tab", { name: "Output" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("run-data-status")).toHaveTextContent("success · 1 item · 7 ms");
+    expect(screen.getByText("HELLO")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Input" }));
+    expect(screen.getByRole("region", { name: "From Start" })).toHaveTextContent("hello");
+    expect(screen.getByText("chat prompt")).not.toBeVisible();
+  });
+
+  it("opens on Parameters when the node has no run data, and says so on Output", async () => {
+    const user = userEvent.setup();
+    render(<NodeInspector {...makeProps({ showRuntimeInspection: true })} />);
+    expect(screen.getByRole("tab", { name: "Parameters" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Output" }));
+    expect(screen.getByText(/No run yet for this node/)).toBeInTheDocument();
+  });
+
+  it("labels pinned data as not from a run", async () => {
+    const user = userEvent.setup();
+    render(<NodeInspector {...makeProps({ showRuntimeInspection: true, pinnedData: { "node-1": { pinned: "value" } } })} />);
+    await user.click(screen.getByRole("tab", { name: "Output" }));
+    expect(screen.getByTestId("run-data-pinned")).toHaveTextContent("Pinned data, not from a run");
+    expect(screen.getByRole("button", { name: "Unpin output" })).toBeInTheDocument();
+  });
+
+  it("steps to the previous and next node of the run without closing", async () => {
+    const user = userEvent.setup();
+    const onNavigateNode = vi.fn();
+    const onClose = vi.fn();
+    render(<NodeInspector {...makeProps({ executionResult: runResult, showRuntimeInspection: true, nodeLabels, onNavigateNode, onClose })} />);
+    expect(screen.getByRole("navigation", { name: "Run steps" })).toHaveTextContent("Step 2 of 3");
+    await user.click(screen.getByRole("button", { name: "Next step: Finish" }));
+    expect(onNavigateNode).toHaveBeenCalledWith("end");
+    await user.click(screen.getByRole("button", { name: "Previous step: Start" }));
+    expect(onNavigateNode).toHaveBeenCalledWith("start");
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("shows Input, Parameters and Output side by side and remembers the choice", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<NodeInspector {...makeProps({ executionResult: runResult, showRuntimeInspection: true, nodeLabels })} />);
+    const toggle = screen.getByRole("button", { name: "Show Input, Parameters and Output side by side" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("dialog", { name: "Inspect User Prompt" })).toHaveClass("insp-split");
+    expect(screen.getByRole("region", { name: "Input" })).toHaveTextContent("From Start");
+    expect(screen.getByRole("region", { name: "Output" })).toHaveTextContent("HELLO");
+    expect(screen.getByLabelText("Text")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Input" })).toBeNull();
+    unmount();
+    render(<NodeInspector {...makeProps({ executionResult: runResult, showRuntimeInspection: true, nodeLabels })} />);
+    expect(screen.getByRole("dialog", { name: "Inspect User Prompt" })).toHaveClass("insp-split");
+  });
+});

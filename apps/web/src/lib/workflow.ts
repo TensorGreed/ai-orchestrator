@@ -36,7 +36,15 @@ export interface EditorNodeData {
   config: Record<string, unknown>;
   executionStatus?: "pending" | "running" | "success" | "error" | "skipped" | "canceled";
   executionPreview?: {
+    /** Run status, item count and duration on one line ("success · 1 item · 28 ms"). */
+    meta?: string;
+    /** The run's prompt, on a first node that takes it as its input. */
     input?: string;
+    /** Attachment-port nodes: which agent used the node, instead of DAG results. */
+    usedBy?: string;
+    /** The run reused this node's pinned data instead of running it. */
+    pinned?: boolean;
+    /** Compact preview of the output values. */
     output?: string;
     /** Tail of the model text streamed so far, while the node runs. */
     live?: string;

@@ -119,9 +119,18 @@ function RunningPill({ data }: { data: EditorNodeData }) {
 
 function DebugPreview({ data }: { data: EditorNodeData }) {
   const preview = data.executionPreview;
-  if (!preview || !(preview.input || preview.output || preview.error || preview.live || preview.now)) return null;
+  if (!preview || !(preview.meta || preview.usedBy || preview.input || preview.output || preview.error || preview.live || preview.now)) return null;
+  const status = data.executionStatus;
   return (
-    <div className="wf-node-debug-preview">
+    <div className="wf-node-debug-preview" data-testid="node-run-preview">
+      {preview.meta && (
+        <div className={`wf-node-run-meta wf-node-run-meta-${status ?? "idle"}`}>
+          <span className="wf-node-run-dot" aria-hidden="true" />
+          {preview.meta}
+          {preview.pinned && <span className="wf-node-run-pinned"> · pinned data</span>}
+        </div>
+      )}
+      {preview.usedBy && <div className="wf-node-run-used-by">{preview.usedBy}</div>}
       {preview.input && (
         <div>
           <strong>In</strong> {preview.input}
@@ -138,7 +147,7 @@ function DebugPreview({ data }: { data: EditorNodeData }) {
         </div>
       )}
       {preview.output && (
-        <div>
+        <div className="wf-node-debug-out">
           <strong>Out</strong> {preview.output}
         </div>
       )}
@@ -470,6 +479,11 @@ function SatelliteNode({ data, selected }: VariantProps) {
         <span className="wf-satellite-summary" title={summary}>
           {summary}
         </span>
+        {data.executionPreview?.usedBy && (
+          <span className="wf-satellite-used-by" data-testid="node-used-by" title={data.executionPreview.usedBy}>
+            {data.executionPreview.usedBy}
+          </span>
+        )}
       </div>
       <Telemetry data={data} />
     </div>

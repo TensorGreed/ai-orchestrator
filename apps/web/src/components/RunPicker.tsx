@@ -1,0 +1,80 @@
+import { useEffect, useId, useState } from "react";
+import { fetchExecutions, inBackground, type ExecutionHistorySummary } from "../lib/api";
+
+/** Runs listed in the picker. */
+export const RUN_PICKER_LIMIT = 10;
+
+export function describeRun(run: { startedAt: string; status: string; triggerType?: string | null }, now = new Date()): string {
+  const started = new Date(run.startedAt);
+  const valid = Number.isFinite(started.getTime());
+  const sameDay = valid && started.toDateString() === now.toDateString();
+  const when = !valid ? "unknown time" : sameDay ? started.toLocaleTimeString() : started.toLocaleString();
+  return [when, run.status, run.triggerType ?? undefined].filter(Boolean).join(" · ");
+}
+
+interface RunPickerProps {
+  workflowId: string;
+  /** False for a workflow that is not saved yet: it has no run history. */
+  enabled: boolean;
+  /** The run shown on the canvas now. */
+  current: { executionId?: string; startedAt: string; status: string } | null;
+  busy?: boolean;
+  onPick: (executionId: string) => void;
+}
+
+/** Which run's data the canvas and inspector show: the current one or one of the workflow's recent runs. */
+export function RunPicker({ workflowId, enabled, current, busy, onPick }: RunPickerProps) {
+  const [runs, setRuns] = useState<ExecutionHistorySummary[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const id = useId();
+  const currentId = current?.executionId;
+  const currentStatus = current?.status;
+
+  useEffect(() => {
+    if (!enabled) {
+      setRuns([]);
+      return;
+    }
+    let cancelled = false;
+    inBackground(() => fetchExecutions({ page: 1, pageSize: RUN_PICKER_LIMIT, workflowId }))
+      .then((response) => {
+        if (cancelled) return;
+        setRuns(response.items);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Could not list runs");
+      });
+    return () => {
+      cancelled = true;
+    };
+    // A finished or newly loaded run refreshes the list.
+  }, [enabled, workflowId, currentId, currentStatus]);
+
+  if (!enabled || (runs.length === 0 && !current)) return null;
+  const listed = Boolean(currentId && runs.some((run) => run.id === currentId));
+  const value = currentId ?? "__current__";
+  return (
+    <label className="run-picker" htmlFor={id} title={error ?? "Which run's data the canvas and the node inspector show"}>
+      <span className="run-picker-label">Run data</span>
+      <select
+        id={id}
+        className="run-picker-select"
+        value={value}
+        disabled={busy}
+        onChange={(event) => {
+          if (event.target.value !== "__current__" && event.target.value !== currentId) onPick(event.target.value);
+        }}
+      >
+        {current && !listed ? <option value={value}>This run · {describeRun(current)}</option> : null}
+        {!current ? <option value="__current__">No run loaded</option> : null}
+        {runs.map((run, index) => (
+          <option key={run.id} value={run.id}>
+            {index === 0 ? "Latest · " : ""}
+            {describeRun(run)}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}

@@ -27,6 +27,8 @@ import { isNumberOrTemplateSchema, numberOrTemplateText, parseNumberOrTemplate }
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
+import { NodeRunInput, NodeRunOutput, RunDataView, RunStepBar, type RunNodeResult } from "./NodeRunData";
+import { hasTestData, runStepOrder } from "../lib/run-data";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields, GuardRevealFields } from "./GuardNodeConfigFields";
@@ -124,6 +126,10 @@ export interface NodeInspectorProps {
   onAttach?: (handle: InspectorAttachmentHandle) => void;
   inputOptions: NodeInputOption[];
   executionResult: WorkflowExecutionResult | null;
+  /** Labels of the workflow's nodes by id, to name upstream nodes and the agent an attachment served. */
+  nodeLabels?: ReadonlyMap<string, string>;
+  /** Opens another node in the inspector (previous/next step of the run), through the host's unsaved-edits guard. */
+  onNavigateNode?: (nodeId: string) => void;
   workflowContext?: {
     id?: string;
     name?: string;
@@ -153,6 +159,32 @@ export interface NodeInspectorProps {
 type NodeConfigModalProps = NodeInspectorProps;
 
 type InspectorTab = "parameters" | "input" | "output" | "trace";
+type InspectorLayout = "split" | "tabs";
+
+const INSPECTOR_LAYOUT_STORAGE_KEY = "l2m:inspector-layout";
+/** Narrowest window that gets the side-by-side Input | Parameters | Output layout by default. */
+const SPLIT_LAYOUT_MIN_WINDOW = 1100;
+
+function readStoredInspectorLayout(): InspectorLayout | null {
+  try {
+    const stored = window.localStorage.getItem(INSPECTOR_LAYOUT_STORAGE_KEY);
+    return stored === "split" || stored === "tabs" ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeInspectorLayout(layout: InspectorLayout): void {
+  try {
+    window.localStorage.setItem(INSPECTOR_LAYOUT_STORAGE_KEY, layout);
+  } catch {
+    // Storage can be unavailable (private mode); the choice then lasts for this node only.
+  }
+}
+
+function isWideWindow(): boolean {
+  return typeof window !== "undefined" && window.innerWidth >= SPLIT_LAYOUT_MIN_WINDOW;
+}
 
 const INSPECTOR_WIDTH_STORAGE_KEY = "l2m:inspector-w";
 const INSPECTOR_MIN_WIDTH = 320;
@@ -283,7 +315,6 @@ export function buildNodeTrace(
   return Object.keys(trace).length > 0 ? trace : undefined;
 }
 
-const NODE_INPUT_OPTION_ID = "__node_input__";
 const ADD_NEW_CREDENTIAL_VALUE = "__add_new_credential__";
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -702,301 +733,6 @@ function TextAreaField({
   );
 }
 
-interface KeyValueRow {
-  key: string;
-  value: string;
-  depth: number;
-  importantScore: number;
-}
-
-const PREVIEW_TABLE_MAX_ROWS = 250;
-const PREVIEW_TABLE_MAX_DEPTH = 5;
-const PREVIEW_IMPORTANT_MAX_ROWS = 18;
-const PREVIEW_IMPORTANT_FALLBACK_ROWS = 12;
-
-const IMPORTANT_PRIMARY_TOKENS = new Set([
-  "prompt",
-  "user_prompt",
-  "system_prompt",
-  "question",
-  "query",
-  "input",
-  "response",
-  "answer",
-  "output",
-  "result",
-  "content",
-  "message",
-  "status",
-  "error"
-]);
-
-const IMPORTANT_SECONDARY_TOKENS = new Set([
-  "model",
-  "provider",
-  "tool",
-  "tool_name",
-  "latency",
-  "duration",
-  "time_ms",
-  "tokens",
-  "total_tokens",
-  "input_tokens",
-  "output_tokens",
-  "finish_reason"
-]);
-
-function serializePreviewValue(value: unknown): string {
-  if (value === null) {
-    return "null";
-  }
-  if (value === undefined) {
-    return "undefined";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-    return String(value);
-  }
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-
-  try {
-    const serialized = JSON.stringify(value);
-    return typeof serialized === "string" ? serialized : String(value);
-  } catch {
-    return "[unserializable value]";
-  }
-}
-
-function scoreImportantKey(rowKey: string, rawValue: unknown, depth: number): number {
-  const key = rowKey.toLowerCase();
-  if (!key || key === "...") {
-    return -100;
-  }
-  if (key.includes("parent_outputs")) {
-    return -80;
-  }
-
-  const tokens = key.split(/[\.\[\]_\-\s]+/).filter(Boolean);
-  let score = 0;
-
-  for (const token of tokens) {
-    if (IMPORTANT_PRIMARY_TOKENS.has(token)) {
-      score += 55;
-    } else if (IMPORTANT_SECONDARY_TOKENS.has(token)) {
-      score += 30;
-    }
-  }
-
-  if (key.endsWith(".error") || key === "error") {
-    score += 40;
-  }
-  if (key.endsWith(".status") || key === "status") {
-    score += 20;
-  }
-
-  if (depth <= 1) {
-    score += 15;
-  }
-
-  const isPrimitive =
-    rawValue === null ||
-    rawValue === undefined ||
-    typeof rawValue === "string" ||
-    typeof rawValue === "number" ||
-    typeof rawValue === "boolean" ||
-    typeof rawValue === "bigint";
-
-  if (isPrimitive) {
-    score += 10;
-  }
-
-  return score;
-}
-
-function toKeyValueRows(value: unknown): KeyValueRow[] {
-  const rows: KeyValueRow[] = [];
-  let truncated = false;
-
-  const appendRow = (key: string, rawValue: unknown, depth: number) => {
-    if (rows.length >= PREVIEW_TABLE_MAX_ROWS) {
-      truncated = true;
-      return;
-    }
-    rows.push({
-      key: key || "value",
-      value: serializePreviewValue(rawValue),
-      depth,
-      importantScore: scoreImportantKey(key || "value", rawValue, depth)
-    });
-  };
-
-  const visit = (entry: unknown, path: string, depth: number) => {
-    if (rows.length >= PREVIEW_TABLE_MAX_ROWS) {
-      truncated = true;
-      return;
-    }
-    if (entry === null || typeof entry !== "object") {
-      appendRow(path, entry, depth);
-      return;
-    }
-    if (depth >= PREVIEW_TABLE_MAX_DEPTH) {
-      appendRow(path, entry, depth);
-      return;
-    }
-
-    if (Array.isArray(entry)) {
-      if (entry.length === 0) {
-        appendRow(path, [], depth);
-        return;
-      }
-      entry.forEach((item, index) => {
-        visit(item, `${path}[${index}]`, depth + 1);
-      });
-      return;
-    }
-
-    const entries = Object.entries(entry as Record<string, unknown>);
-    if (entries.length === 0) {
-      appendRow(path, {}, depth);
-      return;
-    }
-    for (const [key, child] of entries) {
-      visit(child, path ? `${path}.${key}` : key, depth + 1);
-      if (rows.length >= PREVIEW_TABLE_MAX_ROWS) {
-        truncated = true;
-        return;
-      }
-    }
-  };
-
-  visit(value, "", 0);
-
-  if (!rows.length) {
-    appendRow("value", value, 0);
-  }
-  if (truncated) {
-    rows.push({
-      key: "...",
-      value: `Preview truncated at ${PREVIEW_TABLE_MAX_ROWS} rows`,
-      depth: 0,
-      importantScore: -100
-    });
-  }
-
-  return rows;
-}
-
-function toImportantRows(rows: KeyValueRow[]): KeyValueRow[] {
-  const truncationRow = rows.find((row) => row.key === "...");
-  const dataRows = rows.filter((row) => row.key !== "...");
-  const importantRows = dataRows
-    .filter((row) => row.importantScore >= 55)
-    .slice(0, PREVIEW_IMPORTANT_MAX_ROWS);
-
-  const baseRows = importantRows.length ? importantRows : dataRows.slice(0, PREVIEW_IMPORTANT_FALLBACK_ROWS);
-  if (!truncationRow) {
-    return baseRows;
-  }
-  return [...baseRows, truncationRow];
-}
-
-function describeSchema(value: unknown, depth = 0): unknown {
-  if (value === null) return "null";
-  if (Array.isArray(value)) {
-    if (value.length === 0) return "array<empty>";
-    return [describeSchema(value[0], depth + 1)];
-  }
-  if (typeof value !== "object" || value === undefined) {
-    return typeof value;
-  }
-  if (depth >= PREVIEW_TABLE_MAX_DEPTH) {
-    return "object";
-  }
-  const schema: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    schema[key] = describeSchema(child, depth + 1);
-  }
-  return schema;
-}
-
-function KeyValueTable({ label, value }: { label: string; value: unknown }) {
-  const rows = useMemo(() => toKeyValueRows(value), [value]);
-  const importantRows = useMemo(() => toImportantRows(rows), [rows]);
-  const schemaValue = useMemo(() => describeSchema(value), [value]);
-  const [viewMode, setViewMode] = useState<"important" | "table" | "schema" | "json">("important");
-
-  useEffect(() => {
-    setViewMode("important");
-  }, [value, label]);
-
-  const visibleRows = viewMode === "important" ? importantRows : rows;
-  const fullDataRowCount = rows.filter((row) => row.key !== "...").length;
-  const visibleDataRowCount = visibleRows.filter((row) => row.key !== "...").length;
-
-  return (
-    <div className="cfg-field node-kv-field">
-      <span>{label}</span>
-      <div className="node-kv-toolbar">
-        <div className="node-kv-count">
-          {viewMode === "important"
-            ? `Showing ${visibleDataRowCount} important fields`
-            : viewMode === "table"
-              ? `Showing all ${fullDataRowCount} fields`
-              : viewMode === "schema"
-                ? "Showing inferred structure"
-                : "Showing raw JSON"}
-        </div>
-        <div className="node-kv-view-switch" role="tablist" aria-label={`${label} preview mode`}>
-          <button
-            type="button"
-            className={viewMode === "important" ? "active" : ""}
-            onClick={() => setViewMode("important")}
-          >
-            Summary
-          </button>
-          <button type="button" className={viewMode === "table" ? "active" : ""} onClick={() => setViewMode("table")}>
-            Table
-          </button>
-          <button type="button" className={viewMode === "schema" ? "active" : ""} onClick={() => setViewMode("schema")}>
-            Schema
-          </button>
-          <button type="button" className={viewMode === "json" ? "active" : ""} onClick={() => setViewMode("json")}>
-            JSON
-          </button>
-        </div>
-      </div>
-      {viewMode === "schema" || viewMode === "json" ? (
-        <pre className="result-block">
-          {JSON.stringify(viewMode === "schema" ? schemaValue : value, null, 2)}
-        </pre>
-      ) : (
-        <div className="node-kv-table-wrap">
-          <table className="node-kv-table">
-            <thead>
-              <tr>
-                <th>Key</th>
-                <th>Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleRows.map((row, index) => (
-                <tr key={`${row.key}-${index}`}>
-                  <td className="node-kv-key">{row.key}</td>
-                  <td className="node-kv-value">{row.value}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
 interface ExpressionPreviewContext {
   input?: unknown;
   vars?: Record<string, unknown>;
@@ -1191,8 +927,9 @@ export function NodeInspector({
   trace,
   slots,
   onAttach,
-  inputOptions,
   executionResult,
+  nodeLabels,
+  onNavigateNode,
   workflowContext,
   pinnedData,
   showRuntimeInspection = true,
@@ -1212,6 +949,7 @@ export function NodeInspector({
   const [nodeDisabled, setNodeDisabled] = useState<boolean>(Boolean(node.data.disabled));
   const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
   const [activeTab, setActiveTab] = useState<InspectorTab>("parameters");
+  const [layout, setLayout] = useState<InspectorLayout>("tabs");
   const [inspectorWidth, setInspectorWidth] = useState<number | null>(() =>
     typeof window === "undefined" ? null : readStoredInspectorWidth()
   );
@@ -1295,7 +1033,6 @@ export function NodeInspector({
       document.body.style.userSelect = previousSelect;
     };
   }, [resizing]);
-  const [selectedInputId, setSelectedInputId] = useState(NODE_INPUT_OPTION_ID);
   const [discoveredTools, setDiscoveredTools] = useState<MCPToolDefinition[]>([]);
   const [toolAccessByName, setToolAccessByName] = useState<Record<string, McpToolAccess>>({});
   const [discoverBusy, setDiscoverBusy] = useState(false);
@@ -1512,8 +1249,6 @@ export function NodeInspector({
     setLabel(node.data.label);
     setNodeDisabled(Boolean(node.data.disabled));
     setNodeColor(node.data.color);
-    setActiveTab("parameters");
-    setSelectedInputId(NODE_INPUT_OPTION_ID);
     setDiscoveredTools([]);
     setDiscoverBusy(false);
     setDiscoverError(null);
@@ -1678,35 +1413,22 @@ export function NodeInspector({
   const currentNodePinned = hasOwnRecordKey(asRecord(pinnedData), node.id);
   const currentPinnedOutput = currentNodePinned ? asRecord(pinnedData)[node.id] : undefined;
 
-  const resolvedInputPreview = useMemo(() => {
-    if (selectedInputId === NODE_INPUT_OPTION_ID) {
-      return currentNodeResult?.input;
-    }
-    if (!selectedInputId || selectedInputId === "none") {
-      return undefined;
-    }
-    return nodeResultById.get(selectedInputId)?.output;
-  }, [currentNodeResult, nodeResultById, selectedInputId]);
+  const labelFor = useCallback((nodeId: string) => nodeLabels?.get(nodeId) ?? nodeId, [nodeLabels]);
+  const currentRunResult = useMemo(
+    () => executionResult?.nodeResults.find((entry) => entry.nodeId === node.id) as RunNodeResult | undefined,
+    [executionResult, node.id]
+  );
+  const runSteps = useMemo(() => runStepOrder(executionResult), [executionResult]);
+  const hasRunData = Boolean(showRuntimeInspection && currentNodeResult);
+  const hasRunDataRef = useRef(hasRunData);
+  hasRunDataRef.current = hasRunData;
 
-  const resolvedOutputPreview = useMemo(() => {
-    if (!currentNodeResult) {
-      return undefined;
-    }
-    if (currentNodeResult.error) {
-      return {
-        error: currentNodeResult.error,
-        output: currentNodeResult.output ?? null
-      };
-    }
-    return currentNodeResult.output;
-  }, [currentNodeResult]);
-
+  // Opening a node that has data from the run shows that data first; the layout follows the stored choice, else
+  // side by side on a wide window when there is run data.
   useEffect(() => {
-    const validInputIds = new Set([NODE_INPUT_OPTION_ID, ...inputOptions.map((option) => option.id)]);
-    if (!validInputIds.has(selectedInputId)) {
-      setSelectedInputId(NODE_INPUT_OPTION_ID);
-    }
-  }, [inputOptions, selectedInputId]);
+    setActiveTab(hasRunDataRef.current ? "output" : "parameters");
+    setLayout(readStoredInspectorLayout() ?? (hasRunDataRef.current && isWideWindow() ? "split" : "tabs"));
+  }, [node.id]);
 
   const setProvider = (patch: Record<string, unknown>) => {
     setConfig((current) => ({
@@ -9225,14 +8947,12 @@ export function NodeInspector({
   }, [config.inputMapping]);
 
   const availableUpstreamKeys = useMemo(() => {
-    if (resolvedInputPreview === undefined || resolvedInputPreview === null) {
-      return [];
-    }
-    if (typeof resolvedInputPreview === "object" && !Array.isArray(resolvedInputPreview)) {
-      return Object.keys(resolvedInputPreview as Record<string, unknown>).filter((key) => key !== "parent_outputs");
+    const input = currentNodeResult?.input;
+    if (input && typeof input === "object" && !Array.isArray(input)) {
+      return Object.keys(input as Record<string, unknown>).filter((key) => key !== "parent_outputs");
     }
     return [];
-  }, [resolvedInputPreview]);
+  }, [currentNodeResult?.input]);
 
   const handleAddInputMapping = useCallback(() => {
     setConfig((current) => {
@@ -9495,41 +9215,33 @@ export function NodeInspector({
     );
   };
 
-  const renderInputTab = () => {
+  const isTriggerNode = /_trigger$/.test(node.data.nodeType) || node.data.nodeType === "webhook_input";
+
+  const renderRunInput = (options?: { compact?: boolean }) => {
     if (!showRuntimeInspection) {
-      return <div className="insp-empty">Switch to debug mode and run the workflow to inspect this node's input.</div>;
+      return <div className="insp-empty">Turn on Debug in the canvas toolbar and run the workflow to see this node's input.</div>;
     }
-    const resolvedThisRun = latestResolvedFields(currentNodeResult?.activity);
+    const resolvedThisRun = options?.compact ? undefined : latestResolvedFields(currentNodeResult?.activity);
     return (
-      <>
-        {resolvedThisRun && (
-          <div className="insp-resolved">
-            <strong className="insp-resolved-title">Resolved this run</strong>
-            <ResolvedFieldsTable fields={resolvedThisRun} />
-          </div>
-        )}
-        <SelectField
-          label="Input Source"
-          value={selectedInputId}
-          onChange={setSelectedInputId}
-          options={[
-            { value: NODE_INPUT_OPTION_ID, label: "This node input (last run)" },
-            ...inputOptions.map((option) => ({ value: option.id, label: option.label }))
-          ]}
-        />
-        {resolvedInputPreview === undefined ? (
-          <div className="insp-empty">No input data yet. Execute the workflow to inspect payload.</div>
-        ) : (
-          <KeyValueTable
-            label={selectedInputId === NODE_INPUT_OPTION_ID ? "Resolved Input" : "Selected Source Output"}
-            value={resolvedInputPreview}
-          />
-        )}
-      </>
+      <NodeRunInput
+        result={currentRunResult}
+        labelFor={labelFor}
+        isTrigger={isTriggerNode}
+        hasOwnTestData={hasTestData(node.data.config)}
+        onOpenNode={onNavigateNode}
+        before={
+          resolvedThisRun ? (
+            <div className="insp-resolved">
+              <strong className="insp-resolved-title">Resolved this run</strong>
+              <ResolvedFieldsTable fields={resolvedThisRun} />
+            </div>
+          ) : undefined
+        }
+      />
     );
   };
 
-  const renderOutputTab = () => {
+  const renderOutputTab = (options?: { inputBeside?: boolean }) => {
     const pinControls = (
       <div className="insp-row-actions">
         {currentNodePinned ? (
@@ -9553,55 +9265,40 @@ export function NodeInspector({
     if (!showRuntimeInspection) {
       return (
         <>
-          <div className="insp-empty">Switch to debug mode and run the workflow to inspect this node's output.</div>
+          <div className="insp-empty">Turn on Debug in the canvas toolbar and run the workflow to see this node's output.</div>
           {pinControls}
         </>
       );
     }
     return (
       <>
+        <NodeRunOutput
+          result={currentRunResult}
+          labelFor={labelFor}
+          onOpenNode={onNavigateNode}
+          pinnedOutput={currentNodePinned ? { value: currentPinnedOutput } : undefined}
+          notFromRun={
+            node.data.nodeType === "code_node" && codeTestResult
+              ? {
+                  label: "Code test result, not from a workflow run.",
+                  content: (
+                    <>
+                      <RunDataView value={codeTestResult.result} label="Code test result" />
+                      <TextAreaField
+                        label="Console Logs"
+                        value={codeTestResult.logs.length ? codeTestResult.logs.join("\n") : "No logs"}
+                        onChange={() => undefined}
+                        rows={6}
+                        readOnly
+                      />
+                    </>
+                  )
+                }
+              : undefined
+          }
+          failingInput={options?.inputBeside ? undefined : renderRunInput({ compact: true })}
+        />
         {pinControls}
-        {currentNodeResult?.status === "running" && currentNodeResult.liveText ? (
-          <div className="cfg-group">
-            <TextAreaField label="Streaming output" value={currentNodeResult.liveText} onChange={() => undefined} rows={8} readOnly />
-          </div>
-        ) : null}
-        {resolvedOutputPreview !== undefined || currentPinnedOutput !== undefined ? (
-          <div className="cfg-group">
-            <div className="cfg-tip">
-              {currentPinnedOutput !== undefined && resolvedOutputPreview === undefined ? (
-                <>
-                  Using pinned output. <code>Run this node</code> will reuse this data until unpinned.
-                </>
-              ) : (
-                <>
-                  Last run status: <code>{currentNodeResult?.status ?? "unknown"}</code>
-                  {currentNodePinned ? " (pinned)" : ""}
-                </>
-              )}
-            </div>
-            <KeyValueTable label="Output" value={resolvedOutputPreview ?? currentPinnedOutput} />
-          </div>
-        ) : node.data.nodeType === "code_node" && codeTestResult ? (
-          <div className="cfg-group">
-            <TextAreaField
-              label="Result"
-              value={JSON.stringify(codeTestResult.result, null, 2)}
-              onChange={() => undefined}
-              rows={8}
-              readOnly
-            />
-            <TextAreaField
-              label="Console Logs"
-              value={codeTestResult.logs.length ? codeTestResult.logs.join("\n") : "No logs"}
-              onChange={() => undefined}
-              rows={6}
-              readOnly
-            />
-          </div>
-        ) : (
-          <div className="insp-empty">Output appears after running this node.</div>
-        )}
       </>
     );
   };
@@ -9749,27 +9446,58 @@ export function NodeInspector({
     );
   };
 
-  const tabs: Array<{ key: InspectorTab; label: string }> = [
-    { key: "parameters", label: "Parameters" },
-    { key: "input", label: "Input" },
-    { key: "output", label: "Output" },
-    { key: "trace", label: "Trace" }
-  ];
+  const split = layout === "split";
+  const tabs: Array<{ key: InspectorTab; label: string }> = split
+    ? [
+        { key: "parameters", label: "Parameters" },
+        { key: "trace", label: "Trace" }
+      ]
+    : [
+        { key: "parameters", label: "Parameters" },
+        { key: "input", label: "Input" },
+        { key: "output", label: "Output" },
+        { key: "trace", label: "Trace" }
+      ];
+  const middleTab: InspectorTab = activeTab === "trace" ? "trace" : "parameters";
+  const selectedTab: InspectorTab = split ? middleTab : activeTab;
+  const changeLayout = (next: InspectorLayout) => {
+    setLayout(next);
+    storeInspectorLayout(next);
+  };
+  const runLabel = executionResult && showRuntimeInspection
+    ? `run ${executionResult.status === "partial" ? "in progress" : executionResult.status}${
+        executionResult.startedAt ? ` · ${new Date(executionResult.startedAt).toLocaleTimeString()}` : ""
+      }`
+    : undefined;
+  const renderParametersSection = () => (
+    <>
+      {renderSlots()}
+      <section className="insp-section">{renderParameters()}</section>
+      <section className="insp-section insp-settings">
+        <div className="insp-section-head">
+          <h3>Settings</h3>
+        </div>
+        {renderSettings()}
+      </section>
+    </>
+  );
 
   return (
     <aside
-      className={`insp${isAgentNode ? " insp-agent" : ""}`}
+      className={`insp${isAgentNode ? " insp-agent" : ""}${split ? " insp-split" : ""}`}
       role="dialog"
       aria-label={`Inspect ${label || node.data.label}`}
-      style={inspectorWidth !== null ? { width: inspectorWidth } : undefined}
+      style={inspectorWidth !== null && !split ? { width: inspectorWidth } : undefined}
     >
-      <div
-        className={resizing ? "insp-resizer active" : "insp-resizer"}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize inspector"
-        onPointerDown={handleResizeStart}
-      />
+      {split ? null : (
+        <div
+          className={resizing ? "insp-resizer active" : "insp-resizer"}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize inspector"
+          onPointerDown={handleResizeStart}
+        />
+      )}
       <header className="insp-head">
         <span className="insp-glyph" aria-hidden="true">
           <NodeTypeIcon nodeType={node.data.nodeType} />
@@ -9790,6 +9518,16 @@ export function NodeInspector({
             <span>{node.id}</span>
           </div>
         </div>
+        <button
+          type="button"
+          className="insp-btn insp-layout-toggle"
+          aria-pressed={split}
+          onClick={() => changeLayout(split ? "tabs" : "split")}
+          aria-label="Show Input, Parameters and Output side by side"
+          title={split ? "Showing Input, Parameters and Output side by side. Click for tabs." : "Show Input, Parameters and Output side by side"}
+        >
+          Split
+        </button>
         <button className="insp-btn accent insp-run" type="button" onClick={onExecuteStep}>
           Run this node
         </button>
@@ -9798,38 +9536,48 @@ export function NodeInspector({
         </button>
       </header>
 
-      <div className="insp-tabs" role="tablist" aria-label="Inspector sections">
-        {tabs.map((tab) => (
-          <button
-            key={tab.key}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === tab.key}
-            className={activeTab === tab.key ? "insp-tab active" : "insp-tab"}
-            onClick={() => setActiveTab(tab.key)}
-          >
-            {tab.label}
-          </button>
-        ))}
+      <div className="insp-tabbar">
+        <div className="insp-tabs" role="tablist" aria-label="Inspector sections">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={selectedTab === tab.key}
+              className={selectedTab === tab.key ? "insp-tab active" : "insp-tab"}
+              onClick={() => setActiveTab(tab.key)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        {showRuntimeInspection && onNavigateNode && runSteps.length > 0 ? (
+          <RunStepBar steps={runSteps} currentId={node.id} labelFor={labelFor} onStep={onNavigateNode} runLabel={runLabel} />
+        ) : null}
       </div>
 
-      <div className="insp-body">
-        {activeTab === "parameters" && (
-          <>
-            {renderSlots()}
-            <section className="insp-section">{renderParameters()}</section>
-            <section className="insp-section insp-settings">
-              <div className="insp-section-head">
-                <h3>Settings</h3>
-              </div>
-              {renderSettings()}
-            </section>
-          </>
-        )}
-        {activeTab === "input" && <section className="insp-section">{renderInputTab()}</section>}
-        {activeTab === "output" && <section className="insp-section">{renderOutputTab()}</section>}
-        {activeTab === "trace" && <section className="insp-section">{renderTraceTab()}</section>}
-      </div>
+      {split ? (
+        <div className="insp-body insp-split-body">
+          <section className="insp-section insp-split-col insp-split-input" aria-label="Input">
+            <h3 className="insp-split-title">Input</h3>
+            {renderRunInput()}
+          </section>
+          <div className="insp-split-col insp-split-middle">
+            {middleTab === "parameters" ? renderParametersSection() : <section className="insp-section">{renderTraceTab()}</section>}
+          </div>
+          <section className="insp-section insp-split-col insp-split-output" aria-label="Output">
+            <h3 className="insp-split-title">Output</h3>
+            {renderOutputTab({ inputBeside: true })}
+          </section>
+        </div>
+      ) : (
+        <div className="insp-body">
+          {activeTab === "parameters" && renderParametersSection()}
+          {activeTab === "input" && <section className="insp-section">{renderRunInput()}</section>}
+          {activeTab === "output" && <section className="insp-section">{renderOutputTab()}</section>}
+          {activeTab === "trace" && <section className="insp-section">{renderTraceTab()}</section>}
+        </div>
+      )}
 
       <footer className="insp-foot">
         <button type="button" className="insp-btn" onClick={() => requestClose()}>
