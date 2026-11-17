@@ -2,9 +2,12 @@
  * `node_redacted`: when values are revealed later in a run, the server sends each node's data as the run's history
  * keeps it, and the editor's live trace replaces what earlier events showed of that node.
  */
+import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { executeWorkflowStream, type StreamNodeRedactedEvent } from "./api";
+import { NodeRunOutput } from "../components/NodeRunData";
+import { canvasRunPreview } from "./run-data";
 import { applyNodeRedactedToExecutionResult, createTraceStreamHandlers, traceStreamCallbacks, type LiveNodeResult } from "./run-trace";
 
 const T0 = "2026-11-17T10:00:00.000Z";
@@ -67,5 +70,33 @@ describe("the run stream", () => {
     const result = await executeWorkflowStream("wf", {}, { onNodeRedacted: (event) => seen.push(event) });
     expect(result.status).toBe("success");
     expect(seen).toEqual([{ nodeId: "hook", output: { text: "[EMAIL_1]" } }]);
+  });
+});
+
+describe("the editor's run data view", () => {
+  it("shows a held node's data once node_redacted arrives, as history keeps it", () => {
+    let state: WorkflowExecutionResult | null = { workflowId: "wf", status: "partial", startedAt: T0, nodeResults: [] } as WorkflowExecutionResult;
+    const trace = createTraceStreamHandlers({
+      workflowId: "wf",
+      enabled: true,
+      setExecutionResult: (update) => {
+        state = update(state);
+      },
+      setLiveNodeStatuses: () => undefined,
+      normalizeStatus: () => undefined
+    });
+    const callbacks = traceStreamCallbacks(trace, () => undefined);
+    // While a Reveal step is pending the server sends status and timing only.
+    callbacks.onNodeStart({ nodeId: "hook", nodeType: "webhook_input", startedAt: T0 } as never);
+    callbacks.onNodeComplete({ nodeId: "hook", nodeType: "webhook_input", status: "success", completedAt: T0, durationMs: 3 } as never);
+    const held = state!.nodeResults.find((entry) => entry.nodeId === "hook")!;
+    expect(held.output).toBeUndefined();
+    expect(canvasRunPreview(held, (id) => id).output).toBeUndefined();
+
+    callbacks.onNodeRedacted({ nodeId: "hook", status: "success", durationMs: 3, input: { user_prompt: "Mail tok_email_abc" }, output: { text: "Mail tok_email_abc" } });
+    const shown = state!.nodeResults.find((entry) => entry.nodeId === "hook")!;
+    expect(canvasRunPreview(shown, (id) => id)).toMatchObject({ input: "Mail tok_email_abc", output: expect.stringContaining("tok_email_abc") });
+    render(<NodeRunOutput result={shown} labelFor={(id) => id} />);
+    expect(screen.getAllByText(/tok_email_abc/).length).toBeGreaterThan(0);
   });
 });
