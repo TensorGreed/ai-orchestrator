@@ -165,6 +165,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.insp-node-id {
+  color: var(--fg-faint);
+  user-select: all;
+}
+.insp-node-id::before {
+  content: "·";
+  margin-right: 6px;
+}
 .insp-sub-sep {
   color: var(--fg-faint);
   flex-shrink: 0;

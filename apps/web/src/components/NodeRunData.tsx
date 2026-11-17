@@ -25,20 +25,42 @@ export type DataViewMode = "table" | "json" | "schema";
 
 /**
  * One view choice for a whole data pane (Input or Output): the pane header holds the switch, so the blocks inside
- * it show no switch of their own. Without a pane (for example a code test result) each view keeps its own switch.
+ * it show no switch of their own (a Code node's test result in the Output pane follows it too). Outside a pane each view
+ * keeps its own switch.
  */
 export interface RunDataPaneView {
   mode: DataViewMode;
-  /** Show keys that start with "_" (run internals such as `_telemetry`) in tables. JSON always shows them. */
+  /** Show the runtime's own keys (`_telemetry`, `_branchHandle`, ...) in tables. JSON always shows them. */
   showInternal: boolean;
   setShowInternal: (next: boolean) => void;
 }
 
 export const RunDataPaneContext = createContext<RunDataPaneView | null>(null);
 
-/** Keys a node adds for the run's own bookkeeping (`_telemetry`, `_branchHandle`, ...). */
+/**
+ * Keys the runtime adds to a node's data for its own bookkeeping. Only these are hidden: other keys that start with "_"
+ * (`_id`, `_source`, `_score` from a database or search index) are the user's data and always show.
+ */
+const RUNTIME_INTERNAL_KEYS = new Set([
+  "_telemetry",
+  "_childTelemetry",
+  "_branchHandle",
+  "_branchHandleFallback",
+  "_provider",
+  "_toolPolicy",
+  "_guard",
+  "_mcpTools",
+  "_mcpSampling",
+  "_mcpProgress",
+  "_mcpElicitations",
+  "_serverPrompt",
+  "_toolCallLabels",
+  "_trace",
+  "_selectedParentId"
+]);
+
 export function isInternalKey(key: string): boolean {
-  return key.startsWith("_");
+  return RUNTIME_INTERNAL_KEYS.has(key);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -178,13 +200,15 @@ function DataTable({ value }: { value: unknown }) {
 
   if (rows.length === 0) return <div className="run-data-empty">No items</div>;
   const visible = rows.slice(0, shown);
+  const internalColumns = columns.filter((column) => isInternalKey(column)).length;
+  const shownColumns = showInternal ? columns : columns.filter((column) => !isInternalKey(column));
   return (
     <>
       <table className="run-data-table">
         <thead>
           <tr>
             <th scope="col">#</th>
-            {recordRows ? columns.map((column) => <th key={column} scope="col">{column}</th>) : <th scope="col">Value</th>}
+            {recordRows ? shownColumns.map((column) => <th key={column} scope="col">{column}</th>) : <th scope="col">Value</th>}
           </tr>
         </thead>
         <tbody>
@@ -192,7 +216,7 @@ function DataTable({ value }: { value: unknown }) {
             <tr key={index}>
               <td className="run-data-index">{index + 1}</td>
               {recordRows ? (
-                columns.map((column) => <Cell key={column} value={(row as Record<string, unknown>)[column]} className="run-data-value" />)
+                shownColumns.map((column) => <Cell key={column} value={(row as Record<string, unknown>)[column]} className="run-data-value" />)
               ) : (
                 <Cell value={row} className="run-data-value" />
               )}
@@ -203,6 +227,11 @@ function DataTable({ value }: { value: unknown }) {
       {rows.length > shown ? (
         <button type="button" className="insp-btn run-data-more" onClick={() => setShown((count) => count + RUN_DATA_ROW_PAGE)}>
           Show {Math.min(RUN_DATA_ROW_PAGE, rows.length - shown)} more of {rows.length} items
+        </button>
+      ) : null}
+      {internalColumns > 0 ? (
+        <button type="button" className="run-data-internal" onClick={() => setShowInternal(!showInternal)} aria-pressed={showInternal}>
+          {showInternal ? "Hide internal fields" : `Show ${internalColumns} internal field${internalColumns === 1 ? "" : "s"}`}
         </button>
       ) : null}
     </>
@@ -320,6 +349,7 @@ export function RunStatusLine({ result, title }: { result: RunNodeResult; title?
       {parts.map((part) => (
         <span key={part}> · {part}</span>
       ))}
+      {title ? <span className="sr-only">. {title}</span> : null}
     </div>
   );
 }

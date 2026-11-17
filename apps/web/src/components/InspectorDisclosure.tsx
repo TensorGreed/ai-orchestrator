@@ -6,10 +6,11 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 /** Inline `?` next to a field label; the explanation opens on click (or Enter / Space). */
-export function HelpHint({ children }: { children: ReactNode }) {
+export function HelpHint({ children, topic }: { children: ReactNode; topic?: string }) {
+  const name = topic ? `Help: ${topic}` : "Show help";
   return (
     <details className="cfg-help">
-      <summary aria-label="Show help" title="Show help">
+      <summary aria-label={name} title={name}>
         ?
       </summary>
       <div className="cfg-help-body cfg-tip">{children}</div>
@@ -53,14 +54,20 @@ export function AdvancedFields({
 }
 
 /** How many of `values` differ from their defaults (undefined, empty strings and empty lists count as unset). */
-export function countSet(values: Array<[value: unknown, defaultValue: unknown]>): number {
+export function countSet(values: Array<[value: unknown, defaultValue: unknown, sampleValue?: unknown]>): number {
   let count = 0;
-  for (const [value, defaultValue] of values) {
-    if (value === undefined || value === null || value === "") continue;
+  for (const [value, defaultValue, sampleValue] of values) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" && value.trim() === "") continue;
     if (Array.isArray(value) && value.length === 0) continue;
     if (typeof value === "object" && !Array.isArray(value) && Object.keys(value as object).length === 0) continue;
-    if (JSON.stringify(value) === JSON.stringify(defaultValue)) continue;
+    if (sameSetting(value, defaultValue) || (sampleValue !== undefined && sameSetting(value, sampleValue))) continue;
     count += 1;
   }
   return count;
+}
+
+function sameSetting(left: unknown, right: unknown): boolean {
+  if (typeof left === "string" && typeof right === "string") return left.trim() === right.trim();
+  return JSON.stringify(left) === JSON.stringify(right);
 }

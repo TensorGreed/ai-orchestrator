@@ -174,6 +174,10 @@ interface PaneLayout {
 const PANE_LAYOUT_STORAGE_KEY = "l2m:inspector-panes";
 const PANE_MIN_WIDTH = 240;
 const PANE_MAX_WIDTH = 720;
+/** The Parameters column never gets narrower than this; the data panes give way first. */
+const MIDDLE_MIN_WIDTH = 320;
+const PANE_SEPARATOR_WIDTH = 5;
+const PANE_RAIL_WIDTH = 34;
 const DEFAULT_PANE_LAYOUT: PaneLayout = { inputWidth: 360, outputWidth: 380, inputCollapsed: false, outputCollapsed: false };
 
 function readStoredPaneLayout(): PaneLayout {
@@ -273,6 +277,52 @@ function stableStringify(value: unknown): string {
     }
     return inner;
   });
+}
+
+/**
+ * The config the inspector starts from: the stored config plus the defaults its fields show. An MCP Tool node with an
+ * inline connection gets its server, tool and connection defaults; an Agent Orchestrator gets the max-iterations value
+ * the field shows (validation requires one). The saved workflow changes only on Save, and the fill alone does not mark
+ * the node as edited: isDirty compares against this same fill.
+ */
+export function withOpenDefaults(
+  nodeType: string,
+  initialConfig: Record<string, unknown>,
+  firstServerId: string | undefined
+): Record<string, unknown> {
+  const usesRegisteredServer =
+    typeof initialConfig.registryServerId === "string" && initialConfig.registryServerId.trim().length > 0;
+  // A registered server owns its connection, so don't fill in inline defaults for it.
+  if (nodeType === "mcp_tool" && !usesRegisteredServer) {
+    const baseConnection = asRecord(initialConfig.connection);
+    return {
+      ...initialConfig,
+      serverId:
+        typeof initialConfig.serverId === "string" && initialConfig.serverId.trim()
+          ? initialConfig.serverId
+          : (firstServerId ?? "mock-mcp"),
+      toolName:
+        typeof initialConfig.toolName === "string" && initialConfig.toolName.trim() ? initialConfig.toolName : "__all__",
+      connection: {
+        endpoint:
+          typeof baseConnection.endpoint === "string" && baseConnection.endpoint.trim()
+            ? baseConnection.endpoint
+            : "http://127.0.0.1:7001/mcp",
+        transport:
+          typeof baseConnection.transport === "string" && baseConnection.transport.trim()
+            ? baseConnection.transport
+            : "http_streamable",
+        authType:
+          typeof baseConnection.authType === "string" && baseConnection.authType.trim() ? baseConnection.authType : "none",
+        ...baseConnection
+      }
+    };
+  }
+  if (nodeType === "agent_orchestrator" && typeof initialConfig.maxIterations !== "number") {
+    // Also in place of a stored non-number, which the field cannot show either.
+    return { ...initialConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS };
+  }
+  return initialConfig;
 }
 
 function stripAgentOnlyKeys(nodeType: string, value: Record<string, unknown>): Record<string, unknown> {
@@ -994,6 +1044,9 @@ export function NodeInspector({
   const [nodeDisabled, setNodeDisabled] = useState<boolean>(Boolean(node.data.disabled));
   const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
   const [activeTab, setActiveTab] = useState<InspectorTab>("parameters");
+  // A new node starts from its definition's sample config: those values count as defaults on the Advanced sections.
+  const sampleConfig = useMemo(() => asRecord(getNodeDefinition(node.data.nodeType)?.sampleConfig), [node.data.nodeType]);
+  const sampleProvider = asRecord(sampleConfig.provider);
   const [layout, setLayout] = useState<InspectorLayout>("tabs");
   const [panes, setPanesState] = useState<PaneLayout>(() => (typeof window === "undefined" ? DEFAULT_PANE_LAYOUT : readStoredPaneLayout()));
   const panesRef = useRef(panes);
@@ -1002,6 +1055,22 @@ export function NodeInspector({
     setPanesState(panesRef.current);
   }, []);
   const commitPanes = useCallback(() => storePaneLayout(panesRef.current), []);
+  // The split body's width, so the panes (stored in px) never push the Parameters column or the Output pane out of view.
+  const [splitBodyWidth, setSplitBodyWidth] = useState(0);
+  const splitBodyObserver = useRef<ResizeObserver | null>(null);
+  const splitBodyRef = useCallback((element: HTMLDivElement | null) => {
+    splitBodyObserver.current?.disconnect();
+    splitBodyObserver.current = null;
+    if (!element) return;
+    setSplitBodyWidth(element.clientWidth);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setSplitBodyWidth(element.clientWidth));
+    observer.observe(element);
+    splitBodyObserver.current = observer;
+  }, []);
+  // Before any run, the empty Input and Output panes stay rails so the form gets the room; opening one keeps it open
+  // for this node. Nothing about this is stored.
+  const [emptyPanesOpen, setEmptyPanesOpen] = useState(false);
   const [inspectorWidth, setInspectorWidth] = useState<number | null>(() =>
     typeof window === "undefined" ? null : readStoredInspectorWidth()
   );
@@ -1257,46 +1326,8 @@ export function NodeInspector({
   }, [modelLookup]);
 
   useEffect(() => {
-    const initialConfig = asRecord(node.data.config);
-    const usesRegisteredServer =
-      typeof initialConfig.registryServerId === "string" && initialConfig.registryServerId.trim().length > 0;
-    // A registered server owns its connection, so don't fill in inline defaults for it.
-    if (node.data.nodeType === "mcp_tool" && !usesRegisteredServer) {
-      const baseConnection = asRecord(initialConfig.connection);
-      setConfig({
-        ...initialConfig,
-        serverId:
-          typeof initialConfig.serverId === "string" && initialConfig.serverId.trim()
-            ? initialConfig.serverId
-            : (mcpServerDefinitions[0]?.id ?? "mock-mcp"),
-        toolName:
-          typeof initialConfig.toolName === "string" && initialConfig.toolName.trim()
-            ? initialConfig.toolName
-            : "__all__",
-        connection: {
-          endpoint:
-            typeof baseConnection.endpoint === "string" && baseConnection.endpoint.trim()
-              ? baseConnection.endpoint
-              : "http://127.0.0.1:7001/mcp",
-          transport:
-            typeof baseConnection.transport === "string" && baseConnection.transport.trim()
-              ? baseConnection.transport
-              : "http_streamable",
-          authType:
-            typeof baseConnection.authType === "string" && baseConnection.authType.trim()
-              ? baseConnection.authType
-              : "none",
-          ...baseConnection
-        }
-      });
-    } else if (node.data.nodeType === "agent_orchestrator" && typeof initialConfig.maxIterations !== "number") {
-      // Validation requires maxIterations on an Agent Orchestrator: start from the value the field shows (also in place of
-      // a stored non-number, which the field cannot show either), so what the editor shows also validates once saved.
-      // The saved workflow changes only on Save, and the fill alone does not mark the node as edited (see isDirty).
-      setConfig({ ...initialConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS });
-    } else {
-      setConfig(initialConfig);
-    }
+    // The defaults filled in on open are not edits of the user's: isDirty compares against the same fill.
+    setConfig(withOpenDefaults(node.data.nodeType, asRecord(node.data.config), mcpServerDefinitions[0]?.id));
 
     setLabel(node.data.label);
     setNodeDisabled(Boolean(node.data.disabled));
@@ -1486,6 +1517,7 @@ export function NodeInspector({
   // another node keeps the layout, and keeps the Input or Output tab when the next node has run data too.
   const openedRef = useRef(false);
   useEffect(() => {
+    setEmptyPanesOpen(false);
     const hasData = hasRunDataRef.current;
     if (!openedRef.current) {
       openedRef.current = true;
@@ -2452,8 +2484,8 @@ export function NodeInspector({
           setCount={
             countSet([
               [optionalBaseUrl ? provider.baseUrl : undefined, ""],
-              [provider.temperature, 0.2],
-              [provider.maxTokens, 1024]
+              [provider.temperature, 0.2, sampleProvider.temperature],
+              [provider.maxTokens, 1024, sampleProvider.maxTokens]
             ]) + (advanced?.setCount ?? 0)
           }
         >
@@ -2645,19 +2677,19 @@ export function NodeInspector({
 
         <AdvancedFields
           setCount={countSet([
-            [config.agentType, "tools"],
-            [config.serverPrompt, undefined],
-            [config.sessionIdTemplate, "{{session_id}}"],
-            [config.requireSpecificOutputFormat, false],
-            [config.enableFallbackModel, false],
-            [config.maxIterations, AGENT_DEFAULT_MAX_ITERATIONS],
-            [config.toolCallingEnabled, true],
-            [config.thinkTool, false],
-            [config.toolMessageMaxChars, 6000],
-            [config.toolPayloadMaxStringChars, 400],
-            [config.toolPayloadMaxObjectKeys, 32],
-            [config.toolPayloadMaxArrayItems, 8],
-            [config.toolPayloadMaxDepth, 4]
+            [config.agentType, "tools", sampleConfig.agentType],
+            [config.serverPrompt, undefined, sampleConfig.serverPrompt],
+            [config.sessionIdTemplate, "{{session_id}}", sampleConfig.sessionIdTemplate],
+            [config.requireSpecificOutputFormat, false, sampleConfig.requireSpecificOutputFormat],
+            [config.enableFallbackModel, false, sampleConfig.enableFallbackModel],
+            [config.maxIterations, AGENT_DEFAULT_MAX_ITERATIONS, sampleConfig.maxIterations],
+            [config.toolCallingEnabled, true, sampleConfig.toolCallingEnabled],
+            [config.thinkTool, false, sampleConfig.thinkTool],
+            [config.toolMessageMaxChars, 6000, sampleConfig.toolMessageMaxChars],
+            [config.toolPayloadMaxStringChars, 400, sampleConfig.toolPayloadMaxStringChars],
+            [config.toolPayloadMaxObjectKeys, 32, sampleConfig.toolPayloadMaxObjectKeys],
+            [config.toolPayloadMaxArrayItems, 8, sampleConfig.toolPayloadMaxArrayItems],
+            [config.toolPayloadMaxDepth, 4, sampleConfig.toolPayloadMaxDepth]
           ])}
         >
         <SelectField
@@ -3742,11 +3774,12 @@ export function NodeInspector({
           previewContext={expressionPreviewContext}
         />
 
-        {discoveredTools.length > 0 && (
-        <AdvancedFields>
         {toolSelectionMode === "single" && selectedTool && (
-          <div className="cfg-group">
-            <h4>Discovered Tool Metadata</h4>
+          <details className="cfg-advanced cfg-fold" data-testid="mcp-tool-metadata">
+            <summary>
+              Tool schema: <code>{selectedTool.name}</code>
+            </summary>
+            <div className="cfg-advanced-body">
             <div className="cfg-tip">{selectedTool.description || "No description provided."}</div>
             {selectedTool.annotations && (
               <div className="cfg-tip" data-testid="mcp-tool-annotations">
@@ -3769,8 +3802,12 @@ export function NodeInspector({
               ) : null}
               <McpOutputSchema schema={selectedTool.outputSchema} />
             </div>
-          </div>
+            </div>
+          </details>
         )}
+
+        {discoveredTools.length > 0 && (
+        <AdvancedFields>
 
         {discoveredTools.length > 0 && (() => {
           const probeTool =
@@ -3881,9 +3918,9 @@ export function NodeInspector({
       <>
         {renderProviderSection({
           setCount: countSet([
-            [config.promptKey, "prompt"],
-            [config.systemPromptKey, "system_prompt"],
-            [config.serverPrompt, undefined]
+            [config.promptKey, "prompt", sampleConfig.promptKey],
+            [config.systemPromptKey, "system_prompt", sampleConfig.systemPromptKey],
+            [config.serverPrompt, undefined, sampleConfig.serverPrompt]
           ]),
           content: (
             <>
@@ -4105,26 +4142,6 @@ export function NodeInspector({
           />
         </label>
 
-        <AdvancedFields setCount={countSet([[config.timeout, 1500]])} defaultOpen={Boolean(codeTestResult || codeTestError)}>
-        <NumberField
-          label="Timeout (ms)"
-          value={toNumberValue(config.timeout, 1500)}
-          min={1}
-          step={100}
-          onChange={(next) => setConfig((current) => ({ ...current, timeout: next }))}
-        />
-
-        <label className="cfg-field">
-          <span>Test Input (JSON Object)</span>
-          <textarea
-            className="cfg-code-editor cfg-code-editor-secondary"
-            value={codeTestInput}
-            onChange={(event) => setCodeTestInput(event.target.value)}
-            rows={7}
-            spellCheck={false}
-          />
-        </label>
-
         <div className="cfg-inline-actions">
           <button type="button" className="insp-btn" onClick={() => void handleCodeNodeTestRun()} disabled={codeTestBusy}>
             {codeTestBusy ? "Testing..." : "Test Run"}
@@ -4132,6 +4149,31 @@ export function NodeInspector({
           {codeTestResult && <span className="muted">Test completed. The result is under Output, labelled as a test.</span>}
         </div>
         {codeTestError && <div className="error-banner">{codeTestError}</div>}
+
+        <details className="cfg-advanced cfg-fold" data-testid="code-test-input">
+          <summary>Test input</summary>
+          <div className="cfg-advanced-body">
+          <label className="cfg-field">
+            <span>Test Input (JSON Object)</span>
+            <textarea
+              className="cfg-code-editor cfg-code-editor-secondary"
+              value={codeTestInput}
+              onChange={(event) => setCodeTestInput(event.target.value)}
+              rows={7}
+              spellCheck={false}
+            />
+          </label>
+          </div>
+        </details>
+
+        <AdvancedFields setCount={countSet([[config.timeout, 1500, sampleConfig.timeout]])}>
+          <NumberField
+            label="Timeout (ms)"
+            value={toNumberValue(config.timeout, 1500)}
+            min={1}
+            step={100}
+            onChange={(next) => setConfig((current) => ({ ...current, timeout: next }))}
+          />
         </AdvancedFields>
       </>
     );
@@ -4320,13 +4362,13 @@ export function NodeInspector({
 
         <AdvancedFields
           setCount={countSet([
-            [config.passThroughFields, ["system_prompt", "user_prompt", "session_id", "variables"]],
-            [config.inputTrust, undefined],
-            [config.allowedIps, undefined],
-            [config.idempotencyEnabled, false],
-            [config.responseMode, "lastNode"],
-            [config.responseCode, 200],
-            [config.responseBody, ""]
+            [config.passThroughFields, ["system_prompt", "user_prompt", "session_id", "variables"], sampleConfig.passThroughFields],
+            [config.inputTrust, undefined, sampleConfig.inputTrust],
+            [config.allowedIps, undefined, sampleConfig.allowedIps],
+            [config.idempotencyEnabled, false, sampleConfig.idempotencyEnabled],
+            [config.responseMode, "lastNode", sampleConfig.responseMode],
+            [config.responseCode, 200, sampleConfig.responseCode],
+            [config.responseBody, "", sampleConfig.responseBody]
           ])}
           defaultOpen={allowedIpsInvalid.length > 0 || (config.inputTrustFor !== undefined && triggerTrustState({ type: node.data.nodeType, config }) === "reset")}
         >
@@ -4734,11 +4776,11 @@ export function NodeInspector({
         <AdvancedFields
           setCount={countSet([
             [optionalBaseUrl ? config.baseUrl : undefined, ""],
-            [config.temperature, 0.2],
-            [config.maxTokens, 1024],
-            [config.promptKey, "prompt"],
-            [config.systemPromptKey, "system_prompt"],
-            [config.serverPrompt, undefined]
+            [config.temperature, 0.2, sampleConfig.temperature],
+            [config.maxTokens, 1024, sampleConfig.maxTokens],
+            [config.promptKey, "prompt", sampleConfig.promptKey],
+            [config.systemPromptKey, "system_prompt", sampleConfig.systemPromptKey],
+            [config.serverPrompt, undefined, sampleConfig.serverPrompt]
           ])}
         >
         {optionalBaseUrl && baseUrlField}
@@ -6202,10 +6244,10 @@ export function NodeInspector({
             })}
             <AdvancedFields
               setCount={countSet([
-                [config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}"],
-                [config.bodyTemplate, ""],
-                [config.responseType, "json"],
-                [config.timeoutMs, 15000]
+                [config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}", sampleConfig.headersTemplate],
+                [config.bodyTemplate, "", sampleConfig.bodyTemplate],
+                [config.responseType, "json", sampleConfig.responseType],
+                [config.timeoutMs, 15000, sampleConfig.timeoutMs]
               ])}
             >
             <ExpressionField
@@ -6735,7 +6777,7 @@ export function NodeInspector({
               }}
               rows={5}
             />
-            <AdvancedFields setCount={countSet([[config.defaultLabel, "default"]])}>
+            <AdvancedFields setCount={countSet([[config.defaultLabel, "default", sampleConfig.defaultLabel]])}>
               <TextField
                 label="Default Output Label"
                 value={toStringValue(config.defaultLabel, "default")}
@@ -6863,7 +6905,7 @@ export function NodeInspector({
               mode="template"
               previewContext={expressionPreviewContext}
             />
-            <AdvancedFields setCount={countSet([[config.outputKey, "result"]])}>
+            <AdvancedFields setCount={countSet([[config.outputKey, "result", sampleConfig.outputKey]])}>
               <TextField
                 label="Output Key"
                 value={toStringValue(config.outputKey, "result")}
@@ -8675,7 +8717,7 @@ export function NodeInspector({
               }}
               rows={4}
             />
-            <AdvancedFields setCount={countSet([[config.label, "Run manually"]])}>
+            <AdvancedFields setCount={countSet([[config.label, "Run manually", sampleConfig.label]])}>
               <TextField
                 label="Label"
                 value={toStringValue(config.label, "Run manually")}
@@ -9236,14 +9278,14 @@ export function NodeInspector({
           />
         </section>
         <section className="insp-settings-group" aria-label="Input mapping">
-          <h4 className="cfg-field-label">
-            Input mapping
-            <HelpHint>
+          <div className="cfg-field-label">
+            <h4>Input mapping</h4>
+            <HelpHint topic="Input mapping">
               Map output keys from a previous node to input keys this node expects. Example: mapping <code>answer</code>{" "}
               to <code>user_prompt</code> means the upstream <code>answer</code> becomes <code>{"{{user_prompt}}"}</code>.
               Without mappings, parent node outputs are merged into context as-is.
             </HelpHint>
-          </h4>
+          </div>
           {inputMappingRows.length === 0 && <div className="cfg-tip insp-settings-none">No mappings.</div>}
           {inputMappingRows.map((row) => (
             <div key={row.id} className="cfg-assignment-row">
@@ -9327,17 +9369,13 @@ export function NodeInspector({
   };
 
   const isDirty = useMemo(() => {
-    const storedConfig = asRecord(node.data.config);
-    // The default filled in on open is not an edit of the user's.
-    const savedConfig =
-      node.data.nodeType === "agent_orchestrator" && typeof storedConfig.maxIterations !== "number"
-        ? { ...storedConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS }
-        : storedConfig;
+    // The defaults filled in on open are not edits of the user's.
+    const savedConfig = withOpenDefaults(node.data.nodeType, asRecord(node.data.config), mcpServerDefinitions[0]?.id);
     if (label !== node.data.label) return true;
     if (nodeDisabled !== Boolean(node.data.disabled)) return true;
     if ((nodeColor ?? undefined) !== (node.data.color ?? undefined)) return true;
     return stableStringify(getConfigForSave()) !== stableStringify(stripAgentOnlyKeys(node.data.nodeType, savedConfig));
-  }, [config, label, node.data, nodeColor, nodeDisabled]);
+  }, [config, label, mcpServerDefinitions, node.data, nodeColor, nodeDisabled]);
   isDirtyRef.current = isDirty;
 
   const handleSave = () =>
@@ -9362,13 +9400,13 @@ export function NodeInspector({
     return (
       <section className="insp-section insp-slots" aria-label="Slots">
         <div className="insp-section-head">
-          <h3 className="cfg-field-label">
-            Slots
-            <HelpHint>
+          <div className="cfg-field-label">
+            <h3>Slots</h3>
+            <HelpHint topic="Slots">
               Attach a Chat Model on the <code>chat_model</code> port. Optionally attach Memory and one or more MCP Tool nodes on
               their dedicated ports.
             </HelpHint>
-          </h3>
+          </div>
         </div>
         {visibleSlots.map((slot) => {
           const attached = slots?.[slot.handle] ?? [];
@@ -9679,7 +9717,9 @@ export function NodeInspector({
         >
           {tab.label}
           {tab.key === "settings" && settingsChanged ? (
-            <span className="insp-tab-dot" title="Some settings differ from the defaults" aria-label="(changed)" />
+            <span className="insp-tab-dot" title="Some settings differ from the defaults">
+              <span className="sr-only"> (changed)</span>
+            </span>
           ) : null}
         </button>
       ))}
@@ -9701,18 +9741,42 @@ export function NodeInspector({
     );
   };
 
+  const panesQuiet = !hasRunData && !currentNodePinned && !codeTestResult && !emptyPanesOpen;
+  const inputCollapsed = panes.inputCollapsed || panesQuiet;
+  const outputCollapsed = panes.outputCollapsed || panesQuiet;
+  const togglePane = (key: "inputCollapsed" | "outputCollapsed") => {
+    if (panesQuiet) {
+      setEmptyPanesOpen(true);
+      if (panes[key]) setPanes((current) => ({ ...current, [key]: false }));
+    } else {
+      setPanes((current) => ({ ...current, [key]: !current[key] }));
+    }
+    commitPanes();
+  };
+
+  // Pane widths that fit the body: when the stored widths leave the Parameters column less than its minimum, both panes
+  // shrink in proportion (not below their own minimum). The stored widths stay, for a wider window later.
+  const paneBudget =
+    splitBodyWidth -
+    MIDDLE_MIN_WIDTH -
+    (inputCollapsed ? PANE_RAIL_WIDTH : PANE_SEPARATOR_WIDTH) -
+    (outputCollapsed ? PANE_RAIL_WIDTH : PANE_SEPARATOR_WIDTH);
+  const requestedInput = inputCollapsed ? 0 : panes.inputWidth;
+  const requestedOutput = outputCollapsed ? 0 : panes.outputWidth;
+  const paneScale =
+    splitBodyWidth > 0 && requestedInput + requestedOutput > paneBudget ? Math.max(0, paneBudget) / (requestedInput + requestedOutput) : 1;
+  const inputWidth = Math.max(PANE_MIN_WIDTH, Math.floor(panes.inputWidth * paneScale));
+  const outputWidth = Math.max(PANE_MIN_WIDTH, Math.floor(panes.outputWidth * paneScale));
+  const paneMax = (otherWidth: number) =>
+    splitBodyWidth > 0 ? Math.min(PANE_MAX_WIDTH, Math.max(PANE_MIN_WIDTH, paneBudget - otherWidth)) : PANE_MAX_WIDTH;
+  const inputMax = paneMax(outputCollapsed ? 0 : outputWidth);
+  const outputMax = paneMax(inputCollapsed ? 0 : inputWidth);
+
   const inputPane = (collapsible: boolean) => (
     <DataPane
       title="Input"
-      collapsed={collapsible && panes.inputCollapsed}
-      onToggleCollapsed={
-        collapsible
-          ? () => {
-              setPanes((current) => ({ ...current, inputCollapsed: !current.inputCollapsed }));
-              commitPanes();
-            }
-          : undefined
-      }
+      collapsed={collapsible && inputCollapsed}
+      onToggleCollapsed={collapsible ? () => togglePane("inputCollapsed") : undefined}
     >
       {renderRunInput()}
     </DataPane>
@@ -9720,28 +9784,21 @@ export function NodeInspector({
   const outputPane = (collapsible: boolean) => (
     <DataPane
       title="Output"
-      collapsed={collapsible && panes.outputCollapsed}
-      onToggleCollapsed={
-        collapsible
-          ? () => {
-              setPanes((current) => ({ ...current, outputCollapsed: !current.outputCollapsed }));
-              commitPanes();
-            }
-          : undefined
-      }
+      collapsed={collapsible && outputCollapsed}
+      onToggleCollapsed={collapsible ? () => togglePane("outputCollapsed") : undefined}
       meta={currentNodePinned ? <span className="insp-pane-pinned">Pinned</span> : undefined}
       actions={pinMenuItems}
     >
-      {renderOutputTab({ inputBeside: collapsible && !panes.inputCollapsed })}
+      {renderOutputTab({ inputBeside: collapsible && !inputCollapsed })}
     </DataPane>
   );
 
   const splitColumns = [
-    panes.inputCollapsed ? "var(--insp-rail-w)" : `${panes.inputWidth}px`,
-    panes.inputCollapsed ? "0px" : "var(--insp-sep-w)",
-    "minmax(320px, 1fr)",
-    panes.outputCollapsed ? "0px" : "var(--insp-sep-w)",
-    panes.outputCollapsed ? "var(--insp-rail-w)" : `${panes.outputWidth}px`
+    inputCollapsed ? "var(--insp-rail-w)" : `${Math.min(inputWidth, inputMax)}px`,
+    inputCollapsed ? "0px" : "var(--insp-sep-w)",
+    `minmax(${MIDDLE_MIN_WIDTH}px, 1fr)`,
+    outputCollapsed ? "0px" : "var(--insp-sep-w)",
+    outputCollapsed ? "var(--insp-rail-w)" : `${Math.min(outputWidth, outputMax)}px`
   ].join(" ");
 
   return (
@@ -9773,7 +9830,11 @@ export function NodeInspector({
             onChange={(event) => setLabel(event.target.value)}
           />
           <div className="insp-sub">
-            <span title={`Node id: ${node.id}`}>{node.data.nodeType}</span>
+            <span>{node.data.nodeType}</span>
+            <span className="insp-node-id" title="Node id">
+              <span className="sr-only">Node id </span>
+              {node.id}
+            </span>
           </div>
         </div>
         <div className="insp-head-run">
@@ -9804,16 +9865,16 @@ export function NodeInspector({
       </header>
 
       {split ? (
-        <div className="insp-body insp-split-body" style={{ gridTemplateColumns: splitColumns }}>
+        <div ref={splitBodyRef} className="insp-body insp-split-body" style={{ gridTemplateColumns: splitColumns }}>
           {inputPane(true)}
-          {panes.inputCollapsed ? (
+          {inputCollapsed ? (
             <span aria-hidden="true" />
           ) : (
             <PaneSeparator
               label="Resize input"
-              value={panes.inputWidth}
+              value={Math.min(inputWidth, inputMax)}
               min={PANE_MIN_WIDTH}
-              max={PANE_MAX_WIDTH}
+              max={inputMax}
               direction={1}
               onChange={(next) => setPanes((current) => ({ ...current, inputWidth: next }))}
               onCommit={commitPanes}
@@ -9823,14 +9884,14 @@ export function NodeInspector({
             <div className="insp-tabbar">{tabBar}</div>
             <div className="insp-split-middle-body">{renderMiddle(middleTab)}</div>
           </div>
-          {panes.outputCollapsed ? (
+          {outputCollapsed ? (
             <span aria-hidden="true" />
           ) : (
             <PaneSeparator
               label="Resize output"
-              value={panes.outputWidth}
+              value={Math.min(outputWidth, outputMax)}
               min={PANE_MIN_WIDTH}
-              max={PANE_MAX_WIDTH}
+              max={outputMax}
               direction={-1}
               onChange={(next) => setPanes((current) => ({ ...current, outputWidth: next }))}
               onCommit={commitPanes}

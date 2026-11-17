@@ -2,10 +2,11 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Node } from "reactflow";
-import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import { nodeDefinitions, type WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNodeData } from "../lib/workflow";
 import * as api from "../lib/api";
-import { NodeInspector } from "./NodeConfigModal";
+import { NodeInspector, type NodeInspectorHandle } from "./NodeConfigModal";
+import { countSet } from "./InspectorDisclosure";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -108,16 +109,30 @@ describe("node inspector: calm by default", () => {
       "Input: view as",
       "Output: view as"
     ]);
-    // The node id moved to a tooltip; pinning moved to the Output menu.
-    expect(dialog.querySelector(".insp-sub")).toHaveTextContent(/^http_request$/);
+    // The type and node id are one quiet line; pinning moved to the Output menu.
+    expect(dialog.querySelector(".insp-sub")).toHaveTextContent(/^http_requestNode id fetch$/);
     expect(screen.queryByRole("button", { name: "Pin output" })).toBeNull();
   });
 
-  it("keeps the side-by-side layout for a node without run data, so the panel does not change shape", () => {
+  it("keeps the side-by-side layout for a node without run data, with the empty panes as rails", async () => {
+    const user = userEvent.setup();
     render(<NodeInspector {...props({ executionResult: null })} />);
     expect(screen.getByRole("dialog", { name: "Inspect Fetch orders" })).toHaveClass("insp-split");
-    expect(screen.getByRole("region", { name: "Output" })).toHaveTextContent(/No run yet for this node/);
     expect(screen.queryByTestId("run-data-status")).toBeNull();
+    expect(screen.getByRole("button", { name: "Show input" })).toHaveAttribute("aria-expanded", "false");
+    await user.click(screen.getByRole("button", { name: "Show output" }));
+    expect(screen.getByRole("region", { name: "Output" })).toHaveTextContent(/No run yet for this node/);
+    // Focus moves to the button that replaced the one clicked.
+    expect(screen.getByRole("button", { name: "Hide output" })).toHaveFocus();
+    // Opening an empty pane is not stored.
+    expect(window.localStorage.getItem("l2m:inspector-panes") ?? "").not.toContain('"outputCollapsed":true');
+  });
+
+  it("returns focus to the rail after hiding a pane", async () => {
+    const user = userEvent.setup();
+    render(<NodeInspector {...props()} />);
+    await user.click(screen.getByRole("button", { name: "Hide input" }));
+    expect(screen.getByRole("button", { name: "Show input" })).toHaveFocus();
   });
 
   it("puts node settings on a Settings tab, out of the parameter form", async () => {
@@ -285,4 +300,80 @@ describe("node inspector: calm by default", () => {
     expect(screen.getByRole("region", { name: "Output" })).toHaveTextContent("200");
     expect(screen.queryByRole("button", { name: "Hide output" })).toBeNull();
   });
+
+  it("a new node of any type shows no count on its Advanced sections", () => {
+    setWindowWidth(1600);
+    vi.mocked(api.fetchProviderModels).mockResolvedValue({ models: [] } as unknown as Awaited<ReturnType<typeof api.fetchProviderModels>>);
+    const counted: string[] = [];
+    for (const definition of nodeDefinitions) {
+      const { container, unmount } = render(
+        <NodeInspector {...props({ node: node("n", definition.type, structuredClone(definition.sampleConfig ?? {})), executionResult: null })} />
+      );
+      const counts = Array.from(container.querySelectorAll(".cfg-advanced-count")).map((element) => element.textContent);
+      if (counts.length > 0) counted.push(`${definition.type}: ${counts.join(", ")}`);
+      unmount();
+    }
+    expect(counted).toEqual([]);
+  });
+
+  it("opening an MCP Tool node does not count as an edit", () => {
+    setWindowWidth(1600);
+    const handle: { current: NodeInspectorHandle | null } = { current: null };
+    render(
+      <NodeInspector
+        {...props({
+          node: node("wiki", "mcp_tool", { serverId: "l2m-tools", toolName: "__all__", connection: { provider: "wikipedia" } }, "Wikipedia"),
+          executionResult: null,
+          controlRef: handle
+        })}
+      />
+    );
+    expect(handle.current?.isDirty()).toBe(false);
+    expect(screen.getByRole("button", { name: /Save changes/ })).not.toHaveAttribute("data-dirty");
+  });
 });
+
+describe("countSet", () => {
+  it("ignores empty values, defaults and the node's sample values", () => {
+    expect(countSet([[undefined, 1], [null, 1], ["  ", "x"], [[], ["a"]], [{}, { a: 1 }]])).toBe(0);
+    expect(countSet([["json ", "json"], [15000, 15000], [6, 4, 6]])).toBe(0);
+    expect(countSet([["xml", "json"], [7, 4, 6], [["a"], []]])).toBe(3);
+  });
+});
+
+describe("node inspector: fitting and reachable controls", () => {
+  afterEach(() => {
+    window.localStorage.clear();
+    setWindowWidth(originalWidth);
+  });
+
+  it("shrinks stored pane widths to fit, so the Output pane stays in view", () => {
+    setWindowWidth(1600);
+    window.localStorage.setItem(
+      "l2m:inspector-panes",
+      JSON.stringify({ inputWidth: 720, outputWidth: 720, inputCollapsed: false, outputCollapsed: false })
+    );
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 1000 });
+    try {
+      render(<NodeInspector {...props()} />);
+      // 1000 wide: 320 for Parameters and two 5 px separators leave 670 for the panes.
+      const input = screen.getByRole("separator", { name: "Resize input" });
+      const output = screen.getByRole("separator", { name: "Resize output" });
+      const total = Number(input.getAttribute("aria-valuenow")) + Number(output.getAttribute("aria-valuenow"));
+      expect(total).toBeLessThanOrEqual(670);
+      expect(Number(input.getAttribute("aria-valuemax"))).toBeLessThanOrEqual(670 - Number(output.getAttribute("aria-valuenow")));
+    } finally {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, "clientWidth", descriptor);
+    }
+  });
+
+  it("keeps a Code node's Test Run in view, with the test input folded", () => {
+    setWindowWidth(1600);
+    render(<NodeInspector {...props({ node: node("code", "code_node", { code: "return input;" }, "Code"), executionResult: null })} />);
+    expect(screen.getByRole("button", { name: "Test Run" })).toBeVisible();
+    expect(screen.getByTestId("code-test-input")).not.toHaveAttribute("open");
+    expect(screen.getByLabelText("Timeout (ms)")).not.toBeVisible();
+  });
+});
+

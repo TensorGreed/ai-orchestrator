@@ -26,6 +26,22 @@ const sortResult: RunNodeResult = {
 };
 
 describe("RunDataView", () => {
+  it("hides only the runtime's own keys; other keys that start with _ are data", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<RunDataView value={{ _id: "a1", _score: 2, name: "Ada", _telemetry: { ms: 3 } }} label="Output" />);
+    const rowNames = () => within(screen.getByRole("table")).getAllByRole("rowheader").map((cell) => cell.textContent);
+    expect(rowNames()).toEqual(["_id", "_score", "name"]);
+    await user.click(screen.getByRole("button", { name: "Show 1 internal field" }));
+    expect(rowNames()).toContain("_telemetry");
+    unmount();
+
+    render(<RunDataView value={[{ _id: 1, sku: "A", _branchHandle: "x" }]} label="Rows" />);
+    const headers = () => within(screen.getByRole("table")).getAllByRole("columnheader").map((cell) => cell.textContent);
+    expect(headers()).toEqual(["#", "_id", "sku"]);
+    await user.click(screen.getByRole("button", { name: "Show 1 internal field" }));
+    expect(headers()).toEqual(["#", "_id", "sku", "_branchHandle"]);
+  });
+
   it("shows arrays of records as a table and switches to JSON and schema", async () => {
     const user = userEvent.setup();
     render(<RunDataView value={[{ id: 1, sku: "A" }, { id: 2, sku: "B" }]} label="Output" />);

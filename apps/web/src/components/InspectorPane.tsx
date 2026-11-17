@@ -50,11 +50,23 @@ export function PaneMenu({ label, items }: { label: string; items: PaneMenuItem[
       close(true);
       return;
     }
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    if (event.key === "Tab") {
+      // Focus leaves the menu: close it, and let the Tab move focus on.
+      setOpen(false);
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     const buttons = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
     const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    const next = event.key === "ArrowDown" ? (index + 1) % buttons.length : (index - 1 + buttons.length) % buttons.length;
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? buttons.length - 1
+          : event.key === "ArrowDown"
+            ? (index + 1) % buttons.length
+            : (index - 1 + buttons.length) % buttons.length;
     buttons[next]?.focus();
   };
 
@@ -122,11 +134,25 @@ export function DataPane({ title, collapsed = false, onToggleCollapsed, meta, ac
   const view = useMemo<RunDataPaneView>(() => ({ mode, showInternal, setShowInternal }), [mode, showInternal]);
   const lower = title.toLowerCase();
   const side = title === "Input" ? "input" : "output";
+  // The button that was clicked unmounts on toggle: focus moves to the one that replaces it.
+  const toggleButtonRef = useRef<HTMLButtonElement | null>(null);
+  const refocusAfterToggle = useRef(false);
+  useEffect(() => {
+    if (!refocusAfterToggle.current) return;
+    refocusAfterToggle.current = false;
+    toggleButtonRef.current?.focus();
+  }, [collapsed]);
+  const toggle = onToggleCollapsed
+    ? () => {
+        refocusAfterToggle.current = true;
+        onToggleCollapsed();
+      }
+    : undefined;
 
-  if (collapsed && onToggleCollapsed) {
+  if (collapsed && toggle) {
     return (
       <section className={`insp-pane insp-pane-${side} collapsed`} aria-label={title}>
-        <button type="button" className="insp-pane-rail" onClick={onToggleCollapsed} aria-expanded={false} aria-label={`Show ${lower}`} title={`Show ${lower}`}>
+        <button ref={toggleButtonRef} type="button" className="insp-pane-rail" onClick={toggle} aria-expanded={false} aria-label={`Show ${lower}`} title={`Show ${lower}`}>
           <span>{title}</span>
         </button>
       </section>
@@ -151,11 +177,12 @@ export function DataPane({ title, collapsed = false, onToggleCollapsed, meta, ac
           ))}
         </div>
         <PaneMenu label={`${title} options`} items={[...viewItems, ...actions]} />
-        {onToggleCollapsed ? (
+        {toggle ? (
           <button
+            ref={toggleButtonRef}
             type="button"
             className="insp-icon-btn insp-pane-collapse"
-            onClick={onToggleCollapsed}
+            onClick={toggle}
             aria-expanded={true}
             aria-label={`Hide ${lower}`}
             title={`Hide ${lower}`}
@@ -193,17 +220,20 @@ export function PaneSeparator({
   const origin = useRef<{ x: number; width: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   const clamp = useCallback((next: number) => Math.round(Math.min(max, Math.max(min, next))), [max, min]);
+  // The callbacks change on every render; the drag listeners read the latest ones without subscribing again.
+  const latest = useRef({ onChange, onCommit, clamp });
+  latest.current = { onChange, onCommit, clamp };
 
   useEffect(() => {
     if (!dragging) return;
     const move = (event: PointerEvent) => {
       if (!origin.current) return;
-      onChange(clamp(origin.current.width + direction * (event.clientX - origin.current.x)));
+      latest.current.onChange(latest.current.clamp(origin.current.width + direction * (event.clientX - origin.current.x)));
     };
     const up = () => {
       setDragging(false);
       origin.current = null;
-      onCommit();
+      latest.current.onCommit();
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -219,7 +249,7 @@ export function PaneSeparator({
       document.body.style.cursor = previousCursor;
       document.body.style.userSelect = previousSelect;
     };
-  }, [clamp, direction, dragging, onChange, onCommit]);
+  }, [direction, dragging]);
 
   return (
     <div
@@ -238,6 +268,12 @@ export function PaneSeparator({
         setDragging(true);
       }}
       onKeyDown={(event) => {
+        if (event.key === "Home" || event.key === "End") {
+          event.preventDefault();
+          onChange(event.key === "Home" ? min : max);
+          onCommit();
+          return;
+        }
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         event.preventDefault();
         const step = event.shiftKey ? 64 : 16;

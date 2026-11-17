@@ -39,7 +39,7 @@ Double-click a node to open it. On a wide window the inspector shows **Input | P
 for every node, so it keeps its shape while you move between nodes; on a narrow window the same parts are tabs
 (the layout button in the header switches between the two, and the choice is remembered in this browser).
 
-- **The header** holds the node's name (edit it in place), its type (the node id is in the tooltip), the node's run
+- **The header** holds the node's name (edit it in place), its type and node id, the node's run
   status with its item count and duration, **Previous** / **Next** step buttons and **Run node**. The status shows
   only here.
 - **Input** is what the node received: one section per upstream node (**From** and the node's name), then the run's own
@@ -48,15 +48,19 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
 - **Output** shows the data, or the error with a suggested fix when the node failed (in the tab layout the input it
   failed on is repeated under it).
 - Each data pane has one **Table / JSON** switch. Its **⋯** menu holds the **Schema** view, **Show internal fields**
-  (fields whose name starts with `_`, such as `_telemetry`, are left out of tables until you ask; JSON always shows
-  them) and, on Output, **Pin output** / **Unpin output**.
+  (the run's own bookkeeping fields, such as `_telemetry` and `_branchHandle`, are left out of tables until you ask;
+  JSON always shows them; your data's own fields, such as `_id`, always show) and, on Output, **Pin output** /
+  **Unpin output**.
 - Hide a data pane with the arrow in its header (it becomes a thin rail; click it to bring the pane back) and drag the
-  line between panes, or focus it and use the arrow keys, to resize. Both are remembered.
+  line between panes, or focus it and use the arrow keys, to resize. Both are remembered. The panes give way when the
+  window is narrow, so the parameters and the Output pane stay in view. Before a node has run, its empty Input and
+  Output panes start as rails so the parameters get the room.
 - **Parameters** shows the fields you set most. A node type's rarely used fields (for example an HTTP request's
   headers, body and timeout, a model's temperature and max tokens, an agent's iteration and tool output limits, a
   content rules node's approval settings) are under **Advanced**, closed by default; its title counts the fields
-  that differ from their defaults. Help for a field is behind the **?** next to its label, and the expression
-  helpers and preview under a template field show while you edit it.
+  that differ from their defaults. Help for a field is behind the **?** next to its label. The expression helpers
+  under a template field show while you edit it, and its preview shows when the result differs from what you typed
+  (or the expression has an error). A code node's **Test Run** stays in view, with its test input folded under it.
 - **Settings** holds what every node has: disabled, accent colour, error handling (retries, delay, on error), input
   mapping and data labels. A dot on the tab means one of them differs from the default.
 - **Trace** shows timing, token use, the agent's activity and tool policy decisions for the run.

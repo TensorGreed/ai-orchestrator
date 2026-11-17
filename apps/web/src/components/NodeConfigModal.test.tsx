@@ -133,7 +133,7 @@ describe("NodeInspector", () => {
     expect(drawer.querySelector(".node-modal-backdrop")).toBeNull();
     expect(screen.getByLabelText("Node name")).toHaveValue("User Prompt");
     expect(drawer.querySelector(".insp-sub")).toHaveTextContent("user_prompt");
-    expect(drawer.querySelector(".insp-sub span")).toHaveAttribute("title", "Node id: node-1");
+    expect(drawer.querySelector(".insp-node-id")).toHaveTextContent("Node id node-1");
     expect(screen.getByRole("button", { name: "Run node" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Parameters" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Input", "Parameters", "Output", "Settings", "Trace"]);
