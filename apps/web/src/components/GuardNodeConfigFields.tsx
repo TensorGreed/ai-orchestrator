@@ -41,7 +41,7 @@ export const PROTECTION_PROVIDERS: Array<{ value: string; label: string; needsKe
     value: "placeholder",
     label: "Readable placeholder",
     needsKey: false,
-    help: "Swaps each value for a numbered placeholder such as [EMAIL_1]; the same value keeps its placeholder for the whole run. A Reveal node later in the same run can turn placeholders back as its reveal rules allow; the map is kept sealed and expires."
+    help: "Swaps each value for a numbered placeholder such as [EMAIL_1.K3F9QX] (the tag after the dot is random per run); the same value keeps its placeholder for the whole run. A Reveal node later in the same run can turn placeholders back as its reveal rules allow; the map is kept sealed and expires."
   }
 ];
 

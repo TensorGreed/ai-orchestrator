@@ -57,7 +57,8 @@ import {
   mcpServerDestinationRef,
   credentialRotateBodySchema,
   KEY_ROTATION_GRACE_HOURS,
-  CONTENT_RULES_TOOLS_ADAPTER_ID
+  CONTENT_RULES_TOOLS_ADAPTER_ID,
+  CONTENT_RULES_TOOLS_SERVER_LABEL
 } from "@ai-orchestrator/shared";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { createMcpSamplingHandler, referencesSecretIn, type GuardRunResolution } from "@ai-orchestrator/workflow-engine";
@@ -1973,9 +1974,57 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     toolset: McpToolset,
     tool: GatewayContentRulesTool,
     args: Record<string, unknown>,
-    request: JsonRpcRequest
+    request: JsonRpcRequest,
+    callLabels?: DataLabels
   ): Promise<JsonRpcResponse> => {
     if (!deps.contentRulesTools) return rpcResult(request.id, toolError("Content rules tools are not available on this deployment."));
+    // The tool policy with the call's arguments and the session's labels (the catalog decided without them). A
+    // require_approval rule refuses the call: approvals are kept per registered server, which these tools are not.
+    const rules = await store.listMcpToolPolicies();
+    if (rules.length > 0) {
+      const decision = evaluateToolForContext(
+        {
+          rules,
+          classifications: [],
+          role: auth.subject.role,
+          projectId: toolset.projectId ?? null,
+          adapterId: CONTENT_RULES_TOOLS_ADAPTER_ID,
+          serverLabel: CONTENT_RULES_TOOLS_SERVER_LABEL,
+          clientId: auth.client.id,
+          toolsetId: toolset.id
+        },
+        { name: tool.tool, annotations: tool.annotations },
+        "tool",
+        { arguments: args, ...(callLabels ? { dataLabels: policyCallLabels(callLabels) } : {}) }
+      );
+      const refusal = !decision.allowed
+        ? (decision.message ?? `MCP tool '${tool.tool}' is blocked by policy.`)
+        : decision.approval
+          ? `MCP tool '${tool.tool}' needs an approval under rule ${decision.approval.ruleName ?? decision.approval.ruleId}; content rules tools cannot wait for one.`
+          : null;
+      if (refusal) {
+        await deps.auditRaw({
+          category: "system",
+          actor: { type: "api_key", email: auth.client.name },
+          resourceType: "mcp_toolset",
+          resourceId: toolset.id,
+          projectId: toolset.projectId,
+          eventType: "mcp_gateway.tool_denied",
+          action: "execute",
+          outcome: "denied",
+          metadata: {
+            tool: tool.name,
+            adapterId: CONTENT_RULES_TOOLS_ADAPTER_ID,
+            clientId: auth.client.id,
+            role: auth.subject.role,
+            argsHash: gatewayArgsHash(args),
+            ...(decision.ruleId ? { ruleId: decision.ruleId } : decision.approval ? { ruleId: decision.approval.ruleId } : {}),
+            ...scopeMetadata(session)
+          }
+        });
+        return rpcResult(request.id, toolError(refusal));
+      }
+    }
     const callExecutionId = `mcpgw_${crypto.randomUUID()}`;
     let outcome: Awaited<ReturnType<ContentRulesToolsService["call"]>>;
     try {
@@ -2073,7 +2122,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return rpcResult(request.id, toolError(error.message));
     }
     // The built-in content rules tools: their own rule events and audit; the toolset's rule sets do not check them.
-    if (tool.kind === "content_rules") return await callContentRulesTool(session, auth, toolset, tool, args, request);
+    if (tool.kind === "content_rules") return await callContentRulesTool(session, auth, toolset, tool, args, request, callLabels);
 
     // 12.6 — the toolset's and client's Guard profiles. A failed read refuses the call: it may have a binding.
     let guardStack: GatewayGuardStackForCall | undefined;
@@ -3284,6 +3333,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid toolset member", details: parsed.error.issues };
+    }
+    if (parsed.data.kind === "content_rules" && existing.members.some((member) => member.kind === "content_rules")) {
+      reply.code(400);
+      return { error: "This toolset already offers the content rules tools; edit that member instead." };
     }
     const added = await validateMembers([parsed.data], reply);
     if (!added) return reply;

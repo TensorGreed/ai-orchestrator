@@ -197,12 +197,12 @@ async function eventsAndAudit(store: Store): Promise<string> {
 }
 
 describe("content rules tools on the MCP gateway", () => {
-  it("are listed only on a toolset with the content_rules member, with read-only hints on detect and redact", async () => {
+  it("are listed only on a toolset with the content_rules member, with a read-only hint on detect only", async () => {
     const fixture = await setup();
     const listed = await tools(fixture).list();
     expect(listed.map((tool) => tool.name).sort()).toEqual(["detect_sensitive_data", "redact_sensitive_data", "restore_sensitive_data"]);
     expect(listed.find((tool) => tool.name === "detect_sensitive_data")?.annotations).toMatchObject({ readOnlyHint: true });
-    expect(listed.find((tool) => tool.name === "redact_sensitive_data")?.annotations).toMatchObject({ readOnlyHint: true });
+    expect(listed.find((tool) => tool.name === "redact_sensitive_data")?.annotations).toMatchObject({ readOnlyHint: false });
     expect(listed.find((tool) => tool.name === "restore_sensitive_data")?.annotations).toMatchObject({ readOnlyHint: false });
     expect(await tools(fixture, "client", fixture.plain).list()).toEqual([]);
     // The admin view names the member and its rule set; a second member is refused.
@@ -212,6 +212,8 @@ describe("content rules tools on the MCP gateway", () => {
     expect(twice.statusCode).toBe(400);
     const missing = await caller(fixture.context)(fixture.admin, "PUT", `/api/mcp/toolsets/${fixture.plain.id}`, { members: [{ kind: "content_rules", ruleSetId: "nope" }] });
     expect(missing.statusCode).toBe(400);
+    const added = await caller(fixture.context)(fixture.admin, "POST", `/api/mcp/toolsets/${fixture.toolset.id}/members`, { kind: "content_rules" });
+    expect(added.statusCode).toBe(400);
     // Only admins change toolsets.
     const builder = await login(fixture.context, "builder");
     expect((await caller(fixture.context)(builder, "PUT", `/api/mcp/toolsets/${fixture.plain.id}`, { members: [{ kind: "content_rules" }] })).statusCode).toBe(403);
@@ -236,7 +238,11 @@ describe("content rules tools on the MCP gateway", () => {
     expect(allowed.data.inputs[0].riskLevel).toBe("none");
     // A JSON value: paths, never value-like keys.
     const value = await client.call("detect_sensitive_data", { value: { customer: { contact: EMAIL }, [EMAIL]: "x" } });
-    expect(value.data.inputs[0].findings).toEqual([expect.objectContaining({ dataClass: "email", path: "$.customer.contact" })]);
+    // Keys are scanned too, by position: the value-like key never appears in a path.
+    expect(value.data.inputs[0].findings).toEqual([
+      expect.objectContaining({ dataClass: "email", path: "$.customer.contact" }),
+      expect.objectContaining({ dataClass: "email", path: "${#1}{key}" })
+    ]);
     // Bad input and an unavailable rule set are tool errors.
     expect((await client.call("detect_sensitive_data", { text: "a", texts: ["b"] })).error).toBe(true);
     expect((await client.call("detect_sensitive_data", { text: "a", rule_set_id: "default" })).text).toMatch(/not available to this toolset/);
@@ -324,10 +330,16 @@ describe("content rules tools on the MCP gateway", () => {
     const tokenized = await client.call("redact_sensitive_data", { text: `Mail ${EMAIL}`, style: "token" });
     expect(tokenized.data.redacted).toMatch(/^Mail tok_email_[A-Za-z0-9_-]{16}$/);
     expect(tokenized.data.redaction_id).toMatch(/^red_/);
-    expect((await client.call("restore_sensitive_data", { text: tokenized.data.redacted })).data.restored).toBe(`Mail ${EMAIL}`);
+    expect((await client.call("restore_sensitive_data", { text: tokenized.data.redacted, redaction_id: tokenized.data.redaction_id })).data.restored).toBe(`Mail ${EMAIL}`);
+    // Without its redaction, or through another redaction of the same client, a token stays a token.
+    const bare = await client.call("restore_sensitive_data", { text: tokenized.data.redacted });
+    expect(bare.data.restored).toBe(tokenized.data.redacted);
+    expect(bare.data.withheld).toEqual([expect.objectContaining({ reason: "unknown_token" })]);
+    const placeholderRedaction = await client.call("redact_sensitive_data", { text: `Other ${EMAIL}` });
+    const borrowed = await client.call("restore_sensitive_data", { text: tokenized.data.redacted, redaction_id: placeholderRedaction.data.redaction_id });
+    expect(borrowed.data.restored).toBe(tokenized.data.redacted);
     const otherProject = await tools(fixture, "outsider").call("restore_sensitive_data", { text: tokenized.data.redacted });
     expect(otherProject.data.restored).toBe(tokenized.data.redacted);
-    expect(otherProject.data.withheld).toEqual([expect.objectContaining({ dataClass: "email", reason: "other_project" })]);
 
     const masked = await client.call("redact_sensitive_data", { value: { a: [`Mail ${EMAIL}`] }, style: "mask" });
     expect(masked.data.redacted).toEqual({ a: ["Mail j•••••••@e••••••.com"] });
@@ -350,5 +362,57 @@ describe("content rules tools on the MCP gateway", () => {
     const restored = await client.call("restore_sensitive_data", { text: redacted.data.redacted, redaction_id: redacted.data.redaction_id });
     expect(restored.data.restored).toBe("Mail [EMAIL_1]");
     expect(restored.data.withheld).toEqual([expect.objectContaining({ dataClass: "email", reason: "no_rule" })]);
+  });
+
+  it("applies tool rules with the call's arguments: deny by condition, and refuse rules that ask for approval", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    const deny = await call(fixture.admin, "POST", "/api/mcp/policies", {
+      effect: "deny",
+      serverId: "l2m-content-rules",
+      toolPattern: "redact_sensitive_data",
+      conditions: { all: [{ path: "style", op: "equals", value: "mask" }] }
+    });
+    expect(deny.statusCode, deny.body).toBe(201);
+    const approval = await call(fixture.admin, "POST", "/api/mcp/policies", { effect: "require_approval", serverId: "l2m-content-rules", toolPattern: "restore_sensitive_data" });
+    expect(approval.statusCode, approval.body).toBe(201);
+    const client = tools(fixture);
+    expect((await client.call("redact_sensitive_data", { text: EMAIL, style: "mask" })).error).toBe(true);
+    expect((await client.call("redact_sensitive_data", { text: EMAIL })).error).toBe(false);
+    const restore = await client.call("restore_sensitive_data", { text: "[EMAIL_1]" });
+    expect(restore.error).toBe(true);
+    expect(restore.text).toMatch(/needs an approval/);
+    const sql = testSql(fixture.context.store);
+    expect(Number((await sql.get<{ n: number }>("SELECT COUNT(*) AS n FROM audit_logs WHERE event_type = 'mcp_gateway.tool_denied'"))?.n)).toBe(2);
+  });
+
+  it("audits refused restores, refuses sensitive keys and deep values, and keeps one rule event per data class", async () => {
+    const fixture = await setup();
+    const client = tools(fixture);
+    const guessed = await client.call("restore_sensitive_data", { text: "[EMAIL_1]", redaction_id: "red_aaaaaaaaaaaaaaaaaaaaaaaa" });
+    expect(guessed.text).toBe("Unknown or expired redaction_id");
+    const sql = testSql(fixture.context.store);
+    const audit = await sql.all<{ outcome: string; metadata_json?: string }>("SELECT * FROM audit_logs WHERE event_type = 'mcp_gateway.content_restore'");
+    expect(audit).toHaveLength(1);
+    expect(JSON.stringify(audit)).toContain("unknown_redaction");
+    expect(JSON.stringify(audit)).not.toContain("red_aaaaaaaaaaaaaaaaaaaaaaaa");
+
+    const keyed = await client.call("redact_sensitive_data", { value: { [EMAIL]: "contact" } });
+    expect(keyed.error).toBe(true);
+    expect(keyed.text).toMatch(/object key holds sensitive data/);
+    expect(keyed.text).not.toContain(EMAIL);
+    expect((await client.call("detect_sensitive_data", { value: { [EMAIL]: "contact" } })).data.inputs[0].findings).toEqual([expect.objectContaining({ dataClass: "email", path: "${#0}{key}" })]);
+    let deep: unknown = EMAIL;
+    for (let i = 0; i < 40; i += 1) deep = { a: deep };
+    expect((await client.call("redact_sensitive_data", { value: deep })).text).toMatch(/nested deeper/);
+
+    const many = Array.from({ length: 50 }, (_, index) => `user${index}@example.org`).join(" ");
+    await client.call("detect_sensitive_data", { text: many });
+    const rows = await sql.all<{ verdict_id: string; data_class: string }>("SELECT verdict_id, data_class FROM guard_events WHERE node_id = 'detect_sensitive_data'");
+    const perVerdict = new Map<string, string[]>();
+    for (const row of rows) perVerdict.set(row.verdict_id, [...(perVerdict.get(row.verdict_id) ?? []), row.data_class]);
+    // Each call: one event per data class, however many findings (50 emails here).
+    for (const classes of perVerdict.values()) expect(new Set(classes).size).toBe(classes.length);
+    expect(rows.length).toBe(perVerdict.size);
   });
 });

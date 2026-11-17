@@ -33,6 +33,7 @@ import {
 import { createDefaultEmbeddingRegistry, createDefaultProviderRegistry, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
+  CONTENT_RULES_TOOLS_ADAPTER_ID,
   MCP_POLICY_ROLES,
   mcpOAuthConnectSchema,
   DEFAULT_PROJECT_ID,
@@ -14361,7 +14362,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: `Project '${input.projectId}' does not exist` };
     }
-    if (input.serverId && !await store.getMcpServer(input.serverId) && !mcpRegistry.tryGet(input.serverId)) {
+    // The gateway's content rules tools have their own adapter id (no registry entry).
+    if (input.serverId && input.serverId !== CONTENT_RULES_TOOLS_ADAPTER_ID && !await store.getMcpServer(input.serverId) && !mcpRegistry.tryGet(input.serverId)) {
       reply.code(400);
       return { error: `'${input.serverId}' is neither a registered MCP server nor an MCP adapter id` };
     }

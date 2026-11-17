@@ -11,12 +11,23 @@ export const PLACEHOLDER_PROVIDER_ID = "placeholder";
  *   same class always gets the same placeholder;
  * - placeholders already in the text being rewritten are reserved (never handed out by that book), so a
  *   `[EMAIL_1]` someone typed is never mistaken for one the book issued, and restoring never replaces it;
+ * - a book may carry a tag (`[EMAIL_1.K3F9QX]`): a workflow run's book does, so text that reaches the run from
+ *   outside cannot name a placeholder the book hands out later (nobody outside the run knows the tag);
  * - a book persisted server-side makes placeholders reversible (the restore tool, a Reveal node in the same run);
  *   an in-memory book lasts one check, so its placeholders read well but cannot be turned back.
  */
 
-/** Matches a placeholder anywhere: an upper-case label, an underscore and a number, in square brackets. */
-export const PLACEHOLDER_PATTERN = /\[[A-Z0-9_]{1,64}_\d{1,6}\]/g;
+/**
+ * Matches a placeholder anywhere: an upper-case label, an underscore and a number, and a book's optional tag after a
+ * dot, in square brackets (`[EMAIL_1]`, `[EMAIL_1.K3F9QX]`).
+ */
+export const PLACEHOLDER_PATTERN = /\[[A-Z0-9_]{1,64}_\d{1,6}(?:\.[A-Z2-7]{6})?\]/g;
+
+/** A random book tag: 6 base32 characters (30 bits). */
+export function newPlaceholderTag(random: (size: number) => Uint8Array): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  return [...random(6)].map((byte) => alphabet[byte % 32]).join("");
+}
 
 /** At most this many placeholders per data class in one book. */
 export const MAX_PLACEHOLDERS_PER_CLASS = 999_999;
@@ -57,6 +68,8 @@ export interface PlaceholderBookState {
   entries: PlaceholderEntry[];
   /** Placeholders seen in rewritten text that the book did not issue: never handed out. */
   reserved: string[];
+  /** The book's tag, in every placeholder it issues; absent: plain `[EMAIL_1]`. */
+  tag?: string;
 }
 
 /**
@@ -68,8 +81,10 @@ export class InMemoryPlaceholderBook implements PlaceholderBook {
   private readonly byPlaceholder = new Map<string, PlaceholderEntry>();
   private readonly reservedSet = new Set<string>();
   private readonly counters = new Map<string, number>();
+  private readonly tag: string | undefined;
 
   constructor(state?: PlaceholderBookState) {
+    this.tag = state?.tag && /^[A-Z2-7]{6}$/.test(state.tag) ? state.tag : undefined;
     for (const entry of state?.entries ?? []) this.remember(entry);
     for (const placeholder of state?.reserved ?? []) this.reservedSet.add(placeholder);
   }
@@ -95,7 +110,7 @@ export class InMemoryPlaceholderBook implements PlaceholderBook {
     do {
       next += 1;
       if (next > MAX_PLACEHOLDERS_PER_CLASS) throw new GuardProtectionError(PLACEHOLDER_PROVIDER_ID, `More than ${MAX_PLACEHOLDERS_PER_CLASS} placeholders for one data class`);
-      placeholder = `[${label}_${next}]`;
+      placeholder = `[${label}_${next}${this.tag ? `.${this.tag}` : ""}]`;
     } while (this.byPlaceholder.has(placeholder) || this.reservedSet.has(placeholder));
     this.counters.set(label, next);
     this.remember({ placeholder, dataClass, value });
@@ -116,7 +131,11 @@ export class InMemoryPlaceholderBook implements PlaceholderBook {
   }
 
   state(): PlaceholderBookState {
-    return { entries: [...this.byPlaceholder.values()].map((entry) => ({ ...entry })), reserved: [...this.reservedSet].sort() };
+    return {
+      entries: [...this.byPlaceholder.values()].map((entry) => ({ ...entry })),
+      reserved: [...this.reservedSet].sort(),
+      ...(this.tag ? { tag: this.tag } : {})
+    };
   }
 }
 

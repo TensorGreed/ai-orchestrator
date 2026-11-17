@@ -174,7 +174,8 @@ export async function buildGatewayCatalog(input: {
       if (contentRulesAdded) continue;
       contentRulesAdded = true;
       for (const name of CONTENT_RULES_TOOL_LIST) {
-        const readOnly = name !== "restore_sensitive_data";
+        // Only detect is read-only: redact keeps a sealed map (and vault tokens), restore gives values back.
+        const readOnly = name === "detect_sensitive_data";
         const annotations: McpToolAnnotations = { readOnlyHint: readOnly, destructiveHint: false, idempotentHint: readOnly, openWorldHint: false };
         const decision = evaluateToolForContext(
           {

@@ -5,10 +5,11 @@
  * counts and class names. Nothing here logs or returns a value.
  */
 
-import { InMemoryPlaceholderBook, type GuardDataClass, type PlaceholderBook, type PlaceholderBookState } from "@ai-orchestrator/guard-sdk";
+import { randomBytes } from "node:crypto";
+import { InMemoryPlaceholderBook, newPlaceholderTag, type GuardDataClass, type PlaceholderBook, type PlaceholderBookState } from "@ai-orchestrator/guard-sdk";
 import type { ContentRedactionRecord, ContentRedactionScope, ContentRedactionStore } from "../db/content-redaction-store.js";
 
-/** The purpose a map is sealed under (db-shared.ts SEALED_COLUMNS re-seals it on import). */
+/** The purpose a map is sealed under. The table is not exported (db-shared.ts NOT_EXPORTED_TABLES), so no re-seal. */
 export const CONTENT_REDACTION_PURPOSE = "content-redaction-map";
 
 export interface ContentRedactionSealer {
@@ -34,7 +35,8 @@ export function openRedactionMap(sealer: ContentRedactionSealer, sealed: string)
   return {
     book: {
       entries: Array.isArray(book.entries) ? book.entries.filter((entry) => typeof entry?.placeholder === "string" && typeof entry.value === "string" && typeof entry.dataClass === "string") : [],
-      reserved: Array.isArray(book.reserved) ? book.reserved.filter((entry): entry is string => typeof entry === "string") : []
+      reserved: Array.isArray(book.reserved) ? book.reserved.filter((entry): entry is string => typeof entry === "string") : [],
+      ...(typeof book.tag === "string" ? { tag: book.tag } : {})
     },
     tokens: Array.isArray(parsed.tokens) ? parsed.tokens.filter((entry) => typeof entry?.token === "string" && typeof entry.dataClass === "string") : []
   };
@@ -83,7 +85,8 @@ export async function storeRedactionMap(
  */
 export class PersistedPlaceholderBook implements PlaceholderBook {
   private inner: InMemoryPlaceholderBook | undefined;
-  private saved: PlaceholderBookState = { entries: [], reserved: [] };
+  /** A new book gets a random tag, so placeholders from outside the run never match the ones it issues. */
+  private saved: PlaceholderBookState = { entries: [], reserved: [], tag: newPlaceholderTag((size) => new Uint8Array(randomBytes(size))) };
   private createdAt: string | undefined;
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -110,8 +113,8 @@ export class PersistedPlaceholderBook implements PlaceholderBook {
         this.saved = openRedactionMap(this.sealer, row.entriesSealed).book;
         this.createdAt = row.createdAt;
       } catch {
-        // Sealed under another master key or damaged: its placeholders cannot be turned back, and a new one starts.
-        this.saved = { entries: [], reserved: [] };
+        // Sealed under another master key or damaged: its placeholders cannot be turned back, and a new one starts
+        // (with the fresh tag, so the old placeholders are never reissued).
       }
     }
     this.inner = new InMemoryPlaceholderBook(this.saved);

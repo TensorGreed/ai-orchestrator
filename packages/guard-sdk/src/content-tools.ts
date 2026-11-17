@@ -118,13 +118,23 @@ export function scanSensitiveText(text: string, settings: SensitiveScanSettings,
   };
 }
 
-/** Where a string sits in a JSON value: `$`, `$[0]`, `$.a.b`. */
+/** Where a string sits in a JSON value: `$`, `$[0]`, `$.a.b`; an object key's own text has `{key}` after its path. */
 export interface SensitiveStringRef {
   path: string;
   text: string;
+  /** The text is an object key (scanned, never rewritten). */
+  key?: boolean;
 }
 
 export const MAX_SCANNED_DEPTH = 32;
+
+/** A JSON value nested deeper than MAX_SCANNED_DEPTH: refused rather than passed through unscanned. */
+export class JsonTooDeepError extends Error {
+  constructor() {
+    super(`The value is nested deeper than ${MAX_SCANNED_DEPTH} levels`);
+    this.name = "JsonTooDeepError";
+  }
+}
 
 /**
  * The path of an object member: `.name` for a plain identifier key, else `{#n}` (the member's position), so a key that
@@ -134,19 +144,22 @@ function childPath(path: string, key: string, index: number): string {
   return /^[A-Za-z_$][\w$]{0,63}$/.test(key) ? `${path}.${key}` : `${path}{#${index}}`;
 }
 
-/** Strings in a JSON value with their paths (object keys are not scanned), depth-limited. */
+/** Strings in a JSON value with their paths, object keys included (marked `key`). Throws JsonTooDeepError past the depth limit. */
 export function stringsIn(value: unknown, path = "$", depth = 0, out: SensitiveStringRef[] = []): SensitiveStringRef[] {
   if (typeof value === "string") {
     out.push({ path, text: value });
     return out;
   }
-  if (depth >= MAX_SCANNED_DEPTH || !value || typeof value !== "object") return out;
+  if (!value || typeof value !== "object") return out;
+  if (depth >= MAX_SCANNED_DEPTH) throw new JsonTooDeepError();
   if (Array.isArray(value)) {
     value.forEach((item, index) => stringsIn(item, `${path}[${index}]`, depth + 1, out));
     return out;
   }
   for (const [index, [key, item]] of Object.entries(value as Record<string, unknown>).entries()) {
-    stringsIn(item, childPath(path, key, index), depth + 1, out);
+    const memberPath = childPath(path, key, index);
+    out.push({ path: `${memberPath}{key}`, text: key, key: true });
+    stringsIn(item, memberPath, depth + 1, out);
   }
   return out;
 }
@@ -154,7 +167,8 @@ export function stringsIn(value: unknown, path = "$", depth = 0, out: SensitiveS
 /** A JSON value with each string replaced by `rewrite(string, path)` (same shape; keys untouched). */
 export async function mapStrings(value: unknown, rewrite: (text: string, path: string) => Promise<string>, path = "$", depth = 0): Promise<unknown> {
   if (typeof value === "string") return await rewrite(value, path);
-  if (depth >= MAX_SCANNED_DEPTH || !value || typeof value !== "object") return value;
+  if (!value || typeof value !== "object") return value;
+  if (depth >= MAX_SCANNED_DEPTH) throw new JsonTooDeepError();
   if (Array.isArray(value)) {
     const next: unknown[] = [];
     for (const [index, item] of value.entries()) next.push(await mapStrings(item, rewrite, `${path}[${index}]`, depth + 1));

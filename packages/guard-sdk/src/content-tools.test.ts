@@ -46,10 +46,24 @@ describe("allow-list", () => {
     expect(list.allows("alice@company.com")).toBe(false);
   });
 
-  it("matches long inputs against many stars in linear time", () => {
-    const list = compileAllowList({ patterns: ["*a*a*a*a*a*a*a*a*b"] });
+  it("matches globs by their segments, anchored where the pattern has no star", () => {
+    const list = compileAllowList({ patterns: ["*@example.com", "test-??@acme.*", "a*b*c", "*"] });
+    expect(compileAllowList({ patterns: ["*@example.com"] }).allows("ana@example.com")).toBe(true);
+    expect(compileAllowList({ patterns: ["*@example.com"] }).allows("ana@example.community")).toBe(false);
+    expect(compileAllowList({ patterns: ["test-??@acme.*"] }).allows("test-01@acme.io")).toBe(true);
+    expect(compileAllowList({ patterns: ["test-??@acme.*"] }).allows("test-1@acme.io")).toBe(false);
+    expect(compileAllowList({ patterns: ["a*b*c"] }).allows("axxbyyc")).toBe(true);
+    expect(compileAllowList({ patterns: ["a*b*c"] }).allows("axxcyyb")).toBe(false);
+    expect(compileAllowList({ patterns: ["ab*ba"] }).allows("aba")).toBe(false);
+    expect(list.allows("anything")).toBe(true);
+  });
+
+  it("stays fast on adversarial patterns and long findings", () => {
+    const patterns = Array.from({ length: 100 }, (_, index) => `*${"a".repeat(250)}${index}`);
+    const list = compileAllowList({ patterns });
     const started = performance.now();
-    expect(list.allows("a".repeat(20_000))).toBe(false);
+    expect(list.allows("a".repeat(200_000))).toBe(false);
+    for (let i = 0; i < 200; i += 1) expect(list.allows(`${"a".repeat(500)}b${i}`)).toBe(false);
     expect(performance.now() - started).toBeLessThan(2000);
   });
 
@@ -109,7 +123,12 @@ describe("scanSensitiveText", () => {
 
   it("walks JSON values without putting value-like keys in paths", async () => {
     const value = { a: ["x", { b: "y" }], "bob@example.com": "z", n: 3 };
-    expect(stringsIn(value).map((ref) => ref.path)).toEqual(["$.a[0]", "$.a[1].b", "${#1}"]);
+    expect(stringsIn(value).map((ref) => ref.path)).toEqual(["$.a{key}", "$.a[0]", "$.a[1].b{key}", "$.a[1].b", "${#1}{key}", "${#1}", "$.n{key}"]);
+    expect(stringsIn(value).find((ref) => ref.path === "${#1}{key}")).toEqual({ path: "${#1}{key}", text: "bob@example.com", key: true });
+    let deep: unknown = "x";
+    for (let i = 0; i < 40; i += 1) deep = [deep];
+    expect(() => stringsIn(deep)).toThrow(/nested deeper/);
+    await expect(mapStrings(deep, async (text) => text)).rejects.toThrow(/nested deeper/);
     const rewritten = await mapStrings({ ...value, ["__proto__"]: "p" }, async (text) => text.toUpperCase());
     expect(rewritten).toMatchObject({ a: ["X", { b: "Y" }], "bob@example.com": "Z", n: 3 });
     expect(Object.getPrototypeOf(rewritten)).toBe(Object.prototype);

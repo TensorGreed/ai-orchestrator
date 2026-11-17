@@ -30,6 +30,7 @@ import {
   scanSensitiveText,
   sensitiveScanSettingsOf,
   stringsIn,
+  JsonTooDeepError,
   type DlpMatch,
   type RevealRule,
   type RiskLevel,
@@ -119,6 +120,9 @@ export function deriveContentHashKey(masterKey: Uint8Array, projectScope: string
   return new Uint8Array(hkdfSync("sha256", masterKey, new Uint8Array(0), `l2m/content-rules-hash/v1\u0000${projectScope}`, 32));
 }
 
+/** Masked previews a rule event keeps per data class. */
+const EVENT_SAMPLES = 5;
+
 const BUILT_IN_REF = { profileId: GUARD_BUILTIN_PROFILE_ID, version: 0, hash: "" };
 
 function countsOf(findings: ReadonlyArray<{ dataClass: string }>): Record<string, number> {
@@ -196,7 +200,16 @@ export class ContentRulesToolsService {
     let inputs: Array<{ index: number; strings: Array<{ path?: string; text: string }> }>;
     if (args.text !== undefined) inputs = [{ index: 0, strings: [{ text: args.text }] }];
     else if (args.texts !== undefined) inputs = args.texts.map((text, index) => ({ index, strings: [{ text }] }));
-    else inputs = [{ index: 0, strings: stringsIn(args.value).map((ref) => ({ path: ref.path, text: ref.text })) }];
+    else {
+      let refs: ReturnType<typeof stringsIn>;
+      try {
+        refs = stringsIn(args.value);
+      } catch (error) {
+        if (error instanceof JsonTooDeepError) throw new ContentToolError(error.message);
+        throw error;
+      }
+      inputs = [{ index: 0, strings: refs.map((ref) => ({ path: ref.path, text: ref.text })) }];
+    }
     const total = inputs.reduce((sum, input) => sum + input.strings.reduce((chars, entry) => chars + entry.text.length, 0), 0);
     if (total > CONTENT_TOOLS_MAX_CHARS) throw new ContentToolError(`The input holds ${total} characters; the limit is ${CONTENT_TOOLS_MAX_CHARS}`);
     return inputs;
@@ -242,46 +255,56 @@ export class ContentRulesToolsService {
   // ---------------------------------------------------------------------------
 
   /** One rule event per finding, with masked evidence only. */
+  /** One rule event per data class per call (highest score, count, up to EVENT_SAMPLES masked previews): bounded rows. */
   private findingRows(call: ContentToolCall, scanned: ScannedInput[], ruleSet: ResolvedGuardProfile | null, action: string): GuardEventInsert[] {
     const verdictId = randomUUID();
     const createdAt = this.now().toISOString();
     const ref = ruleSet ? { profileId: ruleSet.profileId, version: ruleSet.version, hash: ruleSet.hash } : BUILT_IN_REF;
-    const rows: GuardEventInsert[] = [];
+    const byClass = new Map<string, { score: number; count: number; samples: Array<{ evidence: string; spans: Array<{ start: number; end: number }>; message: string }> }>();
     for (const input of scanned) {
       for (const entry of input.strings) {
         for (const finding of entry.findings) {
-          rows.push({
-            id: randomUUID(),
-            verdictId,
-            executionId: call.callExecutionId,
-            workflowId: null,
-            projectId: call.toolset.projectId,
-            nodeId: call.tool,
-            placement: "gateway",
-            iteration: null,
-            toolName: call.tool,
-            channel: "tool_arguments",
-            detectorId: DLP_DETECTOR_ID,
-            category: "sensitive_data",
-            dataClass: finding.dataClass,
-            score: finding.score,
-            requestedAction: action,
-            effectiveAction: action,
-            verdictAction: action,
-            shadow: false,
-            evidence: [{ evidence: finding.preview, spans: [{ start: finding.start, end: finding.end }], message: `${call.tool}: ${finding.dataClass}` }],
-            profileId: ref.profileId,
-            profileVersion: ref.version,
-            profileHash: ref.hash,
-            latencyMs: 0,
-            budgetExceeded: false,
-            skippedDetectors: [],
-            createdAt
-          });
+          const group = byClass.get(finding.dataClass) ?? { score: 0, count: 0, samples: [] };
+          group.score = Math.max(group.score, finding.score);
+          group.count += 1;
+          if (group.samples.length < EVENT_SAMPLES) {
+            group.samples.push({ evidence: finding.preview, spans: [{ start: finding.start, end: finding.end }], message: `${call.tool}: ${finding.dataClass} (input ${input.index})` });
+          }
+          byClass.set(finding.dataClass, group);
         }
       }
     }
-    return rows;
+    return [...byClass.entries()].map(([dataClass, group]) => ({
+      id: randomUUID(),
+      verdictId,
+      executionId: call.callExecutionId,
+      workflowId: null,
+      projectId: call.toolset.projectId,
+      nodeId: call.tool,
+      placement: "gateway",
+      iteration: null,
+      toolName: call.tool,
+      channel: "tool_arguments",
+      detectorId: DLP_DETECTOR_ID,
+      category: "sensitive_data",
+      dataClass,
+      score: group.score,
+      requestedAction: action,
+      effectiveAction: action,
+      verdictAction: action,
+      shadow: false,
+      evidence: [
+        ...group.samples,
+        ...(group.count > group.samples.length ? [{ evidence: "", spans: [], message: `${call.tool}: ${group.count} ${dataClass} findings in all` }] : [])
+      ],
+      profileId: ref.profileId,
+      profileVersion: ref.version,
+      profileHash: ref.hash,
+      latencyMs: 0,
+      budgetExceeded: false,
+      skippedDetectors: [],
+      createdAt
+    }));
   }
 
   // ---------------------------------------------------------------------------
@@ -339,6 +362,9 @@ export class ContentRulesToolsService {
       ...(args.allow_list ? { allowList: args.allow_list } : {})
     });
     const scope = ContentRulesToolsService.projectScope(call.toolset);
+    // Keys are scanned but never rewritten: a key that holds sensitive data refuses the call rather than pass it on.
+    const sensitiveKey = scanned.flatMap((input) => input.strings).find((entry) => entry.path?.endsWith("{key}") && entry.matches.length > 0);
+    if (sensitiveKey) throw new ContentToolError(`An object key holds sensitive data (${sensitiveKey.path}); keys cannot be redacted, so send it as a value`);
 
     // Placeholders already in any input are reserved, so a typed `[EMAIL_1]` never reads as one this call issued.
     const book = new InMemoryPlaceholderBook();
@@ -428,6 +454,35 @@ export class ContentRulesToolsService {
     return profiles.flatMap((profile) => profileRevealRules(profile.profile).map((rule, index) => ({ rule, profile, index })));
   }
 
+  /** The audit entry of a restore call: client, toolset, counts per class and the redaction id's hash; never values. */
+  private async auditRestore(
+    call: ContentToolCall,
+    redactionId: string | undefined,
+    detail: { outcome: "success" | "denied" | "failure"; reason?: string; revealed: Array<Record<string, unknown>>; withheld: Array<Record<string, unknown>> }
+  ): Promise<void> {
+    const restored = detail.revealed.reduce((total, entry) => total + Number(entry.count ?? 0), 0);
+    const withheld = detail.withheld.reduce((total, entry) => total + Number(entry.count ?? 0), 0);
+    await this.options.audit({
+      eventType: "mcp_gateway.content_restore",
+      category: "system",
+      action: "reveal",
+      outcome: detail.outcome,
+      actor: { type: "api_key", email: call.client.name },
+      resourceType: "mcp_toolset",
+      resourceId: call.toolset.id,
+      projectId: call.toolset.projectId,
+      metadata: {
+        clientId: call.client.id,
+        executionId: call.callExecutionId,
+        ...(redactionId ? { redactionIdHash: createHash("sha256").update(redactionId).digest("hex").slice(0, 16) } : {}),
+        ...(detail.reason ? { reason: detail.reason } : {}),
+        revealed: detail.revealed,
+        withheld: detail.withheld
+      },
+      message: detail.reason ? `Restore through the MCP gateway refused (${detail.reason})` : `Restore through the MCP gateway: restored ${restored}, withheld ${withheld}`
+    });
+  }
+
   private async restore(call: ContentToolCall): Promise<ContentToolOutcome> {
     const parsed = restoreSensitiveDataArgsSchema.safeParse(call.args);
     if (!parsed.success) return { ok: false, message: `Invalid arguments: ${issues(parsed.error)}` };
@@ -437,19 +492,28 @@ export class ContentRulesToolsService {
     ContentRulesToolsService.inputsOf(args);
 
     let book: InMemoryPlaceholderBook | undefined;
+    // Vault tokens restore only through the redaction that issued them: listed in its map and issued by its call.
+    let issuedTokens: Map<string, string> | undefined;
+    let issuedBy: string | null = null;
     if (args.redaction_id) {
+      // Expired maps go at every restore too, so they do not wait on disk for the next redact.
+      await this.options.store.deleteExpiredContentRedactions(this.now().toISOString());
       const row = await this.options.store.getContentRedaction(args.redaction_id, this.now().toISOString());
       // Another client's or another project's redaction reads as unknown: nothing tells the caller it exists.
       if (!row || row.scope !== "gateway" || row.clientId !== call.client.id || row.projectId !== scope) {
+        await this.auditRestore(call, args.redaction_id, { outcome: "denied", reason: "unknown_redaction", revealed: [], withheld: [] });
         throw new ContentToolError("Unknown or expired redaction_id");
       }
       let map: ContentRedactionMap;
       try {
         map = openRedactionMap(this.options.sealer, row.entriesSealed);
       } catch {
+        await this.auditRestore(call, args.redaction_id, { outcome: "failure", reason: "unopenable_redaction", revealed: [], withheld: [] });
         throw new ContentToolError("This redaction can no longer be opened (the deployment's key changed)");
       }
       book = new InMemoryPlaceholderBook(map.book);
+      issuedTokens = new Map(map.tokens.map((entry) => [entry.token, entry.dataClass]));
+      issuedBy = row.executionId;
     }
 
     const entries = await this.revealRuleEntries(call);
@@ -470,8 +534,20 @@ export class ContentRulesToolsService {
     needsApproval.clear();
 
     const content = args.text !== undefined ? args.text : args.texts !== undefined ? args.texts : args.value;
+    const projectVault = this.options.guard.vaultFor({ projectId: scope, executionId: call.callExecutionId });
+    const redactionVault: TokenVaultStorage = {
+      getByToken: async (token) => {
+        if (!issuedTokens?.has(token)) return undefined;
+        const record = await projectVault.getByToken(token);
+        return record && record.executionId === issuedBy && record.dataClass === issuedTokens.get(token) ? record : undefined;
+      },
+      getByValueHash: async () => undefined,
+      put: async () => {
+        throw new ContentToolError("Restore does not issue tokens");
+      }
+    };
     const result = await revealTokens(content, {
-      vault: this.options.guard.vaultFor({ projectId: scope, executionId: call.callExecutionId }),
+      vault: redactionVault,
       ...(book ? { placeholders: book } : {}),
       grant,
       allowedClasses,
@@ -484,26 +560,13 @@ export class ContentRulesToolsService {
     const revealedCount = result.revealed.reduce((total, entry) => total + entry.count, 0);
     const refusedCount = refused.reduce((total, entry) => total + entry.count, 0);
 
+    // The audit entry first, for every restore: one that cannot be recorded gives nothing back.
+    await this.auditRestore(call, args.redaction_id, {
+      outcome: revealedCount > 0 ? "success" : "denied",
+      revealed: result.revealed.map((entry) => ({ dataClass: entry.dataClass ?? null, count: entry.count, ...(entry.rule ? { rule: entry.rule } : {}) })),
+      withheld: refused.map((entry) => ({ dataClass: entry.dataClass ?? null, count: entry.count, reason: entry.reason ?? null }))
+    });
     if (revealedCount > 0 || refusedCount > 0) {
-      // The audit entry first: a restore that cannot be recorded gives nothing back.
-      await this.options.audit({
-        eventType: "mcp_gateway.content_restore",
-        category: "system",
-        action: "reveal",
-        outcome: revealedCount > 0 ? "success" : "denied",
-        actor: { type: "api_key", email: call.client.name },
-        resourceType: "mcp_toolset",
-        resourceId: call.toolset.id,
-        projectId: call.toolset.projectId,
-        metadata: {
-          clientId: call.client.id,
-          executionId: call.callExecutionId,
-          ...(args.redaction_id ? { redactionIdHash: createHash("sha256").update(args.redaction_id).digest("hex").slice(0, 16) } : {}),
-          revealed: result.revealed.map((entry) => ({ dataClass: entry.dataClass ?? null, count: entry.count, ...(entry.rule ? { rule: entry.rule } : {}) })),
-          withheld: refused.map((entry) => ({ dataClass: entry.dataClass ?? null, count: entry.count, reason: entry.reason ?? null }))
-        },
-        message: `Restore through the MCP gateway: restored ${revealedCount}, withheld ${refusedCount}`
-      });
       await this.options.guard.recordGatewayToolEvents(this.restoreRows(call, result.revealed, refused, entries));
     }
     return {

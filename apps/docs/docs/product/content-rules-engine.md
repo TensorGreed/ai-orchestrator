@@ -98,7 +98,7 @@ A protection provider turns a sensitive value into a token (`protect`) and, when
 | `keyed_hash` | no | yes | HMAC-SHA-256 pseudonym under an injected key |
 | `aes_gcm` | yes | no | AES-256-GCM, random nonce, key id in the token, data class bound as authenticated data |
 | `surrogate` | no | yes | keyed, format-preserving stand-in: an email, card, IBAN, US SSN, UK National Insurance or phone number keeps its shape (cards stay Luhn-valid); credentials, private keys and JWTs are fully redacted. Pseudonymisation: whoever holds the key can test a guessed value |
-| `placeholder` | yes (with its map) | yes | readable `[EMAIL_1]` placeholders numbered per data class; the map is kept by the caller (a run's sealed map, or a redaction map of the [gateway tools](./content-rules-tools.md)) |
+| `placeholder` | yes (with its map) | yes | readable placeholders numbered per data class (`[EMAIL_1]`, with a run tag in runs: `[EMAIL_1.K3F9QX]`); the map is kept by the caller (a run's sealed map, or a redaction map of the [gateway tools](./content-rules-tools.md)) |
 | `token_vault` | yes | optional | tokens kept in an injected store; random, deterministic, or format-preserving (card tokens stay Luhn-valid) |
 
 Key material arrives through an injected key resolver. The library never reads environment variables or files; in L2M the resolver reads stored secrets through `SecretService`. The vault's storage is an interface too, with an in-memory implementation for tests and single-process use; L2M stores it encrypted in the database.
