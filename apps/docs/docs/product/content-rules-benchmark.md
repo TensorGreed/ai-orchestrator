@@ -165,6 +165,34 @@ An eval run can also take `guardProfile: { profileId, version? }`. That rule set
 
 Verdicts from eval runs and replay jobs are kept in the run's trace. They are left out of **Security → Overview**, `GET /api/guard/events` and `GET /api/guard/stats`, unless you tick **Include eval and replay runs** on the Overview or add `includeEval=true`. Eval runs are live (real model, tools and secrets), so tick it to see what a poisoned document did during one. Each such event carries an **eval** chip (`runSource: "eval"`), and an eval run that pauses for approval keeps the tag when it resumes.
 
+## Names, places and street addresses
+
+The names and addresses check (`data.entities`) is measured on its own corpus, `packages/guard-sdk/corpus/entities/`: English text with person names, places and street addresses (US, UK, Canada, Australia, Germany and France) marked at the character level, plus look-alikes that must not be flagged ("May" the month, "Grant access", a `main_street_id` column, a postcode or a PO box on its own).
+
+| Split | Items | How it was written |
+|---|---|---|
+| main | 300 | A seeded generator (`src/entity-corpus-generator.ts`) from public-domain US name lists, invented streets and format-valid postcodes |
+| held-out | 120 | Written apart from the generator, the main split and the check, from the class definitions alone |
+
+Every predicted span is matched one to one with a labelled span of the same class:
+
+- **Overlap**: the two share at least half of the shorter span's characters. This is the headline number, since where an address ends (with or without the country) is a matter of style.
+- **Strict**: the exact span.
+
+A place the check finds inside a labelled street address counts as part of that address, so it is neither a hit nor a false positive. Results are precision, recall and F1 per class and split, and the number of look-alikes flagged.
+
+Where you see it:
+
+- **Security → Benchmark** adds a table for names, places and street addresses when the rule set lists the check. The table uses the rule set's own classes, threshold and options. Hover a rate for the exact-span rate and the item ids.
+- `l2m guard benchmark --entities` measures the rules engine with every class and fails when a class drops below its floor (`ENTITY_RULES_BENCHMARK_FLOORS`). The repository's CI runs this step. Add `--profile <file>` to measure a rule set's own options without a gate. `--split`, `--out`, `--junit` and `--json` work as above.
+
+```sh
+l2m guard benchmark --entities
+l2m guard benchmark --entities --profile rules/support.json --split heldout --json
+```
+
+The command exits 1 when the check did not run on an item: it is not registered, it failed or it ran out of time. Those items' spans count as missed. Reports carry ids, counts and rates, never the text.
+
 ## Output checks
 
 The answer schema, topic, content safety and grounding checks have their own small corpus in `packages/guard-sdk/corpus/output-checks/`, run by `runOutputCheckBenchmark()` with local modes only. It is not part of this benchmark, the Security page or `l2m guard benchmark`. See [Output checks](./content-rules-output-checks.md#benchmark).

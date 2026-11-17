@@ -8,6 +8,8 @@
  *                        slack per held-out category)
  *   --profile <file>     a rule set document (JSON; an export with a `document` field works too),
  *                        gated only on regression against --baseline
+ *   --entities           the names, places and street addresses corpus through the data.entities
+ *                        check instead (see guard-entity-benchmark.ts)
  *   --baseline <file>    a report written earlier with --out: fail on a drop in detection,
  *                        a rise in false positives or in workflow attack success beyond --tolerance
  *
@@ -36,10 +38,11 @@ import {
 import { runGuardBenchmarkSuites } from "@ai-orchestrator/workflow-engine";
 import { listFlag, oneFlag, UsageError, type CommandFlags, type ParsedArgs } from "./args";
 import { isObject, readJsonFile, write, writePrivateFile, type CliIo } from "./api";
+import { runGuardEntityBenchmarkCommand } from "./guard-entity-benchmark";
 
 export const GUARD_BENCHMARK_FLAGS: CommandFlags = {
   values: ["profile", "suite", "split", "category", "baseline", "tolerance", "out", "junit"],
-  booleans: ["builtin", "json"]
+  booleans: ["builtin", "entities", "json"]
 };
 
 const pct = (value: number) => `${(value * 100).toFixed(1)}%`;
@@ -74,6 +77,7 @@ function loadBaseline(file: string): GuardBenchmarkReport {
 }
 
 export async function runGuardBenchmarkCommand(args: ParsedArgs, io: CliIo): Promise<number> {
+  if (args.booleans.has("entities")) return runGuardEntityBenchmarkCommand(args, io);
   const builtin = args.booleans.has("builtin");
   const profileFile = oneFlag(args, "profile");
   if (builtin === (profileFile !== undefined)) throw new UsageError("l2m guard benchmark needs exactly one of --builtin and --profile <file>");

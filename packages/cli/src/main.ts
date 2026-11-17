@@ -113,6 +113,8 @@ const USAGE = `Usage:
                       [--split main|heldout]... [--category <name>]...
                       [--baseline <report.json>] [--tolerance <0-1>]
                       [--out <report.json>] [--junit <file>] [--json]
+  l2m guard benchmark --entities [--profile <file>] [--split main|heldout]...
+                      [--out <report.json>] [--junit <file>] [--json]
 
 The API URL and key come from L2M_API_URL and L2M_API_KEY. Prefer the
 environment for the key: --api-key works but shows in the process list and
@@ -142,7 +144,10 @@ guard benchmark runs offline (no server, network or model): 0 the gate
 passed, 1 below the default rule set's floors (--builtin) or a regression
 against --baseline (detection down, false positives or workflow attack
 success up by more than --tolerance, default 0); without --builtin or
---baseline it only reports.
+--baseline it only reports. With --entities it measures names, places and
+street addresses with the data.entities check: 1 below the rules engine's
+floors, on a class without a floor, or when the check did not run on an
+item; with --profile it only reports.
 `;
 
 function loadSnapshot(file: string): McpSnapshotFile {

@@ -1,0 +1,2120 @@
+{
+  "format": "l2m.entity-corpus",
+  "version": 1,
+  "split": "heldout",
+  "description": "Held-out split: person names, places and street addresses (US, UK, CA, AU, DE, FR) in English text, with look-alikes. Written apart from the generator, the main split and the detector, by an author given only the class definitions and the file format.",
+  "source": "Hand-written synthetic text (model-authored for this corpus from the class definitions alone). Names are invented combinations of common given names and surnames; streets, house numbers, postcodes and place combinations are invented (postcodes format-valid only); no dataset or website was copied.",
+  "items": [
+    {
+      "id": "en-h-001",
+      "lang": "en",
+      "tags": [
+        "email",
+        "person"
+      ],
+      "textB64": "SGkgUHJpeWEsCgpJJ3ZlIGF0dGFjaGVkIHRoZSBzaWduZWQgZm9ybSBmb3IgTWFyY3VzIFdlYmIuIExldCBtZSBrbm93IGlmIGFueXRoaW5nIGlzIG1pc3NpbmcuCgpUaGFua3MsCkVsZW5h",
+      "entities": [
+        {
+          "start": 3,
+          "end": 8,
+          "class": "person_name"
+        },
+        {
+          "start": 45,
+          "end": 56,
+          "class": "person_name"
+        },
+        {
+          "start": 103,
+          "end": 108,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-002",
+      "lang": "en",
+      "tags": [
+        "chat",
+        "person"
+      ],
+      "textB64": "WzEwOjQyXSBIdW50ZXI6IGRpZCB5b3Ugc2VlIHRoZSBkZXBsb3kgZmFpbD8KWzEwOjQzXSBHcmFjZSBMaXU6IHllcywgcm9sbGluZyBiYWNrIG5vdw==",
+      "entities": [
+        {
+          "start": 8,
+          "end": 14,
+          "class": "person_name"
+        },
+        {
+          "start": 53,
+          "end": 62,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-003",
+      "lang": "en",
+      "tags": [
+        "note",
+        "person"
+      ],
+      "textB64": "RHIuIE9rYWZvciByZXZpZXdlZCB0aGUgc2NhbiBhbmQgYXNrZWQgSG9wZSBEYW5pZWxzIHRvIGJvb2sgYSBmb2xsb3ctdXAu",
+      "entities": [
+        {
+          "start": 4,
+          "end": 10,
+          "class": "person_name"
+        },
+        {
+          "start": 39,
+          "end": 51,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-004",
+      "lang": "en",
+      "tags": [
+        "news",
+        "person",
+        "us"
+      ],
+      "textB64": "TWF5b3IgU29maWEgUmFtaXJleiBvcGVuZWQgdGhlIG5ldyBsaWJyYXJ5IGluIFR1Y3NvbiBvbiBTYXR1cmRheS4=",
+      "entities": [
+        {
+          "start": 6,
+          "end": 19,
+          "class": "person_name"
+        },
+        {
+          "start": 46,
+          "end": 52,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-005",
+      "lang": "en",
+      "tags": [
+        "crm",
+        "person"
+      ],
+      "textB64": "Q29udGFjdDogV2lsbCBDYXJ0ZXIgKFByb2N1cmVtZW50KS4gUHJlZmVycyBlbWFpbC4gV2lsbCBjYWxsIGJhY2sgYWZ0ZXIgbHVuY2gu",
+      "entities": [
+        {
+          "start": 9,
+          "end": 20,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-006",
+      "lang": "en",
+      "tags": [
+        "csv",
+        "person"
+      ],
+      "textB64": "bmFtZSxyb2xlLGNpdHkKUm9zZSBIYXJ0bGV5LEVuZ2luZWVyLExlZWRzCkdyYW50IE1iZWtpLEFuYWx5c3QsRHVyYmFu",
+      "entities": [
+        {
+          "start": 15,
+          "end": 27,
+          "class": "person_name"
+        },
+        {
+          "start": 37,
+          "end": 42,
+          "class": "location"
+        },
+        {
+          "start": 43,
+          "end": 54,
+          "class": "person_name"
+        },
+        {
+          "start": 63,
+          "end": 69,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-007",
+      "lang": "en",
+      "tags": [
+        "ticket",
+        "person"
+      ],
+      "textB64": "Q3VzdG9tZXIgTWFyayBEb25uZWxseSBzYXlzIHRoZSBiaWxsIGZvciBBcHJpbCB3YXMgY2hhcmdlZCB0d2ljZS4gRXNjYWxhdGVkIHRvIEFwcmlsIFN0b25lLg==",
+      "entities": [
+        {
+          "start": 9,
+          "end": 22,
+          "class": "person_name"
+        },
+        {
+          "start": 79,
+          "end": 90,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-008",
+      "lang": "en",
+      "tags": [
+        "email",
+        "person"
+      ],
+      "textB64": "UGxlYXNlIGFkZHJlc3MgdGhlIGNlcnRpZmljYXRlIHRvIE5ndXnhu4VuIFRo4buLIEhvYSBhbmQgY2MgTW9oYW1tZWQgQWwtRmFyc2ku",
+      "entities": [
+        {
+          "start": 34,
+          "end": 48,
+          "class": "person_name"
+        },
+        {
+          "start": 56,
+          "end": 73,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-009",
+      "lang": "en",
+      "tags": [
+        "notes",
+        "person"
+      ],
+      "textB64": "TWVldGluZyBub3RlcwpBdHRlbmRlZXM6IEx1ZHdpZyB2YW4gV2ViZXIsIFNpb2JoYW4gTydOZWlsbCwgSmVhbi1MdWMgTW9yZWF1CkFjdGlvbjogU2lvYmhhbiB0byBzZW5kIG1pbnV0ZXMu",
+      "entities": [
+        {
+          "start": 25,
+          "end": 41,
+          "class": "person_name"
+        },
+        {
+          "start": 43,
+          "end": 58,
+          "class": "person_name"
+        },
+        {
+          "start": 60,
+          "end": 75,
+          "class": "person_name"
+        },
+        {
+          "start": 84,
+          "end": 91,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-010",
+      "lang": "en",
+      "tags": [
+        "news",
+        "person"
+      ],
+      "textB64": "UHJvZi4gQWRleWVtaSB3aWxsIGNoYWlyIHRoZSBwYW5lbDsgTXMgS293YWxjenlrIG1vZGVyYXRlcy4=",
+      "entities": [
+        {
+          "start": 6,
+          "end": 13,
+          "class": "person_name"
+        },
+        {
+          "start": 39,
+          "end": 48,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-011",
+      "lang": "en",
+      "tags": [
+        "json",
+        "person"
+      ],
+      "textB64": "eyJjdXN0b21lciI6eyJmaXJzdCI6IkRhbmllbCIsImxhc3QiOiJPc2VpIiwiZW1haWwiOiJkb3NlaUBtYWlsLmV4YW1wbGUifX0=",
+      "entities": [
+        {
+          "start": 22,
+          "end": 28,
+          "class": "person_name"
+        },
+        {
+          "start": 38,
+          "end": 42,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-012",
+      "lang": "en",
+      "tags": [
+        "log",
+        "person"
+      ],
+      "textB64": "MjAyNi0wMy0xNCAwOToxMjo0NCBJTkZPIG9yZGVyIDg4NDEgYXBwcm92ZWQgYnkgS2F0YXJ6eW5hIE5vd2FrIHVzZXI9a25vd2Fr",
+      "entities": [
+        {
+          "start": 48,
+          "end": 63,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-013",
+      "lang": "en",
+      "tags": [
+        "code",
+        "person"
+      ],
+      "textB64": "Ly8gTm90ZTogYXNrIFRvbcOhcyBIZXJyZXJhIHdoZXRoZXIgZ2V0Sm9oblJlY29yZCgpIGlzIHN0aWxsIHVzZWQKZnVuY3Rpb24gZ2V0Sm9oblJlY29yZChpZCkgeyByZXR1cm4gZGIuZ2V0KGlkKTsgfQ==",
+      "entities": [
+        {
+          "start": 13,
+          "end": 26,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-014",
+      "lang": "en",
+      "tags": [
+        "email",
+        "person"
+      ],
+      "textB64": "UmVnYXJkcywKQWxleGFuZHJhIFBldHJvdi1TbWl0aApTZW5pb3IgQWNjb3VudCBNYW5hZ2VyCmFsZXgucGV0cm92QGNvcnAuZXhhbXBsZQ==",
+      "entities": [
+        {
+          "start": 9,
+          "end": 31,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-015",
+      "lang": "en",
+      "tags": [
+        "chat",
+        "person"
+      ],
+      "textB64": "Y2FuIHlvdSBhc2sgSm9yZGFuIEJsYWtlIHRvIGpvaW4/IGFuZCB0ZWxsIFNhbSB3ZSdyZSBtb3ZpbmcgdG8gM3Bt",
+      "entities": [
+        {
+          "start": 12,
+          "end": 24,
+          "class": "person_name"
+        },
+        {
+          "start": 43,
+          "end": 46,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-016",
+      "lang": "en",
+      "tags": [
+        "news",
+        "person"
+      ],
+      "textB64": "U2VyZW5hIFdpbGxpYW1zIHdvbiB0aGUgbWF0Y2ggaW4gc3RyYWlnaHQgc2V0cywgdGhlIGNsdWIgc2FpZC4=",
+      "entities": [
+        {
+          "start": 0,
+          "end": 15,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-017",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "person"
+      ],
+      "textB64": "SW4gdGhlIG5vdmVsLCBFbGl6YWJldGggQmVubmV0IGRlY2xpbmVzIHRoZSBwcm9wb3NhbCBmcm9tIE1yLiBDb2xsaW5zLg==",
+      "entities": [
+        {
+          "start": 14,
+          "end": 30,
+          "class": "person_name"
+        },
+        {
+          "start": 62,
+          "end": 69,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-018",
+      "lang": "en",
+      "tags": [
+        "list",
+        "person"
+      ],
+      "textB64": "V2lubmVyczoKMS4gQ2hlbiBXZWkKMi4gRmF0aW1hIFphaHJhCjMuIE9sdXdhc2V1biBBZGViYXlv",
+      "entities": [
+        {
+          "start": 12,
+          "end": 20,
+          "class": "person_name"
+        },
+        {
+          "start": 24,
+          "end": 36,
+          "class": "person_name"
+        },
+        {
+          "start": 40,
+          "end": 57,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-019",
+      "lang": "en",
+      "tags": [
+        "chat",
+        "person"
+      ],
+      "textB64": "VGhhbmtzLCBLd2FtZSwgdGhhdCBmaXhlZCBpdCE=",
+      "entities": [
+        {
+          "start": 8,
+          "end": 13,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-020",
+      "lang": "en",
+      "tags": [
+        "form",
+        "person"
+      ],
+      "textB64": "RnVsbCBuYW1lOiBIYW5uYWggSi4gV2hpdGZpZWxkClByZWZlcnJlZCBuYW1lOiBIYW5uYWgKRGF0ZSBvZiBiaXJ0aDogMTk4OC0wNy0wMg==",
+      "entities": [
+        {
+          "start": 11,
+          "end": 30,
+          "class": "person_name"
+        },
+        {
+          "start": 47,
+          "end": 53,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-021",
+      "lang": "en",
+      "tags": [
+        "email",
+        "person"
+      ],
+      "textB64": "RGVhciBNcyBGb250YWluZSwKCllvdXIgYXBwb2ludG1lbnQgd2l0aCBEci4gUmFtYW4gaXMgY29uZmlybWVkIGZvciBUdWVzZGF5Lg==",
+      "entities": [
+        {
+          "start": 8,
+          "end": 16,
+          "class": "person_name"
+        },
+        {
+          "start": 45,
+          "end": 50,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-022",
+      "lang": "en",
+      "tags": [
+        "invoice",
+        "person"
+      ],
+      "textB64": "SW52b2ljZSBhcHByb3ZlZCBieSBIYXJvbGQgSmVua2lucyBKci4gb24gYmVoYWxmIG9mIHRoZSBib2FyZC4=",
+      "entities": [
+        {
+          "start": 20,
+          "end": 34,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-023",
+      "lang": "en",
+      "tags": [
+        "chat",
+        "person"
+      ],
+      "textB64": "TWFyaWEgTG9wZXoncyBsYXB0b3Agd2FzIHJldHVybmVkOyBIdWdoJ3MgaXMgc3RpbGwgbWlzc2luZy4=",
+      "entities": [
+        {
+          "start": 0,
+          "end": 11,
+          "class": "person_name"
+        },
+        {
+          "start": 35,
+          "end": 39,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-024",
+      "lang": "en",
+      "tags": [
+        "yaml",
+        "person"
+      ],
+      "textB64": "b3duZXI6IElzYWJlbCBEdWFydGUKcmV2aWV3ZXI6IFl1c3VmIERlbWlyCnJlcG86IGluZnJhLXRvb2xz",
+      "entities": [
+        {
+          "start": 7,
+          "end": 20,
+          "class": "person_name"
+        },
+        {
+          "start": 31,
+          "end": 42,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-025",
+      "lang": "en",
+      "tags": [
+        "chat",
+        "person"
+      ],
+      "textB64": "SG9wZSB5b3UncmUgd2VsbC4gUm9zZSBzYWlkIHRoZSBnYXJkZW4gcm9zZXMgd2lsbCBibG9vbSBpbiBNYXku",
+      "entities": [
+        {
+          "start": 18,
+          "end": 22,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-026",
+      "lang": "en",
+      "tags": [
+        "crm",
+        "person",
+        "location"
+      ],
+      "textB64": "TGVhZDogRGVjbGFuIE11cnBoeSwgYmFzZWQgaW4gQ29yaywgSXJlbGFuZC4gSW50ZXJlc3RlZCBpbiB0aGUgYW5udWFsIHBsYW4u",
+      "entities": [
+        {
+          "start": 6,
+          "end": 19,
+          "class": "person_name"
+        },
+        {
+          "start": 30,
+          "end": 34,
+          "class": "location"
+        },
+        {
+          "start": 36,
+          "end": 43,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-027",
+      "lang": "en",
+      "tags": [
+        "news",
+        "person",
+        "location"
+      ],
+      "textB64": "Q2hlZiBBbWFyYSBPa2VrZSBtb3ZlZCBmcm9tIExhZ29zIHRvIE1hbmNoZXN0ZXIgbGFzdCB5ZWFyLg==",
+      "entities": [
+        {
+          "start": 5,
+          "end": 16,
+          "class": "person_name"
+        },
+        {
+          "start": 28,
+          "end": 33,
+          "class": "location"
+        },
+        {
+          "start": 37,
+          "end": 47,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-028",
+      "lang": "en",
+      "tags": [
+        "notes",
+        "person"
+      ],
+      "textB64": "TGlhbSBhbmQgTm9haCB3aWxsIHByZXNlbnQ7IE9saXZpYSBCcm9va3MgdGFrZXMgcXVlc3Rpb25zLg==",
+      "entities": [
+        {
+          "start": 0,
+          "end": 4,
+          "class": "person_name"
+        },
+        {
+          "start": 9,
+          "end": 13,
+          "class": "person_name"
+        },
+        {
+          "start": 28,
+          "end": 41,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-029",
+      "lang": "en",
+      "tags": [
+        "chat",
+        "person"
+      ],
+      "textB64": "UGluZyBEaXZ5YSBQYXRlbCAoQGRwYXRlbCkgZm9yIHJldmlldy4=",
+      "entities": [
+        {
+          "start": 5,
+          "end": 16,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-030",
+      "lang": "en",
+      "tags": [
+        "news",
+        "person",
+        "location"
+      ],
+      "textB64": "VG91ciBndWlkZSBIYXJ1dG8gU2F0byBtZXQgWXVraSBUYW5ha2EgYXQgdGhlIHN0YXRpb24gaW4gS3lvdG8u",
+      "entities": [
+        {
+          "start": 11,
+          "end": 22,
+          "class": "person_name"
+        },
+        {
+          "start": 27,
+          "end": 38,
+          "class": "person_name"
+        },
+        {
+          "start": 57,
+          "end": 62,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-031",
+      "lang": "en",
+      "tags": [
+        "code",
+        "person"
+      ],
+      "textB64": "Rml4IHBhZ2luYXRpb24gYnVnIHJlcG9ydGVkIGJ5IEFuaWwgS2Fwb29yCgpDby1hdXRob3JlZC1ieTogQmV0aCBBbHZhcmV6IDxiZXRoQGRldi5leGFtcGxlPg==",
+      "entities": [
+        {
+          "start": 31,
+          "end": 42,
+          "class": "person_name"
+        },
+        {
+          "start": 60,
+          "end": 72,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-032",
+      "lang": "en",
+      "tags": [
+        "transcript",
+        "person",
+        "location"
+      ],
+      "textB64": "SU5URVJWSUVXRVI6IFdlbGNvbWUgYmFjay4gRnJhbmNlcywgdGVsbCB1cyBhYm91dCB0aGUgbW92ZSB0byBOb3ZhIFNjb3RpYS4=",
+      "entities": [
+        {
+          "start": 27,
+          "end": 34,
+          "class": "person_name"
+        },
+        {
+          "start": 62,
+          "end": 73,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-033",
+      "lang": "en",
+      "tags": [
+        "csv",
+        "person"
+      ],
+      "textB64": "aWQsZmlyc3RfbmFtZSxsYXN0X25hbWUKMSxNaWEsVGhvbXBzb24KMixPbWFyLEhhZGRhZA==",
+      "entities": [
+        {
+          "start": 26,
+          "end": 29,
+          "class": "person_name"
+        },
+        {
+          "start": 30,
+          "end": 38,
+          "class": "person_name"
+        },
+        {
+          "start": 41,
+          "end": 45,
+          "class": "person_name"
+        },
+        {
+          "start": 46,
+          "end": 52,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-034",
+      "lang": "en",
+      "tags": [
+        "form",
+        "us"
+      ],
+      "textB64": "U2hpcCB0bzogMTQyNyBBbGRlciBDcmVlayBSZCwgQXB0IDNCLCBDb2x1bWJ1cywgT0ggNDMyMTU=",
+      "entities": [
+        {
+          "start": 9,
+          "end": 56,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-035",
+      "lang": "en",
+      "tags": [
+        "form",
+        "us",
+        "person"
+      ],
+      "textB64": "TmFtZTogSmVzc2ljYSBUcmFuCkFkZHJlc3M6Cjg4MCBNYXBsZSBBdmUKU3VpdGUgMjEwCkF1c3RpbiwgVFggNzg3MDE=",
+      "entities": [
+        {
+          "start": 6,
+          "end": 18,
+          "class": "person_name"
+        },
+        {
+          "start": 28,
+          "end": 68,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-036",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "us"
+      ],
+      "textB64": "UGxlYXNlIGRlbGl2ZXIgdGhlIHBhY2thZ2UgdG8gMjE5IFcgQmlyY2h3b29kIERyLCBEZW52ZXIsIENPIDgwMjAyIGJlZm9yZSBub29uLg==",
+      "entities": [
+        {
+          "start": 30,
+          "end": 66,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-037",
+      "lang": "en",
+      "tags": [
+        "json",
+        "us"
+      ],
+      "textB64": "eyJhZGRyZXNzIjoiNTUgSGFyYm9yIFZpZXcgTG4sIFVuaXQgMTIsIFBvcnRsYW5kLCBNRSAwNDEwMSwgVVNBIiwicGhvbmUiOiI1NTUtMDE0MiJ9",
+      "entities": [
+        {
+          "start": 12,
+          "end": 63,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-038",
+      "lang": "en",
+      "tags": [
+        "delivery",
+        "us"
+      ],
+      "textB64": "TGVhdmUgaXQgd2l0aCB0aGUgZG9vcm1hbiBhdCAzMDAgRSA1Mm5kIFN0LCBOZXcgWW9yaywgTlkgMTAwMjIuIFJpbmcgdHdpY2Uu",
+      "entities": [
+        {
+          "start": 29,
+          "end": 62,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-039",
+      "lang": "en",
+      "tags": [
+        "csv",
+        "us",
+        "person"
+      ],
+      "textB64": "aWQsbmFtZSxhZGRyZXNzCjE3LENhcmwgV2ludGVycywiNzQyIExpbmRlbiBCbHZkLCBUdWxzYSwgT0sgNzQxMDMi",
+      "entities": [
+        {
+          "start": 19,
+          "end": 31,
+          "class": "person_name"
+        },
+        {
+          "start": 33,
+          "end": 65,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-040",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "us"
+      ],
+      "textB64": "T2ZmaWNlIG1vdmVkIHRvIDkwIFF1YXJyeSBTdCAtIHNhbWUgYnVpbGRpbmcgYXMgYmVmb3JlLg==",
+      "entities": [
+        {
+          "start": 16,
+          "end": 28,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-041",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "us",
+        "location"
+      ],
+      "textB64": "T3VyIENoaWNhZ28gd2FyZWhvdXNlIGlzIGF0IDE2MDAgUyBEYWx0b24gQXZlLCBDaGljYWdvLCBJTCA2MDYxNjsgdGhlIHRlYW0gaW4gTWlsd2F1a2VlIHNoaXBzIGZyb20gdGhlcmUu",
+      "entities": [
+        {
+          "start": 4,
+          "end": 11,
+          "class": "location"
+        },
+        {
+          "start": 28,
+          "end": 64,
+          "class": "street_address"
+        },
+        {
+          "start": 78,
+          "end": 87,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-042",
+      "lang": "en",
+      "tags": [
+        "form",
+        "uk",
+        "person"
+      ],
+      "textB64": "T2xpdmVyIEdyYW50CjE0IEhvbGx5YnVzaCBMYW5lCkZsYXQgMgpCcmlzdG9sIEJTNiA3UVQKVW5pdGVkIEtpbmdkb20=",
+      "entities": [
+        {
+          "start": 0,
+          "end": 12,
+          "class": "person_name"
+        },
+        {
+          "start": 13,
+          "end": 68,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-043",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "uk"
+      ],
+      "textB64": "UmVnaXN0ZXJlZCBvZmZpY2U6IFVuaXQgNiwgVGFubmVyIENvdXJ0LCBHbG91Y2VzdGVyIFJvYWQsIENoZWx0ZW5oYW0sIEdMNTAgMkFCLg==",
+      "entities": [
+        {
+          "start": 19,
+          "end": 78,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-044",
+      "lang": "en",
+      "tags": [
+        "email",
+        "uk"
+      ],
+      "textB64": "U2VuZCB0aGUgY2hlcXVlIHRvIDI3IEtpbmdmaXNoZXIgQ2xvc2UsIE5vcndpY2ggTlI0IDZMRCBieSBGcmlkYXku",
+      "entities": [
+        {
+          "start": 19,
+          "end": 55,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-045",
+      "lang": "en",
+      "tags": [
+        "json",
+        "uk"
+      ],
+      "textB64": "eyJhZGRyIjoiMyBBYmJvdHMgUm93LCBFZGluYnVyZ2ggRUgzIDhQTCwgU2NvdGxhbmQifQ==",
+      "entities": [
+        {
+          "start": 9,
+          "end": 50,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-046",
+      "lang": "en",
+      "tags": [
+        "delivery",
+        "uk",
+        "person"
+      ],
+      "textB64": "UGFyY2VsIGZvciBJbW9nZW4gSGFsZSAtIDEyQiBQZW5yb3NlIFRlcnJhY2UsIExlZWRzLCBXZXN0IFlvcmtzaGlyZSBMUzYgMUhKIC0gbGVhdmUgaW4gcG9yY2gu",
+      "entities": [
+        {
+          "start": 11,
+          "end": 22,
+          "class": "person_name"
+        },
+        {
+          "start": 25,
+          "end": 75,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-047",
+      "lang": "en",
+      "tags": [
+        "csv",
+        "uk"
+      ],
+      "textB64": "MTA0MixIYXJib3VyIEJvb2tzLCI4IFdoYXJmIFN0cmVldCwgQ2FyZGlmZiBDRjEwIDRQWCIsb3Blbg==",
+      "entities": [
+        {
+          "start": 20,
+          "end": 52,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-048",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "uk"
+      ],
+      "textB64": "VGhlIGZsYXQgYXQgRmxhdCA0LCA2MSBNYXJsb3cgR2FyZGVucywgTG9uZG9uIFNFMTUgM1RXIGlzIGF2YWlsYWJsZSBmcm9tIEp1bmUu",
+      "entities": [
+        {
+          "start": 12,
+          "end": 54,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-049",
+      "lang": "en",
+      "tags": [
+        "form",
+        "uk"
+      ],
+      "textB64": "QmlsbGluZyBhZGRyZXNzOiA1IENyYW5tZXJlIFJvYWQsIEV4ZXRlciBFWDQgNFFKCkNhcmQgZW5kaW5nIDQ0MTE=",
+      "entities": [
+        {
+          "start": 17,
+          "end": 48,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-050",
+      "lang": "en",
+      "tags": [
+        "form",
+        "ca"
+      ],
+      "textB64": "QWRkcmVzczogMTE4MCBHcmFudmlsbGUgU3QsIFVuaXQgNDA1LCBWYW5jb3V2ZXIsIEJDIFY2WiAyQjQ=",
+      "entities": [
+        {
+          "start": 9,
+          "end": 59,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-051",
+      "lang": "en",
+      "tags": [
+        "form",
+        "ca",
+        "person"
+      ],
+      "textB64": "U2hpcCB0byBBbGFpbiBHYWdub24KNzcgUnVlIFNhaW50LURlbmlzClF1w6liZWMgUUMgRzFSIDNTNApDYW5hZGE=",
+      "entities": [
+        {
+          "start": 8,
+          "end": 20,
+          "class": "person_name"
+        },
+        {
+          "start": 21,
+          "end": 64,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-052",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "ca"
+      ],
+      "textB64": "TWVldCBhdCA0NTIwIFlvbmdlIFN0cmVldCwgVG9yb250bywgT04gTTJOIDVONiBhdCA5YW0u",
+      "entities": [
+        {
+          "start": 8,
+          "end": 46,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-053",
+      "lang": "en",
+      "tags": [
+        "json",
+        "ca"
+      ],
+      "textB64": "eyJjb21wYW55IjoiTm9ydGhmaWVsZCBTdXBwbHkiLCJhZGRyZXNzIjoiMzAzIFBvcnRhZ2UgQXZlLCBXaW5uaXBlZywgTUIgUjNCIDJCNCJ9",
+      "entities": [
+        {
+          "start": 42,
+          "end": 79,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-054",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "ca",
+        "location"
+      ],
+      "textB64": "T3VyIG5ldyBDYWxnYXJ5IHN0b3JlOiAxOTI1IDE3IEF2ZSBTVywgQ2FsZ2FyeSwgQUIgVDJUIDBFOS4=",
+      "entities": [
+        {
+          "start": 8,
+          "end": 15,
+          "class": "location"
+        },
+        {
+          "start": 23,
+          "end": 58,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-055",
+      "lang": "en",
+      "tags": [
+        "email",
+        "ca",
+        "person"
+      ],
+      "textB64": "U2VuZCB0YXggZG9jdW1lbnRzIHRvIDg5IFdhdGVyIFN0cmVldCwgU3QuIEpvaG4ncywgTkwgQTFDIDFBNiBhdHRlbnRpb24gUmFjaGVsIFBpa2Uu",
+      "entities": [
+        {
+          "start": 22,
+          "end": 61,
+          "class": "street_address"
+        },
+        {
+          "start": 72,
+          "end": 83,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-056",
+      "lang": "en",
+      "tags": [
+        "csv",
+        "ca"
+      ],
+      "textB64": "c3RvcmUsYWRkcmVzcwpTLTE0LCIyMjAxIEdvdHRpbmdlbiBTdCwgSGFsaWZheCwgTlMgQjNLIDNCNiI=",
+      "entities": [
+        {
+          "start": 20,
+          "end": 58,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-057",
+      "lang": "en",
+      "tags": [
+        "form",
+        "ca"
+      ],
+      "textB64": "TWFpbGluZyBhZGRyZXNzOiA2NDAgRWxtIENyZXMsIFVuaXQgOSwgT3R0YXdhLCBPTiBLMVogN1AzClBob25lOiA2MTMtNTU1LTAxMDA=",
+      "entities": [
+        {
+          "start": 17,
+          "end": 57,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-058",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "au"
+      ],
+      "textB64": "VmlzaXQgdXMgYXQgTGV2ZWwgMywgMTIwIENvbGxpbnMgU3RyZWV0LCBNZWxib3VybmUgVklDIDMwMDAu",
+      "entities": [
+        {
+          "start": 12,
+          "end": 59,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-059",
+      "lang": "en",
+      "tags": [
+        "delivery",
+        "au"
+      ],
+      "textB64": "RGVsaXZlciB0byA4LzQ1IEJhbmtzaWEgUm9hZCwgUGFycmFtYXR0YSBOU1cgMjE1MCBiZXR3ZWVuIDkgYW5kIDUu",
+      "entities": [
+        {
+          "start": 11,
+          "end": 49,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-060",
+      "lang": "en",
+      "tags": [
+        "json",
+        "au",
+        "person"
+      ],
+      "textB64": "eyJyZWNpcGllbnQiOiJUb20gRml0emdlcmFsZCIsImFkZHJlc3MiOiIxOSBXYXR0bGUgQ3Jlc2NlbnQsIEZyZW1hbnRsZSBXQSA2MTYwLCBBdXN0cmFsaWEifQ==",
+      "entities": [
+        {
+          "start": 14,
+          "end": 28,
+          "class": "person_name"
+        },
+        {
+          "start": 41,
+          "end": 89,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-061",
+      "lang": "en",
+      "tags": [
+        "form",
+        "au",
+        "person"
+      ],
+      "textB64": "Q2hsb2UgTmcKVW5pdCA3LCAzMyBNYXJpbmUgUGFyYWRlClN1cmZlcnMgUGFyYWRpc2UgUUxEIDQyMTc=",
+      "entities": [
+        {
+          "start": 0,
+          "end": 8,
+          "class": "person_name"
+        },
+        {
+          "start": 9,
+          "end": 59,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-062",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "au"
+      ],
+      "textB64": "VGhlIGNsaW5pYyBhdCAyNTYgSGluZGxleSBTdHJlZXQsIEFkZWxhaWRlIFNBIDUwMDAgcmVvcGVucyBNb25kYXku",
+      "entities": [
+        {
+          "start": 14,
+          "end": 50,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-063",
+      "lang": "en",
+      "tags": [
+        "form",
+        "au"
+      ],
+      "textB64": "UmV0dXJuIHRvIHNlbmRlcjogMTQgR3VtIFRyZWUgTGFuZSwgSG9iYXJ0IFRBUyA3MDAw",
+      "entities": [
+        {
+          "start": 18,
+          "end": 51,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-064",
+      "lang": "en",
+      "tags": [
+        "invoice",
+        "au"
+      ],
+      "textB64": "SW52b2ljZSB0byAyIEZsaW5kZXJzIExhbmUsIENhbmJlcnJhIEFDVCAyNjAwLCByZWYgSU5WLTIyOTEu",
+      "entities": [
+        {
+          "start": 11,
+          "end": 45,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-065",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "au"
+      ],
+      "textB64": "UHJvcGVydHkgZm9yIHNhbGU6IDYxIElyb25iYXJrIERyaXZlLCBEYXJ3aW4gTlQgMDgwMCAtIDMgYmVkLCAyIGJhdGgu",
+      "entities": [
+        {
+          "start": 19,
+          "end": 52,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-066",
+      "lang": "en",
+      "tags": [
+        "form",
+        "de",
+        "person"
+      ],
+      "textB64": "Sm9uYXMgQmVja2VyCkxpbmRlbnN0cmHDn2UgMTQKODAzMzEgTcO8bmNoZW4KR2VybWFueQ==",
+      "entities": [
+        {
+          "start": 0,
+          "end": 12,
+          "class": "person_name"
+        },
+        {
+          "start": 13,
+          "end": 50,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-067",
+      "lang": "en",
+      "tags": [
+        "email",
+        "de"
+      ],
+      "textB64": "U2VuZCB0aGUgY29udHJhY3QgdG8gSGF1cHRzdHJhw59lIDUyLCA1MDY2NyBLw7ZsbiBieSBwb3N0Lg==",
+      "entities": [
+        {
+          "start": 21,
+          "end": 47,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-068",
+      "lang": "en",
+      "tags": [
+        "json",
+        "de"
+      ],
+      "textB64": "eyJhZHJlc3NlIjoiR29ldGhlc3RyLiA3LCA2MDMxMyBGcmFua2Z1cnQgYW0gTWFpbiIsImxhbmQiOiJERSJ9",
+      "entities": [
+        {
+          "start": 12,
+          "end": 49,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-069",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "de",
+        "location"
+      ],
+      "textB64": "T3VyIEJlcmxpbiBvZmZpY2U6IEZyaWVkcmljaHN0cmHDn2UgMTEyLCAxMDExNyBCZXJsaW4sIEdlcm1hbnk=",
+      "entities": [
+        {
+          "start": 4,
+          "end": 10,
+          "class": "location"
+        },
+        {
+          "start": 19,
+          "end": 61,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-070",
+      "lang": "en",
+      "tags": [
+        "delivery",
+        "de",
+        "person"
+      ],
+      "textB64": "U2hpcCB0byBTYWJpbmUgSG9mZm1hbm4sIEFtIFJvc2VuZ2FydGVuIDMsIDA0MTA5IExlaXB6aWcu",
+      "entities": [
+        {
+          "start": 8,
+          "end": 23,
+          "class": "person_name"
+        },
+        {
+          "start": 25,
+          "end": 56,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-071",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "de"
+      ],
+      "textB64": "UmVnaXN0ZXJlZCBhdCBTY2hpbGxlcnBsYXR6IDksIDcwMTczIFN0dXR0Z2FydCBzaW5jZSAyMDE5Lg==",
+      "entities": [
+        {
+          "start": 14,
+          "end": 46,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-072",
+      "lang": "en",
+      "tags": [
+        "csv",
+        "de"
+      ],
+      "textB64": "cmVmLGFkZHIKRC04OCwiQmFobmhvZnN0cmHDn2UgMjEsIDkwNDAyIE7DvHJuYmVyZyI=",
+      "entities": [
+        {
+          "start": 15,
+          "end": 47,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-073",
+      "lang": "en",
+      "tags": [
+        "delivery",
+        "de",
+        "person"
+      ],
+      "textB64": "UGlja3VwIGlzIGF0IEthc3RhbmllbmFsbGVlIDQwLCAyMDM1NyBIYW1idXJnOyBhc2sgZm9yIEtsYXVzIFJpY2h0ZXIu",
+      "entities": [
+        {
+          "start": 13,
+          "end": 45,
+          "class": "street_address"
+        },
+        {
+          "start": 55,
+          "end": 68,
+          "class": "person_name"
+        }
+      ]
+    },
+    {
+      "id": "en-h-074",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "fr"
+      ],
+      "textB64": "TWFpbCBpdCB0byAxMiBydWUgZGVzIExpbGFzLCA2OTAwMyBMeW9uLCBGcmFuY2UgcGxlYXNlLg==",
+      "entities": [
+        {
+          "start": 11,
+          "end": 47,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-075",
+      "lang": "en",
+      "tags": [
+        "form",
+        "fr",
+        "person"
+      ],
+      "textB64": "Q2FtaWxsZSBEdWJvaXMKNDUgYXZlbnVlIFZpY3RvciBIdWdvCjc1MTE2IFBhcmlzCkZyYW5jZQ==",
+      "entities": [
+        {
+          "start": 0,
+          "end": 14,
+          "class": "person_name"
+        },
+        {
+          "start": 15,
+          "end": 55,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-076",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "fr"
+      ],
+      "textB64": "VGhlIHNob3AgYXQgOCBwbGFjZSBkdSBNYXJjaMOpLCAzMTAwMCBUb3Vsb3VzZSBjbG9zZXMgYXQgN3BtLg==",
+      "entities": [
+        {
+          "start": 12,
+          "end": 45,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-077",
+      "lang": "en",
+      "tags": [
+        "json",
+        "fr"
+      ],
+      "textB64": "eyJhZHJlc3NlIjoiMyBib3VsZXZhcmQgR2FtYmV0dGEsIDMzMDAwIEJvcmRlYXV4IiwicGF5cyI6IkZyYW5jZSJ9",
+      "entities": [
+        {
+          "start": 12,
+          "end": 48,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-078",
+      "lang": "en",
+      "tags": [
+        "delivery",
+        "fr"
+      ],
+      "textB64": "RGVsaXZlciB0byAyNyBydWUgZGUgbGEgUGFpeCwgQsOidC4gQiwgNDQwMDAgTmFudGVzIC0gZG9vciBjb2RlIDQ4MjEu",
+      "entities": [
+        {
+          "start": 11,
+          "end": 50,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-079",
+      "lang": "en",
+      "tags": [
+        "invoice",
+        "fr"
+      ],
+      "textB64": "SW52b2ljZSBhZGRyZXNzOiAxMDEgcXVhaSBkZXMgQ2hhcnRyb25zLCAzMzMwMCBCb3JkZWF1eCwgRnJhbmNl",
+      "entities": [
+        {
+          "start": 17,
+          "end": 63,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-080",
+      "lang": "en",
+      "tags": [
+        "delivery",
+        "fr",
+        "person"
+      ],
+      "textB64": "TWVldCDDiXRpZW5uZSBMYXVyZW50IGF0IDYgaW1wYXNzZSBkZXMgQ2VyaXNpZXJzLCA2NzAwMCBTdHJhc2JvdXJnLg==",
+      "entities": [
+        {
+          "start": 5,
+          "end": 20,
+          "class": "person_name"
+        },
+        {
+          "start": 24,
+          "end": 65,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-081",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "fr",
+        "location"
+      ],
+      "textB64": "T3VyIHN0b3JlIGluIExpbGxlIGlzIGF0IDE5IHJ1ZSBOYXRpb25hbGUsIDU5MDAwIExpbGxlLg==",
+      "entities": [
+        {
+          "start": 13,
+          "end": 18,
+          "class": "location"
+        },
+        {
+          "start": 25,
+          "end": 54,
+          "class": "street_address"
+        }
+      ]
+    },
+    {
+      "id": "en-h-082",
+      "lang": "en",
+      "tags": [
+        "news",
+        "location"
+      ],
+      "textB64": "Rmxvb2RpbmcgaW4gQmF2YXJpYSBoYXMgY2xvc2VkIHNldmVyYWwgcm9hZHMsIG9mZmljaWFscyBpbiBNdW5pY2ggc2FpZC4=",
+      "entities": [
+        {
+          "start": 12,
+          "end": 19,
+          "class": "location"
+        },
+        {
+          "start": 59,
+          "end": 65,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-083",
+      "lang": "en",
+      "tags": [
+        "prose",
+        "location"
+      ],
+      "textB64": "U2hlIGdyZXcgdXAgaW4gQnJvb2tseW4gYmVmb3JlIG1vdmluZyB0byBOZXcgWmVhbGFuZC4=",
+      "entities": [
+        {
+          "start": 15,
+          "end": 23,
+          "class": "location"
+        },
+        {
+          "start": 41,
+          "end": 52,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-084",
+      "lang": "en",
+      "tags": [
+        "news",
+        "location"
+      ],
+      "textB64": "RmxpZ2h0cyBmcm9tIFRvcm9udG8gdG8gTGlzYm9uIHJlc3VtZSBuZXh0IHdlZWsu",
+      "entities": [
+        {
+          "start": 13,
+          "end": 20,
+          "class": "location"
+        },
+        {
+          "start": 24,
+          "end": 30,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-085",
+      "lang": "en",
+      "tags": [
+        "log",
+        "location"
+      ],
+      "textB64": "MjAyNi0wMi0wMSAxMjowMDowMyBJTkZPIHdlYXRoZXItc3luYyBmZXRjaGVkIGZvcmVjYXN0IGZvciBQZXJ0aCwgV2VzdGVybiBBdXN0cmFsaWE=",
+      "entities": [
+        {
+          "start": 59,
+          "end": 64,
+          "class": "location"
+        },
+        {
+          "start": 66,
+          "end": 83,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-086",
+      "lang": "en",
+      "tags": [
+        "chat",
+        "location"
+      ],
+      "textB64": "YW55b25lIG5lYXIgU2hvcmVkaXRjaCB3YW50IGx1bmNoPyBvciBpcyBldmVyeW9uZSBpbiBDYW5hcnkgV2hhcmY=",
+      "entities": [
+        {
+          "start": 12,
+          "end": 22,
+          "class": "location"
+        },
+        {
+          "start": 53,
+          "end": 65,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-087",
+      "lang": "en",
+      "tags": [
+        "crm",
+        "location"
+      ],
+      "textB64": "UmVnaW9uOiBPbnRhcmlvLiBUZXJyaXRvcnkgbWFuYWdlciBjb3ZlcnMgUXVlYmVjIGFuZCBNYW5pdG9iYS4=",
+      "entities": [
+        {
+          "start": 8,
+          "end": 15,
+          "class": "location"
+        },
+        {
+          "start": 42,
+          "end": 48,
+          "class": "location"
+        },
+        {
+          "start": 53,
+          "end": 61,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-088",
+      "lang": "en",
+      "tags": [
+        "news",
+        "location"
+      ],
+      "textB64": "SGVhdnkgc25vdyBpcyBmb3JlY2FzdCBhY3Jvc3MgWW9ya3NoaXJlIGFuZCBDdW1icmlhIG9uIFRodXJzZGF5Lg==",
+      "entities": [
+        {
+          "start": 30,
+          "end": 39,
+          "class": "location"
+        },
+        {
+          "start": 44,
+          "end": 51,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-089",
+      "lang": "en",
+      "tags": [
+        "email",
+        "location"
+      ],
+      "textB64": "T3VyIGRpc3RyaWJ1dG9yIGluIEpvcmRhbiBjb25maXJtZWQgdGhlIHNoaXBtZW50IHRocm91Z2ggQXFhYmEu",
+      "entities": [
+        {
+          "start": 19,
+          "end": 25,
+          "class": "location"
+        },
+        {
+          "start": 57,
+          "end": 62,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-090",
+      "lang": "en",
+      "tags": [
+        "yaml",
+        "location"
+      ],
+      "textB64": "cmVnaW9uOiBUdXNjYW55CmNvdW50cnk6IEl0YWx5CnRpbWV6b25lOiBFdXJvcGUvUm9tZQ==",
+      "entities": [
+        {
+          "start": 8,
+          "end": 15,
+          "class": "location"
+        },
+        {
+          "start": 25,
+          "end": 30,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-091",
+      "lang": "en",
+      "tags": [
+        "news",
+        "location"
+      ],
+      "textB64": "V2luZSBleHBvcnRzIGZyb20gTmFwYSBhbmQgU29ub21hIENvdW50eSByb3NlIGxhc3QgeWVhci4=",
+      "entities": [
+        {
+          "start": 18,
+          "end": 22,
+          "class": "location"
+        },
+        {
+          "start": 27,
+          "end": 40,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-092",
+      "lang": "en",
+      "tags": [
+        "chat",
+        "location"
+      ],
+      "textB64": "Zmx5aW5nIGludG8gU3lkbmV5IG9uIHRoZSA5dGgsIHRoZW4gZHJpdmluZyB1cCB0byBRdWVlbnNsYW5k",
+      "entities": [
+        {
+          "start": 12,
+          "end": 18,
+          "class": "location"
+        },
+        {
+          "start": 50,
+          "end": 60,
+          "class": "location"
+        }
+      ]
+    },
+    {
+      "id": "en-h-093",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "VGhlIG1lZXRpbmcgaXMgb24gTWF5IDUgYW5kIHRoZSBNYXkgcmVwb3J0IGlzIGR1ZSBGcmlkYXku",
+      "entities": []
+    },
+    {
+      "id": "en-h-094",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "VGhlIGZsZWV0IGhhcyBhIExpbmNvbG4gTmF2aWdhdG9yIGFuZCB0d28gRm9yZCBUcmFuc2l0IHZhbnMu",
+      "entities": []
+    },
+    {
+      "id": "en-h-095",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike",
+        "code"
+      ],
+      "textB64": "U2V0IGZvbnQtZmFtaWx5OiBQYXJpcywgc2VyaWY7IGluIHRoZSBzdHlsZXNoZWV0Lg==",
+      "entities": []
+    },
+    {
+      "id": "en-h-096",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike",
+        "code"
+      ],
+      "textB64": "ZGVmIGdldF9tYWluX3N0cmVldF9pZChvcmRlcik6CiAgICByZXR1cm4gb3JkZXJbJ21haW5fc3RyZWV0X2lkJ10=",
+      "entities": []
+    },
+    {
+      "id": "en-h-097",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "VmVyc2lvbiA0LjIuMS1yYzMgcmVsZWFzZWQuIFVwZ3JhZGUgZnJvbSAzLjkuMCByZXF1aXJlcyBhIG1pZ3JhdGlvbi4=",
+      "entities": []
+    },
+    {
+      "id": "en-h-098",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "RW50ZXIgeW91ciBwb3N0Y29kZSAoZS5nLiBNMSA0QlQpIGluIHRoZSBib3gu",
+      "entities": []
+    },
+    {
+      "id": "en-h-099",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "Q2FsbCB1cyBvbiAwMjAgNzk0NiAwOTU4IG9yIDU1NS0wMTIzLg==",
+      "entities": []
+    },
+    {
+      "id": "en-h-100",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "TWFpbCB0byBQTyBCb3ggNDQ3MSBiZWZvcmUgdGhlIGRlYWRsaW5lLg==",
+      "entities": []
+    },
+    {
+      "id": "en-h-101",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike",
+        "log"
+      ],
+      "textB64": "U2VydmVyIDE5Mi4xNjguNC4xNyByZWplY3RlZCB0aGUgY29ubmVjdGlvbiBmcm9tIDEwLjAuMC41Mi4=",
+      "entities": []
+    },
+    {
+      "id": "en-h-102",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "VHJhZmZpYyBvbiBPeGZvcmQgU3RyZWV0IHdhcyBoZWF2eSB0aGlzIG1vcm5pbmcsIGFuZCBGaWZ0aCBBdmVudWUgd2FzIGNsb3NlZC4=",
+      "entities": []
+    },
+    {
+      "id": "en-h-103",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "VGhlIGN1c3RvbWVyIGNhbGxlZCB0d2ljZTsgdGhlIGFjY291bnQgbWFuYWdlciB3aWxsIGZvbGxvdyB1cC4gTm90aGluZyBmcm9tIHRoZSBzdXBlcnZpc29yIHlldC4=",
+      "entities": []
+    },
+    {
+      "id": "en-h-104",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "Qm9zdG9uIER5bmFtaWNzIGRlbW9lZCBhIG5ldyByb2JvdCwgYW5kIEJhbmsgb2YgTW9udHJlYWwgcmVwb3J0ZWQgZWFybmluZ3Mu",
+      "entities": []
+    },
+    {
+      "id": "en-h-105",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "U2hlIHNwZWFrcyBGcmVuY2ggYW5kIEdlcm1hbiwgYW5kIHRoZSBBbWVyaWNhbiB0ZWFtIGpvaW5lZCBsYXRlLg==",
+      "entities": []
+    },
+    {
+      "id": "en-h-106",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "SGUgYm91Z2h0IGEgcGFpciBvZiBBaXIgSm9yZGFuIHNuZWFrZXJzIG9ubGluZS4=",
+      "entities": []
+    },
+    {
+      "id": "en-h-107",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "QmlsbCAjNDQ4MSBmb3IgTWFyY2ggaXMgb3ZlcmR1ZSBhbmQgdGhlIGZpbmFsIHdpbGwgd2FzIGZpbGVkIGxhc3Qgd2Vlay4=",
+      "entities": []
+    },
+    {
+      "id": "en-h-108",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike",
+        "code"
+      ],
+      "textB64": "T3BlbiAvaG9tZS9qc21pdGgvcHJvamVjdHMvbWFpbi1zdHJlZXQvY29uZmlnLnlhbWwgYW5kIHNldCB0ejogRXVyb3BlL0Jlcmxpbg==",
+      "entities": []
+    },
+    {
+      "id": "en-h-109",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike",
+        "email"
+      ],
+      "textB64": "Q29udGFjdCBqc21pdGhAY29ycC5leGFtcGxlIG9yIHZpc2l0IGh0dHBzOi8vbG9uZG9uLW9mZmljZS5leGFtcGxlL3BhcmlzL3JvbWUgZm9yIGRldGFpbHMu",
+      "entities": []
+    },
+    {
+      "id": "en-h-110",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "T3JkZXIgIzU1MDIxIHNoaXBwZWQuIFRyYWNraW5nOiAxWjk5OUFBMTAxMjM0NTY3ODQuIEVUQSAzIGJ1c2luZXNzIGRheXMu",
+      "entities": []
+    },
+    {
+      "id": "en-h-111",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "VGhlIFBhcmlzIHNwcmluZyBjb2xsZWN0aW9uIGFuZCB0aGUgQmVybGluIGNoYWlyIGFyZSBvdXIgYmVzdCBzZWxsZXJzLg==",
+      "entities": []
+    },
+    {
+      "id": "en-h-112",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "RG93bnRvd24gcGFya2luZyBpcyBmdWxsLCBzbyBtZWV0IGF0IGhlYWQgb2ZmaWNlIG9yIHRoZSBtYWluIGVudHJhbmNlLg==",
+      "entities": []
+    },
+    {
+      "id": "en-h-113",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike",
+        "code"
+      ],
+      "textB64": "Y29uc3QgbWFpblN0cmVldCA9ICdNYWluIFN0cmVldCc7CmNvbnNvbGUubG9nKGBSZW5kZXJpbmcgJHttYWluU3RyZWV0fSByb3V0ZWApOw==",
+      "entities": []
+    },
+    {
+      "id": "en-h-114",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "SW5zdGFsbCBKZW5raW5zIG9uIHRoZSBDSSBib3gsIHRoZW4gSHVkc29uIGFzIGZhbGxiYWNrOyBNZXJjdXJ5IDMuMSBhbmQgUGhvZW5peCAyIGFyZSB0aGUgY29kZW5hbWVzLg==",
+      "entities": []
+    },
+    {
+      "id": "en-h-115",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "QSBUZXNsYSBjaGFyZ2VyIHdhcyBpbnN0YWxsZWQgYmVzaWRlIHRoZSBIaWx0b24gbG9iYnku",
+      "entities": []
+    },
+    {
+      "id": "en-h-116",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "UTMgcmV2ZW51ZSB3YXMgJDEsMjQwLDAwMCAodXAgOCUpIGFjcm9zcyAxNCBzdG9yZXM7IGhlYWRjb3VudCAyMTIu",
+      "entities": []
+    },
+    {
+      "id": "en-h-117",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "RGVhciBjdXN0b21lciwgeW91ciBhcHBvaW50bWVudCBpcyBjb25maXJtZWQgZm9yIEFwcmlsIDEyIGF0IDNwbS4gUmVwbHkgU1RPUCB0byBvcHQgb3V0Lg==",
+      "entities": []
+    },
+    {
+      "id": "en-h-118",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "SHVudGVyIGJvb3RzIGFyZSBvbiBzYWxlOyB0aGUgaHVudGVyLWdhdGhlcmVyIGV4aGliaXQgb3BlbnMgaW4gSnVuZS4=",
+      "entities": []
+    },
+    {
+      "id": "en-h-119",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike",
+        "code"
+      ],
+      "textB64": "U0VMRUNUICogRlJPTSBzdHJlZXRzIFdIRVJFIHN0cmVldF9uYW1lID0gJ0VsbSBTdHJlZXQnIEFORCB6aXAgPSAnNDMyMTUnOw==",
+      "entities": []
+    },
+    {
+      "id": "en-h-120",
+      "lang": "en",
+      "tags": [
+        "negative",
+        "lookalike"
+      ],
+      "textB64": "R3JhbnQgYXBwbGljYXRpb25zIGNsb3NlIG9uIDMwIEp1bmUuIFRoZSBncmFudCBjb21taXR0ZWUsIGxlZCBieSB0aGUgY2hhaXIsIHdpbGwgYW5ub3VuY2UgcmVzdWx0cy4=",
+      "entities": []
+    }
+  ]
+}

@@ -12,9 +12,9 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import type { GuardBenchmarkListEntry, GuardBenchmarkReport, GuardBenchmarkResponse, GuardProfileSummary } from "@ai-orchestrator/shared";
+import type { EntityBenchmarkReport, GuardBenchmarkListEntry, GuardBenchmarkReport, GuardBenchmarkResponse, GuardProfileSummary } from "@ai-orchestrator/shared";
 import { ApiError, fetchGuardBenchmark, fetchGuardBenchmarks, fetchGuardProfiles, runGuardBenchmark } from "../lib/api";
-import { benchmarkCategoryRows, benchmarkComparisonLine, benchmarkTrend, canRunBenchmark, percent } from "../lib/guard-benchmark";
+import { benchmarkCategoryRows, benchmarkComparisonLine, benchmarkTrend, canRunBenchmark, entityBenchmarkRows, percent } from "../lib/guard-benchmark";
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) return err.message;
@@ -220,6 +220,7 @@ export function GuardBenchmarkReportView({ report }: { report: GuardBenchmarkRep
           </table>
         </div>
       </section>
+      {report.entities && <EntityBenchmarkSection report={report.entities} />}
       {report.workflow && (
         <section className="kb-section" aria-labelledby="guard-bench-workflow">
           <div className="mcp-section-head">
@@ -255,6 +256,60 @@ export function GuardBenchmarkReportView({ report }: { report: GuardBenchmarkRep
         </section>
       )}
     </>
+  );
+}
+
+/** Names, places and street addresses: precision and recall per class on the entity corpus, when the rule set uses that check. */
+function EntityBenchmarkSection({ report }: { report: EntityBenchmarkReport }) {
+  const rows = entityBenchmarkRows(report);
+  const cell = (result: (typeof rows)[number]["main"], metric: "precision" | "recall") => {
+    if (!result) return <td className="num kb-subtle">–</td>;
+    const ids = metric === "recall" ? result.missed : result.flagged;
+    const title = `Exact span: ${percent(result.strict[metric])}${ids.length > 0 ? `. ${metric === "recall" ? "Missed in" : "Flagged in"}: ${ids.join(", ")}` : ""}`;
+    return (
+      <td className="num" title={title}>
+        {percent(result.overlap[metric])}
+      </td>
+    );
+  };
+  const lookalikes = report.negatives.map((entry) => `${entry.split === "heldout" ? "held-out" : entry.split} ${fraction(entry.flagged, entry.items)}`).join(", ");
+  return (
+    <section className="kb-section" aria-labelledby="guard-bench-entities">
+      <div className="mcp-section-head">
+        <h4 id="guard-bench-entities">Names, places and street addresses</h4>
+        <span className="kb-subtle">Labelled spans found by the names and addresses check (half the span or more); hover for exact-span rates and item ids</span>
+      </div>
+      {report.failed.length > 0 && (
+        <p className="guard-bench-compare guard-bench-regressed" role="status">
+          The check did not run on {report.failed.length} item{report.failed.length === 1 ? "" : "s"}; their spans count as missed.
+        </p>
+      )}
+      <div className="mcp-table-scroll">
+        <table className="kb-table guard-bench-table" aria-label="Names, places and street addresses">
+          <thead>
+            <tr>
+              <th scope="col">Class</th>
+              <th scope="col" className="num">Precision · main</th>
+              <th scope="col" className="num">Recall · main</th>
+              <th scope="col" className="num">Precision · held-out</th>
+              <th scope="col" className="num">Recall · held-out</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.dataClass}>
+                <th scope="row">{row.label}</th>
+                {cell(row.main, "precision")}
+                {cell(row.main, "recall")}
+                {cell(row.heldout, "precision")}
+                {cell(row.heldout, "recall")}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {lookalikes && <p className="kb-subtle">Look-alikes with no name or address flagged: {lookalikes}.</p>}
+    </section>
   );
 }
 

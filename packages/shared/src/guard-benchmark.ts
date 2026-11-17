@@ -19,6 +19,7 @@
  */
 
 import { z } from "zod";
+import { entityBenchmarkReportSchema } from "./guard-entity-benchmark";
 
 export const GUARD_BENCHMARK_REPORT_FORMAT = "l2m.guard-benchmark";
 export const GUARD_BENCHMARK_REPORT_VERSION = 1;
@@ -134,7 +135,9 @@ export const guardBenchmarkReportSchema = z.object({
   categories: z.array(guardBenchmarkCategoryResultSchema),
   detectors: z.array(guardBenchmarkDetectorResultSchema),
   latency: guardBenchmarkLatencySchema,
-  workflow: guardWorkflowSuiteSchema.optional()
+  workflow: guardWorkflowSuiteSchema.optional(),
+  /** Names, places and street addresses: present when the rule set lists the `data.entities` check (a full run only). */
+  entities: entityBenchmarkReportSchema.optional()
 });
 export type GuardBenchmarkReport = z.infer<typeof guardBenchmarkReportSchema>;
 

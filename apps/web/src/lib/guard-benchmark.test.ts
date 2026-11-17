@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GuardBenchmarkCategoryResult, GuardBenchmarkListEntry, GuardBenchmarkReport } from "@ai-orchestrator/shared";
-import { benchmarkCategoryLabel, benchmarkCategoryRows, benchmarkComparisonLine, benchmarkDraftDenial, benchmarkTrend, canRunBenchmark, percent } from "./guard-benchmark";
+import { entityBenchmarkRows, benchmarkCategoryLabel, benchmarkCategoryRows, benchmarkComparisonLine, benchmarkDraftDenial, benchmarkTrend, canRunBenchmark, percent } from "./guard-benchmark";
 
 function category(name: string, split: "main" | "heldout", detected: number, flagged: number): GuardBenchmarkCategoryResult {
   return {
@@ -69,5 +69,29 @@ describe("content rules benchmark helpers", () => {
     expect(benchmarkDraftDenial("builder", { builtIn: true })).toMatch(/default rule set is read-only/);
     expect(benchmarkDraftDenial("builder", { builtIn: false, enforced: true })).toMatch(/A project enforces/);
     expect(benchmarkDraftDenial("operator", { builtIn: false })).toMatch(/Only admins and builders/);
+  });
+});
+
+describe("entity benchmark rows", () => {
+  it("puts each class's main and held-out results side by side, with readable labels", () => {
+    const score = { truePositives: 1, falsePositives: 0, falseNegatives: 0, precision: 1, recall: 1, f1: 1 };
+    const result = (dataClass: "person_name" | "location", split: "main" | "heldout") => ({ dataClass, split, labelled: 1, predicted: 1, strict: score, overlap: score, missed: [], flagged: [] });
+    const rows = entityBenchmarkRows({
+      format: "l2m.entity-benchmark",
+      version: 1,
+      generatedAt: "2026-11-17T00:00:00.000Z",
+      detectorId: "data.entities",
+      classes: ["person_name", "location"],
+      profile: { id: "p", version: "1", hash: "h" },
+      corpus: { hash: "c", items: 2, splits: ["main", "heldout"] },
+      results: [result("person_name", "main"), result("location", "main"), result("person_name", "heldout")],
+      negatives: [],
+      failed: [],
+      latency: { p50Ms: 0, p95Ms: 0, maxMs: 0 }
+    });
+    expect(rows.map((row) => [row.label, row.main?.split ?? null, row.heldout?.split ?? null])).toEqual([
+      ["Person names", "main", "heldout"],
+      ["Places", "main", null]
+    ]);
   });
 });

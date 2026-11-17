@@ -53,6 +53,9 @@ export * from "./phone";
 export * from "./destinations";
 export * from "./benchmark";
 export * from "./output-benchmark";
+export * from "./entity-corpus";
+export * from "./entity-benchmark";
+export { ENTITY_CORPUS_FORMAT, ENTITY_CORPUS_SEED, parseEntityMarkup, entityMarkupOf } from "./entity-corpus-generator";
 
 export interface DefaultGuardRegistryOptions {
   /** DNS resolver for the egress guard. Default: never resolves, so only literal addresses are judged and every hostname is unresolved. */

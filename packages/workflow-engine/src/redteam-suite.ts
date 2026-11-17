@@ -9,7 +9,11 @@ import {
   type GuardCorpus,
   type GuardCorpusFile,
   type GuardCorpusItem,
-  type GuardProfile
+  type GuardProfile,
+  entityDetectorEntry,
+  runEntityBenchmark,
+  type EntityCorpus,
+  type GuardRegistry
 } from "@ai-orchestrator/guard-sdk";
 import { MCPRegistry, SnapshotMockMCPServerAdapter, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallRequest } from "@ai-orchestrator/provider-sdk";
@@ -364,6 +368,10 @@ export interface RunGuardBenchmarkSuitesOptions {
   /** Filters the rule set suite; the workflow suite always runs every tool-result category. */
   categories?: readonly string[];
   corpus?: GuardCorpus;
+  /** The entity corpus, measured when the rule set lists the `data.entities` check. Default: the shipped one. */
+  entityCorpus?: EntityCorpus;
+  /** The registry the `data.entities` check runs from (the host's, so its recognizer is measured). Default: the built-in detectors. */
+  entityRegistry?: GuardRegistry;
   clock?: () => Date;
   signal?: AbortSignal;
   pause?: () => Promise<void>;
@@ -382,6 +390,19 @@ export async function runGuardBenchmarkSuites(options: RunGuardBenchmarkSuitesOp
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.pause ? { pause: options.pause } : {})
   });
+  // Names, places and street addresses: measured on their own corpus when the rule set lists the check (not on a category filter).
+  if (suites.includes("profile") && !options.categories?.length && entityDetectorEntry(options.profile)) {
+    const { report: entities } = await runEntityBenchmark({
+      profile: options.profile,
+      ...(options.entityCorpus ? { corpus: options.entityCorpus } : {}),
+      ...(options.entityRegistry ? { registry: options.entityRegistry } : {}),
+      ...(options.splits ? { splits: options.splits } : {}),
+      ...(options.clock ? { clock: options.clock } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.pause ? { pause: options.pause } : {})
+    });
+    report.entities = entities;
+  }
   if (!suites.includes("workflow")) return report;
   const workflow = await runReferenceWorkflowSuite({
     profile: options.profile,

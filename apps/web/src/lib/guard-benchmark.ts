@@ -4,7 +4,7 @@
  * version, the comparison line, and who may benchmark a draft.
  */
 
-import type { GuardBenchmarkCategoryResult, GuardBenchmarkJudgement, GuardBenchmarkListEntry, GuardBenchmarkReport } from "@ai-orchestrator/shared";
+import type { EntityBenchmarkClassResult, EntityBenchmarkReport, GuardBenchmarkCategoryResult, GuardBenchmarkJudgement, GuardBenchmarkListEntry, GuardBenchmarkReport } from "@ai-orchestrator/shared";
 
 const CATEGORY_LABELS: Record<string, string> = {
   direct_injection: "Direct prompt injection",
@@ -110,4 +110,28 @@ export function benchmarkDraftDenial(role: string, profile: { builtIn: boolean; 
 /** Saved versions may be benchmarked by builders and admins, the default rule set included. */
 export function canRunBenchmark(role: string): boolean {
   return role === "admin" || role === "builder";
+}
+
+const ENTITY_CLASS_LABELS: Record<string, string> = {
+  person_name: "Person names",
+  location: "Places",
+  street_address: "Street addresses"
+};
+
+export interface EntityBenchmarkRow {
+  dataClass: string;
+  label: string;
+  main: EntityBenchmarkClassResult | null;
+  heldout: EntityBenchmarkClassResult | null;
+}
+
+/** One row per measured class (names, places, street addresses), main and held-out side by side. */
+export function entityBenchmarkRows(report: EntityBenchmarkReport): EntityBenchmarkRow[] {
+  const rows = new Map<string, EntityBenchmarkRow>();
+  for (const result of report.results) {
+    const row = rows.get(result.dataClass) ?? { dataClass: result.dataClass, label: ENTITY_CLASS_LABELS[result.dataClass] ?? result.dataClass, main: null, heldout: null };
+    row[result.split] = result;
+    rows.set(result.dataClass, row);
+  }
+  return [...rows.values()];
 }
