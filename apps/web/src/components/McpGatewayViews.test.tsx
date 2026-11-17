@@ -294,6 +294,37 @@ describe("MCP gateway views", () => {
     );
   });
 
+  it("turns on scan_document for a content rules member, with URL fetching and its host list behind their own switches", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.updateMcpToolset).mockResolvedValue({ toolset });
+    render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
+    await screen.findByTestId("toolset-endpoint");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const form = screen.getByRole("form", { name: "Edit toolset" });
+    expect(within(form).queryByRole("checkbox", { name: /Also offer scan_document/ })).toBeNull();
+    await user.click(within(form).getByRole("checkbox", { name: /Offer detect_sensitive_data/ }));
+    const documents = within(form).getByRole("checkbox", { name: /Also offer scan_document/ });
+    expect(documents).not.toBeChecked();
+    await user.click(documents);
+    const urls = within(form).getByRole("checkbox", { name: "Let scan_document fetch documents from URLs" });
+    expect(urls).not.toBeChecked();
+    expect(within(form).queryByLabelText("Document hosts")).toBeNull();
+    await user.click(urls);
+    expect(urls).toHaveAccessibleDescription(/Private, loopback and link-local addresses are always refused/);
+    await user.type(within(form).getByLabelText("Document hosts"), "docs.example.com{enter}*.example.org");
+    await user.click(within(form).getByRole("button", { name: "Save toolset" }));
+    await waitFor(() =>
+      expect(api.updateMcpToolset).toHaveBeenCalledWith(
+        "mts_1",
+        expect.objectContaining({
+          members: expect.arrayContaining([
+            { kind: "content_rules", ruleSetId: null, documents: { enabled: true, allowUrls: true, allowedHosts: ["docs.example.com", "*.example.org"] } }
+          ])
+        })
+      )
+    );
+  });
+
   it("shows and edits the per-session outside-content switch, off by default", async () => {
     const user = userEvent.setup();
     vi.mocked(api.updateMcpToolset).mockResolvedValue({ toolset: { ...toolset, trackSessionLabels: true } });

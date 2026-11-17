@@ -17,6 +17,7 @@
     "@ai-orchestrator/provider-sdk": "workspace:*",
     "@ai-orchestrator/shared": "workspace:*",
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "htmlparser2": "10.1.0",
     "ioredis": "^6.0.0",
     "mongodb": "^7.8.0",
     "mysql2": "^3.24.6",

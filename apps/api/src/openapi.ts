@@ -2158,6 +2158,41 @@ export const openApiSpec = {
         responses: { "200": { description: "Rule set document; x-guard-profile-version and x-guard-profile-hash headers" } }
       }
     },
+    "/api/guard/profiles/{id}/scan-document": {
+      post: {
+        tags: ["Content rules"],
+        summary:
+          "Scan a text, Markdown, HTML, JSON or CSV document (an upload as base64, or a URL fetched through the outbound URL checks) with the rule set's draft, a saved version or the latest (builders; 10 a minute per user). Findings with locations and masked previews, counts per class and a risk level; optional redacted text (mask or placeholder). Nothing is stored and no rule events are recorded; audited as guard.document_scan_test.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["source"],
+                properties: {
+                  source: { type: "object", description: "{ kind: 'upload', contentBase64, filename?, mediaType? } or { kind: 'url', url }" },
+                  document: { type: "object", description: "An unsaved rule set document (never stored)" },
+                  version: { type: "integer" },
+                  entityTypes: { type: "array", items: { type: "string" } },
+                  redact: { type: "string", enum: ["mask", "placeholder"] }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "{ result }" },
+          "400": { description: "Invalid request, or an unsupported, invalid or oversized document" },
+          "404": { description: "Rule set or version not found" },
+          "422": { description: "The URL is refused by the outbound URL checks" },
+          "429": { description: "Too many scans" },
+          "502": { description: "The document server answered with an error" },
+          "504": { description: "The document server was too slow" }
+        }
+      }
+    },
     "/api/guard/detectors": {
       get: { tags: ["Content rules"], summary: "Detector catalogue with the channels each one checks (viewers)", responses: { "200": { description: "{ channels, detectors }" } } }
     },

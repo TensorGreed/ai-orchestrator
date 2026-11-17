@@ -4,6 +4,7 @@ import {
   BUILT_IN_TOOLS_ADAPTER_ID,
   builtInToolProviderOf,
   builtInToolsEndpoint,
+  readCapped,
   type BuiltInToolProvider,
   type MCPServerConfig,
   type MCPToolDefinition,
@@ -188,40 +189,6 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
-}
-
-/**
- * The body as text, read as it streams: past `maxBytes` the read stops and the
- * rest is cancelled, so a body with no (or a false) content-length cannot
- * fill memory.
- */
-async function readCapped(response: Response, maxBytes: number): Promise<string> {
-  const tooLarge = () => new Error(`the response is larger than ${maxBytes} bytes.`);
-  if (!response.body) {
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength > maxBytes) throw tooLarge();
-    return new TextDecoder().decode(buffer);
-  }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel().catch(() => undefined);
-      throw tooLarge();
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(bytes);
 }
 
 /** Replaces every occurrence of the secret (raw, URL-encoded, and as a query string encodes it) in a message. */

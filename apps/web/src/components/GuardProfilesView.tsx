@@ -68,6 +68,7 @@ import {
 } from "../lib/guard-profile-edit";
 import { actionLabel, channelLabel } from "../lib/guard-trace";
 import { GuardSimulationCard, useGuardSimulation } from "./GuardSimulationPanel";
+import { GuardDocumentScanPanel } from "./GuardDocumentScanPanel";
 import { simulateDenial } from "../lib/guard-simulation";
 import { benchmarkDraftDenial } from "../lib/guard-benchmark";
 import { GuardBenchmarkResultCard } from "./GuardBenchmarkView";
@@ -663,6 +664,8 @@ function GuardProfileEditor({
           />
         )}
       </section>
+
+      {canEdit && <GuardDocumentScanPanel profileId={profileId} draft={dirty ? document : null} />}
 
       <VersionHistory profileId={profileId} versions={versions} />
     </div>
