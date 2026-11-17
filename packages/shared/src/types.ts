@@ -1987,7 +1987,12 @@ export type McpToolsetMemberSpec =
   | { kind: "workflow"; workflowId: string }
   | { kind: "server"; serverId: string; toolGlob: string | null }
   /** The built-in content rules tools, detecting with `ruleSetId` (null: the built-in detector defaults). */
-  | { kind: "content_rules"; ruleSetId: string | null };
+  | {
+      kind: "content_rules";
+      ruleSetId: string | null;
+      /** v77 — the `scan_document` tool: off unless `enabled`; URL fetches only with `allowUrls`, from `allowedHosts`. Absent: off. */
+      documents?: { enabled: boolean; allowUrls: boolean; allowedHosts: string[] };
+    };
 
 export type McpToolsetMember = McpToolsetMemberSpec & { id: string };
 

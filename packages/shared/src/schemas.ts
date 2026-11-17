@@ -3,6 +3,7 @@ import { MCP_POLICY_TEXT_OPS, WORKFLOW_SCHEMA_VERSION } from "./types";
 import { writeToolApprovalSettingsSchema } from "./approval-gate";
 import { MCP_POLICY_PATH_MAX_LENGTH, parseMcpPolicyPath } from "./mcp-tool-policy";
 import { mcpGatewayRateLimitSchema } from "./gateway-limits";
+import { contentRulesDocumentsSchema } from "./content-documents";
 import { workflowDataProtectionSchema } from "./data-subject";
 import { stripReservedCustomData, SENSITIVE_OUTPUT_CONFIG_KEY, storedTriggerTrustBinding, TRIGGER_TRUST_BINDING_KEY, TRIGGER_TRUST_CONFIG_KEY, TRIGGER_TRUST_LEVELS } from "./data-labels";
 
@@ -620,7 +621,9 @@ export const mcpToolsetMemberInputSchema = z.discriminatedUnion("kind", [
     /** The built-in content rules tools (detect, redact, restore). */
     kind: z.literal("content_rules"),
     /** The rule set the tools detect with; null or absent: the built-in detector defaults. */
-    ruleSetId: z.string().trim().min(1).max(63).nullable().optional()
+    ruleSetId: z.string().trim().min(1).max(63).nullable().optional(),
+    /** The `scan_document` tool (off unless enabled), and whether it may fetch URLs from the listed hosts. */
+    documents: contentRulesDocumentsSchema.optional()
   })
 ]);
 

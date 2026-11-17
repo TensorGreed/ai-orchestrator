@@ -30,7 +30,7 @@ Toolsets live under **MCP → Toolsets** in the sidebar. Admins create and edit 
 | Policy project | The project whose tool policy rules apply to gateway tools. Empty means only global rules apply. |
 | Enabled | A disabled toolset answers 404, and its open sessions are closed. |
 | Track outside content per session | Off by default. When on, each client session remembers what its calls returned, and later calls in the session are checked with those labels (see below). |
-| Members | Workflows with an Expose as MCP Tool trigger, registered servers with an optional tool glob and, off by default, the built-in [content rules tools](./content-rules-tools.md) (detect, redact and restore sensitive data). |
+| Members | Workflows with an Expose as MCP Tool trigger, registered servers with an optional tool glob and, off by default, the built-in [content rules tools](./content-rules-tools.md) (detect, redact and restore sensitive data, and with its own switch [scan_document](./content-rules-tools.md#scan-document) for documents). |
 
 ### Tool names
 

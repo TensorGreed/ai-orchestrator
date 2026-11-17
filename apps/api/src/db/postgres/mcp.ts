@@ -12,7 +12,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { LEGAL_HOLD_LOCK_SHARED_SQL, notHeldSql } from "../legal-hold-sql.js";
-import { parseRecordedCallLabels, parseStoredGatewayRateLimit } from "@ai-orchestrator/shared";
+import { contentRulesMemberOptionsJson, parseContentRulesMemberOptions, parseRecordedCallLabels, parseStoredGatewayRateLimit } from "@ai-orchestrator/shared";
 import {
   MCP_POLICY_KINDS,
   MCP_POLICY_ROLES,
@@ -368,7 +368,7 @@ function mapMcpToolsetMember(row: Row): McpToolsetMember | null {
     return { id: toStr(row.id), kind: "server", serverId: toStr(row.server_id), toolGlob: row.tool_glob ? toStr(row.tool_glob) : null };
   }
   if (toStr(row.kind) === "content_rules") {
-    return { id: toStr(row.id), kind: "content_rules", ruleSetId: row.rule_set_id ? toStr(row.rule_set_id) : null };
+    return { id: toStr(row.id), kind: "content_rules", ruleSetId: row.rule_set_id ? toStr(row.rule_set_id) : null, ...parseContentRulesMemberOptions(row.options_json) };
   }
   return null;
 }
@@ -1530,8 +1530,8 @@ async function writeMcpToolsetMembers(db: Queryable, toolsetId: string, members:
   await db.query(`DELETE FROM mcp_toolset_members WHERE toolset_id = $1`, [toolsetId]);
   for (const [index, member] of members.entries()) {
     await db.query(
-      `INSERT INTO mcp_toolset_members (id, toolset_id, kind, workflow_id, server_id, tool_glob, rule_set_id, position)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO mcp_toolset_members (id, toolset_id, kind, workflow_id, server_id, tool_glob, rule_set_id, options_json, position)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         member.id ?? `mtm_${randomUUID()}`,
         toolsetId,
@@ -1540,6 +1540,7 @@ async function writeMcpToolsetMembers(db: Queryable, toolsetId: string, members:
         member.kind === "server" ? member.serverId : null,
         member.kind === "server" ? member.toolGlob ?? null : null,
         member.kind === "content_rules" ? member.ruleSetId ?? null : null,
+        member.kind === "content_rules" ? contentRulesMemberOptionsJson(member.documents) : null,
         index
       ]
     );

@@ -1,0 +1,4 @@
+{
+  "description": "Held-out split: person names, places and street addresses (US, UK, CA, AU, DE, FR) in English text, with look-alikes. Written apart from the generator, the main split and the detector, by an author given only the class definitions and the file format.",
+  "source": "Hand-written synthetic text (model-authored for this corpus from the class definitions alone). Names are invented combinations of common given names and surnames, and no real person is named; streets, house numbers, postcodes and place combinations are invented (postcodes format-valid only); no dataset or website was copied."
+}

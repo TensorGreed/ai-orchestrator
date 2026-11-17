@@ -174,3 +174,78 @@ of an otherwise matching source sentence still passes (`ug-a01`, `ug-a03`,
 falls in its uncertain band, so it may not see these either; it is not
 measured here because it needs a model. There is no held-out split yet: these
 items were written by someone who had read the checks.
+
+## Names, places and street addresses (`entities/`)
+
+A span-annotated corpus for the `data.entities` check, run by
+`runEntityBenchmark` (`src/entity-benchmark.ts`), `l2m guard benchmark
+--entities` and the Security → Benchmark tab when a rule set lists the check.
+The red-team loader does not read this folder, so the built-in rule set's
+benchmark, its floors and the corpus hash are unchanged.
+
+| File | Split | Items | Written by |
+|---|---|---|---|
+| `entities/main.json` | main | 300 (96 addresses, 16 per country; 80 names; 60 places; 64 look-alikes with no span) | `src/entity-corpus-generator.ts`, seed 20261117 |
+| `entities/heldout/heldout.json` | held-out | 120 | an author given only the class definitions and the file format, apart from the generator, the main split and the check |
+
+English only. Addresses come from the US, the UK, Canada, Australia, Germany
+and France. The same held-out rule applies as above: never tune the check on
+a held-out item.
+
+### File format
+
+```json
+{
+  "format": "l2m.entity-corpus",
+  "version": 1,
+  "split": "main",
+  "description": "…",
+  "source": "where every name, place and street came from",
+  "items": [{ "id": "en-m-001", "lang": "en", "tags": ["email", "us", "address"], "textB64": "…", "entities": [{ "start": 31, "end": 45, "class": "person_name" }] }]
+}
+```
+
+`textB64` is base64 of the UTF-8 text. Offsets are UTF-16 code units of the
+decoded text, as JavaScript strings count them. Spans lie inside the text,
+do not overlap and have no outer whitespace.
+
+To read a file with its spans marked as `⟦class|text⟧`:
+`node packages/guard-sdk/src/entity-corpus-generator.ts --print <file>`.
+To change the main split, edit the generator and run it with `--write`; a test
+fails when `main.json` differs from what the generator writes. The held-out
+split was converted from its author's markup source with `--heldout <source.json>`
+(which also reads `heldout/heldout.meta.json`). The source is not committed:
+`--print` shows the same markup, and held-out items are edited only by moving
+them to the main split, as above.
+
+### What is labelled
+
+- `person_name`: an individual's name as written (given name, surname or both, with middle names, initials and particles), without titles (`Dr`, `Ms`), suffixes or a possessive. Public figures and fictional characters count. A name used as a brand, product, company or place, a word that is a name only elsewhere (`May` the month, `Grant access`), and names inside email addresses, URLs, handles and code identifiers are not labelled.
+- `location`: a named place standing on its own: a city, region, state, province, country or neighbourhood. A place that is part of a street address is not labelled separately, and the benchmark ignores a predicted place inside a labelled address. Places inside organisation or product names, demonyms, time-zone ids, URLs and code are not labelled.
+- `street_address`: a postal address that names a street, from the house number through the unit, town, region, postcode and country when they follow as part of the same address. It may span lines. A postcode alone, a town with only a postcode, a PO box and a street named in passing ("traffic on the high street") are not labelled.
+
+### Sources and licence
+
+Everything is synthetic.
+
+- Main split:
+  - Given names are a hand-picked subset of the US Social Security Administration's baby-name lists. Surnames are a hand-picked subset of the US Census Bureau's 2010 surname list. Both are US government works in the public domain.
+  - US cities are names in the US Census Bureau's gazetteer (public domain). Other cities, regions and countries are names of major places, used as plain geographic facts. No gazetteer dataset was copied.
+  - News-style items name invented people with invented facts.
+  - Street names, house numbers and postcodes are invented; postcodes are format-valid only.
+  - Every template is hand-written.
+- No real person is named anywhere in either split (a fictional character from a classic novel appears once).
+- Held-out split: hand-written for this corpus. Names are invented combinations of common given names and surnames. Streets, numbers, postcodes and place combinations are invented, and no dataset or website was copied.
+
+### Matching and floors
+
+Spans are matched one to one per class. Strict matching needs the exact span. Overlap matching needs the two spans to share at least half of the longer one's characters; overlap is the gated number. `ENTITY_RULES_BENCHMARK_FLOORS` in
+`src/entity-benchmark.ts` holds the rules engine's overlap precision and
+recall per class and split, set `ENTITY_BENCHMARK_FLOOR_MARGIN` (2 points) below
+the measured values. The vitest gate and the repo CI step fail on a drop below a
+floor, on a class with no floor, and on any item the check did not run on.
+The held-out split has `ENTITY_BENCHMARK_HELDOUT_SLACK` (5 points) of slack. Each item has 5 seconds;
+an item that runs out counts as not checked.
+When a change measures more than the margin above a floor, the command lists
+those classes and prints the measured values less the margin. Paste them into
+the floors in the same pull request (the ratchet).

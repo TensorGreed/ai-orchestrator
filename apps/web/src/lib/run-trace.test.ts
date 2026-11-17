@@ -11,7 +11,6 @@ import {
   createTraceStreamHandlers,
   pickStreamFailureMessage,
   runningElapsedMs,
-  summarizeInputPreview,
   tailPreview,
   type LiveNodeResult
 } from "./run-trace";
@@ -95,13 +94,6 @@ describe("run trace helpers", () => {
     expect(pickStreamFailureMessage("Model not found", generic)).toBe("Model not found");
     expect(pickStreamFailureMessage(null, generic)).toBe(generic);
     expect(pickStreamFailureMessage("Model not found", "Network error")).toBe("Network error");
-  });
-
-  it("previews the prompt text for an object input, else the fallback summary", () => {
-    const summarize = () => "{ keys }";
-    expect(summarizeInputPreview({ user_prompt: "Write a haiku", other: 1 }, summarize)).toBe("Write a haiku");
-    expect(summarizeInputPreview({ a: 1 }, summarize)).toBe("{ keys }");
-    expect(summarizeInputPreview("plain", summarize)).toBe("{ keys }");
   });
 
   it("shows the tail of live text on one line", () => {

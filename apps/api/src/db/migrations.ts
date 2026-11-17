@@ -3069,6 +3069,20 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_content_redactions_expires;
       DROP TABLE IF EXISTS content_redactions;
     `
+  },
+  {
+    version: 77,
+    description: "Content rules toolset member options — document scanning (scan_document)",
+    // mcp_toolset_members.options_json: a content_rules member's options as JSON, today `{ documents: { enabled,
+    // allowUrls, allowedHosts } }` (the scan_document tool, off unless enabled; URL fetches only from the listed hosts).
+    // NULL: no options (document scanning off), as before v77.
+    up: `
+      ALTER TABLE mcp_toolset_members ADD COLUMN IF NOT EXISTS options_json TEXT;
+    `,
+    // An older build ignores the column; dropping it turns document scanning off.
+    down: `
+      ALTER TABLE mcp_toolset_members DROP COLUMN IF EXISTS options_json;
+    `
   }
 ];
 

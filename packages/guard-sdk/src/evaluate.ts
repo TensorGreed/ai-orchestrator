@@ -256,7 +256,7 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       return inside ? [inside] : [];
     });
     for (const finding of result) {
-      if (finding.score >= entry.threshold) kept.push(finding);
+      if (finding.score >= entry.threshold && (finding.minScore === undefined || finding.score >= finding.minScore)) kept.push(finding);
       else suppressed.push(finding);
     }
     timings.push({ detectorId: detector.id, tier: detector.tier, durationMs, status: "ran", findings: kept.length });

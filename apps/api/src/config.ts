@@ -498,6 +498,19 @@ const envSchema = z.object({
    * (`CONTENT_REDACTION_DEFAULT_TTL_SECONDS`); at most 30 days.
    */
   CONTENT_REDACTION_TTL_SECONDS: z.coerce.number().int().min(60).max(2_592_000).optional(),
+  /**
+   * Scanning documents with content rules (the rule set page's "Scan a document" test and the gateway's
+   * `scan_document` tool, which is off unless a toolset turns it on). Bytes read from an upload or a URL (decoded
+   * bytes for a compressed response); at most 25 MiB. Uploads are also bound by API_BODY_LIMIT_BYTES after base64.
+   */
+  CONTENT_SCAN_MAX_BYTES: z.coerce.number().int().min(1024).max(25 * 1024 * 1024).default(5 * 1024 * 1024),
+  /** Characters of extracted text checked per document; past this the result says which part was covered. */
+  CONTENT_SCAN_MAX_CHARS: z.coerce.number().int().min(1000).max(20_000_000).default(2_000_000),
+  /** Total time for a document fetch, and the time to the first byte of the body. */
+  CONTENT_SCAN_FETCH_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(15_000),
+  CONTENT_SCAN_FIRST_BYTE_TIMEOUT_MS: z.coerce.number().int().min(500).max(120_000).default(10_000),
+  /** Document scans running at once in this process; more wait their turn (briefly) or are refused. */
+  CONTENT_SCAN_MAX_CONCURRENT: z.coerce.number().int().min(1).max(32).default(2),
   // Phase 10.7 — MCP runtime safety.
   /** Sandbox mode for stdio servers that do not choose one: `none` (on the host) or `container`. */
   MCP_SANDBOX_DEFAULT: z.enum(["none", "container"]).default("none"),

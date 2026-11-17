@@ -6,6 +6,7 @@ import {
   type CSSProperties,
   type DragEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
   type RefObject
 } from "react";
 import { NodeActivityList } from "./NodeActivityList";
@@ -230,6 +231,8 @@ interface WorkflowCanvasAreaProps {
   /** Phase 10.3 — MCP server status and policy markers by node id, and where clicking one goes. */
   mcpMarkers?: Record<string, McpCanvasMarker>;
   onOpenMcpTarget?: (target: McpNavTarget) => void;
+  /** Picks which run's data the canvas shows; rendered in the toolbar while debug mode is on. */
+  runPicker?: ReactNode;
 }
 
 /** Everything the import checklist needs from the app; the canvas adds focus and Tidy. */
@@ -296,7 +299,8 @@ export function WorkflowCanvasArea({
   onBeforeTidy,
   importPanel,
   mcpMarkers,
-  onOpenMcpTarget
+  onOpenMcpTarget,
+  runPicker
 }: WorkflowCanvasAreaProps) {
   const [fileDragActive, setFileDragActive] = useState(false);
   const [expandedNodeLogIds, setExpandedNodeLogIds] = useState<string[]>([]);
@@ -691,6 +695,7 @@ export function WorkflowCanvasArea({
                 <span className="canvas-tool-toggle-dot" aria-hidden="true" />
                 Debug
               </button>
+              {debugMode && runPicker}
             </div>
 
             {hubCount > 0 && (

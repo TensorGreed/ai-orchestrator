@@ -3,6 +3,7 @@ import { createCanaryDetector } from "./detectors/canary";
 import { createInjectionClassifierDetector, type GuardClassifier } from "./detectors/classifier";
 import { createCodeGuardDetector, createCommandGuardDetector } from "./detectors/command-guard";
 import { createDlpDetector, type NationalIdSpec } from "./detectors/dlp";
+import { createEntitiesDetector, type GuardEntityRecognizer } from "./detectors/entities";
 import { createEgressGuardDetector, type DnsResolver } from "./detectors/egress-guard";
 import { createExfiltrationDetector } from "./detectors/exfiltration";
 import { createHiddenUnicodeDetector } from "./detectors/hidden-unicode";
@@ -33,6 +34,8 @@ export * from "./detectors/exfiltration";
 export * from "./detectors/canary";
 export * from "./detectors/classifier";
 export * from "./detectors/dlp";
+export * from "./detectors/entities";
+export { ENTITY_TOKEN_PATTERN, UK_POSTCODE_PATTERN, CA_POSTCODE_PATTERN, RULE_ENTITY_RECOGNIZER_VERSION, recognizeEntitiesByRules, type RuleEntitySpan } from "./detectors/entities-rules";
 export * from "./detectors/sql-guard";
 export * from "./detectors/command-guard";
 export * from "./detectors/path-guard";
@@ -53,6 +56,9 @@ export * from "./phone";
 export * from "./destinations";
 export * from "./benchmark";
 export * from "./output-benchmark";
+export * from "./entity-corpus";
+export * from "./entity-benchmark";
+export { ENTITY_CORPUS_FORMAT, ENTITY_CORPUS_SEED, parseEntityMarkup, entityMarkupOf } from "./entity-corpus-generator";
 
 export interface DefaultGuardRegistryOptions {
   /** DNS resolver for the egress guard. Default: never resolves, so only literal addresses are judged and every hostname is unresolved. */
@@ -65,6 +71,8 @@ export interface DefaultGuardRegistryOptions {
   classifier?: GuardClassifier;
   /** Phase 12 coverage — local content safety classifier; the rule pack stands in when omitted. */
   safetyClassifier?: GuardSafetyClassifier;
+  /** Names, locations and street addresses: the deployment's recognizer for `data.entities` (`engine: auto`); the rules stand in when omitted. */
+  entityRecognizer?: GuardEntityRecognizer;
 }
 
 /** Every built-in detector. Register more with `registry.register(...)`, or swap one with `replace`. */
@@ -77,6 +85,8 @@ export function createDefaultGuardRegistry(options: DefaultGuardRegistryOptions 
   registry.register(createCanaryDetector());
   registry.register(createInjectionClassifierDetector(options.classifier));
   registry.register(createDlpDetector({ nationalIds: options.nationalIds }));
+  // Opt-in: no built-in rule set lists it; a rule set turns it on by listing it with the classes it wants.
+  registry.register(createEntitiesDetector(options.entityRecognizer ? { recognizer: options.entityRecognizer } : {}));
   registry.register(createSqlGuardDetector());
   registry.register(createCommandGuardDetector());
   registry.register(createCodeGuardDetector());

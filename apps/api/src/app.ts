@@ -237,9 +237,13 @@ import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js"
 import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
+import { registerGuardDocumentRoutes } from "./guard-document-routes.js";
+import { ContentScanSettings } from "./services/content-scan-settings.js";
+import { ContentDocumentScanService } from "./services/content-document-scan-service.js";
 import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
 import { registerGuardBenchmarkRoutes } from "./guard-benchmark-routes.js";
 import { GuardBenchmarkService } from "./services/guard-benchmark-service.js";
+import { createDeploymentGuardRegistry } from "./services/guard-registry.js";
 import { registerMcpPolicyLearningRoutes } from "./mcp-policy-learning-routes.js";
 import { loadMcpOpenWorldContext, resolveOpenWorldFor } from "./services/mcp-open-world.js";
 import { registerMcpSafetyPresetRoutes } from "./mcp-safety-preset-routes.js";
@@ -299,7 +303,7 @@ import { buildRunFacts } from "./services/run-facts.js";
 import { createReplaySandbox, type ReplaySandbox } from "./services/replay-sandbox.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
 import { SecretScrubber, environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
-import type { GuardDictionary } from "@ai-orchestrator/guard-sdk";
+import type { DnsResolver, GuardDictionary } from "@ai-orchestrator/guard-sdk";
 import { OtelContentMasker, deriveOtelContentSurrogateKey, environmentUrlSecrets } from "./telemetry/content-masker.js";
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
@@ -1486,6 +1490,11 @@ export interface CreateAppOptions {
    * where a meter provider is built: while tracing is on or with a metrics endpoint.
    */
   telemetryMetricReaders?: readonly MetricReader[];
+  /**
+   * Document scans (the rule set test and the gateway `scan_document` tool): the DNS resolver and, for tests only, a
+   * fetch that replaces the pinned one. The outbound checks still run on every URL and redirect.
+   */
+  documentScanNetwork?: { resolver?: DnsResolver; fetchImpl?: typeof fetch };
 }
 
 /** What provisionSsoUser needs to link or create the local user of an SSO login. */
@@ -1767,7 +1776,11 @@ export async function createApp(
   // Phase 12.1 — guard profiles, bindings, events and the token vault.
   // Phase 16 — runtime surrogates use the capture surrogate key (HKDF of the master key), so a data-subject lookup finds both.
   const runtimeMasterKey = Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64");
+  // The deployment's one detector registry: runs, gateway calls, simulations, the detector list, the benchmark and the
+  // content rules tools all check with it (names and addresses use the built-in rules unless a recognizer is set up).
+  const guardDetectors = createDeploymentGuardRegistry();
   const guardService = new GuardService(store, secretService, {
+    detectors: guardDetectors,
     autoApply: config.GUARD_AUTO_APPLY,
     gatewayRulesWithoutBinding: config.GATEWAY_RULES_WITHOUT_BINDING,
     logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
@@ -1808,6 +1821,23 @@ export async function createApp(
   });
   // Outbound URL policy for nodes that fetch a user-supplied URL.
   const outboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
+  // One per process: a rule set version with invalid stored names and addresses options is logged once.
+  const contentScanSettings = new ContentScanSettings((message, metadata) => app.log.warn(metadata, message));
+  // Document scans with content rules: the rule set test follows the outbound policy; the gateway tool always refuses private ranges.
+  const contentDocumentScans = new ContentDocumentScanService({
+    limits: {
+      maxBytes: config.CONTENT_SCAN_MAX_BYTES,
+      maxChars: config.CONTENT_SCAN_MAX_CHARS,
+      fetchTimeoutMs: config.CONTENT_SCAN_FETCH_TIMEOUT_MS,
+      firstByteTimeoutMs: config.CONTENT_SCAN_FIRST_BYTE_TIMEOUT_MS,
+      maxConcurrent: config.CONTENT_SCAN_MAX_CONCURRENT
+    },
+    outbound: outboundGuard,
+    resolver: options.documentScanNetwork?.resolver ?? nodeDnsResolver,
+    ...(options.documentScanNetwork?.fetchImpl ? { fetchImpl: options.documentScanNetwork.fetchImpl } : {}),
+    ...(guardDetectors.entityRecognizer ? { entityRecognizer: guardDetectors.entityRecognizer } : {}),
+    scanSettings: contentScanSettings
+  });
   let codeSandboxPlan: CodeSandboxPlan = CODE_SANDBOX_INITIALISING;
   const codeSandboxSettled = resolveCodeSandboxPlan(
     {
@@ -12872,7 +12902,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       guard: guardService,
       audit: async (event) => await auditService.record(event),
       ttlSeconds: config.CONTENT_REDACTION_TTL_SECONDS ?? CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
-      hashKey: (scope) => (runtimeMasterKey.length === 32 ? deriveContentHashKey(runtimeMasterKey, scope) : undefined)
+      hashKey: (scope) => (runtimeMasterKey.length === 32 ? deriveContentHashKey(runtimeMasterKey, scope) : undefined),
+      ...(guardDetectors.entityRecognizer ? { entityRecognizer: guardDetectors.entityRecognizer } : {}),
+      documents: contentDocumentScans,
+      scanSettings: contentScanSettings
     }),
     // 12.6 — budgets, sampling cost and per-client rate limits (shared across replicas in cluster mode).
     budgets: budgetService,
@@ -15497,6 +15530,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     audit: async (request, user, event) => await audit(request, user, event),
     recordingDeleteDenial: async (user, workflowId, recordingId) => await releaseService.recordingDeleteDenial(user, workflowId, recordingId),
     gateCasesRemoval: async (user, workflowId, target) => await releaseService.gateCasesRemoval(user, workflowId, target)
+  });
+
+  registerGuardDocumentRoutes({
+    app,
+    guard: guardService,
+    documents: contentDocumentScans,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event)
   });
 
   registerGuardRoutes({

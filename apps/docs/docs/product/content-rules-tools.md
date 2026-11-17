@@ -13,7 +13,7 @@ An admin can add the **content rules tools** to an [MCP gateway](./mcp-gateway.m
 | `redact_sensitive_data` | Replaces sensitive data; reversible styles return a `redaction_id` | no (it keeps a map) |
 | `restore_sensitive_data` | Turns placeholders and vault tokens back, only as reveal rules allow the client | no |
 
-The tools are off by default. A toolset without the member lists none of them, and a deployment that never adds it sees no change.
+The tools are off by default. A toolset without the member lists none of them, and a deployment that never adds it sees no change. A fourth tool, [`scan_document`](#scan-document), checks whole documents; it has its own switch.
 
 ## Turning them on
 
@@ -32,7 +32,7 @@ Each tool takes exactly one of:
 Strings may be up to 1,000,000 characters. `detect_sensitive_data` and `redact_sensitive_data` also take:
 
 - `rule_set_id`: a rule set this toolset makes available (the member's rule set, or one in the toolset's chain). Any other id is a tool error.
-- `entity_types`: only these data classes, such as `email`, `phone`, `card_number`, `iban`, `us_ssn`, `national_id`, `credential`, `private_key`, `jwt` or `ip_address`.
+- `entity_types`: only these data classes, such as `email`, `phone`, `card_number`, `iban`, `us_ssn`, `national_id`, `credential`, `private_key`, `jwt` or `ip_address`. Person names, locations and street addresses (`person_name`, `location`, `street_address`) are looked for only when named here or when the rule set runs [`data.entities`](./content-rules-engine.md#names-locations-and-street-addresses); they are never part of "every class". Their placeholders read `[PERSON_NAME_1]`, `[LOCATION_1]` and `[STREET_ADDRESS_1]`.
 - `allow_list`: up to 100 values never reported in this call, on top of the rule set's [allow-list](#allow-list).
 
 ## detect_sensitive_data
@@ -42,7 +42,7 @@ The result has, per input, its `riskLevel`, its `findings` (data class, `start` 
 | Risk level | When |
 |---|---|
 | `high` | a private key, credential, JWT, card number, IBAN, US SSN or national id with a score of 0.8 or more |
-| `medium` | any other finding with a score of 0.6 or more |
+| `medium` | any other finding with a score of 0.6 or more (person names, locations and street addresses included) |
 | `low` | only findings below 0.6 |
 | `none` | no findings |
 
@@ -86,6 +86,25 @@ In the rule set editor this is the **Gateway client ids** field of **Add a revea
 - **Audit.** Every restore call writes the audit entry `mcp_gateway.content_restore`: the client, the toolset, a hash of the `redaction_id`, counts per class and the rule that allowed each, or why an unknown id was refused; never values. A restore that restored or withheld something also writes rule events with placement `gateway` and action `reveal`, with token hashes as evidence. If the audit entry cannot be written, nothing is restored.
 - **Session labels.** Restored values are sensitive again: on a toolset that tracks outside content per session, the session gets the `sensitive` label and the restored classes, so [rules on data labels](./data-labels-and-destinations.md) apply to the client's later calls.
 
+## scan_document
+
+An admin can also offer `scan_document` on a toolset with the content rules tools: tick **Also offer scan_document** under the toolset's content rules tools. It is off by default. Over the API the member gets `"documents": { "enabled": true }`. The tool checks a text, Markdown, HTML, JSON or CSV document the way [Scanning documents](./content-rules.md#scanning-documents) does on the rule set page, with the member's rule set (or a `rule_set_id` the toolset makes available), and returns findings with locations and masked previews, counts per class, a risk level and how the document was read. Its read-only hint is set. Nothing it reads is stored.
+
+Arguments: `content_base64` (the document's bytes; `media_type` and `filename` are optional, and the content decides the type), or `url` (below); `rule_set_id`, `entity_types` and `allow_list` as for the other tools (person names, locations and street addresses are found when `entity_types` names them or the rule set lists `data.entities`); `redact_style` (`placeholder`, `token`, `mask` or `hash`) to also get the document's text with findings replaced, with a `redaction_id` for `placeholder` and `token` that [restore_sensitive_data](#restore-sensitive-data) accepts like any other; and `ttl_seconds`.
+
+**Fetching URLs** is a second switch, **Let scan_document fetch documents from URLs**, and needs a list of hosts (`"allowUrls": true, "allowedHosts": ["docs.example.com", "*.example.org"]`; `*.example.org` means its subdomains, not `example.org` itself). The tool then takes `url`, and its open-world hint is set. Fetches from the gateway:
+
+- reach only listed hosts, checked on the URL and on every redirect (at most 3);
+- always refuse private, loopback, carrier-grade NAT, unique-local and link-local addresses and cloud metadata endpoints, whatever `OUTBOUND_DENY_PRIVATE` says, and `OUTBOUND_ALLOWLIST` cannot open them: outside callers must not reach the internal network through the API;
+- go through the pinned [outbound URL checks](../security/outbound-url-checks.md) (a name is resolved once, every address is checked, and the connection goes to those addresses only);
+- send no cookies or credentials (a URL with a user name or password is refused);
+- obey the same size, time and concurrency limits as the rule set page (the fetch timeout covers DNS lookups too), and one document scan at a time per client;
+- stop when the client cancels the call (`notifications/cancelled`) or closes the connection: the fetch and the scan end, nothing is sent, and the audit entry records `cancelled`.
+
+A host on the list without a port matches only the scheme's default port, 443 for https and 80 for http; to allow another port, name it (`files.example.com:8443`, which then matches that port for either scheme). List only hosts you would let an agent read. The URL itself, its path and query included, reaches the listed host: a client can send data there in a URL as it could with any other web request, so list hosts you control or trust, not hosts that accept arbitrary paths from anyone. A refused address is reported as not allowed, without the deployment's outbound settings. The result of a URL scan is outside content: on a toolset that tracks session labels it raises `untrusted_external`, as a server tool's result does.
+
+To give URL scanning to some clients only, put the member on a toolset of its own and scope those clients to it. Every call writes rule events (node `scan_document`, masked evidence only) and an audit entry `mcp_gateway.content_document_scan` with the client, the URL's origin and a hash of its path and query, the size, the type and the counts per class; a host that is not on the list is audited as denied. Toolset changes record the hosts in `mcp_toolset.updated`. Migration v77 stores the switch (SQLite and Postgres).
+
 ## Placeholders in workflow runs
 
 The same placeholder style is a protection provider in runs (Protection Provider nodes and `redact` actions with `"providerId": "placeholder"`). In a run, placeholders always carry a random tag of that run after a dot: `[EMAIL_1.K3F9QX]`, `[PHONE_2.K3F9QX]`. The tag stops text that reaches the run from outside (a webhook, a tool result, a model's answer) from naming a placeholder the run hands out later and having a Reveal node fill in someone else's value. Gateway redactions use plain `[EMAIL_1]`: their map belongs to one client, and every placeholder already in the call's input is reserved.
@@ -127,3 +146,5 @@ The data detector can report IPv4 and IPv6 addresses as the data class `ip_addre
 ```
 
 Version strings such as `v1.2.3.4`, `version 1.2.3.4` or `1.2.3.4-beta` are skipped, and so are numbers that are not valid addresses.
+
+A masked IP address keeps nothing of the address: every IPv4 address shows as `•••.•••.•••.•••` and every IPv6 address as `••••:••••:••••:••••:••••:••••:••••:••••`, so the preview does not reveal how long each part is.

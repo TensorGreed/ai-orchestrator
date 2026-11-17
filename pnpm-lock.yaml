@@ -351,6 +351,9 @@ importers:
       '@jitl/quickjs-wasmfile-release-sync':
         specifier: 0.32.0
         version: 0.32.0
+      htmlparser2:
+        specifier: 10.1.0
+        version: 10.1.0
       ioredis:
         specifier: ^6.0.0
         version: 6.0.0

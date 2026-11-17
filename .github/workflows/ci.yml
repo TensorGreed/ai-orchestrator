@@ -93,6 +93,12 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: node packages/cli/bin/l2m.mjs guard benchmark --builtin
 
+      # Names, places and street addresses through the data.entities rules engine, offline:
+      # fails when a class drops below its floor (ENTITY_RULES_BENCHMARK_FLOORS).
+      - name: Content rules benchmark (names and addresses)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: node packages/cli/bin/l2m.mjs guard benchmark --entities
+
       - name: Build
         if: needs.changes.outputs.docs_only != 'true'
         run: pnpm build

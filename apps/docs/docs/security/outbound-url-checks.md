@@ -16,6 +16,15 @@ the host. This
 blocks server-side request forgery (SSRF) and local-file reads through those
 nodes.
 
+Document scans use the same checks: the rule set page's
+[Scan a document](/product/content-rules#scanning-documents) under this
+policy, and the MCP gateway's
+[scan_document](/product/content-rules-tools#scan-document) tool, which also
+always refuses private, loopback and link-local addresses and fetches only
+from the hosts its toolset lists (on the scheme's default port unless the
+entry names one). Their fetch timeout covers DNS lookups, and a caller that
+goes away stops the fetch.
+
 Concepts: [the lethal trifecta](/learn/security/lethal-trifecta) shows how URLs become a way for data to leave an agent.
 
 MCP HTTP servers do not go through these checks. For the OAuth discovery,

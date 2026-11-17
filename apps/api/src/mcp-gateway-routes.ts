@@ -1975,7 +1975,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     tool: GatewayContentRulesTool,
     args: Record<string, unknown>,
     request: JsonRpcRequest,
-    callLabels?: DataLabels
+    callLabels?: DataLabels,
+    signal?: AbortSignal
   ): Promise<JsonRpcResponse> => {
     if (!deps.contentRulesTools) return rpcResult(request.id, toolError("Content rules tools are not available on this deployment."));
     // The tool policy with the call's arguments and the session's labels (the catalog decided without them). A
@@ -2032,9 +2033,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         tool: tool.tool,
         args,
         memberRuleSetId: tool.ruleSetId,
+        ...(tool.documents ? { documents: tool.documents } : {}),
         client: { id: auth.client.id, name: auth.client.name },
         toolset: { id: toolset.id, projectId: toolset.projectId },
-        callExecutionId
+        callExecutionId,
+        ...(signal ? { signal } : {})
       });
     } catch (error) {
       app.log.warn(
@@ -2044,10 +2047,24 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return rpcResult(request.id, toolError("Content rules could not process this call, so nothing was returned. Try again."));
     }
     if (!outcome.ok) return rpcResult(request.id, toolError(outcome.message));
-    const labels: Pick<DataLabels, "provenance" | "dataClasses"> =
-      outcome.restoredClasses.length > 0 ? { provenance: ["sensitive"], dataClasses: outcome.restoredClasses } : { provenance: [], dataClasses: [] };
+    // A document fetched from a URL is outside content, as a server tool's result is (its redacted text goes back).
+    const labels: Pick<DataLabels, "provenance" | "dataClasses"> = {
+      provenance: [...(outcome.externalContent ? (["untrusted_external"] as const) : []), ...(outcome.restoredClasses.length > 0 ? (["sensitive"] as const) : [])],
+      dataClasses: outcome.restoredClasses
+    };
     if (!(await noteResult(session, auth, toolset, tool.name, labels))) return rpcResult(request.id, toolError(MARK_WRITE_FAILED_MESSAGE));
     return rpcResult(request.id, { content: [{ type: "text", text: JSON.stringify(outcome.result, null, 2) }], structuredContent: outcome.result });
+  };
+
+  /** A cancelled call left the caller's servers to stop once its other calls are done: stop them when none is left. */
+  const closeServersWhenDrained = async (session: GatewaySession) => {
+    if (!session.closeWhenDrained || [...session.inFlight.values()].some((value) => !value.holdOnly)) return;
+    session.closeWhenDrained = false;
+    try {
+      await mcpRegistry.closeSessions(session.mcpContext);
+    } catch (error) {
+      app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "MCP gateway could not stop a caller's servers after a cancelled call");
+    }
   };
 
   const handleLimitedToolsCall = async (
@@ -2122,7 +2139,24 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return rpcResult(request.id, toolError(error.message));
     }
     // The built-in content rules tools: their own rule events and audit; the toolset's rule sets do not check them.
-    if (tool.kind === "content_rules") return await callContentRulesTool(session, auth, toolset, tool, args, request, callLabels);
+    // Closing the connection (modern HTTP) or notifications/cancelled stops a document fetch and the scan; nothing is sent.
+    if (tool.kind === "content_rules") {
+      if (modern?.disconnect.aborted) return SUPPRESSED;
+      const key = modern ? modern.inFlightKey : requestKey(request.id);
+      const controller = new AbortController();
+      session.inFlight.set(key, { controller });
+      const onDisconnect = () => controller.abort("The client closed the connection.");
+      modern?.disconnect.addEventListener("abort", onDisconnect, { once: true });
+      try {
+        const response = await callContentRulesTool(session, auth, toolset, tool, args, request, callLabels, controller.signal);
+        return controller.signal.aborted ? SUPPRESSED : response;
+      } finally {
+        modern?.disconnect.removeEventListener("abort", onDisconnect);
+        if (session.inFlight.get(key)?.controller === controller) session.inFlight.delete(key);
+        sessions.touch(session);
+        await closeServersWhenDrained(session);
+      }
+    }
 
     // 12.6 — the toolset's and client's Guard profiles. A failed read refuses the call: it may have a binding.
     let guardStack: GatewayGuardStackForCall | undefined;
@@ -2243,14 +2277,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       modern?.disconnect.removeEventListener("abort", onDisconnect);
       session.inFlight.delete(key);
       sessions.touch(session);
-      if (session.closeWhenDrained && ![...session.inFlight.values()].some((value) => !value.holdOnly)) {
-        session.closeWhenDrained = false;
-        try {
-          await mcpRegistry.closeSessions(session.mcpContext);
-        } catch (error) {
-          app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "MCP gateway could not stop a caller's servers after a cancelled call");
-        }
-      }
+      await closeServersWhenDrained(session);
     }
   };
 
@@ -3091,7 +3118,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           return null;
         }
         seen.add("content_rules");
-        result.push({ kind: "content_rules", ruleSetId });
+        result.push({ kind: "content_rules", ruleSetId, ...(member.documents ? { documents: member.documents } : {}) });
       } else {
         if (!await store.getMcpServer(member.serverId)) {
           reply.code(400).send({ error: `MCP server '${member.serverId}' is not registered` });
@@ -3133,8 +3160,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       resourceType: "mcp_toolset",
       resourceId: toolset.id,
       projectId: toolset.projectId,
-      metadata: { slug: toolset.slug, name: toolset.name, members: toolset.members.length, ...metadata }
+      metadata: { slug: toolset.slug, name: toolset.name, members: toolset.members.length, ...documentScanningOf(toolset), ...metadata }
     });
+  };
+
+  /** The content rules member's document scanning (scan_document, URL fetches and their hosts), for the audit trail. */
+  const documentScanningOf = (toolset: McpToolset): Record<string, unknown> => {
+    const member = toolset.members.find((entry) => entry.kind === "content_rules");
+    const documents = member?.kind === "content_rules" ? member.documents : undefined;
+    return documents?.enabled ? { documentScanning: { allowUrls: documents.allowUrls, allowedHosts: documents.allowedHosts } } : {};
   };
 
   /** 12.2 — "Track outside content per session" turned on or off. */

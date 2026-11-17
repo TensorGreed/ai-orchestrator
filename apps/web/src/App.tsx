@@ -101,7 +101,6 @@ import {
   createPartialExecutionResult,
   createTraceStreamHandlers,
   pickStreamFailureMessage,
-  summarizeInputPreview,
   tailPreview,
   currentActivity,
   describeActivity,
@@ -110,6 +109,7 @@ import {
   type TraceStreamHandlers
 } from "./lib/run-trace";
 import { computeAttachmentSlots, orbitPositions } from "./lib/stages";
+import { canvasRunPreview, hasTestData } from "./lib/run-data";
 import { newNodeConfig } from "./lib/trigger-paths";
 import {
   deleteTabWipWorkflow,
@@ -140,6 +140,7 @@ import { LeftMenuBar } from "./components/LeftMenuBar";
 import { StudioHeader } from "./components/StudioHeader";
 import { deriveRunStatus, isMcpMode, type StudioMode } from "./components/studio-layout-types";
 import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
+import { RunPicker } from "./components/RunPicker";
 import { McpElicitationForm } from "./components/McpElicitationForm";
 import { SettingsPage } from "./components/SettingsPage";
 import { KnowledgeBasePage } from "./components/KnowledgeBasePage";
@@ -799,23 +800,6 @@ function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean 
   return Object.prototype.hasOwnProperty.call(record, key);
 }
 
-function summarizePreviewValue(value: unknown): string {
-  if (value === undefined) return "";
-  if (value === null) return "null";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-    return String(value);
-  }
-  if (Array.isArray(value)) {
-    return `Array(${value.length})`;
-  }
-  if (value && typeof value === "object") {
-    const keys = Object.keys(value as Record<string, unknown>).slice(0, 4);
-    return keys.length ? `{ ${keys.join(", ")} }` : "{}";
-  }
-  return String(value);
-}
-
 function truncatePreview(value: string): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   return normalized.length > 72 ? `${normalized.slice(0, 69)}...` : normalized;
@@ -1295,6 +1279,10 @@ function StudioApp() {
   const activeAssistantMessageIdRef = useRef<string | null>(null);
   const logsResizeAbortRef = useRef<AbortController | null>(null);
   const latestDebugExecutionIdRef = useRef<string | null>(null);
+  /** A past run picked from the Run data list; while set, the poller does not replace it. */
+  const pickedExecutionIdRef = useRef<string | null>(null);
+  const pickRequestRef = useRef(0);
+  const currentWorkflowIdRef = useRef<string | null>(null);
   const latestExecutionResultRef = useRef<WorkflowExecutionResult | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [externalImportOpen, setExternalImportOpen] = useState(false);
@@ -1387,24 +1375,40 @@ function StudioApp() {
     }
     return combined;
   }, [executionResult, isDebugMode, liveNodeStatuses]);
+  // Node labels and test data change rarely; key the maps on them so dragging a node does not rebuild every run preview.
+  const nodeLabelSignature = nodes.map((node) => `${node.id}\u0000${node.data.label}`).join("\u0001");
+  const nodeLabelById = useMemo(
+    () => new Map(nodes.map((node) => [node.id, node.data.label] as const)),
+    [nodeLabelSignature]
+  );
+  const testDataSignature = nodes
+    .filter((node) => hasTestData(node.data.config))
+    .map((node) => node.id)
+    .join("\u0001");
+  const nodesWithTestData = useMemo(() => new Set(testDataSignature ? testDataSignature.split("\u0001") : []), [testDataSignature]);
   const executionPreviewByNodeId = useMemo(() => {
     const map = new Map<string, NonNullable<EditorNodeData["executionPreview"]>>();
     if (!isDebugMode || !executionResult) {
       return map;
     }
+    const labelFor = (nodeId: string) => nodeLabelById.get(nodeId) ?? nodeId;
     for (const nodeResult of executionResult.nodeResults) {
       const liveText = nodeResult.status === "running" ? (nodeResult as LiveNodeResult).liveText : undefined;
+      const run = canvasRunPreview(nodeResult, labelFor, { hasOwnTestData: nodesWithTestData.has(nodeResult.nodeId) });
       map.set(nodeResult.nodeId, {
-        input: nodeResult.input !== undefined ? truncatePreview(summarizeInputPreview(nodeResult.input, summarizePreviewValue)) : undefined,
+        meta: run.meta,
+        input: run.input,
+        usedBy: run.usedBy,
+        pinned: run.pinned,
         now: nodeResult.status === "running" && nodeResult.activity?.length ? describeActivity(currentActivity(nodeResult)!) : undefined,
         live: liveText ? tailPreview(liveText) : undefined,
-        output: nodeResult.output !== undefined ? truncatePreview(summarizePreviewValue(nodeResult.output)) : undefined,
+        output: run.output,
         error: nodeResult.error ? truncatePreview(nodeResult.error) : undefined,
         errorRemediation: nodeResult.errorRemediation ?? undefined
       });
     }
     return map;
-  }, [executionResult, isDebugMode]);
+  }, [executionResult, isDebugMode, nodeLabelById, nodesWithTestData]);
 
   // Browser start time of each running node, so its canvas card can tick an elapsed pill.
   const liveStartedAtByNodeId = useMemo(() => {
@@ -1740,6 +1744,20 @@ function StudioApp() {
   }, [executionResult]);
 
   useEffect(() => {
+    currentWorkflowIdRef.current = currentWorkflow.id;
+    pickedExecutionIdRef.current = null;
+    pickRequestRef.current += 1;
+  }, [currentWorkflow.id]);
+
+  // Starting a run (or any other busy action) follows the newest data again.
+  useEffect(() => {
+    if (busy) {
+      pickedExecutionIdRef.current = null;
+      pickRequestRef.current += 1;
+    }
+  }, [busy]);
+
+  useEffect(() => {
     if (isDebugMode) {
       return;
     }
@@ -1757,7 +1775,8 @@ function StudioApp() {
 
     let cancelled = false;
     const syncLatestExecution = async () => {
-      if (busy || chatBusy) {
+      // A run picked from the Run data list stays on the canvas until the user picks the latest or runs again.
+      if (busy || chatBusy || pickedExecutionIdRef.current) {
         return;
       }
 
@@ -1811,7 +1830,7 @@ function StudioApp() {
         }
 
         const detail = await inBackground(() => fetchExecutionById(latest.id));
-        if (cancelled) {
+        if (cancelled || pickedExecutionIdRef.current) {
           return;
         }
 
@@ -2511,6 +2530,30 @@ function StudioApp() {
       }
     },
     [handleApiError, hydrateWorkflow]
+  );
+
+  // Loads a past run of the open workflow onto the canvas (the stored record only); the workflow itself is untouched.
+  const handlePickRun = useCallback(
+    async (executionId: string, isLatest: boolean) => {
+      const request = ++pickRequestRef.current;
+      const workflowId = currentWorkflowIdRef.current;
+      // The latest run lets the canvas follow new runs again; an older one holds it until the next run.
+      pickedExecutionIdRef.current = isLatest ? null : executionId;
+      try {
+        setError(null);
+        const detail = await fetchExecutionById(executionId);
+        // A later pick, or a switch to another workflow, wins over this one.
+        if (request !== pickRequestRef.current || detail.workflowId !== currentWorkflowIdRef.current || workflowId !== detail.workflowId) {
+          return;
+        }
+        latestDebugExecutionIdRef.current = detail.id;
+        setLiveNodeStatuses({});
+        setExecutionResult(toWorkflowExecutionResult(detail));
+      } catch (pickError) {
+        handleApiError(pickError, "Failed to load that run");
+      }
+    },
+    [handleApiError]
   );
 
   const handleRerunExecution = useCallback(
@@ -5287,6 +5330,19 @@ function StudioApp() {
               importPanel={importPanelBinding}
               mcpMarkers={mcpCanvasMarkers}
               onOpenMcpTarget={navigateMcp}
+              runPicker={
+                <RunPicker
+                  workflowId={currentWorkflow.id}
+                  enabled={currentWorkflowExists}
+                  current={
+                    executionResult && executionResult.workflowId === currentWorkflow.id
+                      ? { executionId: executionResult.executionId, startedAt: executionResult.startedAt, status: executionResult.status }
+                      : null
+                  }
+                  busy={busy}
+                  onPick={(executionId, isLatest) => void handlePickRun(executionId, isLatest)}
+                />
+              }
             />
           )}
 
@@ -5930,6 +5986,8 @@ function StudioApp() {
           onAttach={(handle) => handleOpenAgentAttachmentDrawer(editingNode.id, handle)}
           inputOptions={editingNodeInputOptions}
           executionResult={isDebugMode ? executionResult : null}
+          nodeLabels={nodeLabelById}
+          onNavigateNode={openNodeConfig}
           workflowContext={{
             id: currentWorkflow.id,
             name: currentWorkflow.name,
