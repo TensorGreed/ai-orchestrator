@@ -32,7 +32,7 @@ Each tool takes exactly one of:
 Strings may be up to 1,000,000 characters. `detect_sensitive_data` and `redact_sensitive_data` also take:
 
 - `rule_set_id`: a rule set this toolset makes available (the member's rule set, or one in the toolset's chain). Any other id is a tool error.
-- `entity_types`: only these data classes, such as `email`, `phone`, `card_number`, `iban`, `us_ssn`, `national_id`, `credential`, `private_key`, `jwt` or `ip_address`.
+- `entity_types`: only these data classes, such as `email`, `phone`, `card_number`, `iban`, `us_ssn`, `national_id`, `credential`, `private_key`, `jwt` or `ip_address`. Person names, locations and street addresses (`person_name`, `location`, `street_address`) are looked for only when named here or when the rule set runs [`data.entities`](./content-rules-engine.md#names-locations-and-street-addresses); they are never part of "every class". Their placeholders read `[PERSON_NAME_1]`, `[LOCATION_1]` and `[STREET_ADDRESS_1]`.
 - `allow_list`: up to 100 values never reported in this call, on top of the rule set's [allow-list](#allow-list).
 
 ## detect_sensitive_data
@@ -42,7 +42,7 @@ The result has, per input, its `riskLevel`, its `findings` (data class, `start` 
 | Risk level | When |
 |---|---|
 | `high` | a private key, credential, JWT, card number, IBAN, US SSN or national id with a score of 0.8 or more |
-| `medium` | any other finding with a score of 0.6 or more |
+| `medium` | any other finding with a score of 0.6 or more (person names, locations and street addresses included) |
 | `low` | only findings below 0.6 |
 | `none` | no findings |
 
@@ -127,3 +127,5 @@ The data detector can report IPv4 and IPv6 addresses as the data class `ip_addre
 ```
 
 Version strings such as `v1.2.3.4`, `version 1.2.3.4` or `1.2.3.4-beta` are skipped, and so are numbers that are not valid addresses.
+
+A masked IP address keeps nothing of the address: every IPv4 address shows as `•••.•••.•••.•••` and every IPv6 address as `••••:••••:••••:••••:••••:••••:••••:••••`, so the preview does not reveal how long each part is.

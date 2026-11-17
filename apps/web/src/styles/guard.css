@@ -1109,3 +1109,8 @@
 .guard-dest-rules li .pg-btn {
   margin-left: 8px;
 }
+.guard-entity-class {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

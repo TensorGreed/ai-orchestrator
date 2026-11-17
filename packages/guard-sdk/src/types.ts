@@ -114,6 +114,9 @@ export type GuardDataClass =
   | "private_key"
   | "jwt"
   | "ip_address"
+  | "person_name"
+  | "location"
+  | "street_address"
   | (string & {});
 
 export interface GuardSubject {
@@ -237,6 +240,11 @@ export interface GuardFinding {
   /** Human-readable reason; never includes raw matched values. */
   message: string;
   dataClass?: GuardDataClass;
+  /**
+   * The detector's own lowest score for this finding (a per-class option such as `data.entities` `minScore`): below
+   * it the finding is suppressed like one under the rule set's threshold. Absent: only the threshold counts.
+   */
+  minScore?: number;
   metadata?: Record<string, unknown>;
 }
 
@@ -305,6 +313,11 @@ export interface GuardModelServices {
 export interface GuardDetector {
   id: string;
   tier: DetectorTier;
+  /**
+   * What the detector's verdicts depend on beyond its options (a recognizer's id and version). It is part of the
+   * verdict memo's key, so a clean verdict is not reused after it changed. Absent: the code alone.
+   */
+  version?: string;
   description: string;
   /** Channels the detector is meaningful on. Profiles may still list it elsewhere. */
   channels: readonly GuardChannel[];

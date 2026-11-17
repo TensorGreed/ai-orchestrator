@@ -118,6 +118,7 @@ The rule set's `protection.dataClasses` maps each data class to a provider. When
 | `leak.canary` | rule | model output, final output, tool arguments | canary tokens from the system prompt |
 | `injection.classifier` | classifier | prompt, tool result, model output, final output | the registered classifier's score; the rule packs stand in |
 | `dlp.patterns` | rule | all | email, phone, card numbers (Luhn), IBAN (mod-97), US SSN and a pluggable national-id list (UK NI number built in), credentials with known key prefixes, JWTs, private-key blocks, high-entropy values next to credential-like names, custom dictionaries and patterns; IPv4 and IPv6 addresses (`ip_address`) only when the `include` option names them (see [IP addresses](./content-rules-tools.md#ip-addresses)) |
+| `data.entities` | classifier | all | person names (`person_name`), locations (`location`) and street addresses (`street_address`), each only when the `classes` option names it; built-in rules, or the deployment's own recognizer (see [Names, locations and street addresses](#names-locations-and-street-addresses)) |
 | `tool.sql` | parser | tool arguments | per dialect (postgres, mysql, mariadb, sqlite, mssql): read, write and DDL classification; stacked queries, tautologies, comment tricks and union probes; table and column allowlists; WHERE required on mutations; row cap rewrite (LIMIT or TOP) or check; unparseable SQL fails closed |
 | `tool.command` | rule | tool arguments | shell metacharacters, command substitution, redirection, destructive commands; option-shaped arguments from untrusted input |
 | `tool.code` | rule | tool arguments | dangerous imports and calls in Python and JavaScript code-node source |
@@ -136,8 +137,35 @@ The four `output.*` detectors are the [output checks](./content-rules-output-che
 - The rule packs are pattern based. They catch the phrasings in the corpus and their encoded variants; a paraphrase the patterns do not cover needs the classifier tier, which this release leaves as an interface.
 - The egress check judges addresses, not traffic. A host that resolves to a public address at check time and to a private one a moment later (DNS rebinding) is only caught when the caller resolves once and connects to the resolved address.
 - The SQL check parses whole statements. A fragment pasted into a template is reported as unparseable, which blocks, but the check cannot tell what the surrounding template does.
-- The data rule detectors are patterns with checksums. Names, addresses and free-text health information need the NER model planned for a later release.
+- The data rule detectors are patterns with checksums. Names and addresses by rules need a cue or a known format (see below); free-text health information is not detected.
 - Spans refer to the canonical text. For JSON content that is the serialisation with sorted keys; the transformed content is parsed back to JSON when it still parses.
+
+## Names, locations and street addresses
+
+`data.entities` finds person names, locations and street addresses. It is off unless a rule set lists it, and it reports only the classes its `classes` option names:
+
+```json
+{ "id": "data.entities", "threshold": 0.5, "options": { "classes": ["person_name", "street_address"] } }
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `classes` | required | any of `person_name`, `location`, `street_address` |
+| `engine` | `auto` | `auto` uses the deployment's recognizer when one is set up, otherwise the built-in rules; `rules` always uses the rules |
+| `minScore` | person 0.75, address 0.7, location 0.8 | lowest score reported per class; lower findings are kept as suppressed and never act |
+| `minLength` | 3 | shorter spans are dropped |
+| `singleTokenNames` | `false` | report a one-word name without a cue (a title, a field label or a greeting) |
+| `contextWords` | none | `boost` and `suppress` lists (up to 50 words each): a word within 40 characters raises a score by 0.1 or lowers it by 0.3 |
+| `languages` | `["en"]` | English only for now |
+| `maxChars` | 20000 | longer text fails the check instead of being cut, so the rule set's fail-open or fail-closed setting decides; the content rules tools use their own input limit instead |
+
+The options refuse any other key, so a rule set cannot name an endpoint or a model address. The **Names and addresses** card in the rule set editor sets them and says which engine this deployment has.
+
+**What the built-in rules find.** Street addresses in six countries: a house number, street name and street type (US, UK, Canada, Australia), the German order (`Hauptstraße 5`) and the French order (`12 rue de la Paix`), with a unit if one follows. A following town with a postcode in that country's format (US state and ZIP code, Canadian province and postcode, Australian state and four digits, UK postcode, German or French five-digit code) raises the score to 0.95; a street line alone scores 0.75, or 0.85 after an `Address:` label. A postcode alone is never reported. Person names are found after a title (`Dr.`, `Ms`), a field label (`Name:`, `Patient:`, `Customer:`), a greeting (`Dear Ana`), on the line after a sign-off (`Kind regards,`) or after phrases such as `my name is`; a listed given name followed by a listed surname scores 0.8 without a cue. Locations are listed countries, US states and well-known cities after a place cue (`in`, `from`, `based in`) or a `City:` or `Country:` label; place names that are also common names or words (`Jordan`, `Nice`, `Reading`) need a strong cue. Names without a cue are mostly missed: recall for names is low by design, so that `May`, `Will` or `Jordan` in ordinary text is not reported.
+
+**False positives.** Spans inside an email address, a URL, a code block, a placeholder such as `[EMAIL_1]`, a vault token or a surrogate the run issued are dropped, a span that overlaps another data finding (an email, a phone number) yields to it, and the rule set's allow-list and dictionaries apply as for every data check. Evidence keeps the first letter of each word only (`J••• S••••`). Findings of these classes count as `medium` risk in the content rules tools.
+
+**Your own recognizer.** A deployment can plug in its own engine through the `GuardEntityRecognizer` interface: `id`, `version`, the classes and languages it handles, and `recognize(texts, { classes, language, signal })`, which returns spans (`start`, `end`, `dataClass`, `score`, `source`) per text. Pass it as `createDefaultGuardRegistry({ entityRecognizer })`. Its spans go through the same checks as the rules' (malformed spans are ignored), and its id and version are part of the key that lets a clean result be reused within a run, so a changed engine is never answered from an older result. The API builds one detector registry for the whole deployment, so runs, gateway calls, simulations, the benchmark and the content rules tools all use the same engine; the detector list (`GET /api/guard/detectors`) shows it as `engine` on `data.entities`.
 
 ## Spotlighting helpers
 

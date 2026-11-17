@@ -15,7 +15,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { createDefaultGuardRegistry, GUARD_CHANNELS, type GuardChannel } from "@ai-orchestrator/guard-sdk";
+import { ENTITIES_DETECTOR_ID, GUARD_CHANNELS, type GuardChannel } from "@ai-orchestrator/guard-sdk";
 import {
   GUARD_EVENT_ACTION_VALUES,
   GUARD_BUILTIN_PROFILE_ID,
@@ -491,7 +491,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.get("/api/guard/detectors", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const registry = createDefaultGuardRegistry();
+    // The deployment's registry: what runs actually use, with the engine behind names and addresses.
+    const registry = guard.detectors.registry;
     return {
       channels: GUARD_CHANNELS,
       detectors: registry.list().map((detector) => ({
@@ -499,7 +500,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
         tier: detector.tier,
         description: detector.description,
         channels: detector.channels as GuardChannel[],
-        categories: detector.categories
+        categories: detector.categories,
+        ...(detector.id === ENTITIES_DETECTOR_ID ? { engine: guard.detectors.entityEngine() } : {})
       }))
     };
   });

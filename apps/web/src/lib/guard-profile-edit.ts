@@ -2,6 +2,8 @@
 // editor. The API validates the result with the guard-sdk schema; these
 // helpers only keep the document's shape.
 
+import { defaultEntitiesOptions, ENTITIES_DETECTOR_ID } from "./entity-options-edit";
+
 export type GuardDocument = Record<string, unknown>;
 
 export const GUARD_EDITOR_CHANNELS = ["prompt", "tool_arguments", "tool_result", "model_output", "final_output", "response"] as const;
@@ -68,7 +70,9 @@ export function setDetector(document: GuardDocument, channel: string, detectorId
     if (existing) {
       return { ...current, detectors: current.detectors.map((entry) => (entry.id === detectorId ? { ...entry, threshold: threshold ?? entry.threshold } : entry)) };
     }
-    return { ...current, detectors: [...current.detectors, { id: detectorId, threshold: threshold ?? 0.5 }] };
+    // Names and addresses need the classes to report; a new entry starts with all three (the editor card narrows them).
+    const options = detectorId === ENTITIES_DETECTOR_ID ? { options: defaultEntitiesOptions() } : {};
+    return { ...current, detectors: [...current.detectors, { id: detectorId, threshold: threshold ?? 0.5, ...options }] };
   });
 }
 

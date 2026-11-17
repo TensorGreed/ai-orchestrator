@@ -32,6 +32,7 @@ import {
   outputCheckCustomEndpoints,
   outputCheckModelUses,
   outputCheckOptionIssues,
+  entitiesProfileIssues,
   outputCheckSecretRefs,
   unsafeDictionaryPattern,
   type GuardProfile,
@@ -83,6 +84,7 @@ import type {
 import type { SecretService } from "./secret-service.js";
 import type { AuditEventInput } from "./audit-service.js";
 import { PersistedPlaceholderBook, runPlaceholderBookId } from "./content-redaction-books.js";
+import { createDeploymentGuardRegistry, type DeploymentGuardRegistry } from "./guard-registry.js";
 import type { Store } from "../db/store.js";
 import { filterAsync, mapAsync } from "../async-array.js";
 
@@ -131,6 +133,11 @@ export interface GuardServiceOptions {
   audit?: (event: AuditEventInput) => Promise<unknown>;
   /** v76 — how long a run's placeholder book can be read back (CONTENT_REDACTION_TTL_SECONDS); default one day. */
   redactionTtlSeconds?: number;
+  /**
+   * The deployment's detector registry (`createDeploymentGuardRegistry`), handed to every run, gateway call and
+   * simulation. Absent: one is built with the built-in rules, the same detectors the engine uses by default.
+   */
+  detectors?: DeploymentGuardRegistry;
 }
 
 export interface GuardRunContext {
@@ -260,11 +267,16 @@ export class GuardService {
   /** The deployment's destination rules profile, per guard profile revision (read on every gateway call). */
   private deploymentProfileCache: { revision: number; value: ResolvedGuardProfile | undefined } | undefined;
 
+  /** The deployment's detector registry (see `GuardServiceOptions.detectors`). */
+  readonly detectors: DeploymentGuardRegistry;
+
   constructor(
     private readonly store: Store,
     private readonly secrets: SecretService,
     private readonly options: GuardServiceOptions
-  ) {}
+  ) {
+    this.detectors = options.detectors ?? createDeploymentGuardRegistry();
+  }
 
   private eventStream: GuardEventStream | null = null;
 
@@ -378,6 +390,8 @@ export class GuardService {
     // Phase 12 coverage — output checks: a schema that compiles, topics that name this rule set's dictionaries, model
     // configs that name stored secrets (never raw keys).
     issues.push(...outputCheckOptionIssues(result.data));
+    // Names and addresses: the classes to report and options that parse (no endpoint or model keys in a rule set).
+    issues.push(...entitiesProfileIssues(result.data));
     // A check's model runs with the key it names whenever the rule set runs, for whoever starts the run: the person
     // saving it must be allowed to use that key (one message for missing and not allowed, so ids cannot be probed).
     for (const ref of outputCheckSecretRefs(result.data)) {
@@ -883,6 +897,7 @@ export class GuardService {
   /** 12.6 — the engine's Guard dependencies for one gateway server tool call, for a resolution from `resolveGateway`. */
   gatewayRuntime(context: GatewayGuardContext, resolution: GuardRunResolution): GuardRuntimeDependencies {
     return {
+      registry: this.detectors.registry,
       resolveRun: () => resolution,
       loadProfile: async (profileId) => await this.loadProfile(profileId),
       // Phase 12 coverage — a toolset or route set without a project tags its tokens with its own scope, which no
@@ -1024,6 +1039,7 @@ export class GuardService {
     const override = context.profileOverride;
     const substitute = context.profileSubstitute;
     const runtime: GuardRuntimeDependencies = {
+      registry: this.detectors.registry,
       resolveRun: async () => await this.resolveRun(context),
       // Phase 16 — a simulation's unsaved document may opt in; stored versions are checked in one cached query.
       mayUseLabels: async () => (substitute ? profileUsesLabels(substitute.profile) : false) || await this.mayUseLabels(),

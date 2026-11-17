@@ -9,7 +9,8 @@ import {
   type GuardCorpus,
   type GuardCorpusFile,
   type GuardCorpusItem,
-  type GuardProfile
+  type GuardProfile,
+  type GuardEntityRecognizer
 } from "@ai-orchestrator/guard-sdk";
 import { MCPRegistry, SnapshotMockMCPServerAdapter, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallRequest } from "@ai-orchestrator/provider-sdk";
@@ -280,6 +281,8 @@ export interface RunReferenceWorkflowSuiteOptions {
   signal?: AbortSignal;
   /** Awaited between scenarios, so a host can yield to its event loop. */
   pause?: () => Promise<void>;
+  /** The deployment's recognizer for names and addresses (`data.entities`); the built-in rules when absent. */
+  entityRecognizer?: GuardEntityRecognizer;
 }
 
 const ratio = (part: number, whole: number, empty: number) => (whole > 0 ? part / whole : empty);
@@ -287,7 +290,7 @@ const ratio = (part: number, whole: number, empty: number) => (whole > 0 ? part 
 /** Run every tool-result item of the corpus through the reference workflow, per configuration and split. */
 export async function runReferenceWorkflowSuite(options: RunReferenceWorkflowSuiteOptions): Promise<GuardWorkflowSuiteReport> {
   const corpus = options.corpus ?? loadGuardCorpus();
-  const registry = createBenchmarkGuardRegistry(corpus);
+  const registry = createBenchmarkGuardRegistry(corpus, options.entityRecognizer ? { entityRecognizer: options.entityRecognizer } : {});
   const splits = options.splits ?? GUARD_BENCHMARK_SPLITS;
   const files: GuardCorpusFile[] = corpus.files.filter((file) => file.channel === "tool_result" && splits.includes(file.split));
   const profile: ResolvedGuardProfile = {
@@ -367,6 +370,8 @@ export interface RunGuardBenchmarkSuitesOptions {
   clock?: () => Date;
   signal?: AbortSignal;
   pause?: () => Promise<void>;
+  /** The deployment's recognizer for names and addresses (`data.entities`); the built-in rules when absent. */
+  entityRecognizer?: GuardEntityRecognizer;
 }
 
 /** One report for the requested suites: the rule set suite's rates, and the workflow suite's when asked. */
@@ -380,7 +385,8 @@ export async function runGuardBenchmarkSuites(options: RunGuardBenchmarkSuitesOp
     ...(options.categories && suites.includes("profile") ? { categories: options.categories } : {}),
     ...(options.clock ? { clock: options.clock } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.pause ? { pause: options.pause } : {})
+    ...(options.pause ? { pause: options.pause } : {}),
+    ...(options.entityRecognizer ? { registry: createBenchmarkGuardRegistry(corpus, { entityRecognizer: options.entityRecognizer }) } : {})
   });
   if (!suites.includes("workflow")) return report;
   const workflow = await runReferenceWorkflowSuite({
@@ -389,7 +395,8 @@ export async function runGuardBenchmarkSuites(options: RunGuardBenchmarkSuitesOp
     ...(options.profileRef ? { profileRef: options.profileRef } : {}),
     ...(options.splits ? { splits: options.splits } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.pause ? { pause: options.pause } : {})
+    ...(options.pause ? { pause: options.pause } : {}),
+    ...(options.entityRecognizer ? { entityRecognizer: options.entityRecognizer } : {})
   });
   return { ...report, workflow };
 }

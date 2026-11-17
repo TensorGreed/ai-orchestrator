@@ -322,6 +322,9 @@ describe("guard profiles", () => {
     expect(good.statusCode).toBe(201);
     const detectors = (await call(context, "GET", "/api/guard/detectors", builder.cookie)).json<{ detectors: Array<{ id: string }> }>().detectors.map((entry) => entry.id);
     expect(detectors).toEqual(expect.arrayContaining(["output.schema", "output.topic", "output.safety", "output.grounding"]));
+    const listed = (await call(context, "GET", "/api/guard/detectors", builder.cookie)).json<{ detectors: Array<{ id: string; engine?: Record<string, unknown> }> }>().detectors;
+    expect(listed.find((entry) => entry.id === "data.entities")?.engine).toMatchObject({ id: "rules", status: "rules", languages: ["en"] });
+    expect(listed.filter((entry) => entry.engine).map((entry) => entry.id)).toEqual(["data.entities"]);
   });
 
   it("a builder cannot point a rule set's check model at a secret they may not use, or at an address of their choosing", async () => {

@@ -1,5 +1,7 @@
 import { compileAllowList, type AllowListInput } from "./allow-list";
+import { ENTITIES_DETECTOR_ID, isEntityDataClass, type EntityDataClass, type GuardEntitiesOptions } from "@ai-orchestrator/shared";
 import { DLP_DETECTOR_ID, scanDlp, type DlpMatch, type DlpScanOptions } from "./detectors/dlp";
+import { defaultEntitiesOptions, findEntities, guardEntitiesOptionsOrNull, type GuardEntityRecognizer } from "./detectors/entities";
 import { maskForDataClass } from "./masking";
 import type { GuardProfile } from "./profile";
 import type { GuardDataClass } from "./types";
@@ -21,7 +23,8 @@ export const MEDIUM_RISK_MIN_SCORE = 0.6;
 /**
  * The risk level of an input from its findings:
  * - `high`: a private key, credential, JWT, card number, IBAN, US SSN or national id with a score of at least 0.8;
- * - `medium`: any other finding with a score of at least 0.6 (an email, a phone number, an IP address, a dictionary term);
+ * - `medium`: any other finding with a score of at least 0.6 (an email, a phone number, an IP address, a person name,
+ *   a location, a street address, a dictionary term);
  * - `low`: findings, all with a score below 0.6;
  * - `none`: no finding.
  */
@@ -43,11 +46,14 @@ export interface SensitiveScanSettings {
   include?: GuardDataClass[];
   disable?: GuardDataClass[];
   entropyThreshold?: number;
+  /** Names, locations and addresses: the options of the rule set's `data.entities` detector, when it runs one. */
+  entities?: GuardEntitiesOptions;
 }
 
 /**
- * What a rule set says about the data scan: its dictionaries and allow-list, and the data detector options (`include`,
- * `disable`, `entropyThreshold`) of the first channel that runs it. No rule set: the built-in defaults.
+ * What a rule set says about the data scan: its dictionaries and allow-list, the data detector options (`include`,
+ * `disable`, `entropyThreshold`) of the first channel that runs it, and the `data.entities` options of the first
+ * channel that runs that. No rule set: the built-in defaults (no names or addresses).
  */
 export function sensitiveScanSettingsOf(profile: GuardProfile | null | undefined): SensitiveScanSettings {
   if (!profile) return { dictionaries: [] };
@@ -58,7 +64,12 @@ export function sensitiveScanSettingsOf(profile: GuardProfile | null | undefined
   const classes = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : undefined);
   const include = classes(options.include);
   const disable = classes(options.disable);
+  const entitiesEntry = Object.values(profile.channels)
+    .flatMap((channel) => channel?.detectors ?? [])
+    .find((detector) => detector.id === ENTITIES_DETECTOR_ID);
+  const entities = entitiesEntry ? guardEntitiesOptionsOrNull(entitiesEntry.options) : null;
   return {
+    ...(entities ? { entities } : {}),
     dictionaries: profile.dictionaries,
     ...(profile.allowList ? { allowList: profile.allowList } : {}),
     ...(include ? { include } : {}),
@@ -97,7 +108,11 @@ export function scanSensitiveText(text: string, settings: SensitiveScanSettings,
     ...(settings.entropyThreshold !== undefined ? { entropyThreshold: settings.entropyThreshold } : {})
   };
   const matches = scanDlp(text, options).filter((match) => !wanted || wanted.has(String(match.dataClass)));
-  // Overlapping matches (a phone number inside a card number) keep the earlier, wider one: a rewrite needs disjoint spans.
+  return disjointResult(text, matches);
+}
+
+/** Overlapping matches (a phone number inside a card number) keep the earlier, wider one: a rewrite needs disjoint spans. */
+function disjointResult(text: string, matches: readonly DlpMatch[]): { matches: DlpMatch[]; findings: SensitiveTextFinding[] } {
   const disjoint: DlpMatch[] = [];
   let end = -1;
   for (const match of [...matches].sort((a, b) => a.span.start - b.span.start || b.span.end - a.span.end || b.score - a.score)) {
@@ -117,6 +132,73 @@ export function scanSensitiveText(text: string, settings: SensitiveScanSettings,
     }))
   };
 }
+
+/** The entity classes a scan looks for: those `entityTypes` names, or (without `entityTypes`) the rule set's. Never implied by "all". */
+export function entityClassesFor(settings: Pick<SensitiveScanSettings, "entities">, request: Pick<SensitiveScanRequest, "entityTypes">): EntityDataClass[] {
+  if (request.entityTypes && request.entityTypes.length > 0) return [...new Set(request.entityTypes.filter(isEntityDataClass))];
+  return [...(settings.entities?.classes ?? [])];
+}
+
+export interface SensitiveScanContext {
+  /** The deployment's recognizer (`engine: auto`). Absent: the built-in rules. */
+  recognizer?: GuardEntityRecognizer;
+  signal?: AbortSignal;
+  /** The longest text names and addresses are looked for in (the caller's own input limit); default the options' `maxChars`. */
+  maxChars?: number;
+}
+
+/**
+ * `scanSensitiveText` plus person names, locations and street addresses, when the request names an entity class in
+ * `entityTypes` or (without `entityTypes`) the rule set runs `data.entities`. Entity spans that overlap a data rule
+ * match yield to it, and the allow-lists apply to them too.
+ */
+/** Names and addresses could not be looked for. `cause` keeps the original error for server logs; it may quote the input. */
+export class EntityScanError extends Error {
+  constructor(cause: unknown) {
+    super("Names and addresses could not be checked", { cause });
+    this.name = "EntityScanError";
+  }
+}
+
+export async function scanSensitiveTextAsync(
+  text: string,
+  settings: SensitiveScanSettings,
+  request: SensitiveScanRequest = {},
+  context: SensitiveScanContext = {}
+): Promise<{ matches: DlpMatch[]; findings: SensitiveTextFinding[] }> {
+  const base = scanSensitiveText(text, settings, request);
+  const classes = entityClassesFor(settings, request);
+  if (classes.length === 0) return base;
+  const options = settings.entities ? { ...settings.entities, classes } : defaultEntitiesOptions(classes);
+  let found: Awaited<ReturnType<typeof findEntities>>;
+  try {
+    found = await findEntities(text, options, {
+      ...(context.recognizer ? { recognizer: context.recognizer } : {}),
+      ...(context.signal ? { signal: context.signal } : {}),
+      ...(context.maxChars !== undefined ? { maxChars: context.maxChars } : {})
+    });
+  } catch (error) {
+    throw new EntityScanError(error);
+  }
+  const allowList = compileAllowList(settings.allowList, request.allowList);
+  const entities: DlpMatch[] = found
+    .filter((match) => match.score >= match.minScore && !(allowList.allows(text.slice(match.start, match.end))))
+    .filter(notOverlapping(base.matches))
+    .map((match) => ({ dataClass: match.dataClass, span: { start: match.start, end: match.end }, score: match.score, message: ENTITY_LABELS[match.dataClass] }));
+  if (entities.length === 0) return base;
+  return disjointResult(text, [...base.matches, ...entities]);
+}
+
+/** A filter for spans in start order: false for one that overlaps a match (matches disjoint, in start order). */
+function notOverlapping(matches: readonly DlpMatch[]): (span: { start: number; end: number }) => boolean {
+  let at = 0;
+  return (span) => {
+    while (at < matches.length && matches[at]!.span.end <= span.start) at += 1;
+    return !(at < matches.length && matches[at]!.span.start < span.end);
+  };
+}
+
+const ENTITY_LABELS: Record<EntityDataClass, string> = { person_name: "Person name", location: "Location", street_address: "Street address" };
 
 /** Where a string sits in a JSON value: `$`, `$[0]`, `$.a.b`; an object key's own text has `{key}` after its path. */
 export interface SensitiveStringRef {

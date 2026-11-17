@@ -18,6 +18,7 @@ import {
   generateCanaryToken,
   GUARD_ACTIONS,
   guardCheckIsMemoisable,
+  guardDetectorVersions,
   guardVerdictMemoKey,
   hashGuardProfile,
   profilesUseGrounding,
@@ -544,8 +545,9 @@ export function guardCheckMemoKey(
   if (profiles.length === 0) return undefined;
   const subject = scopeSubjectOf(scope);
   const evaluated: GuardInput = { ...input, ...(subject && !input.subject ? { subject } : {}) };
-  return guardCheckIsMemoisable(evaluated, judged, registryOf(scope.guard))
-    ? guardVerdictMemoKey(profiles.map((entry) => entry.hash), evaluated)
+  const registry = registryOf(scope.guard);
+  return guardCheckIsMemoisable(evaluated, judged, registry)
+    ? guardVerdictMemoKey(profiles.map((entry) => entry.hash), evaluated, guardDetectorVersions(evaluated, judged, registry))
     : undefined;
 }
 

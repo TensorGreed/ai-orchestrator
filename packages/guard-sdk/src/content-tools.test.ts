@@ -105,7 +105,7 @@ describe("scanSensitiveText", () => {
     expect(JSON.stringify(all.findings)).not.toContain("alice@example.com");
     expect(JSON.stringify(all.findings)).not.toContain("4111 1111 1111 1111");
     const only = scanSensitiveText(text, { dictionaries: [] }, { entityTypes: ["ip_address"] });
-    expect(only.findings.map((finding) => [finding.dataClass, finding.preview])).toEqual([["ip_address", "••.•.•.•"]]);
+    expect(only.findings.map((finding) => [finding.dataClass, finding.preview])).toEqual([["ip_address", "•••.•••.•••.•••"]]);
   });
 
   it("takes dictionaries, allow-list and data detector options from a rule set", () => {
