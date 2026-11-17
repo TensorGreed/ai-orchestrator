@@ -86,7 +86,7 @@ export type GuardEventChannelValue = (typeof GUARD_EVENT_CHANNEL_VALUES)[number]
 /** Phase 15.6: the list lives in data-labels.ts. */
 export const GUARD_PROVENANCE_VALUES = PROVENANCE_LABELS;
 
-export const PROTECTION_PROVIDER_IDS = ["mask", "keyed_hash", "aes_gcm", "token_vault", "surrogate"] as const;
+export const PROTECTION_PROVIDER_IDS = ["mask", "keyed_hash", "aes_gcm", "token_vault", "surrogate", "placeholder"] as const;
 export type ProtectionProviderIdValue = (typeof PROTECTION_PROVIDER_IDS)[number];
 
 /** Phase 16 — protection providers whose tokens cannot be turned back into the value. */

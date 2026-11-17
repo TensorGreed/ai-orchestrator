@@ -36,6 +36,12 @@ export const PROTECTION_PROVIDERS: Array<{ value: string; label: string; needsKe
     needsKey: false,
     oneWay: true,
     help: "Swaps each value for a realistic stand-in of the same shape (an email stays an email), keyed by the deployment. One-way: the original can never be revealed; use the token vault if you need it back. Credentials and keys are still fully redacted. Later checks in the same run recognise the stand-ins, so destination rules do not stop them."
+  },
+  {
+    value: "placeholder",
+    label: "Readable placeholder",
+    needsKey: false,
+    help: "Swaps each value for a numbered placeholder such as [EMAIL_1]; the same value keeps its placeholder for the whole run. A Reveal node later in the same run can turn placeholders back as its reveal rules allow; the map is kept sealed and expires."
   }
 ];
 

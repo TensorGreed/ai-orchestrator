@@ -1389,7 +1389,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
-        providerId: { type: "string", enum: ["mask", "keyed_hash", "aes_gcm", "token_vault", "surrogate"] },
+        providerId: { type: "string", enum: ["mask", "keyed_hash", "aes_gcm", "token_vault", "surrogate", "placeholder"] },
         dataClasses: { type: "array", items: { type: "string" } },
         keySecretRef: { type: "object" },
         deterministic: { type: "boolean" },

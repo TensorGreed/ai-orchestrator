@@ -684,7 +684,7 @@ function McpToolsetForm({
           <label>
             Rule set
             <select aria-label="Content rules tools rule set" value={contentRuleSetId} onChange={(event) => setContentRuleSetId(event.target.value)}>
-              <option value="">The rule sets that apply to this toolset</option>
+              <option value="">None (built-in data checks only)</option>
               {ruleSets.map((ruleSet) => (
                 <option key={ruleSet.id} value={ruleSet.id}>
                   {ruleSet.name}
