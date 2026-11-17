@@ -446,7 +446,7 @@ Tokenises, encrypts, hashes or masks sensitive data for a Content Rules node. At
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `providerId` | `string` | yes | `mask` \| `keyed_hash` \| `aes_gcm` \| `token_vault` \| `surrogate` |
+| `providerId` | `string` | yes | `mask` \| `keyed_hash` \| `aes_gcm` \| `token_vault` \| `surrogate` \| `placeholder` |
 | `dataClasses` | `array<string>` | yes | — |
 | `keySecretRef` | `object` | no | — |
 | `deterministic` | `boolean` | no | — |
