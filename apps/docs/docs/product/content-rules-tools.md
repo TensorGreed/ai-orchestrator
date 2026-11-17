@@ -111,6 +111,10 @@ The same placeholder style is a protection provider in runs (Protection Provider
 
 A run keeps its placeholders in one sealed map (`content_redactions`, id `run:<execution id>`), expiring like gateway maps. A resumed run that writes the map at the same time as the original never loses a mapping: each write is conditional on the map's version, and a writer that loses re-reads the map and numbers again from there. If the map keeps changing under it, the placeholder is not issued and the rule set's protection fallback applies (by default the content is blocked). A Reveal node that finds a placeholder it does not know leaves it as it is.
 
+**Restores inside a workflow.** An MCP Tool node, or an agent's tool, that calls `restore_sensitive_data` through this deployment's gateway gets the values, and the steps after it in the same run get them too. The run keeps them out of what it stores and shows, as it does for a [Reveal node](./content-rules.md#reveal-node): the run history, the live run view, a paused run's saved state and session state hold the placeholders and tokens the restore turned back, the step's output is labelled sensitive, and the run is not captured for replay and stores no MCP cassette or model tape. Steps shown live before the restore that held one of the values are shown again as the history keeps them.
+
+The restore's result lists the values it gave back and their placeholders or tokens in `_meta["com.lsquarem/sensitive-values"]`, signed with a key derived from the deployment's master key. A run trusts only a signature its own deployment made. For a list another server sends, or one that does not verify, the run still keeps each listed value that appears in that result out of what it stores and shows, as `[SENSITIVE]`: such a list can only hide more, never less. Without a master key nothing is signed, and every list is handled that way. As with Reveal, a value a later step reformatted (cut, re-spaced, re-encoded) is not found.
+
 ## Retention and data-subject requests
 
 Redaction maps hold sealed originals, so they are treated like other personal data:

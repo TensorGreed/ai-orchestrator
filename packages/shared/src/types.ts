@@ -947,6 +947,11 @@ export interface MCPToolResult {
   errorKind?: McpToolErrorKind;
   /** Phase 10.7 — for rate-limited, queued-out and breaker-rejected calls: when retrying makes sense. */
   retryAfterMs?: number;
+  /**
+   * The raw `_meta["com.lsquarem/sensitive-values"]` of the result, when the server sent one (see
+   * sensitive-values-marker.ts). Read by the workflow engine; never part of a node's output.
+   */
+  sensitiveValues?: unknown;
 }
 
 /** Phase 10.7 — failure classes of an MCP tool call. */

@@ -733,6 +733,22 @@ export interface StreamNodeProgressEvent {
 /** One step a running node took (resolved input, model call, retry, agent step, tool call). */
 export type StreamNodeActivityEvent = NodeActivityEvent;
 
+/**
+ * A node's data as the run's history keeps it, sent when values were revealed later in the run: it replaces what
+ * earlier events showed of that node (those may have held the values in clear).
+ */
+export interface StreamNodeRedactedEvent {
+  nodeId: string;
+  status?: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  input?: unknown;
+  output?: unknown;
+  error?: string;
+  activity?: NodeActivityEvent[];
+}
+
 /** Phase 10.5 — an MCP server's question to the person running the workflow, as it starts waiting or is settled. */
 export interface StreamElicitationEvent {
   phase: "created" | "settled";
@@ -746,6 +762,7 @@ interface WorkflowExecuteStreamHandlers {
   onLlmDelta?: (event: StreamLlmDeltaEvent) => void;
   onNodeProgress?: (event: StreamNodeProgressEvent) => void;
   onNodeActivity?: (event: StreamNodeActivityEvent) => void;
+  onNodeRedacted?: (event: StreamNodeRedactedEvent) => void;
   onElicitation?: (event: StreamElicitationEvent) => void;
   onError?: (event: StreamErrorEvent) => void;
 }
@@ -917,6 +934,11 @@ async function streamWorkflowExecutionRequest(
 
       if (parsedFrame.event === "node_activity" && data && typeof data === "object") {
         handlers.onNodeActivity?.(data as StreamNodeActivityEvent);
+        continue;
+      }
+
+      if (parsedFrame.event === "node_redacted" && data && typeof data === "object") {
+        handlers.onNodeRedacted?.(data as StreamNodeRedactedEvent);
         continue;
       }
 

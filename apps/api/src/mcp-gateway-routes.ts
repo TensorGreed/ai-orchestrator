@@ -60,6 +60,7 @@ import {
   CONTENT_RULES_TOOLS_ADAPTER_ID,
   CONTENT_RULES_TOOLS_SERVER_LABEL
 } from "@ai-orchestrator/shared";
+import { SENSITIVE_VALUES_META_KEY, type SensitiveValuesMarker } from "@ai-orchestrator/shared";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { createMcpSamplingHandler, referencesSecretIn, type GuardRunResolution } from "@ai-orchestrator/workflow-engine";
 import type { GuardService } from "./services/guard-service.js";
@@ -327,6 +328,12 @@ export interface McpGatewayDeps {
   guard?: GuardService;
   /** Content rules tools (a toolset's `content_rules` member). Absent: such a toolset lists them but every call fails. */
   contentRulesTools?: ContentRulesToolsService;
+  /**
+   * Signs the sensitive values marker a restore's result carries in `_meta` (the deployment's own key), so a workflow
+   * of this deployment that called the tool keeps the restored values out of its history and live events as their
+   * tokens. Absent: no marker.
+   */
+  signSensitiveValues?: (values: Array<{ token: string; value: string }>) => SensitiveValuesMarker;
   /**
    * 12.6 — budgets: a `block` budget of the client, the toolset's project or the deployment that is used up refuses
    * the call; sampling cost counts toward them. Absent: no budget checks.
@@ -2053,7 +2060,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       dataClasses: outcome.restoredClasses
     };
     if (!(await noteResult(session, auth, toolset, tool.name, labels))) return rpcResult(request.id, toolError(MARK_WRITE_FAILED_MESSAGE));
-    return rpcResult(request.id, { content: [{ type: "text", text: JSON.stringify(outcome.result, null, 2) }], structuredContent: outcome.result });
+    const marked = outcome.sensitiveValues && deps.signSensitiveValues ? { _meta: { [SENSITIVE_VALUES_META_KEY]: deps.signSensitiveValues(outcome.sensitiveValues) } } : {};
+    return rpcResult(request.id, { content: [{ type: "text", text: JSON.stringify(outcome.result, null, 2) }], structuredContent: outcome.result, ...marked });
   };
 
   /** A cancelled call left the caller's servers to stop once its other calls are done: stop them when none is left. */

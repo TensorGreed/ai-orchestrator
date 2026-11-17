@@ -44,7 +44,27 @@ export type WorkflowExecutionEventHooks = {
   onNodeActivity?: (event: NodeActivityEvent) => Promise<void> | void;
   /** Phase 10.5 — an `elicitation/create` request started waiting for a person, or was settled. */
   onMcpElicitation?: (event: { phase: "created" | "settled"; elicitation: McpElicitationView }) => Promise<void> | void;
+  /**
+   * Values were revealed in the run after earlier events were sent (the engine's `onRunRedacted`): the progress
+   * tracker puts them back as tokens in what it holds and sends `onNodeRedacted` for each node that changed.
+   */
+  onRunRedacted?: (redact: <T>(value: T) => T) => Promise<void> | void;
+  /** A node's data as the run's history keeps it, replacing what earlier events showed of it (SSE `node_redacted`). */
+  onNodeRedacted?: (event: RedactedNodeEvent) => Promise<void> | void;
 };
+
+/** `node_redacted`: a node's current data with values revealed later in the run put back as their tokens. */
+export interface RedactedNodeEvent {
+  nodeId: string;
+  status?: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  input?: unknown;
+  output?: unknown;
+  error?: string;
+  activity?: NodeActivityEvent[];
+}
 
 /** What a run is started with (app.ts runWorkflowExecution). */
 export interface RunWorkflowExecutionInput {

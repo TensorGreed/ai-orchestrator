@@ -8,6 +8,8 @@
  *     persisted progress;
  *   - node_complete always by reference: its input, output and error are in the progress record (written before the
  *     event); its other fields (status, errorCategory, errorRemediation, retryable, ...) travel with it;
+ *   - node_redacted always by reference: the node's corrected entry is in the progress record (written before the
+ *     event);
  *   - llm_delta coalesced per node every RUN_EVENT_COALESCE_MS (about 20 messages a second per streaming node), and
  *     flushed before any other event so the order holds;
  *   - a final `done` after the run's history (and its result on the queue row) is stored.
@@ -28,8 +30,8 @@ export const RUN_EVENT_INLINE_BYTES = CLUSTER_BUS_MAX_PAYLOAD_BYTES - 500;
 export const RUN_RELAY_POLL_MS = 2_000;
 
 /** The run events an SSE stream carries (named as the SSE events are). */
-export type RunEventName = "node_start" | "node_complete" | "llm_delta" | "node_progress" | "node_activity" | "mcp_elicitation";
-const RUN_EVENT_NAMES = new Set<string>(["node_start", "node_complete", "llm_delta", "node_progress", "node_activity", "mcp_elicitation"]);
+export type RunEventName = "node_start" | "node_complete" | "llm_delta" | "node_progress" | "node_activity" | "node_redacted" | "mcp_elicitation";
+const RUN_EVENT_NAMES = new Set<string>(["node_start", "node_complete", "llm_delta", "node_progress", "node_activity", "node_redacted", "mcp_elicitation"]);
 
 function byteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
@@ -56,6 +58,8 @@ export function encodeRunEvent(name: RunEventName, payload: Record<string, unkno
     }
     return event;
   }
+  // The corrected entry is read from the progress record, which holds no value the run revealed.
+  if (name === "node_redacted") return { t: name, ref: true, nodeId };
   const event: RunBusEvent = { ...payload, t: name };
   if (byteLength(event) <= maxBytes) return event;
   if (name === "node_start") return { t: name, ref: true, nodeId, nodeType: payload.nodeType, startedAt: payload.startedAt };
@@ -317,6 +321,7 @@ export async function decodeRunEvent(
   if (name === "node_start") {
     return { name, payload: { nodeId: rest.nodeId, nodeType: rest.nodeType, startedAt: rest.startedAt, input: entry?.input } };
   }
+  if (name === "node_redacted") return entry ? { name, payload: { ...(entry as unknown as Record<string, unknown>) } } : null;
   if (name === "node_progress") {
     return entry?.progress ? { name, payload: { nodeId: rest.nodeId, ...entry.progress } } : null;
   }

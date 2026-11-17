@@ -117,6 +117,15 @@ export type ContentToolOutcome =
   | { ok: true; result: Record<string, unknown>; summary: string; restoredClasses: string[]; /** The result carries content fetched from outside (a URL). */ externalContent?: boolean }
   | { ok: false; message: string };
 
+/**
+ * What a restore gave back, beside its outcome: each value and the token or placeholder it came from, for the
+ * sensitive values marker on the gateway's result (a workflow that called the tool keeps these values out of what it
+ * stores and streams). Never logged or stored.
+ */
+export interface RestoredValues {
+  sensitiveValues?: Array<{ token: string; value: string }>;
+}
+
 /** A tool error the client can read (never a value). */
 class ContentToolError extends Error {}
 
@@ -171,7 +180,7 @@ export class ContentRulesToolsService {
     return toolset.projectId ?? gatewayVaultScope(toolset.id);
   }
 
-  async call(call: ContentToolCall): Promise<ContentToolOutcome> {
+  async call(call: ContentToolCall): Promise<ContentToolOutcome & RestoredValues> {
     try {
       switch (call.tool) {
         case "detect_sensitive_data":
@@ -696,7 +705,7 @@ export class ContentRulesToolsService {
     });
   }
 
-  private async restore(call: ContentToolCall): Promise<ContentToolOutcome> {
+  private async restore(call: ContentToolCall): Promise<ContentToolOutcome & RestoredValues> {
     const parsed = restoreSensitiveDataArgsSchema.safeParse(call.args);
     if (!parsed.success) return { ok: false, message: `Invalid arguments: ${issues(parsed.error)}` };
     const args = parsed.data;
@@ -759,13 +768,17 @@ export class ContentRulesToolsService {
         throw new ContentToolError("Restore does not issue tokens");
       }
     };
+    const pairs = new Map<string, string>();
     const result = await revealTokens(content, {
       vault: redactionVault,
       ...(book ? { placeholders: book } : {}),
       grant,
       allowedClasses,
       projectId: scope,
-      allowUnscoped: false
+      allowUnscoped: false,
+      onRevealed: (token, value) => {
+        if (!pairs.has(token)) pairs.set(token, value);
+      }
     });
     const refused: RevealClassSummary[] = result.refused.map((entry) =>
       entry.reason === "no_rule" && entry.dataClass && needsApproval.has(entry.dataClass) ? { ...entry, reason: "approval_required" } : entry
@@ -790,7 +803,8 @@ export class ContentRulesToolsService {
         withheld: refused.map((entry) => ({ ...(entry.dataClass ? { dataClass: entry.dataClass } : {}), count: entry.count, reason: entry.reason }))
       },
       summary: `${revealedCount} restored, ${refusedCount} withheld`,
-      restoredClasses: result.revealedClasses
+      restoredClasses: result.revealedClasses,
+      ...(pairs.size > 0 ? { sensitiveValues: [...pairs].map(([token, value]) => ({ token, value })) } : {})
     };
   }
 

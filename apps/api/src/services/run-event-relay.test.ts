@@ -148,6 +148,11 @@ describe("decodeRunEvent", () => {
     expect((await decodeRunEvent({ t: "node_progress", ref: true, nodeId: "n1" }, readers))?.payload).toEqual({ nodeId: "n1", progress: 1, total: 2 });
     expect((await decodeRunEvent({ t: "node_activity", ref: true, nodeId: "n1", seq: 3 }, readers))?.payload).toEqual({ nodeId: "n1", seq: 3, kind: "k" });
     expect(await decodeRunEvent({ t: "node_activity", ref: true, nodeId: "n1", seq: 9 }, readers)).toBeNull();
+    // A corrected node always goes by reference: its data is read from the progress record, never sent on the bus.
+    const redacted = encodeRunEvent("node_redacted", { nodeId: "n1", input: { q: "clear" }, output: "clear" });
+    expect(redacted).toEqual({ t: "node_redacted", ref: true, nodeId: "n1" });
+    expect((await decodeRunEvent(redacted, readers))?.payload).toEqual(run.nodeResults && (run.nodeResults as unknown[])[0]);
+    expect(await decodeRunEvent({ t: "node_redacted", ref: true, nodeId: "gone" }, readers)).toBeNull();
     expect((await decodeRunEvent({ t: "mcp_elicitation", ref: true, phase: "created", elicitationId: "e1" }, readers))?.payload).toEqual({ phase: "created", elicitation: { id: "e1" } });
   });
 

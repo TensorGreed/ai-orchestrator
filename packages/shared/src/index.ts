@@ -34,6 +34,7 @@ export * from "./mcp-tool-policy";
 export * from "./tool-argument-summary";
 export * from "./mcp-policy-simulation";
 export * from "./taint-policy";
+export * from "./sensitive-values-marker";
 export * from "./gateway-limits";
 export * from "./model-allowlist";
 export * from "./agent-tools";

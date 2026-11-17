@@ -82,6 +82,7 @@ import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./
 import {
   executeCodeNodeSandbox,
   executeWorkflow,
+  runRedaction,
   runRevealedValues,
   runWasSensitiveWork,
   evaluateExpression,
@@ -263,6 +264,8 @@ import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
 import { bindTriggerTrust, triggerTrustDenial, withoutTriggerTrust, withStoredTriggerTrust } from "./services/trigger-trust.js";
 import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
+import { createSensitiveValuesSigner } from "./services/sensitive-values-signer.js";
+import type { SensitiveValuesMarker } from "@ai-orchestrator/shared";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
@@ -334,7 +337,7 @@ import {
 import { DeliveryDedupe } from "./services/delivery-dedupe.js";
 import { acceptSlackEvent } from "./services/slack-intake.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
-import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
+import type { RedactedNodeEvent, RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
@@ -881,6 +884,20 @@ function safeEqualSecret(expected: string, provided: string): boolean {
 
 function computeSha256Hex(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+/** The error text a node event carries while its run holds node data back (see createProgressTrackingHooks). */
+const NODE_DATA_HELD_MESSAGE = "This node failed. Its details are shown once the run's Reveal steps finish, or when the run ends.";
+
+/** A node event or progress entry with its data held back: status and timing (and an error's kind) only. */
+function heldNodeData<T extends { input?: unknown; output?: unknown; error?: string }>(entry: T): Omit<T, "input" | "output" | "error"> & { error?: string } {
+  const { input: _input, output: _output, error, ...rest } = entry;
+  return error !== undefined ? { ...rest, error: NODE_DATA_HELD_MESSAGE } : rest;
+}
+
+/** The workflow has a Reveal node that can run: its request input may hold a value the run reveals later. */
+function hasRevealNode(workflow: Workflow): boolean {
+  return workflow.nodes.some((node) => node.type === "guard_reveal" && node.disabled !== true);
 }
 
 function redactSensitiveInput(value: unknown): unknown {
@@ -1779,6 +1796,9 @@ export async function createApp(
   // The deployment's one detector registry: runs, gateway calls, simulations, the detector list, the benchmark and the
   // content rules tools all check with it (names and addresses use the built-in rules unless a recognizer is set up).
   const guardDetectors = createDeploymentGuardRegistry();
+  // The gateway signs the sensitive values marker on a restore's result; runs trust only markers that verify.
+  const sensitiveValuesSigner = createSensitiveValuesSigner(runtimeMasterKey);
+  const verifySensitiveValues = sensitiveValuesSigner ? (marker: SensitiveValuesMarker) => sensitiveValuesSigner.verify(marker) : undefined;
   const guardService = new GuardService(store, secretService, {
     detectors: guardDetectors,
     autoApply: config.GUARD_AUTO_APPLY,
@@ -2860,6 +2880,7 @@ export async function createApp(
                   codeSandbox: codeSandboxPlan,
                   outboundGuard,
                   outboundDnsResolver: nodeDnsResolver,
+                  ...(verifySensitiveValues ? { verifySensitiveValues } : {}),
                   ...(runInstrumentation.enabled ? { instrument: runInstrumentation } : {}),
                   ...(metricsService.isEnabled() ? { onNodeComplete: (event: { status: string; durationMs: number; output?: unknown }) => recordNodeMetric(input, event) } : {})
                 }
@@ -2881,6 +2902,9 @@ export async function createApp(
               app.log.warn({ err: err instanceof Error ? err.message : String(err), errorWorkflowId: payload.errorWorkflowId }, "Error workflow execution failed");
             }
           },
+          ...(verifySensitiveValues ? { verifySensitiveValues } : {}),
+          // Values revealed mid-run: the progress record and the live stream are corrected to what history keeps.
+          ...(input.hooks?.onRunRedacted ? { onRunRedacted: input.hooks.onRunRedacted } : {}),
           onNodeStart: input.hooks?.onNodeStart,
           onNodeComplete: metricsService.isEnabled()
             ? async (event) => {
@@ -3186,6 +3210,7 @@ export async function createApp(
       return;
     }
 
+    const redactRun = runRedaction(input.result) ?? (<T>(value: T): T => value);
     const persisted = await persistExecutionHistoryRecord({
       id: input.executionId,
       workflowId: input.workflow.id,
@@ -3196,10 +3221,11 @@ export async function createApp(
       durationMs: toDurationMs(input.result.startedAt, input.result.completedAt),
       triggerType: input.triggerType,
       triggeredBy: input.triggeredBy,
-      inputJson: redactSensitiveInput(input.requestInput),
+      // A value the run revealed is kept as its token here too (it may have been typed into the input in clear).
+      inputJson: redactRun(redactSensitiveInput(input.requestInput)),
       outputJson: input.result.output,
       nodeResultsJson: input.result.nodeResults,
-      customData: input.customData ?? input.result.customData,
+      customData: redactRun(input.customData ?? input.result.customData),
       error: input.result.error,
       // v74 — content copied from this run later (pinned data, a retry, a single-node run) stays out of exported content.
       sensitive: runWasSensitiveWork(input.result)
@@ -3397,8 +3423,17 @@ export async function createApp(
 
     // The last NODE_ACTIVITY_LIMIT activity entries per node, so polls of a running execution carry them.
     const activityByNodeId = new Map<string, NodeActivityEvent[]>();
+    // Values a Reveal node turns back can be in the run's data before the Reveal runs (typed in clear, then made a
+    // token by a content rules node): the run's history keeps their tokens everywhere. Until every Reveal node of the
+    // workflow has finished, live events and progress writes carry status and timing only; then each node's data goes
+    // out as history keeps it (`node_redacted`), and later events as usual. The run's result has everything.
+    const revealPending = new Set(input.workflow.nodes.filter((node) => node.type === "guard_reveal" && node.disabled !== true).map((node) => node.id));
+    let holding = revealPending.size > 0;
+    // The run's redaction as last heard (onRunRedacted), for the request input and custom data of progress writes.
+    let redactLive = <T>(value: T): T => value;
     const snapshotNodeResults = () =>
       [...nodeResultsById.values()].map((entry) => {
+        if (holding) return heldNodeData(entry);
         const activity = activityByNodeId.get(entry.nodeId);
         return activity?.length ? { ...entry, activity: [...activity] } : entry;
       });
@@ -3417,6 +3452,38 @@ export async function createApp(
         });
       });
     };
+    /** Sends each node's data as the progress record now has it (`node_redacted`). */
+    const sendNodeData = async (nodeIds: Iterable<string>) => {
+      for (const nodeId of nodeIds) {
+        const entry = nodeResultsById.get(nodeId);
+        const activity = activityByNodeId.get(nodeId);
+        if (!entry && !activity?.length) continue;
+        const event: RedactedNodeEvent = {
+          ...(entry ? { ...entry } : { nodeId }),
+          ...(activity?.length ? { activity: [...activity] } : {})
+        };
+        localRunEvents.emit(input.executionId, "node_redacted", { ...event });
+        try {
+          await input.passthroughHooks?.onNodeRedacted?.(event);
+        } catch (error) {
+          app.log.warn(
+            {
+              executionId: input.executionId,
+              workflowId: input.workflow.id,
+              nodeId,
+              error: secretService.redact(error instanceof Error ? error.message : String(error))
+            },
+            "Execution node-redacted hook failed"
+          );
+        }
+      }
+    };
+    /** Every Reveal node finished: write the progress with node data and send what was held back. */
+    const releaseHeldNodeData = async (completedAt?: string) => {
+      holding = false;
+      await persistProgress(completedAt);
+      await sendNodeData(new Set([...nodeResultsById.keys(), ...activityByNodeId.keys()]));
+    };
     const progressRecord = (completedAt?: string): ExecutionHistoryRecord => {
       const effectiveStartedAt = startedAt ?? new Date().toISOString();
       return {
@@ -3432,8 +3499,9 @@ export async function createApp(
             : undefined,
         triggerType: input.triggerType,
         triggeredBy: input.triggeredBy,
-        inputJson: redactSensitiveInput(input.requestInput),
-        customData: input.customData,
+        // The request input can hold a value a Reveal node turns back (typed in clear): held back like node data.
+        ...(holding ? {} : { inputJson: redactLive(redactSensitiveInput(input.requestInput)) }),
+        customData: redactLive(input.customData),
         nodeResultsJson: snapshotNodeResults()
       };
     };
@@ -3469,9 +3537,10 @@ export async function createApp(
         // The progress write starts first and is awaited after the event is passed on, so events reach
         // the stream in the order the engine emitted them (activity hooks are not awaited by the engine).
         const persisted = persistProgress();
-        localRunEvents.emit(input.executionId, "node_start", event);
+        const shown = holding ? heldNodeData(event) : event;
+        localRunEvents.emit(input.executionId, "node_start", shown);
         try {
-          await input.passthroughHooks?.onNodeStart?.(event);
+          await input.passthroughHooks?.onNodeStart?.(shown);
         } catch (error) {
           app.log.warn(
             {
@@ -3505,7 +3574,12 @@ export async function createApp(
         if (event.status === "waiting_approval") {
           currentStatus = "waiting_approval";
         }
-        await persistProgress(event.completedAt);
+        if (revealPending.delete(event.nodeId) && event.status === "waiting_approval") revealPending.add(event.nodeId);
+        if (holding && revealPending.size === 0) {
+          await releaseHeldNodeData(event.completedAt);
+        } else {
+          await persistProgress(event.completedAt);
+        }
         app.log.debug(
           {
             executionId: input.executionId,
@@ -3517,9 +3591,10 @@ export async function createApp(
           },
           "Workflow node completed"
         );
-        localRunEvents.emit(input.executionId, "node_complete", event);
+        const completed = holding ? heldNodeData(event) : event;
+        localRunEvents.emit(input.executionId, "node_complete", completed);
         try {
-          await input.passthroughHooks?.onNodeComplete?.(event);
+          await input.passthroughHooks?.onNodeComplete?.(completed);
         } catch (error) {
           app.log.warn(
             {
@@ -3536,7 +3611,10 @@ export async function createApp(
       },
       onMcpProgress: async (event) => {
         let persisted: Promise<unknown> | null = null;
-        const { nodeId, ...progressEvent } = event;
+        const { nodeId, ...reported } = event;
+        // A server's progress message is the server's text: held back like node data.
+        const { message: _message, ...withoutMessage } = reported;
+        const progressEvent = holding ? withoutMessage : reported;
         const snapshot: NodeProgressSnapshot = {
           ...progressEvent,
           ...(typeof event.total === "number" && event.total > 0
@@ -3574,6 +3652,8 @@ export async function createApp(
         buffer.push(event);
         if (buffer.length > NODE_ACTIVITY_LIMIT) buffer.shift();
         activityByNodeId.set(event.nodeId, buffer);
+        // Held back with the node data; it goes out with each node's data once released.
+        if (holding) return;
         if (nodeResultsById.has(event.nodeId)) {
           const nowMs = Date.now();
           if (nowMs - lastProgressPersistMs >= 1000) {
@@ -3597,7 +3677,40 @@ export async function createApp(
         }
         await persisted;
       },
+      onRunRedacted: async (redact) => {
+        // Values were revealed after earlier events went out (and progress was written): put them back as their
+        // tokens here, write the progress again, and send each changed node as history will keep it.
+        const inputBefore = JSON.stringify([redactLive(input.requestInput ?? null), redactLive(input.customData ?? null)]);
+        redactLive = redact;
+        const inputChanged = JSON.stringify([redact(input.requestInput ?? null), redact(input.customData ?? null)]) !== inputBefore;
+        const changed = new Set<string>();
+        for (const [nodeId, entry] of nodeResultsById) {
+          const next = redact(entry);
+          if (JSON.stringify(next) !== JSON.stringify(entry)) {
+            nodeResultsById.set(nodeId, next);
+            changed.add(nodeId);
+          }
+        }
+        for (const [nodeId, list] of activityByNodeId) {
+          const next = redact(list);
+          if (JSON.stringify(next) !== JSON.stringify(list)) {
+            activityByNodeId.set(nodeId, next);
+            changed.add(nodeId);
+          }
+        }
+        // Held data is redacted in place and goes out when released.
+        if (holding) return;
+        if (changed.size === 0) {
+          if (inputChanged) await persistProgress();
+          return;
+        }
+        // Written first: a dispatched run's relay reads the corrected entries from the progress record.
+        await persistProgress();
+        await sendNodeData(changed);
+      },
       onLLMDelta: async (event) => {
+        // Streamed text is node data: none while it is held back (the node's data has the full text).
+        if (holding) return;
         localRunEvents.emit(input.executionId, "llm_delta", event);
         try {
           await input.passthroughHooks?.onLLMDelta?.(event);
@@ -3668,7 +3781,8 @@ export async function createApp(
     onNodeComplete: (event) => emit("node_complete", { ...event }),
     onLLMDelta: (event) => emit("llm_delta", { ...event }),
     onMcpProgress: (event) => emit("node_progress", { ...event }),
-    onNodeActivity: (event) => emit("node_activity", { ...event })
+    onNodeActivity: (event) => emit("node_activity", { ...event }),
+    onNodeRedacted: (event) => emit("node_redacted", { ...event })
   });
 
   /**
@@ -3752,7 +3866,8 @@ export async function createApp(
             completedAt: new Date().toISOString(),
             triggerType: run.triggerType,
             triggeredBy: run.triggeredBy,
-            inputJson: redactSensitiveInput(spec.history.requestInput),
+            // A run that threw has no redaction of what it revealed: a workflow with a Reveal node keeps no input.
+            ...(hasRevealNode(run.workflow) ? {} : { inputJson: redactSensitiveInput(spec.history.requestInput) }),
             customData: spec.history.customData,
             ...(progress?.nodeResults !== undefined && progress?.nodeResults !== null ? { nodeResultsJson: progress.nodeResults } : {}),
             error: message
@@ -4024,7 +4139,8 @@ export async function createApp(
           startedAt: new Date().toISOString(),
           triggerType: spec.run.triggerType,
           triggeredBy: spec.run.triggeredBy,
-          inputJson: redactSensitiveInput(tracked.requestInput),
+          // Held back for a workflow with a Reveal node, as the run's progress does (see createProgressTrackingHooks).
+          ...(hasRevealNode(spec.run.workflow) ? {} : { inputJson: redactSensitiveInput(tracked.requestInput) }),
           customData: tracked.customData,
           nodeResultsJson: []
         },
@@ -4111,6 +4227,7 @@ export async function createApp(
               : name === "llm_delta" ? passthrough.onLLMDelta
               : name === "node_progress" ? passthrough.onMcpProgress
               : name === "node_activity" ? passthrough.onNodeActivity
+              : name === "node_redacted" ? passthrough.onNodeRedacted
               : passthrough.onMcpElicitation;
             await (hook as ((event: unknown) => Promise<void> | void) | undefined)?.(payload);
           }
@@ -12907,6 +13024,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       documents: contentDocumentScans,
       scanSettings: contentScanSettings
     }),
+    ...(sensitiveValuesSigner ? { signSensitiveValues: (values: Array<{ token: string; value: string }>) => sensitiveValuesSigner.sign(values) } : {}),
     // 12.6 — budgets, sampling cost and per-client rate limits (shared across replicas in cluster mode).
     budgets: budgetService,
     priceSampling: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
@@ -13180,6 +13298,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           },
           onNodeActivity: (event) => {
             sendSseEvent("node_activity", event);
+          },
+          onNodeRedacted: (event) => {
+            sendSseEvent("node_redacted", event);
           }
         } }
       );
