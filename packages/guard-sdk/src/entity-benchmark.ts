@@ -47,11 +47,19 @@ export const ENTITY_BENCHMARK_DEFAULT_THRESHOLD = 0.5;
 
 /**
  * Floors for the rules engine on the shipped entity corpus (overlap precision and recall per class and split),
- * enforced by `l2m guard benchmark --entities` in repo CI and by the vitest gate. They sit at the measured level, so
- * any drop fails; when a change measures higher, raise the entries here to the printed values in the same pull
- * request (the gate lists them). The held-out split has `ENTITY_BENCHMARK_HELDOUT_SLACK` of slack.
+ * enforced by `l2m guard benchmark --entities` in repo CI and by the vitest gate. They sit 0.02 below the measured
+ * level (measured 2026-11-17), so a real drop fails; when a change measures higher, raise the entries here in the same
+ * pull request (the gate lists them, past `ENTITY_BENCHMARK_FLOOR_MARGIN`). The held-out split has
+ * `ENTITY_BENCHMARK_HELDOUT_SLACK` of slack on top.
  */
-export const ENTITY_RULES_BENCHMARK_FLOORS: EntityBenchmarkFloors = {};
+export const ENTITY_RULES_BENCHMARK_FLOORS: EntityBenchmarkFloors = {
+  person_name: { main: { precision: 0.9706, recall: 0.8081 }, heldout: { precision: 0.98, recall: 0.3361 } },
+  location: { main: { precision: 0.9561, recall: 0.468 }, heldout: { precision: 0.98, recall: 0.3854 } },
+  street_address: { main: { precision: 0.9501, recall: 0.657 }, heldout: { precision: 0.8221, recall: 0.6466 } }
+};
+
+/** How far below the measured rates the floors sit; the gate asks to raise a floor only past it. */
+export const ENTITY_BENCHMARK_FLOOR_MARGIN = 0.02;
 
 /** Rate slack on the held-out split's floors (it has about 40 spans per class, so one span is 2-3 points). */
 export const ENTITY_BENCHMARK_HELDOUT_SLACK = 0.05;

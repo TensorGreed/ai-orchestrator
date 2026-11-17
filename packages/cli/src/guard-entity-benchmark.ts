@@ -12,6 +12,7 @@
  */
 import path from "node:path";
 import {
+  ENTITY_BENCHMARK_FLOOR_MARGIN,
   ENTITY_BENCHMARK_HELDOUT_SLACK,
   ENTITY_RULES_BENCHMARK_FLOORS,
   entityBenchmarkRegistry,
@@ -65,7 +66,7 @@ export async function runGuardEntityBenchmarkCommand(args: ParsedArgs, io: CliIo
 
   const { report } = await runEntityBenchmark({ registry: entityBenchmarkRegistry(), ...(profile ? { profile } : {}), ...(splits ? { splits } : {}) });
   const judgement: EntityBenchmarkJudgement = gated
-    ? judgeEntityBenchmark(report, ENTITY_RULES_BENCHMARK_FLOORS, { heldoutSlack: ENTITY_BENCHMARK_HELDOUT_SLACK, requireFloors: true })
+    ? judgeEntityBenchmark(report, ENTITY_RULES_BENCHMARK_FLOORS, { heldoutSlack: ENTITY_BENCHMARK_HELDOUT_SLACK, requireFloors: true, raiseMargin: ENTITY_BENCHMARK_FLOOR_MARGIN })
     : judgeEntityBenchmark(report, {});
 
   const out = oneFlag(args, "out");
@@ -107,8 +108,8 @@ export function formatEntityBenchmark(report: EntityBenchmarkReport, judgement: 
   if (report.failed.length === 0 && (missing || judgement.floorsToRaise.length > 0)) {
     if (judgement.floorsToRaise.length > 0) lines.push(`Above the floor: ${judgement.floorsToRaise.map((entry) => `${entry.dataClass} (${entry.split})`).join(", ")}.`);
     lines.push(
-      "Set ENTITY_RULES_BENCHMARK_FLOORS in packages/guard-sdk/src/entity-benchmark.ts to the measured values:",
-      JSON.stringify(entityBenchmarkMeasuredFloors(report), null, 2)
+      `Set ENTITY_RULES_BENCHMARK_FLOORS in packages/guard-sdk/src/entity-benchmark.ts to the measured values less ${ENTITY_BENCHMARK_FLOOR_MARGIN}:`,
+      JSON.stringify(entityBenchmarkMeasuredFloors(report, ENTITY_BENCHMARK_FLOOR_MARGIN), null, 2)
     );
   }
   return lines.join("\n");

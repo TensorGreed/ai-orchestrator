@@ -45,6 +45,16 @@ describe("entity benchmark gate", () => {
     expect(slack.failures.map((failure) => `${failure.split}:${failure.metric}`)).toEqual(["main:precision"]);
   });
 
+  it("sets floors a margin below the measurement and asks to raise them only past that margin", () => {
+    const floors = entityBenchmarkMeasuredFloors(report(), 0.02);
+    expect(floors.person_name?.main).toEqual({ precision: 0.6466, recall: 0.48 });
+    expect(entityBenchmarkMeasuredFloors(report(), 0.9).person_name?.main).toEqual({ precision: 0, recall: 0 });
+    expect(judgeEntityBenchmark(report(), floors).floorsToRaise).toEqual([{ dataClass: "person_name", split: "main" }, { dataClass: "person_name", split: "heldout" }]);
+    expect(judgeEntityBenchmark(report(), floors, { raiseMargin: 0.02 })).toEqual({ ok: true, failures: [], floorsToRaise: [] });
+    const lower = { person_name: { ...floors.person_name, main: { precision: 0.6, recall: 0.48 } } };
+    expect(judgeEntityBenchmark(report(), lower, { raiseMargin: 0.02 }).floorsToRaise).toEqual([{ dataClass: "person_name", split: "main" }]);
+  });
+
   it("lists floors to raise, requires floors when asked, and fails on unchecked items", () => {
     expect(judgeEntityBenchmark(report(), { person_name: { main: { precision: 0.5, recall: 0.5 } } }).floorsToRaise).toEqual([{ dataClass: "person_name", split: "main" }]);
     const missing = judgeEntityBenchmark(report(), {}, { requireFloors: true });

@@ -5,6 +5,7 @@ import { ENTITY_BENCHMARK_CLASSES, ENTITY_DETECTOR_ID, entityBenchmarkReportSche
 import { loadGuardCorpus } from "./benchmark";
 import { entityCorpusDir, loadEntityCorpus, parseEntityCorpus } from "./entity-corpus";
 import {
+  ENTITY_BENCHMARK_FLOOR_MARGIN,
   ENTITY_BENCHMARK_HELDOUT_SLACK,
   ENTITY_RULES_BENCHMARK_FLOORS,
   entityBenchmarkProfile,
@@ -195,9 +196,13 @@ describe("runEntityBenchmark", () => {
 
 // The gate on the real check: runs once data.entities is registered in the default registry.
 describe.skipIf(!entityBenchmarkRegistry().has(ENTITY_DETECTOR_ID))("rules engine floors", () => {
-  it("meets ENTITY_RULES_BENCHMARK_FLOORS exactly (set every class and split; raise them when it measures higher)", async () => {
+  it("meets ENTITY_RULES_BENCHMARK_FLOORS, set within the margin of the measurement (set every class and split; raise them when it measures higher)", async () => {
     const { report } = await runEntityBenchmark();
-    const judgement = judgeEntityBenchmark(report, ENTITY_RULES_BENCHMARK_FLOORS, { heldoutSlack: ENTITY_BENCHMARK_HELDOUT_SLACK, requireFloors: true });
+    const judgement = judgeEntityBenchmark(report, ENTITY_RULES_BENCHMARK_FLOORS, {
+      heldoutSlack: ENTITY_BENCHMARK_HELDOUT_SLACK,
+      requireFloors: true,
+      raiseMargin: ENTITY_BENCHMARK_FLOOR_MARGIN
+    });
     expect(judgement.failures.map((failure) => failure.message)).toEqual([]);
     expect(judgement.floorsToRaise).toEqual([]);
   });

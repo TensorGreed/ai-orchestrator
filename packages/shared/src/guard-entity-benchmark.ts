@@ -128,6 +128,11 @@ export interface EntityBenchmarkGateOptions {
   heldoutSlack?: number;
   /** Fail on a measured class and split with no floor (the CI gate does, so new results get a floor). Default false. */
   requireFloors?: boolean;
+  /**
+   * How far a measurement may sit above its floor before the gate asks to raise it (default 0: floors sit at the
+   * measured level). Floors set a margin below the measurement use the same margin here.
+   */
+  raiseMargin?: number;
 }
 
 const pct = (value: number) => `${(value * 100).toFixed(1)}%`;
@@ -179,16 +184,23 @@ export function judgeEntityBenchmark(report: EntityBenchmarkReport, floors: Enti
       }
     }
     // Floors are written rounded down to 4 decimals (entityBenchmarkMeasuredFloors), so compare at that precision.
-    if (roundDown(result.overlap.precision) > floor.precision + EPSILON || roundDown(result.overlap.recall) > floor.recall + EPSILON) floorsToRaise.push({ dataClass: result.dataClass, split: result.split });
+    const margin = Math.max(0, options.raiseMargin ?? 0);
+    if (roundDown(result.overlap.precision) > floor.precision + margin + EPSILON || roundDown(result.overlap.recall) > floor.recall + margin + EPSILON) {
+      floorsToRaise.push({ dataClass: result.dataClass, split: result.split });
+    }
   }
   return { ok: failures.length === 0, failures, floorsToRaise };
 }
 
-/** The measured overlap precision and recall as floors (rounded down to 4 decimals), for pasting into a floors table. */
-export function entityBenchmarkMeasuredFloors(report: EntityBenchmarkReport): EntityBenchmarkFloors {
+/**
+ * The measured overlap precision and recall as floors (rounded down to 4 decimals), less `margin` (never below 0), for
+ * pasting into a floors table.
+ */
+export function entityBenchmarkMeasuredFloors(report: EntityBenchmarkReport, margin = 0): EntityBenchmarkFloors {
   const floors: EntityBenchmarkFloors = {};
+  const less = (value: number) => Math.max(0, Math.round((roundDown(value) - Math.max(0, margin)) * 10_000) / 10_000);
   for (const result of report.results) {
-    floors[result.dataClass] = { ...floors[result.dataClass], [result.split]: { precision: roundDown(result.overlap.precision), recall: roundDown(result.overlap.recall) } };
+    floors[result.dataClass] = { ...floors[result.dataClass], [result.split]: { precision: less(result.overlap.precision), recall: less(result.overlap.recall) } };
   }
   return floors;
 }

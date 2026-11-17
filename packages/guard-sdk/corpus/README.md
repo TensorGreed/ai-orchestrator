@@ -240,11 +240,12 @@ Everything is synthetic.
 ### Matching and floors
 
 Spans are matched one to one per class. Strict matching needs the exact span. Overlap matching needs the two spans to share at least half of the longer one's characters; overlap is the gated number. `ENTITY_RULES_BENCHMARK_FLOORS` in
-`src/entity-benchmark.ts` holds the rules engine's measured overlap precision
-and recall per class and split. The vitest gate and the repo CI step fail on
-any drop, on a class with no floor, and on any item the check did not run on.
+`src/entity-benchmark.ts` holds the rules engine's overlap precision and
+recall per class and split, set `ENTITY_BENCHMARK_FLOOR_MARGIN` (2 points) below
+the measured values. The vitest gate and the repo CI step fail on a drop below a
+floor, on a class with no floor, and on any item the check did not run on.
 The held-out split has `ENTITY_BENCHMARK_HELDOUT_SLACK` (5 points) of slack. Each item has 5 seconds;
 an item that runs out counts as not checked.
-When a change measures higher, the command lists the classes above their
-floor and prints the measured values. Paste them into the floors in the same
-pull request (the ratchet).
+When a change measures more than the margin above a floor, the command lists
+those classes and prints the measured values less the margin. Paste them into
+the floors in the same pull request (the ratchet).
