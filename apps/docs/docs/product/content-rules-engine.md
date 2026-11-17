@@ -98,6 +98,7 @@ A protection provider turns a sensitive value into a token (`protect`) and, when
 | `keyed_hash` | no | yes | HMAC-SHA-256 pseudonym under an injected key |
 | `aes_gcm` | yes | no | AES-256-GCM, random nonce, key id in the token, data class bound as authenticated data |
 | `surrogate` | no | yes | keyed, format-preserving stand-in: an email, card, IBAN, US SSN, UK National Insurance or phone number keeps its shape (cards stay Luhn-valid); credentials, private keys and JWTs are fully redacted. Pseudonymisation: whoever holds the key can test a guessed value |
+| `placeholder` | yes (with its map) | yes | readable placeholders numbered per data class (`[EMAIL_1]`, with a run tag in runs: `[EMAIL_1.K3F9QX]`); the map is kept by the caller (a run's sealed map, or a redaction map of the [gateway tools](./content-rules-tools.md)) |
 | `token_vault` | yes | optional | tokens kept in an injected store; random, deterministic, or format-preserving (card tokens stay Luhn-valid) |
 
 Key material arrives through an injected key resolver. The library never reads environment variables or files; in L2M the resolver reads stored secrets through `SecretService`. The vault's storage is an interface too, with an in-memory implementation for tests and single-process use; L2M stores it encrypted in the database.
@@ -116,7 +117,7 @@ The rule set's `protection.dataClasses` maps each data class to a provider. When
 | `exfiltration.urls` | rule | model output, final output, tool arguments, tool result | markdown and HTML images and links whose URLs carry data (long or high-entropy query values, data-like parameter names, data-like path segments or hostnames); URLs outside an allowlist in tool arguments |
 | `leak.canary` | rule | model output, final output, tool arguments | canary tokens from the system prompt |
 | `injection.classifier` | classifier | prompt, tool result, model output, final output | the registered classifier's score; the rule packs stand in |
-| `dlp.patterns` | rule | all | email, phone, card numbers (Luhn), IBAN (mod-97), US SSN and a pluggable national-id list (UK NI number built in), credentials with known key prefixes, JWTs, private-key blocks, high-entropy values next to credential-like names, custom dictionaries and patterns |
+| `dlp.patterns` | rule | all | email, phone, card numbers (Luhn), IBAN (mod-97), US SSN and a pluggable national-id list (UK NI number built in), credentials with known key prefixes, JWTs, private-key blocks, high-entropy values next to credential-like names, custom dictionaries and patterns; IPv4 and IPv6 addresses (`ip_address`) only when the `include` option names them (see [IP addresses](./content-rules-tools.md#ip-addresses)) |
 | `tool.sql` | parser | tool arguments | per dialect (postgres, mysql, mariadb, sqlite, mssql): read, write and DDL classification; stacked queries, tautologies, comment tricks and union probes; table and column allowlists; WHERE required on mutations; row cap rewrite (LIMIT or TOP) or check; unparseable SQL fails closed |
 | `tool.command` | rule | tool arguments | shell metacharacters, command substitution, redirection, destructive commands; option-shaped arguments from untrusted input |
 | `tool.code` | rule | tool arguments | dangerous imports and calls in Python and JavaScript code-node source |

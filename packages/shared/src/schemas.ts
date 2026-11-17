@@ -615,6 +615,12 @@ export const mcpToolsetMemberInputSchema = z.discriminatedUnion("kind", [
     serverId: z.string().trim().min(1),
     /** Tool name or glob; null or absent exposes every tool of the server. */
     toolGlob: mcpToolPatternSchema.nullable().optional()
+  }),
+  z.object({
+    /** The built-in content rules tools (detect, redact, restore). */
+    kind: z.literal("content_rules"),
+    /** The rule set the tools detect with; null or absent: the built-in detector defaults. */
+    ruleSetId: z.string().trim().min(1).max(63).nullable().optional()
   })
 ]);
 

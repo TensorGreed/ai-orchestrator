@@ -31,6 +31,8 @@ import * as retention from "./postgres/retention.js";
 import * as legalHolds from "./postgres/legal-holds.js";
 import * as schedules from "./postgres/schedules.js";
 import { pgScimStore } from "./postgres/scim.js";
+import { pgContentRedactionStore } from "./postgres/content-redaction.js";
+import type { ContentRedactionStore } from "./content-redaction-store.js";
 import type { ScimStore } from "./scim-store.js";
 import * as secrets from "./postgres/secrets.js";
 import * as subject from "./postgres/subject.js";
@@ -1156,6 +1158,30 @@ export class PostgresStore implements Store {
   async staffSubjectRows(...args: Parameters<Store["staffSubjectRows"]>): ReturnType<Store["staffSubjectRows"]> {
     return subject.staffSubjectRows(this.ctx, ...args);
   }
+  // v76 — content redaction maps (postgres/content-redaction.ts).
+  private contentRedactionStore?: ContentRedactionStore;
+  private get contentRedactions(): ContentRedactionStore {
+    return (this.contentRedactionStore ??= pgContentRedactionStore(this.ctx));
+  }
+  putContentRedaction(...args: Parameters<ContentRedactionStore["putContentRedaction"]>) {
+    return this.contentRedactions.putContentRedaction(...args);
+  }
+  getContentRedaction(...args: Parameters<ContentRedactionStore["getContentRedaction"]>) {
+    return this.contentRedactions.getContentRedaction(...args);
+  }
+  deleteExpiredContentRedactions(...args: Parameters<ContentRedactionStore["deleteExpiredContentRedactions"]>) {
+    return this.contentRedactions.deleteExpiredContentRedactions(...args);
+  }
+  listContentRedactions(...args: Parameters<ContentRedactionStore["listContentRedactions"]>) {
+    return this.contentRedactions.listContentRedactions(...args);
+  }
+  writeContentRedactionIfVersion(...args: Parameters<ContentRedactionStore["writeContentRedactionIfVersion"]>) {
+    return this.contentRedactions.writeContentRedactionIfVersion(...args);
+  }
+  deleteContentRedaction(...args: Parameters<ContentRedactionStore["deleteContentRedaction"]>) {
+    return this.contentRedactions.deleteContentRedaction(...args);
+  }
+
   // 13.2 (v75) — SCIM provisioning (postgres/scim.ts; setUserDisabled in postgres/auth.ts).
   private scimStore?: Omit<ScimStore, "setUserDisabled">;
   private get scim(): Omit<ScimStore, "setUserDisabled"> {

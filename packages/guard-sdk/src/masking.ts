@@ -58,6 +58,8 @@ export function maskForDataClass(value: string, dataClass?: GuardDataClass): str
     case "credential":
     case "jwt":
       return maskValue(value, { keepStart: Math.min(4, Math.max(0, value.length - 8)) });
+    case "ip_address":
+      return maskValue(value, { keepSeparators: true });
     case "private_key":
       return "-----BEGIN PRIVATE KEY----- " + MASK_CHAR.repeat(8) + " -----END PRIVATE KEY-----";
     default:

@@ -1982,10 +1982,12 @@ export interface McpOAuthConnectionStatus {
 // Phase 10.4 — L2M as an MCP server and gateway
 // ---------------------------------------------------------------------------
 
-/** One entry of a toolset: a workflow exposing `mcp_server_trigger` tools, or a registry server. */
+/** One entry of a toolset: a workflow exposing `mcp_server_trigger` tools, a registry server, or the content rules tools. */
 export type McpToolsetMemberSpec =
   | { kind: "workflow"; workflowId: string }
-  | { kind: "server"; serverId: string; toolGlob: string | null };
+  | { kind: "server"; serverId: string; toolGlob: string | null }
+  /** The built-in content rules tools, detecting with `ruleSetId` (null: the built-in detector defaults). */
+  | { kind: "content_rules"; ruleSetId: string | null };
 
 export type McpToolsetMember = McpToolsetMemberSpec & { id: string };
 
@@ -2106,7 +2108,8 @@ export interface McpClient {
 /** One tool a toolset exposes, as an MCP client would list it. */
 export interface McpGatewayToolView {
   name: string;
-  kind: "workflow" | "server";
+  /** `content_rules`: a built-in content rules tool (serverId/serverName name the built-in, toolName the tool). */
+  kind: "workflow" | "server" | "content_rules";
   description: string;
   inputSchema: Record<string, unknown>;
   annotations?: McpToolAnnotations;

@@ -273,6 +273,27 @@ describe("MCP gateway views", () => {
     expect(await screen.findByTestId("toolset-endpoint")).toBeInTheDocument();
   });
 
+  it("adds the content rules tools to a toolset, off by default, with a chosen rule set", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.updateMcpToolset).mockResolvedValue({ toolset });
+    render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
+    await screen.findByTestId("toolset-endpoint");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const form = screen.getByRole("form", { name: "Edit toolset" });
+    const toggle = within(form).getByRole("checkbox", { name: /Offer detect_sensitive_data/ });
+    expect(toggle).not.toBeChecked();
+    expect(within(form).queryByLabelText("Content rules tools rule set")).toBeNull();
+    await user.click(toggle);
+    await user.selectOptions(await within(form).findByLabelText("Content rules tools rule set"), "strict");
+    await user.click(within(form).getByRole("button", { name: "Save toolset" }));
+    await waitFor(() =>
+      expect(api.updateMcpToolset).toHaveBeenCalledWith(
+        "mts_1",
+        expect.objectContaining({ members: expect.arrayContaining([{ kind: "content_rules", ruleSetId: "strict" }]) })
+      )
+    );
+  });
+
   it("shows and edits the per-session outside-content switch, off by default", async () => {
     const user = userEvent.setup();
     vi.mocked(api.updateMcpToolset).mockResolvedValue({ toolset: { ...toolset, trackSessionLabels: true } });

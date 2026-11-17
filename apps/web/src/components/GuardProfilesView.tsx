@@ -62,7 +62,9 @@ import {
   revealRulesOf,
   setRevealRules,
   type GuardDocument,
-  type RevealRuleView
+  type RevealRuleView,
+  allowListOf,
+  setAllowList
 } from "../lib/guard-profile-edit";
 import { actionLabel, channelLabel } from "../lib/guard-trace";
 import { GuardSimulationCard, useGuardSimulation } from "./GuardSimulationPanel";
@@ -309,7 +311,8 @@ function GuardProfileEditor({
       setIssues([]);
       setError(null);
       setNote("");
-      setMessage(response.changed ? `Saved as version ${response.version.version}` : "No changes to save");
+      const savedText = response.changed ? `Saved as version ${response.version.version}` : "No changes to save";
+      setMessage(response.warnings?.length ? `${savedText}. ${response.warnings.join(". ")}.` : savedText);
       await load();
       onChanged(profileId);
     } catch (err) {
@@ -487,6 +490,7 @@ function GuardProfileEditor({
         </fieldset>
         <DestinationRulesSummary document={document} />
         <RevealRulesSection document={document} role={role} readOnly={readOnly} onChange={update} />
+        <AllowListSection document={document} readOnly={readOnly} onChange={update} />
       </section>
 
       <section className="kb-section">
@@ -1074,6 +1078,51 @@ const splitList = (text: string): string[] =>
  * Only admins may add, change or remove reveal rules; others see them read-only. Nothing shows for a non-admin when
  * the rule set has none.
  */
+/** One entry per line; the text stays as typed (blank lines and all) and the document gets the trimmed entries. */
+function AllowListLines({ label, entries, placeholder, onChange }: { label: string; entries: string[]; placeholder?: string; onChange: (next: string[]) => void }) {
+  const toLines = (text: string): string[] => text.split("\n").map((entry) => entry.trim()).filter(Boolean);
+  const [text, setText] = useState(entries.join("\n"));
+  const joined = entries.join("\n");
+  // Another rule set or version was opened: show its entries.
+  useEffect(() => {
+    setText((current) => (toLines(current).join("\n") === joined ? current : joined));
+  }, [joined]);
+  return (
+    <textarea
+      rows={3}
+      aria-label={label}
+      placeholder={placeholder}
+      value={text}
+      onChange={(event) => {
+        setText(event.target.value);
+        onChange(toLines(event.target.value));
+      }}
+    />
+  );
+}
+
+/** The rule set's allow-list; saved with the rule set as a new version. */
+export function AllowListSection({ document, readOnly, onChange }: { document: GuardDocument; readOnly: boolean; onChange: (next: GuardDocument) => void }) {
+  const list = allowListOf(document);
+  return (
+    <fieldset className="guard-reveal-form" aria-label="Allow-list" disabled={readOnly}>
+      <legend>Allow-list</legend>
+      <p className="kb-subtle">
+        Values here are never reported by the data checks of this rule set, for example a support address or a test card number. Values match without case,
+        spaces or dashes; patterns use * for any run of characters and ? for one.
+      </p>
+      <label>
+        <span>Values (one per line)</span>
+        <AllowListLines label="Allow-listed values" entries={list.values} onChange={(values) => onChange(setAllowList(document, { ...list, values }))} />
+      </label>
+      <label>
+        <span>Patterns (one per line)</span>
+        <AllowListLines label="Allow-listed patterns" placeholder="*@example.com" entries={list.patterns} onChange={(patterns) => onChange(setAllowList(document, { ...list, patterns }))} />
+      </label>
+    </fieldset>
+  );
+}
+
 export function RevealRulesSection({
   document,
   role,
@@ -1088,7 +1137,7 @@ export function RevealRulesSection({
   const rules = revealRulesOf(document);
   const isAdmin = role === "admin";
   const editable = isAdmin && !readOnly;
-  const [draft, setDraft] = useState({ name: "", dataClasses: "", roles: [] as string[], users: "", serviceAccounts: "", workflows: "", requireApproval: false });
+  const [draft, setDraft] = useState({ name: "", dataClasses: "", roles: [] as string[], users: "", serviceAccounts: "", gatewayClients: "", workflows: "", requireApproval: false });
   if (rules.length === 0 && !editable) return null;
   const draftRule: RevealRuleView = {
     ...(draft.name.trim() ? { name: draft.name.trim() } : {}),
@@ -1096,10 +1145,11 @@ export function RevealRulesSection({
     roles: draft.roles,
     users: splitList(draft.users),
     serviceAccounts: splitList(draft.serviceAccounts),
+    ...(splitList(draft.gatewayClients).length ? { gatewayClients: splitList(draft.gatewayClients) } : {}),
     workflows: splitList(draft.workflows),
     requireApproval: draft.requireApproval
   };
-  const draftReady = draftRule.dataClasses.length > 0 && draftRule.roles.length + draftRule.users.length + draftRule.serviceAccounts.length > 0;
+  const draftReady = draftRule.dataClasses.length > 0 && draftRule.roles.length + draftRule.users.length + draftRule.serviceAccounts.length + (draftRule.gatewayClients?.length ?? 0) > 0;
   return (
     <div className="guard-dest-rules-block" aria-label="Reveal rules">
       <h5>Reveal rules</h5>
@@ -1121,6 +1171,7 @@ export function RevealRulesSection({
       )}
       <p className="kb-subtle">
         Roles and users match only runs a signed-in person started. Webhook, chat, schedule and gateway runs never match them; name a service account to allow an unattended run.
+        Gateway client ids let that MCP gateway client call restore_sensitive_data on a toolset with content rules tools; a rule that asks for approval withholds them there.
         Revealed values count as sensitive again, so destination rules decide where they may go.
       </p>
       {!isAdmin && rules.length > 0 && (
@@ -1160,6 +1211,10 @@ export function RevealRulesSection({
             <input value={draft.serviceAccounts} onChange={(event) => setDraft({ ...draft, serviceAccounts: event.target.value })} />
           </label>
           <label>
+            <span>Gateway client ids</span>
+            <input value={draft.gatewayClients} onChange={(event) => setDraft({ ...draft, gatewayClients: event.target.value })} />
+          </label>
+          <label>
             <span>Only in workflows (ids, optional)</span>
             <input value={draft.workflows} onChange={(event) => setDraft({ ...draft, workflows: event.target.value })} />
           </label>
@@ -1171,10 +1226,10 @@ export function RevealRulesSection({
             type="button"
             className="pg-btn small"
             disabled={!draftReady}
-            title={draftReady ? undefined : "Name at least one data class and one role, user or service account"}
+            title={draftReady ? undefined : "Name at least one data class and one role, user, service account or gateway client"}
             onClick={() => {
               onChange(setRevealRules(document, [...rules, draftRule]));
-              setDraft({ name: "", dataClasses: "", roles: [], users: "", serviceAccounts: "", workflows: "", requireApproval: false });
+              setDraft({ name: "", dataClasses: "", roles: [], users: "", serviceAccounts: "", gatewayClients: "", workflows: "", requireApproval: false });
             }}
           >
             Add reveal rule

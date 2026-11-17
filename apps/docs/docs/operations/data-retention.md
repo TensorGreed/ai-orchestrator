@@ -35,6 +35,7 @@ the hold is released.
 | Eval runs | `EVAL_RUN_RETENTION_DAYS` | 90 | Finished eval runs and replay jobs with their results. The newest run of every set stays. |
 | Captured runs | `REPLAY_CAPTURE_RETENTION_DAYS` | 14 | Captured production runs nobody promoted. |
 | Rule simulations | fixed | 30 | Content rules simulations and their replay jobs. |
+| Redaction maps | `CONTENT_REDACTION_TTL_SECONDS` | 1 day | Expired redaction maps of the [content rules tools](../product/content-rules-tools.md#retention-and-data-subject-requests) and run placeholder books. Each map ends at its own expiry (at most 30 days); the purge removes those already expired. |
 | Audit log | `AUDIT_LOG_RETENTION_DAYS` | 365 | [Audit entries](../security/audit-log.md), cached run manifests whose run is gone, and ended sign-in sessions. |
 | Log stream deliveries | `LOG_STREAM_EVENT_RETENTION_DAYS` | 14 | The delivery history of log streams (not what the destinations keep). |
 | Workflow versions | `WORKFLOW_VERSION_RETENTION` | 100 | A count, not an age: saved versions kept per workflow. |

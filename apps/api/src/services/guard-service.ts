@@ -17,9 +17,11 @@
  *     this service: the engine passes verdict summaries.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   createDefaultGuardProfile,
+  InMemoryPlaceholderBook,
+  newPlaceholderTag,
   guardProfileDisplayName,
   diffGuardProfiles,
   guardProfileSchema,
@@ -34,6 +36,7 @@ import {
   unsafeDictionaryPattern,
   type GuardProfile,
   type GuardProfileChange,
+  type PlaceholderBook,
   type TokenVaultRecord,
   type TokenVaultStorage
 } from "@ai-orchestrator/guard-sdk";
@@ -79,6 +82,7 @@ import type {
 } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
 import type { AuditEventInput } from "./audit-service.js";
+import { PersistedPlaceholderBook, runPlaceholderBookId } from "./content-redaction-books.js";
 import type { Store } from "../db/store.js";
 import { filterAsync, mapAsync } from "../async-array.js";
 
@@ -125,6 +129,8 @@ export interface GuardServiceOptions {
   surrogateKey?: Uint8Array;
   /** Phase 12 coverage — writes an audit log entry (a Reveal node's `content_rules.reveal`). */
   audit?: (event: AuditEventInput) => Promise<unknown>;
+  /** v76 — how long a run's placeholder book can be read back (CONTENT_REDACTION_TTL_SECONDS); default one day. */
+  redactionTtlSeconds?: number;
 }
 
 export interface GuardRunContext {
@@ -1044,15 +1050,40 @@ export class GuardService {
       ...(context.simulation ? { recordCleanOutbound: true } : {})
     };
     const runProject = context.projectId ?? DEFAULT_PROJECT_ID;
+    // v76 — the run's placeholder book: kept sealed for real runs only, so a Reveal node later in the run can turn its
+    // placeholders back. Simulations, candidate rule set runs and eval runs number each check on its own.
+    const runBook: PlaceholderBook | undefined =
+      context.executionId && !GuardService.revealDisabledFor(context)
+        ? new PersistedPlaceholderBook(
+            this.store,
+            this.secrets,
+            { id: runPlaceholderBookId(context.executionId, runProject, runProject), scope: "run", clientId: null, toolsetId: null, projectId: runProject, executionId: context.executionId },
+            (this.options.redactionTtlSeconds ?? 86_400) * 1000
+          )
+        : undefined;
+    // A sub-workflow in another project never reveals, so its book stays in memory (one per project for this runtime).
+    const childBooks = new Map<string, PlaceholderBook>();
+    const childBookFor = (projectId: string): PlaceholderBook | undefined => {
+      if (!runBook) return undefined;
+      let book = childBooks.get(projectId);
+      if (!book) {
+        book = new InMemoryPlaceholderBook({ entries: [], reserved: [], tag: newPlaceholderTag((size) => new Uint8Array(randomBytes(size))) });
+        childBooks.set(projectId, book);
+      }
+      return book;
+    };
+    if (runBook) runtime.placeholders = runBook;
     // Phase 12 coverage — a sub-workflow in another project: its Protect steps tag its own project, and it never
     // reveals (its tokens and the run's rule sets belong to different projects). Its checks keep the run's rule sets.
     const forWorkflow = (workflow: { id: string; projectId: string | null }): GuardRuntimeDependencies => {
       const childProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
       if (childProject === runProject) return runtime;
-      const { onReveal: _onReveal, ...rest } = runtime;
+      const { onReveal: _onReveal, placeholders: _placeholders, ...rest } = runtime;
+      const childBook = childBookFor(childProject);
       return {
         ...rest,
         vault: context.simulation?.vault ?? this.vaultFor({ projectId: childProject, executionId: context.executionId ?? null }),
+        ...(childBook ? { placeholders: childBook } : {}),
         projectId: childProject,
         revealDisabled: true,
         forWorkflow
@@ -1237,6 +1268,16 @@ export class GuardService {
       return;
     }
     this.streamEvents(rows, context);
+  }
+
+  /**
+   * Content rules tools on the MCP gateway — their rule events (masked evidence or token hashes only, built by
+   * ContentRulesToolsService), stored and sent to the log streams like every other rule event.
+   */
+  async recordGatewayToolEvents(rows: GuardEventInsert[]): Promise<void> {
+    if (rows.length === 0) return;
+    await this.store.insertGuardEvents(rows);
+    this.streamEvents(rows, {});
   }
 
   /** Phase 12 coverage — runs that must never reveal: rule simulations, candidate rule set runs (replays) and eval runs. */

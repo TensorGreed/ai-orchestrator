@@ -88,6 +88,7 @@ function describeDeletion(request: SubjectRequestView): string | null {
   if (deleted) parts.push(`Deleted: ${deleted}`);
   if (deletion.usageRowsCleared > 0) parts.push(`${deletion.usageRowsCleared} usage row(s) kept with the person cleared`);
   if (deletion.vaultTokensDeleted > 0) parts.push(`${deletion.vaultTokensDeleted} reversible token(s) deleted`);
+  if ((deletion.redactionMapsDeleted ?? 0) > 0) parts.push(`${deletion.redactionMapsDeleted} redaction map(s) deleted`);
   if (deletion.deferred > 0) parts.push(`${deletion.deferred} row(s) kept by a legal hold until it is released`);
   if (deletion.waitingForRuns > 0) parts.push(`${deletion.waitingForRuns} run(s) still in progress, deleted once they finish`);
   if (deletion.staff) {

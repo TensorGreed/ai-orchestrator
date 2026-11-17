@@ -3,6 +3,7 @@ import type { RevealClassSummary, RevealRefusalReason } from "@ai-orchestrator/s
 import { scanDlp } from "../detectors/dlp";
 import { GuardProtectionError } from "../types";
 import { createAesGcmProvider } from "./aes-gcm";
+import { PLACEHOLDER_PATTERN, type PlaceholderBook } from "./placeholder";
 import type { TokenVaultRecord, TokenVaultStorage } from "./token-vault";
 import type { KeyResolver } from "./types";
 
@@ -46,6 +47,11 @@ export interface RevealTokensOptions {
   allowUnscoped: boolean;
   /** Data classes whose format-preserving vault tokens are looked for. */
   formatPreservingClasses?: readonly string[];
+  /**
+   * A placeholder book (a run's, or one redaction's): placeholders it issued (`[EMAIL_1]`) are revealed under the same
+   * rules. A placeholder the book did not issue is left alone (it is ordinary text).
+   */
+  placeholders?: PlaceholderBook;
   /** Vault token prefix (default `tok`). */
   vaultPrefix?: string;
   /** Distinct tokens one call may look at (default 1000); more fails the call. */
@@ -94,7 +100,7 @@ interface Span {
   end: number;
   token: string;
   /** Shape-found tokens are reported when unknown; detector-found candidates that are not tokens are real values. */
-  source: "vault_shape" | "encrypted" | "format_preserving";
+  source: "vault_shape" | "encrypted" | "format_preserving" | "placeholder";
   dataClass?: string;
 }
 
@@ -105,6 +111,11 @@ function findSpans(text: string, options: RevealTokensOptions): Span[] {
   }
   for (const match of text.matchAll(ENCRYPTED_TOKEN_PATTERN)) {
     spans.push({ start: match.index, end: match.index + match[0].length, token: match[0], source: "encrypted" });
+  }
+  if (options.placeholders) {
+    for (const match of text.matchAll(PLACEHOLDER_PATTERN)) {
+      spans.push({ start: match.index, end: match.index + match[0].length, token: match[0], source: "placeholder" });
+    }
   }
   const classes = new Set(options.formatPreservingClasses ?? []);
   if (classes.size > 0) {
@@ -161,6 +172,15 @@ export async function revealTokens(content: unknown, options: RevealTokensOption
     return { kind: "refused", reason: "not_decryptable" };
   };
 
+  // The book belongs to this run or this redaction, so it carries the project and client scope itself.
+  const placeholderOutcome = async (token: string): Promise<Outcome> => {
+    const entry = await options.placeholders!.lookup(token);
+    if (!entry) return { kind: "ignored" };
+    const grant = options.grant(entry.dataClass);
+    if (!grant) return { kind: "refused", dataClass: entry.dataClass, reason: "no_rule" };
+    return { kind: "revealed", dataClass: entry.dataClass, value: entry.value, grant };
+  };
+
   const outcomeOf = (span: Span): Promise<Outcome> => {
     const key = `${span.source}\u0000${span.dataClass ?? ""}\u0000${span.token}`;
     let pending = outcomes.get(key);
@@ -171,6 +191,8 @@ export async function revealTokens(content: unknown, options: RevealTokensOption
       pending =
         span.source === "encrypted"
           ? encryptedOutcome(span.token)
+          : span.source === "placeholder"
+            ? placeholderOutcome(span.token)
           : options.vault
             ? options.vault.getByToken(span.token).then((record) => vaultOutcome(record, span.dataClass, span.source))
             : Promise.resolve<Outcome>(span.source === "vault_shape" ? { kind: "refused", reason: "unknown_token" } : { kind: "ignored" });

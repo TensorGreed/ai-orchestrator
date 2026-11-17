@@ -175,6 +175,37 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     return null;
   };
 
+  /**
+   * v76 — reveal rules naming gateway clients that do not exist (a typo, a revoked or deleted client, or a rule set
+   * imported from another deployment). Only a warning: such a rule matches nobody (fails closed), and refusing the save
+   * would break export and import between deployments.
+   */
+  /** Warnings only: the rule set is already saved, so a failed lookup returns no warnings instead of failing the save. */
+  const revealRuleWarnings = async (document: unknown): Promise<string[]> => {
+    try {
+      return await unknownClientWarnings(document);
+    } catch (error) {
+      deps.app.log.warn({ err: error }, "Could not check the gateway clients named in reveal rules");
+      return [];
+    }
+  };
+  const unknownClientWarnings = async (document: unknown): Promise<string[]> => {
+    const rules = ((document as { reveal?: { rules?: unknown } } | null)?.reveal?.rules ?? []) as unknown[];
+    if (!Array.isArray(rules)) return [];
+    const warnings: string[] = [];
+    const known = new Map<string, boolean>();
+    for (const [index, rule] of rules.entries()) {
+      const subjects = (rule && typeof rule === "object" ? (rule as { subjects?: Record<string, unknown> }).subjects : undefined) ?? {};
+      const ids = Array.isArray(subjects.gatewayClients) ? subjects.gatewayClients.filter((entry): entry is string => typeof entry === "string") : [];
+      for (const id of ids) {
+        if (!known.has(id)) known.set(id, (await deps.store.getMcpClient(id)) !== null);
+        if (!known.get(id)) warnings.push(`Reveal rule ${index + 1}: no MCP gateway client '${id}' exists on this deployment; the rule matches no client until one does`);
+      }
+    }
+    return warnings;
+  };
+  const withWarnings = <T extends object>(result: T, warnings: string[]): T & { warnings?: string[] } => (warnings.length > 0 ? { ...result, warnings } : result);
+
   const saveActor = (user: SafeUser): GuardSaveActor => ({ admin: user.role === "admin", canUseSecret: async (secretId) => await deps.canUseSecret(user, secretId) });
 
   const forbidden = (reply: FastifyReply) => {
@@ -212,7 +243,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       const profile = await guard.createProfile(parsed.data, user.id, { actor: saveActor(user) });
       await deps.audit(request, user, { eventType: "guard.profile.created", category: "system", action: "create", resourceType: "guard_profile", resourceId: profile.id, metadata: { version: 1, hash: profile.hash } });
       reply.code(201);
-      return { profile };
+      return withWarnings({ profile }, await revealRuleWarnings(parsed.data.document));
     } catch (error) {
       return fail(reply, error);
     }
@@ -251,7 +282,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
         metadata: { version: result.profile.latestVersion, hash: result.profile.hash, changed: result.changed }
       });
       reply.code(result.created ? 201 : 200);
-      return result;
+      return withWarnings(result, await revealRuleWarnings(document));
     } catch (error) {
       return fail(reply, error);
     }
@@ -298,7 +329,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
           metadata: { version: result.version.version, hash: result.version.hash }
         });
       }
-      return result;
+      return withWarnings(result, await revealRuleWarnings(parsed.data.document));
     } catch (error) {
       return fail(reply, error);
     }

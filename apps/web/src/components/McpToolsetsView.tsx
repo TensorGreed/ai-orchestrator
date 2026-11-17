@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { McpPolicyRole, McpToolsetMemberSpec, Project } from "@ai-orchestrator/shared";
+import type { GuardProfileSummary, McpPolicyRole, McpToolsetMemberSpec, Project } from "@ai-orchestrator/shared";
 import {
   ApiError,
   type McpRegisteredServer,
@@ -18,6 +18,7 @@ import {
   type McpToolsetView,
   createMcpToolset,
   deleteMcpToolset,
+  fetchGuardProfiles,
   fetchMcpToolsetCandidates,
   fetchMcpToolsets,
   fetchProjects,
@@ -337,7 +338,7 @@ function ToolsetDetail({
           <ul className="mcp-members" aria-label="Toolset members">
             {toolset.members.map((member) => (
               <li key={member.id} className="mcp-member">
-                <span className="mcp-flag mcp-flag-neutral">{member.kind === "workflow" ? "workflow" : "server"}</span>
+                <span className="mcp-flag mcp-flag-neutral">{member.kind === "workflow" ? "workflow" : member.kind === "content_rules" ? "content rules" : "server"}</span>
                 <span className="mcp-rule-name">{member.label}</span>
                 {member.kind === "server" && <code className="mcp-member-glob">{member.toolGlob ?? "*"}</code>}
                 {member.missing && <span className="mcp-flag">missing</span>}
@@ -422,7 +423,11 @@ function ToolsetPreview({ toolsetId, version }: { toolsetId: string; version: st
                     </span>
                   </div>
                   <span className="kb-subtle">
-                    {tool.kind === "workflow" ? `Workflow ${tool.workflowName ?? tool.workflowId}` : `${tool.serverName} · ${tool.toolName}`}
+                    {tool.kind === "workflow"
+                      ? `Workflow ${tool.workflowName ?? tool.workflowId}`
+                      : tool.kind === "content_rules"
+                        ? "Content rules (built in)"
+                        : `${tool.serverName} · ${tool.toolName}`}
                   </span>
                   {tool.description && <span className="mcp-gw-tool-desc">{tool.description}</span>}
                 </li>
@@ -486,6 +491,25 @@ function McpToolsetForm({
       member.kind === "server" ? [{ key: index, serverId: member.serverId, toolGlob: member.toolGlob ?? "" }] : []
     ) ?? []
   );
+  const initialContentRules = initial?.members.find((member) => member.kind === "content_rules");
+  const [contentRules, setContentRules] = useState(Boolean(initialContentRules));
+  const [contentRuleSetId, setContentRuleSetId] = useState(
+    initialContentRules && initialContentRules.kind === "content_rules" ? initialContentRules.ruleSetId ?? "" : ""
+  );
+  const [ruleSets, setRuleSets] = useState<GuardProfileSummary[]>([]);
+  useEffect(() => {
+    let live = true;
+    fetchGuardProfiles()
+      .then((result) => {
+        if (live) setRuleSets(result.profiles);
+      })
+      .catch(() => {
+        // The picker then offers only the toolset's own rule sets.
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
   const [nextKey, setNextKey] = useState(1000);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -517,7 +541,8 @@ function McpToolsetForm({
       ...workflowIds.map((workflowId) => ({ kind: "workflow" as const, workflowId })),
       ...serverRows
         .filter((row) => row.serverId)
-        .map((row) => ({ kind: "server" as const, serverId: row.serverId, toolGlob: row.toolGlob.trim() || null }))
+        .map((row) => ({ kind: "server" as const, serverId: row.serverId, toolGlob: row.toolGlob.trim() || null })),
+      ...(contentRules ? [{ kind: "content_rules" as const, ruleSetId: contentRuleSetId || null }] : [])
     ];
     const payload = {
       name: name.trim(),
@@ -647,6 +672,32 @@ function McpToolsetForm({
             + Add server
           </button>
         )}
+      </fieldset>
+
+      <fieldset className="mcp-role-picker mcp-gw-picker">
+        <legend className="kb-subtle">Content rules tools</legend>
+        <label className="mcp-check">
+          <input type="checkbox" checked={contentRules} onChange={(event) => setContentRules(event.target.checked)} aria-describedby="toolset-content-rules-hint" />
+          Offer detect_sensitive_data, redact_sensitive_data and restore_sensitive_data
+        </label>
+        {contentRules && (
+          <label>
+            Rule set
+            <select aria-label="Content rules tools rule set" value={contentRuleSetId} onChange={(event) => setContentRuleSetId(event.target.value)}>
+              <option value="">None (built-in data checks only)</option>
+              {ruleSets.map((ruleSet) => (
+                <option key={ruleSet.id} value={ruleSet.id}>
+                  {ruleSet.name}
+                </option>
+              ))}
+              {contentRuleSetId && !ruleSets.some((ruleSet) => ruleSet.id === contentRuleSetId) && <option value={contentRuleSetId}>{contentRuleSetId}</option>}
+            </select>
+          </label>
+        )}
+        <small id="toolset-content-rules-hint" className="kb-subtle">
+          Off by default. Clients of this toolset can find and redact sensitive data with the rule set&apos;s checks. Restore only returns the data classes a
+          reveal rule of the rule set allows for that client; redactions expire and only the client that made one can restore it.
+        </small>
       </fieldset>
 
       <label className="mcp-check">

@@ -155,6 +155,8 @@ export interface SubjectDeletionView {
   usageRowsCleared: number;
   /** Token vault entries of the person's values deleted: their tokens can no longer be revealed anywhere. */
   vaultTokensDeleted: number;
+  /** Redaction maps (content rules tools, run placeholder books) that held the person's value, deleted. */
+  redactionMapsDeleted?: number;
   /** Rows a legal hold keeps; deleted when the hold is released. */
   deferred: number;
   /** Runs still in flight when the deletion reached them; deleted once they have finished (the sweep retries). */

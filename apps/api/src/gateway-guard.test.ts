@@ -802,7 +802,7 @@ function plainWorkflowTool(id: string, answer: string): Workflow {
 async function addToolsetMember(fixture: Fixture, workflowId: string) {
   const call = caller(fixture.context);
   const current = (await call(fixture.admin, "GET", `/api/mcp/toolsets/${fixture.toolset.id}`)).json<{ toolset: McpToolset }>().toolset;
-  const members = [...(current.members ?? []).map((member) => (member.kind === "server" ? { kind: "server", serverId: member.serverId } : { kind: "workflow", workflowId: member.workflowId })), { kind: "workflow", workflowId }];
+  const members = [...(current.members ?? []).map((member) => (member.kind === "server" ? { kind: "server", serverId: member.serverId } : member.kind === "workflow" ? { kind: "workflow", workflowId: member.workflowId } : member)), { kind: "workflow", workflowId }];
   const updated = await call(fixture.admin, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { members });
   expect(updated.statusCode, updated.body).toBe(200);
 }
