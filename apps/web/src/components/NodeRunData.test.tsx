@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ReactFlowProvider, type NodeProps } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
-import { NodeRunInput, NodeRunOutput, RUN_DATA_JSON_LIMIT, RUN_DATA_ROW_PAGE, RunDataView, RunStepBar, type RunNodeResult } from "./NodeRunData";
+import { NodeRunInput, NodeRunOutput, RUN_DATA_JSON_LIMIT, RUN_DATA_ROW_PAGE, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
 import { WorkflowCanvasNode } from "./WorkflowCanvasNode";
 
 const T0 = "2026-01-01T00:00:00.000Z";
@@ -123,10 +123,16 @@ describe("NodeRunInput", () => {
 });
 
 describe("NodeRunOutput", () => {
-  it("shows status, item count and duration with the real output", () => {
+  it("shows the real output, and leaves the status to the inspector header", () => {
     render(<NodeRunOutput result={sortResult} labelFor={labelFor} />);
-    expect(screen.getByTestId("run-data-status")).toHaveTextContent("success · 2 items · 12 ms");
     expect(screen.getByText("items (2)")).toBeInTheDocument();
+    expect(screen.queryByTestId("run-data-status")).toBeNull();
+  });
+
+  it("sums up status, item count and duration in one line", () => {
+    render(<RunStatusLine result={sortResult} title="Run success" />);
+    expect(screen.getByTestId("run-data-status")).toHaveTextContent("success · 2 items · 12 ms");
+    expect(screen.getByTestId("run-data-status")).toHaveAttribute("title", "Run success");
   });
 
   it("shows an error with the input it failed on", () => {
@@ -153,7 +159,7 @@ describe("NodeRunOutput", () => {
     render(<NodeRunOutput result={sortResult} labelFor={labelFor} notFromRun={{ label: "Code test result, not from a workflow run.", content: <span>test value</span> }} />);
     expect(screen.getByTestId("run-data-not-from-run")).toBeInTheDocument();
     expect(screen.getByText("test value")).toBeInTheDocument();
-    expect(screen.getByTestId("run-data-status")).toHaveTextContent("success · 2 items");
+    expect(screen.getByText("items (2)")).toBeInTheDocument();
   });
 
   it("says when the run reused pinned data", () => {
@@ -170,8 +176,8 @@ describe("NodeRunOutput", () => {
 describe("RunStepBar", () => {
   it("steps to the previous and next node of the run by button and Alt+[ / Alt+]", async () => {
     const onStep = vi.fn();
-    render(<RunStepBar steps={["start", "sort", "fail"]} currentId="sort" labelFor={labelFor} onStep={onStep} runLabel="run success" />);
-    expect(screen.getByRole("navigation", { name: "Run steps" })).toHaveTextContent("Step 2 of 3 · run success");
+    render(<RunStepBar steps={["start", "sort", "fail"]} currentId="sort" labelFor={labelFor} onStep={onStep} />);
+    expect(screen.getByRole("navigation", { name: "Run steps" })).toHaveTextContent("Step 2 of 3");
     await userEvent.click(screen.getByRole("button", { name: "Previous step: Orders in" }));
     expect(onStep).toHaveBeenLastCalledWith("start");
     await userEvent.click(screen.getByRole("button", { name: "Next step: fail" }));

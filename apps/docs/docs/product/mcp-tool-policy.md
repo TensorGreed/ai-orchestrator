@@ -188,7 +188,7 @@ A run is evaluated with one role, its **subject**.
 
 | Run | Role used |
 |---|---|
-| Manual runs from the editor, "Run this node", retries | The signed-in user who started it |
+| Manual runs from the editor, "Run node", retries | The signed-in user who started it |
 | Approval decisions | The approver, except that a run resumed after approval keeps the subject it paused with |
 | `POST /api/webhooks/execute` and `/api/webhooks/execute/stream`, the manual trigger route | The authenticated user (session or API key) |
 | Eval runs | The user who started the eval |

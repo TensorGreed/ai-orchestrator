@@ -132,12 +132,11 @@ describe("NodeInspector", () => {
     expect(drawer).toHaveClass("insp");
     expect(drawer.querySelector(".node-modal-backdrop")).toBeNull();
     expect(screen.getByLabelText("Node name")).toHaveValue("User Prompt");
-    expect(drawer.querySelector(".insp-sub")).toHaveTextContent("user_prompt·node-1");
-    expect(screen.getByRole("button", { name: "Run this node" })).toBeInTheDocument();
+    expect(drawer.querySelector(".insp-sub")).toHaveTextContent("user_prompt");
+    expect(drawer.querySelector(".insp-sub span")).toHaveAttribute("title", "Node id: node-1");
+    expect(screen.getByRole("button", { name: "Run node" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Parameters" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "Input" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Output" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Trace" })).toBeInTheDocument();
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Input", "Parameters", "Output", "Settings", "Trace"]);
     expect(screen.getByRole("separator", { name: "Resize inspector" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
@@ -148,22 +147,27 @@ describe("NodeInspector", () => {
     const gate: Node<EditorNodeData> = { id: "gate", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Gate", nodeType: "approval_gate", config: {} } };
     render(<NodeInspector {...makeProps({ node: gate })} />);
     await user.click(screen.getByRole("tab", { name: "Output" }));
-    expect(screen.queryByRole("button", { name: "Pin output" })).toBeNull();
-    expect(screen.getByText(/An Approval Gate cannot be pinned/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Output options" }));
+    const pin = screen.getByRole("menuitem", { name: "Pin output" });
+    expect(pin).toBeDisabled();
+    expect(pin).toHaveAttribute("title", expect.stringMatching(/An Approval Gate cannot be pinned/));
   });
 
-  it("offers no 'Continue Anyway' on error for an Approval Gate or Human Approval", () => {
-    const gate: Node<EditorNodeData> = { id: "gate", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Gate", nodeType: "approval_gate", config: {} } };
-    const { unmount } = render(<NodeInspector {...makeProps({ node: gate })} />);
+  it("offers no 'Continue Anyway' on error for an Approval Gate or Human Approval", async () => {
+    const user = userEvent.setup();
     const options = (select: HTMLElement) => Array.from(select.querySelectorAll("option")).map((option) => option.getAttribute("value"));
-    expect(options(screen.getByLabelText("On Error Behavior"))).toEqual(["stop", "branch"]);
-    unmount();
+    const onErrorOptions = async (node?: Node<EditorNodeData>) => {
+      const view = render(<NodeInspector {...makeProps(node ? { node } : {})} />);
+      await user.click(screen.getByRole("tab", { name: "Settings" }));
+      const values = options(screen.getByLabelText("On Error Behavior"));
+      view.unmount();
+      return values;
+    };
+    const gate: Node<EditorNodeData> = { id: "gate", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Gate", nodeType: "approval_gate", config: {} } };
+    expect(await onErrorOptions(gate)).toEqual(["stop", "branch"]);
     const human: Node<EditorNodeData> = { id: "ask", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Ask", nodeType: "human_approval", config: {} } };
-    const humanView = render(<NodeInspector {...makeProps({ node: human })} />);
-    expect(options(screen.getByLabelText("On Error Behavior"))).toEqual(["stop", "branch"]);
-    humanView.unmount();
-    render(<NodeInspector {...makeProps()} />);
-    expect(options(screen.getByLabelText("On Error Behavior"))).toEqual(["stop", "continue", "branch"]);
+    expect(await onErrorOptions(human)).toEqual(["stop", "branch"]);
+    expect(await onErrorOptions()).toEqual(["stop", "continue", "branch"]);
   });
 
   it("saves updated user prompt text", async () => {
@@ -251,7 +255,7 @@ describe("NodeInspector", () => {
 
     render(<NodeInspector {...makeProps({ onExecuteStep })} />);
 
-    await user.click(screen.getByRole("button", { name: "Run this node" }));
+    await user.click(screen.getByRole("button", { name: "Run node" }));
     expect(onExecuteStep).toHaveBeenCalledTimes(1);
   });
 
@@ -578,7 +582,8 @@ describe("NodeInspector run data", () => {
     render(<NodeInspector {...makeProps({ showRuntimeInspection: true, pinnedData: { "node-1": { pinned: "value" } } })} />);
     await user.click(screen.getByRole("tab", { name: "Output" }));
     expect(screen.getByTestId("run-data-pinned")).toHaveTextContent("Pinned data, not from a run");
-    expect(screen.getByRole("button", { name: "Unpin output" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Output options" }));
+    expect(screen.getByRole("menuitem", { name: "Unpin output" })).toBeEnabled();
   });
 
   it("steps to the previous and next node of the run without closing", async () => {
