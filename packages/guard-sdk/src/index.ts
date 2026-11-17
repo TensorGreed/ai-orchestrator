@@ -17,6 +17,9 @@ import { GuardRegistry } from "./registry";
 
 export * from "./types";
 export * from "./masking";
+export * from "./allow-list";
+export * from "./content-tools";
+export * from "./detectors/ip-address";
 export * from "./profile";
 export * from "./registry";
 export * from "./evaluate";

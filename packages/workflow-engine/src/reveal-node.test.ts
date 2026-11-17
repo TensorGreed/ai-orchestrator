@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { DefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
-import { createAesGcmProvider, hashGuardProfile, InMemoryTokenVaultStorage, parseGuardProfile, type GuardProfileInput } from "@ai-orchestrator/guard-sdk";
+import { createAesGcmProvider, hashGuardProfile, InMemoryPlaceholderBook, InMemoryTokenVaultStorage, parseGuardProfile, type GuardProfileInput } from "@ai-orchestrator/guard-sdk";
 import { createDefaultMCPRegistry, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { resolvePendingApproval, type McpToolPolicySubject, type Workflow, type WorkflowExecutionState, type WorkflowNode } from "@ai-orchestrator/shared";
@@ -221,6 +221,22 @@ describe("Reveal node", () => {
     expect(revealOutput(result).reveal.refused[0].reason).toBe("no_rule");
     const anonymous = await run(`Card ${CARD_TOKEN}`);
     expect(revealOutput(anonymous.result).text).toBe(`Card ${CARD_TOKEN}`);
+  });
+
+  it("reveals placeholders from the run's own book under the same rules, and leaves typed ones alone", async () => {
+    const guard = await guardDeps({ stack: ["support"] });
+    const book = new InMemoryPlaceholderBook();
+    await book.assign("card_number", CARD);
+    await book.assign("email", EMAIL);
+    const withBook = { ...guard, guard: { ...guard.guard, placeholders: book } };
+    const { result, got } = await run("Card [CARD_NUMBER_1] mail [EMAIL_1] and [CARD_NUMBER_7]", { subject: ADMIN, guard: withBook });
+    expect(got).toBe(`Card ${CARD} mail [EMAIL_1] and [CARD_NUMBER_7]`);
+    expect(revealOutput(result).text).toBe("Card [CARD_NUMBER_1] mail [EMAIL_1] and [CARD_NUMBER_7]");
+    expect(revealOutput(result).reveal.refused).toEqual([expect.objectContaining({ dataClass: "email", reason: "no_rule" })]);
+    expect(JSON.stringify(result)).not.toContain(CARD);
+    // Without the run's book, placeholders are ordinary text.
+    const none = await run("Card [CARD_NUMBER_1]", { subject: ADMIN });
+    expect(none.got).toBe("Card [CARD_NUMBER_1]");
   });
 
   it("matches users by id and service accounts only by explicit id", async () => {

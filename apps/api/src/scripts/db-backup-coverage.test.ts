@@ -434,6 +434,7 @@ describe("db:import re-encryption", () => {
     "app.ts": { calls: 1, handling: "workflow_executions.state_json approvedToolResultsSealed (JSON_SEALED_FIELDS)" },
     "services/audit-export-service.ts": { calls: 1, handling: "audit_export_destinations.config_json headersSealed (JSON_SEALED_FIELDS)" },
     "services/challenge-store.ts": { calls: 2, handling: "pending_challenges (NOT_EXPORTED_TABLES)" },
+    "services/content-redaction-books.ts": { calls: 2, handling: "content_redactions (NOT_EXPORTED_TABLES); the sealer interface and sealRedactionMap" },
     "services/mcp-elicitation-service.ts": { calls: 1, handling: "an answer sent over the cluster bus, never stored" },
     "services/oidc-service.ts": { calls: 1, handling: "the OIDC flow cookie, never stored" },
     "services/saml-service.ts": { calls: 1, handling: "the SAML request cookie, never stored" }

@@ -367,6 +367,9 @@ function mapMcpToolsetMember(row: Row): McpToolsetMember | null {
   if (toStr(row.kind) === "server" && row.server_id) {
     return { id: toStr(row.id), kind: "server", serverId: toStr(row.server_id), toolGlob: row.tool_glob ? toStr(row.tool_glob) : null };
   }
+  if (toStr(row.kind) === "content_rules") {
+    return { id: toStr(row.id), kind: "content_rules", ruleSetId: row.rule_set_id ? toStr(row.rule_set_id) : null };
+  }
   return null;
 }
 
@@ -1527,8 +1530,8 @@ async function writeMcpToolsetMembers(db: Queryable, toolsetId: string, members:
   await db.query(`DELETE FROM mcp_toolset_members WHERE toolset_id = $1`, [toolsetId]);
   for (const [index, member] of members.entries()) {
     await db.query(
-      `INSERT INTO mcp_toolset_members (id, toolset_id, kind, workflow_id, server_id, tool_glob, position)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      `INSERT INTO mcp_toolset_members (id, toolset_id, kind, workflow_id, server_id, tool_glob, rule_set_id, position)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         member.id ?? `mtm_${randomUUID()}`,
         toolsetId,
@@ -1536,6 +1539,7 @@ async function writeMcpToolsetMembers(db: Queryable, toolsetId: string, members:
         member.kind === "workflow" ? member.workflowId : null,
         member.kind === "server" ? member.serverId : null,
         member.kind === "server" ? member.toolGlob ?? null : null,
+        member.kind === "content_rules" ? member.ruleSetId ?? null : null,
         index
       ]
     );

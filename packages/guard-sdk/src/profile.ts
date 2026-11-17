@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { DESTINATION_TIERS, PROVENANCE_LABELS, dataClassNameSchema, mcpPolicyRoleSchema } from "@ai-orchestrator/shared";
+import { allowListSchema } from "./allow-list";
 import { GUARD_ACTIONS, GUARD_CHANNELS, GuardProfileError, stableStringify, type GuardAction, type GuardChannel } from "./types";
 
 /**
@@ -140,7 +141,8 @@ const idList = z.array(z.string().trim().min(1).max(200)).max(200);
  * `requireApproval`: a person approves each reveal first. Only an admin may
  * save a rule set with reveal rules, and `roles` / `users` match only runs a
  * signed-in person started (see `revealRuleMatchesSubject` in shared);
- * `serviceAccounts` match explicitly.
+ * `serviceAccounts` match explicitly, and `gatewayClients` (MCP gateway
+ * client ids) match only calls of those clients to the restore tool.
  */
 export const revealRuleSchema = z
   .object({
@@ -148,7 +150,8 @@ export const revealRuleSchema = z
     subjects: z.object({
       roles: z.array(mcpPolicyRoleSchema).max(4).optional(),
       users: idList.optional(),
-      serviceAccounts: idList.optional()
+      serviceAccounts: idList.optional(),
+      gatewayClients: idList.optional()
     }),
     workflows: idList.optional(),
     requireApproval: z.boolean().optional(),
@@ -156,9 +159,13 @@ export const revealRuleSchema = z
     name: z.string().trim().min(1).max(120).optional()
   })
   .superRefine((rule, ctx) => {
-    const subjects = (rule.subjects.roles?.length ?? 0) + (rule.subjects.users?.length ?? 0) + (rule.subjects.serviceAccounts?.length ?? 0);
+    const subjects =
+      (rule.subjects.roles?.length ?? 0) +
+      (rule.subjects.users?.length ?? 0) +
+      (rule.subjects.serviceAccounts?.length ?? 0) +
+      (rule.subjects.gatewayClients?.length ?? 0);
     if (subjects === 0) {
-      ctx.addIssue({ code: "custom", path: ["subjects"], message: "Name at least one role, user or service account; reveal is denied to everyone else" });
+      ctx.addIssue({ code: "custom", path: ["subjects"], message: "Name at least one role, user, service account or gateway client; reveal is denied to everyone else" });
     }
   });
 
@@ -222,7 +229,12 @@ export const guardProfileSchema = z.object({
    * Phase 12 coverage — who may reveal protected tokens. Absent (or no
    * rules) means nobody: reveal is denied by default.
    */
-  reveal: z.object({ rules: z.array(revealRuleSchema).max(100).default([]) }).optional()
+  reveal: z.object({ rules: z.array(revealRuleSchema).max(100).default([]) }).optional(),
+  /**
+   * Values the data detectors never report (exact values and simple globs), for every finding with a data class.
+   * Absent keeps the hash and today's behaviour.
+   */
+  allowList: allowListSchema.optional()
 });
 
 export type GuardProfileInput = z.input<typeof guardProfileSchema>;

@@ -492,6 +492,12 @@ const envSchema = z.object({
    * rule set is bound there, as before.
    */
   GATEWAY_RULES_WITHOUT_BINDING: booleanFromEnv.default(true),
+  /**
+   * The longest a reversible redaction can be turned back: the map a gateway redact tool call keeps (its caller may
+   * ask for less) and a run's placeholder book. Expired maps are unreadable and swept. Absent: one day
+   * (`CONTENT_REDACTION_DEFAULT_TTL_SECONDS`); at most 30 days.
+   */
+  CONTENT_REDACTION_TTL_SECONDS: z.coerce.number().int().min(60).max(2_592_000).optional(),
   // Phase 10.7 — MCP runtime safety.
   /** Sandbox mode for stdio servers that do not choose one: `none` (on the host) or `container`. */
   MCP_SANDBOX_DEFAULT: z.enum(["none", "container"]).default("none"),
@@ -1154,6 +1160,9 @@ const TRUST_PROXY_NAMED_RANGES = new Set(["loopback", "linklocal", "uniquelocal"
  * counts); `true` → every hop is trusted; a whole number → that many hops; otherwise a comma list of IP addresses,
  * CIDR ranges or `loopback` / `linklocal` / `uniquelocal`. Anything else fails fast with the setting's name.
  */
+/** The redaction lifetime when CONTENT_REDACTION_TTL_SECONDS is not set: one day. */
+export const CONTENT_REDACTION_DEFAULT_TTL_SECONDS = 86_400;
+
 export function parseTrustProxy(raw: string | undefined): boolean | number | string[] {
   const value = (raw ?? "").trim();
   if (!value || value.toLowerCase() === "false") return false;

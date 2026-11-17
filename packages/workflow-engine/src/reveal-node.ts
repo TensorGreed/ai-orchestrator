@@ -148,6 +148,8 @@ export async function executeRevealNodeStep(input: {
   const pairs: Array<[string, string]> = [];
   const result = await revealTokens(value, {
     ...(guard.vault ? { vault: guard.vault } : {}),
+    // Placeholders a rule set wrote earlier in this run (the run's own book only).
+    ...(guard.placeholders ? { placeholders: guard.placeholders } : {}),
     keys: keyResolverFor(input.scope),
     allowedKeyIds: config.keySecretRefs.map((ref) => ref.secretId),
     allowedClasses,

@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import { ensureAiGatewaySchema, sqliteAiGatewayStore } from "./ai-gateway-sqlite.js";
 import { ensureScimSchema, sqliteScimStore } from "./scim-sqlite.js";
+import { ensureContentRedactionSchema, sqliteContentRedactionStore } from "./content-redaction-sqlite.js";
+import type { ContentRedactionStore } from "./content-redaction-store.js";
 import type { ScimStore, UserDisableOutcome } from "./scim-store.js";
 import { ensureErasureSchema, ensureSubjectSchema, sqliteSubjectStore } from "./subject-sqlite.js";
 import {
@@ -981,6 +983,8 @@ interface McpToolsetMemberRow {
   workflow_id: string | null;
   server_id: string | null;
   tool_glob: string | null;
+  /** v76 — a content_rules member's rule set. */
+  rule_set_id?: string | null;
   position: number;
 }
 
@@ -1061,6 +1065,9 @@ function mapMcpToolsetMember(row: McpToolsetMemberRow): McpToolsetMember | null 
       serverId: toString(row.server_id),
       toolGlob: row.tool_glob ? toString(row.tool_glob) : null
     };
+  }
+  if (toString(row.kind) === "content_rules") {
+    return { id: toString(row.id), kind: "content_rules", ruleSetId: row.rule_set_id ? toString(row.rule_set_id) : null };
   }
   return null;
 }
@@ -4530,6 +4537,9 @@ export class SqliteStore implements Store {
     // 13.2 (v75) — SCIM provisioning: disabled users, provisioning tokens, provisioned users, groups and members.
     this.ensureColumn("users", "disabled_at", "TEXT");
     ensureScimSchema(this.db);
+    // v76 — content redaction maps (sealed) and the rule set of a content rules toolset member.
+    ensureContentRedactionSchema(this.db);
+    this.ensureColumn("mcp_toolset_members", "rule_set_id", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -11734,6 +11744,14 @@ export class SqliteStore implements Store {
   removeScimGroupMembers(...args: Parameters<ScimStore["removeScimGroupMembers"]>) { return this.scim.removeScimGroupMembers(...args); }
   removeAllScimGroupMembers(...args: Parameters<ScimStore["removeAllScimGroupMembers"]>) { return this.scim.removeAllScimGroupMembers(...args); }
 
+  private contentRedactionStore?: ContentRedactionStore;
+  private get contentRedactions(): ContentRedactionStore {
+    return (this.contentRedactionStore ??= sqliteContentRedactionStore(this.db));
+  }
+  putContentRedaction(...args: Parameters<ContentRedactionStore["putContentRedaction"]>) { return this.contentRedactions.putContentRedaction(...args); }
+  getContentRedaction(...args: Parameters<ContentRedactionStore["getContentRedaction"]>) { return this.contentRedactions.getContentRedaction(...args); }
+  deleteExpiredContentRedactions(...args: Parameters<ContentRedactionStore["deleteExpiredContentRedactions"]>) { return this.contentRedactions.deleteExpiredContentRedactions(...args); }
+
   private aiGatewayStore?: AiGatewayStore;
   private get aiGateway(): AiGatewayStore {
     return (this.aiGatewayStore ??= sqliteAiGatewayStore(this.db));
@@ -14048,8 +14066,8 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM mcp_toolset_members WHERE toolset_id = ?`, [toolsetId]);
     members.forEach((member, index) => {
       this.exec(
-        `INSERT INTO mcp_toolset_members (id, toolset_id, kind, workflow_id, server_id, tool_glob, position)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO mcp_toolset_members (id, toolset_id, kind, workflow_id, server_id, tool_glob, rule_set_id, position)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           member.id ?? `mtm_${randomUUID()}`,
           toolsetId,
@@ -14057,6 +14075,7 @@ export class SqliteStore implements Store {
           member.kind === "workflow" ? member.workflowId : null,
           member.kind === "server" ? member.serverId : null,
           member.kind === "server" ? member.toolGlob ?? null : null,
+          member.kind === "content_rules" ? member.ruleSetId ?? null : null,
           index
         ]
       );

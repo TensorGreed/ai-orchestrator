@@ -129,6 +129,7 @@ import {
   resolveSubjectRequestSettings,
   ssoPostLoginUrl,
   toolArgumentSummariesEnabled,
+  CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
   type AppConfig
 } from "./config";
 import { redactSensitiveUrl } from "./services/url-redaction.js";
@@ -377,6 +378,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
+import { ContentRulesToolsService, deriveContentHashKey } from "./services/content-rules-tools-service.js";
 import { GATEWAY_TOOLS_CHANGED_MESSAGE } from "./services/mcp-gateway-list-changed.js";
 import { gatewayCorsAllowedHeaders } from "./services/mcp-gateway-modern.js";
 import { McpClientService } from "./services/mcp-client-service.js";
@@ -1770,6 +1772,7 @@ export async function createApp(
     // Phase 16 — destination rows are read when a run first needs them.
     destinationRows: async () => await store.listDataDestinations(),
     ...(runtimeMasterKey.length === 32 ? { surrogateKey: deriveCaptureSurrogateKey(runtimeMasterKey) } : {}),
+    redactionTtlSeconds: config.CONTENT_REDACTION_TTL_SECONDS ?? CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
     // Phase 12 coverage — a Reveal node's audit entry (the audit service is set up further down; runs start later).
     audit: async (event) => {
       await auditService.record(event);
@@ -12858,6 +12861,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     },
     sensitiveSecretIds: async () => await sensitiveSecrets.ids(),
     guard: guardService,
+    // Content rules tools for toolsets an admin gave the content_rules member.
+    contentRulesTools: new ContentRulesToolsService({
+      store,
+      sealer: secretService,
+      guard: guardService,
+      audit: async (event) => await auditService.record(event),
+      ttlSeconds: config.CONTENT_REDACTION_TTL_SECONDS ?? CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
+      hashKey: (scope) => (runtimeMasterKey.length === 32 ? deriveContentHashKey(runtimeMasterKey, scope) : undefined)
+    }),
     // 12.6 — budgets, sampling cost and per-client rate limits (shared across replicas in cluster mode).
     budgets: budgetService,
     priceSampling: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),

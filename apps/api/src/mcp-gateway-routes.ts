@@ -56,11 +56,13 @@ import {
   PROVENANCE_LABELS,
   mcpServerDestinationRef,
   credentialRotateBodySchema,
-  KEY_ROTATION_GRACE_HOURS
+  KEY_ROTATION_GRACE_HOURS,
+  CONTENT_RULES_TOOLS_ADAPTER_ID
 } from "@ai-orchestrator/shared";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { createMcpSamplingHandler, referencesSecretIn, type GuardRunResolution } from "@ai-orchestrator/workflow-engine";
 import type { GuardService } from "./services/guard-service.js";
+import { ContentRulesToolsService } from "./services/content-rules-tools-service.js";
 import type { BudgetCheckContext, BudgetExceededError, BudgetService } from "./services/budget-service.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { retryAfterSeconds } from "./run-helpers.js";
@@ -80,6 +82,7 @@ import {
   toMcpToolDescriptor,
   toToolView,
   type GatewayCatalog,
+  type GatewayContentRulesTool,
   type GatewayServerTool,
   type GatewayTool,
   type GatewayWorkflowTool
@@ -321,6 +324,8 @@ export interface McpGatewayDeps {
   sensitiveSecretIds?: () => Promise<ReadonlySet<string>>;
   /** 12.6 — Guard per toolset and per client. Absent: the gateway runs no Guard (as before 12.6). */
   guard?: GuardService;
+  /** Content rules tools (a toolset's `content_rules` member). Absent: such a toolset lists them but every call fails. */
+  contentRulesTools?: ContentRulesToolsService;
   /**
    * 12.6 — budgets: a `block` budget of the client, the toolset's project or the deployment that is used up refuses
    * the call; sampling cost counts toward them. Absent: no budget checks.
@@ -1139,7 +1144,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   const guardToolOf = (tool: GatewayTool) =>
     tool.kind === "server"
       ? { serverId: tool.serverId, toolName: tool.toolName, inputSchema: tool.inputSchema }
-      : { serverId: tool.workflowId, toolName: tool.name, inputSchema: tool.inputSchema };
+      : tool.kind === "workflow"
+        ? { serverId: tool.workflowId, toolName: tool.name, inputSchema: tool.inputSchema }
+        : { serverId: CONTENT_RULES_TOOLS_ADAPTER_ID, toolName: tool.tool, inputSchema: tool.inputSchema };
 
   const guardCheck = async (
     stack: GatewayGuardStackForCall,
@@ -1188,7 +1195,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       projectId: scope.toolset.projectId,
       metadata: {
         tool: scope.tool.name,
-        ...(scope.tool.kind === "server" ? { serverId: scope.tool.serverId, upstreamTool: scope.tool.toolName } : { workflowId: scope.tool.workflowId }),
+        ...(scope.tool.kind === "server"
+          ? { serverId: scope.tool.serverId, upstreamTool: scope.tool.toolName }
+          : scope.tool.kind === "workflow"
+            ? { workflowId: scope.tool.workflowId }
+            : { serverId: CONTENT_RULES_TOOLS_ADAPTER_ID, upstreamTool: scope.tool.tool }),
         ...(scope.runExecutionId ? { runExecutionId: scope.runExecutionId } : {}),
         channel,
         clientId: scope.auth.client.id,
@@ -1951,6 +1962,45 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
   };
 
+  /**
+   * A content rules tool call (detect, redact, restore). A restore's result carries the sensitive label and the classes
+   * it gave back, as a Reveal node's output does: it joins the caller's mark first, and a mark that cannot be stored
+   * withholds the result.
+   */
+  const callContentRulesTool = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    tool: GatewayContentRulesTool,
+    args: Record<string, unknown>,
+    request: JsonRpcRequest
+  ): Promise<JsonRpcResponse> => {
+    if (!deps.contentRulesTools) return rpcResult(request.id, toolError("Content rules tools are not available on this deployment."));
+    const callExecutionId = `mcpgw_${crypto.randomUUID()}`;
+    let outcome: Awaited<ReturnType<ContentRulesToolsService["call"]>>;
+    try {
+      outcome = await deps.contentRulesTools.call({
+        tool: tool.tool,
+        args,
+        memberRuleSetId: tool.ruleSetId,
+        client: { id: auth.client.id, name: auth.client.name },
+        toolset: { id: toolset.id, projectId: toolset.projectId },
+        callExecutionId
+      });
+    } catch (error) {
+      app.log.warn(
+        { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, tool: tool.name },
+        "MCP gateway content rules tool failed"
+      );
+      return rpcResult(request.id, toolError("Content rules could not process this call, so nothing was returned. Try again."));
+    }
+    if (!outcome.ok) return rpcResult(request.id, toolError(outcome.message));
+    const labels: Pick<DataLabels, "provenance" | "dataClasses"> =
+      outcome.restoredClasses.length > 0 ? { provenance: ["sensitive"], dataClasses: outcome.restoredClasses } : { provenance: [], dataClasses: [] };
+    if (!(await noteResult(session, auth, toolset, tool.name, labels))) return rpcResult(request.id, toolError(MARK_WRITE_FAILED_MESSAGE));
+    return rpcResult(request.id, { content: [{ type: "text", text: JSON.stringify(outcome.result, null, 2) }], structuredContent: outcome.result });
+  };
+
   const handleLimitedToolsCall = async (
     session: GatewaySession,
     auth: AuthenticatedClient,
@@ -2022,6 +2072,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       if (!(error instanceof LabelMarkUnavailableError)) throw error;
       return rpcResult(request.id, toolError(error.message));
     }
+    // The built-in content rules tools: their own rule events and audit; the toolset's rule sets do not check them.
+    if (tool.kind === "content_rules") return await callContentRulesTool(session, auth, toolset, tool, args, request);
+
     // 12.6 — the toolset's and client's Guard profiles. A failed read refuses the call: it may have a binding.
     let guardStack: GatewayGuardStackForCall | undefined;
     try {
@@ -2946,6 +2999,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           const workflow = await store.getWorkflow(member.workflowId);
           return { ...member, label: workflow?.name ?? member.workflowId, missing: !workflow };
         }
+        if (member.kind === "content_rules") {
+          const ruleSet = member.ruleSetId ? await deps.guard?.getProfile(member.ruleSetId) : null;
+          return { ...member, label: ruleSet ? `Content rules (${ruleSet.profile.name})` : "Content rules", missing: Boolean(member.ruleSetId && !ruleSet) };
+        }
         const server = servers.get(member.serverId);
         return { ...member, label: server?.name ?? member.serverId, missing: !server };
       }),
@@ -2973,6 +3030,19 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         if (seen.has(key)) continue;
         seen.add(key);
         result.push({ kind: "workflow", workflowId: member.workflowId });
+      } else if (member.kind === "content_rules") {
+        // One content rules member per toolset: its three tools would otherwise be listed twice.
+        if (seen.has("content_rules")) {
+          reply.code(400).send({ error: "A toolset can have the content rules tools once" });
+          return null;
+        }
+        const ruleSetId = member.ruleSetId?.trim() ? member.ruleSetId.trim() : null;
+        if (ruleSetId && !(await deps.guard?.getProfile(ruleSetId))) {
+          reply.code(400).send({ error: `Rule set '${ruleSetId}' does not exist` });
+          return null;
+        }
+        seen.add("content_rules");
+        result.push({ kind: "content_rules", ruleSetId });
       } else {
         if (!await store.getMcpServer(member.serverId)) {
           reply.code(400).send({ error: `MCP server '${member.serverId}' is not registered` });
