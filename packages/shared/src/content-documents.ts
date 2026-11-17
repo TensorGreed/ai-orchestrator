@@ -135,14 +135,22 @@ export const documentScanRequestSchema = z
   });
 export type DocumentScanRequest = z.infer<typeof documentScanRequestSchema>;
 
-/** A host allow-list entry: `docs.example.com` (exactly that host) or `*.example.com` (any subdomain of it). */
+/**
+ * A host allow-list entry: `docs.example.com` (exactly that host) or `*.example.com` (any subdomain of it), optionally
+ * with a port (`docs.example.com:8443`). Without a port only the scheme's default port matches (80 for http, 443 for
+ * https); with one, only that port.
+ */
 export const documentHostPatternSchema = z
   .string()
   .trim()
   .toLowerCase()
   .min(1)
-  .max(253)
-  .regex(/^(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/, "Use a host name like docs.example.com or *.example.com");
+  .max(259)
+  .regex(
+    /^(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|[1-9]\d{0,3}))?$/,
+    "Use a host name like docs.example.com, *.example.com or docs.example.com:8443"
+  )
+  .refine((value) => value.split(":")[0]!.length <= 253, "The host name is longer than 253 characters");
 
 /**
  * The `documents` options of a content rules toolset member. `enabled` lists `scan_document` for inline content;
@@ -161,17 +169,28 @@ export const contentRulesDocumentsSchema = z
   });
 export type ContentRulesDocumentsOptions = z.output<typeof contentRulesDocumentsSchema>;
 
-/** True when `host` matches an allow-list entry: exactly, or as a subdomain of a `*.` entry. */
-export function documentHostAllowed(host: string, patterns: readonly string[]): boolean {
-  const h = host.trim().toLowerCase().replace(/\.$/, "");
-  if (!h) return false;
+const DEFAULT_PORTS: Record<string, string> = { "http:": "80", "https:": "443" };
+
+/**
+ * True when a URL's host and port match an allow-list entry: the host exactly, or as a subdomain of a `*.` entry; and
+ * the entry's port, or, for an entry without one, the scheme's default port (80 for http, 443 for https) only.
+ */
+export function documentHostAllowed(target: { hostname: string; port: string; protocol: string }, patterns: readonly string[]): boolean {
+  const host = target.hostname.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  const defaultPort = DEFAULT_PORTS[target.protocol.toLowerCase()];
+  if (!host || !defaultPort) return false;
+  const port = target.port || defaultPort;
   return patterns.some((raw) => {
-    const pattern = raw.trim().toLowerCase();
+    const entry = raw.trim().toLowerCase();
+    const colon = entry.lastIndexOf(":");
+    const pattern = colon >= 0 ? entry.slice(0, colon) : entry;
+    const wantedPort = colon >= 0 ? entry.slice(colon + 1) : defaultPort;
+    if (port !== wantedPort) return false;
     if (pattern.startsWith("*.")) {
       const suffix = pattern.slice(1);
-      return h.length > suffix.length && h.endsWith(suffix);
+      return host.length > suffix.length && host.endsWith(suffix);
     }
-    return h === pattern;
+    return host === pattern;
   });
 }
 

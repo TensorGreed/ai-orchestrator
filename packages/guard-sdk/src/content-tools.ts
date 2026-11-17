@@ -48,12 +48,18 @@ export interface SensitiveScanSettings {
   entropyThreshold?: number;
   /** Names, locations and addresses: the options of the rule set's `data.entities` detector, when it runs one. */
   entities?: GuardEntitiesOptions;
+  /**
+   * The rule set runs `data.entities` with stored options that do not parse (only a hand-edited stored row can, since
+   * saving validates them): they are ignored, so the check's defaults apply to the classes a call names. Hosts warn.
+   */
+  entitiesOptionsInvalid?: true;
 }
 
 /**
  * What a rule set says about the data scan: its dictionaries and allow-list, the data detector options (`include`,
  * `disable`, `entropyThreshold`) of the first channel that runs it, and the `data.entities` options of the first
- * channel that runs that. No rule set: the built-in defaults (no names or addresses).
+ * channel that runs that (options that do not parse are ignored and flagged with `entitiesOptionsInvalid`). No rule
+ * set: the built-in defaults (no names or addresses).
  */
 export function sensitiveScanSettingsOf(profile: GuardProfile | null | undefined): SensitiveScanSettings {
   if (!profile) return { dictionaries: [] };
@@ -70,6 +76,7 @@ export function sensitiveScanSettingsOf(profile: GuardProfile | null | undefined
   const entities = entitiesEntry ? guardEntitiesOptionsOrNull(entitiesEntry.options) : null;
   return {
     ...(entities ? { entities } : {}),
+    ...(entitiesEntry && !entities ? { entitiesOptionsInvalid: true as const } : {}),
     dictionaries: profile.dictionaries,
     ...(profile.allowList ? { allowList: profile.allowList } : {}),
     ...(include ? { include } : {}),
@@ -147,11 +154,6 @@ export interface SensitiveScanContext {
   maxChars?: number;
 }
 
-/**
- * `scanSensitiveText` plus person names, locations and street addresses, when the request names an entity class in
- * `entityTypes` or (without `entityTypes`) the rule set runs `data.entities`. Entity spans that overlap a data rule
- * match yield to it, and the allow-lists apply to them too.
- */
 /** Names and addresses could not be looked for. `cause` keeps the original error for server logs; it may quote the input. */
 export class EntityScanError extends Error {
   constructor(cause: unknown) {
@@ -160,6 +162,11 @@ export class EntityScanError extends Error {
   }
 }
 
+/**
+ * `scanSensitiveText` plus person names, locations and street addresses, when the request names an entity class in
+ * `entityTypes` or (without `entityTypes`) the rule set runs `data.entities`. Entity spans that overlap a data rule
+ * match yield to it, and the allow-lists apply to them too.
+ */
 export async function scanSensitiveTextAsync(
   text: string,
   settings: SensitiveScanSettings,

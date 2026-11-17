@@ -29,7 +29,6 @@ import {
   riskLevelOf,
   scanSensitiveTextAsync,
   EntityScanError,
-  sensitiveScanSettingsOf,
   ENTITIES_DETECTOR_ID,
   type GuardEntityRecognizer,
   stringsIn,
@@ -67,6 +66,7 @@ import type { GuardRunResolution, ResolvedGuardProfile } from "@ai-orchestrator/
 import type { ContentRedactionStore } from "../db/content-redaction-store.js";
 import type { GuardEventInsert } from "../db/database.js";
 import type { AuditEventInput } from "./audit-service.js";
+import { ContentScanSettings } from "./content-scan-settings.js";
 import { openRedactionMap, storeRedactionMap, type ContentRedactionMap, type ContentRedactionSealer } from "./content-redaction-books.js";
 import { gatewayVaultScope } from "./guard-service.js";
 import { DocumentError } from "@ai-orchestrator/workflow-engine";
@@ -93,6 +93,8 @@ export interface ContentRulesToolsOptions {
   entityRecognizer?: GuardEntityRecognizer;
   /** Document scans (`scan_document`); absent: the tool fails on this deployment. */
   documents?: ContentDocumentScanService;
+  /** A rule set's scan settings (warns once per version about invalid stored names and addresses options). */
+  scanSettings?: ContentScanSettings;
   now?: () => Date;
 }
 
@@ -107,6 +109,8 @@ export interface ContentToolCall {
   toolset: { id: string; projectId: string | null };
   /** The call's synthetic `mcpgw_*` execution id: its rule events are recorded under it. */
   callExecutionId: string;
+  /** Aborted when the client goes away or cancels the call: a document fetch and the names and addresses check stop. */
+  signal?: AbortSignal;
 }
 
 export type ContentToolOutcome =
@@ -155,8 +159,11 @@ function issues(error: { issues: Array<{ path: PropertyKey[]; message: string }>
 export class ContentRulesToolsService {
   private readonly now: () => Date;
 
+  private readonly scanSettings: ContentScanSettings;
+
   constructor(private readonly options: ContentRulesToolsOptions) {
     this.now = options.now ?? (() => new Date());
+    this.scanSettings = options.scanSettings ?? new ContentScanSettings();
   }
 
   /** The project scope of a toolset: its project, or `gateway:<toolsetId>` for a toolset without one. */
@@ -207,8 +214,8 @@ export class ContentRulesToolsService {
     return loaded;
   }
 
-  private static settingsOf(profile: ResolvedGuardProfile | null): SensitiveScanSettings {
-    return sensitiveScanSettingsOf(profile?.profile ?? null);
+  private settingsOf(ruleSet: ResolvedGuardProfile | null): SensitiveScanSettings {
+    return this.scanSettings.settingsOf(ruleSet ? { id: ruleSet.profileId, version: ruleSet.version, profile: ruleSet.profile } : null);
   }
 
   // ---------------------------------------------------------------------------
@@ -237,14 +244,18 @@ export class ContentRulesToolsService {
   private async scan(
     inputs: ReturnType<typeof ContentRulesToolsService.inputsOf>,
     settings: SensitiveScanSettings,
-    request: { entityTypes?: string[]; allowList?: string[] }
+    request: { entityTypes?: string[]; allowList?: string[]; signal?: AbortSignal }
   ): Promise<ScannedInput[]> {
     const scanRequest = {
       ...(request.entityTypes ? { entityTypes: request.entityTypes } : {}),
       ...(request.allowList ? { allowList: { values: request.allowList } } : {})
     };
     // The input is already capped at CONTENT_TOOLS_MAX_CHARS in all, so names and addresses are looked for in all of it.
-    const context = { ...(this.options.entityRecognizer ? { recognizer: this.options.entityRecognizer } : {}), maxChars: CONTENT_TOOLS_MAX_CHARS };
+    const context = {
+      ...(this.options.entityRecognizer ? { recognizer: this.options.entityRecognizer } : {}),
+      ...(request.signal ? { signal: request.signal } : {}),
+      maxChars: CONTENT_TOOLS_MAX_CHARS
+    };
     const out: ScannedInput[] = [];
     for (const input of inputs) {
       const strings: ScannedString[] = [];
@@ -373,9 +384,10 @@ export class ContentRulesToolsService {
     if (!parsed.success) return { ok: false, message: `Invalid arguments: ${issues(parsed.error)}` };
     const args = parsed.data;
     const ruleSet = await this.ruleSetFor(call, args.rule_set_id);
-    const scanned = await this.scan(ContentRulesToolsService.inputsOf(args), ContentRulesToolsService.settingsOf(ruleSet), {
+    const scanned = await this.scan(ContentRulesToolsService.inputsOf(args), this.settingsOf(ruleSet), {
       ...(args.entity_types ? { entityTypes: args.entity_types } : {}),
-      ...(args.allow_list ? { allowList: args.allow_list } : {})
+      ...(args.allow_list ? { allowList: args.allow_list } : {}),
+      ...(call.signal ? { signal: call.signal } : {})
     });
     await this.options.guard.recordGatewayToolEvents(this.findingRows(call, scanned, ruleSet, "allow"));
     const riskLevel = highestRiskLevel(scanned.map((input) => input.riskLevel));
@@ -414,9 +426,10 @@ export class ContentRulesToolsService {
     const style: RedactionStyle = args.style;
     const ruleSet = await this.ruleSetFor(call, args.rule_set_id);
     const inputs = ContentRulesToolsService.inputsOf(args);
-    const scanned = await this.scan(inputs, ContentRulesToolsService.settingsOf(ruleSet), {
+    const scanned = await this.scan(inputs, this.settingsOf(ruleSet), {
       ...(args.entity_types ? { entityTypes: args.entity_types } : {}),
-      ...(args.allow_list ? { allowList: args.allow_list } : {})
+      ...(args.allow_list ? { allowList: args.allow_list } : {}),
+      ...(call.signal ? { signal: call.signal } : {})
     });
     const scope = ContentRulesToolsService.projectScope(call.toolset);
     // Keys are scanned but never rewritten: a key that holds sensitive data refuses the call rather than pass it on.
@@ -534,7 +547,7 @@ export class ContentRulesToolsService {
         await scanner.withSlot(async () => {
           const loaded: LoadedDocument =
             args.url !== undefined
-              ? await scanner.fetchUrl(args.url, { gateway: true, allowHost: (host) => documentHostAllowed(host, documents.allowedHosts) })
+              ? await scanner.fetchUrl(args.url, { gateway: true, allowHost: (target) => documentHostAllowed(target, documents.allowedHosts) }, call.signal)
               : { bytes: scanner.decodeUpload(args.content_base64!), mediaType: args.media_type ?? null, source: { kind: "upload", ...(args.filename ? { filename: args.filename } : {}) } };
           if (loaded.source.kind === "url") sourceRef = { source: loaded.source.origin, pathHash: loaded.source.pathHash };
           // A fetched document's declared type is the server's; an upload's is the caller's.
@@ -544,12 +557,13 @@ export class ContentRulesToolsService {
           const outcome = await scanner.scan(
             extracted,
             loaded,
-            ruleSet?.profile ?? null,
+            ruleSet ? { id: ruleSet.profileId, version: ruleSet.version, profile: ruleSet.profile } : null,
             {
               ...(args.entity_types ? { entityTypes: args.entity_types } : {}),
               ...(args.allow_list ? { allowList: { values: args.allow_list } } : {})
             },
-            protector?.protect
+            protector?.protect,
+            call.signal
           );
           const kept = style && protector ? await this.keepRedaction(call, scope, style, protector.book, protector.tokens, args.ttl_seconds) : {};
           const result: DocumentScanResult = documentScanResult(

@@ -238,6 +238,7 @@ import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerGuardDocumentRoutes } from "./guard-document-routes.js";
+import { ContentScanSettings } from "./services/content-scan-settings.js";
 import { ContentDocumentScanService } from "./services/content-document-scan-service.js";
 import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
 import { registerGuardBenchmarkRoutes } from "./guard-benchmark-routes.js";
@@ -1820,6 +1821,8 @@ export async function createApp(
   });
   // Outbound URL policy for nodes that fetch a user-supplied URL.
   const outboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
+  // One per process: a rule set version with invalid stored names and addresses options is logged once.
+  const contentScanSettings = new ContentScanSettings((message, metadata) => app.log.warn(metadata, message));
   // Document scans with content rules: the rule set test follows the outbound policy; the gateway tool always refuses private ranges.
   const contentDocumentScans = new ContentDocumentScanService({
     limits: {
@@ -1831,7 +1834,9 @@ export async function createApp(
     },
     outbound: outboundGuard,
     resolver: options.documentScanNetwork?.resolver ?? nodeDnsResolver,
-    ...(options.documentScanNetwork?.fetchImpl ? { fetchImpl: options.documentScanNetwork.fetchImpl } : {})
+    ...(options.documentScanNetwork?.fetchImpl ? { fetchImpl: options.documentScanNetwork.fetchImpl } : {}),
+    ...(guardDetectors.entityRecognizer ? { entityRecognizer: guardDetectors.entityRecognizer } : {}),
+    scanSettings: contentScanSettings
   });
   let codeSandboxPlan: CodeSandboxPlan = CODE_SANDBOX_INITIALISING;
   const codeSandboxSettled = resolveCodeSandboxPlan(
@@ -12899,7 +12904,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       ttlSeconds: config.CONTENT_REDACTION_TTL_SECONDS ?? CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
       hashKey: (scope) => (runtimeMasterKey.length === 32 ? deriveContentHashKey(runtimeMasterKey, scope) : undefined),
       ...(guardDetectors.entityRecognizer ? { entityRecognizer: guardDetectors.entityRecognizer } : {}),
-      documents: contentDocumentScans
+      documents: contentDocumentScans,
+      scanSettings: contentScanSettings
     }),
     // 12.6 — budgets, sampling cost and per-client rate limits (shared across replicas in cluster mode).
     budgets: budgetService,

@@ -21,7 +21,9 @@ Document scans use the same checks: the rule set page's
 policy, and the MCP gateway's
 [scan_document](/product/content-rules-tools#scan_document) tool, which also
 always refuses private, loopback and link-local addresses and fetches only
-from the hosts its toolset lists.
+from the hosts its toolset lists (on the scheme's default port unless the
+entry names one). Their fetch timeout covers DNS lookups, and a caller that
+goes away stops the fetch.
 
 Concepts: [the lethal trifecta](/learn/security/lethal-trifecta) shows how URLs become a way for data to leave an agent.
 

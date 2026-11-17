@@ -2189,6 +2189,7 @@ export const openApiSpec = {
           "422": { description: "The URL is refused by the outbound URL checks" },
           "429": { description: "Too many scans" },
           "502": { description: "The document server answered with an error" },
+          "503": { description: "Names and addresses could not be checked (code check_failed)" },
           "504": { description: "The document server was too slow" }
         }
       }

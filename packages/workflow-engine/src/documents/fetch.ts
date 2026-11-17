@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { BodyTooLargeError, CONTENT_SCAN_LIMITS, readBodyCapped } from "@ai-orchestrator/shared";
 import type { DnsResolver } from "@ai-orchestrator/guard-sdk";
-import { guardedFetch, OutboundUrlBlockedError, type OutboundGuardConfig } from "../outbound-url-guard.js";
+import { guardedFetch, nodeDnsResolver, OutboundUrlBlockedError, type OutboundGuardConfig } from "../outbound-url-guard.js";
 import { DocumentError } from "./errors.js";
 
 /**
@@ -9,7 +9,9 @@ import { DocumentError } from "./errors.js";
  * (DNS-rebinding safe), re-checks every redirect hop and drops credential headers across origins. On top of that:
  * no cookies or credentials are ever sent (and a URL with a user name or password is refused), redirects are capped,
  * an optional host allow-list is checked on every hop, the body is read with a cap on decoded bytes (and on the
- * expansion of a compressed body), and there is a first-byte timeout and a total one.
+ * expansion of a compressed body), and there is a first-byte timeout and a total one. The total one covers the DNS
+ * lookups too (the vetting one and the pinned connection's), and aborting `signal` (the caller went away) stops the
+ * fetch at any point.
  */
 
 export interface DocumentFetchOptions {
@@ -21,8 +23,9 @@ export interface DocumentFetchOptions {
   timeoutMs?: number;
   firstByteTimeoutMs?: number;
   maxRedirects?: number;
-  /** Checked on the URL and on every redirect target; false refuses the fetch (host_not_allowed). */
-  allowHost?: (host: string) => boolean;
+  /** Checked on the URL and on every redirect target (host, port and scheme); false refuses the fetch (host_not_allowed). */
+  allowHost?: (target: URL) => boolean;
+  /** Aborted when the caller goes away: the fetch stops and fails with `cancelled`. */
   signal?: AbortSignal;
 }
 
@@ -59,10 +62,33 @@ function hostOf(url: URL): string {
   return url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
 }
 
+/** The host as an allow-list names it: with the port when the URL gives a non-default one. */
+function hostPortOf(url: URL): string {
+  return url.port ? `${hostOf(url)}:${url.port}` : hostOf(url);
+}
+
+/** A resolver that gives up when `signal` aborts, so a slow DNS answer counts against the fetch's timeouts. */
+export function abortableResolver(resolver: DnsResolver, signal: AbortSignal): DnsResolver {
+  return async (hostname) => {
+    if (signal.aborted) throw new Error("The lookup was cancelled");
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new Error("The lookup was cancelled"));
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([resolver(hostname), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+  };
+}
+
 export async function fetchDocument(rawUrl: string, options: DocumentFetchOptions): Promise<FetchedDocument> {
   const url = parseDocumentUrl(rawUrl);
   const ref = urlLogRef(url);
-  if (options.allowHost && !options.allowHost(hostOf(url))) throw new DocumentError("host_not_allowed", `Host '${hostOf(url)}' is not on this toolset's list of document hosts`);
+  if (options.signal?.aborted) throw new DocumentError("cancelled", "The scan was cancelled");
+  if (options.allowHost && !options.allowHost(url)) throw new DocumentError("host_not_allowed", `Host '${hostPortOf(url)}' is not on this toolset's list of document hosts`);
   const maxBytes = options.maxBytes ?? CONTENT_SCAN_LIMITS.maxBytes;
   const timeoutMs = options.timeoutMs ?? CONTENT_SCAN_LIMITS.fetchTimeoutMs;
   const firstByteTimeoutMs = Math.min(options.firstByteTimeoutMs ?? CONTENT_SCAN_LIMITS.firstByteTimeoutMs, timeoutMs);
@@ -81,8 +107,20 @@ export async function fetchDocument(rawUrl: string, options: DocumentFetchOption
     if (firstByte) clearTimeout(firstByte);
     firstByte = undefined;
   };
-  const onOuterAbort = () => controller.abort();
+  let cancelled = false;
+  const onOuterAbort = () => {
+    cancelled = true;
+    controller.abort();
+  };
   options.signal?.addEventListener("abort", onOuterAbort, { once: true });
+  // Why the fetch stopped, when it was stopped: the caller left, or a timer ran out (DNS included).
+  const stopped = () =>
+    cancelled
+      ? new DocumentError("cancelled", "The scan was cancelled")
+      : timedOut
+        ? new DocumentError("timeout", timedOut === "first_byte" ? `The server did not answer within ${firstByteTimeoutMs} ms` : `The document did not arrive within ${timeoutMs} ms`)
+        : null;
+  const resolver = abortableResolver(options.resolver ?? nodeDnsResolver, controller.signal);
 
   try {
     let response: Response;
@@ -97,21 +135,23 @@ export async function fetchDocument(rawUrl: string, options: DocumentFetchOption
         },
         {
           config: options.outbound,
-          ...(options.resolver ? { resolver: options.resolver } : {}),
+          resolver,
           ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
           maxRedirects: options.maxRedirects ?? CONTENT_SCAN_LIMITS.maxRedirects,
           onRedirect: async (next) => {
             const target = parseDocumentUrl(next);
-            if (options.allowHost && !options.allowHost(hostOf(target))) {
-              throw new DocumentError("host_not_allowed", `The URL redirected to host '${hostOf(target)}', which is not on this toolset's list of document hosts`);
+            if (options.allowHost && !options.allowHost(target)) {
+              throw new DocumentError("host_not_allowed", `The URL redirected to host '${hostPortOf(target)}', which is not on this toolset's list of document hosts`);
             }
           }
         }
       );
     } catch (error) {
       if (error instanceof DocumentError) throw error;
+      // A lookup cut short by the timer or the caller fails the outbound check: report why it stopped instead.
+      const why = stopped();
+      if (why) throw why;
       if (error instanceof OutboundUrlBlockedError) throw new DocumentError("blocked_url", error.message, error.reason);
-      if (timedOut) throw new DocumentError("timeout", timedOut === "first_byte" ? `The server did not answer within ${firstByteTimeoutMs} ms` : `The document did not arrive within ${timeoutMs} ms`);
       throw new DocumentError("fetch_failed", "The document could not be fetched (network error)");
     }
     if (response.status < 200 || response.status >= 300) {
@@ -131,6 +171,7 @@ export async function fetchDocument(rawUrl: string, options: DocumentFetchOption
       if (error instanceof BodyTooLargeError) {
         throw new DocumentError("too_large", error.reason === "expansion" ? "The compressed document expands far beyond its size, so it was not read" : `The document is larger than ${maxBytes} bytes`);
       }
+      if (cancelled) throw new DocumentError("cancelled", "The scan was cancelled");
       if (timedOut) throw new DocumentError("timeout", timedOut === "first_byte" ? `The server did not send the document within ${firstByteTimeoutMs} ms` : `The document did not arrive within ${timeoutMs} ms`);
       throw new DocumentError("fetch_failed", "The document could not be read (the connection failed or the encoding was invalid)");
     }

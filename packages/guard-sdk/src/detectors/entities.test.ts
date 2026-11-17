@@ -316,6 +316,15 @@ describe("content tools with names and addresses", () => {
     expect(riskLevelOf(configured.findings)).toBe("medium");
   });
 
+  it("flags stored data.entities options that do not parse and ignores them", () => {
+    expect(sensitiveScanSettingsOf(profileWith({ classes: ["street_address"] })).entitiesOptionsInvalid).toBeUndefined();
+    const broken = sensitiveScanSettingsOf(profileWith({ classes: ["street_address"], endpoint: "http://10.0.0.1/ner" }));
+    expect(broken.entitiesOptionsInvalid).toBe(true);
+    expect(broken.entities).toBeUndefined();
+    expect(entityClassesFor(broken, { entityTypes: ["person_name"] })).toEqual(["person_name"]);
+    expect(sensitiveScanSettingsOf(null).entitiesOptionsInvalid).toBeUndefined();
+  });
+
   it("wraps recognizer failures in EntityScanError and leaves other scans alone", async () => {
     const failing: GuardEntityRecognizer = { ...fixedRecognizer(() => []), recognize: async () => Promise.reject(new Error("boom")) };
     await expect(scanSensitiveTextAsync("Ana", { dictionaries: [] }, { entityTypes: ["person_name"] }, { recognizer: failing })).rejects.toBeInstanceOf(EntityScanError);

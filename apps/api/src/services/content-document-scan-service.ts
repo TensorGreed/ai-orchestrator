@@ -14,7 +14,7 @@
  * its path and query are recorded. Scans in this process are capped (CONTENT_SCAN_MAX_CONCURRENT).
  */
 
-import { InMemoryPlaceholderBook, maskForDataClass, placeholdersIn, sensitiveScanSettingsOf, type DnsResolver, type GuardProfile, type SensitiveScanRequest } from "@ai-orchestrator/guard-sdk";
+import { InMemoryPlaceholderBook, maskForDataClass, placeholdersIn, type DnsResolver, type GuardEntityRecognizer, type GuardProfile, type SensitiveScanRequest } from "@ai-orchestrator/guard-sdk";
 import { type DocumentScanRequest, type DocumentScanResult, type DocumentSource } from "@ai-orchestrator/shared";
 import {
   DocumentError,
@@ -29,6 +29,7 @@ import {
   type OutboundGuardConfig
 } from "@ai-orchestrator/workflow-engine";
 import type { SafeUser } from "./auth-service.js";
+import { ContentScanSettings } from "./content-scan-settings.js";
 
 export interface ContentDocumentScanLimits {
   maxBytes: number;
@@ -47,6 +48,10 @@ export interface ContentDocumentScanOptions {
   fetchImpl?: typeof fetch;
   /** Rule set test scans a user may start per minute. Default 10. */
   testScansPerMinute?: number;
+  /** The deployment's recognizer for names and addresses; absent: the built-in rules. */
+  entityRecognizer?: GuardEntityRecognizer;
+  /** A rule set's scan settings (warns once per version about invalid stored names and addresses options). */
+  scanSettings?: ContentScanSettings;
   now?: () => number;
 }
 
@@ -74,7 +79,11 @@ export class ContentDocumentScanService {
   private readonly testScans = new Map<string, number[]>();
   private readonly gatewayClients = new Set<string>();
 
-  constructor(private readonly options: ContentDocumentScanOptions) {}
+  private readonly scanSettings: ContentScanSettings;
+
+  constructor(private readonly options: ContentDocumentScanOptions) {
+    this.scanSettings = options.scanSettings ?? new ContentScanSettings();
+  }
 
   get limits(): ContentDocumentScanLimits {
     return this.options.limits;
@@ -154,9 +163,10 @@ export class ContentDocumentScanService {
   /**
    * Fetches a URL. `gateway`: private, loopback and link-local addresses are always refused (whatever
    * OUTBOUND_DENY_PRIVATE says, and the allowlist cannot widen it), and only `allowHost` hosts are fetched. Otherwise
-   * the deployment's outbound policy applies, as for nodes.
+   * the deployment's outbound policy applies, as for nodes. `signal` aborts the fetch (the caller went away); DNS
+   * lookups count against the fetch timeout.
    */
-  async fetchUrl(url: string, scope: { gateway: true; allowHost: (host: string) => boolean } | { gateway: false }): Promise<LoadedDocument> {
+  async fetchUrl(url: string, scope: { gateway: true; allowHost: (target: URL) => boolean } | { gateway: false }, signal?: AbortSignal): Promise<LoadedDocument> {
     const limits = this.options.limits;
     const fetchOptions: DocumentFetchOptions = {
       outbound: scope.gateway ? { denyPrivate: true, allowlist: [] } : this.options.outbound,
@@ -165,7 +175,8 @@ export class ContentDocumentScanService {
       maxBytes: limits.maxBytes,
       timeoutMs: limits.fetchTimeoutMs,
       firstByteTimeoutMs: limits.firstByteTimeoutMs,
-      ...(scope.gateway ? { allowHost: scope.allowHost } : {})
+      ...(scope.gateway ? { allowHost: scope.allowHost } : {}),
+      ...(signal ? { signal } : {})
     };
     let fetched: Awaited<ReturnType<typeof fetchDocument>>;
     try {
@@ -185,22 +196,33 @@ export class ContentDocumentScanService {
     return extractDocument({ bytes: document.bytes, mediaType: document.mediaType, limits: { maxBytes: limits.maxBytes, maxChars: limits.maxChars } });
   }
 
-  /** Scans an extracted document with a rule set's data scan settings. */
+  /**
+   * Scans an extracted document with a rule set's data scan settings, and person names, locations and street addresses
+   * when the request names them or the rule set runs `data.entities` (with the deployment's recognizer). The whole
+   * extracted text (already capped at CONTENT_SCAN_MAX_CHARS) is checked for them.
+   */
   async scan(
     extracted: ExtractedDocument,
     loaded: LoadedDocument,
-    profile: GuardProfile | null,
+    ruleSet: { id: string; version: number; profile: GuardProfile } | null,
     request: SensitiveScanRequest,
-    protect?: (value: string, dataClass: string) => Promise<string>
+    protect?: (value: string, dataClass: string) => Promise<string>,
+    signal?: AbortSignal
   ): Promise<DocumentScanOutcome> {
-    return await scanExtractedDocument(extracted, loaded.bytes, { scanner: sensitiveDocumentScanner(sensitiveScanSettingsOf(profile), request), ...(protect ? { protect } : {}) });
+    const scanner = sensitiveDocumentScanner(this.scanSettings.settingsOf(ruleSet), request, {
+      ...(this.options.entityRecognizer ? { recognizer: this.options.entityRecognizer } : {}),
+      ...(signal ? { signal } : {}),
+      maxChars: this.options.limits.maxChars
+    });
+    return await scanExtractedDocument(extracted, loaded.bytes, { scanner, ...(protect ? { protect } : {}) });
   }
 
   /** The rule set page's test: load, extract and scan, with an optional mask or placeholder view (nothing kept). */
   async testScan(
     request: DocumentScanRequest,
     ruleSet: { id: string; version: number; profile: GuardProfile },
-    user: SafeUser
+    user: SafeUser,
+    signal?: AbortSignal
   ): Promise<{ result: DocumentScanResult; total: number }> {
     this.takeTestScan(user.id);
     return await this.withSlot(async () => {
@@ -211,7 +233,7 @@ export class ContentDocumentScanService {
               mediaType: request.source.mediaType ?? null,
               source: { kind: "upload", ...(request.source.filename ? { filename: request.source.filename } : {}) }
             }
-          : await this.fetchUrl(request.source.url, { gateway: false });
+          : await this.fetchUrl(request.source.url, { gateway: false }, signal);
       const extracted = this.extract(loaded);
       let protect: ((value: string, dataClass: string) => Promise<string>) | undefined;
       if (request.redact === "mask") protect = async (value, dataClass) => maskForDataClass(value, dataClass);
@@ -220,7 +242,7 @@ export class ContentDocumentScanService {
         const reserved = new Set(extracted.segments.flatMap((segment) => [...placeholdersIn(segment.text)]));
         protect = async (value, dataClass) => book.assignNow(dataClass, value, reserved).placeholder;
       }
-      const outcome = await this.scan(extracted, loaded, ruleSet.profile, request.entityTypes ? { entityTypes: request.entityTypes } : {}, protect);
+      const outcome = await this.scan(extracted, loaded, ruleSet, request.entityTypes ? { entityTypes: request.entityTypes } : {}, protect, signal);
       return {
         result: documentScanResult(extracted, loaded, outcome, { id: ruleSet.id, version: ruleSet.version }, request.redact && outcome.redactedText !== undefined ? { style: request.redact, text: outcome.redactedText } : undefined),
         total: outcome.total

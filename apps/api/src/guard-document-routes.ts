@@ -8,7 +8,8 @@
  * OUTBOUND_ALLOWLIST), as HTTP Request nodes do. No rule events (a test); an audit entry `guard.document_scan_test`
  * with the origin or "upload", the size and the counts per class, never content. Errors: 400 for an invalid,
  * unsupported or oversized document, 404 for an unknown rule set or version, 422 for a URL the outbound checks refuse,
- * 429 past 10 scans a minute (or when the process is busy), 502/504 when the server fails or is too slow.
+ * 429 past 10 scans a minute (or when the process is busy), 502/504 when the server fails or is too slow, 503 when
+ * names and addresses could not be checked. A caller that goes away stops the fetch and the scan (audited as cancelled).
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -80,8 +81,14 @@ export function registerGuardDocumentRoutes(deps: GuardDocumentRoutesDeps): void
         return { source: "url" };
       }
     })();
+    // The caller closing the connection before the answer is sent stops the fetch and the scan.
+    const disconnect = new AbortController();
+    const onClose = () => {
+      if (!reply.raw.writableFinished) disconnect.abort();
+    };
+    reply.raw.on("close", onClose);
     try {
-      const { result, total } = await documents.testScan(body, ruleSet, user);
+      const { result, total } = await documents.testScan(body, ruleSet, user, disconnect.signal);
       await auditScan("success", {
         ...(result.source.kind === "url" ? { source: result.source.origin, pathHash: result.source.pathHash } : { source: "upload" }),
         bytes: result.bytes,
@@ -102,6 +109,8 @@ export function registerGuardDocumentRoutes(deps: GuardDocumentRoutesDeps): void
         return { error: error.message, code: error.code, ...(error.reason ? { reason: error.reason } : {}) };
       }
       throw error;
+    } finally {
+      reply.raw.off("close", onClose);
     }
   });
 }

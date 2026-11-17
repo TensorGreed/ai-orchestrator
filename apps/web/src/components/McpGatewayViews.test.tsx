@@ -311,6 +311,7 @@ describe("MCP gateway views", () => {
     expect(within(form).queryByLabelText("Document hosts")).toBeNull();
     await user.click(urls);
     expect(urls).toHaveAccessibleDescription(/Private, loopback and link-local addresses are always refused/);
+    expect(urls).toHaveAccessibleDescription(/a host without a port means port 443 for https and 80 for http/);
     await user.type(within(form).getByLabelText("Document hosts"), "docs.example.com{enter}*.example.org");
     await user.click(within(form).getByRole("button", { name: "Save toolset" }));
     await waitFor(() =>

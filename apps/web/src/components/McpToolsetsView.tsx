@@ -739,12 +739,13 @@ function McpToolsetForm({
                 aria-label="Document hosts"
                 rows={3}
                 value={documentHosts}
-                placeholder={"docs.example.com\n*.example.org"}
+                placeholder={"docs.example.com\n*.example.org\nfiles.example.com:8443"}
                 onChange={(event) => setDocumentHosts(event.target.value)}
               />
             </label>
             <small id="toolset-document-urls-hint" className="kb-subtle" role="note">
-              Clients of this toolset can make this server fetch pages from these hosts (one per line; *.example.org means its subdomains). Private, loopback and
+              Clients of this toolset can make this server fetch pages from these hosts (one per line; *.example.org means its subdomains; a host without
+              a port means port 443 for https and 80 for http, so add one for other ports, as in docs.example.com:8443). Private, loopback and
               link-local addresses are always refused, and nothing fetched is stored.
             </small>
           </>

@@ -7,6 +7,7 @@ import { decodeDocument, looksLikeHtml, sniffKind } from "./sniff.js";
 import { extractHtmlText, HTML_MAX_DEPTH } from "./html.js";
 import { parseCsv } from "./csv.js";
 import { extractDocument } from "./extract.js";
+import { parseEntitiesOptions, type GuardEntityRecognizer } from "@ai-orchestrator/guard-sdk";
 import { fetchDocument } from "./fetch.js";
 import { scanExtractedDocument, sensitiveDocumentScanner } from "./scan.js";
 
@@ -324,10 +325,57 @@ describe("fetchDocument", () => {
   });
 
   it("checks the host allow-list on the URL and on every redirect", async () => {
-    await expectDocumentError(fetchDocument(`${base}/doc`, { outbound: open, allowHost: (host) => host === "docs.test" }), "host_not_allowed");
-    const error = await expectDocumentError(fetchDocument(`${base}/to-other-host`, { outbound: open, allowHost: (host) => host === "127.0.0.1" }), "host_not_allowed");
+    await expectDocumentError(fetchDocument(`${base}/doc`, { outbound: open, allowHost: (target) => target.hostname === "docs.test" }), "host_not_allowed");
+    const port = (server.address() as AddressInfo).port;
+    const checked: string[] = [];
+    const error = await expectDocumentError(
+      fetchDocument(`${base}/to-other-host`, {
+        outbound: open,
+        allowHost: (target) => {
+          checked.push(`${target.protocol}//${target.hostname}:${target.port}`);
+          return target.hostname === "127.0.0.1";
+        }
+      }),
+      "host_not_allowed"
+    );
     expect(error.status).toBe(403);
     expect(error.message).toContain("elsewhere.test");
+    // The check sees the scheme and the port, so an allow-list can tell ports apart.
+    expect(checked).toEqual([`http://127.0.0.1:${port}`, "http://elsewhere.test:"]);
+    const portError = await expectDocumentError(fetchDocument(`${base}/doc`, { outbound: open, allowHost: (target) => target.port === "" }), "host_not_allowed");
+    expect(portError.message).toContain(`127.0.0.1:${port}`);
+  });
+
+  it("counts DNS lookups against the fetch timeout", async () => {
+    const hanging = () => new Promise<string[]>(() => undefined);
+    const fetchImpl = (async () => new Response("never")) as typeof fetch;
+    const started = Date.now();
+    const error = await expectDocumentError(fetchDocument("http://slow-dns.test/doc", { outbound: { denyPrivate: true, allowlist: [] }, resolver: hanging, fetchImpl, timeoutMs: 1_000, firstByteTimeoutMs: 200 }), "timeout");
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(error.status).toBe(504);
+    // The pinned connection's own lookup is bounded too.
+    let calls = 0;
+    const secondHangs = (host: string) => (++calls === 1 ? Promise.resolve(["127.0.0.1"]) : hanging());
+    const port = (server.address() as AddressInfo).port;
+    await expectDocumentError(fetchDocument(`http://pinned-dns.test:${port}/doc`, { outbound: open, resolver: secondHangs as (host: string) => Promise<string[]>, timeoutMs: 1_000, firstByteTimeoutMs: 300 }), "timeout");
+  });
+
+  it("stops when the caller goes away: before, during the DNS lookup, and while the body is read", async () => {
+    const gone = new AbortController();
+    gone.abort();
+    await expectDocumentError(fetchDocument(`${base}/doc`, { outbound: open, signal: gone.signal }), "cancelled");
+
+    const duringDns = new AbortController();
+    const hanging = () => new Promise<string[]>(() => undefined);
+    setTimeout(() => duringDns.abort(), 50);
+    const error = await expectDocumentError(fetchDocument("http://slow-dns.test/doc", { outbound: { denyPrivate: true, allowlist: [] }, resolver: hanging, timeoutMs: 5_000, signal: duringDns.signal }), "cancelled");
+    expect(error.status).toBe(499);
+
+    const duringBody = new AbortController();
+    setTimeout(() => duringBody.abort(), 100);
+    const started = Date.now();
+    await expectDocumentError(fetchDocument(`${base}/slow`, { outbound: open, timeoutMs: 5_000, firstByteTimeoutMs: 5_000, signal: duringBody.signal }), "cancelled");
+    expect(Date.now() - started).toBeLessThan(1_500);
   });
 
   it("times out on a server that does not answer, and reports error statuses", async () => {
@@ -337,5 +385,50 @@ describe("fetchDocument", () => {
 
   it("refuses non-http schemes", async () => {
     await expectDocumentError(fetchDocument("file:///etc/passwd", { outbound: open }), "blocked_url");
+  });
+});
+
+describe("names, locations and street addresses in documents", () => {
+  const text = "Dear Mr. Alan Doyle,\nPlease send the forms to 42 Dunmore Street, Springfield, IL 62704.\nMail a@example.com";
+
+  it("are found when the call names them or the rule set runs data.entities, with masked previews and disjoint spans", async () => {
+    const bytes = utf8(text);
+    const document = extractDocument({ bytes, mediaType: "text/plain" });
+    const plain = await scanExtractedDocument(document, bytes, { scanner });
+    expect(plain.countsByClass).toEqual({ email: 1 });
+
+    const named = await scanExtractedDocument(document, bytes, { scanner: sensitiveDocumentScanner({ dictionaries: [] }, { entityTypes: ["person_name", "street_address", "email"] }) });
+    expect(named.countsByClass).toMatchObject({ email: 1, person_name: 1, street_address: 1 });
+    expect(named.riskLevel).toBe("medium");
+    const name = named.findings.find((finding) => finding.dataClass === "person_name")!;
+    expect(name.maskedPreview).toBe("A••• D••••");
+    expect(name.location.label).toBe("line 1, column 10");
+    expect(JSON.stringify(named.findings)).not.toContain("Doyle");
+    expect(JSON.stringify(named.findings)).not.toContain("Dunmore");
+
+    const configured = sensitiveDocumentScanner({ dictionaries: [], entities: parseEntitiesOptions({ classes: ["street_address"] }) });
+    const byRuleSet = await scanExtractedDocument(document, bytes, { scanner: configured, protect: async (_value, dataClass) => `[${dataClass}]` });
+    expect(byRuleSet.countsByClass).toEqual({ email: 1, street_address: 1 });
+    expect(byRuleSet.redactedText).toContain("Please send the forms to [street_address]");
+    expect(byRuleSet.redactedText).toContain("Mr. Alan Doyle");
+  });
+
+  it("fail the scan with check_failed when the recognizer fails, without its message, and stop when cancelled", async () => {
+    const failing: GuardEntityRecognizer = {
+      id: "broken",
+      version: "1",
+      classes: ["person_name"],
+      languages: "any",
+      recognize: async () => Promise.reject(new Error(`could not read ${text}`))
+    };
+    const bytes = utf8(text);
+    const document = extractDocument({ bytes, mediaType: "text/plain" });
+    const failingScanner = sensitiveDocumentScanner({ dictionaries: [], entities: parseEntitiesOptions({ classes: ["person_name"], engine: "auto" }) }, {}, { recognizer: failing });
+    const error = await expectDocumentError(scanExtractedDocument(document, bytes, { scanner: failingScanner }), "check_failed");
+    expect(error.status).toBe(503);
+    expect(error.message).not.toContain("Doyle");
+    const gone = new AbortController();
+    gone.abort();
+    await expectDocumentError(scanExtractedDocument(document, bytes, { scanner: sensitiveDocumentScanner({ dictionaries: [] }, { entityTypes: ["person_name"] }, { signal: gone.signal }) }), "cancelled");
   });
 });

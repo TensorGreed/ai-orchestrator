@@ -17,6 +17,8 @@ import { createApp, type CreateAppOptions } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
+import { DEFAULT_GUARD_PROFILE_DOCUMENT, parseGuardProfile } from "@ai-orchestrator/guard-sdk";
+import { ContentDocumentScanService } from "./services/content-document-scan-service.js";
 import { testSql } from "./test-support/test-sql.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
@@ -89,6 +91,7 @@ const EMAIL = "jane.doe@example.com";
 const CARD = "4111 1111 1111 1111";
 const SUPPORT = "support@acme.example";
 const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64");
+const LETTER = `Dear Mr. Alan Doyle,\nPlease send the forms to 42 Dunmore Street, Springfield, IL 62704.\nMail ${EMAIL}\n`;
 
 function ruleSet(id: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return { id, name: `Rules ${id}`, version: "1", allowList: { values: [SUPPORT] }, ...extra };
@@ -181,6 +184,51 @@ describe("the rule set page's document scan", () => {
     expect(served.length).toBe(before);
     const metadata = await caller(closed)(closedBuilder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "url", url: "http://169.254.169.254/latest/meta-data" } });
     expect(metadata.statusCode).toBe(422);
+  });
+
+  it("finds names and street addresses when the rule set runs data.entities or the scan names them", async () => {
+    const context = await createTestContext();
+    const call = caller(context);
+    const builder = await login(context, "builder");
+    const entities = { prompt: { detectors: [{ id: "data.entities", threshold: 0.5, options: { classes: ["person_name", "street_address"] } }], defaultAction: { action: "allow" } } };
+    expect((await call(builder, "POST", "/api/guard/profiles", { document: ruleSet("names", { channels: entities }) })).statusCode).toBe(201);
+    const response = await call(builder, "POST", "/api/guard/profiles/names/scan-document", { source: { kind: "upload", contentBase64: b64(LETTER), mediaType: "text/plain" }, redact: "placeholder" });
+    expect(response.statusCode, response.body).toBe(200);
+    const { result } = response.json<{ result: Record<string, any> }>();
+    expect(result.countsByClass).toMatchObject({ person_name: 1, street_address: 1, email: 1 });
+    expect(result.findings.find((finding: { dataClass: string }) => finding.dataClass === "person_name")).toMatchObject({ maskedPreview: "A••• D••••", location: { label: "line 1, column 10" } });
+    expect(result.redacted.text).toContain("Dear Mr. [PERSON_NAME_1],");
+    expect(response.body).not.toContain("Dunmore");
+    // The built-in rule set does not look for them, unless the scan names them.
+    const builtIn = await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: b64(LETTER) } });
+    expect(builtIn.json<{ result: { countsByClass: Record<string, number> } }>().result.countsByClass).toEqual({ email: 1 });
+    const named = await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: b64(LETTER) }, entityTypes: ["street_address"] });
+    expect(named.json<{ result: { countsByClass: Record<string, number> } }>().result.countsByClass).toEqual({ street_address: 1 });
+  });
+
+  it("stops the rule set test's fetch when the caller goes away", async () => {
+    let aborted = false;
+    const fetchImpl = ((_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(new DOMException("The operation was aborted", "AbortError"));
+        });
+      })) as typeof fetch;
+    const service = new ContentDocumentScanService({
+      limits: { maxBytes: 1024 * 1024, maxChars: 100_000, fetchTimeoutMs: 60_000, firstByteTimeoutMs: 60_000, maxConcurrent: 1 },
+      outbound: { denyPrivate: false, allowlist: [] },
+      resolver: async () => ["93.184.216.34"],
+      fetchImpl
+    });
+    const disconnect = new AbortController();
+    setTimeout(() => disconnect.abort(), 50);
+    const user = { id: "u1", email: "builder@example.com", role: "builder" } as Parameters<ContentDocumentScanService["testScan"]>[2];
+    const scan = service.testScan({ source: { kind: "url", url: "https://docs.example.test/slow" } }, { id: "default", version: 1, profile: parseGuardProfile(DEFAULT_GUARD_PROFILE_DOCUMENT) }, user, disconnect.signal);
+    await expect(scan).rejects.toMatchObject({ code: "cancelled", status: 499 });
+    expect(aborted).toBe(true);
+    // The slot was given back.
+    await expect(service.withSlot(async () => "free")).resolves.toBe("free");
   });
 
   it("refuses unsupported files, viewers, and more than 10 scans a minute", async () => {
@@ -336,7 +384,7 @@ describe("the scan_document gateway tool", () => {
       return new Response(`<html><body><p>Mail ${EMAIL}</p><img alt="card ${CARD}"></body></html>`, { headers: { "content-type": "text/html" } });
     }) as typeof fetch;
     const resolver = async (host: string) => (host === "intranet.example.test" ? ["10.1.2.3"] : ["93.184.216.34"]);
-    const fixture = await gateway({ OUTBOUND_DENY_PRIVATE: "false" }, { documentScanNetwork: { resolver, fetchImpl } }, { enabled: true, allowUrls: true, allowedHosts: ["docs.example.test", "*.example.test", "127.0.0.1"] }, { trackSessionLabels: true });
+    const fixture = await gateway({ OUTBOUND_DENY_PRIVATE: "false" }, { documentScanNetwork: { resolver, fetchImpl } }, { enabled: true, allowUrls: true, allowedHosts: ["docs.example.test", "*.example.test", new URL(base).host] }, { trackSessionLabels: true });
     const client = tools(fixture);
     const listed = (await client.list()).find((entry) => entry.name === "scan_document");
     expect(listed?.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: true });
@@ -372,5 +420,76 @@ describe("the scan_document gateway tool", () => {
     expect((await client.call("scan_document", { url: `${base}/people.csv` })).text).not.toMatch(/OUTBOUND/);
     expect(served.length).toBe(before);
     expect(fetched.some((entry) => entry.url.includes("intranet"))).toBe(false);
+  });
+
+  it("finds names and street addresses in a document when the member's rule set runs data.entities", async () => {
+    const context = await createTestContext();
+    const call = caller(context);
+    const admin = await login(context, "admin");
+    const entities = { prompt: { detectors: [{ id: "data.entities", threshold: 0.5, options: { classes: ["person_name", "street_address"] } }], defaultAction: { action: "allow" } } };
+    expect((await call(admin, "POST", "/api/guard/profiles", { document: ruleSet("names", { channels: entities }) })).statusCode).toBe(201);
+    const created = await call(admin, "POST", "/api/mcp/toolsets", { name: "Names", projectId: "default", members: [{ kind: "content_rules", ruleSetId: "names", documents: { enabled: true } }] });
+    expect(created.statusCode, created.body).toBe(201);
+    const toolset = created.json<{ toolset: McpToolset }>().toolset;
+    const client = (await call(admin, "POST", "/api/mcp/clients", { name: "Names agent", toolsetIds: [toolset.id], role: "builder" })).json<{ client: McpClient; token: string }>();
+    const fixture: Gateway = { context, admin, toolset, client: client.client, token: client.token };
+    const result = await tools(fixture).call("scan_document", { content_base64: b64(LETTER), redact_style: "mask" });
+    expect(result.error, result.text).toBe(false);
+    expect(result.data.countsByClass).toMatchObject({ person_name: 1, street_address: 1, email: 1 });
+    expect(result.data.riskLevel).toBe("medium");
+    expect(result.text).not.toContain("Doyle");
+    expect(result.text).not.toContain("Dunmore");
+    const { events } = await stored(context.store);
+    expect(events.find((event) => event.data_class === "person_name")).toMatchObject({ detector_id: "data.entities" });
+    expect(JSON.stringify(events)).not.toContain("Doyle");
+  });
+
+  it("matches listed hosts on the scheme's default port only, unless the entry names a port", async () => {
+    const fetched: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      fetched.push(String(input));
+      return new Response("hello", { headers: { "content-type": "text/plain" } });
+    }) as typeof fetch;
+    const resolver = async () => ["93.184.216.34"];
+    const fixture = await gateway({}, { documentScanNetwork: { resolver, fetchImpl } }, { enabled: true, allowUrls: true, allowedHosts: ["docs.example.test", "files.example.test:8443"] });
+    const client = tools(fixture);
+    expect((await client.call("scan_document", { url: "https://docs.example.test/a" })).error).toBe(false);
+    expect((await client.call("scan_document", { url: "http://docs.example.test/a" })).error).toBe(false);
+    expect((await client.call("scan_document", { url: "https://docs.example.test:443/a" })).error).toBe(false);
+    const otherPort = await client.call("scan_document", { url: "https://docs.example.test:8443/a" });
+    expect(otherPort.text).toMatch(/Host 'docs.example.test:8443' is not on this toolset's list/);
+    expect((await client.call("scan_document", { url: "https://files.example.test:8443/a" })).error).toBe(false);
+    expect((await client.call("scan_document", { url: "https://files.example.test/a" })).error).toBe(true);
+    expect(fetched.map((url) => new URL(url).host)).toEqual(["docs.example.test", "docs.example.test", "docs.example.test", "files.example.test:8443"]);
+    const call = caller(fixture.context);
+    const badPort = await call(fixture.admin, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { members: [{ kind: "content_rules", documents: { enabled: true, allowUrls: true, allowedHosts: ["docs.example.test:70000"] } }] });
+    expect(badPort.statusCode).toBe(400);
+  });
+
+  it("stops the fetch when the client cancels the call", async () => {
+    let aborted = false;
+    let started!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => (started = resolve));
+    const fetchImpl = ((_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        started();
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(new DOMException("The operation was aborted", "AbortError"));
+        });
+      })) as typeof fetch;
+    const resolver = async () => ["93.184.216.34"];
+    const fixture = await gateway({ CONTENT_SCAN_FETCH_TIMEOUT_MS: "60000", CONTENT_SCAN_FIRST_BYTE_TIMEOUT_MS: "60000" }, { documentScanNetwork: { resolver, fetchImpl } }, { enabled: true, allowUrls: true, allowedHosts: ["docs.example.test"] });
+    const initialize = await rpc(fixture, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "docs-test", version: "1" } } });
+    const session = initialize.headers["mcp-session-id"] as string;
+    const id = (requestId += 1);
+    const pending = rpc(fixture, { jsonrpc: "2.0", id, method: "tools/call", params: { name: "scan_document", arguments: { url: "https://docs.example.test/slow" } } }, session);
+    await fetchStarted;
+    await rpc(fixture, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "not needed" } }, session);
+    const response = await pending;
+    expect(aborted).toBe(true);
+    expect(response.body).not.toContain("finding");
+    const audit = JSON.stringify((await stored(fixture.context.store)).audit);
+    expect(audit).toContain("cancelled");
   });
 });
