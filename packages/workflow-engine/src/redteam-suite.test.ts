@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBenchmarkGuardRegistry, createDefaultGuardProfile, hashGuardProfile, loadGuardCorpus, parseGuardProfile } from "@ai-orchestrator/guard-sdk";
+import { createBenchmarkGuardRegistry, createDefaultGuardProfile, GuardRegistry, hashGuardProfile, loadGuardCorpus, parseGuardProfile } from "@ai-orchestrator/guard-sdk";
 import { createDefaultProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { REDTEAM_SCRIPTED_PROVIDER_ID, referenceWorkflow, runReferenceScenario, runReferenceWorkflowSuite } from "./redteam-suite";
 import { validateWorkflowGraph } from "./validation";
@@ -64,5 +64,37 @@ describe("combined benchmark", () => {
     expect(profileOnly.corpus.categories).toEqual(["sql_injection"]);
     const both = await runGuardBenchmarkSuites({ profile: loose, corpus, splits: ["main"], suites: ["profile", "workflow"] });
     expect(both.workflow?.results.map((result) => result.configuration)).toEqual(["guard", "guard_untrusted_write_approval"]);
+  });
+});
+
+describe("entity benchmark in the combined report", () => {
+  const withEntities = parseGuardProfile({
+    id: "names",
+    name: "Names",
+    version: "2",
+    channels: { model_output: { detectors: [{ id: "data.entities", options: { classes: ["person_name", "street_address"] } }] } }
+  });
+  // A stand-in check that finds nothing: enough to show the entity report is attached and measured with the rule set's classes.
+  const entityRegistry = new GuardRegistry().register({
+    id: "data.entities",
+    tier: "classifier",
+    description: "test stand-in",
+    channels: ["prompt"],
+    categories: ["sensitive_data"],
+    detect: () => []
+  });
+
+  it("is attached when the rule set lists data.entities, with the rule set's classes", async () => {
+    const { runGuardBenchmarkSuites } = await import("./redteam-suite");
+    const report = await runGuardBenchmarkSuites({ profile: withEntities, corpus, splits: ["heldout"], entityRegistry });
+    expect(report.entities?.classes).toEqual(["person_name", "street_address"]);
+    expect(report.entities?.corpus.splits).toEqual(["heldout"]);
+    expect(report.entities?.results.every((result) => result.overlap.recall === 0 || result.labelled === 0)).toBe(true);
+  });
+
+  it("is left out without the check and on a category filter", async () => {
+    const { runGuardBenchmarkSuites } = await import("./redteam-suite");
+    expect((await runGuardBenchmarkSuites({ profile: loose, corpus, splits: ["heldout"] })).entities).toBeUndefined();
+    expect((await runGuardBenchmarkSuites({ profile: withEntities, corpus, splits: ["main"], categories: ["sql_injection"], entityRegistry })).entities).toBeUndefined();
   });
 });

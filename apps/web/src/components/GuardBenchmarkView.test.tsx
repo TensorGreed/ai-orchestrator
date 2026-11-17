@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { GuardBenchmarkListEntry, GuardBenchmarkReport, GuardBenchmarkResponse, GuardProfileSummary, GuardProfileVersionView, Project, WorkflowListItem } from "@ai-orchestrator/shared";
+import type { EntityBenchmarkReport, GuardBenchmarkListEntry, GuardBenchmarkReport, GuardBenchmarkResponse, GuardProfileSummary, GuardProfileVersionView, Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../lib/api";
 import { GuardBenchmarkView } from "./GuardBenchmarkView";
@@ -169,5 +169,45 @@ describe("Benchmark this draft", () => {
     render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
     await screen.findByRole("button", { name: /Simulate on recent traffic/ });
     expect(screen.queryByRole("button", { name: "Benchmark this draft" })).toBeNull();
+  });
+});
+
+describe("Security > Benchmark: names, places and street addresses", () => {
+  const score = (precision: number, recall: number) => ({ truePositives: 0, falsePositives: 0, falseNegatives: 0, precision, recall, f1: 0 });
+  const entities: EntityBenchmarkReport = {
+    format: "l2m.entity-benchmark",
+    version: 1,
+    generatedAt: now,
+    detectorId: "data.entities",
+    classes: ["person_name", "street_address"],
+    profile: { id: "default", version: "1", hash: "h" },
+    corpus: { hash: "e".repeat(64), items: 420, splits: ["main", "heldout"] },
+    results: [
+      { dataClass: "person_name", split: "main", labelled: 10, predicted: 8, strict: score(0.5, 0.4), overlap: score(0.875, 0.7), missed: ["en-m-101"], flagged: ["en-m-240"] },
+      { dataClass: "street_address", split: "main", labelled: 10, predicted: 10, strict: score(0.6, 0.6), overlap: score(1, 1), missed: [], flagged: [] },
+      { dataClass: "person_name", split: "heldout", labelled: 10, predicted: 5, strict: score(0.4, 0.2), overlap: score(0.8, 0.4), missed: ["en-h-001"], flagged: [] },
+      { dataClass: "street_address", split: "heldout", labelled: 10, predicted: 0, strict: score(1, 0), overlap: score(1, 0), missed: ["en-h-050"], flagged: [] }
+    ],
+    negatives: [{ split: "main", items: 64, flagged: 1, flaggedIds: ["en-m-240"] }],
+    failed: [],
+    latency: { p50Ms: 0.2, p95Ms: 0.9, maxMs: 2 }
+  };
+
+  it("shows precision and recall per class when the report carries the entity results", async () => {
+    vi.mocked(api.fetchGuardBenchmark).mockResolvedValue({ benchmark: history[0]!, report: { ...report(7), entities } });
+    render(<GuardBenchmarkView role="viewer" />);
+    const table = await screen.findByRole("table", { name: "Names, places and street addresses" });
+    const names = within(table).getByRole("row", { name: /Person names/ });
+    expect(within(names).getAllByRole("cell").map((cell) => cell.textContent)).toEqual(["87.5%", "70%", "80%", "40%"]);
+    expect(within(names).getAllByRole("cell")[1]!.getAttribute("title")).toBe("Exact span: 40%. Missed in: en-m-101");
+    const addresses = within(table).getByRole("row", { name: /Street addresses/ });
+    expect(within(addresses).getAllByRole("cell").map((cell) => cell.textContent)).toEqual(["100%", "100%", "–", "0%"]);
+    expect(screen.getByText(/Look-alikes with no name or address flagged: main 1\/64/)).toBeTruthy();
+  });
+
+  it("leaves the section out when the rule set does not use the check", async () => {
+    render(<GuardBenchmarkView role="viewer" />);
+    await screen.findByRole("heading", { name: "By category" });
+    expect(screen.queryByRole("heading", { name: "Names, places and street addresses" })).toBeNull();
   });
 });

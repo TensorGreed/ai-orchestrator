@@ -38,6 +38,7 @@ export * from "./gateway-limits";
 export * from "./model-allowlist";
 export * from "./agent-tools";
 export * from "./guard-benchmark";
+export * from "./guard-entity-benchmark";
 export * from "./ai-gateway";
 export * from "./notification-events";
 export * from "./retention";
