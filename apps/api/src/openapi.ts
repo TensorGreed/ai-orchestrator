@@ -3313,7 +3313,15 @@ export const openApiSpec = {
         tags: ["Triggers"],
         summary: "Slack Events API webhook endpoint",
         parameters: [{ name: "workflowId", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Event processed" } }
+        responses: {
+          "200": {
+            description:
+              "Taken: `{ ok, accepted, executionId }` (inline: the run goes on in the background; queue dispatch: the queue took the job), `{ ok, duplicate }` for an event id already taken (no execution id), `{ ok, refused: \"budget\" }` for a used-up budget, or the url_verification challenge as text"
+          },
+          "401": { description: "Missing or wrong Slack signature, or a timestamp outside the tolerance" },
+          "500": { description: "The run could not be started; Slack retries the event" },
+          "503": { description: "The run queue is full, too many Slack runs are going on, or the same event is still being started; Slack retries the event" }
+        }
       }
     },
     "/api/webhooks/github/{workflowId}": {
@@ -3552,7 +3560,7 @@ export const openApiSpec = {
       },
       put: {
         tags: ["AI gateway"],
-        summary: "Update a route set: name, project, enabled, default rate limit (admin)",
+        summary: "Update a route set: name, project, enabled, per-client rate limit (admin)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
         responses: { "200": { description: "OK" }, "404": { description: "Not found" } }

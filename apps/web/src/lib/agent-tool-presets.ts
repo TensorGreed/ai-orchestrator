@@ -22,3 +22,8 @@ export const BUILT_IN_TOOL_PRESETS: readonly PaletteDefinition[] = BUILT_IN_TOOL
 export function withAgentToolPresets<T extends PaletteDefinition>(definitions: readonly T[]): Array<T | PaletteDefinition> {
   return definitions.some((definition) => definition.type === "mcp_tool") ? [...definitions, ...BUILT_IN_TOOL_PRESETS] : [...definitions];
 }
+
+/** Whether the palette offers a definition: a node that cannot run in this build (`unavailable`) is left out. */
+export function isPaletteDefinition(definition: { type: string; unavailable?: unknown }): boolean {
+  return typeof definition.unavailable !== "string" || definition.unavailable.length === 0;
+}

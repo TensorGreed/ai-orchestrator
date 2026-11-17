@@ -113,6 +113,12 @@ describe("AiRoutesView", () => {
     expect(within(usagePanel).getByText(/1 blocked by content rules/)).toBeInTheDocument();
   });
 
+  it("says a route set's rate limit applies on top of a client's own limit", async () => {
+    render(<AiRoutesView isAdmin />);
+    const limits = await screen.findByTestId("gateway-rate-limit-ai_route_set");
+    expect(within(limits).getByLabelText("Calls at once")).toHaveAccessibleDescription(/A client.s own limit also applies; a request must pass both/);
+  });
+
   it("lets admins create a route set and add a route with a stored secret", async () => {
     const user = userEvent.setup();
     mocked.createAiGatewayRouteSet.mockResolvedValue({ ...set, id: "aiset_2", name: "Internal", routes: [], clientIds: [] });

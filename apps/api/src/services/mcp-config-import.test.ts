@@ -105,6 +105,26 @@ describe("parseMcpClientConfig", () => {
     expect(parseMcpClientConfig({ mcp: { a: { type: "local", command: ["x"] } } }).format).toBe("mcp_typed_map");
   });
 
+  it("imports env vars nested in a context_servers command object", () => {
+    const parsed = parseMcpClientConfig({
+      context_servers: {
+        nested: { command: { path: "srv", args: ["--stdio"], env: { MODE: "fast", SRV_TOKEN: "tok-nested-1" } } },
+        both: { command: { path: "srv2", env: { MODE: "nested", LEVEL: "1" } }, env: { MODE: "top" } }
+      }
+    });
+    const plan = planMcpConfigImport(parsed, { existing: [] });
+    const nested = materializeImportEntry(plan.entries[0]!);
+    expect(nested.connection).toEqual({ command: "srv", args: ["--stdio"], env: { MODE: "fast" }, secretEnvVar: "SRV_TOKEN" });
+    expect(nested.secret?.value).toBe("tok-nested-1");
+    expect(plan.entries[0]!.view.report.some((item) => item.status === "skipped")).toBe(false);
+
+    const both = materializeImportEntry(plan.entries[1]!);
+    expect(both.connection.env).toEqual({ MODE: "top", LEVEL: "1" });
+    expect(plan.entries[1]!.view.report).toContainEqual(
+      expect.objectContaining({ field: "command.env.MODE", status: "skipped" })
+    );
+  });
+
   it("rejects text that is not JSON and objects without servers", () => {
     expect(() => parseMcpClientConfig("{ nope")).toThrow(McpConfigImportError);
     expect(() => parseMcpClientConfig({ theme: "dark" })).toThrow(/No MCP servers found/);

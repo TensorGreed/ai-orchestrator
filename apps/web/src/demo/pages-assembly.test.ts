@@ -476,9 +476,15 @@ describe("the search-engine checks on the assembled site", () => {
     edit(inAlt, "docs/guide/start.html", (html) => html.replace("</body>", '<img src="/docs/guide/start" alt="the DLP screen"></body>'));
     expect(checkSeo(inAlt).output).toContain('shows the banned word "DLP"');
     const inCode = site();
-    edit(inCode, "docs/guide/start.html", (html) => html.replace("</body>", `<p>Set <code>GUARD_MODE</code> and map <code>${competitor}-nodes-base.webhook</code>.</p><pre><code>Guard DLP</code></pre><p>Safeguards and guardrails are fine.</p></body>`));
+    edit(inCode, "docs/guide/start.html", (html) => html.replace("</body>", `<p>Set <code>GUARD_MODE</code>.</p><pre><code>Guard DLP</code></pre><p>Safeguards and guardrails are fine.</p></body>`));
     const run = checkSeo(inCode);
     expect(run.status, run.output).toBe(0);
+    // The competing tool's name is refused anywhere in a built text file, code and scripts included.
+    const competitorInCode = site();
+    edit(competitorInCode, "docs/guide/start.html", (html) => html.replace("</body>", `<p>Map <code>${competitor}-nodes-base.webhook</code>.</p></body>`));
+    const named = checkSeo(competitorInCode);
+    expect(named.status).toBe(1);
+    expect(named.output).toContain("names the competing workflow tool");
   });
 
   it("fail when a sitemap URL is not the page's canonical form, or the blog has no feed", () => {

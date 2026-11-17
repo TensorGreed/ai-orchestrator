@@ -8,7 +8,7 @@ description: "The L2M Chart node renders a Vega-Lite spec to SVG on the server, 
 
 # Chart Node
 
-The `chart` node renders a [Vega-Lite](https://vega.github.io/vega-lite/) spec to SVG, server-side, with no browser. Pair it with `pdf_output` for branded reports, or drop the SVG directly into a `prompt_template` HTML body for an emailable summary.
+The `chart` node renders a [Vega-Lite](https://vega.github.io/vega-lite/) spec to SVG, server-side, with no browser. Pair it with `pdf_output` for branded reports, or drop the SVG into a `prompt_template` HTML body for a page or a summary. For email, mind that many mail clients do not show inline SVG or `data:` image URLs, and the SMTP: Send Email node cannot attach run files: put the chart somewhere the reader can open (the PDF from `pdf_output`, or a hosted image) and link to it, rather than relying on `imgTag` in the message body.
 
 Vega-Lite is the same JSON dialect used by Altair (Python), Streamlit, Observable, and the Vega Editor — operators can paste specs verbatim, and any LLM that knows the format can produce specs directly.
 
@@ -38,7 +38,7 @@ Vega-Lite is the same JSON dialect used by Altair (Python), Streamlit, Observabl
 }
 ```
 
-`outputKey` lets you customize the nested key (the example above uses `"chart"`). Top-level `svg` / `dataUrl` / `imgTag` are always populated for convenience — drop `imgTag` straight into a Prompt Template's HTML body.
+`outputKey` lets you customize the nested key (the example above uses `"chart"`). Top-level `svg` / `dataUrl` / `imgTag` are always populated for convenience — drop `imgTag` straight into a Prompt Template's HTML body (for a page or a PDF; see the email caveat above).
 
 ## Examples
 

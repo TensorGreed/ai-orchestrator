@@ -78,8 +78,8 @@ describe("checkCommandAgainstCatalog", () => {
   const entries = parseMcpCatalog(fs.readFileSync(exampleFile, "utf8")).entries;
 
   it("allows approved pinned packages with any trailing arguments", () => {
-    expect(checkCommandAgainstCatalog("npx", ["-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "/data"], entries)).toBeNull();
-    expect(checkCommandAgainstCatalog("uvx", ["mcp-server-time==0.6.2"], entries)).toBeNull();
+    expect(checkCommandAgainstCatalog("npx", ["-y", "@modelcontextprotocol/server-filesystem@2.3.0", "/data"], entries)).toBeNull();
+    expect(checkCommandAgainstCatalog("uvx", ["mcp-server-time==2026.11.11"], entries)).toBeNull();
     expect(checkCommandAgainstCatalog("node", ["samples/mcp-echo-server/server.mjs"], entries)).toBeNull();
   });
 
@@ -139,6 +139,10 @@ describe("McpCatalogService", () => {
   it("hides built-in stdio presets that enforcement would refuse", () => {
     const file = tmpFile(fs.readFileSync(exampleFile, "utf8"));
     const service = new McpCatalogService({ filePath: file, mode: "merge", enforce: true });
-    expect(service.presets().filter((preset) => preset.origin === "builtin")).toEqual([]);
+    // The sample catalog approves the same filesystem and time pins as the built-in presets; every other one is hidden.
+    expect(service.presets().filter((preset) => preset.origin === "builtin").map((preset) => preset.id).sort()).toEqual(["filesystem", "time"]);
+    const other = tmpFile(JSON.stringify({ version: 1, servers: [] }));
+    const empty = new McpCatalogService({ filePath: other, mode: "merge", enforce: true });
+    expect(empty.presets().filter((preset) => preset.origin === "builtin")).toEqual([]);
   });
 });

@@ -32,6 +32,25 @@ Admins register servers from **MCP servers → + Register server**:
 
 The server is probed once straight away unless probing is turned off for it.
 
+### Built-in presets
+
+Each preset pins an exact package or image version, so it starts the same server build every time. The runner has to be installed where the API runs. The stock API image has Node.js (`npx`) only: for the `uvx` presets, install uv in a custom image or run the API on a host that has it, and the GitHub preset needs a Docker CLI with access to a Docker daemon.
+
+| Preset | Runs with | Notes |
+|---|---|---|
+| Filesystem | `npx` (Node.js) | Replace `/tmp` with the directories to expose. |
+| Git | `uvx` (uv) | A Python server. Set `--repository` to a local repository. |
+| GitHub | `docker` | GitHub's own server. The token goes into the container by name (`-e GITHUB_PERSONAL_ACCESS_TOKEN`); pick it as the server's secret. GitHub also publishes a standalone binary, run as `github-mcp-server stdio`. |
+| Brave Search | `npx` | Needs a Brave Search API key as the secret (`BRAVE_API_KEY`). |
+| Fetch | `uvx` | A Python server. Refuses private and loopback addresses by default. |
+| Time | `uvx` | A Python server. No credentials. |
+| Knowledge Graph Memory | `npx` | Set `MEMORY_FILE_PATH` in `env` to choose where the graph is stored. |
+| Sequential Thinking | `npx` | No credentials. |
+| Playwright (Browser) | `npx` | Headless, with an in-memory profile. Needs Chrome on the host. |
+| Everything (test server) | `npx` | The MCP test server, for checking your wiring. |
+
+There is no PostgreSQL, SQLite or Slack preset: the reference servers for them are archived and unmaintained. To give an agent SQL access, register a maintained server of your choice and connect it with a database role that can only read (`GRANT SELECT` on the tables it needs, nothing else); do not rely on a server's own read-only mode. With an [approved catalog](./mcp-onboarding.md), your own entries appear as presets too.
+
 ## Using a registered server on a node
 
 Open an MCP Tool node and pick it under **Registered server**. The inline adapter, connection and secret fields disappear, because the registry entry owns them. The tool list comes from the server's latest snapshot, so opening the node never starts or calls the server. Pick **None, configure on this node** to go back to inline configuration.
@@ -233,21 +252,36 @@ A server can ask the client to run a completion on its behalf (`sampling/createM
 
 | Setting (server registry, **Sampling**) | Default | Meaning |
 |---|---|---|
-| Allow sampling | off | Servers are refused with "Sampling is off for MCP server …" until an admin turns it on. |
-| Max tokens | 1024 | Upper bound on `maxTokens` per request; larger requests are clamped. |
-| Allowed models | empty (any) | Model names the server may ask for in `modelPreferences.hints`. The first allowed hint wins; with no usable hint the attached node's model answers. |
-| Max requests per call | 3 | Requests one tool call may make; the next one is refused with "Sampling budget exhausted". |
-| Default model | none | Provider and model used when no chat model is attached: direct MCP Tool nodes and gateway calls. Without it those calls refuse sampling. |
+| Let this server ask the attached chat model to generate text during a tool call | off | Servers are refused with "Sampling is off for MCP server …" until an admin turns it on. |
+| Max tokens per request | 1024 | Upper bound on `maxTokens` per request; larger requests are clamped. |
+| Models the server may ask for | empty (only the attached model) | Model names the server may ask for in `modelPreferences.hints`. The first allowed hint wins; with no usable hint, or an empty list, the attached node's model answers. |
+| Max requests per tool call | 3 | Requests one tool call may make; the next one is refused with "Sampling budget exhausted". |
+| Default model provider / Default model | none | Provider and model used when no chat model is attached: direct MCP Tool nodes and gateway calls. Without it those calls refuse sampling. |
 
 Inside an agent or supervisor, requests are fulfilled by the chat model attached to the node, within the model's own provider and secret. Tool policy evaluates a rule of kind **sampling** with the model name as the pattern, so admins can deny sampling for a role or allow only certain models. Prompts the server sends are passed to the model as they are; they are not combined with the agent's system message.
 
 Tokens used by sampling are counted on the tool call that triggered them: the row in `mcp_tool_calls` carries `sampling_requests`, `sampling_input_tokens` and `sampling_output_tokens`, the server page's totals include them, and the run's usage adds them to the node's `_telemetry` (`samplingUsage`, `samplingRequests`). Each request, with the model that answered or the reason it was refused, is on the node's output under `_mcpSampling` and in the inspector's Trace tab.
 
-**Risk notes.** Turn sampling on only for servers you trust: the server chooses the prompt and reads the answer, and each request costs tokens on your provider account. Keep **Max requests per call** small, restrict **Allowed models** to cheap models where possible, and use a sampling policy rule to keep it away from unattended roles. L2M never forwards sampling to another instance or service; the model is always one configured in this deployment.
+**Risk notes.** Turn sampling on only for servers you trust: the server chooses the prompt and reads the answer, and each request costs tokens on your provider account. Keep **Max requests per tool call** small, restrict **Models the server may ask for** to cheap models where possible, and use a sampling policy rule to keep it away from unattended roles. L2M never forwards sampling to another instance or service; the model is always one configured in this deployment.
+
+## Environment of stdio servers on the host
+
+A stdio server started on the API host (no container sandbox) does not get the API's whole environment. It gets:
+
+- a short allowlist of the API's variables that programs need to start and reach the network: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `TERM`, the temp folders (`TMPDIR`, `TEMP`, `TMP`), the `XDG_*_HOME` folders and `XDG_RUNTIME_DIR`, proxies (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, also in lower case), certificates (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`), npm's cache, config file, proxy and certificate settings (for example `npm_config_cache`, `npm_config_userconfig`, `npm_config_https_proxy`), uv's and pip's cache, config file and certificate settings (`UV_CACHE_DIR`, `UV_CONFIG_FILE`, `PIP_CACHE_DIR`, `PIP_CONFIG_FILE`, `PIP_CERT` and a few more), and on Windows the system variables programs expect (`SystemRoot`, `windir`, `ComSpec`, `PATHEXT`, `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, `USERNAME`, `ProgramFiles` and the like; on Windows names match in any case);
+- the variables in its own `env`, and its secret (`secretEnvVar`, or each name of a secret bundle). These win over an allowlisted variable of the same name.
+
+Everything else stays out: `SECRET_MASTER_KEY_BASE64`, `DATABASE_URL` and other database settings, model provider keys, `NODE_OPTIONS`, and package index URLs (`npm_config_registry`, `PIP_INDEX_URL`, `UV_INDEX_URL`), which can carry credentials. Proxy URLs are passed as they are, so a proxy password in `HTTPS_PROXY` reaches the server too. npx, uvx and pip still read their own config files (`~/.npmrc`, `pip.conf`, `uv.toml`), because `HOME` and `APPDATA` are passed.
+
+**A server that needs another variable.** Put it in the server's `env` (or its secret, for a credential). To pass a variable from the API's own environment instead, list its name in `MCP_STDIO_ENV_PASSTHROUGH` (comma-separated; a trailing `*` matches a prefix of at least three characters, for example `JAVA_HOME,MY_TOOL_*`). The list never passes `SECRET_MASTER_KEY_BASE64`, and an entry with a value (`NAME=value`) stops the API at start-up. When a server exits early, the error says so. `MCP_STDIO_INHERIT_ENV=true` passes the API's whole environment again, as releases before this one did; keep it off unless every stdio server is your own.
+
+The same rules apply to `l2m check --stdio`, which reads both settings from its own environment.
+
+This keeps secrets out of what a server, its logs, its crash reports and the programs it starts can see in their environment. It is not isolation: a hostile server running as the API user can still read the API's files and, on Linux, `/proc/<api-pid>/environ`. Use a container sandbox, below, for servers you do not trust. A sandboxed server gets none of the API's variables, only its own `env` and secret.
 
 ## Sandboxed stdio servers
 
-A stdio server is a program L2M starts on the API host. By default it runs with the API's own permissions. To contain it, an admin sets the server's **Sandbox** to **Container**. L2M then starts the command inside a throwaway container with docker or podman, whichever the host has (`MCP_SANDBOX_RUNTIME` picks one).
+A stdio server is a program L2M starts on the API host. By default it runs with the API's own permissions and the [environment above](#environment-of-stdio-servers-on-the-host). To contain it, an admin sets the server's **Sandbox** to **Container**. L2M then starts the command inside a throwaway container with docker or podman, whichever the host has (`MCP_SANDBOX_RUNTIME` picks one).
 
 Every sandbox gets these settings, and none of them can be turned off:
 
@@ -353,6 +387,8 @@ Admins can restrict which tools of a server each role may use, per project, and 
 | `MCP_SANDBOX_REQUIRED` | `false` | Refuse every stdio server, inline ones included, that would run outside a container. |
 | `MCP_SANDBOX_ALLOWED_MOUNT_ROOTS` | empty | Comma-separated absolute host directories that sandbox mounts must resolve into. Empty means no mounts. |
 | `MCP_SANDBOX_RUNTIME` | `auto` | Container CLI: `auto` (docker, then podman), `docker` or `podman`. |
+| `MCP_STDIO_INHERIT_ENV` | `false` | Pass the API's whole environment to stdio servers on the host. Default: a [minimal allowlist](#environment-of-stdio-servers-on-the-host) plus each server's own variables. |
+| `MCP_STDIO_ENV_PASSTHROUGH` | empty | Comma-separated names of more API variables stdio servers on the host get; a trailing `*` matches a prefix. |
 
 Servers can override the interval (at least 10 seconds) or opt out of scheduled probing. In an HA deployment only the leader instance runs scheduled probes. stdio servers start a short-lived process for each probe, which is closed when the probe ends.
 

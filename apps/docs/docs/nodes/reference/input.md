@@ -20,7 +20,7 @@ Fields that take <span v-pre>`{{ }}`</span> templates (prompts, URLs, bodies, va
 ---
 ### `chat_trigger` — Chat Trigger
 
-Receive chat messages via POST /api/chat/:workflowId. Pairs naturally with agent_orchestrator.
+Receive chat messages via POST /api/chat/:workflowId. Pairs naturally with agent_orchestrator. authMode: session (signed-in users who can read the workflow), bearer (a stored secret) or public (anyone). A new node starts at session; a node saved without authMode is public.
 
 **Config fields**
 
@@ -171,7 +171,7 @@ Public HTML form that starts a workflow. GET /api/forms/:path renders the form, 
 
 ### `github_webhook_trigger` — GitHub Webhook Trigger
 
-Webhook trigger that validates the X-Hub-Signature-256 header.
+Webhook trigger that validates the X-Hub-Signature-256 header. Point a GitHub webhook at /api/webhooks/github/:workflowId. A redelivery (same X-GitHub-Delivery) within 10 minutes starts no second run.
 
 **Config fields**
 
@@ -243,7 +243,7 @@ Polling trigger that detects new rows since the last run.
 
 ### `imap_email_trigger` — IMAP Email Trigger
 
-Poll an IMAP inbox for new messages (requires imapflow — stubbed if missing).
+Poll an IMAP inbox for new messages. Not supported yet: this node does not run in this build.
 
 **Config fields**
 
@@ -534,7 +534,7 @@ Triggers workflow execution automatically from a cron schedule.
 
 ### `slack_trigger` — Slack Trigger
 
-Webhook-based trigger that validates Slack signing secret. Point Slack Events at /api/webhooks/slack/:workflowId.
+Webhook-based trigger that validates Slack signing secret. Point Slack Events at /api/webhooks/slack/:workflowId. Slack gets its answer at once and the run goes on in the background (see the run history); a retried event (same event_id) within 10 minutes starts no second run.
 
 **Config fields**
 

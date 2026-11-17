@@ -79,7 +79,7 @@ The closest sample is `samples/workflows/supervisor-worker-swarm-flow.json` ([su
 To build the triage agent from it:
 
 1. Replace the Manual Trigger with a Webhook Input with HMAC auth.
-2. Attach a real chat model to the supervisor and to each worker. Build the supervisor's user prompt from the alert fields (<span v-pre>`{{webhook.service}}`</span> and so on): the sample's <span v-pre>`{{user_prompt}}`</span> is empty for a normal alert. Leave the workers on <span v-pre>`{{user_prompt}}`</span>, which carries the supervisor's task. Workers also see the supervisor's input, so an alert body with its own top-level `user_prompt` field would replace that task; keep the field out of the body.
+2. Attach a real chat model to the supervisor and to each worker. Build the supervisor's user prompt from the alert fields (<span v-pre>`{{webhook.service}}`</span> and so on): the sample's <span v-pre>`{{user_prompt}}`</span> is empty for a normal alert. Leave the workers on <span v-pre>`{{user_prompt}}`</span>, which carries the supervisor's task even when the alert body has a `user_prompt` field of its own. Workers can also read the supervisor's other input fields in their templates.
 3. Rename the workers (logs, metrics, changes), give each a short system prompt that starts with what it is for, and swap the mock tools for your read-only MCP tools.
 4. Turn on **No write tools** for the workflow.
 5. Add the Output Parser, the Switch and the Slack and Jira steps; add the approval branch only if you want proposed fixes.

@@ -113,13 +113,14 @@ describe("tier1 — smtp_send_email", () => {
 });
 
 describe("tier1 — imap_email_trigger", () => {
-  it("throws NOT_IMPLEMENTED when imapflow absent", async () => {
+  it("throws NOT_IMPLEMENTED with a clear 'not supported yet' message", async () => {
     try {
       await executeImapEmailTrigger({ host: "x", port: 993, user: "u" }, makeCtx());
       expect.fail("should throw");
     } catch (err) {
       expect(err).toBeInstanceOf(WorkflowError);
-      expect([ErrorCategory.NOT_IMPLEMENTED]).toContain((err as WorkflowError).category);
+      expect((err as WorkflowError).category).toBe(ErrorCategory.NOT_IMPLEMENTED);
+      expect((err as WorkflowError).message).toContain("not supported yet");
     }
   });
 });
@@ -335,6 +336,69 @@ describe("tier1 — redis_command", () => {
     await expect(
       executeRedisCommand({ command: "GET", args: ["k"] }, ctx)
     ).rejects.toBeInstanceOf(WorkflowError);
+  });
+});
+
+describe("tier1 — templated fields of slack_send_message and github_action", () => {
+  it("renders slack threadTs from the run's data", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    await executeSlackSendMessage(
+      { authType: "webhook", webhookUrl: "https://hooks.slack.com/services/T/B/xyz", text: "re", threadTs: "{{event.ts}}" },
+      makeCtx({ fetchImpl: fetchMock, templateData: { event: { ts: "1700000000.000100" } } })
+    );
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(body.thread_ts).toBe("1700000000.000100");
+  });
+
+  it("leaves thread_ts out when the template renders empty", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    await executeSlackSendMessage(
+      { authType: "webhook", webhookUrl: "https://hooks.slack.com/services/T/B/xyz", text: "x", threadTs: "{{event.thread_ts}}" },
+      makeCtx({ fetchImpl: fetchMock, templateData: { event: {} } })
+    );
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(body).not.toHaveProperty("thread_ts");
+  });
+
+  it("comments on the pull request that triggered the run: owner, repo and issueNumber from templates", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 1 }), { status: 201 }));
+    await executeGitHubAction(
+      {
+        owner: "{{repository.owner.login}}",
+        repo: "{{repository.name}}",
+        operation: "commentIssue",
+        issueNumber: "{{pull_request.number}}",
+        body: "Looks good",
+        secretRef: { secretId: "gh" }
+      },
+      makeCtx({
+        fetchImpl: fetchMock,
+        templateData: { repository: { name: "api", owner: { login: "acme" } }, pull_request: { number: 42 } }
+      })
+    );
+    expect(fetchMock.mock.calls[0]![0]).toBe("https://api.github.com/repos/acme/api/issues/42/comments");
+  });
+
+  it("refuses an issueNumber that does not render to a whole number, and an owner that renders empty", async () => {
+    const fetchMock = vi.fn();
+    await expect(
+      executeGitHubAction(
+        { owner: "o", repo: "r", operation: "closeIssue", issueNumber: "{{n}}", secretRef: { secretId: "gh" } },
+        makeCtx({ fetchImpl: fetchMock, templateData: { n: "12abc" } })
+      )
+    ).rejects.toThrow(/whole number/);
+    await expect(
+      executeGitHubAction(
+        { owner: "{{missing}}", repo: "r", operation: "listIssues", secretRef: { secretId: "gh" } },
+        makeCtx({ fetchImpl: fetchMock, templateData: {} })
+      )
+    ).rejects.toThrow(/owner/);
+    for (const repo of ["..", "a/b", "x?y"]) {
+      await expect(
+        executeGitHubAction({ owner: "o", repo: "{{r}}", operation: "listIssues", secretRef: { secretId: "gh" } }, makeCtx({ fetchImpl: fetchMock, templateData: { r: repo } }))
+      ).rejects.toThrow(/not a valid GitHub name/);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

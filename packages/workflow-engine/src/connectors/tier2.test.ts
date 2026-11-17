@@ -330,6 +330,34 @@ describe("tier2 — stripe", () => {
     expect(body).toContain("currency=usd");
   });
 
+  it("renders amount, currency and customerId from templates", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "pi_2" }));
+    await executeStripeCreateCharge(
+      { secretRef: { secretId: "sk" }, amount: "{{order.total_cents}}", currency: "{{order.currency}}", customerId: "{{order.customer}}" },
+      makeCtx({ fetchImpl: fetchMock, templateData: { order: { total_cents: 2500, currency: "eur", customer: "cus_9" } } })
+    );
+    const body = lastRequest(fetchMock).init.body as string;
+    expect(body).toContain("amount=2500");
+    expect(body).toContain("currency=eur");
+    expect(body).toContain("customer=cus_9");
+  });
+
+  it("refuses an amount that renders to anything but a positive whole number", async () => {
+    for (const total of ["19.99", "abc", "", "-5"]) {
+      const fetchMock = vi.fn();
+      await expect(
+        executeStripeCreateCharge(
+          { secretRef: { secretId: "sk" }, amount: "{{total}}", currency: "usd" },
+          makeCtx({ fetchImpl: fetchMock, templateData: { total } })
+        )
+      ).rejects.toBeInstanceOf(WorkflowError);
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+    await expect(
+      executeStripeCreateCharge({ secretRef: { secretId: "sk" }, amount: 10.5, currency: "usd" }, makeCtx({ fetchImpl: vi.fn() }))
+    ).rejects.toThrow(/whole number/);
+  });
+
   it("rejects zero amount", async () => {
     await expect(
       executeStripeCreateCharge(

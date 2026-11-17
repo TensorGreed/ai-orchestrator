@@ -442,19 +442,36 @@ export class RunDispatcher {
    */
   async fire(
     spec: DispatchedRunSpec,
-    options: { pool: string; queueItemId?: string }
-  ): Promise<{ queued: false; result: WorkflowExecutionResult; refused?: BudgetExceededError } | { queued: true; deduplicated: boolean }> {
+    options: { pool: string; queueItemId?: string; enforceBackpressure?: boolean }
+  ): Promise<FireOutcome> {
+    const started = await this.start(spec, options);
+    return started.queued ? started : await started.done;
+  }
+
+  /**
+   * `fire` in two steps, for a caller that answers someone before an inline run ends (a Slack event): resolves once
+   * the run is admitted and either queued (or found already queued) or started in this process. A refusal (a full
+   * pool, a failed enqueue) is thrown before it resolves; an inline run's outcome is `done`.
+   */
+  async start(
+    spec: DispatchedRunSpec,
+    options: { pool: string; queueItemId?: string; enforceBackpressure?: boolean }
+  ): Promise<{ queued: true; deduplicated: boolean } | { queued: false; refused?: BudgetExceededError; done: Promise<FireOutcome> }> {
     try {
       await this.deps.admit?.(spec);
     } catch (error) {
       // 12.6 — nobody waits on a fired run: a budget refusal is recorded as a failed run with the reason. `refused`
       // tells a polling trigger not to count what it fired as delivered.
       if (!(error instanceof BudgetExceededError) || !this.deps.recordRefused) throw error;
-      return { queued: false, result: await this.deps.recordRefused(spec, error), refused: error };
+      const done = this.deps.recordRefused(spec, error).then((result) => ({ queued: false as const, result, refused: error }));
+      return { queued: false, refused: error, done };
     }
     if (!(await this.deps.gate.useQueue(options.pool, capabilitiesFor(spec)))) {
-      return { queued: false, result: await this.deps.executeLocally(spec) };
+      const done = this.deps.executeLocally(spec).then((result) => ({ queued: false as const, result }));
+      return { queued: false, done };
     }
+    // A fire on behalf of an outside caller (a Slack event) is refused when the pool is full, like a run() is.
+    if (options.enforceBackpressure) await this.deps.checkBackpressure(options.pool);
     const added = await this.deps.enqueue(spec, {
       pool: options.pool,
       ...(options.queueItemId ? { queueItemId: options.queueItemId, dedupeWindowMs: FIRE_DEDUPE_WINDOW_MS } : {})
@@ -467,6 +484,11 @@ export class RunDispatcher {
     return { queued: true, deduplicated: false };
   }
 }
+
+/** What `fire` resolves with: the inline run's result (or its budget refusal), or whether the queue took it. */
+export type FireOutcome =
+  | { queued: false; result: WorkflowExecutionResult; refused?: BudgetExceededError }
+  | { queued: true; deduplicated: boolean };
 
 export { QueueFullError };
 export { BudgetExceededError };

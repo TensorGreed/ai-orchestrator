@@ -74,7 +74,7 @@ Containment is the whole point of this server, and it is where its security repo
 
 Three practical rules follow:
 
-1. **Pin 2.3.0 or later.** An unpinned `npx -y @modelcontextprotocol/server-filesystem` runs whatever npm serves, and an old pinned date version stays vulnerable. The repository's `samples/mcp-catalog.example.json` pins an older date version as an example; change it to a current release before you use it.
+1. **Pin 2.3.0 or later.** An unpinned `npx -y @modelcontextprotocol/server-filesystem` runs whatever npm serves, and an old pinned date version stays vulnerable. The built-in **Filesystem** preset and the repository's `samples/mcp-catalog.example.json` both pin 2.3.0; move the pin forward when a newer release fixes another advisory.
 2. **Do not rely on argument rules for containment.** A policy rule like "deny unless `path` starts with `/srv/shared`" is the same prefix check the first advisory was about, and it cannot see symlinks or hard links. Containment is the server's job, backed by the operating system.
 3. **Mind hard links.** The README notes that the checks are path-based: if a file inside an allowed directory is hard-linked from elsewhere, writing it changes the content at every name. `get_file_info` reports a `hardLinks` count; more than 1 means the file has other names.
 
@@ -82,7 +82,7 @@ Three practical rules follow:
 
 Register the server once under **MCP → Servers**. There are three ways to get it in:
 
-- **The Filesystem preset** on the registration form fills in the adapter and an `npx` connection with `/tmp` as the directory. Pin the version and replace `/tmp` with your directories.
+- **The Filesystem preset** on the registration form fills in the adapter and an `npx` connection pinned to `@modelcontextprotocol/server-filesystem@2.3.0`, with `/tmp` as the directory. Replace `/tmp` with your directories, and add `--read-only` for read-only use.
 - **Your deployment catalog**, if you keep one (`MCP_CATALOG_FILE`). With `MCP_CATALOG_ENFORCE=true`, only approved, pinned packages can be registered as stdio servers; trailing arguments such as directories stay free. See [MCP onboarding](/product/mcp-onboarding#deployment-catalog).
 - **Import config**, if the server is already in a client config file. See [The mcpServers JSON config format](/learn/mcp-servers/import-mcp-json-config).
 

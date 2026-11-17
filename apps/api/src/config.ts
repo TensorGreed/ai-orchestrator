@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import { z } from "zod";
+import { parseStdioEnvPassthrough } from "@ai-orchestrator/mcp-sdk";
 import { parseSessionPolicy } from "./services/session-policy.js";
 import { resolveTelemetrySettings } from "./telemetry/settings.js";
 import { traceUrlTemplateProblem } from "./telemetry/trace-url.js";
@@ -514,6 +515,25 @@ const envSchema = z.object({
     ),
   /** Container runtime for sandboxes: `auto` prefers docker, then podman. */
   MCP_SANDBOX_RUNTIME: z.enum(["auto", "docker", "podman"]).default("auto"),
+  /**
+   * Stdio servers started on the host (no container sandbox) get only a minimal allowlist of the API's environment
+   * (PATH, HOME, locale, temp folders, proxies and certificates, package manager caches) plus their own configured
+   * variables. True passes the API's whole environment, master key and provider keys included, as earlier releases did.
+   * Unset or blank means false (optional so hand-built AppConfig objects in tests still typecheck).
+   */
+  MCP_STDIO_INHERIT_ENV: optionalBooleanFromEnv,
+  /**
+   * Comma-separated names of more API environment variables host-launched stdio servers get; a trailing `*` matches
+   * a prefix (`MY_APP_*`). Empty or unset: the allowlist only.
+   */
+  MCP_STDIO_ENV_PASSTHROUGH: z
+    .string()
+    .optional()
+    .superRefine((value, ctx) => {
+      for (const problem of parseStdioEnvPassthrough(value ?? "").problems) {
+        ctx.addIssue({ code: "custom", message: `MCP_STDIO_ENV_PASSTHROUGH: ${problem}` });
+      }
+    }),
   // Code nodes (JavaScript and Python).
   /** Master switch. When false, every code node fails with a clear error. */
   CODE_NODES_ENABLED: booleanFromEnv.default(true),

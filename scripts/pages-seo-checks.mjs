@@ -35,7 +35,10 @@
 //     an external key manager's vendor name, and a competing workflow tool's name) in its visible text, title, description or
 //     alt/aria-label/title attributes. Code is exempt: text inside <code>, <pre>, <kbd>, <samp>,
 //     <script>, <style> and <svg> is not visible prose, so a config key or a node type id that
-//     must be typed literally (such as `GUARD_*` or an imported node type id) may appear in code.
+//     must be typed literally (such as `GUARD_*`) may appear in code;
+//   - no text file of the built site (HTML, scripts, styles, XML, JSON, text, SVG, the demo included)
+//     contains the competing workflow tool's name anywhere, code included, in any case. Images and
+//     fonts are not read, and data: URIs inside text files are skipped.
 import { existsSync, promises as fs, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,6 +163,36 @@ export function bannedWordsIn(html) {
     }
   }
   return hits;
+}
+
+/** The competing workflow tool's name, built from its letters so it never sits in the repository. */
+const COMPETITOR_NAME = new RegExp(`(?<![a-z0-9])${["n", "8", "n"].join("")}(?![a-z0-9])`, "i");
+/** File types of the built site that are read as text by the name check. */
+export const SITE_TEXT_EXTENSIONS = new Set([".html", ".htm", ".js", ".mjs", ".cjs", ".css", ".xml", ".txt", ".json", ".webmanifest", ".svg", ".md", ".map"]);
+
+/**
+ * Where a text file of the built site names the competing workflow tool, with a little context, or
+ * null. Unlike the banned-word check this covers code too (a node type id in a table, a bundled
+ * string). It is not part of a longer word or token (so a hash such as `a1n8nb` passes), and data:
+ * URIs are skipped, since base64 can spell anything.
+ */
+export function competitorNameIn(text) {
+  const scanned = text.replace(/data:[a-z0-9.+-]+\/[a-z0-9.+-]+(?:;[a-z0-9=.+-]+)*,[^"'()\s]*/gi, " ");
+  const match = COMPETITOR_NAME.exec(scanned);
+  if (!match) return null;
+  const at = match.index;
+  return scanned.slice(Math.max(0, at - 40), at + match[0].length + 40).replace(/\s+/g, " ").trim();
+}
+
+/** Every file of the site whose type is in SITE_TEXT_EXTENSIONS, as paths relative to the site. */
+async function textFiles(dir, root = dir) {
+  const files = [];
+  for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...(await textFiles(full, root)));
+    else if (SITE_TEXT_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) files.push(path.relative(root, full));
+  }
+  return files.sort();
 }
 
 /** The public addresses of a page file: `docs/a.html` → /docs/a and /docs/a.html, `x/index.html` → /x/. */
@@ -553,6 +586,19 @@ export async function checkSeo(site, options = {}) {
     }
     pass(`sitemap.xml lists ${urls.length} URLs`);
   }
+
+  // The competing workflow tool's name in any text file, code and the demo included.
+  let textFileCount = 0;
+  let namedFiles = 0;
+  for (const file of await textFiles(site)) {
+    textFileCount += 1;
+    const context = competitorNameIn(await fs.readFile(path.join(site, file), "utf8"));
+    if (context !== null) {
+      namedFiles += 1;
+      fail(`/${file.split(path.sep).join("/")}: names the competing workflow tool (…${context}…)`);
+    }
+  }
+  if (namedFiles === 0) pass(`no text file of the site names the competing workflow tool (${textFileCount} files read)`);
 
   // The landing must have JSON-LD (checked per page above); say so plainly when it has none.
   const landing = path.join(site, "index.html");

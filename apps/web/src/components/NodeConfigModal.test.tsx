@@ -4,6 +4,7 @@ import { beforeEach, vi } from "vitest";
 import type { Node } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
 import * as api from "../lib/api";
+import { AGENT_DEFAULT_MAX_ITERATIONS } from "@ai-orchestrator/shared";
 import { NodeConfigModal, NodeInspector, buildNodeTrace } from "./NodeConfigModal";
 
 vi.mock("../lib/api", async () => {
@@ -74,6 +75,54 @@ describe("NodeInspector", () => {
 
   it("keeps the NodeConfigModal alias pointing at the inspector", () => {
     expect(NodeConfigModal).toBe(NodeInspector);
+  });
+
+  it.each(["agent_orchestrator", "supervisor_node"] as const)("shows the runtime's default Max Iterations for a %s saved without one", (nodeType) => {
+    const node = makeAgentNode(nodeType);
+    node.data.config = { systemPrompt: "You coordinate." };
+    render(<NodeInspector {...makeProps({ node })} />);
+    expect(screen.getByRole("spinbutton", { name: /Max Iterations/ })).toHaveValue(AGENT_DEFAULT_MAX_ITERATIONS);
+    expect(AGENT_DEFAULT_MAX_ITERATIONS).toBe(4);
+  });
+
+  it("starts an Agent Orchestrator saved without Max Iterations from the shown default, saved only on Save", async () => {
+    const onSave = vi.fn();
+    const node = makeAgentNode("agent_orchestrator");
+    node.data.config = { systemPrompt: "You help." };
+    render(<NodeInspector {...makeProps({ node, onSave })} />);
+    // Opening changes nothing stored: the node's own config is untouched and nothing was saved.
+    expect(node.data.config).toEqual({ systemPrompt: "You help." });
+    expect(onSave).not.toHaveBeenCalled();
+    // The fill is not an edit: closing does not ask about unsaved changes.
+    const save = screen.getByRole("button", { name: /Save changes/ });
+    expect(save).not.toHaveAttribute("data-dirty");
+    await userEvent.click(save);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0]![0].config).toMatchObject({ maxIterations: AGENT_DEFAULT_MAX_ITERATIONS });
+  });
+
+  it("leaves a Supervisor saved without Max Iterations on its schema default", async () => {
+    const onSave = vi.fn();
+    const node = makeAgentNode("supervisor_node");
+    node.data.config = { systemPrompt: "You coordinate." };
+    render(<NodeInspector {...makeProps({ node, onSave })} />);
+    expect(screen.getByRole("button", { name: /Save changes/ })).not.toHaveAttribute("data-dirty");
+  });
+
+  it("edits a GitHub issue number as a number or a template", async () => {
+    const onSave = vi.fn();
+    const node: Node<EditorNodeData> = {
+      id: "gh-1",
+      type: "workflowNode",
+      position: { x: 0, y: 0 },
+      data: { label: "GitHub", nodeType: "github_action", config: { owner: "o", repo: "r", operation: "commentIssue", issueNumber: 7 } }
+    };
+    render(<NodeInspector {...makeProps({ node, onSave })} />);
+    const field = screen.getByRole("textbox", { name: /Issue Number/ });
+    expect(field).toHaveValue("7");
+    await userEvent.clear(field);
+    await userEvent.type(field, "{{{{pull_request.number}}");
+    expect(field).toHaveValue("{{pull_request.number}}");
   });
 
   it("renders as a docked drawer with header, tabs and footer", () => {

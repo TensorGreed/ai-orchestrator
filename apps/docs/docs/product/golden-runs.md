@@ -69,7 +69,7 @@ A node that has to be answered from the recording but has no recorded result (yo
 
 A node answered from the recording inside a loop gets the recorded result of the same iteration. If the candidate calls it more often than the golden run did, the extra calls cannot be judged and the replay is **inconclusive**, for every node that is answered from the recording.
 
-Code nodes are answered from the recording because neither runtime is cut off from the network: the JavaScript sandbox is a `vm` context, not an isolate, and Python runs as a subprocess. A replay therefore cannot test a change to a code node: when a code node's code or settings differ from the golden run's, the replay reports **inconclusive** and names the node ("code changed since the golden run; code nodes are not executed in replay"). Save a new golden run after the change. A changed external read or write is answered from the recording too, with a warning that the change is untested.
+Code nodes are answered from the recording, because a replay cannot count on user code doing the same thing twice: JavaScript runs in a QuickJS sandbox in the API process (or in a container), which has no network but can read the clock and random numbers, and Python on the host runs as a subprocess that can reach the network. A replay therefore cannot test a change to a code node: when a code node's code or settings differ from the golden run's, the replay reports **inconclusive** and names the node ("code changed since the golden run; code nodes are not executed in replay"). Save a new golden run after the change. A changed external read or write is answered from the recording too, with a warning that the change is untested.
 
 ### What a replay does not stop yet
 

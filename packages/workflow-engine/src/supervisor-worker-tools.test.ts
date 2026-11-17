@@ -91,3 +91,67 @@ describe("Supervisor worker tools", () => {
     expect(names).toEqual(expect.arrayContaining(["mock-mcp__calculator", "delegate_to_Researcher", "delegate_to_Writer", "delegate_to_Critic"]));
   });
 });
+
+/** Scripted model: the supervisor delegates once, the worker answers; every call's messages are kept. */
+class DelegatingProvider implements LLMProviderAdapter {
+  readonly definition = { id: "delegating", label: "Delegating", supportsTools: true, configSchema: {} };
+  readonly calls: ProviderCallRequest[] = [];
+
+  async generate(request: ProviderCallRequest) {
+    this.calls.push(request);
+    const delegate = request.tools?.find((tool) => tool.name.startsWith("delegate_to_"));
+    const sawTool = request.messages.some((message) => message.role === "tool");
+    if (delegate && !sawTool) {
+      return { content: "", toolCalls: [{ id: "call-1", name: delegate.name, arguments: { task_prompt: "Summarise ticket 42 for the on-call engineer" } }] };
+    }
+    return { content: "done", toolCalls: [] };
+  }
+}
+
+describe("Supervisor workers get their task_prompt", () => {
+  it("uses the delegated task_prompt as the worker's user_prompt even when an upstream node set user_prompt", async () => {
+    const provider = new DelegatingProvider();
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(provider);
+    const workflow: Workflow = {
+      id: "wf-worker-task-prompt",
+      name: "Worker task prompt",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        node("trigger", "webhook_input", "Trigger"),
+        node("sup", "supervisor_node", "Lead", { systemPromptTemplate: "You coordinate.", userPromptTemplate: "{{user_prompt}}", maxIterations: 3 }),
+        node("worker", "agent_orchestrator", "Helper", {
+          systemPromptTemplate: "You help.",
+          // Upstream data stays available to the worker's templates.
+          userPromptTemplate: "{{user_prompt}} (team {{team}})",
+          maxIterations: 2
+        }),
+        node("model", "llm_call", "Model", { provider: { providerId: "delegating", model: "m" } }),
+        node("output", "output", "Output")
+      ],
+      edges: [
+        edge("trigger", "sup"),
+        edge("sup", "output"),
+        edge("sup", "model", "chat_model"),
+        edge("sup", "worker", "worker"),
+        edge("worker", "model", "chat_model")
+      ]
+    };
+    const result = await executeWorkflow(
+      { workflow, webhookPayload: { user_prompt: "The customer says the app is down", team: "payments" } },
+      {
+        providerRegistry,
+        mcpRegistry: createDefaultMCPRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        agentRuntime: new DefaultAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+    expect(result.status, result.error).toBe("success");
+    const workerCall = provider.calls.find((call) => call.messages.some((message) => message.role === "system" && message.content.startsWith("You help.")));
+    expect(workerCall).toBeDefined();
+    const userMessage = workerCall!.messages.find((message) => message.role === "user");
+    expect(userMessage?.content).toBe("Summarise ticket 42 for the on-call engineer (team payments)");
+  });
+});

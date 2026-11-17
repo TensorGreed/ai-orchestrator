@@ -38,7 +38,7 @@ With no roles and no users listed, any operator, builder or admin may decide. In
 
 Self-approval is checked against the person who started the run. A run started by a webhook, a schedule or another automatic trigger has no known requester; the card says **Requester unknown (automatic trigger)**, and anyone who passes the approver check may decide it, including whoever sent the webhook if they are also an approver.
 
-The approved output carries the incoming fields, the edited values and an `approval` record:
+The approved output carries the incoming fields, the edited values, the proposed values of fields not on the incoming item, and an `approval` record:
 
 ```json
 {
@@ -75,7 +75,7 @@ Human Approval nodes keep their earlier behaviour here (pins and start nodes wor
 
 Each editable field has a key, a label, a type (`string`, `text`, `number`, `boolean` or `json`), an optional value template the approver starts from (for example `{{reply}}`), whether it is required and, for text, a maximum length. When the gate pauses, the templates are rendered from the run and the approver sees the proposed values.
 
-Edits are checked before the run resumes: only listed keys, values of the field's type, required fields not empty, text within its maximum length, and no more than 64 KiB in total. A refused edit answers `400` with one message per field. The values land on the approved output under their keys, so a field named `reply` replaces the incoming `reply` for every node after the gate. Edits are ignored on a rejection or a timeout.
+Edits are checked before the run resumes: only listed keys, values of the field's type, required fields not empty, text within its maximum length, and no more than 64 KiB in total. A refused edit answers `400` with one message per field. On an approval, a field the approver changed lands on the approved output under its key, so an edited `reply` replaces the incoming `reply` for every node after the gate. A field whose key is not on the incoming item is added with the value the approver saw (the edit, or else the proposed value from its template), whether or not they edited it. A field they did not change whose key is already on the incoming item keeps the incoming value. A field with no template that the approver left empty adds nothing. Edits are ignored on a rejection or a timeout.
 
 ## Who can see and decide: project authorization
 

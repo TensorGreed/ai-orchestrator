@@ -35,13 +35,11 @@ In your Slack app's settings, turn on the Events API, set the request URL to `/a
 
 Store the app's signing secret in L2M's secret store and pick it in the **Slack Trigger** node's `signingSecretRef`. The route then checks every request the way Slack's guide describes: it builds `v0:<timestamp>:<body>`, computes an HMAC-SHA256 with the signing secret, compares it with `X-Slack-Signature` in constant time, and refuses a request whose `X-Slack-Request-Timestamp` is more than `replayToleranceSeconds` away from now (300 seconds by default, the same five minutes Slack's example uses). A missing header, an old timestamp and a wrong signature each get 401. Slack's `url_verification` request is answered with its challenge, after the signature check.
 
-::: warning Known issue
-In the build this page was checked against, the Slack and GitHub webhook routes compute the signature over an empty body instead of the raw request body, so real Slack requests are refused with `401 Slack signature mismatch`, including the URL check when you save the request URL. Check that Slack accepts the URL before you build further.
-:::
+The signature is computed over the raw request body, the exact bytes Slack signed, so Slack's URL check passes when you save the request URL.
 
 The event arrives under `webhook` in the run. The question is `webhook.event.text`, the channel `webhook.event.channel`, and the message's timestamp `webhook.event.ts`. The trigger runs the workflow for every signed request, whatever its type, so put a **Switch** on <span v-pre>`{{webhook.event.type}}`</span> with one case, `app_mention`, leading to the agent, and leave the default branch unconnected.
 
-**Mind Slack's three seconds.** Slack says your app "should respond to the event request with an HTTP 2xx within three seconds", and after a failure "we'll retry three times, backing off exponentially". L2M's Slack route answers when the run finishes or pauses for approval. An answer that takes several model calls can take longer than three seconds, and then Slack sends the same event again and the assistant answers twice. L2M does not read Slack's retry headers or remove duplicate `event_id`s on this route. Keep the assistant quick: a fast model, a low `maxIterations`, few tools.
+**Slack's three seconds.** Slack says your app "should respond to the event request with an HTTP 2xx within three seconds", and after a failure "we'll retry three times, backing off exponentially". L2M's Slack route answers `{"ok": true, "accepted": true, "executionId": "…"}` as soon as the run is safely started and lets it run on, so a slow answer does not make Slack retry. With inline execution (the default) that is at once; with [queue dispatch](/operations/queue-and-workers) it is once the queue has taken the job, and the run shows in the run history under that id when a worker starts it. If the queue's pool is full the route answers 503, and if the job cannot be queued 500, so Slack sends the event again. If Slack retries anyway, the retry carries the same `event_id`, and an `event_id` seen in the last 10 minutes starts no second run: the route answers `{"ok": true, "duplicate": true}`, without an execution id. In queue mode the event id is also the queue item id, so the check holds across instances. A retry without an `event_id` (one with an `X-Slack-Retry-Num` header) is acknowledged without a run. When too many Slack runs are already going on one inline instance, the route answers 503 and Slack tries again later.
 
 ## Memory per thread
 
@@ -63,7 +61,7 @@ Things to decide:
 
 ## Reply in the thread
 
-Slack's `chat.postMessage` takes `thread_ts`: "Provide another message's `ts` value to make this message a reply." The **Slack: Send Message** node has a `threadTs` field, but it is sent as typed: a template in it is not filled in (we saw the literal text <span v-pre>`{{webhook.event.ts}}`</span> arrive at a stand-in endpoint). Its `channel` and `text` fields are templated, so it is fine for a reply in the channel. For a reply in the thread, use an **HTTP Request** node:
+Slack's `chat.postMessage` takes `thread_ts`: "Provide another message's `ts` value to make this message a reply." The **Slack: Send Message** node with `authType` set to `bot` calls it for you, and its `channel`, `text` and `threadTs` fields all take templates: set `channel` to <span v-pre>`{{webhook.event.channel}}`</span>, `threadTs` to <span v-pre>`{{ $json.webhook.event.thread_ts || $json.webhook.event.ts }}`</span>, `text` to <span v-pre>`{{answer}}`</span>, and pick the bot token secret. An **HTTP Request** node does the same with the body spelled out, which helps when you want other `chat.postMessage` fields:
 
 ```json
 {
@@ -93,13 +91,13 @@ The write happens inside the agent's loop, at a moment nobody can predict. So th
 - **Ask before write tools** (the workflow setting). Before the agent calls any <Term id="write-tool">write tool</Term>, the run pauses and a request appears in the **Approvals** inbox with the tool, the server and the arguments. A tool counts as read-only only when an admin marked it so; a server's own hint is not trusted. Each approval covers one call with its exact arguments, self-approval is off by default, and an unanswered request is rejected after the timeout (one day by default). See [approval before write tools](/product/approvals#approval-before-write-tools).
 - **A `require_approval` policy rule**, when only some calls need a person, for example `create_ticket` with `priority` set to `urgent`. Admins decide these. See [require approval](/product/mcp-tool-policy#require-approval).
 
-We ran this end to end on a local L2M with a stand-in model that asked for a write tool and a stand-in for Slack's API. Because of the known issue above, our test request was signed over an empty body. It got `200 {"ok":true,"status":"waiting_approval"}` as soon as the run paused, the request appeared in the inbox, and after the approval the run resumed, called the tool once and posted the reply to the stand-in.
+We ran this end to end on a local L2M with a stand-in model that asked for a write tool and a stand-in for Slack's API. The request appeared in the inbox when the run paused, and after the approval the run resumed, called the tool once and posted the reply to the stand-in. (That test predates the change that makes the route answer at once; the approval flow is the same either way.)
 
 The person who asked in Slack sees nothing until then. L2M can send `approval.requested` to a Slack notification channel, with a link to the inbox when `APP_PUBLIC_URL` is set, but there are no approve buttons inside Slack messages. Pick a timeout that matches how fast your approvers answer: minutes if people wait in the thread, hours if they do not.
 
 ## Test it with a golden set
 
-Turn on **Record MCP calls**, run real questions, and save the good runs as [golden runs](/product/golden-runs). A replay answers the MCP calls and the HTTP Request reply from the recording and keeps memory in a throwaway copy, so testing never posts to Slack. Cases for a [golden set](/product/golden-sets):
+Turn on **Record MCP calls**, run real questions, and save the good runs as [golden runs](/product/golden-runs). A replay answers the MCP calls and the reply step from the recording and keeps memory in a throwaway copy, so testing never posts to Slack. Cases for a [golden set](/product/golden-sets):
 
 | Case | Input | A pass looks like |
 |---|---|---|
@@ -115,7 +113,7 @@ Scorers that fit: `tool_sequence` (did it search before answering, and with `for
 
 Each mention is at least one model call, plus one per tool round. Memory adds to every call: the thread's last `maxMessages` messages are sent each time, so long threads cost more per answer. Tool results are capped by the agent's `toolMessageMaxChars` (6,000 characters by default).
 
-Ways to cap it: subscribe to mentions only; set `maxIterations` (4 when the agent has no value); keep `maxMessages` small, since Slack threads are usually short; leave **Persist Tool Messages** off so old tool results are not replayed into every turn; and set a workflow [budget](/product/budgets) with the **Block** action so a busy channel cannot run up the bill. Budgets are optional.
+Ways to cap it: subscribe to mentions only; set `maxIterations` (required on the Agent Orchestrator; new nodes start at 6); keep `maxMessages` small, since Slack threads are usually short; leave **Persist Tool Messages** off so old tool results are not replayed into every turn; and set a workflow [budget](/product/budgets) with the **Block** action so a busy channel cannot run up the bill. Budgets are optional.
 
 ## Starting point, honestly
 
@@ -127,7 +125,7 @@ The closest sample is the [webhook agent with memory recipe](/recipes/webhook-ag
 4. Give the Simple Memory node its own namespace.
 5. Replace the mock tools with MCP Tool nodes for your registered servers, one per tool, and mark the read tools read-only.
 6. Turn on **Ask before write tools** and pick approvers.
-7. Add the **HTTP Request** reply step and the bot token secret.
+7. Add the reply step (**Slack: Send Message** or **HTTP Request**) and the bot token secret.
 
 The live demo below runs a support agent with two MCP tools and memory. It shows the agent loop and tool calls in a recorded run; it has no Slack trigger.
 

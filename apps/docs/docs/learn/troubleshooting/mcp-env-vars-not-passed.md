@@ -71,13 +71,13 @@ Finally, read the server's README for the exact variable names it expects.
 
 ```json
 {
-  "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-github"],
+  "command": "docker",
+  "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server:v2.1.0"],
   "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "<token>" }
 }
 ```
 
-**With Docker, pass it twice:** in the client's `env`, so the Docker CLI has it, and as `-e NAME` in the arguments, so the CLI forwards it into the container. Writing `-e NAME=value` in the arguments works too, but puts the value on the command line, where process listings can show it.
+**With Docker, pass it twice,** as in the example: in the client's `env`, so the Docker CLI has it, and as `-e NAME` in the arguments, so the CLI forwards it into the container. Writing `-e NAME=value` in the arguments works too, but puts the value on the command line, where process listings can show it.
 
 **Keep the value out of the file when you can.** A config file with a plaintext token gets copied, synced and committed. OWASP's Secrets Management Cheat Sheet warns that environment variables "are generally accessible to all processes and may be included in logs or system dumps", so they are a delivery mechanism, not storage. Store the token in a secret manager and inject it at launch, give each server its own token with the narrowest scope the API offers, and rotate it if a config file leaked.
 
@@ -93,7 +93,7 @@ L2M keeps credentials out of the connection JSON. In the [MCP server registry](/
 
 Where the server runs decides what else it gets:
 
-- **On the API host (the default),** the server inherits the API process's whole environment, with `env` and the injected secrets on top. That includes the API's own settings, so a server you do not trust should not run this way.
+- **On the API host (the default),** the server gets a short allowlist of the API's variables (`PATH`, `HOME`, locale, temp folders, proxies, certificate settings, npm/uv/pip cache and config locations, and the Windows system variables), with `env` and the injected secrets on top. Nothing else from the API's environment reaches it: not `SECRET_MASTER_KEY_BASE64`, database settings or model provider keys, and not a variable such as `JAVA_HOME` or a cloud credential that the API happens to have. A server that exits early gets an error saying so. Put what it needs in its `env` or secret, or list names from the API's own environment in `MCP_STDIO_ENV_PASSTHROUGH` (comma-separated, for example `JAVA_HOME,AWS_PROFILE`; a trailing `*` matches a prefix of three or more characters). `MCP_STDIO_INHERIT_ENV=true` passes the API's whole environment as earlier releases did; keep it off unless every stdio server is your own. The [registry page](/product/mcp-server-registry#environment-of-stdio-servers-on-the-host) has the full list. This is not isolation, so a server you do not trust should not run this way.
 - **In the optional container sandbox,** the server gets only the variables its config defines plus its secrets, passed to the container by name (`--env NAME`) so the values never appear on a command line. Names the container runtime reads itself, such as `PATH`, `HOME` and `DOCKER_*`, are refused. See [Sandboxed stdio servers](/product/mcp-server-registry#sandboxed-stdio-servers).
 
 The [config importer](/product/mcp-onboarding#how-credentials-are-handled) turns credential-looking values in a client config file into secrets. It cannot read `${env:NAME}` references from the machine the file came from, so it asks you to type those values. It skips `envFile` entries and reports them, so add those values as env vars or secrets yourself ([the mcpServers JSON config format](/learn/mcp-servers/import-mcp-json-config) explains the `env` and `inputs` fields). To confirm what a server receives, call a tool from the **Playground** under MCP: the JSON-RPC exchange panel lists the command and the environment variable names, with every credential masked. Secret values are also redacted from tool results there and in gateway responses.

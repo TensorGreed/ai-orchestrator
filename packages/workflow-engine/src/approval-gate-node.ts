@@ -154,12 +154,27 @@ export function approvalGateOutcome(input: {
     throw new WorkflowError(message, ErrorCategory.NODE_CONFIG, false, { approval }, "Connect the gate's Rejected output to handle a rejection without failing the run.");
   }
   const item = itemFrom(input.merged, input.parentIds);
-  // Only the gate's declared fields; engine routing keys are never taken from an edit.
+  // Only the gate's declared fields; engine routing keys are never taken from an edit. On an approval:
+  // - a field the approver changed lands with the edited value (all edits, when the decision names no changed fields);
+  // - a field whose key is not on the incoming item lands with the value the approver saw (edited or proposed), so an
+  //   approval without edits still adds the fields the approver reviewed;
+  // - an unchanged field whose key is on the incoming item keeps the incoming value (a proposed value went through
+  //   rendering and truncation, so it is not written over the item unless the approver changed it).
   const allowed = new Set(request.editableFields.map((field) => field.key));
-  const values =
-    decision.decision === "approve"
-      ? Object.fromEntries(Object.entries(decision.edits ?? {}).filter(([key]) => allowed.has(key) && !key.startsWith("_")))
-      : {};
+  const usable = (key: string, value: unknown) => allowed.has(key) && !key.startsWith("_") && value !== undefined;
+  const values: Record<string, unknown> = {};
+  if (decision.decision === "approve") {
+    const edits = decision.edits ?? {};
+    for (const field of request.editableFields) {
+      if (Object.prototype.hasOwnProperty.call(item, field.key)) continue;
+      const seen = Object.prototype.hasOwnProperty.call(edits, field.key) ? edits[field.key] : field.value;
+      if (usable(field.key, seen)) values[field.key] = seen;
+    }
+    const changed = decision.editedFields ? new Set(decision.editedFields) : null;
+    for (const [key, value] of Object.entries(edits)) {
+      if ((!changed || changed.has(key)) && usable(key, value)) values[key] = value;
+    }
+  }
   return {
     ...item,
     ...values,

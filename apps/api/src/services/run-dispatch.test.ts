@@ -343,6 +343,27 @@ describe("RunDispatcher", () => {
     expect(calls).toEqual([`enqueue:cron:wf:n:1@${FIRE_DEDUPE_WINDOW_MS}`, "queued"]);
   });
 
+  it("fire checks the pool only when asked to (an outside caller), and is refused by a full pool before enqueueing", async () => {
+    const plain = make({ queue: true, backpressure: new QueueFullError("default", 1, 5) });
+    expect(await plain.dispatcher.fire(spec(), { pool: "default" })).toEqual({ queued: true, deduplicated: false });
+    expect(plain.calls).not.toContain("backpressure");
+    const asked = make({ queue: true, backpressure: new QueueFullError("default", 1, 5) });
+    await expect(asked.dispatcher.fire(spec(), { pool: "default", enforceBackpressure: true })).rejects.toBeInstanceOf(QueueFullError);
+    expect(asked.calls).toEqual(["backpressure"]);
+  });
+
+  it("start resolves once the queue took the job, and before an inline run ends", async () => {
+    const queued = make({ queue: true });
+    expect(await queued.dispatcher.start(spec(), { pool: "default", queueItemId: "slack:wf:Ev1", enforceBackpressure: true })).toEqual({ queued: true, deduplicated: false });
+    expect(queued.calls).toEqual(["backpressure", `enqueue:slack:wf:Ev1@${FIRE_DEDUPE_WINDOW_MS}`, "queued"]);
+    const full = make({ queue: true, backpressure: new QueueFullError("default", 1, 5) });
+    await expect(full.dispatcher.start(spec(), { pool: "default", enforceBackpressure: true })).rejects.toBeInstanceOf(QueueFullError);
+    const inline = make({ queue: false });
+    const started = await inline.dispatcher.start(spec(), { pool: "default" });
+    expect(started.queued).toBe(false);
+    if (!started.queued) expect(await started.done).toEqual({ queued: false, result });
+  });
+
   it("a duplicate fire is reported and not counted as a dispatched run", async () => {
     const { dispatcher, calls } = make({ queue: true, duplicate: true });
     expect(await dispatcher.fire(spec(), { pool: "default", queueItemId: "trig:wf:n:abc" })).toEqual({ queued: true, deduplicated: true });

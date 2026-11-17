@@ -22,7 +22,7 @@ The cost is trust. A stdio server is a program on your machine with your rights.
 
 ```json
 { "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "/srv/shared"],
+  "args": ["-y", "@modelcontextprotocol/server-filesystem@2.3.0", "/srv/shared"],
   "env": { "LOG_LEVEL": "info" } }
 ```
 
@@ -34,7 +34,7 @@ Pinning the version matters: `npx -y some-server` without one runs whatever the 
 
 ## In L2M
 
-The `stdio_mcp` adapter starts the server's command on the API host, with its secret passed as an environment variable. Optionally, an admin runs it in a [container sandbox](/product/mcp-server-registry#sandboxed-stdio-servers) (no network by default, read-only file system, non-root user), and a [deployment catalog](/product/mcp-onboarding#deployment-catalog) can limit stdio servers to pinned, approved packages.
+The `stdio_mcp` adapter starts the server's command on the API host, with its secret passed as an environment variable and only a [minimal part of the API's own environment](/product/mcp-server-registry#environment-of-stdio-servers-on-the-host). Optionally, an admin runs it in a [container sandbox](/product/mcp-server-registry#sandboxed-stdio-servers) (no network by default, read-only file system, non-root user), and a [deployment catalog](/product/mcp-onboarding#deployment-catalog) can limit stdio servers to pinned, approved packages.
 
 ## Further reading
 

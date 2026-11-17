@@ -16,6 +16,14 @@ description: "L2M environment variables: the required master key, local defaults
 - `WEB_ORIGIN=http://localhost:5173`
 - `COOKIE_SECURE=false`
 
+## Run time limit
+
+`WORKFLOW_EXECUTION_TIMEOUT_MS` (default `300000`, five minutes) is how long one
+workflow run may take before it is stopped. Raise it for long agent, model or
+MCP runs; `.env.example` sets `1200000` (20 minutes). Calls still in flight to
+MCP servers are cancelled when it runs out. A queue job counts as stuck no
+sooner than this limit plus a minute.
+
 ## Auth bootstrap (optional, recommended)
 
 - `BOOTSTRAP_ADMIN_EMAIL`

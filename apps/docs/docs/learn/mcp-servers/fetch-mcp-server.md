@@ -91,11 +91,11 @@ Register it once under **MCP → Servers → + Register server** as a stdio serv
 }
 ```
 
-`uvx` has to be installed on the API host. If you start from L2M's built-in **Fetch** preset, replace its command with this one: the server is a Python package, and the preset's `npx` command does not install it. With a [deployment catalog](/product/mcp-onboarding#deployment-catalog) enforced, `mcp-server-fetch==2026.11.11` counts as pinned; `mcp-server-fetch` without a version does not.
+`uvx` has to be installed on the API host (the stock L2M container image ships Node.js only). L2M's built-in **Fetch** preset fills in `uvx mcp-server-fetch==2026.11.11`; add the `--allowed-hosts` arguments yourself. With a [deployment catalog](/product/mcp-onboarding#deployment-catalog) enforced, `mcp-server-fetch==2026.11.11` counts as pinned; `mcp-server-fetch` without a version does not.
 
 ### What L2M checks, and what it does not
 
-L2M's [outbound URL checks](/security/outbound-url-checks) apply to URLs that L2M's own nodes fetch: HTTP Request, Web Browse, Chart, PDF rendering, RAG endpoints and feed triggers. They do **not** apply to a stdio MCP server. The fetch server is a separate process that L2M starts; it opens its own sockets, so `OUTBOUND_DENY_PRIVATE` and `OUTBOUND_ALLOWLIST` never see its requests. Without a sandbox it also runs with the API process's environment and network access.
+L2M's [outbound URL checks](/security/outbound-url-checks) apply to URLs that L2M's own nodes fetch: HTTP Request, Web Browse, Chart, PDF rendering, RAG endpoints and feed triggers. They do **not** apply to a stdio MCP server. The fetch server is a separate process that L2M starts; it opens its own sockets, so `OUTBOUND_DENY_PRIVATE` and `OUTBOUND_ALLOWLIST` never see its requests. Without a sandbox it also has the API host's network access. Its environment is the API's short [stdio allowlist](/product/mcp-server-registry#environment-of-stdio-servers-on-the-host) plus its own `env`, so proxy settings reach it but the API's keys do not.
 
 What L2M can do around it:
 

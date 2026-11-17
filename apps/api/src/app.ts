@@ -22,6 +22,7 @@ import {
   detectContainerRuntime,
   hashMcpToolPolicyRule,
   invokeDirectMCPTool,
+  parseStdioEnvPassthrough,
   policyReadsOpenWorld,
   sweepSandboxContainers,
   validateSandboxMounts,
@@ -319,10 +320,13 @@ import {
   readDispatchedRunSpec,
   resultForQueue,
   RunDispatcher,
+  FIRE_DEDUPE_WINDOW_MS,
   triggerQueueItemId,
   type DispatchedRunInput,
   type DispatchedRunSpec
 } from "./services/run-dispatch.js";
+import { DeliveryDedupe } from "./services/delivery-dedupe.js";
+import { acceptSlackEvent } from "./services/slack-intake.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
 import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
@@ -439,8 +443,8 @@ const TIER1_INTEGRATIONS: Tier1IntegrationSpec[] = [
   { id: "http", label: "HTTP Request", category: "Protocol", logoPath: "/logos/http.svg", nodeTypes: ["http_request", "webhook_input", "webhook_response"] },
   { id: "slack", label: "Slack", category: "Communication", logoPath: "/logos/slack.svg", nodeTypes: ["slack_send_message", "slack_trigger"] },
   { id: "smtp", label: "Email (SMTP)", category: "Communication", logoPath: "/logos/smtp.svg", nodeTypes: ["smtp_send_email"] },
-  { id: "imap", label: "Email (IMAP)", category: "Communication", logoPath: "/logos/imap.svg", nodeTypes: ["imap_email_trigger"] },
-  { id: "gmail", label: "Gmail", category: "Communication", logoPath: "/logos/gmail.svg", nodeTypes: ["smtp_send_email", "imap_email_trigger"] },
+  // IMAP intake (imap_email_trigger) is not offered: it cannot run in this build (its definition is `unavailable`).
+  { id: "gmail", label: "Gmail", category: "Communication", logoPath: "/logos/gmail.svg", nodeTypes: ["smtp_send_email"] },
   { id: "google-sheets", label: "Google Sheets", category: "Productivity", logoPath: "/logos/google-sheets.svg", nodeTypes: ["google_sheets_read", "google_sheets_append", "google_sheets_update", "google_sheets_trigger"] },
   { id: "postgresql", label: "PostgreSQL", category: "Database", logoPath: "/logos/postgresql.svg", nodeTypes: ["postgres_query", "postgres_trigger"] },
   { id: "mysql", label: "MySQL", category: "Database", logoPath: "/logos/mysql.svg", nodeTypes: ["mysql_query"] },
@@ -1281,19 +1285,10 @@ function getRawRequestBody(request: { rawBody?: unknown; body: unknown }): strin
     return request.rawBody.toString("utf8");
   }
 
-  if (typeof request.body === "string") {
-    return request.body;
-  }
-
-  if (request.body === undefined || request.body === null) {
-    return "";
-  }
-
-  try {
-    return JSON.stringify(request.body);
-  } catch {
-    return String(request.body);
-  }
+  // No raw body: a request without one (GET, an empty POST). Never a re-serialisation of the parsed body: a signature
+  // is over the bytes that were sent, and re-serialising would make a missing raw body look like a bad signature at
+  // best, and hide the missing raw body at worst.
+  return "";
 }
 
 function decodeBufferLikePayload(payload: unknown): string | null {
@@ -1992,6 +1987,11 @@ export async function createApp(
       legacySafeReissue: config.MCP_CLIENT_LEGACY_SAFE_REISSUE,
       probeTimeoutMs: config.MCP_CLIENT_ERA_PROBE_TIMEOUT_MS,
       toolReadOnlyOverride: readOnlyMarks.lookup
+    },
+    // Host-launched stdio servers get a minimal allowlist of this process's environment unless the operator widens it.
+    stdioEnv: {
+      inherit: config.MCP_STDIO_INHERIT_ENV === true,
+      passthrough: parseStdioEnvPassthrough(config.MCP_STDIO_ENV_PASSTHROUGH ?? "").names
     },
     // Tracing (only while it is on): a CLIENT span per MCP operation, and trace context sent to MCP servers in
     // `_meta` and HTTP headers unless L2M_OTEL_PROPAGATE_TO_MCP=false or the server's connection opts out. With only a
@@ -6966,8 +6966,11 @@ export async function createApp(
     });
   }
 
-  app.register(cookie);
-  app.register(fastifyRawBody, {
+  await app.register(cookie);
+  // Awaited for the same reason as rate-limit above: fastify-raw-body marks routes from an onRoute hook, which only sees
+  // routes declared after the plugin has loaded. Unawaited, no route on the root app got `rawBody` and every signature
+  // check (GitHub, Slack, Stripe, Discord, webhook HMAC) hashed something other than the bytes that were signed.
+  await app.register(fastifyRawBody, {
     field: "rawBody",
     global: false,
     encoding: "utf8",
@@ -12033,6 +12036,32 @@ export async function createApp(
     };
   });
 
+  // Slack retries an event it got no 200 for within 3 seconds, and GitHub redelivers under the same delivery id: an id
+  // seen in the last FIRE_DEDUPE_WINDOW_MS starts no second run (per instance; queued Slack runs also dedupe in the queue).
+  const slackEventDedupe = new DeliveryDedupe(FIRE_DEDUPE_WINDOW_MS);
+  const githubDeliveryDedupe = new DeliveryDedupe(FIRE_DEDUPE_WINDOW_MS);
+  // Slack runs started after the answer went out (inline dispatch runs them in this process). At most
+  // MAX_BACKGROUND_SLACK_RUNS at once: past that an event is refused with 503 and Slack retries it later. Closing the
+  // app waits a little for them, not for a whole run.
+  const MAX_BACKGROUND_SLACK_RUNS = 100;
+  const SLACK_CLOSE_WAIT_MS = 10_000;
+  const backgroundSlackRuns = new Set<Promise<void>>();
+  // Slack events between the checks below and their answer (start awaits the budget check and the queue).
+  let slackStartsInFlight = 0;
+  const slackEventsStarting = new Set<string>();
+  app.addHook("onClose", async () => {
+    if (backgroundSlackRuns.size === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.allSettled([...backgroundSlackRuns]),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, SLACK_CLOSE_WAIT_MS);
+        timer.unref();
+      })
+    ]);
+    if (timer) clearTimeout(timer);
+  });
+
   // Slack Events API webhook — validates Slack signing secret.
   // Endpoint: POST /api/webhooks/slack/:workflowId
   app.post<{
@@ -12083,24 +12112,72 @@ export async function createApp(
         return body.challenge;
       }
 
+      // A retry of an event already taken: Slack resends the same event_id (with X-Slack-Retry-Num) when the first answer
+      // was late. Without an event_id, a retry is still one Slack says it sent before.
+      const eventId = body && typeof body.event_id === "string" && body.event_id.length > 0 ? body.event_id : null;
+      const dedupeKey = eventId ? `${workflow.id}:${eventId}` : null;
+      // A retry while the first delivery is still being started: its outcome is not known yet (it may be refused and
+      // forgotten), so this one is not acknowledged; Slack sends it again.
+      if (dedupeKey && slackEventsStarting.has(dedupeKey)) {
+        reply.code(503);
+        return { error: "This Slack event is still being started; Slack will retry it." };
+      }
+      if (dedupeKey ? slackEventDedupe.seen(dedupeKey) : getHeaderValue(request.headers, "x-slack-retry-num") !== "") {
+        return { ok: true, duplicate: true };
+      }
+
+      // Slots are held from here, before any await, so a burst cannot pass the check together.
+      if (backgroundSlackRuns.size + slackStartsInFlight >= MAX_BACKGROUND_SLACK_RUNS) {
+        if (dedupeKey) slackEventDedupe.forget(dedupeKey);
+        reply.code(503);
+        return { error: "Too many Slack events are running; Slack will retry this one." };
+      }
+      slackStartsInFlight += 1;
+      if (dedupeKey) slackEventsStarting.add(dedupeKey);
+
+      // Queue dispatch answers once the queue took the job; inline answers at once and runs in the background (Slack
+      // waits 3 seconds). A refusal answers 5xx so Slack sends the event again.
       const executionId = crypto.randomUUID();
-      const result = await runDispatcher.run(
-        {
-          v: DISPATCH_SPEC_VERSION,
-          run: {
-            channel: "production",
-            workflow,
-            webhookPayload: (body as Record<string, unknown>) ?? {},
-            executionId,
-            triggerType: "slack_webhook",
-            triggeredBy: "slack"
+      let answer: Awaited<ReturnType<typeof acceptSlackEvent>>;
+      try {
+        answer = await acceptSlackEvent(
+          {
+            v: DISPATCH_SPEC_VERSION,
+            run: {
+              channel: "production",
+              workflow,
+              webhookPayload: (body as Record<string, unknown>) ?? {},
+              executionId,
+              triggerType: "slack_webhook",
+              triggeredBy: "slack"
+            },
+            progress: { requestInput: body ?? {} },
+            history: { requestInput: body ?? {} }
           },
-          progress: { requestInput: body ?? {} },
-          history: { requestInput: body ?? {} }
-        },
-        { pool: dispatchPoolOf(workflow) }
-      );
-      return { ok: true, status: result.status };
+          { pool: dispatchPoolOf(workflow), ...(eventId ? { queueItemId: `slack:${workflow.id}:${eventId}` } : {}) },
+          {
+            dispatcher: runDispatcher,
+            track: (run) => {
+              backgroundSlackRuns.add(run);
+              void run.finally(() => backgroundSlackRuns.delete(run));
+            },
+            onNotTaken: (error) => {
+              // Refused before the answer (the budgets could not be read, the queue was full or failed): Slack gets a 5xx
+              // and its redelivery runs. An inline run that failed after the answer is only logged.
+              if (dedupeKey) slackEventDedupe.forget(dedupeKey);
+              app.log.error(
+                { workflowId: workflow.id, executionId, err: secretService.redact(error instanceof Error ? error.message : String(error)) },
+                "A Slack event's run was refused or failed"
+              );
+            }
+          }
+        );
+      } finally {
+        slackStartsInFlight -= 1;
+        if (dedupeKey) slackEventsStarting.delete(dedupeKey);
+      }
+      reply.code(answer.status);
+      return answer.body;
     }
   );
 
@@ -12136,24 +12213,41 @@ export async function createApp(
         reply.code(401);
         return { error: "GitHub signature mismatch" };
       }
+      // A redelivery (the same X-GitHub-Delivery) of a delivery already taken starts no second run.
+      const deliveryId = getHeaderValue(request.headers, "x-github-delivery");
+      const deliveryKey = deliveryId ? `${workflow.id}:${deliveryId}` : null;
+      if (deliveryKey && githubDeliveryDedupe.seen(deliveryKey)) {
+        return { ok: true, duplicate: true };
+      }
       const body = request.body as Record<string, unknown> | undefined;
       const executionId = crypto.randomUUID();
-      const result = await runDispatcher.run(
-        {
-          v: DISPATCH_SPEC_VERSION,
-          run: {
-            channel: "production",
-            workflow,
-            webhookPayload: (body as Record<string, unknown>) ?? {},
-            executionId,
-            triggerType: "github_webhook",
-            triggeredBy: "github"
+      let result: WorkflowExecutionResult;
+      try {
+        result = await runDispatcher.run(
+          {
+            v: DISPATCH_SPEC_VERSION,
+            run: {
+              channel: "production",
+              workflow,
+              webhookPayload: (body as Record<string, unknown>) ?? {},
+              executionId,
+              triggerType: "github_webhook",
+              triggeredBy: "github"
+            },
+            progress: { requestInput: body ?? {} },
+            history: { requestInput: body ?? {} }
           },
-          progress: { requestInput: body ?? {} },
-          history: { requestInput: body ?? {} }
-        },
-        { pool: dispatchPoolOf(workflow) }
-      );
+          { pool: dispatchPoolOf(workflow) }
+        );
+      } catch (error) {
+        // Not started (refused, or the queue could not take it): a redelivery may try again. A run still going on its
+        // worker (the wait timed out) stays taken.
+        if (deliveryKey && !(error instanceof DispatchTimeoutError)) githubDeliveryDedupe.forget(deliveryKey);
+        throw error;
+      }
+      // A redelivery after a failed run is a retry on purpose: only a run that succeeded (or waits for an approval)
+      // keeps the delivery id taken.
+      if (deliveryKey && result.status !== "success" && result.status !== "waiting_approval") githubDeliveryDedupe.forget(deliveryKey);
       return { ok: true, status: result.status };
     }
   );

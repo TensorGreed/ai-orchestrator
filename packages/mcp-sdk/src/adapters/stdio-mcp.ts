@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import type {
   McpClientProtocolMode,
@@ -27,6 +28,7 @@ import {
 } from "../errors";
 import { annotateMcpError, annotateMcpRequest, mcpTraceCarrier, traceMcpRound, withTraceContext } from "../tracing";
 import type { StdioLaunchPlan, StdioLauncher } from "../sandbox";
+import { buildHostStdioEnv, type StdioEnvPolicy } from "../stdio-env";
 import {
   DEFAULT_RESOURCE_MAX_BYTES,
   JSON_RPC_INVALID_PARAMS,
@@ -194,6 +196,11 @@ export interface StdioMcpServerAdapterOptions {
   protocol?: StdioMcpProtocolOptions;
   /** Tracing (only while it is on): requests carry the active span's trace context in `params._meta`. */
   trace?: RunInstrumentation;
+  /**
+   * Which of this process's environment variables a server started on the host gets (a sandboxed server never gets
+   * any). Unset: the minimal allowlist only, plus the server's own variables.
+   */
+  env?: StdioEnvPolicy;
 }
 
 /** What the adapter has observed about a stdio server's protocol, for display. */
@@ -251,9 +258,29 @@ interface StdioSession {
   serverRequests: Set<Promise<void>>;
   /** Phase 10.7 — removes what a sandboxed launch left behind; runs once the process is gone. */
   cleanup?: () => Promise<void>;
+  /** Started on the host with only part of this process's environment: failure messages say how to pass more. */
+  minimalHostEnv?: boolean;
+  /** The working directory a host launch asked for, to name it when it does not exist. */
+  hostCwd?: string;
 }
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
+/** Added to early-exit failures of servers that did not get the API's whole environment. */
+const ENV_HINT =
+  " The server gets only a minimal set of the API's environment variables: set the ones it needs in its env, or list their names in MCP_STDIO_ENV_PASSTHROUGH.";
+
+function cwdErrorMessage(dir: string, problem: string): string {
+  return `MCP stdio process could not start: the working directory '${safeText(dir, 300)}' ${problem}. Check the server's cwd setting.`;
+}
+
+/** Why `dir` cannot be a working directory, or null when it is a folder. */
+function directoryProblem(dir: string): string | null {
+  try {
+    return fs.statSync(dir).isDirectory() ? null : "is not a folder";
+  } catch {
+    return "was not found";
+  }
+}
 const STDERR_LOG_BUFFER_LINES = 100;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const CLOSE_GRACE_MS = 2_000;
@@ -384,7 +411,7 @@ function normalizeTimeoutMs(config: MCPServerConfig): number {
 /**
  * The variables the server's config defines: custom env plus the resolved
  * secret. A sandbox gets only these; a host process gets them on top of the
- * API's environment.
+ * allowlisted part of the API's environment (see stdio-env.ts).
  */
 async function buildServerEnv(config: MCPServerConfig, context: MCPExecutionContext): Promise<Record<string, string>> {
   const baseEnv: Record<string, string> = {};
@@ -481,9 +508,12 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   private readonly observed = new Map<string, StdioMcpObservedProtocol>();
   /** Tracing (only while it is on): requests carry the active span's trace context in `params._meta`. */
   private readonly trace?: RunInstrumentation;
+  /** Which of this process's variables host-launched servers get. */
+  private readonly envPolicy: StdioEnvPolicy;
 
   constructor(options?: StdioMcpServerAdapterOptions) {
     this.launcher = options?.launcher;
+    this.envPolicy = options?.env ?? {};
     this.protocol = options?.protocol ?? {};
     this.eraCache = this.protocol.eraCache ?? new McpEraCache();
     this.modernOnlyCache = new McpEraCache();
@@ -622,12 +652,21 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       });
     } else {
       const resolved = resolveSpawnCommand(command, args);
-      proc = spawn(resolved.command, resolved.args, {
-        cwd,
-        env: { ...process.env, ...serverEnv },
-        stdio: ["pipe", "pipe", "pipe"],
-        shell: resolved.shell
-      });
+      try {
+        proc = spawn(resolved.command, resolved.args, {
+          cwd,
+          // Only the allowlisted part of the API's environment (or all of it with MCP_STDIO_INHERIT_ENV), then the
+          // server's own variables.
+          env: buildHostStdioEnv(process.env, serverEnv, this.envPolicy),
+          stdio: ["pipe", "pipe", "pipe"],
+          shell: resolved.shell
+        });
+      } catch (error) {
+        // A working directory that is a file can fail the spawn call itself (ENOTDIR) instead of an 'error' event.
+        const problem = cwd ? directoryProblem(cwd) : null;
+        if (cwd && problem) throw new Error(cwdErrorMessage(cwd, problem));
+        throw error;
+      }
     }
 
     const session: StdioSession = {
@@ -651,7 +690,9 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       context,
       config,
       serverRequests: new Set(),
-      ...(plan?.cleanup ? { cleanup: plan.cleanup } : {})
+      ...(plan?.cleanup ? { cleanup: plan.cleanup } : {}),
+      ...(!plan && this.envPolicy.inherit !== true ? { minimalHostEnv: true } : {}),
+      ...(!plan && cwd ? { hostCwd: cwd } : {})
     };
 
     proc.stdout?.setEncoding("utf-8");
@@ -1081,7 +1122,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     const tail = session.stderrBuffer.slice(-5).join(" | ") || "(empty)";
     const error =
       session.closeError ??
-      new Error(`MCP stdio process exited unexpectedly. Last stderr: ${tail}`);
+      new Error(`MCP stdio process exited unexpectedly. Last stderr: ${tail}${session.minimalHostEnv ? ENV_HINT : ""}`);
     session.closeError = error;
     for (const [, pending] of session.pending) {
       clearTimeout(pending.timer);
@@ -1099,7 +1140,11 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   private handleProcError(session: StdioSession, error: Error): void {
     const code = (error as NodeJS.ErrnoException).code;
     const path = (error as NodeJS.ErrnoException).path;
-    if (code === "ENOENT") {
+    const cwdProblem = (code === "ENOENT" || code === "ENOTDIR") && session.hostCwd ? directoryProblem(session.hostCwd) : null;
+    if (cwdProblem && session.hostCwd) {
+      // Node reports a missing working directory as the command not being found (or as a bare ENOTDIR for a file).
+      session.closeError = new Error(cwdErrorMessage(session.hostCwd, cwdProblem));
+    } else if (code === "ENOENT") {
       const target = path ?? "the configured command";
       const hint =
         process.platform === "win32"

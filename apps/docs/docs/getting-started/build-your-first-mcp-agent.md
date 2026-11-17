@@ -123,7 +123,7 @@ The `mock-mcp` adapter is in-process and ships with a few demo tools (`get_curre
 2. Set the connection:
     - **Transport**: `stdio`
     - **Command**: `npx`
-    - **Args**: `["-y", "@modelcontextprotocol/server-filesystem", "/path/to/your/safe/dir"]`
+    - **Args**: `["-y", "@modelcontextprotocol/server-filesystem@2.3.0", "/path/to/your/safe/dir"]`
 3. Click **Test connection** — Studio will spawn the server, list its tools, and let you pick one.
 4. Save and re-run with a prompt like `List files in the project root and tell me which ones look like documentation.`
 
