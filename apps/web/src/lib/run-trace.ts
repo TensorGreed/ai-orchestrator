@@ -304,18 +304,6 @@ export function pickStreamFailureMessage(streamError: string | null, thrown: str
   return thrown;
 }
 
-/** One-line preview of a node's input: the prompt text when there is one, else `summarize(value)`. */
-export function summarizeInputPreview(value: unknown, summarize: (value: unknown) => string): string {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    const record = value as Record<string, unknown>;
-    for (const key of ["user_prompt", "prompt", "userPrompt", "message"]) {
-      const candidate = record[key];
-      if (typeof candidate === "string" && candidate.trim()) return candidate;
-    }
-  }
-  return summarize(value);
-}
-
 /** Last `max` characters of streamed text on one line, for the canvas preview. */
 export function tailPreview(text: string, max: number = 120): string {
   const flat = text.replace(/\s+/g, " ").trim();
