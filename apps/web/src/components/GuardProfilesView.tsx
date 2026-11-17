@@ -72,6 +72,8 @@ import { simulateDenial } from "../lib/guard-simulation";
 import { benchmarkDraftDenial } from "../lib/guard-benchmark";
 import { GuardBenchmarkResultCard } from "./GuardBenchmarkView";
 import { OutputCheckOptions } from "./OutputCheckOptions";
+import { EntitiesOptionsCard } from "./EntitiesOptionsCard";
+import { ENTITIES_DETECTOR_ID } from "../lib/entity-options-edit";
 import { OUTPUT_CHECK_CATEGORY, isOutputCheck, type OutputCheckId } from "../lib/output-check-edit";
 
 type Role = "admin" | "builder" | "operator" | "viewer";
@@ -287,6 +289,7 @@ function GuardProfileEditor({
   };
   const view = channelOf(document, channel);
   const channelDetectors = detectors.filter((detector) => detector.channels.includes(channel));
+  const entitiesEngine = detectors.find((detector) => detector.id === ENTITIES_DETECTOR_ID)?.engine;
   const shadow = (document.shadow && typeof document.shadow === "object" ? document.shadow : {}) as Record<string, boolean>;
   const budget = (document.latencyBudget ?? {}) as { ms?: number; onExceeded?: string };
   const protection = (document.protection ?? {}) as { fallback?: string };
@@ -581,6 +584,17 @@ function GuardProfileEditor({
                   onBuffered={(buffered) => update(setRuleStreamBuffer(document, channel, OUTPUT_CHECK_CATEGORY[entry.id as OutputCheckId], buffered))}
                 />
               ))}
+            {view.detectors
+              .filter((entry) => entry.id === ENTITIES_DETECTOR_ID)
+              .map((entry) => (
+                <EntitiesOptionsCard
+                  key={`${summary.id}:${channel}:${entry.id}`}
+                  options={entry.options ?? {}}
+                  {...(entitiesEngine ? { engine: entitiesEngine } : {})}
+                  readOnly={readOnly}
+                  onChange={(options) => update(setDetectorOptions(document, channel, entry.id, options))}
+                />
+              ))}
             <ActionRules
               key={channel}
               rules={view.actions}
@@ -737,7 +751,7 @@ function ActionRules({
         <div className="guard-add-rule">
           <input aria-label="New rule key" list="guard-rule-keys" placeholder="category or data class (e.g. email)" value={newKey} onChange={(event) => setNewKey(event.target.value)} />
           <datalist id="guard-rule-keys">
-            {[...suggestions, "email", "phone", "credential", "card_number", "iban", "national_id"].filter((key) => !keys.includes(key)).map((key) => (
+            {[...suggestions, "email", "phone", "credential", "card_number", "iban", "national_id", "person_name", "location", "street_address"].filter((key) => !keys.includes(key)).map((key) => (
               <option key={key} value={key} />
             ))}
           </datalist>

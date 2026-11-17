@@ -57,7 +57,10 @@ const scanShape = {
   ...inputShape,
   /** A rule set the toolset makes available (its member's rule set or one bound to the toolset, client or project). */
   rule_set_id: z.string().trim().min(1).max(63).optional(),
-  /** Only these data classes (names as rule sets use them; `ip_address` is scanned only when named here or by the rule set). */
+  /**
+   * Only these data classes (names as rule sets use them). `ip_address`, `person_name`, `location` and `street_address`
+   * are scanned only when named here or turned on by the rule set.
+   */
   entity_types: z.array(dataClassNameSchema).max(50).optional(),
   /** Values never reported in this call, on top of the rule set's allow-list. */
   allow_list: z.array(z.string().trim().min(1).max(256)).max(CONTENT_TOOLS_MAX_ALLOW_LIST).optional()
@@ -92,7 +95,7 @@ const inputJsonSchema = {
 const scanJsonSchema = {
   ...inputJsonSchema,
   rule_set_id: { type: "string", description: "A rule set this toolset makes available; defaults to the toolset's own." },
-  entity_types: { type: "array", items: { type: "string" }, maxItems: 50, description: "Only these data classes, e.g. email, phone, card_number, iban, us_ssn, national_id, credential, private_key, jwt, ip_address." },
+  entity_types: { type: "array", items: { type: "string" }, maxItems: 50, description: "Only these data classes, e.g. email, phone, card_number, iban, us_ssn, national_id, credential, private_key, jwt, ip_address. Person names, locations and street addresses (person_name, location, street_address) are found only when named here or turned on by the rule set." },
   allow_list: { type: "array", items: { type: "string" }, maxItems: CONTENT_TOOLS_MAX_ALLOW_LIST, description: "Values never reported in this call." }
 } as const;
 

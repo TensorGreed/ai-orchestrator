@@ -27,8 +27,10 @@ import {
   revealTokens,
   rewriteMatches,
   riskLevelOf,
-  scanSensitiveText,
+  scanSensitiveTextAsync,
   sensitiveScanSettingsOf,
+  ENTITIES_DETECTOR_ID,
+  type GuardEntityRecognizer,
   stringsIn,
   JsonTooDeepError,
   type DlpMatch,
@@ -43,6 +45,7 @@ import {
   detectSensitiveDataArgsSchema,
   findRevealRule,
   GUARD_BUILTIN_PROFILE_ID,
+  isEntityDataClass,
   REVEAL_EVENT_DETECTOR_ID,
   REVEAL_GATEWAY_CLIENT_SOURCE,
   redactSensitiveDataArgsSchema,
@@ -78,6 +81,8 @@ export interface ContentRulesToolsOptions {
   ttlSeconds: number;
   /** The keyed-hash key of a project scope (derived from the master key); undefined: the hash style is unavailable. */
   hashKey?: (projectScope: string) => Uint8Array | undefined;
+  /** The deployment's recognizer for names and addresses (asked for in `entity_types` or by the rule set); absent: the built-in rules. */
+  entityRecognizer?: GuardEntityRecognizer;
   now?: () => Date;
 }
 
@@ -215,19 +220,29 @@ export class ContentRulesToolsService {
     return inputs;
   }
 
-  private static scan(
+  private async scan(
     inputs: ReturnType<typeof ContentRulesToolsService.inputsOf>,
     settings: SensitiveScanSettings,
     request: { entityTypes?: string[]; allowList?: string[] }
-  ): ScannedInput[] {
+  ): Promise<ScannedInput[]> {
     const scanRequest = {
       ...(request.entityTypes ? { entityTypes: request.entityTypes } : {}),
       ...(request.allowList ? { allowList: { values: request.allowList } } : {})
     };
-    return inputs.map((input) => {
-      const strings = input.strings.map((entry) => {
-        const scanned = scanSensitiveText(entry.text, settings, scanRequest);
-        return {
+    // The input is already capped at CONTENT_TOOLS_MAX_CHARS in all, so names and addresses are looked for in all of it.
+    const context = { ...(this.options.entityRecognizer ? { recognizer: this.options.entityRecognizer } : {}), maxChars: CONTENT_TOOLS_MAX_CHARS };
+    const out: ScannedInput[] = [];
+    for (const input of inputs) {
+      const strings: ScannedString[] = [];
+      for (const entry of input.strings) {
+        let scanned: Awaited<ReturnType<typeof scanSensitiveTextAsync>>;
+        try {
+          scanned = await scanSensitiveTextAsync(entry.text, settings, scanRequest, context);
+        } catch {
+          // The recognizer's own message stays on the server: it could quote the input.
+          throw new ContentToolError("Names and addresses could not be checked; try again, or leave person_name, location and street_address out of entity_types");
+        }
+        strings.push({
           ...(entry.path !== undefined ? { path: entry.path } : {}),
           text: entry.text,
           matches: scanned.matches,
@@ -239,10 +254,11 @@ export class ContentRulesToolsService {
             score: finding.score,
             preview: finding.preview
           }))
-        };
-      });
-      return { index: input.index, strings, riskLevel: riskLevelOf(strings.flatMap((entry) => entry.findings)) };
-    });
+        });
+      }
+      out.push({ index: input.index, strings, riskLevel: riskLevelOf(strings.flatMap((entry) => entry.findings)) });
+    }
+    return out;
   }
 
   private static inputView(input: ScannedInput, withFindings: boolean): ContentToolInputResult | Omit<ContentToolInputResult, "findings"> {
@@ -285,7 +301,7 @@ export class ContentRulesToolsService {
       iteration: null,
       toolName: call.tool,
       channel: "tool_arguments",
-      detectorId: DLP_DETECTOR_ID,
+      detectorId: isEntityDataClass(dataClass) ? ENTITIES_DETECTOR_ID : DLP_DETECTOR_ID,
       category: "sensitive_data",
       dataClass,
       score: group.score,
@@ -316,7 +332,7 @@ export class ContentRulesToolsService {
     if (!parsed.success) return { ok: false, message: `Invalid arguments: ${issues(parsed.error)}` };
     const args = parsed.data;
     const ruleSet = await this.ruleSetFor(call, args.rule_set_id);
-    const scanned = ContentRulesToolsService.scan(ContentRulesToolsService.inputsOf(args), ContentRulesToolsService.settingsOf(ruleSet), {
+    const scanned = await this.scan(ContentRulesToolsService.inputsOf(args), ContentRulesToolsService.settingsOf(ruleSet), {
       ...(args.entity_types ? { entityTypes: args.entity_types } : {}),
       ...(args.allow_list ? { allowList: args.allow_list } : {})
     });
@@ -357,7 +373,7 @@ export class ContentRulesToolsService {
     const style: RedactionStyle = args.style;
     const ruleSet = await this.ruleSetFor(call, args.rule_set_id);
     const inputs = ContentRulesToolsService.inputsOf(args);
-    const scanned = ContentRulesToolsService.scan(inputs, ContentRulesToolsService.settingsOf(ruleSet), {
+    const scanned = await this.scan(inputs, ContentRulesToolsService.settingsOf(ruleSet), {
       ...(args.entity_types ? { entityTypes: args.entity_types } : {}),
       ...(args.allow_list ? { allowList: args.allow_list } : {})
     });

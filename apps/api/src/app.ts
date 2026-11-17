@@ -240,6 +240,7 @@ import { registerGuardRoutes } from "./guard-routes.js";
 import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
 import { registerGuardBenchmarkRoutes } from "./guard-benchmark-routes.js";
 import { GuardBenchmarkService } from "./services/guard-benchmark-service.js";
+import { createDeploymentGuardRegistry } from "./services/guard-registry.js";
 import { registerMcpPolicyLearningRoutes } from "./mcp-policy-learning-routes.js";
 import { loadMcpOpenWorldContext, resolveOpenWorldFor } from "./services/mcp-open-world.js";
 import { registerMcpSafetyPresetRoutes } from "./mcp-safety-preset-routes.js";
@@ -1767,7 +1768,11 @@ export async function createApp(
   // Phase 12.1 — guard profiles, bindings, events and the token vault.
   // Phase 16 — runtime surrogates use the capture surrogate key (HKDF of the master key), so a data-subject lookup finds both.
   const runtimeMasterKey = Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64");
+  // The deployment's one detector registry: runs, gateway calls, simulations, the detector list, the benchmark and the
+  // content rules tools all check with it (names and addresses use the built-in rules unless a recognizer is set up).
+  const guardDetectors = createDeploymentGuardRegistry();
   const guardService = new GuardService(store, secretService, {
+    detectors: guardDetectors,
     autoApply: config.GUARD_AUTO_APPLY,
     gatewayRulesWithoutBinding: config.GATEWAY_RULES_WITHOUT_BINDING,
     logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
@@ -12872,7 +12877,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       guard: guardService,
       audit: async (event) => await auditService.record(event),
       ttlSeconds: config.CONTENT_REDACTION_TTL_SECONDS ?? CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
-      hashKey: (scope) => (runtimeMasterKey.length === 32 ? deriveContentHashKey(runtimeMasterKey, scope) : undefined)
+      hashKey: (scope) => (runtimeMasterKey.length === 32 ? deriveContentHashKey(runtimeMasterKey, scope) : undefined),
+      ...(guardDetectors.entityRecognizer ? { entityRecognizer: guardDetectors.entityRecognizer } : {})
     }),
     // 12.6 — budgets, sampling cost and per-client rate limits (shared across replicas in cluster mode).
     budgets: budgetService,

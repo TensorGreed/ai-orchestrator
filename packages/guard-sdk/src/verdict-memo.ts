@@ -98,7 +98,7 @@ function sha256(text: string): string {
  * values, sources, a partial stream check) is folded in as one more hash, so a hit always means the
  * same check. Piece metadata does not change verdicts and is left out.
  */
-export function guardVerdictMemoKey(profileHashes: readonly string[], input: GuardInput): string {
+export function guardVerdictMemoKey(profileHashes: readonly string[], input: GuardInput, detectorVersions: readonly string[] = []): string {
   const labels = [...new Set(input.labels ?? [])].sort();
   const context = {
     tool: input.tool,
@@ -112,7 +112,9 @@ export function guardVerdictMemoKey(profileHashes: readonly string[], input: Gua
     sources: input.sources,
     streamWindow: input.streamWindow,
     // Absent unless set, so keys of complete checks are unchanged.
-    partial: input.partial === true ? true : undefined
+    partial: input.partial === true ? true : undefined,
+    // The versions of detectors that depend on more than their code (a recognizer); absent when none does.
+    detectors: detectorVersions.length > 0 ? [...detectorVersions] : undefined
   };
   return [
     "v1",
@@ -122,6 +124,21 @@ export function guardVerdictMemoKey(profileHashes: readonly string[], input: Gua
     sha256(contentText(input.content)),
     sha256(stableStringify(context))
   ].join(":");
+}
+
+/**
+ * The versions (`GuardDetector.version`) of the detectors the rule sets run on the input's channel, as `id=version`,
+ * sorted, for `guardVerdictMemoKey`. Detectors without a version are left out, so keys stay as they were for them.
+ */
+export function guardDetectorVersions(input: Pick<GuardInput, "channel">, profiles: readonly GuardProfile[], registry: Pick<GuardRegistry, "get">): string[] {
+  const versions = new Set<string>();
+  for (const profile of profiles) {
+    for (const entry of profile.channels[input.channel]?.detectors ?? []) {
+      const version = registry.get(entry.id)?.version;
+      if (version) versions.add(`${entry.id}=${version}`);
+    }
+  }
+  return [...versions].sort();
 }
 
 /** A verdict the memo may keep: allowed, nothing found (shadow included), nothing rewritten, no detector skipped. */

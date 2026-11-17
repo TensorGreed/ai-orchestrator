@@ -433,4 +433,35 @@ describe("content rules tools on the MCP gateway", () => {
     expect(imported.statusCode).toBe(201);
     expect(imported.json<{ warnings?: string[] }>().warnings).toHaveLength(1);
   });
+  it("finds names and addresses only when entity_types names them, with placeholders and rule events that hold no values", async () => {
+    const fixture = await setup();
+    const client = tools(fixture);
+    const text = `Patient: Ana Diaz, ${EMAIL}, lives at 221B Baker Street, London NW1 6XE`;
+    const plain = await client.call("detect_sensitive_data", { text });
+    expect(plain.data.inputs[0].counts).toEqual({ email: 1 });
+    const named = await client.call("detect_sensitive_data", { text, entity_types: ["person_name", "street_address"] });
+    expect(named.error, named.text).toBe(false);
+    expect(named.data.inputs[0].findings.map((finding: { dataClass: string; preview: string }) => [finding.dataClass, finding.preview])).toEqual([
+      ["person_name", "A•• D•••"],
+      ["street_address", "•••• B•••• S•••••, L••••• N•• •••"]
+    ]);
+    expect(named.data.inputs[0].riskLevel).toBe("medium");
+    expect(named.text).not.toContain("Diaz");
+    expect(named.text).not.toContain("Baker");
+    const redacted = await client.call("redact_sensitive_data", { text, entity_types: ["person_name", "email", "street_address"] });
+    expect(redacted.data.redacted).toBe("Patient: [PERSON_NAME_1], [EMAIL_1], lives at [STREET_ADDRESS_1]");
+    const stored = await eventsAndAudit(fixture.context.store);
+    expect(stored).toContain('"data.entities"');
+    expect(stored).not.toContain("Diaz");
+    expect(stored).not.toContain("Baker");
+  });
+
+  it("finds names and addresses when the member's rule set runs data.entities", async () => {
+    const fixture = await setup();
+    const document = ruleSet("pii", { channels: { prompt: { detectors: [{ id: "data.entities", options: { classes: ["location"] } }] } } });
+    const updated = await caller(fixture.context)(fixture.admin, "PUT", "/api/guard/profiles/pii", { document });
+    expect(updated.statusCode, updated.body).toBe(200);
+    const result = await tools(fixture).call("detect_sensitive_data", { text: "Dr. Ana Diaz moved to Lisbon" });
+    expect(result.data.inputs[0].counts).toEqual({ location: 1 });
+  });
 });

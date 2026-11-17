@@ -65,6 +65,7 @@ import type {
   McpPlaygroundCallResponse
 } from "@ai-orchestrator/shared";
 import { EVAL_RUN_FINISHED_STATUSES } from "@ai-orchestrator/shared";
+import type { GuardEntityEngineInfo } from "@ai-orchestrator/shared";
 import type {
   EvalCaseDetail,
   EvalCaseResult,
@@ -4421,6 +4422,8 @@ export interface GuardDetectorInfo {
   description: string;
   channels: string[];
   categories: string[];
+  /** Names and addresses (`data.entities`) only: the engine behind it on this deployment. */
+  engine?: GuardEntityEngineInfo;
 }
 
 export interface GuardStats {

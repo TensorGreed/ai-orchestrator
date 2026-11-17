@@ -45,6 +45,28 @@ function maskEmail(value: string): string {
   return `${maskValue(local, { keepStart: 1 })}@${maskedDomain}`;
 }
 
+/**
+ * Names, places and addresses: the first letter of each word stays, every other letter and every digit is masked,
+ * and spaces and punctuation stay (`J••• S••••`, `••• M••• S•.`).
+ */
+function maskWords(value: string): string {
+  let out = "";
+  let inWord = false;
+  for (const c of value) {
+    if (/[\p{L}\p{M}]/u.test(c)) {
+      out += inWord ? MASK_CHAR : c;
+      inWord = true;
+    } else if (/\p{N}/u.test(c) || (inWord && (c === "'" || c === "’"))) {
+      out += MASK_CHAR;
+      inWord = true;
+    } else {
+      out += c;
+      inWord = false;
+    }
+  }
+  return out;
+}
+
 /** Mask a value the way its data class is usually shown: last four digits of a card, the domain suffix of an email. */
 export function maskForDataClass(value: string, dataClass?: GuardDataClass): string {
   switch (dataClass) {
@@ -65,6 +87,10 @@ export function maskForDataClass(value: string, dataClass?: GuardDataClass): str
     case "ip_address":
       // A fixed shape per family, nothing kept: the octet or group lengths would narrow the address down.
       return value.includes(":") ? MASKED_IPV6 : MASKED_IPV4;
+    case "person_name":
+    case "location":
+    case "street_address":
+      return maskWords(value);
     case "private_key":
       return "-----BEGIN PRIVATE KEY----- " + MASK_CHAR.repeat(8) + " -----END PRIVATE KEY-----";
     default:
