@@ -466,3 +466,22 @@ describe("node inspector: layer edges", () => {
     }
   });
 });
+
+describe("node inspector: focus after a mouse close", () => {
+  it("does not put focus (and its ring) on the node when the close came from the mouse", async () => {
+    const user = userEvent.setup();
+    const nodeElement = document.createElement("div");
+    nodeElement.className = "react-flow__node";
+    nodeElement.dataset.id = "fetch";
+    nodeElement.tabIndex = 0;
+    document.body.appendChild(nodeElement);
+    try {
+      const { unmount } = render(<NodeInspector {...props()} />);
+      await user.click(screen.getByRole("tab", { name: "Settings" }));
+      unmount();
+      expect(nodeElement).not.toHaveFocus();
+    } finally {
+      nodeElement.remove();
+    }
+  });
+});

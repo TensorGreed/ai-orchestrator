@@ -1117,11 +1117,21 @@ export function NodeInspector({
   );
 
   // The panel takes focus when it opens and gives it back to the node (the last one shown) when it closes.
+  const lastInputWasKeyboard = useRef(true);
   const nodeIdRef = useRef(node.id);
   nodeIdRef.current = node.id;
   useEffect(() => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     asideRef.current?.focus({ preventScroll: true });
+    // Whether the last input was the keyboard: only a keyboard close puts focus (and its ring) back on the node.
+    const markKeyboard = () => {
+      lastInputWasKeyboard.current = true;
+    };
+    const markPointer = () => {
+      lastInputWasKeyboard.current = false;
+    };
+    document.addEventListener("keydown", markKeyboard, true);
+    document.addEventListener("pointerdown", markPointer, true);
     // Focus that lands on the dimmed page (say a Tab after the focused control went away) comes back to the panel.
     // Layers above the inspector (dialogs, the command palette) keep theirs.
     const keepFocusInside = (event: FocusEvent) => {
@@ -1134,6 +1144,11 @@ export function NodeInspector({
     document.addEventListener("focusin", keepFocusInside);
     return () => {
       document.removeEventListener("focusin", keepFocusInside);
+      document.removeEventListener("keydown", markKeyboard, true);
+      document.removeEventListener("pointerdown", markPointer, true);
+      // A mouse or touch close leaves focus alone (the closed panel's focus falls to the page), so the node gets no
+      // focus ring; a keyboard close puts focus back on the node.
+      if (!lastInputWasKeyboard.current) return;
       const nodeElement = document.querySelector<HTMLElement>(
         `.react-flow__node[data-id="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(nodeIdRef.current) : nodeIdRef.current}"]`
       );

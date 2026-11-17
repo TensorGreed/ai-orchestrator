@@ -27,6 +27,13 @@
   --surface-overlay-well: #0d121d;
   --overlay-border: #2e3a52;
   --overlay-line: #27314a;
+  /* text and controls on an overlay panel: faint text at 4.5:1 or more and control edges at 3:1 or more against
+     every overlay surface (WCAG AA) */
+  --overlay-fg-faint: #7f89a0;
+  --overlay-control-bg: #1a2234;
+  --overlay-control-bg-hover: #222c42;
+  --overlay-control-border: #606c85;
+  --overlay-raised: #1a2234;
   --overlay-scrim: rgba(2, 4, 8, 0.64);
   --shadow-overlay: 0 32px 80px rgba(0, 0, 0, 0.7), 0 8px 24px rgba(0, 0, 0, 0.45);
 
@@ -140,6 +147,11 @@
   --surface-overlay-well: #fafbfd;
   --overlay-border: #cbd3e1;
   --overlay-line: #dde2ec;
+  --overlay-fg-faint: #687083;
+  --overlay-control-bg: #ffffff;
+  --overlay-control-bg-hover: #eef1f7;
+  --overlay-control-border: #878fa1;
+  --overlay-raised: #ffffff;
   --overlay-scrim: rgba(17, 22, 37, 0.4);
   --shadow-overlay: 0 28px 72px rgba(17, 22, 37, 0.22), 0 6px 16px rgba(17, 22, 37, 0.08);
 

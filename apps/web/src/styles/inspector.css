@@ -18,8 +18,9 @@
 }
 
 .insp {
-  /* Dividers inside the panel stay visible on its raised surface. */
+  /* Dividers stay visible on the raised surface, and faint text stays readable (AA) on it. */
   --line: var(--overlay-line);
+  --fg-faint: var(--overlay-fg-faint);
   position: fixed;
   top: var(--overlay-inset);
   right: var(--overlay-inset);
@@ -218,9 +219,9 @@
 .insp-close {
   width: 30px;
   height: 30px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-sm);
-  background: transparent;
+  background: var(--overlay-control-bg);
   color: var(--fg-muted);
   font-size: 18px;
   line-height: 1;
@@ -229,8 +230,8 @@
 }
 .insp-close:hover {
   color: var(--fg);
-  border-color: var(--line-strong);
-  background: var(--bg-elev-2);
+  border-color: var(--fg-muted);
+  background: var(--overlay-control-bg-hover);
 }
 
 /* ---- Tabs ---------------------------------------------------------------- */
@@ -571,9 +572,9 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-pill);
-  background: var(--bg-elev-2);
+  background: var(--overlay-control-bg);
   color: var(--fg);
   font: 600 var(--fs-sm) / 1 var(--font-body);
   padding: 8px 14px;
@@ -582,8 +583,8 @@
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .insp-btn:hover:not(:disabled) {
-  background: var(--bg-elev-3);
-  border-color: var(--line-strong);
+  background: var(--overlay-control-bg-hover);
+  border-color: var(--fg-muted);
 }
 .insp-btn:disabled {
   opacity: 0.5;
@@ -635,9 +636,9 @@
   display: grid;
   gap: 10px;
   padding: 18px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-lg);
-  background: var(--bg-elev-2);
+  background: var(--overlay-raised);
   box-shadow: var(--shadow-md);
   color: var(--fg);
 }
@@ -670,9 +671,9 @@
 .insp .header-btn,
 .insp .mini-btn {
   appearance: none;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-pill);
-  background: var(--bg-elev-2);
+  background: var(--overlay-control-bg);
   color: var(--fg);
   font: 500 var(--fs-xs) / 1 var(--font-body);
   padding: 6px 10px;
@@ -1324,9 +1325,9 @@
   min-width: 190px;
   display: grid;
   padding: 4px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-md);
-  background: var(--bg-elev-2);
+  background: var(--overlay-raised);
   box-shadow: var(--shadow-md);
 }
 .insp-menu-list button {
@@ -1591,7 +1592,7 @@
 .run-data-modes {
   display: inline-flex;
   justify-self: start;
-  border: 1px solid var(--line);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-sm);
   overflow: hidden;
   background: var(--bg-input);
