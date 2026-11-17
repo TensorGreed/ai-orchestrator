@@ -311,7 +311,8 @@ function GuardProfileEditor({
       setIssues([]);
       setError(null);
       setNote("");
-      setMessage(response.changed ? `Saved as version ${response.version.version}` : "No changes to save");
+      const savedText = response.changed ? `Saved as version ${response.version.version}` : "No changes to save";
+      setMessage(response.warnings?.length ? `${savedText}. ${response.warnings.join(". ")}.` : savedText);
       await load();
       onChanged(profileId);
     } catch (err) {

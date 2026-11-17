@@ -4540,6 +4540,7 @@ export class SqliteStore implements Store {
     // v76 — content redaction maps (sealed) and the rule set of a content rules toolset member.
     ensureContentRedactionSchema(this.db);
     this.ensureColumn("mcp_toolset_members", "rule_set_id", "TEXT");
+    this.ensureColumn("content_redactions", "version", "INTEGER NOT NULL DEFAULT 0");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -11751,6 +11752,9 @@ export class SqliteStore implements Store {
   putContentRedaction(...args: Parameters<ContentRedactionStore["putContentRedaction"]>) { return this.contentRedactions.putContentRedaction(...args); }
   getContentRedaction(...args: Parameters<ContentRedactionStore["getContentRedaction"]>) { return this.contentRedactions.getContentRedaction(...args); }
   deleteExpiredContentRedactions(...args: Parameters<ContentRedactionStore["deleteExpiredContentRedactions"]>) { return this.contentRedactions.deleteExpiredContentRedactions(...args); }
+  listContentRedactions(...args: Parameters<ContentRedactionStore["listContentRedactions"]>) { return this.contentRedactions.listContentRedactions(...args); }
+  writeContentRedactionIfVersion(...args: Parameters<ContentRedactionStore["writeContentRedactionIfVersion"]>) { return this.contentRedactions.writeContentRedactionIfVersion(...args); }
+  deleteContentRedaction(...args: Parameters<ContentRedactionStore["deleteContentRedaction"]>) { return this.contentRedactions.deleteContentRedaction(...args); }
 
   private aiGatewayStore?: AiGatewayStore;
   private get aiGateway(): AiGatewayStore {

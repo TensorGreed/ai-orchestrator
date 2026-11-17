@@ -143,6 +143,7 @@ export const SUBJECT_EXPORT_NOT_COVERED = [
   "Usage and cost events",
   "Signed run manifests already generated (they hold rendered prompts; export them per run as audit bundles)",
   "Knowledge bases (ingested documents)",
+  "Redaction maps of the content rules tools and run placeholder books (sealed, expire within CONTENT_REDACTION_TTL_SECONDS; a deletion removes those holding the value)",
   "Backups already written, model providers and MCP servers (outside this deployment)"
 ];
 
@@ -188,6 +189,10 @@ interface DeletionState {
   deleted: Partial<Record<SubjectRowKind, number>>;
   usageRowsCleared: number;
   vaultTokensDeleted: number;
+  /** v76 — redaction maps (gateway redactions, run placeholder books) that held the person's value, deleted. */
+  redactionMapsDeleted: number;
+  /** Whether the redaction maps were scanned (once per deletion). */
+  redactionsDone: boolean;
   skipped: number;
   /** Tokens seen in rows that were deleted, and in rows a hold keeps (never deleted while held). */
   tokens: string[];
@@ -219,6 +224,11 @@ export interface SubjectRequestServiceOptions {
   matcher: (query: ReplayFindSubjectQuery) => Promise<{ classesTried: string[]; match: (row: SubjectTextRow) => ReplayFindSubjectMatch | null }>;
   /** A reversible token's original value, or null (the token vault). */
   revealToken?: (token: string) => Promise<string | null>;
+  /**
+   * v76 — what a sealed redaction map holds: the original values of its placeholders and the vault tokens it issued;
+   * null when it cannot be opened. Without it, redaction maps are left to their expiry.
+   */
+  openRedactionMap?: (sealed: string) => { values: string[]; tokens: string[] } | null;
   instanceId: string;
   isLeader: () => boolean;
   dueDays: number;
@@ -394,6 +404,8 @@ function readDeletion(raw: Record<string, unknown>): DeletionState {
     deleted: raw.deleted && typeof raw.deleted === "object" ? (raw.deleted as Partial<Record<SubjectRowKind, number>>) : {},
     usageRowsCleared: numberOf(raw.usageRowsCleared),
     vaultTokensDeleted: numberOf(raw.vaultTokensDeleted),
+    redactionMapsDeleted: numberOf(raw.redactionMapsDeleted),
+    redactionsDone: raw.redactionsDone === true,
     skipped: numberOf(raw.skipped),
     tokens: Array.isArray(raw.tokens) ? raw.tokens.map(String) : [],
     heldTokens: Array.isArray(raw.heldTokens) ? raw.heldTokens.map(String) : [],
@@ -702,6 +714,8 @@ export class SubjectRequestService {
       deleted: {},
       usageRowsCleared: 0,
       vaultTokensDeleted: 0,
+      redactionMapsDeleted: 0,
+      redactionsDone: false,
       skipped: 0,
       tokens: [],
       heldTokens: [],
@@ -1421,6 +1435,34 @@ export class SubjectRequestService {
         }
       }
 
+      // v76 — redaction maps holding the person's value: a run's placeholder book (its history holds only placeholders,
+      // so the search cannot find the run) and the maps of gateway redactions. They are linked by what they hold, so
+      // each unexpired map is opened and checked; its vault tokens go to the token check below. The tokens are saved
+      // before the maps go, so a restart in between loses none.
+      if (!deletion.redactionsDone && this.options.openRedactionMap && initial.subjectKind !== "staff") {
+        const subject = normalizeSubjectValue(value);
+        const doomed: string[] = [];
+        let afterId: string | null = null;
+        for (;;) {
+          const page = await store.listContentRedactions({ afterId, limit: 200, now: this.now().toISOString() });
+          if (page.length === 0) break;
+          for (const row of page) {
+            const map = this.options.openRedactionMap(row.entriesSealed);
+            if (!map) continue;
+            for (const token of map.tokens) tokens.add(token);
+            if (map.values.some((original) => normalizeSubjectValue(original) === subject)) doomed.push(row.id);
+          }
+          afterId = page[page.length - 1]!.id;
+          if (page.length < 200) break;
+          await yieldToEventLoop();
+        }
+        deletion.tokens = [...tokens];
+        if (!(await save())) return;
+        for (const id of doomed) if (await store.deleteContentRedaction(id)) deletion.redactionMapsDeleted += 1;
+        deletion.redactionsDone = true;
+        if (!(await save())) return;
+      }
+
       // The vault entries of the person's own values (never a token a held row still holds, nor another person's).
       if (tokens.size > 0 && this.options.revealToken) {
         const subject = normalizeSubjectValue(value);
@@ -1501,6 +1543,7 @@ export class SubjectRequestService {
           deleted: deletion.deleted,
           usageRowsCleared: deletion.usageRowsCleared,
           vaultTokensDeleted: deletion.vaultTokensDeleted,
+          redactionMapsDeleted: deletion.redactionMapsDeleted,
           skipped: deletion.skipped,
           deferred: deferredCount({ deferred }),
           waitingForRuns: waitingCount({ deferred }),
@@ -1572,6 +1615,7 @@ function deletionView(record: SubjectRequestRecord, deletion: DeletionState): Su
     deleted: deletion.deleted,
     usageRowsCleared: deletion.usageRowsCleared,
     vaultTokensDeleted: deletion.vaultTokensDeleted,
+    redactionMapsDeleted: deletion.redactionMapsDeleted,
     deferred: deferredCount(record),
     waitingForRuns: waitingCount(record),
     skipped: deletion.skipped,

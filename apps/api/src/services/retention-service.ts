@@ -197,6 +197,22 @@ function tableStep(
   };
 }
 
+/**
+ * v76 — redaction maps (`content_redactions`): each row ends at its own `expires_at`, at most `ttlSeconds` after it was
+ * written, so the step deletes what has expired by now whatever the cutoff; its days are the longest a row can live.
+ */
+export function redactionStep(store: Pick<Store, "deleteExpiredContentRedactions">, ttlSeconds: number, now: () => Date = () => new Date()): RetentionStep {
+  return {
+    class: "redactions",
+    setting: "CONTENT_REDACTION_TTL_SECONDS",
+    days: () => Math.max(1, Math.ceil(ttlSeconds / 86_400)),
+    async run({ limit }) {
+      const deleted = await store.deleteExpiredContentRedactions(now().toISOString(), limit);
+      return { deleted, capped: deleted >= limit };
+    }
+  };
+}
+
 export class RetentionService {
   private readonly steps = new Map<RetentionPurgeClass, RetentionStep>();
   private readonly now: () => Date;

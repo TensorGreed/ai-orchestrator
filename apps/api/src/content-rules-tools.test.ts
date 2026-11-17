@@ -415,4 +415,22 @@ describe("content rules tools on the MCP gateway", () => {
     for (const classes of perVerdict.values()) expect(new Set(classes).size).toBe(classes.length);
     expect(rows.length).toBe(perVerdict.size);
   });
+
+  it("saves reveal rules naming unknown gateway clients with a warning, so export and import still work", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    const known = await call(fixture.admin, "PUT", "/api/guard/profiles/pii", { document: ruleSet("pii", { reveal: { rules: [{ dataClasses: ["email"], subjects: { gatewayClients: [fixture.client.id] } }] } }) });
+    expect(known.statusCode).toBe(200);
+    expect(known.json<{ warnings?: string[] }>().warnings).toBeUndefined();
+    const unknown = await call(fixture.admin, "PUT", "/api/guard/profiles/pii", {
+      document: ruleSet("pii", { reveal: { rules: [{ dataClasses: ["email"], subjects: { gatewayClients: [fixture.client.id, "mcpc_elsewhere"] } }] } })
+    });
+    expect(unknown.statusCode).toBe(200);
+    expect(unknown.json<{ warnings?: string[] }>().warnings).toEqual([expect.stringContaining("'mcpc_elsewhere'")]);
+    const imported = await call(fixture.admin, "POST", "/api/guard/profiles/import", {
+      text: JSON.stringify(ruleSet("imported", { reveal: { rules: [{ dataClasses: ["email"], subjects: { gatewayClients: ["mcpc_elsewhere"] } }] } }))
+    });
+    expect(imported.statusCode).toBe(201);
+    expect(imported.json<{ warnings?: string[] }>().warnings).toHaveLength(1);
+  });
 });

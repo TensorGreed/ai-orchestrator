@@ -28,6 +28,8 @@ export interface ContentRedactionRecord {
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
+  /** Write count of the row (conditional writes); 0 when first written. */
+  version?: number;
 }
 
 export interface ContentRedactionStore {
@@ -37,6 +39,16 @@ export interface ContentRedactionStore {
   getContentRedaction(id: string, now: string): Promise<ContentRedactionRecord | null>;
   /** Removes maps that expired before `now` (at most `limit`); resolves with how many went. */
   deleteExpiredContentRedactions(now: string, limit?: number): Promise<number>;
+  /**
+   * A conditional write: with `expectedVersion` null, inserts the map only when no unexpired row has its id; otherwise
+   * replaces its contents only while the row is still at that version. Resolves with the row's new version, or null
+   * when another writer got there first (the caller reloads and merges).
+   */
+  writeContentRedactionIfVersion(record: ContentRedactionRecord, expectedVersion: number | null): Promise<number | null>;
+  /** Unexpired maps after `afterId` in id order, at most `limit` (a data-subject deletion pages through them). */
+  listContentRedactions(input: { afterId: string | null; limit: number; now: string }): Promise<ContentRedactionRecord[]>;
+  /** Removes one map; resolves with whether it was there. */
+  deleteContentRedaction(id: string): Promise<boolean>;
 }
 
 type Row = Record<string, unknown>;
@@ -73,7 +85,8 @@ function mapRow(row: Row): ContentRedactionRecord {
     classes: classesOf(row.classes_json),
     createdAt: str(row.created_at),
     updatedAt: str(row.updated_at),
-    expiresAt: str(row.expires_at)
+    expiresAt: str(row.expires_at),
+    version: Number(row.version ?? 0)
   };
 }
 
@@ -114,7 +127,40 @@ export function createContentRedactionSqlStore(exec: ContentRedactionSqlExecutor
       const rows = await exec.all(`SELECT * FROM content_redactions WHERE id = ? AND expires_at > ?`, [id, now]);
       return rows[0] ? mapRow(rows[0]) : null;
     },
-    deleteExpiredContentRedactions: deleteExpired
+    deleteExpiredContentRedactions: deleteExpired,
+    async writeContentRedactionIfVersion(record, expectedVersion) {
+      await deleteExpired(record.updatedAt);
+      if (expectedVersion === null) {
+        // An expired row of the same id is gone first, so it never blocks a new book.
+        await exec.run(`DELETE FROM content_redactions WHERE id = ? AND expires_at <= ?`, [record.id, record.updatedAt]);
+        const inserted = await exec.run(
+          `INSERT INTO content_redactions (id, scope, client_id, toolset_id, project_id, execution_id, entries_sealed, entry_count, classes_json, created_at, updated_at, expires_at, version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            record.id, record.scope, record.clientId, record.toolsetId, record.projectId, record.executionId, record.entriesSealed, record.entryCount,
+            JSON.stringify([...new Set(record.classes)].sort()), record.createdAt, record.updatedAt, record.expiresAt
+          ]
+        );
+        return inserted > 0 ? 1 : null;
+      }
+      const updated = await exec.run(
+        `UPDATE content_redactions SET entries_sealed = ?, entry_count = ?, classes_json = ?, updated_at = ?, expires_at = ?, version = version + 1
+         WHERE id = ? AND version = ? AND expires_at > ?`,
+        [record.entriesSealed, record.entryCount, JSON.stringify([...new Set(record.classes)].sort()), record.updatedAt, record.expiresAt, record.id, expectedVersion, record.updatedAt]
+      );
+      return updated > 0 ? expectedVersion + 1 : null;
+    },
+    async listContentRedactions({ afterId, limit, now }) {
+      const rows = await exec.all(
+        `SELECT * FROM content_redactions WHERE expires_at > ? AND id > ? ORDER BY id LIMIT ?`,
+        [now, afterId ?? "", Math.max(1, Math.min(1000, Math.floor(limit)))]
+      );
+      return rows.map(mapRow);
+    },
+    async deleteContentRedaction(id) {
+      return (await exec.run(`DELETE FROM content_redactions WHERE id = ?`, [id])) > 0;
+    }
   };
 }
 
@@ -131,7 +177,8 @@ export const SQLITE_CONTENT_REDACTION_SCHEMA = `
     classes_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    expires_at TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS idx_content_redactions_expires ON content_redactions(expires_at);
   CREATE INDEX IF NOT EXISTS idx_content_redactions_project ON content_redactions(project_id);

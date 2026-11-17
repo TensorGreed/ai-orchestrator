@@ -2000,7 +2000,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       const refusal = !decision.allowed
         ? (decision.message ?? `MCP tool '${tool.tool}' is blocked by policy.`)
         : decision.approval
-          ? `MCP tool '${tool.tool}' needs an approval under rule ${decision.approval.ruleName ?? decision.approval.ruleId}; content rules tools cannot wait for one.`
+          ? `MCP tool '${tool.tool}' needs an approval under rule ${decision.approval.ruleName ?? decision.approval.ruleId}, and content rules tools do not support approval rules: the call is refused. Ask an admin to allow or deny this tool instead.`
           : null;
       if (refusal) {
         await deps.auditRaw({

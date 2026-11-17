@@ -95,8 +95,9 @@ matches are left out of the export and counted in its manifest (`possibleMatches
 **Not covered** (the manifest lists these too): logs, metrics, traces and log-streaming destinations; the audit log (a
 staff export lists the person's own entries); tool-call telemetry and rule events (they hold summaries and masked
 evidence only); usage and cost events; signed run manifests already generated (they hold rendered prompts; an
-[audit bundle](./audit-bundles.md) exports one run's); knowledge bases; backups already written; model providers and MCP
-servers.
+[audit bundle](./audit-bundles.md) exports one run's); knowledge bases; redaction maps of the
+[content rules tools](../product/content-rules-tools.md#retention-and-data-subject-requests) and run placeholder books
+(sealed, short-lived; a deletion removes them, see below); backups already written; model providers and MCP servers.
 
 ### How it runs
 
@@ -162,6 +163,7 @@ run that was still stopping.
 | Agent memory session | The session's messages, its artifacts, its cached tool results (the session tool cache) and its subject references. |
 | Agent memory artifact | The artifact. |
 | Golden or captured run, golden-set case, eval or replay result | The row, as the data-subject lookup deletes it. Release-gate jobs whose evidence it removed are marked stale. |
+| Redaction maps | Every unexpired redaction map that holds the person's value: run placeholder books (a run's history holds only `[EMAIL_1.K3F9QX]`-style placeholders, so the search cannot find the run itself) and the maps of the gateway's [content rules tools](../product/content-rules-tools.md#retention-and-data-subject-requests). Each map is opened and compared; the vault tokens a map issued go to the token check below. A deleted run takes its own placeholder book. |
 | Reversible tokens | The vault entries of tokens that appear in the deleted rows and stand for **this person's** value. A later reveal of such a token finds nothing. Tokens of other people's values stay. While any legal hold is active the entries wait (the same token may stand in a held row the request did not find) and are deleted when the hold is released. |
 
 ### Staff members

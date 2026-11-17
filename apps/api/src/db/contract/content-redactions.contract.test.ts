@@ -62,6 +62,31 @@ describeStoreContract("store contract: content redaction maps", (ctx) => {
     expect((await store.getContentRedaction("red_new_aaaaaaaaaaaaaaaaaa", "2026-11-17T11:30:00.000Z"))?.scope).toBe("gateway");
   });
 
+  it("pages through unexpired maps in id order and deletes one by id", async () => {
+    const store = ctx.store();
+    for (const id of ["red_c", "red_a", "red_b"]) await store.putContentRedaction(record({ id }));
+    await store.putContentRedaction(record({ id: "red_0", expiresAt: NOW }));
+    const first = await store.listContentRedactions({ afterId: null, limit: 2, now: NOW });
+    expect(first.map((row) => row.id)).toEqual(["red_a", "red_b"]);
+    expect((await store.listContentRedactions({ afterId: "red_b", limit: 2, now: NOW })).map((row) => row.id)).toEqual(["red_c"]);
+    expect(await store.deleteContentRedaction("red_b")).toBe(true);
+    expect(await store.deleteContentRedaction("red_b")).toBe(false);
+    expect((await store.listContentRedactions({ afterId: null, limit: 10, now: NOW })).map((row) => row.id)).toEqual(["red_a", "red_c"]);
+  });
+
+  it("writes conditionally on the version: one insert wins, a stale update loses, an expired row never blocks", async () => {
+    const store = ctx.store();
+    const run = record({ id: "run:exec-9", scope: "run", clientId: null, toolsetId: null, executionId: "exec-9" });
+    expect(await store.writeContentRedactionIfVersion(run, null)).toBe(1);
+    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.second" }, null)).toBeNull();
+    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.two" }, 1)).toBe(2);
+    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.stale" }, 1)).toBeNull();
+    expect(await store.getContentRedaction("run:exec-9", NOW)).toMatchObject({ entriesSealed: "v1.two", version: 2 });
+    const later = "2026-11-17T12:00:00.000Z";
+    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.fresh", updatedAt: later, expiresAt: "2026-11-17T13:00:00.000Z" }, null)).toBe(1);
+    expect((await store.getContentRedaction("run:exec-9", later))?.entriesSealed).toBe("v1.fresh");
+  });
+
   it("keeps a content rules toolset member with its rule set", async () => {
     const store = ctx.store();
     const toolset = await store.createMcpToolset({

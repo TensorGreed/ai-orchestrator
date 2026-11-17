@@ -78,16 +78,24 @@ export async function storeRedactionMap(
   return record;
 }
 
+/** How often a book write that lost a race reloads and tries again before it gives up (fail closed). */
+export const PLACEHOLDER_BOOK_WRITE_ATTEMPTS = 5;
+
 /**
  * A workflow run's placeholder book: read from its row on first use (a run resumed on another instance finds what it
- * wrote before), and written back after each new placeholder, before the placeholder is used. A write that fails takes
- * the new placeholder back and throws (the rule set's fallback then applies). Calls are serialised.
+ * wrote before), and written back after each new placeholder, before the placeholder is used. Writes are conditional on
+ * the row's version: a writer that lost a race (another instance writing the same run's book) reloads the row, which
+ * holds everything both wrote, and assigns again from there, so no mapping is ever overwritten. A write that still fails
+ * takes the new placeholder back and throws (the rule set's fallback then applies). A placeholder this instance does not
+ * know is looked up in the row once more before it is treated as unknown. Calls are serialised per instance.
  */
 export class PersistedPlaceholderBook implements PlaceholderBook {
   private inner: InMemoryPlaceholderBook | undefined;
   /** A new book gets a random tag, so placeholders from outside the run never match the ones it issues. */
   private saved: PlaceholderBookState = { entries: [], reserved: [], tag: newPlaceholderTag((size) => new Uint8Array(randomBytes(size))) };
   private createdAt: string | undefined;
+  /** The row's version as last read or written; null: no row yet. */
+  private version: number | null = null;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -104,18 +112,23 @@ export class PersistedPlaceholderBook implements PlaceholderBook {
     return next;
   }
 
-  private async load(): Promise<InMemoryPlaceholderBook> {
-    if (this.inner) return this.inner;
+  /** Reads the row into the book (always, when `fresh`; else only the first time). */
+  private async load(fresh = false): Promise<InMemoryPlaceholderBook> {
+    if (this.inner && !fresh) return this.inner;
     const row = await this.store.getContentRedaction(this.owner.id, this.clock().toISOString());
     // Another owner's row under the same id is never read (ids are per run and project).
     if (row && row.scope === this.owner.scope && row.projectId === this.owner.projectId) {
+      this.version = row.version ?? 0;
+      this.createdAt = row.createdAt;
       try {
         this.saved = openRedactionMap(this.sealer, row.entriesSealed).book;
-        this.createdAt = row.createdAt;
       } catch {
-        // Sealed under another master key or damaged: its placeholders cannot be turned back, and a new one starts
-        // (with the fresh tag, so the old placeholders are never reissued).
+        // Sealed under another master key or damaged: its placeholders cannot be turned back. The next write replaces
+        // the row (at its version) with a book under the fresh tag, so the old placeholders are never reissued.
+        this.saved = { entries: [], reserved: [], tag: newPlaceholderTag((size) => new Uint8Array(randomBytes(size))) };
       }
+    } else if (!row) {
+      this.version = null;
     }
     this.inner = new InMemoryPlaceholderBook(this.saved);
     return this.inner;
@@ -123,25 +136,52 @@ export class PersistedPlaceholderBook implements PlaceholderBook {
 
   async assign(dataClass: GuardDataClass, value: string, reserved?: ReadonlySet<string>): Promise<string> {
     return await this.serial(async () => {
-      const book = await this.load();
-      const assigned = book.assignNow(String(dataClass), value, reserved);
-      if (!assigned.changed) return assigned.placeholder;
-      const state = book.state();
-      try {
+      let book = await this.load();
+      for (let attempt = 1; ; attempt += 1) {
+        const assigned = book.assignNow(String(dataClass), value, reserved);
+        if (!assigned.changed) return assigned.placeholder;
+        const state = book.state();
         const now = this.clock();
-        const record = await storeRedactionMap(this.store, this.sealer, this.owner, { book: state, tokens: [] }, { now, ttlMs: this.ttlMs, ...(this.createdAt ? { createdAt: this.createdAt } : {}) });
-        this.createdAt = record.createdAt;
-        this.saved = state;
-      } catch (error) {
-        this.inner = new InMemoryPlaceholderBook(this.saved);
-        throw error;
+        const at = now.toISOString();
+        const record: ContentRedactionRecord = {
+          ...this.owner,
+          entriesSealed: sealRedactionMap(this.sealer, { book: state, tokens: [] }),
+          entryCount: state.entries.length,
+          classes: redactionClasses({ book: state, tokens: [] }),
+          createdAt: this.createdAt ?? at,
+          updatedAt: at,
+          expiresAt: new Date(now.getTime() + this.ttlMs).toISOString()
+        };
+        let written: number | null;
+        try {
+          written = await this.store.writeContentRedactionIfVersion(record, this.version);
+        } catch (error) {
+          this.inner = new InMemoryPlaceholderBook(this.saved);
+          throw error;
+        }
+        if (written !== null) {
+          this.version = written;
+          this.createdAt = record.createdAt;
+          this.saved = state;
+          return assigned.placeholder;
+        }
+        // Another writer got there first: start again from what the row holds now.
+        if (attempt >= PLACEHOLDER_BOOK_WRITE_ATTEMPTS) {
+          this.inner = new InMemoryPlaceholderBook(this.saved);
+          throw new Error("The run's placeholder book kept changing under concurrent writes; the placeholder was not issued");
+        }
+        book = await this.load(true);
       }
-      return assigned.placeholder;
     });
   }
 
   async lookup(placeholder: string): Promise<{ dataClass: string; value: string } | undefined> {
-    return await this.serial(async () => await (await this.load()).lookup(placeholder));
+    return await this.serial(async () => {
+      const known = await (await this.load()).lookup(placeholder);
+      if (known) return known;
+      // Another instance of the run may have issued it since this one last read the row.
+      return await (await this.load(true)).lookup(placeholder);
+    });
   }
 }
 

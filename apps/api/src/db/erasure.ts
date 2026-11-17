@@ -72,7 +72,7 @@ export interface ErasureStatement {
 }
 
 /**
- * A whole run, by execution id: its tool calls, rule events, MCP cassettes, approval requests, questions to the user,
+ * A whole run, by execution id: its tool calls, rule events, placeholder book (v76 content_redactions), MCP cassettes, approval requests, questions to the user,
  * queue jobs (and their dead letters), paused state, subject references and the history row. Usage rows are kept
  * with the person cleared (user id and email), so token and cost totals and budgets do not move.
  */
@@ -81,6 +81,7 @@ export function runErasureStatements(executionId: string): ErasureStatement[] {
   return [
     { sql: "DELETE FROM mcp_tool_calls WHERE execution_id = ?", params: id },
     { sql: "DELETE FROM guard_events WHERE execution_id = ?", params: id },
+    { sql: "DELETE FROM content_redactions WHERE execution_id = ?", params: id },
     { sql: "DELETE FROM mcp_cassettes WHERE execution_id = ?", params: id },
     { sql: "DELETE FROM approval_requests WHERE execution_id = ?", params: id },
     { sql: "DELETE FROM mcp_elicitations WHERE execution_id = ?", params: id },

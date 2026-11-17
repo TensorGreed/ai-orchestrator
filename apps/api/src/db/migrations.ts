@@ -3037,7 +3037,8 @@ export const MIGRATIONS: Migration[] = [
     // content_redactions: what a reversible redaction replaced, sealed with the master key (SecretService.sealValue,
     // purpose content-redaction-map): the redact tool's maps (scope 'gateway', bound to the client, toolset and
     // project scope that made them) and a run's placeholder book (scope 'run', id 'run:<executionId>'). Each row ends at
-    // expires_at; reads ignore expired rows and writes sweep them. mcp_toolset_members.rule_set_id: the rule set a
+    // expires_at; reads ignore expired rows and writes sweep them. `version` counts a run book's writes, so two writers
+    // of one book (a resumed run racing the original) never overwrite each other. mcp_toolset_members.rule_set_id: the rule set a
     // content_rules member detects with (NULL: the built-in detector defaults). Older builds skip that member kind.
     up: `
       CREATE TABLE IF NOT EXISTS content_redactions (
@@ -3052,7 +3053,8 @@ export const MIGRATIONS: Migration[] = [
         classes_json TEXT NOT NULL DEFAULT '[]',
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL,
-        expires_at TIMESTAMPTZ NOT NULL
+        expires_at TIMESTAMPTZ NOT NULL,
+        version INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_content_redactions_expires ON content_redactions(expires_at);
       CREATE INDEX IF NOT EXISTS idx_content_redactions_project ON content_redactions(project_id);

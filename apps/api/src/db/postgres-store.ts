@@ -1172,6 +1172,15 @@ export class PostgresStore implements Store {
   deleteExpiredContentRedactions(...args: Parameters<ContentRedactionStore["deleteExpiredContentRedactions"]>) {
     return this.contentRedactions.deleteExpiredContentRedactions(...args);
   }
+  listContentRedactions(...args: Parameters<ContentRedactionStore["listContentRedactions"]>) {
+    return this.contentRedactions.listContentRedactions(...args);
+  }
+  writeContentRedactionIfVersion(...args: Parameters<ContentRedactionStore["writeContentRedactionIfVersion"]>) {
+    return this.contentRedactions.writeContentRedactionIfVersion(...args);
+  }
+  deleteContentRedaction(...args: Parameters<ContentRedactionStore["deleteContentRedaction"]>) {
+    return this.contentRedactions.deleteContentRedaction(...args);
+  }
 
   // 13.2 (v75) — SCIM provisioning (postgres/scim.ts; setUserDisabled in postgres/auth.ts).
   private scimStore?: Omit<ScimStore, "setUserDisabled">;

@@ -54,6 +54,37 @@ describe("a run's placeholder book", () => {
     expect((await otherRun.assign("email", "ana@example.com")).slice(-8)).not.toBe(first.slice(-8));
   });
 
+  it("merges two writers of one run's book: a resumed run racing the original never loses or remaps a placeholder", async () => {
+    const { store, secrets } = await fixture();
+    const original = new PersistedPlaceholderBook(store, secrets, owner, 60_000);
+    const resumed = new PersistedPlaceholderBook(store, secrets, owner, 60_000);
+    // Both read the (empty) book before either writes.
+    expect(await original.lookup("[EMAIL_1]")).toBeUndefined();
+    expect(await resumed.lookup("[EMAIL_1]")).toBeUndefined();
+    const values = Array.from({ length: 12 }, (_, index) => `user${index}@example.com`);
+    const issued = await Promise.all(values.map((value, index) => (index % 2 === 0 ? original : resumed).assign("email", value)));
+    expect(new Set(issued).size).toBe(values.length);
+    // Every placeholder resolves to its own value through either writer and through a fresh reader.
+    const reader = new PersistedPlaceholderBook(store, secrets, owner, 60_000);
+    for (const [index, placeholder] of issued.entries()) {
+      for (const book of [original, resumed, reader]) expect(await book.lookup(placeholder)).toEqual({ dataClass: "email", value: values[index] });
+    }
+    // A value either writer already has keeps its placeholder on the other.
+    expect(await resumed.assign("email", values[0]!)).toBe(issued[0]);
+    expect(await original.assign("email", values[1]!)).toBe(issued[1]);
+  });
+
+  it("fails closed when the row keeps changing", async () => {
+    const { store, secrets } = await fixture();
+    const racing = {
+      getContentRedaction: (id: string, now: string) => store.getContentRedaction(id, now),
+      writeContentRedactionIfVersion: async () => null
+    } as unknown as Store;
+    const book = new PersistedPlaceholderBook(racing, secrets, owner, 60_000);
+    await expect(book.assign("email", "ana@example.com")).rejects.toThrow(/kept changing/);
+    expect(await book.lookup("[EMAIL_1]")).toBeUndefined();
+  });
+
   it("is unreadable once expired", async () => {
     const { store, secrets } = await fixture();
     let now = new Date("2026-11-17T10:00:00.000Z");

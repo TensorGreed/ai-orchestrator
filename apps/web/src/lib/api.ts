@@ -4472,11 +4472,12 @@ export async function fetchGuardProfile(id: string) {
 }
 
 export async function createGuardProfile(payload: { id?: string; document: Record<string, unknown>; note?: string }) {
-  return apiRequest<{ profile: GuardProfileSummary }>("/api/guard/profiles", { method: "POST", body: JSON.stringify(payload) });
+  return apiRequest<{ profile: GuardProfileSummary; warnings?: string[] }>("/api/guard/profiles", { method: "POST", body: JSON.stringify(payload) });
 }
 
 export async function updateGuardProfile(id: string, payload: { document: Record<string, unknown>; note?: string }) {
-  return apiRequest<{ version: GuardProfileVersionView; changed: boolean }>(`/api/guard/profiles/${encodeURIComponent(id)}`, {
+  // `warnings`: reveal rules naming gateway clients this deployment does not have (saved anyway).
+  return apiRequest<{ version: GuardProfileVersionView; changed: boolean; warnings?: string[] }>(`/api/guard/profiles/${encodeURIComponent(id)}`, {
     method: "PUT",
     body: JSON.stringify(payload)
   });
@@ -4501,7 +4502,7 @@ export function guardProfileExportUrl(id: string, version?: number): string {
 }
 
 export async function importGuardProfile(payload: { text: string; note?: string }) {
-  return apiRequest<{ profile: GuardProfileSummary; created: boolean; changed: boolean }>("/api/guard/profiles/import", {
+  return apiRequest<{ profile: GuardProfileSummary; created: boolean; changed: boolean; warnings?: string[] }>("/api/guard/profiles/import", {
     method: "POST",
     body: JSON.stringify(payload)
   });
