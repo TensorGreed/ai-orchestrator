@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { riskLevelOf, scanSensitiveText, type SensitiveScanRequest, type SensitiveScanSettings } from "@ai-orchestrator/guard-sdk";
 import { CONTENT_SCAN_LIMITS, type DocumentFinding, type DocumentRiskLevel } from "@ai-orchestrator/shared";
-import { lineLocator, locationLabel, type ExtractedDocument } from "./extract.js";
+import { csvFieldName, jsonPointerOf, lineLocator, locationLabel, type DocumentSegment, type ExtractedDocument } from "./extract.js";
 
 /**
  * Checks an extracted document's segments with a text scanner (the content rules data scan by default) and maps each
@@ -58,8 +58,23 @@ export async function scanExtractedDocument(document: ExtractedDocument, bytes: 
   const maxScore: Record<string, number> = {};
   const rewritten: string[] = [];
   let total = 0;
-  for (const segment of document.segments) {
+  // Pass one: every segment's findings. JSON keys and CSV headers that hold one are then never echoed in a location.
+  const allHits: DocumentTextFinding[][] = [];
+  const unsafeNames = new Set<string>();
+  for (const [index, segment] of document.segments.entries()) {
+    // Many small segments (CSV cells, JSON strings) are checked synchronously: give the event loop a turn now and then.
+    if (index > 0 && index % 500 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
     const hits = segment.text.length === 0 ? [] : [...(await options.scanner(segment.text))].sort((a, b) => a.start - b.start);
+    allHits.push(hits);
+    if (hits.length > 0 && (segment.where.key || (segment.where.kind === "csv" && segment.where.row === 1))) unsafeNames.add(segment.text);
+  }
+  const whereOf = (segment: DocumentSegment) => {
+    if (segment.where.kind === "json") return { ...segment.where, pointer: jsonPointerOf(segment.path, unsafeNames) };
+    const field = csvFieldName(segment.header, unsafeNames);
+    return field ? { ...segment.where, field } : segment.where;
+  };
+  for (const [index, segment] of document.segments.entries()) {
+    const hits = allHits[index] ?? [];
     let locate: ReturnType<typeof lineLocator> | undefined;
     for (const hit of hits) {
       total += 1;
@@ -68,7 +83,7 @@ export async function scanExtractedDocument(document: ExtractedDocument, bytes: 
       maxScore[hit.dataClass] = Math.max(maxScore[hit.dataClass] ?? 0, hit.score);
       if (findings.length < maxFindings) {
         if (segment.lines) locate ??= lineLocator(segment.text);
-        const where = { ...segment.where, ...(locate ? locate(hit.start) : {}) };
+        const where = { ...whereOf(segment), ...(locate ? locate(hit.start) : {}) };
         findings.push({ dataClass: hit.dataClass, score: hit.score, location: { ...where, label: locationLabel(where) }, maskedPreview: hit.preview });
       }
     }

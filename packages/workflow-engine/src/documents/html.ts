@@ -1,4 +1,5 @@
 import { Parser } from "htmlparser2";
+import { DocumentError } from "./errors.js";
 
 /**
  * HTML to text without a DOM and without running anything: a streaming tokenizer (htmlparser2) keeps the visible
@@ -49,6 +50,19 @@ export function normalizeExtractedText(text: string): string {
     .trim();
 }
 
+/**
+ * Structure limits. The tokenizer searches its open-element stack for every closing tag, so a page of deeply nested
+ * or never-closed elements costs time quadratic in its depth: past HTML_MAX_DEPTH open elements, or HTML_MAX_ELEMENTS
+ * elements in all, the page is refused rather than parsed for minutes.
+ */
+export const HTML_MAX_DEPTH = 256;
+export const HTML_MAX_ELEMENTS = 200_000;
+
+/** A tag name as a location may show it (anything else reads as "element"). */
+function tagLabel(name: string): string {
+  return /^[a-z][a-z0-9-]{0,15}$/.test(name) ? name : "element";
+}
+
 export function extractHtmlText(html: string, maxAttributes = 10_000): HtmlText {
   const visible: string[] = [];
   const hidden: string[] = [];
@@ -57,11 +71,15 @@ export function extractHtmlText(html: string, maxAttributes = 10_000): HtmlText 
   const stack: Array<{ name: string; skip: boolean; hide: boolean }> = [];
   let skipDepth = 0;
   let hideDepth = 0;
+  let elements = 0;
   const sink = () => (hideDepth > 0 ? hidden : visible);
 
   const parser = new Parser(
     {
       onopentag(name, attribs) {
+        elements += 1;
+        if (elements > HTML_MAX_ELEMENTS) throw new DocumentError("too_large", `The page has more than ${HTML_MAX_ELEMENTS} elements`);
+        if (stack.length >= HTML_MAX_DEPTH) throw new DocumentError("too_large", `The page nests elements more than ${HTML_MAX_DEPTH} deep`);
         const skip = SKIPPED.has(name);
         const hide = !skip && hides(attribs);
         stack.push({ name, skip, hide });
@@ -73,10 +91,10 @@ export function extractHtmlText(html: string, maxAttributes = 10_000): HtmlText 
         if (attributes.length < maxAttributes) {
           for (const attribute of TEXT_ATTRIBUTES) {
             const value = attribs[attribute]?.trim();
-            if (value) attributes.push({ tag: name, attribute, text: value });
+            if (value) attributes.push({ tag: tagLabel(name), attribute, text: value });
           }
           const value = attribs.value?.trim();
-          if (value && VALUE_TAGS.has(name)) attributes.push({ tag: name, attribute: "value", text: value });
+          if (value && VALUE_TAGS.has(name)) attributes.push({ tag: tagLabel(name), attribute: "value", text: value });
           const content = attribs.content?.trim();
           if (content && name === "meta") attributes.push({ tag: name, attribute: "content", text: content });
         }

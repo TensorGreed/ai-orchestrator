@@ -167,7 +167,16 @@ export class ContentDocumentScanService {
       firstByteTimeoutMs: limits.firstByteTimeoutMs,
       ...(scope.gateway ? { allowHost: scope.allowHost } : {})
     };
-    const fetched = await fetchDocument(url, fetchOptions);
+    let fetched: Awaited<ReturnType<typeof fetchDocument>>;
+    try {
+      fetched = await fetchDocument(url, fetchOptions);
+    } catch (error) {
+      // A gateway client learns that the address is refused, not what the deployment's outbound settings say.
+      if (scope.gateway && error instanceof DocumentError && error.code === "blocked_url") {
+        throw new DocumentError("blocked_url", "The URL cannot be fetched: its address is not allowed", error.reason);
+      }
+      throw error;
+    }
     return { bytes: fetched.bytes, mediaType: fetched.mediaType, source: { kind: "url", origin: fetched.origin, pathHash: fetched.pathHash } };
   }
 

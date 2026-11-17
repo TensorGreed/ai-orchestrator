@@ -214,12 +214,12 @@ interface Gateway {
   token: string;
 }
 
-async function gateway(env: Record<string, string> = {}, options: CreateAppOptions = {}, documents?: Record<string, unknown>): Promise<Gateway> {
+async function gateway(env: Record<string, string> = {}, options: CreateAppOptions = {}, documents?: Record<string, unknown>, toolsetExtra: Record<string, unknown> = {}): Promise<Gateway> {
   const context = await createTestContext(env, options);
   const call = caller(context);
   const admin = await login(context, "admin");
   expect((await call(admin, "POST", "/api/guard/profiles", { document: ruleSet("pii") })).statusCode).toBe(201);
-  const created = await call(admin, "POST", "/api/mcp/toolsets", { name: "Docs", projectId: "default", members: [{ kind: "content_rules", ruleSetId: "pii", ...(documents ? { documents } : {}) }] });
+  const created = await call(admin, "POST", "/api/mcp/toolsets", { name: "Docs", projectId: "default", members: [{ kind: "content_rules", ruleSetId: "pii", ...(documents ? { documents } : {}) }], ...toolsetExtra });
   expect(created.statusCode, created.body).toBe(201);
   const toolset = created.json<{ toolset: McpToolset }>().toolset;
   const client = await call(admin, "POST", "/api/mcp/clients", { name: "Doc agent", toolsetIds: [toolset.id], role: "builder" });
@@ -336,7 +336,7 @@ describe("the scan_document gateway tool", () => {
       return new Response(`<html><body><p>Mail ${EMAIL}</p><img alt="card ${CARD}"></body></html>`, { headers: { "content-type": "text/html" } });
     }) as typeof fetch;
     const resolver = async (host: string) => (host === "intranet.example.test" ? ["10.1.2.3"] : ["93.184.216.34"]);
-    const fixture = await gateway({ OUTBOUND_DENY_PRIVATE: "false" }, { documentScanNetwork: { resolver, fetchImpl } }, { enabled: true, allowUrls: true, allowedHosts: ["docs.example.test", "*.example.test", "127.0.0.1"] });
+    const fixture = await gateway({ OUTBOUND_DENY_PRIVATE: "false" }, { documentScanNetwork: { resolver, fetchImpl } }, { enabled: true, allowUrls: true, allowedHosts: ["docs.example.test", "*.example.test", "127.0.0.1"] }, { trackSessionLabels: true });
     const client = tools(fixture);
     const listed = (await client.list()).find((entry) => entry.name === "scan_document");
     expect(listed?.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: true });
@@ -353,6 +353,9 @@ describe("the scan_document gateway tool", () => {
     expect(JSON.stringify(audit)).toContain("https://docs.example.test");
     expect(JSON.stringify({ events, audit })).not.toContain("tok-123");
     expect(JSON.stringify({ events, audit })).not.toContain(EMAIL);
+    // A fetched page is outside content: the session carries untrusted_external from here on.
+    const raised = await testSql(fixture.context.store).all("SELECT metadata_json FROM audit_logs WHERE event_type = 'mcp_gateway.session_labels_raised'");
+    expect(JSON.stringify(raised)).toContain("untrusted_external");
 
     // Not on the list: refused before any request, audited as denied.
     const count = fetched.length;
@@ -362,10 +365,11 @@ describe("the scan_document gateway tool", () => {
     expect(JSON.stringify((await stored(fixture.context.store)).audit)).toContain('"denied"');
     // A listed host that resolves to a private address, a redirect into the private network, and a loopback literal:
     // all refused, although OUTBOUND_DENY_PRIVATE is false for nodes.
-    expect((await client.call("scan_document", { url: "http://intranet.example.test/secret" })).text).toMatch(/private/);
-    expect((await client.call("scan_document", { url: "https://docs.example.test/redirect" })).text).toMatch(/private/);
+    expect((await client.call("scan_document", { url: "http://intranet.example.test/secret" })).text).toMatch(/address is not allowed/);
+    expect((await client.call("scan_document", { url: "https://docs.example.test/redirect" })).text).toMatch(/address is not allowed/);
     const before = served.length;
-    expect((await client.call("scan_document", { url: `${base}/people.csv` })).text).toMatch(/loopback/);
+    expect((await client.call("scan_document", { url: `${base}/people.csv` })).text).toMatch(/address is not allowed/);
+    expect((await client.call("scan_document", { url: `${base}/people.csv` })).text).not.toMatch(/OUTBOUND/);
     expect(served.length).toBe(before);
     expect(fetched.some((entry) => entry.url.includes("intranet"))).toBe(false);
   });

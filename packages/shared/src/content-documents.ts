@@ -37,6 +37,8 @@ export const CONTENT_SCAN_LIMITS = {
   jsonMaxDepth: 64,
   jsonMaxNodes: 200_000,
   csvMaxRows: 100_000,
+  /** Each CSV cell is checked on its own; more cells than this are refused. */
+  csvMaxCells: 500_000,
   /** Findings listed per document (counts always cover all of them). */
   maxFindings: 1_000
 } as const;

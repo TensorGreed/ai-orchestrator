@@ -2045,8 +2045,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return rpcResult(request.id, toolError("Content rules could not process this call, so nothing was returned. Try again."));
     }
     if (!outcome.ok) return rpcResult(request.id, toolError(outcome.message));
-    const labels: Pick<DataLabels, "provenance" | "dataClasses"> =
-      outcome.restoredClasses.length > 0 ? { provenance: ["sensitive"], dataClasses: outcome.restoredClasses } : { provenance: [], dataClasses: [] };
+    // A document fetched from a URL is outside content, as a server tool's result is (its redacted text goes back).
+    const labels: Pick<DataLabels, "provenance" | "dataClasses"> = {
+      provenance: [...(outcome.externalContent ? (["untrusted_external"] as const) : []), ...(outcome.restoredClasses.length > 0 ? (["sensitive"] as const) : [])],
+      dataClasses: outcome.restoredClasses
+    };
     if (!(await noteResult(session, auth, toolset, tool.name, labels))) return rpcResult(request.id, toolError(MARK_WRITE_FAILED_MESSAGE));
     return rpcResult(request.id, { content: [{ type: "text", text: JSON.stringify(outcome.result, null, 2) }], structuredContent: outcome.result });
   };

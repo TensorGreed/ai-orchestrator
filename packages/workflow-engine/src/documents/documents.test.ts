@@ -3,8 +3,8 @@ import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DocumentError } from "./errors.js";
-import { decodeDocument, sniffKind } from "./sniff.js";
-import { extractHtmlText } from "./html.js";
+import { decodeDocument, looksLikeHtml, sniffKind } from "./sniff.js";
+import { extractHtmlText, HTML_MAX_DEPTH } from "./html.js";
 import { parseCsv } from "./csv.js";
 import { extractDocument } from "./extract.js";
 import { fetchDocument } from "./fetch.js";
@@ -103,9 +103,27 @@ describe("HTML", () => {
     expect(outcome.riskLevel).toBe("medium");
   });
 
-  it("parses deeply nested markup without recursion", () => {
-    const html = `${"<div>".repeat(50_000)}deep@example.com${"</div>".repeat(50_000)}`;
+  it("parses nested markup up to the depth limit", () => {
+    const depth = HTML_MAX_DEPTH - 1;
+    const html = `${"<div>".repeat(depth)}deep@example.com${"</div>".repeat(depth)}`;
     expect(extractHtmlText(html).visible).toBe("deep@example.com");
+  });
+
+  it("refuses deep or never-closed nesting quickly instead of parsing it in quadratic time", async () => {
+    for (const html of [`${"<div>".repeat(50_000)}x${"</div>".repeat(50_000)}`, `${"<b>".repeat(200_000)}${"</i>".repeat(200_000)}`]) {
+      const started = Date.now();
+      await expectDocumentError(() => extractHtmlText(html), "too_large");
+      expect(Date.now() - started).toBeLessThan(2_000);
+    }
+  });
+
+  it("sniffs HTML after many leading comments in linear time", () => {
+    const comments = "<!---->".repeat(5_000);
+    const started = Date.now();
+    expect(looksLikeHtml(`${comments}<!doctype html><p>x`)).toBe(true);
+    expect(looksLikeHtml(`${comments}x`)).toBe(false);
+    expect(looksLikeHtml(`${"<!--".repeat(40)}${"-".repeat(4_000)}`)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(500);
   });
 });
 
@@ -120,6 +138,17 @@ describe("JSON", () => {
     await expectDocumentError(() => extractDocument({ bytes: utf8(deep), mediaType: "application/json" }), "too_large");
     const wide = JSON.stringify(Array.from({ length: 50 }, (_, i) => i));
     await expectDocumentError(() => extractDocument({ bytes: utf8(wide), mediaType: "application/json", limits: { jsonMaxNodes: 10 } }), "too_large");
+  });
+
+  it("writes a key that holds a finding by position wherever it appears in a pointer", async () => {
+    const { outcome } = await scan(JSON.stringify({ "bob@example.com": { note: "c@example.com" } }), "application/json");
+    expect(outcome.findings.map((finding) => finding.location.label)).toEqual(["/{#0} (key)", "/{#0}/note"]);
+    expect(JSON.stringify(outcome.findings)).not.toContain("bob");
+  });
+
+  it("keeps both members when two keys redact to the same text", async () => {
+    const { outcome } = await scan(JSON.stringify({ "a@example.com": 1, "b@example.com": 2 }), "application/json", async () => "[EMAIL]");
+    expect(JSON.parse(outcome.redactedText!)).toEqual({ "[EMAIL]": 1, "[EMAIL] (2)": 2 });
   });
 
   it("redacts in place and keeps the shape", async () => {
@@ -142,6 +171,16 @@ describe("CSV", () => {
       { kind: "csv", row: 2, column: 2, field: "email", label: "row 2, column 2 (email)" },
       { kind: "csv", row: 3, column: 2, field: "email", label: "row 3, column 2 (email)" }
     ]);
+  });
+
+  it("never shows a header that holds a finding as a field name", async () => {
+    const { outcome } = await scan("id,ada@example.com\n1,bob@example.com\n", "text/csv");
+    expect(outcome.findings.map((finding) => finding.location.label)).toEqual(["row 1, column 2", "row 2, column 2"]);
+  });
+
+  it("refuses more cells than the limit", async () => {
+    await expectDocumentError(() => extractDocument({ bytes: utf8(`${",".repeat(20)}\n`.repeat(5)), mediaType: "text/csv", limits: { csvMaxCells: 50 } }), "too_large");
+    expect(() => parseCsv("a,b\nc,d\n", ",", 10, 3)).toThrow(DocumentError);
   });
 
   it("refuses more rows than the limit", async () => {

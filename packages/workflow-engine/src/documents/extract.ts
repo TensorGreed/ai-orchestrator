@@ -16,6 +16,7 @@ export interface DocumentLimits {
   jsonMaxDepth: number;
   jsonMaxNodes: number;
   csvMaxRows: number;
+  csvMaxCells: number;
 }
 
 export const DEFAULT_DOCUMENT_LIMITS: DocumentLimits = {
@@ -23,14 +24,26 @@ export const DEFAULT_DOCUMENT_LIMITS: DocumentLimits = {
   maxChars: CONTENT_SCAN_LIMITS.maxChars,
   jsonMaxDepth: CONTENT_SCAN_LIMITS.jsonMaxDepth,
   jsonMaxNodes: CONTENT_SCAN_LIMITS.jsonMaxNodes,
-  csvMaxRows: CONTENT_SCAN_LIMITS.csvMaxRows
+  csvMaxRows: CONTENT_SCAN_LIMITS.csvMaxRows,
+  csvMaxCells: CONTENT_SCAN_LIMITS.csvMaxCells
 };
+
+/** One step of a JSON path: an array index, or an object member (its key and position). */
+export interface JsonPathNode {
+  parent: JsonPathNode | null;
+  index: number;
+  key?: string;
+}
 
 export interface DocumentSegment {
   text: string;
   /** The location of the segment; for a line-based one, line and column are added per finding. */
   where: Omit<DocumentLocation, "label" | "line">;
   lines: boolean;
+  /** JSON: the path of the string (the pointer is written at scan time, once the keys themselves are checked). */
+  path?: JsonPathNode;
+  /** CSV: the header cell of the column (shown as the field name only when it is plain and holds no finding). */
+  header?: string;
 }
 
 export interface ExtractedDocument {
@@ -51,15 +64,26 @@ export interface ExtractedDocument {
 
 const NOT_CHECKED = "[not checked: past the size limit]";
 
-/** A JSON pointer segment (RFC 6901), or `{#n}` (the member's position) for a key that is not a plain name. */
-function pointerToken(key: string, index: number): string {
-  return /^[A-Za-z_$][\w$-]{0,63}$/.test(key) ? key.replace(/~/g, "~0").replace(/\//g, "~1") : `{#${index}}`;
+const PLAIN_KEY = /^[A-Za-z_$][\w$-]{0,63}$/;
+const PLAIN_HEADER = /^[A-Za-z][\w .-]{0,47}$/;
+
+/**
+ * The JSON pointer of a path. A key is written by name (RFC 6901 escaped) only when it is a plain name and `unsafe`
+ * does not hold it (a key with a finding); otherwise by position, `{#n}`, so a value used as a key never appears.
+ */
+export function jsonPointerOf(path: JsonPathNode | null | undefined, unsafe: ReadonlySet<string> = new Set()): string {
+  const tokens: string[] = [];
+  for (let node = path ?? null; node; node = node.parent) {
+    if (node.key === undefined) tokens.push(String(node.index));
+    else tokens.push(PLAIN_KEY.test(node.key) && !unsafe.has(node.key) ? node.key.replace(/~/g, "~0").replace(/\//g, "~1") : `{#${node.index}}`);
+  }
+  return tokens.length === 0 ? "/" : `/${tokens.reverse().join("/")}`;
 }
 
-/** A CSV header cell as a field name, when it is short and plain (a header that holds data is never echoed). */
-function fieldName(header: string | undefined): string | undefined {
+/** A CSV header cell as a field name, when it is short and plain and `unsafe` does not hold it. */
+export function csvFieldName(header: string | undefined, unsafe: ReadonlySet<string> = new Set()): string | undefined {
   const value = header?.trim();
-  return value && /^[A-Za-z][\w .-]{0,47}$/.test(value) ? value : undefined;
+  return value && PLAIN_HEADER.test(value) && !unsafe.has(header!) ? value : undefined;
 }
 
 interface JsonWalk {
@@ -72,30 +96,30 @@ interface JsonWalk {
 function walkJson(value: unknown, limits: DocumentLimits): JsonWalk {
   const segments: DocumentSegment[] = [];
   let nodes = 0;
-  type Step = { type: "value"; value: unknown; pointer: string; depth: number } | { type: "key"; key: string; pointer: string };
-  const visit: Step[] = [{ type: "value", value, pointer: "", depth: 0 }];
+  type Step = { type: "value"; value: unknown; path: JsonPathNode | null; depth: number } | { type: "key"; key: string; path: JsonPathNode };
+  const visit: Step[] = [{ type: "value", value, path: null, depth: 0 }];
   while (visit.length > 0) {
     const step = visit.pop()!;
     nodes += 1;
     if (nodes > limits.jsonMaxNodes) throw new DocumentError("too_large", `The JSON has more than ${limits.jsonMaxNodes} values`);
     if (step.type === "key") {
-      segments.push({ text: step.key, where: { kind: "json", pointer: step.pointer, key: true }, lines: false });
+      segments.push({ text: step.key, where: { kind: "json", key: true }, lines: false, path: step.path });
       continue;
     }
-    const { value: node, pointer, depth } = step;
+    const { value: node, path, depth } = step;
     if (depth > limits.jsonMaxDepth) throw new DocumentError("too_large", `The JSON is nested deeper than ${limits.jsonMaxDepth} levels`);
     if (typeof node === "string") {
-      segments.push({ text: node, where: { kind: "json", pointer: pointer || "/" }, lines: false });
+      segments.push({ text: node, where: { kind: "json" }, lines: false, ...(path ? { path } : {}) });
     } else if (Array.isArray(node)) {
-      for (let index = node.length - 1; index >= 0; index -= 1) visit.push({ type: "value", value: node[index], pointer: `${pointer}/${index}`, depth: depth + 1 });
+      for (let index = node.length - 1; index >= 0; index -= 1) visit.push({ type: "value", value: node[index], path: { parent: path, index }, depth: depth + 1 });
     } else if (node && typeof node === "object") {
       const entries = Object.entries(node as Record<string, unknown>);
       // Pushed last first, so each key comes out just before its value: segment order is document order.
       for (let index = entries.length - 1; index >= 0; index -= 1) {
         const [key, item] = entries[index]!;
-        const memberPointer = `${pointer}/${pointerToken(key, index)}`;
-        visit.push({ type: "value", value: item, pointer: memberPointer, depth: depth + 1 });
-        visit.push({ type: "key", key, pointer: memberPointer });
+        const memberPath: JsonPathNode = { parent: path, index, key };
+        visit.push({ type: "value", value: item, path: memberPath, depth: depth + 1 });
+        visit.push({ type: "key", key, path: memberPath });
       }
     }
   }
@@ -110,7 +134,9 @@ function walkJson(value: unknown, limits: DocumentLimits): JsonWalk {
         if (node && typeof node === "object") {
           const out: Record<string, unknown> = {};
           for (const item of Object.values(node as Record<string, unknown>)) {
-            const name = next();
+            let name = next();
+            // Two keys redacted to the same text keep both members.
+            for (let suffix = 2; Object.prototype.hasOwnProperty.call(out, name); suffix += 1) name = `${name.replace(/ \(\d+\)$/, "")} (${suffix})`;
             // defineProperty: a `__proto__` key stays an own member instead of replacing the prototype.
             Object.defineProperty(out, name, { value: build(item), enumerable: true, writable: true, configurable: true });
           }
@@ -204,14 +230,14 @@ export function extractDocument(input: ExtractInput): ExtractedDocument {
 
   if (sniffed.kind === "csv") {
     const delimiter = csvDelimiter(decoded.text, declared.essence);
-    const rows = parseCsv(decoded.text, delimiter, limits.csvMaxRows);
+    const rows = parseCsv(decoded.text, delimiter, limits.csvMaxRows, limits.csvMaxCells);
     const header = rows[0] ?? [];
     const all: DocumentSegment[] = [];
     rows.forEach((row, rowIndex) => {
       row.forEach((cell, columnIndex) => {
         if (cell === "") return;
-        const field = rowIndex > 0 ? fieldName(header[columnIndex]) : undefined;
-        all.push({ text: cell, where: { kind: "csv", row: rowIndex + 1, column: columnIndex + 1, ...(field ? { field } : {}) }, lines: false });
+        const headerCell = rowIndex > 0 ? header[columnIndex] : undefined;
+        all.push({ text: cell, where: { kind: "csv", row: rowIndex + 1, column: columnIndex + 1 }, lines: false, ...(headerCell !== undefined ? { header: headerCell } : {}) });
       });
     });
     const covered = cover(all, limits.maxChars);

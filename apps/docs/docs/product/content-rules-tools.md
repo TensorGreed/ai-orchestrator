@@ -100,6 +100,8 @@ Arguments: `content_base64` (the document's bytes; `media_type` and `filename` a
 - send no cookies or credentials (a URL with a user name or password is refused);
 - obey the same size, time and concurrency limits as the rule set page, and one document scan at a time per client.
 
+A host on the list is trusted on any port and for both schemes, so list only hosts you would let an agent read. The URL itself, its path and query included, reaches the listed host: a client can send data there in a URL as it could with any other web request, so list hosts you control or trust, not hosts that accept arbitrary paths from anyone. A refused address is reported as not allowed, without the deployment's outbound settings. The result of a URL scan is outside content: on a toolset that tracks session labels it raises `untrusted_external`, as a server tool's result does.
+
 To give URL scanning to some clients only, put the member on a toolset of its own and scope those clients to it. Every call writes rule events (node `scan_document`, masked evidence only) and an audit entry `mcp_gateway.content_document_scan` with the client, the URL's origin and a hash of its path and query, the size, the type and the counts per class; a host that is not on the list is audited as denied. Toolset changes record the hosts in `mcp_toolset.updated`. Migration v77 stores the switch (SQLite and Postgres).
 
 ## Placeholders in workflow runs

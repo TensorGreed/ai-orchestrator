@@ -104,7 +104,7 @@ export interface ContentToolCall {
 }
 
 export type ContentToolOutcome =
-  | { ok: true; result: Record<string, unknown>; summary: string; restoredClasses: string[] }
+  | { ok: true; result: Record<string, unknown>; summary: string; restoredClasses: string[]; /** The result carries content fetched from outside (a URL). */ externalContent?: boolean }
   | { ok: false; message: string };
 
 /** A tool error the client can read (never a value). */
@@ -550,7 +550,7 @@ export class ContentRulesToolsService {
               ruleSet,
               action,
               loaded.source.kind === "url" ? "tool_result" : "tool_arguments",
-              outcome.findings.map((finding) => ({ dataClass: finding.dataClass, score: finding.score, evidence: finding.maskedPreview, spans: [], message: `${call.tool}: ${finding.dataClass} at ${finding.location.label}` })),
+              outcome.findings.map((finding) => ({ dataClass: finding.dataClass, score: finding.score, evidence: finding.maskedPreview, spans: [], message: `${call.tool}: ${finding.dataClass} in a ${finding.location.kind} document` })),
               outcome.countsByClass,
               outcome.maxScoreByClass
             )
@@ -567,7 +567,7 @@ export class ContentRulesToolsService {
             ...(style ? { redactStyle: style } : {})
           });
           const total = outcome.total;
-          return { ok: true, result: result as unknown as Record<string, unknown>, summary: `${total} finding${total === 1 ? "" : "s"}; risk ${result.riskLevel}`, restoredClasses: [] };
+          return { ok: true, result: result as unknown as Record<string, unknown>, summary: `${total} finding${total === 1 ? "" : "s"}; risk ${result.riskLevel}`, restoredClasses: [], ...(loaded.source.kind === "url" ? { externalContent: true } : {}) };
         })
       );
     } catch (error) {

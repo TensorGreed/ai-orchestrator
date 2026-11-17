@@ -70,8 +70,19 @@ function metaCharset(bytes: Uint8Array): string | undefined {
   return match?.[1];
 }
 
-function looksLikeHtml(head: string): boolean {
-  return /^\s*(?:<!--[\s\S]{0,500}?-->\s*)*<(?:!doctype\s+html|html[\s>])/i.test(head) || /<(?:html|head|body)[\s>]/i.test(head);
+/**
+ * True when the head starts (after whitespace and comments) with a doctype or an html tag, or holds an html, head or
+ * body tag. Comments are skipped with indexOf, never with a nested regex quantifier (a run of `<!---->` would make one
+ * backtrack exponentially).
+ */
+export function looksLikeHtml(head: string): boolean {
+  let rest = head.trimStart();
+  while (rest.startsWith("<!--")) {
+    const end = rest.indexOf("-->", 4);
+    if (end < 0) return false;
+    rest = rest.slice(end + 3).trimStart();
+  }
+  return /^<(?:!doctype\s+html|html[\s>])/i.test(rest) || /<(?:html|head|body)[\s>]/i.test(head);
 }
 
 export interface DecodedText {

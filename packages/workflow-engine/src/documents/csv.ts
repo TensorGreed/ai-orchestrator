@@ -2,15 +2,22 @@ import { DocumentError } from "./errors.js";
 
 /**
  * An RFC 4180 reader: quoted fields (with `""` escapes and line breaks inside quotes), CRLF or LF rows, and a chosen
- * delimiter. Linear in the text; refuses more than `maxRows` rows rather than read part of the file silently.
+ * delimiter. Linear in the text; refuses more than `maxRows` rows or `maxCells` cells rather than read part of the
+ * file silently.
  */
-export function parseCsv(text: string, delimiter: string, maxRows: number): string[][] {
+export function parseCsv(text: string, delimiter: string, maxRows: number, maxCells = Number.POSITIVE_INFINITY): string[][] {
   const rows: string[][] = [];
+  let cells = 0;
+  const countCell = () => {
+    cells += 1;
+    if (cells > maxCells) throw new DocumentError("too_large", `The CSV has more than ${maxCells} cells`);
+  };
   let row: string[] = [];
   let field = "";
   let quoted = false;
   let fieldStart = true;
   const pushRow = () => {
+    countCell();
     row.push(field);
     field = "";
     fieldStart = true;
@@ -35,6 +42,7 @@ export function parseCsv(text: string, delimiter: string, maxRows: number): stri
       quoted = true;
       fieldStart = false;
     } else if (char === delimiter) {
+      countCell();
       row.push(field);
       field = "";
       fieldStart = true;
