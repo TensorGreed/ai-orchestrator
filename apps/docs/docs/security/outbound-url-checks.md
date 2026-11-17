@@ -19,7 +19,7 @@ nodes.
 Document scans use the same checks: the rule set page's
 [Scan a document](/product/content-rules#scanning-documents) under this
 policy, and the MCP gateway's
-[scan_document](/product/content-rules-tools#scan_document) tool, which also
+[scan_document](/product/content-rules-tools#scan-document) tool, which also
 always refuses private, loopback and link-local addresses and fetches only
 from the hosts its toolset lists (on the scheme's default port unless the
 entry names one). Their fetch timeout covers DNS lookups, and a caller that

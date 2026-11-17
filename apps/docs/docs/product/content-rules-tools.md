@@ -13,7 +13,7 @@ An admin can add the **content rules tools** to an [MCP gateway](./mcp-gateway.m
 | `redact_sensitive_data` | Replaces sensitive data; reversible styles return a `redaction_id` | no (it keeps a map) |
 | `restore_sensitive_data` | Turns placeholders and vault tokens back, only as reveal rules allow the client | no |
 
-The tools are off by default. A toolset without the member lists none of them, and a deployment that never adds it sees no change. A fourth tool, [`scan_document`](#scan_document), checks whole documents; it has its own switch.
+The tools are off by default. A toolset without the member lists none of them, and a deployment that never adds it sees no change. A fourth tool, [`scan_document`](#scan-document), checks whole documents; it has its own switch.
 
 ## Turning them on
 
@@ -90,7 +90,7 @@ In the rule set editor this is the **Gateway client ids** field of **Add a revea
 
 An admin can also offer `scan_document` on a toolset with the content rules tools: tick **Also offer scan_document** under the toolset's content rules tools. It is off by default. Over the API the member gets `"documents": { "enabled": true }`. The tool checks a text, Markdown, HTML, JSON or CSV document the way [Scanning documents](./content-rules.md#scanning-documents) does on the rule set page, with the member's rule set (or a `rule_set_id` the toolset makes available), and returns findings with locations and masked previews, counts per class, a risk level and how the document was read. Its read-only hint is set. Nothing it reads is stored.
 
-Arguments: `content_base64` (the document's bytes; `media_type` and `filename` are optional, and the content decides the type), or `url` (below); `rule_set_id`, `entity_types` and `allow_list` as for the other tools (person names, locations and street addresses are found when `entity_types` names them or the rule set lists `data.entities`); `redact_style` (`placeholder`, `token`, `mask` or `hash`) to also get the document's text with findings replaced, with a `redaction_id` for `placeholder` and `token` that [restore_sensitive_data](#restore_sensitive_data) accepts like any other; and `ttl_seconds`.
+Arguments: `content_base64` (the document's bytes; `media_type` and `filename` are optional, and the content decides the type), or `url` (below); `rule_set_id`, `entity_types` and `allow_list` as for the other tools (person names, locations and street addresses are found when `entity_types` names them or the rule set lists `data.entities`); `redact_style` (`placeholder`, `token`, `mask` or `hash`) to also get the document's text with findings replaced, with a `redaction_id` for `placeholder` and `token` that [restore_sensitive_data](#restore-sensitive-data) accepts like any other; and `ttl_seconds`.
 
 **Fetching URLs** is a second switch, **Let scan_document fetch documents from URLs**, and needs a list of hosts (`"allowUrls": true, "allowedHosts": ["docs.example.com", "*.example.org"]`; `*.example.org` means its subdomains, not `example.org` itself). The tool then takes `url`, and its open-world hint is set. Fetches from the gateway:
 

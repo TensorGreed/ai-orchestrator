@@ -1,6 +1,6 @@
 ---
 title: "Workflow editor: palette, connections and validation"
-description: "The L2M visual workflow editor: the node palette, connections, node configuration, run data on the canvas and in the node inspector, import and export, flow patterns, validation."
+description: "The L2M workflow editor: node palette, connections, node configuration, run data on the canvas and in the inspector, import and export, validation."
 ---
 
 # Workflow Editor
