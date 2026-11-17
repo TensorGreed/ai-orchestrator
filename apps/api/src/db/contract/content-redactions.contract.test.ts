@@ -74,16 +74,24 @@ describeStoreContract("store contract: content redaction maps", (ctx) => {
     expect((await store.listContentRedactions({ afterId: null, limit: 10, now: NOW })).map((row) => row.id)).toEqual(["red_a", "red_c"]);
   });
 
-  it("writes conditionally on the version: one insert wins, a stale update loses, an expired row never blocks", async () => {
+  it("writes conditionally on the version: one insert wins, a stale update loses, an expired or deleted row never comes back", async () => {
     const store = ctx.store();
     const run = record({ id: "run:exec-9", scope: "run", clientId: null, toolsetId: null, executionId: "exec-9" });
-    expect(await store.writeContentRedactionIfVersion(run, null)).toBe(1);
+    const first = (await store.writeContentRedactionIfVersion(run, null))!;
+    expect(first).toBeGreaterThanOrEqual(1);
     expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.second" }, null)).toBeNull();
-    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.two" }, 1)).toBe(2);
-    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.stale" }, 1)).toBeNull();
-    expect(await store.getContentRedaction("run:exec-9", NOW)).toMatchObject({ entriesSealed: "v1.two", version: 2 });
+    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.two" }, first)).toBe(first + 1);
+    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.stale" }, first)).toBeNull();
+    expect(await store.getContentRedaction("run:exec-9", NOW)).toMatchObject({ entriesSealed: "v1.two", version: first + 1 });
+    // Deleted, then written again by another writer: a writer still holding the old version never matches the new row.
+    expect(await store.deleteContentRedaction("run:exec-9")).toBe(true);
+    const replaced = (await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.new-book" }, null))!;
+    expect(replaced).not.toBe(first + 1);
+    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.old-book" }, first + 1)).toBeNull();
+    expect((await store.getContentRedaction("run:exec-9", NOW))?.entriesSealed).toBe("v1.new-book");
     const later = "2026-11-17T12:00:00.000Z";
-    expect(await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.fresh", updatedAt: later, expiresAt: "2026-11-17T13:00:00.000Z" }, null)).toBe(1);
+    const fresh = await store.writeContentRedactionIfVersion({ ...run, entriesSealed: "v1.fresh", updatedAt: later, expiresAt: "2026-11-17T13:00:00.000Z" }, null);
+    expect(fresh).not.toBeNull();
     expect((await store.getContentRedaction("run:exec-9", later))?.entriesSealed).toBe("v1.fresh");
   });
 

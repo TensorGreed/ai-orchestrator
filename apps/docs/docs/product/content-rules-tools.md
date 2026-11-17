@@ -98,6 +98,10 @@ Redaction maps hold sealed originals, so they are treated like other personal da
 
 - **Expiry and purge.** Each map ends at its own expiry. Expired maps are deleted as maps are written and restored, and by every [retention purge](../operations/data-retention.md) (class **Redaction maps**).
 - **Data-subject deletion.** A [deletion request](../security/data-subject-requests.md) opens every unexpired map and deletes those that hold the person's value, both gateway maps and run placeholder books (a run whose history holds only placeholders is not found by the search, but its map is). Vault tokens a map issued go through the same check as other tokens: the person's are deleted. Deleting a run deletes its placeholder book. Maps sealed under another master key cannot be opened and are left to expire.
+  - A map is matched when one of its originals equals the person's value after the same normalisation as the search (case and surrounding spaces ignored, phone numbers compared by their digits); a value only inside a longer original is not matched, and that map is left to expire.
+  - A deleted map takes all of its placeholders with it, including those of other people in the same run or gateway session: they stay as placeholders and cannot be revealed.
+  - A run still in progress keeps going after its book is deleted. Its earlier placeholders stop resolving, and later ones go into a new book under a new tag; the deleted mappings are never written back.
+  - While any legal hold is active, the maps wait like vault tokens do, and releasing the hold runs the deletion again.
 - **Exports.** A data-subject export does not include redaction maps (listed under not covered in its manifest).
 - **Backups.** Maps are not exported by `db:export`; a restore brings none back.
 

@@ -106,6 +106,8 @@ const TOMBSTONES_PER_SWEEP = 5_000;
 export const ERASURE_TOMBSTONE_DEFAULT_RETENTION_DAYS = 400;
 /** Found entries a deletion handles between saves of where it is (and lease renewals). */
 const DELETE_SAVE_EVERY = 10;
+/** Redaction maps read per page by a deletion's scan (the lease is renewed between pages). */
+const REDACTION_SCAN_PAGE = 200;
 /** Errors in a row before a request fails (a passing page resets the count). */
 export const SUBJECT_REQUEST_MAX_ERRORS = 3;
 /** Times an export is started before the request fails (a crash while building it cannot loop). */
@@ -430,8 +432,17 @@ function deferredCount(record: Pick<SubjectRequestRecord, "deferred">): number {
   for (const entry of record.deferred as Array<Record<string, unknown>>) {
     if (entry && entry.staff === true) count += numberOf(entry.held);
     if (entry && entry.vault === true) count += numberOf(entry.tokens);
+    if (entry && entry.redactions === true) count += numberOf(entry.maps);
   }
   return count;
+}
+
+/** Removes a pass's markers of one kind (`vault`, `redactions`) from a deletion's deferred entries, in place. */
+function dropMarkers(deferred: unknown[], kind: "vault" | "redactions"): void {
+  for (let index = deferred.length - 1; index >= 0; index -= 1) {
+    const entry = deferred[index] as Record<string, unknown> | null;
+    if (entry && entry[kind] === true) deferred.splice(index, 1);
+  }
 }
 
 /** Runs a deletion waits for (still in flight when it reached them). */
@@ -787,6 +798,10 @@ export class SubjectRequestService {
    * rows are tried again when a hold is released (the release calls requeueDeferred), not from here.
    */
   private async deferredFreed(record: SubjectRequestRecord): Promise<boolean> {
+    // Vault entries and redaction maps wait for every hold: once none is active they can go, even if the release's own
+    // re-queue was missed.
+    const markers = (record.deferred as Array<Record<string, unknown> | null>).some((entry) => entry && (entry.vault === true || entry.redactions === true));
+    if (markers && (await this.options.store.listLegalHolds({ status: "active" })).length === 0) return true;
     for (const found of deferredOf(record)) {
       if ((found as FoundRow & { busy?: boolean }).busy && (await this.options.store.subjectRunActive(found.id))) continue;
       let held = false;
@@ -1437,33 +1452,54 @@ export class SubjectRequestService {
 
       // v76 — redaction maps holding the person's value: a run's placeholder book (its history holds only placeholders,
       // so the search cannot find the run) and the maps of gateway redactions. They are linked by what they hold, so
-      // each unexpired map is opened and checked; its vault tokens go to the token check below. The tokens are saved
-      // before the maps go, so a restart in between loses none.
+      // each unexpired map is opened and checked (exactly, after the same normalisation as the token check). Of a map's
+      // vault tokens, those that stand for the person's value go to the token check below; they are saved before the
+      // maps go, so a restart in between loses none. A run still in progress may keep its book: it never writes a
+      // deleted book back (it starts a new one under a new tag). While any legal hold is active the maps wait, as the
+      // vault entries do, and the hold's release runs them again.
+      // A marker an earlier pass left (it stopped after deferring) is replaced by what this pass finds.
+      dropMarkers(deferred, "redactions");
       if (!deletion.redactionsDone && this.options.openRedactionMap && initial.subjectKind !== "staff") {
         const subject = normalizeSubjectValue(value);
         const doomed: string[] = [];
+        const checked = new Set<string>();
         let afterId: string | null = null;
         for (;;) {
-          const page = await store.listContentRedactions({ afterId, limit: 200, now: this.now().toISOString() });
+          if (this.stopped) return;
+          const page = await store.listContentRedactions({ afterId, limit: REDACTION_SCAN_PAGE, now: this.now().toISOString() });
           if (page.length === 0) break;
           for (const row of page) {
             const map = this.options.openRedactionMap(row.entriesSealed);
             if (!map) continue;
-            for (const token of map.tokens) tokens.add(token);
             if (map.values.some((original) => normalizeSubjectValue(original) === subject)) doomed.push(row.id);
+            if (!this.options.revealToken) continue;
+            for (const token of map.tokens) {
+              if (tokens.has(token) || checked.has(token)) continue;
+              checked.add(token);
+              const original = await this.options.revealToken(token);
+              if (original !== null && normalizeSubjectValue(original) === subject) tokens.add(token);
+              if (checked.size % REDACTION_SCAN_PAGE === 0 && !(await renew())) return;
+            }
           }
           afterId = page[page.length - 1]!.id;
-          if (page.length < 200) break;
+          if (page.length < REDACTION_SCAN_PAGE) break;
+          if (!(await renew())) return;
           await yieldToEventLoop();
         }
         deletion.tokens = [...tokens];
         if (!(await save())) return;
-        for (const id of doomed) if (await store.deleteContentRedaction(id)) deletion.redactionMapsDeleted += 1;
-        deletion.redactionsDone = true;
+        if (!(await renew())) return;
+        if (doomed.length > 0 && (await store.listLegalHolds({ status: "active" })).length > 0) {
+          deferred.push({ redactions: true, maps: doomed.length });
+        } else {
+          for (const id of doomed) if (await store.deleteContentRedaction(id)) deletion.redactionMapsDeleted += 1;
+          deletion.redactionsDone = true;
+        }
         if (!(await save())) return;
       }
 
       // The vault entries of the person's own values (never a token a held row still holds, nor another person's).
+      dropMarkers(deferred, "vault");
       if (tokens.size > 0 && this.options.revealToken) {
         const subject = normalizeSubjectValue(value);
         const theirs: string[] = [];

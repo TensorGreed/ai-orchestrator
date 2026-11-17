@@ -9,6 +9,16 @@
  * Rows end at `expires_at`: reads never return an expired row, and every write sweeps a batch of expired rows.
  */
 
+import { randomInt } from "node:crypto";
+
+/**
+ * The first version of a new row: random in [1, 2^30], so it fits the Postgres INTEGER column after many updates and a
+ * stale writer's version matches a replacement row only by a one-in-a-billion chance.
+ */
+export function newContentRedactionVersion(): number {
+  return randomInt(1, 2 ** 30 + 1);
+}
+
 export const CONTENT_REDACTION_SCOPES = ["gateway", "run"] as const;
 export type ContentRedactionScope = (typeof CONTENT_REDACTION_SCOPES)[number];
 
@@ -131,18 +141,21 @@ export function createContentRedactionSqlStore(exec: ContentRedactionSqlExecutor
     async writeContentRedactionIfVersion(record, expectedVersion) {
       await deleteExpired(record.updatedAt);
       if (expectedVersion === null) {
+        // A new row starts at a random version, not 1: a writer still holding the version of a row that was deleted (a
+        // data-subject deletion, expiry) must never match the row that replaced it and write the old mappings back.
+        const version = newContentRedactionVersion();
         // An expired row of the same id is gone first, so it never blocks a new book.
         await exec.run(`DELETE FROM content_redactions WHERE id = ? AND expires_at <= ?`, [record.id, record.updatedAt]);
         const inserted = await exec.run(
           `INSERT INTO content_redactions (id, scope, client_id, toolset_id, project_id, execution_id, entries_sealed, entry_count, classes_json, created_at, updated_at, expires_at, version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
           [
             record.id, record.scope, record.clientId, record.toolsetId, record.projectId, record.executionId, record.entriesSealed, record.entryCount,
-            JSON.stringify([...new Set(record.classes)].sort()), record.createdAt, record.updatedAt, record.expiresAt
+            JSON.stringify([...new Set(record.classes)].sort()), record.createdAt, record.updatedAt, record.expiresAt, version
           ]
         );
-        return inserted > 0 ? 1 : null;
+        return inserted > 0 ? version : null;
       }
       const updated = await exec.run(
         `UPDATE content_redactions SET entries_sealed = ?, entry_count = ?, classes_json = ?, updated_at = ?, expires_at = ?, version = version + 1

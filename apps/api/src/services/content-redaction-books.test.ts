@@ -85,6 +85,52 @@ describe("a run's placeholder book", () => {
     expect(await book.lookup("[EMAIL_1]")).toBeUndefined();
   });
 
+  it("never writes a deleted book back, and a run still in progress reveals nothing from it once it is gone", async () => {
+    const { store, secrets } = await fixture();
+    let now = new Date("2026-11-17T10:00:00.000Z");
+    const book = new PersistedPlaceholderBook(store, secrets, owner, 3_600_000, () => now);
+    const subject = await book.assign("email", "subject@example.com");
+    // A data-subject deletion removes the row while the run goes on.
+    expect(await store.deleteContentRedaction(owner.id)).toBe(true);
+    now = new Date("2026-11-17T10:00:05.000Z");
+    expect(await book.lookup(subject)).toBeUndefined();
+    const next = await book.assign("email", "other@example.com");
+    expect(next.startsWith("[EMAIL_1.")).toBe(true);
+    expect(next.slice(-8)).not.toBe(subject.slice(-8));
+    const row = await store.getContentRedaction(owner.id, now.toISOString());
+    const opened = JSON.parse(secrets.openValue("content-redaction-map", row!.entriesSealed)) as { book: { entries: Array<{ value: string }> } };
+    expect(opened.book.entries.map((entry) => entry.value)).toEqual(["other@example.com"]);
+  });
+
+  it("a replica still holding a deleted book's version never writes it back over the book another replica started since", async () => {
+    const { store, secrets } = await fixture();
+    const a = new PersistedPlaceholderBook(store, secrets, owner, 3_600_000);
+    await a.assign("email", "subject@example.com");
+    expect(await store.deleteContentRedaction(owner.id)).toBe(true);
+    const b = new PersistedPlaceholderBook(store, secrets, owner, 3_600_000);
+    const fromB = await b.assign("email", "b@example.com");
+    await a.assign("email", "a-later@example.com");
+    const row = await store.getContentRedaction(owner.id, new Date().toISOString());
+    const opened = JSON.parse(secrets.openValue("content-redaction-map", row!.entriesSealed)) as { book: { entries: Array<{ value: string }> } };
+    const values = opened.book.entries.map((entry) => entry.value);
+    expect(values).not.toContain("subject@example.com");
+    expect(values).toEqual(expect.arrayContaining(["b@example.com", "a-later@example.com"]));
+    expect(await b.lookup(fromB)).toEqual({ dataClass: "email", value: "b@example.com" });
+  });
+
+  it("fails closed on another owner's row or a row it cannot open, without writing over it", async () => {
+    const { store, secrets } = await fixture();
+    await store.putContentRedaction({ ...owner, scope: "gateway", entriesSealed: "v1.x", entryCount: 0, classes: [], createdAt: "2026-11-17T10:00:00.000Z", updatedAt: "2026-11-17T10:00:00.000Z", expiresAt: "2099-01-01T00:00:00.000Z" });
+    const foreign = new PersistedPlaceholderBook(store, secrets, owner, 60_000);
+    await expect(foreign.assign("email", "ana@example.com")).rejects.toThrow(/Another owner/);
+    expect(await foreign.lookup("[EMAIL_1]")).toBeUndefined();
+    const other = { ...owner, id: "run:exec-7", executionId: "exec-7" };
+    await store.putContentRedaction({ ...other, entriesSealed: "v1.not-a-seal", entryCount: 1, classes: ["email"], createdAt: "2026-11-17T10:00:00.000Z", updatedAt: "2026-11-17T10:00:00.000Z", expiresAt: "2099-01-01T00:00:00.000Z" });
+    const unopenable = new PersistedPlaceholderBook(store, secrets, other, 60_000);
+    await expect(unopenable.assign("email", "ana@example.com")).rejects.toThrow(/cannot be opened/);
+    expect((await store.getContentRedaction(other.id, "2026-11-17T10:00:00.000Z"))?.entriesSealed).toBe("v1.not-a-seal");
+  });
+
   it("is unreadable once expired", async () => {
     const { store, secrets } = await fixture();
     let now = new Date("2026-11-17T10:00:00.000Z");

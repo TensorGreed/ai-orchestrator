@@ -81,21 +81,35 @@ export async function storeRedactionMap(
 /** How often a book write that lost a race reloads and tries again before it gives up (fail closed). */
 export const PLACEHOLDER_BOOK_WRITE_ATTEMPTS = 5;
 
+/** A run's book that cannot be used: another owner's row under its id, or a row this deployment cannot open. */
+export class PlaceholderBookUnavailableError extends Error {}
+
+/** How long a lookup may answer from the last read of the row before it reads it again. */
+export const PLACEHOLDER_BOOK_LOOKUP_FRESH_MS = 1_000;
+
 /**
- * A workflow run's placeholder book: read from its row on first use (a run resumed on another instance finds what it
- * wrote before), and written back after each new placeholder, before the placeholder is used. Writes are conditional on
- * the row's version: a writer that lost a race (another instance writing the same run's book) reloads the row, which
- * holds everything both wrote, and assigns again from there, so no mapping is ever overwritten. A write that still fails
- * takes the new placeholder back and throws (the rule set's fallback then applies). A placeholder this instance does not
- * know is looked up in the row once more before it is treated as unknown. Calls are serialised per instance.
+ * A workflow run's placeholder book: one sealed row per run (a run resumed on another instance finds what it wrote
+ * before). The row is the authority:
+ * - a new placeholder is written before it is used, conditionally on the row's version: a writer that lost a race (a
+ *   resumed run racing the original) re-reads the row, which holds everything both wrote, and numbers again from there,
+ *   so no mapping is overwritten; after PLACEHOLDER_BOOK_WRITE_ATTEMPTS lost races it gives up (fail closed);
+ * - a lookup answers from a read of the row at most PLACEHOLDER_BOOK_LOOKUP_FRESH_MS old, so a row a data-subject
+ *   deletion removed (or that expired) reveals nothing more, even in a run still in progress; a placeholder with this
+ *   book's tag that it does not know is looked up in a fresh read once more;
+ * - once the row this book wrote is gone, the book starts again empty under a new tag and never writes the old
+ *   mappings back;
+ * - another owner's row under the same id, or a row this deployment cannot open, fails closed
+ *   (PlaceholderBookUnavailableError): nothing is written over it and nothing is revealed from it.
+ * A write that fails takes the new placeholder back and throws (the rule set's fallback then applies). Calls are
+ * serialised per instance.
  */
 export class PersistedPlaceholderBook implements PlaceholderBook {
   private inner: InMemoryPlaceholderBook | undefined;
-  /** A new book gets a random tag, so placeholders from outside the run never match the ones it issues. */
-  private saved: PlaceholderBookState = { entries: [], reserved: [], tag: newPlaceholderTag((size) => new Uint8Array(randomBytes(size))) };
+  private saved: PlaceholderBookState = PersistedPlaceholderBook.emptyState();
   private createdAt: string | undefined;
-  /** The row's version as last read or written; null: no row yet. */
+  /** The row's version as last read or written; null: no row (yet, or any more). */
   private version: number | null = null;
+  private loadedAt = 0;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -106,37 +120,50 @@ export class PersistedPlaceholderBook implements PlaceholderBook {
     private readonly clock: () => Date = () => new Date()
   ) {}
 
+  /** A new book gets a random tag, so placeholders from outside the run never match the ones it issues. */
+  private static emptyState(): PlaceholderBookState {
+    return { entries: [], reserved: [], tag: newPlaceholderTag((size) => new Uint8Array(randomBytes(size))) };
+  }
+
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const next = this.queue.then(work, work);
     this.queue = next.catch(() => undefined);
     return next;
   }
 
-  /** Reads the row into the book (always, when `fresh`; else only the first time). */
+  /** Reads the row into the book (always when `fresh`, else only the first time). */
   private async load(fresh = false): Promise<InMemoryPlaceholderBook> {
     if (this.inner && !fresh) return this.inner;
-    const row = await this.store.getContentRedaction(this.owner.id, this.clock().toISOString());
-    // Another owner's row under the same id is never read (ids are per run and project).
-    if (row && row.scope === this.owner.scope && row.projectId === this.owner.projectId) {
+    const now = this.clock();
+    const row = await this.store.getContentRedaction(this.owner.id, now.toISOString());
+    if (row) {
+      if (row.scope !== this.owner.scope || row.projectId !== this.owner.projectId) {
+        throw new PlaceholderBookUnavailableError("Another owner's redaction map uses this run's id; no placeholder is issued or revealed");
+      }
+      let opened: PlaceholderBookState;
+      try {
+        opened = openRedactionMap(this.sealer, row.entriesSealed).book;
+      } catch {
+        throw new PlaceholderBookUnavailableError("The run's placeholder map cannot be opened with this deployment's key");
+      }
+      this.saved = opened;
       this.version = row.version ?? 0;
       this.createdAt = row.createdAt;
-      try {
-        this.saved = openRedactionMap(this.sealer, row.entriesSealed).book;
-      } catch {
-        // Sealed under another master key or damaged: its placeholders cannot be turned back. The next write replaces
-        // the row (at its version) with a book under the fresh tag, so the old placeholders are never reissued.
-        this.saved = { entries: [], reserved: [], tag: newPlaceholderTag((size) => new Uint8Array(randomBytes(size))) };
-      }
-    } else if (!row) {
+    } else if (this.version !== null || !this.inner) {
+      // Never written, or written and since deleted (a data-subject deletion) or expired: start again, empty, under a
+      // new tag. The old mappings are dropped from memory too and never written back.
+      this.saved = PersistedPlaceholderBook.emptyState();
       this.version = null;
+      this.createdAt = undefined;
     }
     this.inner = new InMemoryPlaceholderBook(this.saved);
+    this.loadedAt = now.getTime();
     return this.inner;
   }
 
   async assign(dataClass: GuardDataClass, value: string, reserved?: ReadonlySet<string>): Promise<string> {
     return await this.serial(async () => {
-      let book = await this.load();
+      let book = await this.load(this.clock().getTime() - this.loadedAt > PLACEHOLDER_BOOK_LOOKUP_FRESH_MS);
       for (let attempt = 1; ; attempt += 1) {
         const assigned = book.assignNow(String(dataClass), value, reserved);
         if (!assigned.changed) return assigned.placeholder;
@@ -165,7 +192,7 @@ export class PersistedPlaceholderBook implements PlaceholderBook {
           this.saved = state;
           return assigned.placeholder;
         }
-        // Another writer got there first: start again from what the row holds now.
+        // Another writer got there first, or the row went: start again from what the store holds now.
         if (attempt >= PLACEHOLDER_BOOK_WRITE_ATTEMPTS) {
           this.inner = new InMemoryPlaceholderBook(this.saved);
           throw new Error("The run's placeholder book kept changing under concurrent writes; the placeholder was not issued");
@@ -177,10 +204,18 @@ export class PersistedPlaceholderBook implements PlaceholderBook {
 
   async lookup(placeholder: string): Promise<{ dataClass: string; value: string } | undefined> {
     return await this.serial(async () => {
-      const known = await (await this.load()).lookup(placeholder);
-      if (known) return known;
-      // Another instance of the run may have issued it since this one last read the row.
-      return await (await this.load(true)).lookup(placeholder);
+      try {
+        const stale = !this.inner || this.clock().getTime() - this.loadedAt > PLACEHOLDER_BOOK_LOOKUP_FRESH_MS;
+        const found = await (await this.load(stale)).lookup(placeholder);
+        // Not known here: another instance of the run may have issued it since this one last read the row (one more
+        // read, only for a placeholder carrying this book's tag).
+        if (found || stale || !this.saved.tag || !placeholder.endsWith(`.${this.saved.tag}]`)) return found;
+        return await (await this.load(true)).lookup(placeholder);
+      } catch (error) {
+        // A book that cannot be used reveals nothing: the placeholder stays as it is.
+        if (error instanceof PlaceholderBookUnavailableError) return undefined;
+        throw error;
+      }
     });
   }
 }

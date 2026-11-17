@@ -255,6 +255,48 @@ for (const kind of kinds) {
       expect(await revealToken(OTHER_TOKEN)).toBe("someone-else");
     });
 
+    it("keeps the redaction maps holding the person's value while a legal hold is active, and deletes them once it is released", async () => {
+      const secrets = new SecretService(undefined as never, KEY);
+      const { store, service } = await setup({
+        openRedactionMap: (sealed) => {
+          const parsed = JSON.parse(secrets.openValue("content-redaction-map", sealed)) as { book: { entries: Array<{ value: string }> } };
+          return { values: parsed.book.entries.map((entry) => entry.value), tokens: [] };
+        }
+      });
+      await store.upsertWorkflow(WORKFLOW);
+      await store.upsertWorkflow({ ...WORKFLOW, id: "wf-elsewhere" } as Workflow);
+      await seedRun(store, service, "run-1", "CUST-777");
+      const sealed = secrets.sealValue("content-redaction-map", JSON.stringify({ v: 1, book: { entries: [{ placeholder: "[CUSTOMER_ID_1]", dataClass: "customer_id", value: "CUST-777" }], reserved: [] }, tokens: [] }));
+      await store.putContentRedaction({
+        id: "run:run-9", scope: "run", clientId: null, toolsetId: null, projectId: "default", executionId: "run-9",
+        entriesSealed: sealed, entryCount: 1, classes: ["customer_id"], createdAt: T0.toISOString(), updatedAt: T0.toISOString(), expiresAt: "2026-11-11T12:00:00.000Z"
+      });
+      const hold = await store.placeLegalHold({
+        id: "h-maps", name: "Else", reason: "r", matterRef: null, scopeType: "workflow", scopeId: "wf-elsewhere", endsAt: null, createdBy: null, createdAt: AT, items: []
+      });
+      const created = await service.create({ type: "delete", subjectKind: "end_user", value: "cust-777", scan: false, revealTokens: false }, ADMIN);
+      await settle(service);
+      await service.confirm(created.id, ADMIN);
+      await settle(service);
+      const deferred = (await service.get(created.id))!;
+      expect(deferred.status).toBe("deferred_by_hold");
+      expect(deferred.deletion).toMatchObject({ redactionMapsDeleted: 0, deferred: 1 });
+      expect(await count(store, "content_redactions", "id = 'run:run-9'")).toBe(1);
+      // The sweep leaves it while the hold is active.
+      await service.sweep();
+      await settle(service);
+      expect((await service.get(created.id))!.status).toBe("deferred_by_hold");
+
+      // Released without the release's own re-queue (say it failed): the sweep finds no active hold and runs it again.
+      await store.releaseLegalHold({ id: hold.id, releasedBy: null, reason: "done", releasedAt: T0.toISOString() });
+      await service.sweep();
+      await settle(service);
+      const done = (await service.get(created.id))!;
+      expect(done.status).toBe("done");
+      expect(done.deletion).toMatchObject({ redactionMapsDeleted: 1, deferred: 0 });
+      expect(await count(store, "content_redactions", "id = 'run:run-9'")).toBe(0);
+    });
+
     it("deletes the memory session found by a session reference", async () => {
       const { store, service } = await setup();
       await store.upsertWorkflow(WORKFLOW);

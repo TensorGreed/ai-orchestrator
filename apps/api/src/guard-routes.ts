@@ -180,7 +180,16 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
    * imported from another deployment). Only a warning: such a rule matches nobody (fails closed), and refusing the save
    * would break export and import between deployments.
    */
+  /** Warnings only: the rule set is already saved, so a failed lookup returns no warnings instead of failing the save. */
   const revealRuleWarnings = async (document: unknown): Promise<string[]> => {
+    try {
+      return await unknownClientWarnings(document);
+    } catch (error) {
+      deps.app.log.warn({ err: error }, "Could not check the gateway clients named in reveal rules");
+      return [];
+    }
+  };
+  const unknownClientWarnings = async (document: unknown): Promise<string[]> => {
     const rules = ((document as { reveal?: { rules?: unknown } } | null)?.reveal?.rules ?? []) as unknown[];
     if (!Array.isArray(rules)) return [];
     const warnings: string[] = [];
