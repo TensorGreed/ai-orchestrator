@@ -39,8 +39,8 @@ Open a node to see the data of that run. With run data, the inspector opens on *
 **Input | Parameters | Output** side by side (the default on wide windows when the node ran); the choice is
 remembered in this browser.
 
-- **Input** is what the node received: one section per upstream node (**From** and the node's name), then any other fields in
-  scope (run input, input mapping). The run context (the editor's prompt fields, variables, webhook body, trigger) is
+- **Input** is what the node received: one section per upstream node (**From** and the node's name), then the run's own
+  input fields. The run context (the editor's prompt fields, variables, webhook body, trigger) is
   folded away underneath: it is the same for every node of the run.
 - **Output** shows the status line, then the data as a **Table** (lists become rows and columns), **JSON** or
   **Schema**. On an error it shows the error and the input the node failed on.
@@ -54,8 +54,9 @@ remembered in this browser.
 ### Picking a run
 
 **Run data** in the canvas toolbar lists this workflow's latest runs. Pick one to load it onto the canvas and into
-the inspector; the workflow itself is not changed. A run started elsewhere (a webhook, the API) appears on the canvas
-on its own while it is running.
+the inspector; the workflow itself is not changed. An older run stays loaded until you pick the latest one or run
+the workflow again. Otherwise a run started elsewhere (a webhook, the API) appears on the canvas on its own while it is
+running.
 
 The editor shows exactly what run history stored for that run: it never fetches anything else. Values that run
 history keeps masked or as placeholders (see [content rules](/product/content-rules)) stay that way here.
