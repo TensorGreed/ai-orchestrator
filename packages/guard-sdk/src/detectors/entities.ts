@@ -166,11 +166,17 @@ export async function findEntities(text: string, options: GuardEntitiesOptions, 
   const recognizer = entityRecognizerFor(options, context.recognizer);
   const wanted = classes.filter((dataClass) => recognizer.classes.includes(dataClass));
   if (wanted.length === 0) return [];
-  const results = await recognizer.recognize([text], { classes: wanted, ...(options.languages[0] ? { language: options.languages[0] } : {}), ...(context.signal ? { signal: context.signal } : {}) });
+  let results: GuardEntitySpan[][];
+  try {
+    results = await recognizer.recognize([text], { classes: wanted, ...(options.languages[0] ? { language: options.languages[0] } : {}), ...(context.signal ? { signal: context.signal } : {}) });
+  } catch {
+    // A fixed message: a recognizer's own error text could quote the input, and it would reach traces and logs.
+    throw new Error(`Entity recognizer ${recognizer.id} failed`);
+  }
   const raw = Array.isArray(results) ? results[0] ?? [] : [];
   const wantedSet = new Set<string>(wanted);
   const blocked = protectedRegions(text, context.issuedSurrogates);
-  const dataSpans = scanDlp(text).map((match) => match.span);
+  const dataSpans = mergeRegions(scanDlp(text).map((match) => match.span));
   const boost = options.contextWords.boost.map((word) => word.toLowerCase());
   const suppress = options.contextWords.suppress.map((word) => word.toLowerCase());
   const matches: EntityMatch[] = [];
@@ -209,24 +215,40 @@ const NAME_CUE_BEFORE =
   /(?:\b(?:Mr|Mrs|Ms|Miss|Mx|Dr|Prof|Professor|Sir|Dame|Rev|Herr|Frau|Mme)\.?|\b(?:name|patient|customer|client|employee|contact|applicant|recipient|sender|attn|attention|cardholder|member|guest|passenger|tenant|owner|beneficiary|surname)\s?[:-]|\b(?:Dear|Hi|Hello|Hey))\s{1,3}$/i;
 
 function hasNameCue(text: string, start: number): boolean {
-  const lineStart = text.lastIndexOf("\n", start - 1) + 1;
-  return NAME_CUE_BEFORE.test(text.slice(Math.max(lineStart, start - 40), start));
+  // Only the 40 characters before the span are read, so the cost per span is constant.
+  const window = text.slice(Math.max(0, start - 40), start);
+  return NAME_CUE_BEFORE.test(window.slice(window.lastIndexOf("\n") + 1));
 }
 
-function overlapsAny(span: GuardSpan, regions: readonly GuardSpan[]): boolean {
-  // Regions are few per text; sorted by start, the search stops at the first one past the span.
-  for (const region of regions) {
-    if (region.start >= span.end) break;
-    if (region.end > span.start) return true;
+/** Regions merged into disjoint intervals in start order, for `overlapsAny`'s binary search. */
+function mergeRegions(regions: readonly GuardSpan[]): GuardSpan[] {
+  const sorted = regions.filter((region) => region.end > region.start).sort((a, b) => a.start - b.start);
+  const merged: GuardSpan[] = [];
+  for (const region of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && region.start <= last.end) last.end = Math.max(last.end, region.end);
+    else merged.push({ start: region.start, end: region.end });
   }
-  return false;
+  return merged;
+}
+
+/** True when the span overlaps one of the disjoint, sorted regions (O(log n)). */
+function overlapsAny(span: GuardSpan, regions: readonly GuardSpan[]): boolean {
+  let lo = 0;
+  let hi = regions.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (regions[mid]!.end <= span.start) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < regions.length && regions[lo]!.start < span.end;
 }
 
 const URL_START = /\b(?:[a-z][a-z0-9+.-]{0,15}:\/\/|www\.)[^\s<>"'`]{1,2048}/gi;
 const VAULT_TOKEN = /\btok_[A-Za-z0-9_]{1,64}_[A-Za-z0-9_-]{8,128}/g;
 const INLINE_CODE = /`[^`\n]{1,500}`/g;
 
-/** Where names and addresses are never reported: emails, URLs, code, placeholders, vault tokens, issued surrogates. Sorted by start. */
+/** Where names and addresses are never reported: emails, URLs, code, placeholders, vault tokens, issued surrogates. Merged and sorted. */
 function protectedRegions(text: string, issued: ReadonlySet<string> | undefined): GuardSpan[] {
   const regions: GuardSpan[] = [...findEmailSpans(text)];
   const add = (pattern: RegExp) => {
@@ -236,19 +258,19 @@ function protectedRegions(text: string, issued: ReadonlySet<string> | undefined)
   add(URL_START);
   add(VAULT_TOKEN);
   add(new RegExp(PLACEHOLDER_PATTERN.source, "g"));
-  // Fenced code blocks (``` … ```); an unclosed fence runs to the end of the text.
+  // Fenced code blocks (``` … ```). An unclosed fence is not a block: one stray fence must not hide the rest of the text.
   for (let open = text.indexOf("```"); open !== -1; ) {
     const close = text.indexOf("```", open + 3);
-    const end = close === -1 ? text.length : close + 3;
-    regions.push({ start: open, end });
-    open = close === -1 ? -1 : text.indexOf("```", end);
+    if (close === -1) break;
+    regions.push({ start: open, end: close + 3 });
+    open = text.indexOf("```", close + 3);
   }
   add(INLINE_CODE);
   for (const value of issued ?? []) {
     if (!value) continue;
     for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + value.length)) regions.push({ start: at, end: at + value.length });
   }
-  return regions.sort((a, b) => a.start - b.start);
+  return mergeRegions(regions);
 }
 
 export interface EntitiesDetectorOptions {

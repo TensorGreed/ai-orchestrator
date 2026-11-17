@@ -157,7 +157,7 @@ The four `output.*` detectors are the [output checks](./content-rules-output-che
 | `singleTokenNames` | `false` | report a one-word name without a cue (a title, a field label or a greeting) |
 | `contextWords` | none | `boost` and `suppress` lists (up to 50 words each): a word within 40 characters raises a score by 0.1 or lowers it by 0.3 |
 | `languages` | `["en"]` | English only for now |
-| `maxChars` | 20000 | longer text fails the check instead of being cut, so the rule set's fail-open or fail-closed setting decides |
+| `maxChars` | 20000 | longer text fails the check instead of being cut, so the rule set's fail-open or fail-closed setting decides; the content rules tools use their own input limit instead |
 
 The options refuse any other key, so a rule set cannot name an endpoint or a model address. The **Names and addresses** card in the rule set editor sets them and says which engine this deployment has.
 

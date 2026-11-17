@@ -152,6 +152,14 @@ export interface SensitiveScanContext {
  * `entityTypes` or (without `entityTypes`) the rule set runs `data.entities`. Entity spans that overlap a data rule
  * match yield to it, and the allow-lists apply to them too.
  */
+/** Names and addresses could not be looked for. `cause` keeps the original error for server logs; it may quote the input. */
+export class EntityScanError extends Error {
+  constructor(cause: unknown) {
+    super("Names and addresses could not be checked", { cause });
+    this.name = "EntityScanError";
+  }
+}
+
 export async function scanSensitiveTextAsync(
   text: string,
   settings: SensitiveScanSettings,
@@ -162,11 +170,16 @@ export async function scanSensitiveTextAsync(
   const classes = entityClassesFor(settings, request);
   if (classes.length === 0) return base;
   const options = settings.entities ? { ...settings.entities, classes } : defaultEntitiesOptions(classes);
-  const found = await findEntities(text, options, {
-    ...(context.recognizer ? { recognizer: context.recognizer } : {}),
-    ...(context.signal ? { signal: context.signal } : {}),
-    ...(context.maxChars !== undefined ? { maxChars: context.maxChars } : {})
-  });
+  let found: Awaited<ReturnType<typeof findEntities>>;
+  try {
+    found = await findEntities(text, options, {
+      ...(context.recognizer ? { recognizer: context.recognizer } : {}),
+      ...(context.signal ? { signal: context.signal } : {}),
+      ...(context.maxChars !== undefined ? { maxChars: context.maxChars } : {})
+    });
+  } catch (error) {
+    throw new EntityScanError(error);
+  }
   const allowList = compileAllowList(settings.allowList, request.allowList);
   const entities: DlpMatch[] = found
     .filter((match) => match.score >= match.minScore && !(allowList.allows(text.slice(match.start, match.end))))

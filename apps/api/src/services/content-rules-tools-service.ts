@@ -28,6 +28,7 @@ import {
   rewriteMatches,
   riskLevelOf,
   scanSensitiveTextAsync,
+  EntityScanError,
   sensitiveScanSettingsOf,
   ENTITIES_DETECTOR_ID,
   type GuardEntityRecognizer,
@@ -238,7 +239,8 @@ export class ContentRulesToolsService {
         let scanned: Awaited<ReturnType<typeof scanSensitiveTextAsync>>;
         try {
           scanned = await scanSensitiveTextAsync(entry.text, settings, scanRequest, context);
-        } catch {
+        } catch (error) {
+          if (!(error instanceof EntityScanError)) throw error;
           // The recognizer's own message stays on the server: it could quote the input.
           throw new ContentToolError("Names and addresses could not be checked; try again, or leave person_name, location and street_address out of entity_types");
         }

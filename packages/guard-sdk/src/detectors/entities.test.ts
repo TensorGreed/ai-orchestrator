@@ -1,6 +1,6 @@
 import { checkRegexSafety, ENTITIES_DETECTOR_ID } from "@ai-orchestrator/shared";
 import { describe, expect, it } from "vitest";
-import { entityClassesFor, riskLevelOf, scanSensitiveTextAsync, sensitiveScanSettingsOf } from "../content-tools";
+import { entityClassesFor, EntityScanError, riskLevelOf, scanSensitiveTextAsync, sensitiveScanSettingsOf } from "../content-tools";
 import { DEFAULT_GUARD_PROFILE_DOCUMENT } from "../default-profile";
 import { evaluateGuard } from "../evaluate";
 import { createDefaultGuardRegistry } from "../index";
@@ -175,6 +175,25 @@ describe("data.entities detector", () => {
     expect(matches.map((match) => text.slice(match.start, match.end))).toEqual(["Iris Wu"]);
   });
 
+  it("does not hide the rest of the text behind an unclosed code fence", async () => {
+    const text = "```\nconst x = 1\nDr. Ana Diaz wrote ``` and then ``` Dr. Tom Lee replied";
+    const matches = await findEntities(text, parseEntitiesOptions({ classes: ["person_name"] }));
+    expect(matches.map((match) => text.slice(match.start, match.end))).toEqual(["Tom Lee"]);
+  });
+
+  it("stays fast on long text with many one-word names, emails and data findings", async () => {
+    const names = fixedRecognizer((text) => occurrences(text, "Kim").map((start) => ({ start, end: start + 3, dataClass: "person_name", score: 0.9, source: "model" })));
+    const oneLine = "Kim ".repeat(200_000);
+    let started = performance.now();
+    await findEntities(oneLine, parseEntitiesOptions({ classes: ["person_name"], maxChars: 1_000_000 }), { recognizer: names });
+    expect(performance.now() - started).toBeLessThan(3_000);
+    const mixed = "Kim a@b.io 10.0.0.1 ".repeat(30_000);
+    started = performance.now();
+    const matches = await findEntities(mixed, parseEntitiesOptions({ classes: ["person_name"], singleTokenNames: true, maxChars: 1_000_000 }), { recognizer: names });
+    expect(performance.now() - started).toBeLessThan(3_000);
+    expect(matches).toHaveLength(30_000);
+  });
+
   it("needs a cue for a one-word name unless singleTokenNames is on", async () => {
     const recognizer = fixedRecognizer((text) => occurrences(text, "Kim").map((start) => ({ start, end: start + 3, dataClass: "person_name", score: 0.9, source: "model" })));
     const text = "Kim said hi. Dear Kim, thanks";
@@ -217,6 +236,10 @@ describe("data.entities detector", () => {
     const failing = createDefaultGuardRegistry({ entityRecognizer: { ...fixedRecognizer(() => []), recognize: async () => Promise.reject(new Error("model not loaded")) } });
     const error = await evaluateGuard(profileWith({ classes: ["person_name"] }, { latencyBudget: { ms: 2000, onExceeded: "fail_closed" } }), { channel: "prompt", content: "hi" }, { registry: failing });
     expect(error.action).toBe("block");
+    const leaky = createDefaultGuardRegistry({ entityRecognizer: { ...fixedRecognizer(() => []), recognize: async () => Promise.reject(new Error("could not parse 'Ana Diaz'")) } });
+    const quiet = await evaluateGuard(profileWith({ classes: ["person_name"] }, { latencyBudget: { ms: 2000, onExceeded: "fail_closed" } }), { channel: "prompt", content: "Ana Diaz" }, { registry: leaky });
+    expect(JSON.stringify([quiet.trace, quiet.timings, quiet.actions])).not.toContain("Ana Diaz");
+    expect(quiet.timings.detectors[0]!.error).toContain("Entity recognizer test failed");
     const slow = createDefaultGuardRegistry({ entityRecognizer: { ...fixedRecognizer(() => []), recognize: () => new Promise(() => undefined) } });
     const timedOut = await evaluateGuard(profileWith({ classes: ["person_name"] }, { latencyBudget: { ms: 20, onExceeded: "fail_open" } }), { channel: "prompt", content: "hi" }, { registry: slow });
     expect(timedOut.timings.detectors[0]!.status).toBe("timed_out");
@@ -291,6 +314,12 @@ describe("content tools with names and addresses", () => {
     const configured = await scanSensitiveTextAsync(text, settings);
     expect(configured.findings.map((finding) => finding.dataClass)).toEqual(["email", "street_address"]);
     expect(riskLevelOf(configured.findings)).toBe("medium");
+  });
+
+  it("wraps recognizer failures in EntityScanError and leaves other scans alone", async () => {
+    const failing: GuardEntityRecognizer = { ...fixedRecognizer(() => []), recognize: async () => Promise.reject(new Error("boom")) };
+    await expect(scanSensitiveTextAsync("Ana", { dictionaries: [] }, { entityTypes: ["person_name"] }, { recognizer: failing })).rejects.toBeInstanceOf(EntityScanError);
+    await expect(scanSensitiveTextAsync("Ana", { dictionaries: [] }, {}, { recognizer: failing })).resolves.toMatchObject({ findings: [] });
   });
 
   it("applies allow-lists and lets data rule matches win", async () => {
