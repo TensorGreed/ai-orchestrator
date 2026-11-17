@@ -48,6 +48,31 @@ describe("buildHostStdioEnv", () => {
     }
   });
 
+  it("passes uv's folders and Python settings but not its index URLs", () => {
+    const env = buildHostStdioEnv(
+      {
+        UV_CACHE_DIR: "/data/.uv/cache",
+        UV_TOOL_DIR: "/data/.uv/tools",
+        UV_PYTHON_INSTALL_DIR: "/data/.uv/python",
+        UV_PYTHON_PREFERENCE: "only-system",
+        UV_PYTHON_DOWNLOADS: "never",
+        UV_INDEX_URL: "https://user:token@pypi.example/simple",
+        UV_EXTRA_INDEX_URL: "https://user:token@pypi.example/extra",
+        UV_DEFAULT_INDEX: "https://user:token@pypi.example/simple"
+      },
+      {},
+      undefined,
+      "linux"
+    );
+    expect(env).toEqual({
+      UV_CACHE_DIR: "/data/.uv/cache",
+      UV_TOOL_DIR: "/data/.uv/tools",
+      UV_PYTHON_INSTALL_DIR: "/data/.uv/python",
+      UV_PYTHON_PREFERENCE: "only-system",
+      UV_PYTHON_DOWNLOADS: "never"
+    });
+  });
+
   it("matches names case-sensitively off Windows", () => {
     const env = buildHostStdioEnv({ path: "/x", Home: "/h", SystemRoot: "C:\\Windows" }, {}, undefined, "linux");
     // SystemRoot is on the list as spelled; `path` and `Home` are not.
