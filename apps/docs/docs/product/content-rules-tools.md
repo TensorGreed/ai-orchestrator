@@ -127,3 +127,5 @@ The data detector can report IPv4 and IPv6 addresses as the data class `ip_addre
 ```
 
 Version strings such as `v1.2.3.4`, `version 1.2.3.4` or `1.2.3.4-beta` are skipped, and so are numbers that are not valid addresses.
+
+A masked IP address keeps nothing of the address: every IPv4 address shows as `•••.•••.•••.•••` and every IPv6 address as `••••:••••:••••:••••:••••:••••:••••:••••`, so the preview does not reveal how long each part is.

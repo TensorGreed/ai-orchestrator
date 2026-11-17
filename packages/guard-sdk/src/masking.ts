@@ -8,6 +8,10 @@ import type { GuardDataClass, GuardSpan } from "./types";
 
 export const MASK_CHAR = "•";
 
+/** What every IPv4 and every IPv6 address masks to (`maskForDataClass`), whatever its digits. */
+export const MASKED_IPV4 = ["•••", "•••", "•••", "•••"].join(".");
+export const MASKED_IPV6 = Array.from({ length: 8 }, () => "••••").join(":");
+
 export interface MaskOptions {
   keepStart?: number;
   keepEnd?: number;
@@ -59,7 +63,8 @@ export function maskForDataClass(value: string, dataClass?: GuardDataClass): str
     case "jwt":
       return maskValue(value, { keepStart: Math.min(4, Math.max(0, value.length - 8)) });
     case "ip_address":
-      return maskValue(value, { keepSeparators: true });
+      // A fixed shape per family, nothing kept: the octet or group lengths would narrow the address down.
+      return value.includes(":") ? MASKED_IPV6 : MASKED_IPV4;
     case "private_key":
       return "-----BEGIN PRIVATE KEY----- " + MASK_CHAR.repeat(8) + " -----END PRIVATE KEY-----";
     default:

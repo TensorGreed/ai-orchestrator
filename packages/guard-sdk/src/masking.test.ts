@@ -127,3 +127,10 @@ describe("normaliseMaskedSpans", () => {
     expect(n("Key [REDACTED:credential] set")).not.toBe(n("Key [REDACTED:email] set"));
   });
 });
+
+describe("maskForDataClass ip_address", () => {
+  it("masks every address to one fixed shape per family, so lengths leak nothing", () => {
+    for (const ip of ["10.0.0.9", "192.168.100.254", "1.2.3.4"]) expect(maskForDataClass(ip, "ip_address")).toBe("•••.•••.•••.•••");
+    for (const ip of ["::1", "2001:db8::8a2e:370:7334", "::ffff:10.0.0.7"]) expect(maskForDataClass(ip, "ip_address")).toBe("••••:••••:••••:••••:••••:••••:••••:••••");
+  });
+});
