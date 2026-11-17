@@ -19,12 +19,12 @@
  *
  * This file is self-contained (no relative imports, erasable TypeScript only), so Node runs it
  * directly:
- *   node packages/guard-sdk/src/entity-corpus-generator.ts --write          regenerate main/main.json
+ *   node packages/guard-sdk/src/entity-corpus-generator.ts --write          regenerate corpus/entities/main.json
  *   node packages/guard-sdk/src/entity-corpus-generator.ts --heldout <src>  convert a held-out markup source
  *   node packages/guard-sdk/src/entity-corpus-generator.ts --print <file>   show a corpus file as markup
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, lstatSync, openSync, readFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -456,6 +456,23 @@ export function entityCorpusFolder(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "corpus", "entities");
 }
 
+/** Write a corpus file; never through a symbolic link. */
+function writeCorpusFile(target: string, text: string): void {
+  let isLink = false;
+  try {
+    isLink = lstatSync(target).isSymbolicLink();
+  } catch {
+    isLink = false;
+  }
+  if (isLink) throw new Error(`Refusing to write through the symbolic link ${target}`);
+  const fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o644);
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function serialise(document: EntityCorpusDocument): string {
   return `${JSON.stringify(document, null, 2)}\n`;
 }
@@ -480,14 +497,14 @@ function runCli(argv: string[]): void {
   const [command, file] = argv;
   if (command === "--write") {
     const target = join(entityCorpusFolder(), "main.json");
-    writeFileSync(target, mainEntityCorpusText());
+    writeCorpusFile(target, mainEntityCorpusText());
     process.stdout.write(`Wrote ${target}\n`);
     return;
   }
   if (command === "--heldout" && file) {
     const target = join(entityCorpusFolder(), "heldout", "heldout.json");
     const meta = JSON.parse(readFileSync(join(entityCorpusFolder(), "heldout", "heldout.meta.json"), "utf8")) as { description: string; source: string };
-    writeFileSync(target, heldoutEntityCorpusText(JSON.parse(readFileSync(file, "utf8")) as unknown, meta));
+    writeCorpusFile(target, heldoutEntityCorpusText(JSON.parse(readFileSync(file, "utf8")) as unknown, meta));
     process.stdout.write(`Wrote ${target}\n`);
     return;
   }

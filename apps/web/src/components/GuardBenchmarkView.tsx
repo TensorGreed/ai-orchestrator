@@ -264,6 +264,8 @@ function EntityBenchmarkSection({ report }: { report: EntityBenchmarkReport }) {
   const rows = entityBenchmarkRows(report);
   const cell = (result: (typeof rows)[number]["main"], metric: "precision" | "recall") => {
     if (!result) return <td className="num kb-subtle">–</td>;
+    // Precision of no predictions says nothing; show a dash instead of 100%.
+    if (metric === "precision" && result.predicted === 0) return <td className="num kb-subtle" title="Nothing was predicted">–</td>;
     const ids = metric === "recall" ? result.missed : result.flagged;
     const title = `Exact span: ${percent(result.strict[metric])}${ids.length > 0 ? `. ${metric === "recall" ? "Missed in" : "Flagged in"}: ${ids.join(", ")}` : ""}`;
     return (
@@ -277,7 +279,7 @@ function EntityBenchmarkSection({ report }: { report: EntityBenchmarkReport }) {
     <section className="kb-section" aria-labelledby="guard-bench-entities">
       <div className="mcp-section-head">
         <h4 id="guard-bench-entities">Names, places and street addresses</h4>
-        <span className="kb-subtle">Labelled spans found by the names and addresses check (half the span or more); hover for exact-span rates and item ids</span>
+        <span className="kb-subtle">Labelled spans found by the names and addresses check (sharing half the longer span or more); hover for exact-span rates and item ids</span>
       </div>
       {report.failed.length > 0 && (
         <p className="guard-bench-compare guard-bench-regressed" role="status">

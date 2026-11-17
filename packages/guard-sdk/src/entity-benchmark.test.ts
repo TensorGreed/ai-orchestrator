@@ -102,13 +102,25 @@ describe("entity corpus", () => {
 });
 
 describe("span matching", () => {
-  it("strict needs the exact span; overlap needs half of the shorter span; matches are one-to-one", () => {
+  it("strict needs the exact span; overlap needs half of the longer span; matches are one-to-one", () => {
     const gold = [{ start: 0, end: 10 }];
     expect(matchEntitySpans(gold, [{ start: 0, end: 10 }], "strict")).toEqual({ matched: 1, unmatchedLabelled: 0, unmatchedPredicted: 0 });
     expect(matchEntitySpans(gold, [{ start: 0, end: 9 }], "strict")).toEqual({ matched: 0, unmatchedLabelled: 1, unmatchedPredicted: 1 });
-    expect(matchEntitySpans(gold, [{ start: 5, end: 30 }], "overlap").matched).toBe(1);
-    expect(matchEntitySpans(gold, [{ start: 8, end: 30 }], "overlap").matched).toBe(0);
-    expect(matchEntitySpans(gold, [{ start: 0, end: 6 }, { start: 4, end: 10 }], "overlap")).toEqual({ matched: 1, unmatchedLabelled: 0, unmatchedPredicted: 1 });
+    expect(matchEntitySpans(gold, [{ start: 2, end: 14 }], "overlap").matched).toBe(1);
+    expect(matchEntitySpans(gold, [{ start: 0, end: 4 }], "overlap").matched).toBe(0);
+    expect(matchEntitySpans(gold, [{ start: 0, end: 6 }, { start: 1, end: 9 }], "overlap")).toEqual({ matched: 1, unmatchedLabelled: 0, unmatchedPredicted: 1 });
+  });
+
+  it("gives no credit to one prediction covering a whole text", () => {
+    const gold = [{ start: 5, end: 10 }, { start: 40, end: 52 }];
+    expect(matchEntitySpans(gold, [{ start: 0, end: 200 }], "overlap")).toEqual({ matched: 0, unmatchedLabelled: 2, unmatchedPredicted: 1 });
+  });
+
+  it("finds the largest matching, not the greedy one", () => {
+    // A greedy pass pairs the long prediction with A (largest overlap) and leaves B unmatched; the best pairing finds both.
+    const gold = [{ start: 0, end: 10 }, { start: 8, end: 14 }];
+    const predicted = [{ start: 2, end: 14 }, { start: 1, end: 9 }];
+    expect(matchEntitySpans(gold, predicted, "overlap")).toEqual({ matched: 2, unmatchedLabelled: 0, unmatchedPredicted: 0 });
   });
 });
 
@@ -159,7 +171,8 @@ describe("runEntityBenchmark", () => {
     expect(judgement.failures[0]!.kind).toBe("failed_items");
 
     const throwing = await runEntityBenchmark({ registry: new GuardRegistry().register(scriptedEntityDetector(() => new Error("recognizer down"))), splits: ["heldout"] });
-    expect(throwing.report.failed[0]).toMatchObject({ status: "error", error: "recognizer down" });
+    expect(throwing.report.failed[0]).toEqual({ id: expect.any(String), status: "error" });
+    expect(JSON.stringify(throwing.report)).not.toContain("recognizer down");
   });
 
   it("measures a rule set's own options and classes, and refuses a rule set without the check", async () => {

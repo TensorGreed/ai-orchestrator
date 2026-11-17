@@ -137,7 +137,8 @@ export const guardBenchmarkReportSchema = z.object({
   latency: guardBenchmarkLatencySchema,
   workflow: guardWorkflowSuiteSchema.optional(),
   /** Names, places and street addresses: present when the rule set lists the `data.entities` check (a full run only). */
-  entities: entityBenchmarkReportSchema.optional()
+  // An entity block this build cannot read is dropped rather than hiding the whole report.
+  entities: entityBenchmarkReportSchema.optional().catch(undefined)
 });
 export type GuardBenchmarkReport = z.infer<typeof guardBenchmarkReportSchema>;
 

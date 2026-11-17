@@ -49,7 +49,7 @@ describe("entity benchmark gate", () => {
     expect(judgeEntityBenchmark(report(), { person_name: { main: { precision: 0.5, recall: 0.5 } } }).floorsToRaise).toEqual([{ dataClass: "person_name", split: "main" }]);
     const missing = judgeEntityBenchmark(report(), {}, { requireFloors: true });
     expect(missing.failures.map((failure) => failure.kind)).toEqual(["missing_floor", "missing_floor"]);
-    const failed = judgeEntityBenchmark(report({ failed: [{ id: "m-9", status: "error", error: "down" }] }), entityBenchmarkMeasuredFloors(report()));
+    const failed = judgeEntityBenchmark(report({ failed: [{ id: "m-9", status: "error" }] }), entityBenchmarkMeasuredFloors(report()));
     expect(failed.ok).toBe(false);
     expect(failed.failures[0]).toMatchObject({ kind: "failed_items" });
     expect(failed.failures[0]!.message).toContain("m-9");
@@ -61,5 +61,7 @@ describe("entity benchmark gate", () => {
     const shape = guardBenchmarkReportSchema.shape.entities;
     expect(shape.safeParse(undefined).success).toBe(true);
     expect(shape.safeParse(report()).success).toBe(true);
+    // A stored entity block this build cannot read is dropped; the red-team report around it still parses.
+    expect(shape.parse({ ...report(), version: 2 })).toBeUndefined();
   });
 });

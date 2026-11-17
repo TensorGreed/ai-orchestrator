@@ -107,7 +107,7 @@ export function formatEntityBenchmark(report: EntityBenchmarkReport, judgement: 
   if (report.failed.length === 0 && (missing || judgement.floorsToRaise.length > 0)) {
     if (judgement.floorsToRaise.length > 0) lines.push(`Above the floor: ${judgement.floorsToRaise.map((entry) => `${entry.dataClass} (${entry.split})`).join(", ")}.`);
     lines.push(
-      "Set ENTITY_RULES_BENCHMARK_FLOORS in packages/guard-sdk/src/entity-benchmark.ts (and the table in packages/guard-sdk/corpus/README.md) to the measured values:",
+      "Set ENTITY_RULES_BENCHMARK_FLOORS in packages/guard-sdk/src/entity-benchmark.ts to the measured values:",
       JSON.stringify(entityBenchmarkMeasuredFloors(report), null, 2)
     );
   }

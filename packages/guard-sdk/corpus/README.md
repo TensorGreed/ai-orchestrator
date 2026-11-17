@@ -213,8 +213,10 @@ To read a file with its spans marked as `⟦class|text⟧`:
 `node packages/guard-sdk/src/entity-corpus-generator.ts --print <file>`.
 To change the main split, edit the generator and run it with `--write`; a test
 fails when `main.json` differs from what the generator writes. The held-out
-split is converted from its author's markup source with `--heldout <source.json>`,
-which also reads `heldout/heldout.meta.json`.
+split was converted from its author's markup source with `--heldout <source.json>`
+(which also reads `heldout/heldout.meta.json`). The source is not committed:
+`--print` shows the same markup, and held-out items are edited only by moving
+them to the main split, as above.
 
 ### What is labelled
 
@@ -236,11 +238,12 @@ Everything is synthetic.
 
 ### Matching and floors
 
-Spans are matched one to one per class. Strict matching needs the exact span. Overlap matching needs the two spans to share at least half of the shorter one's characters; overlap is the gated number. `ENTITY_RULES_BENCHMARK_FLOORS` in
+Spans are matched one to one per class. Strict matching needs the exact span. Overlap matching needs the two spans to share at least half of the longer one's characters; overlap is the gated number. `ENTITY_RULES_BENCHMARK_FLOORS` in
 `src/entity-benchmark.ts` holds the rules engine's measured overlap precision
 and recall per class and split. The vitest gate and the repo CI step fail on
 any drop, on a class with no floor, and on any item the check did not run on.
-The held-out split has `ENTITY_BENCHMARK_HELDOUT_SLACK` (5 points) of slack.
+The held-out split has `ENTITY_BENCHMARK_HELDOUT_SLACK` (5 points) of slack. Each item has 5 seconds;
+an item that runs out counts as not checked.
 When a change measures higher, the command lists the classes above their
 floor and prints the measured values. Paste them into the floors in the same
 pull request (the ratchet).

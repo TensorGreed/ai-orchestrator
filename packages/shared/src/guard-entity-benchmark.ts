@@ -3,7 +3,7 @@
  *
  * A span-annotated corpus (`packages/guard-sdk/corpus/entities/`, main and held-out splits) is run through the
  * `data.entities` check, and every predicted span is matched against the labelled ones, per data class and split:
- * strict (the exact span) and overlap (the spans share at least half of the shorter one's characters). This file is
+ * strict (the exact span) and overlap (the spans share at least half of the longer one's characters). This file is
  * the contract the runner (guard-sdk `runEntityBenchmark`), the CLI, the API and the web UI share: the report shape and
  * the floors gate. Reports carry ids, counts and rates only: never corpus text, matched values or evidence.
  */
@@ -80,7 +80,7 @@ export const entityBenchmarkReportSchema = z.object({
   results: z.array(entityBenchmarkClassResultSchema),
   negatives: z.array(entityBenchmarkNegativesSchema),
   /** Items on which the check did not run (an error, a timeout, not registered); their labelled spans count as missed. */
-  failed: z.array(z.object({ id: z.string(), status: z.string(), error: z.string().optional() })),
+  failed: z.array(z.object({ id: z.string(), status: z.enum(["missing", "error", "timed_out", "skipped_budget", "skipped_short_circuit"]).or(z.string().max(32)) })),
   latency: z.object({ p50Ms: z.number().nonnegative(), p95Ms: z.number().nonnegative(), maxMs: z.number().nonnegative() })
 });
 export type EntityBenchmarkReport = z.infer<typeof entityBenchmarkReportSchema>;

@@ -25,7 +25,7 @@ import type { GuardSpan } from "./types";
  * Every corpus item goes through the public `evaluateGuard` API with a rule set that runs the `data.entities` check
  * alone (on `prompt`, action `review`, so no finding stops the others). Predicted spans are the check's findings of the
  * measured classes; they are matched one-to-one against the labelled spans of the same class, strict (exact span)
- * and overlap (the two share at least half of the shorter span's characters). A predicted `location` inside a
+ * and overlap (the two share at least half of the longer span's characters). A predicted `location` inside a
  * labelled street address is part of that address and is ignored. Deterministic: no network and no model unless the
  * registry's recognizer calls one. Reports carry ids, counts and rates only.
  */
@@ -48,7 +48,7 @@ export const ENTITY_BENCHMARK_DEFAULT_THRESHOLD = 0.5;
 /**
  * Floors for the rules engine on the shipped entity corpus (overlap precision and recall per class and split),
  * enforced by `l2m guard benchmark --entities` in repo CI and by the vitest gate. They sit at the measured level, so
- * any drop fails; when a change measures higher, raise the entries here and in `corpus/README.md` in the same pull
+ * any drop fails; when a change measures higher, raise the entries here to the printed values in the same pull
  * request (the gate lists them). The held-out split has `ENTITY_BENCHMARK_HELDOUT_SLACK` of slack.
  */
 export const ENTITY_RULES_BENCHMARK_FLOORS: EntityBenchmarkFloors = {};
@@ -73,13 +73,17 @@ export function entityClassesOf(options: Record<string, unknown>): EntityBenchma
 }
 
 /** The rule set the benchmark evaluates with: the check alone on `prompt`, every finding to review. */
-export function entityBenchmarkProfile(options: { detectorOptions?: Record<string, unknown>; threshold?: number; id?: string; name?: string; version?: string } = {}): GuardProfile {
+/** Time limit for one item in the entity benchmark. */
+export const ENTITY_BENCHMARK_ITEM_BUDGET_MS = 5_000;
+
+export function entityBenchmarkProfile(options: { detectorOptions?: Record<string, unknown>; threshold?: number; id?: string; name?: string; version?: string; itemBudgetMs?: number } = {}): GuardProfile {
   return parseGuardProfile({
     id: options.id ?? "entity-benchmark",
     name: options.name ?? "Entity benchmark",
     version: options.version ?? "1",
-    // Generous: a slow host must not turn an item into a failure. Fail open so a failed check is reported, not scored.
-    latencyBudget: { ms: 60_000, onExceeded: "fail_open" },
+    // Per item: enough for a slow host or a local model, bounded so a slow recognizer cannot hold a run for long.
+    // Fail open so a failed check is reported as not checked, not scored.
+    latencyBudget: { ms: options.itemBudgetMs ?? ENTITY_BENCHMARK_ITEM_BUDGET_MS, onExceeded: "fail_open" },
     channels: {
       prompt: {
         detectors: [{ id: ENTITY_DETECTOR_ID, threshold: options.threshold ?? ENTITY_BENCHMARK_DEFAULT_THRESHOLD, options: { ...(options.detectorOptions ?? ENTITY_BENCHMARK_DEFAULT_OPTIONS) } }],
@@ -108,7 +112,7 @@ export interface EntityBenchmarkItemOutcome {
   id: string;
   split: GuardBenchmarkSplit;
   predicted: Array<GuardSpan & { dataClass: EntityBenchmarkClass }>;
-  failed?: { status: string; error?: string };
+  failed?: { status: string };
   latencyMs: number;
 }
 
@@ -118,31 +122,36 @@ interface Tally {
   fn: number;
 }
 
-const overlapLength = (a: GuardSpan, b: GuardSpan) => Math.max(0, Math.min(a.end, b.end) - Math.max(a.start, b.start));
+const overlapLength = (a: GuardSpan, b: GuardSpan): number => Math.max(0, Math.min(a.end, b.end) - Math.max(a.start, b.start));
 
-/** One-to-one matches between labelled and predicted spans; returns the matched counts and unmatched sides. */
+/** Whether a predicted span counts as finding a labelled one: the exact span (strict), or sharing at least half of the longer of the two (overlap). */
+function spansMatch(gold: GuardSpan, guess: GuardSpan, mode: "strict" | "overlap"): boolean {
+  if (mode === "strict") return gold.start === guess.start && gold.end === guess.end;
+  const longer = Math.max(gold.end - gold.start, guess.end - guess.start);
+  return overlapLength(gold, guess) * 2 >= longer && longer > 0;
+}
+
+/**
+ * The largest one-to-one matching between labelled and predicted spans (augmenting paths; the sets per item and
+ * class are small), with the matched count and what is left unmatched on each side.
+ */
 export function matchEntitySpans(labelled: readonly GuardSpan[], predicted: readonly GuardSpan[], mode: "strict" | "overlap"): { matched: number; unmatchedLabelled: number; unmatchedPredicted: number } {
-  const pairs: Array<{ l: number; p: number; weight: number }> = [];
-  labelled.forEach((gold, l) =>
-    predicted.forEach((guess, p) => {
-      if (mode === "strict") {
-        if (gold.start === guess.start && gold.end === guess.end) pairs.push({ l, p, weight: gold.end - gold.start });
-        return;
+  const edges = labelled.map((gold) => predicted.flatMap((guess, p) => (spansMatch(gold, guess, mode) ? [p] : [])));
+  const ownerOf = new Array<number>(predicted.length).fill(-1);
+  const augment = (l: number, seen: boolean[]): boolean => {
+    for (const p of edges[l]!) {
+      if (seen[p]) continue;
+      seen[p] = true;
+      if (ownerOf[p] === -1 || augment(ownerOf[p]!, seen)) {
+        ownerOf[p] = l;
+        return true;
       }
-      const shared = overlapLength(gold, guess);
-      const shorter = Math.min(gold.end - gold.start, guess.end - guess.start);
-      if (shared > 0 && shared * 2 >= shorter) pairs.push({ l, p, weight: shared });
-    })
-  );
-  pairs.sort((a, b) => b.weight - a.weight || a.l - b.l || a.p - b.p);
-  const usedL = new Set<number>();
-  const usedP = new Set<number>();
-  for (const pair of pairs) {
-    if (usedL.has(pair.l) || usedP.has(pair.p)) continue;
-    usedL.add(pair.l);
-    usedP.add(pair.p);
-  }
-  return { matched: usedL.size, unmatchedLabelled: labelled.length - usedL.size, unmatchedPredicted: predicted.length - usedP.size };
+    }
+    return false;
+  };
+  let matched = 0;
+  for (let l = 0; l < labelled.length; l += 1) if (augment(l, new Array<boolean>(predicted.length).fill(false))) matched += 1;
+  return { matched, unmatchedLabelled: labelled.length - matched, unmatchedPredicted: predicted.length - matched };
 }
 
 function score(tally: Tally): EntityBenchmarkScore {
@@ -218,8 +227,9 @@ export async function runEntityBenchmark(options: RunEntityBenchmarkOptions = {}
     const status = timing?.status ?? "missing";
     const outcome: EntityBenchmarkItemOutcome = { id: item.id, split: item.split, predicted: [], latencyMs: verdict.timings.totalMs };
     if (status !== "ran") {
-      outcome.failed = { status, ...(timing?.error ? { error: timing.error } : {}) };
-      failed.push({ id: item.id, status, ...(timing?.error ? { error: timing.error.slice(0, 200) } : {}) });
+      // The status only: a check's error message may echo the text it was given, and reports never carry text.
+      outcome.failed = { status };
+      failed.push({ id: item.id, status });
     } else {
       outcome.predicted = predictionsFor(item, verdict.findings, classes);
     }

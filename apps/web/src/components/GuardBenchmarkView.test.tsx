@@ -185,7 +185,8 @@ describe("Security > Benchmark: names, places and street addresses", () => {
     results: [
       { dataClass: "person_name", split: "main", labelled: 10, predicted: 8, strict: score(0.5, 0.4), overlap: score(0.875, 0.7), missed: ["en-m-101"], flagged: ["en-m-240"] },
       { dataClass: "street_address", split: "main", labelled: 10, predicted: 10, strict: score(0.6, 0.6), overlap: score(1, 1), missed: [], flagged: [] },
-      { dataClass: "person_name", split: "heldout", labelled: 10, predicted: 5, strict: score(0.4, 0.2), overlap: score(0.8, 0.4), missed: ["en-h-001"], flagged: [] }
+      { dataClass: "person_name", split: "heldout", labelled: 10, predicted: 5, strict: score(0.4, 0.2), overlap: score(0.8, 0.4), missed: ["en-h-001"], flagged: [] },
+      { dataClass: "street_address", split: "heldout", labelled: 10, predicted: 0, strict: score(1, 0), overlap: score(1, 0), missed: ["en-h-050"], flagged: [] }
     ],
     negatives: [{ split: "main", items: 64, flagged: 1, flaggedIds: ["en-m-240"] }],
     failed: [],
@@ -200,7 +201,7 @@ describe("Security > Benchmark: names, places and street addresses", () => {
     expect(within(names).getAllByRole("cell").map((cell) => cell.textContent)).toEqual(["87.5%", "70%", "80%", "40%"]);
     expect(within(names).getAllByRole("cell")[1]!.getAttribute("title")).toBe("Exact span: 40%. Missed in: en-m-101");
     const addresses = within(table).getByRole("row", { name: /Street addresses/ });
-    expect(within(addresses).getAllByRole("cell").map((cell) => cell.textContent)).toEqual(["100%", "100%", "–", "–"]);
+    expect(within(addresses).getAllByRole("cell").map((cell) => cell.textContent)).toEqual(["100%", "100%", "–", "0%"]);
     expect(screen.getByText(/Look-alikes with no name or address flagged: main 1\/64/)).toBeTruthy();
   });
 
