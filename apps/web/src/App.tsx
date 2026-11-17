@@ -1055,6 +1055,15 @@ function computeExecutionOrderForVisual(nodes: EditorNode[], edges: Edge[]): str
   return order;
 }
 
+/**
+ * Canvas shortcuts (undo, delete, copy and paste, disable) do nothing while the user types, or while a modal layer
+ * (such as the node inspector over the dimmed editor) is open: they would act on the canvas behind it.
+ */
+function isCanvasShortcutBlocked(target: EventTarget | null): boolean {
+  if (isTypingTarget(target)) return true;
+  return typeof document !== "undefined" && document.querySelector('[aria-modal="true"]') !== null;
+}
+
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -1636,7 +1645,7 @@ function StudioApp() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (activeMode !== "editor") return;
-      if (isTypingTarget(event.target)) return;
+      if (isCanvasShortcutBlocked(event.target)) return;
 
       const isModifier = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
@@ -1937,7 +1946,7 @@ function StudioApp() {
         return;
       }
 
-      if (isTypingTarget(event.target)) {
+      if (isCanvasShortcutBlocked(event.target)) {
         return;
       }
 
@@ -1974,7 +1983,7 @@ function StudioApp() {
         return;
       }
 
-      if (isTypingTarget(event.target)) {
+      if (isCanvasShortcutBlocked(event.target)) {
         return;
       }
 
@@ -5983,7 +5992,17 @@ function StudioApp() {
           node={editingNode}
           trace={buildNodeTrace(editingNode.id, executionResult, executionStatuses, telemetryByNodeId)}
           slots={buildNodeSlots(editingNode.id, nodes, edges)}
-          onAttach={(handle) => handleOpenAgentAttachmentDrawer(editingNode.id, handle)}
+          onAttach={(handle) => {
+            // The node palette opens on the canvas, under the inspector's layer: close the inspector first (unsaved
+            // edits are confirmed), then open the palette for this agent's port.
+            const agentId = editingNode.id;
+            const openPalette = () => {
+              setEditingNodeId(null);
+              handleOpenAgentAttachmentDrawer(agentId, handle);
+            };
+            if (inspectorRef.current) inspectorRef.current.requestClose(openPalette);
+            else openPalette();
+          }}
           inputOptions={editingNodeInputOptions}
           executionResult={isDebugMode ? executionResult : null}
           nodeLabels={nodeLabelById}

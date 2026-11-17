@@ -176,6 +176,13 @@ const PANE_MIN_WIDTH = 240;
 const PANE_MAX_WIDTH = 720;
 /** The Parameters column never gets narrower than this; the data panes give way first. */
 const MIDDLE_MIN_WIDTH = 320;
+/** Matches --overlay-dur, the inspector's leave animation (tokens.css). */
+const INSPECTOR_CLOSE_MS = 160;
+/** Layers that open above the inspector and keep their own focus. */
+const INSPECTOR_UPPER_LAYERS =
+  '[aria-modal="true"]:not(.insp), [role="alertdialog"], .pg-modal-backdrop, .mcp-drawer, .cmdk-overlay, .shortcuts-overlay, .idle-warning-backdrop';
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])';
 const PANE_SEPARATOR_WIDTH = 5;
 const PANE_RAIL_WIDTH = 34;
 const DEFAULT_PANE_LAYOUT: PaneLayout = { inputWidth: 360, outputWidth: 380, inputCollapsed: false, outputCollapsed: false };
@@ -1082,15 +1089,68 @@ export function NodeInspector({
   const unsavedDialogTitleId = useId();
   const keepEditingButtonRef = useRef<HTMLButtonElement | null>(null);
 
+  // Closing fades the panel and the scrim out first (not under reduced motion, and not where the browser runs no
+  // animations), then hands over to onClose.
+  const asideRef = useRef<HTMLElement | null>(null);
+  const [closing, setClosing] = useState(false);
+  const closeTimer = useRef<number | null>(null);
+  const closeWithTransition = useCallback(() => {
+    if (closeTimer.current !== null) return;
+    const aside = asideRef.current;
+    const reduceMotion =
+      typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!aside || reduceMotion || typeof aside.getAnimations !== "function") {
+      onClose();
+      return;
+    }
+    setClosing(true);
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = null;
+      onClose();
+    }, INSPECTOR_CLOSE_MS);
+  }, [onClose]);
+  useEffect(
+    () => () => {
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    },
+    []
+  );
+
+  // The panel takes focus when it opens and gives it back to the node (the last one shown) when it closes.
+  const nodeIdRef = useRef(node.id);
+  nodeIdRef.current = node.id;
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    asideRef.current?.focus({ preventScroll: true });
+    // Focus that lands on the dimmed page (say a Tab after the focused control went away) comes back to the panel.
+    // Layers above the inspector (dialogs, the command palette) keep theirs.
+    const keepFocusInside = (event: FocusEvent) => {
+      const aside = asideRef.current;
+      const target = event.target;
+      if (!aside || !(target instanceof Element) || aside.contains(target)) return;
+      if (target.closest(INSPECTOR_UPPER_LAYERS)) return;
+      aside.focus({ preventScroll: true });
+    };
+    document.addEventListener("focusin", keepFocusInside);
+    return () => {
+      document.removeEventListener("focusin", keepFocusInside);
+      const nodeElement = document.querySelector<HTMLElement>(
+        `.react-flow__node[data-id="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(nodeIdRef.current) : nodeIdRef.current}"]`
+      );
+      const target = nodeElement ?? opener;
+      if (target && target.isConnected) target.focus({ preventScroll: true });
+    };
+  }, []);
+
   const requestClose = useCallback(
     (next?: () => void) => {
       if (!isDirtyRef.current) {
-        (next ?? onClose)();
+        (next ?? closeWithTransition)();
         return;
       }
       setPendingClose({ next });
     },
-    [onClose]
+    [closeWithTransition]
   );
 
   useImperativeHandle(controlRef, () => ({ isDirty: () => isDirtyRef.current, requestClose }), [requestClose]);
@@ -9391,7 +9451,7 @@ export function NodeInspector({
     setPendingClose(null);
     if (!pending || choice === "keep") return;
     if (choice === "save") handleSave();
-    (pending.next ?? (choice === "discard" ? onClose : undefined))?.();
+    (pending.next ?? (choice === "discard" ? closeWithTransition : undefined))?.();
   };
 
   const renderSlots = () => {
@@ -9793,6 +9853,31 @@ export function NodeInspector({
     </DataPane>
   );
 
+  // Tab and Shift+Tab stay inside the panel (inside the unsaved-changes prompt while it is open).
+  const trapFocus = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Tab" || event.defaultPrevented) return;
+    const aside = asideRef.current;
+    if (!aside) return;
+    const scope = aside.querySelector<HTMLElement>(".insp-unsaved") ?? aside;
+    const focusable = Array.from(scope.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+      (element) => !element.closest("[hidden], details:not([open]) > :not(summary)")
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || active === aside || !scope.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !scope.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   const splitColumns = [
     inputCollapsed ? "var(--insp-rail-w)" : `${Math.min(inputWidth, inputMax)}px`,
     inputCollapsed ? "0px" : "var(--insp-sep-w)",
@@ -9802,10 +9887,17 @@ export function NodeInspector({
   ].join(" ");
 
   return (
+    <>
+    {/* The dimmed page behind the panel: a click closes the inspector (unsaved edits are confirmed first). */}
+    <div className={closing ? "insp-scrim closing" : "insp-scrim"} aria-hidden="true" data-testid="insp-scrim" onClick={() => requestClose()} />
     <aside
-      className={`insp${isAgentNode ? " insp-agent" : ""}${split ? " insp-split" : ""}`}
+      ref={asideRef}
+      className={`insp${isAgentNode ? " insp-agent" : ""}${split ? " insp-split" : ""}${closing ? " closing" : ""}`}
       role="dialog"
+      aria-modal="true"
       aria-label={`Inspect ${label || node.data.label}`}
+      tabIndex={-1}
+      onKeyDown={trapFocus}
       style={inspectorWidth !== null && !split ? { width: inspectorWidth } : undefined}
     >
       {split ? null : (
@@ -9948,6 +10040,7 @@ export function NodeInspector({
         </div>
       ) : null}
     </aside>
+    </>
   );
 }
 

@@ -377,3 +377,92 @@ describe("node inspector: fitting and reachable controls", () => {
   });
 });
 
+
+describe("node inspector: a layer above the editor", () => {
+  afterEach(() => {
+    window.localStorage.clear();
+    setWindowWidth(originalWidth);
+  });
+
+  it("dims the page behind it; a click on the dimmed page closes it", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<NodeInspector {...props({ onClose })} />);
+    expect(screen.getByRole("dialog", { name: "Inspect Fetch orders" })).toHaveAttribute("aria-modal", "true");
+    await user.click(screen.getByTestId("insp-scrim"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks about unsaved edits before the dimmed page closes it", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<NodeInspector {...props({ onClose })} />);
+    await user.clear(screen.getByLabelText("Node name"));
+    await user.type(screen.getByLabelText("Node name"), "Renamed");
+    await user.click(screen.getByTestId("insp-scrim"));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog", { name: "Unsaved changes" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes focus on open, keeps Tab inside, and gives focus back to the node on close", async () => {
+    const user = userEvent.setup();
+    const nodeElement = document.createElement("div");
+    nodeElement.className = "react-flow__node";
+    nodeElement.dataset.id = "fetch";
+    nodeElement.tabIndex = 0;
+    document.body.appendChild(nodeElement);
+    try {
+      const { unmount } = render(<NodeInspector {...props()} />);
+      const dialog = screen.getByRole("dialog", { name: "Inspect Fetch orders" });
+      expect(dialog).toHaveFocus();
+      // Shift+Tab from the panel goes to its last control, Tab from there back to the first.
+      await user.tab({ shift: true });
+      expect(screen.getByRole("button", { name: /Save changes/ })).toHaveFocus();
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      expect(document.activeElement).not.toBe(nodeElement);
+      unmount();
+      expect(nodeElement).toHaveFocus();
+    } finally {
+      nodeElement.remove();
+    }
+  });
+});
+
+describe("node inspector: layer edges", () => {
+  it("brings focus that lands on the dimmed page back to the panel", () => {
+    const outside = document.createElement("button");
+    outside.textContent = "Sidebar link";
+    document.body.appendChild(outside);
+    try {
+      render(<NodeInspector {...props()} />);
+      outside.focus();
+      expect(screen.getByRole("dialog", { name: "Inspect Fetch orders" })).toHaveFocus();
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("fades out before it hands over to onClose", () => {
+    vi.useFakeTimers();
+    const original = (HTMLElement.prototype as unknown as { getAnimations?: unknown }).getAnimations;
+    (HTMLElement.prototype as unknown as { getAnimations: () => [] }).getAnimations = () => [];
+    try {
+      const onClose = vi.fn();
+      render(<NodeInspector {...props({ onClose })} />);
+      fireEvent.click(screen.getByRole("button", { name: "Close inspector" }));
+      expect(screen.getByRole("dialog", { name: "Inspect Fetch orders" })).toHaveClass("closing");
+      expect(screen.getByTestId("insp-scrim")).toHaveClass("closing");
+      expect(onClose).not.toHaveBeenCalled();
+      act(() => {
+        vi.advanceTimersByTime(200);
+      });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      (HTMLElement.prototype as unknown as { getAnimations?: unknown }).getAnimations = original;
+      vi.useRealTimers();
+    }
+  });
+});

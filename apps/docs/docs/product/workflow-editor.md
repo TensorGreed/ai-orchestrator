@@ -35,7 +35,9 @@ While the run is going the cards update live (running time, the step a node is o
 
 ### The node inspector
 
-Double-click a node to open it. On a wide window the inspector shows **Input | Parameters | Output** side by side,
+Double-click a node to open it. The inspector opens as a panel over the dimmed editor; click the dimmed area, press
+`Esc` or use the close button to return to the canvas (unsaved edits are confirmed first). On a wide window the
+inspector shows **Input | Parameters | Output** side by side,
 for every node, so it keeps its shape while you move between nodes; on a narrow window the same parts are tabs
 (the layout button in the header switches between the two, and the choice is remembered in this browser).
 
