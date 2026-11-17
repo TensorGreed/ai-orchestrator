@@ -44,9 +44,9 @@ describe("splitNodeInput", () => {
     expect(split.otherFields).toEqual({ mapped_name: "Jane" });
   });
 
-  it("keeps a field that differs from the parent's (an input mapping overwrote it)", () => {
-    const split = splitNodeInput({ ...storedInput, text: "mapped" });
-    expect(split.otherFields).toMatchObject({ text: "mapped" });
+  it("treats a run input field a parent also has as the parent's copy", () => {
+    const split = splitNodeInput({ ...storedInput, text: "run input of the same name" });
+    expect(split.otherFields).toEqual({ mapped_name: "Jane" });
   });
 
   it("treats a trigger's input as run input and run context only", () => {

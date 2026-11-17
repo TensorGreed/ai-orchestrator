@@ -128,7 +128,7 @@ export interface NodeInspectorProps {
   executionResult: WorkflowExecutionResult | null;
   /** Labels of the workflow's nodes by id, to name upstream nodes and the agent an attachment served. */
   nodeLabels?: ReadonlyMap<string, string>;
-  /** Opens another node in the inspector (previous/next step of the run), through the host's unsaved-edits guard. */
+  /** Opens another node in the inspector (previous/next step of the run), through the host's unsaved-edits check. */
   onNavigateNode?: (nodeId: string) => void;
   workflowContext?: {
     id?: string;
@@ -1414,20 +1414,34 @@ export function NodeInspector({
   const currentPinnedOutput = currentNodePinned ? asRecord(pinnedData)[node.id] : undefined;
 
   const labelFor = useCallback((nodeId: string) => nodeLabels?.get(nodeId) ?? nodeId, [nodeLabels]);
-  const currentRunResult = useMemo(
-    () => executionResult?.nodeResults.find((entry) => entry.nodeId === node.id) as RunNodeResult | undefined,
-    [executionResult, node.id]
-  );
-  const runSteps = useMemo(() => runStepOrder(executionResult), [executionResult]);
+  // The last entry for the node, the same one the canvas card shows.
+  const currentRunResult = useMemo(() => {
+    const results = executionResult?.nodeResults ?? [];
+    for (let index = results.length - 1; index >= 0; index -= 1) {
+      if (results[index]!.nodeId === node.id) return results[index] as RunNodeResult;
+    }
+    return undefined;
+  }, [executionResult, node.id]);
+  // Nodes of a past run that were deleted since cannot be opened, so stepping skips them.
+  const nodeExists = useCallback((nodeId: string) => !nodeLabels || nodeLabels.has(nodeId), [nodeLabels]);
+  const runSteps = useMemo(() => runStepOrder(executionResult).filter(nodeExists), [executionResult, nodeExists]);
   const hasRunData = Boolean(showRuntimeInspection && currentNodeResult);
   const hasRunDataRef = useRef(hasRunData);
   hasRunDataRef.current = hasRunData;
 
   // Opening a node that has data from the run shows that data first; the layout follows the stored choice, else
-  // side by side on a wide window when there is run data.
+  // side by side on a wide window when there is run data. Stepping to another node keeps the layout, and keeps the
+  // Input or Output tab when the next node has run data too.
+  const openedRef = useRef(false);
   useEffect(() => {
-    setActiveTab(hasRunDataRef.current ? "output" : "parameters");
-    setLayout(readStoredInspectorLayout() ?? (hasRunDataRef.current && isWideWindow() ? "split" : "tabs"));
+    const hasData = hasRunDataRef.current;
+    if (!openedRef.current) {
+      openedRef.current = true;
+      setLayout(readStoredInspectorLayout() ?? (hasData && isWideWindow() ? "split" : "tabs"));
+      setActiveTab(hasData ? "output" : "parameters");
+      return;
+    }
+    setActiveTab((current) => (hasData ? (current === "input" || current === "output" ? current : "output") : "parameters"));
   }, [node.id]);
 
   const setProvider = (patch: Record<string, unknown>) => {
@@ -4003,7 +4017,7 @@ export function NodeInspector({
           <button type="button" className="insp-btn" onClick={() => void handleCodeNodeTestRun()} disabled={codeTestBusy}>
             {codeTestBusy ? "Testing..." : "Test Run"}
           </button>
-          {codeTestResult && <span className="muted">Test completed. Inspect output panel for logs/result.</span>}
+          {codeTestResult && <span className="muted">Test completed. The result is under Output, labelled as a test.</span>}
         </div>
         {codeTestError && <div className="error-banner">{codeTestError}</div>}
       </>
@@ -9229,6 +9243,7 @@ export function NodeInspector({
         isTrigger={isTriggerNode}
         hasOwnTestData={hasTestData(node.data.config)}
         onOpenNode={onNavigateNode}
+        nodeExists={nodeExists}
         before={
           resolvedThisRun ? (
             <div className="insp-resolved">
@@ -9276,6 +9291,7 @@ export function NodeInspector({
           result={currentRunResult}
           labelFor={labelFor}
           onOpenNode={onNavigateNode}
+          nodeExists={nodeExists}
           pinnedOutput={currentNodePinned ? { value: currentPinnedOutput } : undefined}
           notFromRun={
             node.data.nodeType === "code_node" && codeTestResult
@@ -9552,7 +9568,14 @@ export function NodeInspector({
           ))}
         </div>
         {showRuntimeInspection && onNavigateNode && runSteps.length > 0 ? (
-          <RunStepBar steps={runSteps} currentId={node.id} labelFor={labelFor} onStep={onNavigateNode} runLabel={runLabel} />
+          <RunStepBar
+            steps={runSteps}
+            currentId={node.id}
+            labelFor={labelFor}
+            onStep={onNavigateNode}
+            runLabel={runLabel}
+            keysEnabled={!pendingClose}
+          />
         ) : null}
       </div>
 

@@ -18,6 +18,8 @@ export const RUN_DATA_JSON_LIMIT = 20_000;
 export const RUN_DATA_ROW_PAGE = 50;
 const TABLE_MAX_COLUMNS = 12;
 const CELL_MAX_CHARS = 300;
+/** Rows read to find the table's columns. */
+const COLUMN_SCAN_ROWS = 500;
 
 type DataViewMode = "table" | "json" | "schema";
 
@@ -35,13 +37,23 @@ function safeStringify(value: unknown, space?: number): string {
   }
 }
 
-function cellText(value: unknown): string {
+function fullCellText(value: unknown): string {
   if (value === null) return "null";
   if (value === undefined) return "";
   if (typeof value === "string") return value;
   if (typeof value !== "object") return String(value);
-  const text = safeStringify(value);
-  return text.length > CELL_MAX_CHARS ? `${text.slice(0, CELL_MAX_CHARS - 1)}…` : text;
+  return safeStringify(value);
+}
+
+/** A table cell: clipped, with the full value (up to the JSON limit) in its tooltip. */
+function Cell({ value, className }: { value: unknown; className: string }) {
+  const text = fullCellText(value);
+  if (text.length <= CELL_MAX_CHARS) return <td className={className}>{text}</td>;
+  return (
+    <td className={className} title={text.slice(0, RUN_DATA_JSON_LIMIT)}>
+      {`${text.slice(0, CELL_MAX_CHARS - 1)}…`}
+    </td>
+  );
 }
 
 function inferSchema(value: unknown, depth = 0): unknown {
@@ -59,6 +71,11 @@ function defaultMode(value: unknown): DataViewMode {
 }
 
 function DataTable({ value }: { value: unknown }) {
+  const itemsSplit = useMemo(() => {
+    if (!isRecord(value) || !Array.isArray(value.items)) return null;
+    const { items, ...rest } = value;
+    return { items: items as unknown[], rest };
+  }, [value]);
   const [shown, setShown] = useState(RUN_DATA_ROW_PAGE);
   useEffect(() => setShown(RUN_DATA_ROW_PAGE), [value]);
   const isArray = Array.isArray(value);
@@ -67,7 +84,7 @@ function DataTable({ value }: { value: unknown }) {
   const columns = useMemo(() => {
     if (!recordRows) return [];
     const seen: string[] = [];
-    for (const row of rows.slice(0, RUN_DATA_ROW_PAGE)) {
+    for (const row of rows.slice(0, COLUMN_SCAN_ROWS)) {
       for (const key of Object.keys(row as Record<string, unknown>)) {
         if (!seen.includes(key)) seen.push(key);
         if (seen.length >= TABLE_MAX_COLUMNS) return seen;
@@ -79,13 +96,12 @@ function DataTable({ value }: { value: unknown }) {
   if (!isArray) {
     const record = isRecord(value) ? value : {};
     // Many nodes return `{ items: [...], count }`: the items get their own table.
-    if (Array.isArray(record.items)) {
-      const { items, ...rest } = record;
+    if (itemsSplit) {
       return (
         <>
-          <div className="run-data-subtitle">items ({(items as unknown[]).length})</div>
-          <DataTable value={items} />
-          {Object.keys(rest).length > 0 ? <DataTable value={rest} /> : null}
+          <div className="run-data-subtitle">items ({itemsSplit.items.length})</div>
+          <DataTable value={itemsSplit.items} />
+          {Object.keys(itemsSplit.rest).length > 0 ? <DataTable value={itemsSplit.rest} /> : null}
         </>
       );
     }
@@ -107,7 +123,7 @@ function DataTable({ value }: { value: unknown }) {
                 <th scope="row" className="run-data-key">
                   {key}
                 </th>
-                <td className="run-data-value">{cellText(child)}</td>
+                <Cell value={child} className="run-data-value" />
               </tr>
             ))}
           </tbody>
@@ -137,13 +153,9 @@ function DataTable({ value }: { value: unknown }) {
             <tr key={index}>
               <td className="run-data-index">{index + 1}</td>
               {recordRows ? (
-                columns.map((column) => (
-                  <td key={column} className="run-data-value">
-                    {cellText((row as Record<string, unknown>)[column])}
-                  </td>
-                ))
+                columns.map((column) => <Cell key={column} value={(row as Record<string, unknown>)[column]} className="run-data-value" />)
               ) : (
-                <td className="run-data-value">{cellText(row)}</td>
+                <Cell value={row} className="run-data-value" />
               )}
             </tr>
           ))}
@@ -158,14 +170,14 @@ function DataTable({ value }: { value: unknown }) {
   );
 }
 
-function JsonBlock({ value }: { value: unknown }) {
-  const text = useMemo(() => safeStringify(value, 2), [value]);
+/** Long text, cut at the JSON limit until the user asks for all of it. */
+function ClippedPre({ text, className }: { text: string; className: string }) {
   const [full, setFull] = useState(false);
-  useEffect(() => setFull(false), [value]);
+  useEffect(() => setFull(false), [text]);
   const clipped = !full && text.length > RUN_DATA_JSON_LIMIT;
   return (
     <>
-      <pre className="run-data-json" tabIndex={0}>
+      <pre className={className} tabIndex={0}>
         {clipped ? `${text.slice(0, RUN_DATA_JSON_LIMIT)}\n…` : text}
       </pre>
       {clipped ? (
@@ -175,6 +187,11 @@ function JsonBlock({ value }: { value: unknown }) {
       ) : null}
     </>
   );
+}
+
+function JsonBlock({ value }: { value: unknown }) {
+  const text = useMemo(() => safeStringify(value, 2), [value]);
+  return <ClippedPre text={text} className="run-data-json" />;
 }
 
 /** One value of a run, as a table, JSON or inferred schema. */
@@ -211,9 +228,7 @@ export function RunDataView({ value, label }: { value: unknown; label: string })
       ) : active === "schema" ? (
         <JsonBlock value={inferSchema(value)} />
       ) : typeof value === "string" ? (
-        <pre className="run-data-json run-data-text" tabIndex={0}>
-          {value.length > RUN_DATA_JSON_LIMIT ? `${value.slice(0, RUN_DATA_JSON_LIMIT)}…` : value}
-        </pre>
+        <ClippedPre text={value} className="run-data-json run-data-text" />
       ) : (
         <JsonBlock value={value} />
       )}
@@ -223,7 +238,17 @@ export function RunDataView({ value, label }: { value: unknown; label: string })
 
 export type RunNodeResult = NodeExecutionResult & { liveText?: string };
 
-function AttachmentNote({ use, labelFor, onOpenNode }: { use: AttachmentUse; labelFor: (id: string) => string; onOpenNode?: (id: string) => void }) {
+function AttachmentNote({
+  use,
+  labelFor,
+  onOpenNode,
+  nodeExists
+}: {
+  use: AttachmentUse;
+  labelFor: (id: string) => string;
+  onOpenNode?: (id: string) => void;
+  nodeExists: (id: string) => boolean;
+}) {
   const agent = labelFor(use.usedByNodeId);
   return (
     <div className="run-data-note" data-testid="run-data-attachment">
@@ -231,7 +256,7 @@ function AttachmentNote({ use, labelFor, onOpenNode }: { use: AttachmentUse; lab
         Used by <strong>{agent}</strong> as its {portName(use.handle)}. Attached nodes do not run as their own step: the data
         they handled is in {agent}'s input and output.
       </p>
-      {onOpenNode ? (
+      {onOpenNode && nodeExists(use.usedByNodeId) ? (
         <button type="button" className="insp-btn" onClick={() => onOpenNode(use.usedByNodeId)}>
           Open {agent}
         </button>
@@ -265,17 +290,24 @@ interface NodeRunInputProps {
   /** The node has its own test data, so the run's prompt field is context, not its input. */
   hasOwnTestData?: boolean;
   onOpenNode?: (nodeId: string) => void;
+  /** False for nodes of a past run that are no longer in the workflow (they cannot be opened). */
+  nodeExists?: (nodeId: string) => boolean;
   /** Shown above the received data (for example the values the node resolved this run). */
   before?: ReactNode;
 }
 
 /** What the node received in the run: each upstream node's output, other fields in scope, and the run context. */
-export function NodeRunInput({ result, labelFor, isTrigger, hasOwnTestData = false, onOpenNode, before }: NodeRunInputProps) {
+const ALWAYS = () => true;
+
+export function NodeRunInput({ result, labelFor, isTrigger, hasOwnTestData = false, onOpenNode, nodeExists = ALWAYS, before }: NodeRunInputProps) {
+  const input = result?.input;
+  const promptIsInput = runPromptInput(input, hasOwnTestData) !== undefined;
+  const split = useMemo(() => splitNodeInput(input, labelFor, { promptIsInput }), [input, labelFor, promptIsInput]);
   if (!result) {
     return <div className="insp-empty">No run data for this node yet. Run the workflow, or this node, to see what it receives.</div>;
   }
   const use = attachmentUse(result);
-  if (use) return <AttachmentNote use={use} labelFor={labelFor} onOpenNode={onOpenNode} />;
+  if (use) return <AttachmentNote use={use} labelFor={labelFor} onOpenNode={onOpenNode} nodeExists={nodeExists} />;
   if (result.input === undefined) {
     return (
       <div className="insp-empty">
@@ -287,7 +319,6 @@ export function NodeRunInput({ result, labelFor, isTrigger, hasOwnTestData = fal
       </div>
     );
   }
-  const split = splitNodeInput(result.input, labelFor, { promptIsInput: runPromptInput(result.input, hasOwnTestData) !== undefined });
   const otherKeys = Object.keys(split.otherFields);
   return (
     <div className="run-data-input">
@@ -303,7 +334,7 @@ export function NodeRunInput({ result, labelFor, isTrigger, hasOwnTestData = fal
           <section key={entry.nodeId} className="run-data-block" aria-label={`From ${entry.label}`}>
             <h4 className="run-data-block-title">
               From{" "}
-              {onOpenNode ? (
+              {onOpenNode && nodeExists(entry.nodeId) ? (
                 <button type="button" className="run-data-link" onClick={() => onOpenNode(entry.nodeId)}>
                   {entry.label}
                 </button>
@@ -317,7 +348,7 @@ export function NodeRunInput({ result, labelFor, isTrigger, hasOwnTestData = fal
       )}
       {otherKeys.length > 0 ? (
         <section className="run-data-block" aria-label="Other fields">
-          <h4 className="run-data-block-title">{split.receivedFrom.length === 0 ? "Run input" : "Other fields (run input, input mapping)"}</h4>
+          <h4 className="run-data-block-title">Run input</h4>
           <RunDataView value={split.otherFields} label="Other fields" />
         </section>
       ) : null}
@@ -336,6 +367,7 @@ interface NodeRunOutputProps {
   result: RunNodeResult | undefined;
   labelFor: (nodeId: string) => string;
   onOpenNode?: (nodeId: string) => void;
+  nodeExists?: (nodeId: string) => boolean;
   /** Pinned data stored on the workflow for this node, when there is no run result. */
   pinnedOutput?: { value: unknown };
   /** A result that is not from a workflow run (for example a code test), with its label. */
@@ -345,7 +377,16 @@ interface NodeRunOutputProps {
 }
 
 /** What the node produced in the run, its error with the input it failed on, or an explicit label for other data. */
-export function NodeRunOutput({ result, labelFor, onOpenNode, pinnedOutput, notFromRun, failingInput }: NodeRunOutputProps) {
+export function NodeRunOutput({ result, labelFor, onOpenNode, nodeExists = ALWAYS, pinnedOutput, notFromRun, failingInput }: NodeRunOutputProps) {
+  // A test result is shown on its own, labelled, above whatever the run recorded.
+  const notFromRunBlock = notFromRun ? (
+    <div className="run-data-output">
+      <p className="run-data-label" data-testid="run-data-not-from-run">
+        {notFromRun.label}
+      </p>
+      {notFromRun.content}
+    </div>
+  ) : null;
   if (!result) {
     if (pinnedOutput) {
       return (
@@ -354,25 +395,18 @@ export function NodeRunOutput({ result, labelFor, onOpenNode, pinnedOutput, notF
             Pinned data, not from a run. Runs reuse it instead of running this node until you unpin it.
           </p>
           <RunDataView value={pinnedOutput.value} label="Pinned data" />
+          {notFromRunBlock}
         </div>
       );
     }
-    if (notFromRun) {
-      return (
-        <div className="run-data-output">
-          <p className="run-data-label" data-testid="run-data-not-from-run">
-            {notFromRun.label}
-          </p>
-          {notFromRun.content}
-        </div>
-      );
-    }
+    if (notFromRunBlock) return notFromRunBlock;
     return <div className="insp-empty">No run yet for this node. Run the workflow, or this node, to see its output.</div>;
   }
   const use = attachmentUse(result);
-  if (use) return <AttachmentNote use={use} labelFor={labelFor} onOpenNode={onOpenNode} />;
+  if (use) return <AttachmentNote use={use} labelFor={labelFor} onOpenNode={onOpenNode} nodeExists={nodeExists} />;
   return (
     <div className="run-data-output">
+      {notFromRunBlock}
       <RunStatusLine result={result} />
       {usedPinnedData(result) ? (
         <p className="run-data-label run-data-label-pinned" data-testid="run-data-pinned">
@@ -421,6 +455,8 @@ interface RunStepBarProps {
   labelFor: (nodeId: string) => string;
   onStep: (nodeId: string) => void;
   runLabel?: string;
+  /** False while something else holds the keyboard (for example the unsaved-changes prompt). */
+  keysEnabled?: boolean;
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -430,12 +466,13 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 /** Previous / next node of the run, without closing the inspector (Alt+[ and Alt+]). */
-export function RunStepBar({ steps, currentId, labelFor, onStep, runLabel }: RunStepBarProps) {
+export function RunStepBar({ steps, currentId, labelFor, onStep, runLabel, keysEnabled = true }: RunStepBarProps) {
   const index = steps.indexOf(currentId);
   const previous = index > 0 ? steps[index - 1] : undefined;
   const next = index >= 0 && index < steps.length - 1 ? steps[index + 1] : undefined;
 
   useEffect(() => {
+    if (!keysEnabled) return;
     const handleKey = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey || isTypingTarget(event.target)) return;
       const target = event.code === "BracketLeft" ? previous : event.code === "BracketRight" ? next : undefined;
@@ -445,7 +482,7 @@ export function RunStepBar({ steps, currentId, labelFor, onStep, runLabel }: Run
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [next, onStep, previous]);
+  }, [keysEnabled, next, onStep, previous]);
 
   if (steps.length === 0) return null;
   return (

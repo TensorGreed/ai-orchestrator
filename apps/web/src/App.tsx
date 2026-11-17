@@ -1279,6 +1279,10 @@ function StudioApp() {
   const activeAssistantMessageIdRef = useRef<string | null>(null);
   const logsResizeAbortRef = useRef<AbortController | null>(null);
   const latestDebugExecutionIdRef = useRef<string | null>(null);
+  /** A past run picked from the Run data list; while set, the poller does not replace it. */
+  const pickedExecutionIdRef = useRef<string | null>(null);
+  const pickRequestRef = useRef(0);
+  const currentWorkflowIdRef = useRef<string | null>(null);
   const latestExecutionResultRef = useRef<WorkflowExecutionResult | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [externalImportOpen, setExternalImportOpen] = useState(false);
@@ -1740,6 +1744,20 @@ function StudioApp() {
   }, [executionResult]);
 
   useEffect(() => {
+    currentWorkflowIdRef.current = currentWorkflow.id;
+    pickedExecutionIdRef.current = null;
+    pickRequestRef.current += 1;
+  }, [currentWorkflow.id]);
+
+  // Starting a run (or any other busy action) follows the newest data again.
+  useEffect(() => {
+    if (busy) {
+      pickedExecutionIdRef.current = null;
+      pickRequestRef.current += 1;
+    }
+  }, [busy]);
+
+  useEffect(() => {
     if (isDebugMode) {
       return;
     }
@@ -1757,7 +1775,8 @@ function StudioApp() {
 
     let cancelled = false;
     const syncLatestExecution = async () => {
-      if (busy || chatBusy) {
+      // A run picked from the Run data list stays on the canvas until the user picks the latest or runs again.
+      if (busy || chatBusy || pickedExecutionIdRef.current) {
         return;
       }
 
@@ -1811,7 +1830,7 @@ function StudioApp() {
         }
 
         const detail = await inBackground(() => fetchExecutionById(latest.id));
-        if (cancelled) {
+        if (cancelled || pickedExecutionIdRef.current) {
           return;
         }
 
@@ -2515,10 +2534,18 @@ function StudioApp() {
 
   // Loads a past run of the open workflow onto the canvas (the stored record only); the workflow itself is untouched.
   const handlePickRun = useCallback(
-    async (executionId: string) => {
+    async (executionId: string, isLatest: boolean) => {
+      const request = ++pickRequestRef.current;
+      const workflowId = currentWorkflowIdRef.current;
+      // The latest run lets the canvas follow new runs again; an older one holds it until the next run.
+      pickedExecutionIdRef.current = isLatest ? null : executionId;
       try {
         setError(null);
         const detail = await fetchExecutionById(executionId);
+        // A later pick, or a switch to another workflow, wins over this one.
+        if (request !== pickRequestRef.current || detail.workflowId !== currentWorkflowIdRef.current || workflowId !== detail.workflowId) {
+          return;
+        }
         latestDebugExecutionIdRef.current = detail.id;
         setLiveNodeStatuses({});
         setExecutionResult(toWorkflowExecutionResult(detail));
@@ -5313,7 +5340,7 @@ function StudioApp() {
                       : null
                   }
                   busy={busy}
-                  onPick={(executionId) => void handlePickRun(executionId)}
+                  onPick={(executionId, isLatest) => void handlePickRun(executionId, isLatest)}
                 />
               }
             />

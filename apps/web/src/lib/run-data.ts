@@ -31,7 +31,7 @@ export interface ReceivedInput {
 export interface SplitNodeInput {
   /** One entry per upstream node whose output this node received, in the order the engine recorded them. */
   receivedFrom: ReceivedInput[];
-  /** Fields that are neither run context nor a copy of an upstream field: run input and input mapping. */
+  /** Fields that are neither run context nor a copy of an upstream field: the run's own input. */
   otherFields: Record<string, unknown>;
   /** Run-wide context: prompt fields, variables, webhook body, session, trigger and execution ids. */
   runContext: Record<string, unknown>;
@@ -39,16 +39,6 @@ export interface SplitNodeInput {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function sameValue(left: unknown, right: unknown): boolean {
-  if (left === right) return true;
-  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) return false;
-  try {
-    return JSON.stringify(left) === JSON.stringify(right);
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -91,6 +81,7 @@ export function splitNodeInput(
     split.receivedFrom.push({ nodeId, label: labelFor(nodeId), value });
   }
   const parentValues = Object.values(parents).filter(isRecord);
+  const hasOwn = (record: Record<string, unknown>, key: string) => Object.prototype.hasOwnProperty.call(record, key);
   for (const [key, value] of Object.entries(input)) {
     if (key === PARENT_OUTPUTS_KEY) continue;
     if (key === "user_prompt" && options.promptIsInput) {
@@ -102,8 +93,9 @@ export function splitNodeInput(
       continue;
     }
     // The engine also keys each parent's output by its node id and spreads its fields: both are copies.
-    if (Object.prototype.hasOwnProperty.call(parents, key)) continue;
-    if (parentValues.some((parent) => Object.prototype.hasOwnProperty.call(parent, key) && sameValue(parent[key], value))) continue;
+    // Parent fields win over run input of the same name, so a key any parent has is that parent's copy.
+    if (hasOwn(parents, key)) continue;
+    if (parentValues.some((parent) => hasOwn(parent, key))) continue;
     split.otherFields[key] = value;
   }
   return split;

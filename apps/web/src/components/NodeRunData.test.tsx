@@ -57,6 +57,15 @@ describe("RunDataView", () => {
     expect(document.querySelector(".run-data-json")!.textContent).toContain("x".repeat(RUN_DATA_JSON_LIMIT + 100));
   });
 
+  it("cuts a long text output until asked, then shows all of it", async () => {
+    const user = userEvent.setup();
+    const text = "y".repeat(RUN_DATA_JSON_LIMIT + 50);
+    render(<RunDataView value={text} label="Answer" />);
+    expect(document.querySelector(".run-data-text")!.textContent!.length).toBeLessThan(text.length);
+    await user.click(screen.getByRole("button", { name: /Show all/ }));
+    expect(document.querySelector(".run-data-text")!.textContent).toBe(text);
+  });
+
   it("gives an items list its own table", () => {
     render(<RunDataView value={sortResult.output} label="Output" />);
     expect(screen.getByText("items (2)")).toBeInTheDocument();
@@ -74,6 +83,12 @@ describe("NodeRunInput", () => {
     expect(within(context).getByText("What time is it in America/Toronto?")).not.toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Orders in" }));
     expect(onOpenNode).toHaveBeenCalledWith("start");
+  });
+
+  it("names an upstream node that no longer exists without a link to it", () => {
+    render(<NodeRunInput result={sortResult} labelFor={labelFor} isTrigger={false} onOpenNode={vi.fn()} nodeExists={() => false} />);
+    expect(screen.getByRole("region", { name: "From Orders in" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Orders in" })).toBeNull();
   });
 
   it("says when there is no run, and explains a trigger", () => {
@@ -134,6 +149,13 @@ describe("NodeRunOutput", () => {
     expect(screen.getByText(/No run yet for this node/)).toBeInTheDocument();
   });
 
+  it("shows a code test result labelled, above the run's own output", () => {
+    render(<NodeRunOutput result={sortResult} labelFor={labelFor} notFromRun={{ label: "Code test result, not from a workflow run.", content: <span>test value</span> }} />);
+    expect(screen.getByTestId("run-data-not-from-run")).toBeInTheDocument();
+    expect(screen.getByText("test value")).toBeInTheDocument();
+    expect(screen.getByTestId("run-data-status")).toHaveTextContent("success · 2 items");
+  });
+
   it("says when the run reused pinned data", () => {
     render(<NodeRunOutput result={{ ...sortResult, warnings: ["Used pinned data; node executor was not called."] }} labelFor={labelFor} />);
     expect(screen.getByTestId("run-data-pinned")).toHaveTextContent("reused the node's pinned data");
@@ -159,6 +181,13 @@ describe("RunStepBar", () => {
     fireEvent.keyDown(window, { code: "BracketLeft", altKey: true });
     expect(onStep).toHaveBeenLastCalledWith("start");
     expect(onStep).toHaveBeenCalledTimes(4);
+  });
+
+  it("ignores the step keys while they are turned off", () => {
+    const onStep = vi.fn();
+    render(<RunStepBar steps={["a", "b"]} currentId="a" labelFor={labelFor} onStep={onStep} keysEnabled={false} />);
+    fireEvent.keyDown(window, { code: "BracketRight", altKey: true });
+    expect(onStep).not.toHaveBeenCalled();
   });
 
   it("does not step while typing in a field", () => {

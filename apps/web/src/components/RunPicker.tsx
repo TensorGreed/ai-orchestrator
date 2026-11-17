@@ -19,16 +19,24 @@ interface RunPickerProps {
   /** The run shown on the canvas now. */
   current: { executionId?: string; startedAt: string; status: string } | null;
   busy?: boolean;
-  onPick: (executionId: string) => void;
+  /** `isLatest` is true for the newest run in the list. */
+  onPick: (executionId: string, isLatest: boolean) => void;
 }
 
 /** Which run's data the canvas and inspector show: the current one or one of the workflow's recent runs. */
 export function RunPicker({ workflowId, enabled, current, busy, onPick }: RunPickerProps) {
   const [runs, setRuns] = useState<ExecutionHistorySummary[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
   const id = useId();
   const currentId = current?.executionId;
   const currentStatus = current?.status;
+
+  // Another workflow's runs must never be offered, not even while this one's list loads.
+  useEffect(() => {
+    setRuns([]);
+    setError(null);
+  }, [workflowId]);
 
   useEffect(() => {
     if (!enabled) {
@@ -48,22 +56,26 @@ export function RunPicker({ workflowId, enabled, current, busy, onPick }: RunPic
     return () => {
       cancelled = true;
     };
-    // A finished or newly loaded run refreshes the list.
-  }, [enabled, workflowId, currentId, currentStatus]);
+    // A finished or newly loaded run refreshes the list, and so does opening it.
+  }, [enabled, workflowId, currentId, currentStatus, refreshKey]);
 
   if (!enabled || (runs.length === 0 && !current)) return null;
   const listed = Boolean(currentId && runs.some((run) => run.id === currentId));
   const value = currentId ?? "__current__";
   return (
-    <label className="run-picker" htmlFor={id} title={error ?? "Which run's data the canvas and the node inspector show"}>
+    <label className="run-picker" htmlFor={id} title="Which run's data the canvas and the node inspector show">
       <span className="run-picker-label">Run data</span>
       <select
         id={id}
         className="run-picker-select"
         value={value}
         disabled={busy}
+        onFocus={() => setRefreshKey((key) => key + 1)}
         onChange={(event) => {
-          if (event.target.value !== "__current__" && event.target.value !== currentId) onPick(event.target.value);
+          const picked = event.target.value;
+          if (picked === "__current__") return;
+          const isLatest = runs[0]?.id === picked;
+          if (picked !== currentId || isLatest) onPick(picked, isLatest);
         }}
       >
         {current && !listed ? <option value={value}>This run · {describeRun(current)}</option> : null}
@@ -75,6 +87,11 @@ export function RunPicker({ workflowId, enabled, current, busy, onPick }: RunPic
           </option>
         ))}
       </select>
+      {error ? (
+        <span className="run-picker-error" role="status">
+          {error}
+        </span>
+      ) : null}
     </label>
   );
 }

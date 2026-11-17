@@ -45,7 +45,16 @@ describe("RunPicker", () => {
     expect(select).toHaveValue("run-2");
     expect(select.querySelector("option")!.textContent).toMatch(/^Latest · /);
     await userEvent.selectOptions(select, "run-1");
-    expect(onPick).toHaveBeenCalledWith("run-1");
+    expect(onPick).toHaveBeenCalledWith("run-1", false);
+  });
+
+  it("tells the host when the newest run is picked, so the canvas follows new runs again", async () => {
+    const onPick = vi.fn();
+    render(<RunPicker workflowId="wf" enabled current={{ executionId: "run-1", startedAt: "2026-01-01T10:00:00.000Z", status: "error" }} onPick={onPick} />);
+    const select = await screen.findByLabelText("Run data");
+    await waitFor(() => expect(select.querySelectorAll("option")).toHaveLength(2));
+    await userEvent.selectOptions(select, "run-2");
+    expect(onPick).toHaveBeenCalledWith("run-2", true);
   });
 
   it("names a run that is not in the list yet (in progress) and shows nothing for an unsaved workflow", async () => {

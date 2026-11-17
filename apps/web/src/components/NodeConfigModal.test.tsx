@@ -594,6 +594,19 @@ describe("NodeInspector run data", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("keeps the Input tab while stepping, and leaves out steps whose node was deleted", async () => {
+    const user = userEvent.setup();
+    const props = makeProps({ executionResult: runResult, showRuntimeInspection: true, nodeLabels: new Map([["node-1", "User Prompt"], ["end", "Finish"]]), onNavigateNode: vi.fn() });
+    const { rerender } = render(<NodeInspector {...props} />);
+    // "start" is in the run but not in the workflow any more.
+    expect(screen.getByRole("navigation", { name: "Run steps" })).toHaveTextContent("Step 1 of 2");
+    expect(screen.queryByRole("button", { name: "Start" })).toBeNull();
+    await user.click(screen.getByRole("tab", { name: "Input" }));
+    const end = { ...makeNode(), id: "end", data: { ...makeNode().data, label: "Finish" } };
+    rerender(<NodeInspector {...props} node={end} />);
+    expect(screen.getByRole("tab", { name: "Input" })).toHaveAttribute("aria-selected", "true");
+  });
+
   it("shows Input, Parameters and Output side by side and remembers the choice", async () => {
     const user = userEvent.setup();
     const { unmount } = render(<NodeInspector {...makeProps({ executionResult: runResult, showRuntimeInspection: true, nodeLabels })} />);
