@@ -176,7 +176,7 @@ The names and addresses check (`data.entities`) is measured on its own corpus, `
 
 Every predicted span is matched one to one with a labelled span of the same class:
 
-- **Overlap**: the two share at least half of the longer span's characters. This is the headline number, since where an address ends (with or without the country) is a matter of style.
+- **Overlap**: the two share at least half of the longer span's characters. This is the headline number, since where an address ends (with or without the country) is a matter of style. The longer span sets the bar, so a prediction that covers a whole paragraph earns nothing, and a street line alone (`12 Larkspur Lane`) does not match a labelled address that goes on through the town and postcode. Each labelled span pairs with at most one prediction, using the pairing that matches the most spans.
 - **Strict**: the exact span.
 
 A place the check finds inside a labelled street address counts as part of that address, so it is neither a hit nor a false positive. Results are precision, recall and F1 per class and split, and the number of look-alikes flagged.

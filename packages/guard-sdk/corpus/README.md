@@ -231,9 +231,10 @@ Everything is synthetic.
 - Main split:
   - Given names are a hand-picked subset of the US Social Security Administration's baby-name lists. Surnames are a hand-picked subset of the US Census Bureau's 2010 surname list. Both are US government works in the public domain.
   - US cities are names in the US Census Bureau's gazetteer (public domain). Other cities, regions and countries are names of major places, used as plain geographic facts. No gazetteer dataset was copied.
-  - A few items name long-dead historical figures in neutral, factual sentences.
+  - News-style items name invented people with invented facts.
   - Street names, house numbers and postcodes are invented; postcodes are format-valid only.
   - Every template is hand-written.
+- No real person is named anywhere in either split (a fictional character from a classic novel appears once).
 - Held-out split: hand-written for this corpus. Names are invented combinations of common given names and surnames. Streets, numbers, postcodes and place combinations are invented, and no dataset or website was copied.
 
 ### Matching and floors

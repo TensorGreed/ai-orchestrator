@@ -3,7 +3,7 @@
   "version": 1,
   "split": "heldout",
   "description": "Held-out split: person names, places and street addresses (US, UK, CA, AU, DE, FR) in English text, with look-alikes. Written apart from the generator, the main split and the detector, by an author given only the class definitions and the file format.",
-  "source": "Hand-written synthetic text (model-authored for this corpus from the class definitions alone). Names are invented combinations of common given names and surnames; streets, house numbers, postcodes and place combinations are invented (postcodes format-valid only); no dataset or website was copied.",
+  "source": "Hand-written synthetic text (model-authored for this corpus from the class definitions alone). Names are invented combinations of common given names and surnames, and no real person is named; streets, house numbers, postcodes and place combinations are invented (postcodes format-valid only); no dataset or website was copied.",
   "items": [
     {
       "id": "en-h-001",
@@ -333,11 +333,11 @@
         "news",
         "person"
       ],
-      "textB64": "U2VyZW5hIFdpbGxpYW1zIHdvbiB0aGUgbWF0Y2ggaW4gc3RyYWlnaHQgc2V0cywgdGhlIGNsdWIgc2FpZC4=",
+      "textB64": "VGFsaWEgQnJlbm5pY2sgd29uIHRoZSBtYXRjaCBpbiBzdHJhaWdodCBzZXRzLCB0aGUgY2x1YiBzYWlkLg==",
       "entities": [
         {
           "start": 0,
-          "end": 15,
+          "end": 14,
           "class": "person_name"
         }
       ]
@@ -651,16 +651,16 @@
         "code",
         "person"
       ],
-      "textB64": "Rml4IHBhZ2luYXRpb24gYnVnIHJlcG9ydGVkIGJ5IEFuaWwgS2Fwb29yCgpDby1hdXRob3JlZC1ieTogQmV0aCBBbHZhcmV6IDxiZXRoQGRldi5leGFtcGxlPg==",
+      "textB64": "Rml4IHBhZ2luYXRpb24gYnVnIHJlcG9ydGVkIGJ5IEFuaWwgRGVzaHdhbAoKQ28tYXV0aG9yZWQtYnk6IEJldGggQWx2YXJleiA8YmV0aEBkZXYuZXhhbXBsZT4=",
       "entities": [
         {
           "start": 31,
-          "end": 42,
+          "end": 43,
           "class": "person_name"
         },
         {
-          "start": 60,
-          "end": 72,
+          "start": 61,
+          "end": 73,
           "class": "person_name"
         }
       ]
