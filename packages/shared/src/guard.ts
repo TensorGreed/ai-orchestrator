@@ -86,7 +86,7 @@ export type GuardEventChannelValue = (typeof GUARD_EVENT_CHANNEL_VALUES)[number]
 /** Phase 15.6: the list lives in data-labels.ts. */
 export const GUARD_PROVENANCE_VALUES = PROVENANCE_LABELS;
 
-export const PROTECTION_PROVIDER_IDS = ["mask", "keyed_hash", "aes_gcm", "token_vault", "surrogate"] as const;
+export const PROTECTION_PROVIDER_IDS = ["mask", "keyed_hash", "aes_gcm", "token_vault", "surrogate", "placeholder"] as const;
 export type ProtectionProviderIdValue = (typeof PROTECTION_PROVIDER_IDS)[number];
 
 /** Phase 16 — protection providers whose tokens cannot be turned back into the value. */
@@ -360,23 +360,37 @@ export function guardDocumentHasRevealRules(document: unknown): boolean {
 
 /** The subject a reveal is judged for: the run subject, plus the service account a run acts as, when it has one. */
 export interface RevealSubject {
-  /** `user`: a signed-in person started the run. Anything else is unattended (owner, fallback, client, ...). */
+  /**
+   * `user`: a signed-in person started the run. `gateway_client`: an MCP gateway client calls the restore tool.
+   * Anything else is unattended (owner, fallback, client, ...).
+   */
   source: string;
   role?: string;
   userId?: string | null;
   serviceAccountId?: string | null;
+  /** The MCP gateway client calling the restore tool (source `gateway_client`). */
+  gatewayClientId?: string | null;
 }
+
+/** The reveal subject source of an MCP gateway client calling the restore tool. */
+export const REVEAL_GATEWAY_CLIENT_SOURCE = "gateway_client";
 
 /** The parts of a reveal rule the match reads (structurally the guard-sdk `RevealRule`). */
 export interface RevealRuleLike {
   dataClasses: readonly string[];
-  subjects: { roles?: readonly string[]; users?: readonly string[]; serviceAccounts?: readonly string[] };
+  subjects: { roles?: readonly string[]; users?: readonly string[]; serviceAccounts?: readonly string[]; gatewayClients?: readonly string[] };
   workflows?: readonly string[];
 }
 
-/** Whether a reveal rule names this subject: role and user only for runs a signed-in person started; service accounts explicitly. */
+/**
+ * Whether a reveal rule names this subject: role and user only for runs a signed-in person started; service accounts
+ * explicitly; a gateway client only by its id under `gatewayClients` (never through a role, user or service account).
+ */
 export function revealRuleMatchesSubject(rule: RevealRuleLike, subject: RevealSubject | null | undefined): boolean {
   if (!subject) return false;
+  if (subject.source === REVEAL_GATEWAY_CLIENT_SOURCE) {
+    return Boolean(subject.gatewayClientId && (rule.subjects.gatewayClients ?? []).includes(subject.gatewayClientId));
+  }
   if (subject.serviceAccountId && (rule.subjects.serviceAccounts ?? []).includes(subject.serviceAccountId)) return true;
   if (subject.source !== "user") return false;
   if (subject.userId && (rule.subjects.users ?? []).includes(subject.userId)) return true;
@@ -451,8 +465,11 @@ export const guardRevealNodeConfigSchema = z.object({
 });
 export type GuardRevealNodeConfig = z.output<typeof guardRevealNodeConfigSchema>;
 
-/** Phase 12 coverage — why a token was not revealed. */
-export const REVEAL_REFUSAL_REASONS = ["no_rule", "other_project", "unscoped_token", "unknown_token", "key_not_allowed", "not_decryptable"] as const;
+/**
+ * Phase 12 coverage — why a token was not revealed. `approval_required`: the restore tool on the MCP gateway cannot
+ * wait for the approval a reveal rule asks for, so that class stays as it is.
+ */
+export const REVEAL_REFUSAL_REASONS = ["no_rule", "other_project", "unscoped_token", "unknown_token", "key_not_allowed", "not_decryptable", "approval_required"] as const;
 export type RevealRefusalReason = (typeof REVEAL_REFUSAL_REASONS)[number];
 
 /** Phase 12 coverage — what a Reveal node reports per data class (counts and token hashes, never values). */

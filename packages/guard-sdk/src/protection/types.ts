@@ -17,6 +17,8 @@ export interface ProtectContext {
   keyId?: string;
   /** Provider-specific settings from the profile's data-class mapping. */
   options?: Record<string, unknown>;
+  /** The whole text being rewritten, for providers that must not collide with what it already holds (placeholders). */
+  text?: string;
 }
 
 export interface ProtectionProvider {

@@ -1,8 +1,10 @@
 import { dropInsideValues, dropIssuedSurrogates, evaluateDestinationRules, profileHasDestinationRules, withoutIgnoredValues } from "./destinations";
+import { compileAllowList } from "./allow-list";
 import { scanDlp } from "./detectors/dlp";
 import { maskedEvidence, maskForDataClass } from "./masking";
 import type { ActionRule, GuardProfile } from "./profile";
 import { hashGuardProfile } from "./profile";
+import { PLACEHOLDER_PROVIDER_ID } from "./protection/placeholder";
 import type { ProtectionRegistry } from "./protection/registry";
 import type { GuardRegistry } from "./registry";
 import {
@@ -126,6 +128,10 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
   const applied: AppliedAction[] = [];
   const effectiveActions: GuardAction[] = [];
   const dictionaries = profile.dictionaries;
+  // A rule set's allow-list: values no data detector reports (every finding with a data class, dictionaries included).
+  const allowList = profile.allowList ? compileAllowList(profile.allowList) : undefined;
+  const allowListed = (finding: GuardFinding): boolean =>
+    Boolean(allowList && !allowList.empty && finding.dataClass && finding.spans.length > 0 && finding.spans.every((span) => allowList.allows(text.slice(span.start, span.end))));
 
   log("start", `Evaluating ${input.channel} with profile ${profile.id}@${profile.version}`, {
     labels: input.labels ?? [],
@@ -244,6 +250,7 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
         message: withoutIgnoredValues(finding.message, ignored)
       }));
     }
+    if (allowList && !allowList.empty) result = result.filter((finding) => !allowListed(finding));
     if (win) result = result.flatMap((finding) => {
       const inside = inWindow(finding);
       return inside ? [inside] : [];
@@ -359,6 +366,21 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     if (!action || action.shadow) continue;
     switch (action.effective) {
       case "redact":
+        // A redact rule naming the placeholder provider writes readable placeholders (`[EMAIL_1]`) instead.
+        if (action.providerId === PLACEHOLDER_PROVIDER_ID && finding.dataClass && options.protection?.get(PLACEHOLDER_PROVIDER_ID)) {
+          const provider = options.protection.get(PLACEHOLDER_PROVIDER_ID)!;
+          for (const span of finding.spans) {
+            let placeholder: string;
+            try {
+              placeholder = await provider.protect(text.slice(span.start, span.end), { dataClass: finding.dataClass, text });
+            } catch (error) {
+              log("fallback", `Placeholder provider failed: ${(error as Error).message}; redacting`, { detectorId: finding.detectorId, dataClass: finding.dataClass });
+              placeholder = `[REDACTED:${finding.dataClass}]`;
+            }
+            replacements.push({ span, text: placeholder, priority: 3 });
+          }
+          break;
+        }
         for (const span of finding.spans) replacements.push({ span, text: `[REDACTED:${finding.dataClass ?? finding.category}]`, priority: 3 });
         break;
       case "mask":
@@ -446,7 +468,7 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       const provider = options.protection.resolve(providerId, dataClass);
       const tokens: Array<{ span: GuardSpan; token: string }> = [];
       for (const span of finding.spans) {
-        const token = await provider.protect(source.slice(span.start, span.end), { dataClass, options: mapping?.options ?? {} });
+        const token = await provider.protect(source.slice(span.start, span.end), { dataClass, options: mapping?.options ?? {}, text: source });
         tokens.push({ span, token });
       }
       return { kind: "ok", providerId, tokens };
@@ -485,7 +507,7 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     if (!input.destination || !profileHasDestinationRules(profile)) return [];
     const matches = dropInsideValues(
       dropIssuedSurrogates(
-        scanDlp(text, { dictionaries }).filter((match) => match.score >= DESTINATION_SCAN_THRESHOLD),
+        scanDlp(text, { dictionaries, ...(allowList ? { allowList } : {}) }).filter((match) => match.score >= DESTINATION_SCAN_THRESHOLD),
         input.issuedSurrogates ?? NO_SURROGATES,
         text
       ),

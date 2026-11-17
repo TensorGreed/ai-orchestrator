@@ -2,11 +2,33 @@ import { maskedEvidence, maskForDataClass, MASK_CHAR, replaceSpans, shannonEntro
 import type { DetectorContext, GuardDataClass, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
 import { clampScore } from "../types";
 import { unsafeDictionaryPattern, type GuardDictionary } from "../profile";
+import type { AllowListMatcher } from "../allow-list";
+import { findIpAddressSpans } from "./ip-address";
 import { digitsAroundAtLeast, findBasicAuthUrlSpans, findEmailSpans, findJwtSpans, findPrivateKeySpans, findSqlStringLiteralSpans, findUrlQueryMatches } from "./dlp-linear";
 
 export { findBasicAuthUrlSpans, findEmailSpans, findJwtSpans, findPrivateKeySpans, findSqlStringLiteralSpans, findUrlQueryMatches, type UrlQueryMatch } from "./dlp-linear";
 
 export const DLP_DETECTOR_ID = "dlp.patterns";
+
+/**
+ * Data classes the scan finds only when asked (`include`): the built-in rule set and every existing rule set keep
+ * their behaviour. `ip_address` — IPv4 and IPv6 addresses (see `ip-address.ts`).
+ */
+export const OPT_IN_DATA_CLASSES: readonly GuardDataClass[] = ["ip_address"];
+
+/** Every data class the scan can report: the default ones, then the opt-in ones. */
+export const DLP_DATA_CLASSES: readonly GuardDataClass[] = [
+  "email",
+  "phone",
+  "card_number",
+  "iban",
+  "us_ssn",
+  "national_id",
+  "credential",
+  "private_key",
+  "jwt",
+  ...OPT_IN_DATA_CLASSES
+];
 
 /**
  * Phase 12.5 — DLP detectors, rule tier. Patterns with checksums where the
@@ -223,6 +245,10 @@ export interface DlpScanOptions {
   disable?: GuardDataClass[];
   /** Minimum entropy (bits/char) for a value next to a credential-like name. */
   entropyThreshold?: number;
+  /** Opt-in data classes to scan for too (`OPT_IN_DATA_CLASSES`, such as `ip_address`). */
+  include?: GuardDataClass[];
+  /** Values never reported (a rule set's allow-list). */
+  allowList?: AllowListMatcher;
 }
 
 export function scanDlp(text: string, options: DlpScanOptions = {}): DlpMatch[] {
@@ -230,8 +256,11 @@ export function scanDlp(text: string, options: DlpScanOptions = {}): DlpMatch[] 
   const disabled = new Set(options.disable ?? []);
   // Findings of one pass are checked against earlier passes when the pass ends (see `appendUncoveredMatches`).
   const pending: DlpMatch[] = [];
+  const allowList = options.allowList && !options.allowList.empty ? options.allowList : undefined;
   const add = (m: DlpMatch) => {
-    if (!disabled.has(m.dataClass)) pending.push(m);
+    if (disabled.has(m.dataClass)) return;
+    if (allowList?.allows(text.slice(m.span.start, m.span.end))) return;
+    pending.push(m);
   };
   const flush = () => {
     appendUncoveredMatches(matches, pending);
@@ -303,6 +332,10 @@ export function scanDlp(text: string, options: DlpScanOptions = {}): DlpMatch[] 
     if (digitsAroundAtLeast(text, m.index ?? 0, (m.index ?? 0) + m[0].length, 13)) return;
     add({ dataClass: "phone", span: spanOf(m), score: 0.6, message: "Phone number" });
   });
+
+  if (options.include?.includes("ip_address")) {
+    runSpans(findIpAddressSpans(text), (_value, span) => add({ dataClass: "ip_address", span, score: 0.7, message: "IP address" }));
+  }
 
   for (const dictionary of options.dictionaries ?? []) {
     for (const term of dictionary.terms) {
@@ -402,7 +435,8 @@ export function createDlpDetector(defaults: DlpDetectorOptions = {}): GuardDetec
   return {
     id: DLP_DETECTOR_ID,
     tier: "rule",
-    description: "Email, phone, payment cards (Luhn), IBAN (mod-97), US SSN and other national ids, credentials, keys and custom dictionaries.",
+    description:
+      "Email, phone, payment cards (Luhn), IBAN (mod-97), US SSN and other national ids, credentials, keys and custom dictionaries; IP addresses when the option include lists ip_address.",
     channels: ["prompt", "model_output", "tool_arguments", "tool_result", "final_output", "response", "trigger_input"],
     categories: ["sensitive_data"],
     // A key block runs over many lines: it can grow past a stream's held-back tail.
@@ -414,6 +448,7 @@ export function createDlpDetector(defaults: DlpDetectorOptions = {}): GuardDetec
         nationalIds: defaults.nationalIds,
         dictionaries,
         disable: Array.isArray(options.disable) ? (options.disable as GuardDataClass[]) : undefined,
+        include: Array.isArray(options.include) ? (options.include as GuardDataClass[]) : undefined,
         entropyThreshold: typeof options.entropyThreshold === "number" ? options.entropyThreshold : undefined
       });
       return matches.map<GuardFinding>((match) => ({

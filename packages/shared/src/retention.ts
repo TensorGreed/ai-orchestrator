@@ -16,7 +16,8 @@ export const RETENTION_PURGE_CLASSES = [
   "gateway_requests",
   "eval_runs",
   "captures",
-  "simulations"
+  "simulations",
+  "redactions"
 ] as const;
 
 export type RetentionPurgeClass = (typeof RETENTION_PURGE_CLASSES)[number];
@@ -33,7 +34,8 @@ export const RETENTION_PURGE_CLASS_LABELS: Record<RetentionPurgeClass, { label: 
   gateway_requests: { label: "AI gateway requests", what: "Metadata of /v1 requests" },
   eval_runs: { label: "Eval runs", what: "Finished eval runs and replay jobs; the newest run of every set stays" },
   captures: { label: "Captured runs", what: "Captured runs nobody promoted; golden runs stay" },
-  simulations: { label: "Rule simulations", what: "Content rules simulations" }
+  simulations: { label: "Rule simulations", what: "Content rules simulations" },
+  redactions: { label: "Redaction maps", what: "Expired redaction maps of the content rules tools and run placeholder books" }
 };
 
 /** How a purge ended: everything due was deleted (`ok`), some steps failed (`partial`), or nothing could run (`error`). */

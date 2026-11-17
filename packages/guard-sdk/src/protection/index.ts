@@ -2,6 +2,7 @@ import { createAesGcmProvider } from "./aes-gcm";
 import { createKeyedHashProvider } from "./keyed-hash";
 import { createMaskProvider } from "./mask";
 import { createSurrogateProvider } from "./surrogate";
+import { createPlaceholderProvider, type PlaceholderBook } from "./placeholder";
 import { ProtectionRegistry } from "./registry";
 import { createTokenVaultProvider, InMemoryTokenVaultStorage, type TokenVaultStorage } from "./token-vault";
 import type { KeyResolver } from "./types";
@@ -13,6 +14,7 @@ export * from "./keyed-hash";
 export * from "./aes-gcm";
 export * from "./token-vault";
 export * from "./surrogate";
+export * from "./placeholder";
 export * from "./reveal";
 export { legacyTailedSurrogate, legacyTailedPhoneSurrogateDigits, LEGACY_TAILED_SURROGATE_CLASSES } from "./legacy-tailed-surrogate";
 
@@ -22,6 +24,8 @@ export interface DefaultProtectionOptions {
   defaultKeyId?: string;
   /** Vault storage; defaults to an in-memory store, which is for tests and single-process use only. */
   vault?: TokenVaultStorage;
+  /** Placeholder book (a run's, kept by the API); defaults to one in memory for this registry only. */
+  placeholders?: PlaceholderBook;
 }
 
 export function createDefaultProtectionRegistry(options: DefaultProtectionOptions = {}): ProtectionRegistry {
@@ -31,6 +35,7 @@ export function createDefaultProtectionRegistry(options: DefaultProtectionOption
   registry.register(createKeyedHashProvider({ keys, defaultKeyId: options.defaultKeyId }));
   registry.register(createAesGcmProvider({ keys, defaultKeyId: options.defaultKeyId }));
   registry.register(createSurrogateProvider({ keys, defaultKeyId: options.defaultKeyId }));
+  registry.register(createPlaceholderProvider(options.placeholders ? { book: options.placeholders } : {}));
   registry.register(createTokenVaultProvider({ storage: options.vault ?? new InMemoryTokenVaultStorage(), keys, defaultKeyId: options.defaultKeyId }));
   return registry;
 }

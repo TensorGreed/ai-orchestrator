@@ -44,6 +44,7 @@ import {
   type GuardVerdictSummary,
   type ProtectionBinding,
   type ProvenanceLabel,
+  type PlaceholderBook,
   type TokenVaultStorage
 } from "@ai-orchestrator/guard-sdk";
 import {
@@ -150,6 +151,12 @@ export interface GuardRuntimeDependencies {
   loadProfile(profileId: string): Promise<ResolvedGuardProfile | undefined> | ResolvedGuardProfile | undefined;
   /** Token vault storage; persisted and encrypted by the API. */
   vault?: TokenVaultStorage;
+  /**
+   * The run's placeholder book (`[EMAIL_1]` and so on), kept sealed by the API: placeholders a rule set writes in this
+   * run keep their numbering across checks and a Reveal node in the same run can turn them back. Absent: each check
+   * numbers on its own and its placeholders cannot be turned back.
+   */
+  placeholders?: PlaceholderBook;
   onVerdict?(event: GuardVerdictEvent): Promise<void> | void;
   /**
    * Phase 16 — a cheap check before a run resolves its profiles to learn
@@ -555,7 +562,11 @@ export async function runGuardCheck(
   meta: { iteration?: number; toolName?: string; onlyFindings?: boolean } = {}
 ): Promise<GuardCheckResult> {
   const registry = registryOf(scope.guard);
-  const protection = createDefaultProtectionRegistry({ keys: keyResolverFor(scope), ...(scope.guard.vault ? { vault: scope.guard.vault } : {}) });
+  const protection = createDefaultProtectionRegistry({
+    keys: keyResolverFor(scope),
+    ...(scope.guard.vault ? { vault: scope.guard.vault } : {}),
+    ...(scope.guard.placeholders ? { placeholders: scope.guard.placeholders } : {})
+  });
   // Phase 16 — runtime surrogates use the deployment key (the capture key), so lookups find them.
   const surrogateKey = scope.guard.surrogateKey;
   if (surrogateKey) protection.replace(createSurrogateProvider({ keys: async () => surrogateKey, defaultKeyId: "deployment" }));

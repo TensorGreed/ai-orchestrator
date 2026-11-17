@@ -113,6 +113,7 @@ export type GuardDataClass =
   | "credential"
   | "private_key"
   | "jwt"
+  | "ip_address"
   | (string & {});
 
 export interface GuardSubject {

@@ -265,7 +265,7 @@ export function registerMcpTestingRoutes(deps: McpTestingDeps): void {
       const toolsetWorkflows = new Set<string>();
       for (const member of toolset.members) {
         if (member.kind === "server") serverIds.add(member.serverId);
-        else toolsetWorkflows.add(member.workflowId);
+        else if (member.kind === "workflow") toolsetWorkflows.add(member.workflowId);
       }
       // Workflows a toolset publishes count as dependents, and so do the servers they use.
       if (toolsetWorkflows.size > 0) {

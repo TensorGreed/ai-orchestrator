@@ -11,6 +11,14 @@
  */
 
 import { assignServerSlugs, dedupeToolNames, gatewayToolName, matchesToolPattern, policyReadsOpenWorld } from "@ai-orchestrator/mcp-sdk";
+import {
+  CONTENT_RULES_TOOL_DESCRIPTIONS,
+  CONTENT_RULES_TOOL_INPUT_SCHEMAS,
+  CONTENT_RULES_TOOL_LIST,
+  CONTENT_RULES_TOOLS_ADAPTER_ID,
+  CONTENT_RULES_TOOLS_SERVER_LABEL,
+  type ContentRulesToolName
+} from "@ai-orchestrator/shared";
 import type {
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -52,7 +60,20 @@ export interface GatewayServerTool {
   readOnly: boolean;
 }
 
-export type GatewayTool = GatewayWorkflowTool | GatewayServerTool;
+/** A built-in content rules tool (a toolset member of kind `content_rules`). */
+export interface GatewayContentRulesTool {
+  kind: "content_rules";
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  annotations: McpToolAnnotations;
+  tool: ContentRulesToolName;
+  /** The member's rule set; null: the built-in detector defaults. */
+  ruleSetId: string | null;
+  readOnly: boolean;
+}
+
+export type GatewayTool = GatewayWorkflowTool | GatewayServerTool | GatewayContentRulesTool;
 
 export interface GatewayHiddenTool extends McpGatewayHiddenToolView {
   adapterId: string;
@@ -94,6 +115,7 @@ export function registryServerSlugs(servers: readonly McpServerRecord[]): Map<st
 type Candidate =
   | (Omit<GatewayWorkflowTool, "name"> & { rawName: string })
   | (Omit<GatewayServerTool, "name"> & { rawName: string })
+  | (Omit<GatewayContentRulesTool, "name"> & { rawName: string })
   | { kind: "hidden"; rawName: string; hidden: Omit<GatewayHiddenTool, "name"> };
 
 export async function buildGatewayCatalog(input: {
@@ -111,6 +133,7 @@ export async function buildGatewayCatalog(input: {
   let openWorldLoaded: McpOpenWorldContext | undefined;
   const warnings: string[] = [];
   const candidates: Candidate[] = [];
+  let contentRulesAdded = false;
 
   for (const member of toolset.members) {
     if (member.kind === "workflow") {
@@ -140,6 +163,58 @@ export async function buildGatewayCatalog(input: {
           workflowName: workflow.name,
           projectId: workflow.projectId ?? null,
           nodeId: node.id
+        });
+      }
+      continue;
+    }
+
+    if (member.kind === "content_rules") {
+      // One content rules member per toolset (the admin API keeps only the first); the tools follow the tool policy
+      // like a server's, under their own adapter id and server label.
+      if (contentRulesAdded) continue;
+      contentRulesAdded = true;
+      for (const name of CONTENT_RULES_TOOL_LIST) {
+        // Only detect is read-only: redact keeps a sealed map (and vault tokens), restore gives values back.
+        const readOnly = name === "detect_sensitive_data";
+        const annotations: McpToolAnnotations = { readOnlyHint: readOnly, destructiveHint: false, idempotentHint: readOnly, openWorldHint: false };
+        const decision = evaluateToolForContext(
+          {
+            rules,
+            classifications: [],
+            role,
+            projectId: toolset.projectId,
+            adapterId: CONTENT_RULES_TOOLS_ADAPTER_ID,
+            serverLabel: CONTENT_RULES_TOOLS_SERVER_LABEL,
+            clientId: input.clientId ?? null,
+            toolsetId: toolset.id
+          },
+          { name, annotations }
+        );
+        if (!decision.allowed) {
+          candidates.push({
+            kind: "hidden",
+            rawName: name,
+            hidden: {
+              serverId: CONTENT_RULES_TOOLS_ADAPTER_ID,
+              serverName: CONTENT_RULES_TOOLS_SERVER_LABEL,
+              adapterId: CONTENT_RULES_TOOLS_ADAPTER_ID,
+              toolName: name,
+              ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
+              ...(decision.ruleName ? { ruleName: decision.ruleName } : {}),
+              message: decision.message ?? `MCP tool '${name}' is blocked by policy for role ${role}.`
+            }
+          });
+          continue;
+        }
+        candidates.push({
+          kind: "content_rules",
+          rawName: name,
+          description: CONTENT_RULES_TOOL_DESCRIPTIONS[name],
+          inputSchema: CONTENT_RULES_TOOL_INPUT_SCHEMAS[name],
+          annotations,
+          tool: name,
+          ruleSetId: member.ruleSetId,
+          readOnly
         });
       }
       continue;
@@ -240,7 +315,7 @@ export function toMcpToolDescriptor(tool: GatewayTool): Record<string, unknown> 
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema,
-    ...(tool.kind === "server" && tool.annotations ? { annotations: tool.annotations } : {})
+    ...(tool.kind !== "workflow" && tool.annotations ? { annotations: tool.annotations } : {})
   };
 }
 
@@ -255,6 +330,19 @@ export function toToolView(tool: GatewayTool): McpGatewayToolView {
       workflowId: tool.workflowId,
       workflowName: tool.workflowName,
       readOnly: false
+    };
+  }
+  if (tool.kind === "content_rules") {
+    return {
+      name: tool.name,
+      kind: "content_rules",
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      annotations: tool.annotations,
+      serverId: CONTENT_RULES_TOOLS_ADAPTER_ID,
+      serverName: CONTENT_RULES_TOOLS_SERVER_LABEL,
+      toolName: tool.tool,
+      readOnly: tool.readOnly
     };
   }
   return {

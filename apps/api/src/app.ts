@@ -33,6 +33,7 @@ import {
 import { createDefaultEmbeddingRegistry, createDefaultProviderRegistry, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
+  CONTENT_RULES_TOOLS_ADAPTER_ID,
   MCP_POLICY_ROLES,
   mcpOAuthConnectSchema,
   DEFAULT_PROJECT_ID,
@@ -129,6 +130,7 @@ import {
   resolveSubjectRequestSettings,
   ssoPostLoginUrl,
   toolArgumentSummariesEnabled,
+  CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
   type AppConfig
 } from "./config";
 import { redactSensitiveUrl } from "./services/url-redaction.js";
@@ -199,7 +201,7 @@ import {
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GIT_SYNC_LOCK_WAIT_MS, GitSyncService } from "./services/git-sync-service.js";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
-import { RetentionService, captureStep, ruleSimulationStep, usageRetentionWarning } from "./services/retention-service.js";
+import { RetentionService, captureStep, redactionStep, ruleSimulationStep, usageRetentionWarning } from "./services/retention-service.js";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
@@ -377,6 +379,8 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
+import { ContentRulesToolsService, deriveContentHashKey } from "./services/content-rules-tools-service.js";
+import { openRedactionMap } from "./services/content-redaction-books.js";
 import { GATEWAY_TOOLS_CHANGED_MESSAGE } from "./services/mcp-gateway-list-changed.js";
 import { gatewayCorsAllowedHeaders } from "./services/mcp-gateway-modern.js";
 import { McpClientService } from "./services/mcp-client-service.js";
@@ -1770,6 +1774,7 @@ export async function createApp(
     // Phase 16 — destination rows are read when a run first needs them.
     destinationRows: async () => await store.listDataDestinations(),
     ...(runtimeMasterKey.length === 32 ? { surrogateKey: deriveCaptureSurrogateKey(runtimeMasterKey) } : {}),
+    redactionTtlSeconds: config.CONTENT_REDACTION_TTL_SECONDS ?? CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
     // Phase 12 coverage — a Reveal node's audit entry (the audit service is set up further down; runs start later).
     audit: async (event) => {
       await auditService.record(event);
@@ -5411,6 +5416,8 @@ export async function createApp(
     redact: (text) => String(secretService.redact(text))
   });
   retentionService = retention;
+  // v76 — expired redaction maps go with every purge, besides the sweeps on redact and restore.
+  retention.register(redactionStep(store, config.CONTENT_REDACTION_TTL_SECONDS ?? CONTENT_REDACTION_DEFAULT_TTL_SECONDS));
   // 13.3 — usage retention is applied since 13.3. An .env copied from an older .env.example still sets 365; say loudly
   // what that now deletes, so an operator who wants to keep chargeback history removes it or sets 0.
   const usageWarning = usageRetentionWarning(config.USAGE_EVENTS_RETENTION_DAYS);
@@ -12858,6 +12865,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     },
     sensitiveSecretIds: async () => await sensitiveSecrets.ids(),
     guard: guardService,
+    // Content rules tools for toolsets an admin gave the content_rules member.
+    contentRulesTools: new ContentRulesToolsService({
+      store,
+      sealer: secretService,
+      guard: guardService,
+      audit: async (event) => await auditService.record(event),
+      ttlSeconds: config.CONTENT_REDACTION_TTL_SECONDS ?? CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
+      hashKey: (scope) => (runtimeMasterKey.length === 32 ? deriveContentHashKey(runtimeMasterKey, scope) : undefined)
+    }),
     // 12.6 — budgets, sampling cost and per-client rate limits (shared across replicas in cluster mode).
     budgets: budgetService,
     priceSampling: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
@@ -14349,7 +14365,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: `Project '${input.projectId}' does not exist` };
     }
-    if (input.serverId && !await store.getMcpServer(input.serverId) && !mcpRegistry.tryGet(input.serverId)) {
+    // The gateway's content rules tools have their own adapter id (no registry entry).
+    if (input.serverId && input.serverId !== CONTENT_RULES_TOOLS_ADAPTER_ID && !await store.getMcpServer(input.serverId) && !mcpRegistry.tryGet(input.serverId)) {
       reply.code(400);
       return { error: `'${input.serverId}' is neither a registered MCP server nor an MCP adapter id` };
     }
@@ -15346,6 +15363,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     secrets: secretService,
     matcher: async (query) => await captureService.subjectMatcher(query),
     revealToken: async (token) => (await guardService.vault.getByToken(token))?.value ?? null,
+    openRedactionMap: (sealed) => {
+      try {
+        const map = openRedactionMap(secretService, sealed);
+        return { values: map.book.entries.map((entry) => entry.value), tokens: map.tokens.map((entry) => entry.token) };
+      } catch {
+        return null;
+      }
+    },
     instanceId: leaderElection.getInstanceId(),
     isLeader: () => leaderElection.isLeader(),
     dueDays: subjectRequestSettings.dueDays,

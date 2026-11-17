@@ -205,6 +205,8 @@ export const EXPORTED_TABLES = [
 /** Tables db:export leaves out on purpose, and why (the runbook lists them as safe to lose). */
 export const NOT_EXPORTED_TABLES: Record<string, string> = {
   schema_migrations: "the importer migrates the destination itself",
+  content_redactions:
+    "v76 redaction maps: sealed original values that expire within CONTENT_REDACTION_TTL_SECONDS (at most 30 days); a backup would keep them past their expiry, and a restore after one is simply refused",
   schema_markers: "written by the SQLite store as it creates the schema",
   sessions: "live sign-in sessions: a backup would carry working session ids, and users simply sign in again",
   pending_challenges: "short-lived sign-in and MCP OAuth state, sealed with the master key, expires in minutes",

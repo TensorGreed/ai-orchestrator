@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   findRevealRule,
+  REVEAL_GATEWAY_CLIENT_SOURCE,
   GUARD_ACTION_VALUES,
   GUARD_EVENT_ACTION_VALUES,
   GUARD_EVENT_CHANNEL_VALUES,
@@ -69,5 +70,24 @@ describe("reveal subjects", () => {
     expect(revealSubjectIsAdmin(revealSubjectOf({ source: "owner", role: "admin", userId: "u" }))).toBe(false);
     expect(revealSubjectIsAdmin(revealSubjectOf({ source: "user", role: "builder", userId: "u" }))).toBe(false);
     expect(revealSubjectIsAdmin(revealSubjectOf(undefined))).toBe(false);
+  });
+});
+
+describe("reveal rules for MCP gateway clients", () => {
+  const rules = [
+    { dataClasses: ["email"], subjects: { gatewayClients: ["mcpc_a"] } },
+    { dataClasses: ["phone"], subjects: { roles: ["admin"], users: ["usr_1"] } }
+  ];
+  const client = (id: string) => ({ source: REVEAL_GATEWAY_CLIENT_SOURCE, gatewayClientId: id, role: "admin", userId: "usr_1" });
+
+  it("matches a gateway client only by its id, never by the role or user it acts as", () => {
+    expect(findRevealRule(rules, { subject: client("mcpc_a"), dataClass: "email" })).toBe(rules[0]);
+    expect(findRevealRule(rules, { subject: client("mcpc_b"), dataClass: "email" })).toBeUndefined();
+    expect(findRevealRule(rules, { subject: client("mcpc_a"), dataClass: "phone" })).toBeUndefined();
+  });
+
+  it("does not let a person match a gateway client rule", () => {
+    expect(findRevealRule(rules, { subject: { source: "user", role: "admin", userId: "mcpc_a" }, dataClass: "email" })).toBeUndefined();
+    expect(findRevealRule(rules, { subject: { source: "user", role: "admin" }, dataClass: "phone" })).toBe(rules[1]);
   });
 });

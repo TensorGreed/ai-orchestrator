@@ -3030,6 +3030,45 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS scim_tokens;
       ALTER TABLE users DROP COLUMN IF EXISTS disabled_at;
     `
+  },
+  {
+    version: 76,
+    description: "Content rules as MCP gateway tools — redaction maps and the content rules toolset member",
+    // content_redactions: what a reversible redaction replaced, sealed with the master key (SecretService.sealValue,
+    // purpose content-redaction-map): the redact tool's maps (scope 'gateway', bound to the client, toolset and
+    // project scope that made them) and a run's placeholder book (scope 'run', id 'run:<executionId>'). Each row ends at
+    // expires_at; reads ignore expired rows and writes sweep them. `version` counts a run book's writes, so two writers
+    // of one book (a resumed run racing the original) never overwrite each other. mcp_toolset_members.rule_set_id: the rule set a
+    // content_rules member detects with (NULL: the built-in detector defaults). Older builds skip that member kind.
+    up: `
+      CREATE TABLE IF NOT EXISTS content_redactions (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        client_id TEXT,
+        toolset_id TEXT,
+        project_id TEXT,
+        execution_id TEXT,
+        entries_sealed TEXT NOT NULL,
+        entry_count INTEGER NOT NULL DEFAULT 0,
+        classes_json TEXT NOT NULL DEFAULT '[]',
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        version INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_content_redactions_expires ON content_redactions(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_content_redactions_project ON content_redactions(project_id);
+      ALTER TABLE mcp_toolset_members ADD COLUMN IF NOT EXISTS rule_set_id TEXT;
+    `,
+    // A build before v76 cannot read content_rules members (it skips them) or the maps; the maps hold sealed values
+    // that nothing else may read, so they go.
+    down: `
+      DELETE FROM mcp_toolset_members WHERE kind = 'content_rules';
+      ALTER TABLE mcp_toolset_members DROP COLUMN IF EXISTS rule_set_id;
+      DROP INDEX IF EXISTS idx_content_redactions_project;
+      DROP INDEX IF EXISTS idx_content_redactions_expires;
+      DROP TABLE IF EXISTS content_redactions;
+    `
   }
 ];
 

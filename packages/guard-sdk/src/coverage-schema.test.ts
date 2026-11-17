@@ -155,7 +155,7 @@ describe("reveal rules", () => {
   });
 
   it("refuse a rule that names no subject or no data class", () => {
-    expect(() => parseGuardProfile({ id: "r", name: "R", version: "1", reveal: { rules: [{ dataClasses: ["email"], subjects: {} }] } })).toThrow(/at least one role, user or service account/);
+    expect(() => parseGuardProfile({ id: "r", name: "R", version: "1", reveal: { rules: [{ dataClasses: ["email"], subjects: {} }] } })).toThrow(/at least one role, user, service account or gateway client/);
     expect(() => parseGuardProfile({ id: "r", name: "R", version: "1", reveal: { rules: [{ dataClasses: [], subjects: { roles: ["admin"] } }] } })).toThrow(GuardProfileError);
     expect(() => parseGuardProfile({ id: "r", name: "R", version: "1", reveal: { rules: [{ dataClasses: ["email"], subjects: { roles: ["owner"] } }] } })).toThrow(GuardProfileError);
   });

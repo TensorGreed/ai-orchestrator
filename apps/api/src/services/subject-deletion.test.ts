@@ -207,6 +207,96 @@ for (const kind of kinds) {
       expect(JSON.stringify(audits).toLowerCase()).not.toContain("cust-777");
     });
 
+    it("deletes the redaction maps that hold the person's value (run books and gateway maps), with their vault tokens; others stay", async () => {
+      const secrets = new SecretService(undefined as never, KEY);
+      const sealMap = (values: string[], tokens: string[] = []) =>
+        secrets.sealValue(
+          "content-redaction-map",
+          JSON.stringify({ v: 1, book: { entries: values.map((value, index) => ({ placeholder: `[CUSTOMER_ID_${index + 1}]`, dataClass: "customer_id", value })), reserved: [] }, tokens: tokens.map((token) => ({ token, dataClass: "email" })) })
+        );
+      const { store, service, revealToken } = await setup({
+        openRedactionMap: (sealed) => {
+          try {
+            const parsed = JSON.parse(secrets.openValue("content-redaction-map", sealed)) as { book: { entries: Array<{ value: string }> }; tokens: Array<{ token: string }> };
+            return { values: parsed.book.entries.map((entry) => entry.value), tokens: parsed.tokens.map((entry) => entry.token) };
+          } catch {
+            return null;
+          }
+        }
+      });
+      await store.upsertWorkflow(WORKFLOW);
+      await seedRun(store, service, "run-1", "CUST-777");
+      await seedVault(store);
+      const map = (id: string, sealed: string, executionId: string, scope: "run" | "gateway" = "gateway") =>
+        store.putContentRedaction({
+          id, scope, clientId: scope === "gateway" ? "mcpc_1" : null, toolsetId: scope === "gateway" ? "mts_1" : null, projectId: "default", executionId,
+          entriesSealed: sealed, entryCount: 1, classes: ["customer_id"], createdAt: T0.toISOString(), updatedAt: T0.toISOString(), expiresAt: "2026-11-11T12:00:00.000Z"
+        });
+      // The found run's own book (its execution id), another run's book and a gateway map holding the value, a gateway
+      // map issuing the person's token, and a map of someone else.
+      await map("run:run-1", sealMap(["someone-else"]), "run-1", "run");
+      await map("run:run-9", sealMap(["CUST-777"]), "run-9", "run");
+      await map("red_person_aaaaaaaaaaaaaaaa", sealMap(["cust-777"]), "mcpgw_1");
+      await map("red_token_aaaaaaaaaaaaaaaaa", sealMap([], [TOKEN]), "mcpgw_2");
+      await map("red_other_aaaaaaaaaaaaaaaaa", sealMap(["someone-else"], [OTHER_TOKEN]), "mcpgw_3");
+      await map("red_broken_aaaaaaaaaaaaaaaa", "v1.not-a-seal", "mcpgw_4");
+
+      const created = await service.create({ type: "delete", subjectKind: "end_user", value: "cust-777", scan: false, revealTokens: false }, ADMIN);
+      await settle(service);
+      await service.confirm(created.id, ADMIN);
+      await settle(service);
+      const done = (await service.get(created.id))!;
+      expect(done.status).toBe("done");
+      expect(done.deletion).toMatchObject({ redactionMapsDeleted: 2 });
+      const left = (await testSql(store).all<{ id: string }>("SELECT id FROM content_redactions ORDER BY id")).map((row) => row.id);
+      // run:run-1 went with its run; run:run-9 and red_person held the value; the token map stays, its token goes.
+      expect(left).toEqual(["red_broken_aaaaaaaaaaaaaaaa", "red_other_aaaaaaaaaaaaaaaaa", "red_token_aaaaaaaaaaaaaaaaa"]);
+      expect(await revealToken(TOKEN)).toBeNull();
+      expect(await revealToken(OTHER_TOKEN)).toBe("someone-else");
+    });
+
+    it("keeps the redaction maps holding the person's value while a legal hold is active, and deletes them once it is released", async () => {
+      const secrets = new SecretService(undefined as never, KEY);
+      const { store, service } = await setup({
+        openRedactionMap: (sealed) => {
+          const parsed = JSON.parse(secrets.openValue("content-redaction-map", sealed)) as { book: { entries: Array<{ value: string }> } };
+          return { values: parsed.book.entries.map((entry) => entry.value), tokens: [] };
+        }
+      });
+      await store.upsertWorkflow(WORKFLOW);
+      await store.upsertWorkflow({ ...WORKFLOW, id: "wf-elsewhere" } as Workflow);
+      await seedRun(store, service, "run-1", "CUST-777");
+      const sealed = secrets.sealValue("content-redaction-map", JSON.stringify({ v: 1, book: { entries: [{ placeholder: "[CUSTOMER_ID_1]", dataClass: "customer_id", value: "CUST-777" }], reserved: [] }, tokens: [] }));
+      await store.putContentRedaction({
+        id: "run:run-9", scope: "run", clientId: null, toolsetId: null, projectId: "default", executionId: "run-9",
+        entriesSealed: sealed, entryCount: 1, classes: ["customer_id"], createdAt: T0.toISOString(), updatedAt: T0.toISOString(), expiresAt: "2026-11-11T12:00:00.000Z"
+      });
+      const hold = await store.placeLegalHold({
+        id: "h-maps", name: "Else", reason: "r", matterRef: null, scopeType: "workflow", scopeId: "wf-elsewhere", endsAt: null, createdBy: null, createdAt: AT, items: []
+      });
+      const created = await service.create({ type: "delete", subjectKind: "end_user", value: "cust-777", scan: false, revealTokens: false }, ADMIN);
+      await settle(service);
+      await service.confirm(created.id, ADMIN);
+      await settle(service);
+      const deferred = (await service.get(created.id))!;
+      expect(deferred.status).toBe("deferred_by_hold");
+      expect(deferred.deletion).toMatchObject({ redactionMapsDeleted: 0, deferred: 1 });
+      expect(await count(store, "content_redactions", "id = 'run:run-9'")).toBe(1);
+      // The sweep leaves it while the hold is active.
+      await service.sweep();
+      await settle(service);
+      expect((await service.get(created.id))!.status).toBe("deferred_by_hold");
+
+      // Released without the release's own re-queue (say it failed): the sweep finds no active hold and runs it again.
+      await store.releaseLegalHold({ id: hold.id, releasedBy: null, reason: "done", releasedAt: T0.toISOString() });
+      await service.sweep();
+      await settle(service);
+      const done = (await service.get(created.id))!;
+      expect(done.status).toBe("done");
+      expect(done.deletion).toMatchObject({ redactionMapsDeleted: 1, deferred: 0 });
+      expect(await count(store, "content_redactions", "id = 'run:run-9'")).toBe(0);
+    });
+
     it("deletes the memory session found by a session reference", async () => {
       const { store, service } = await setup();
       await store.upsertWorkflow(WORKFLOW);
