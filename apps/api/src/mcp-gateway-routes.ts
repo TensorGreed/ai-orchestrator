@@ -2032,6 +2032,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         tool: tool.tool,
         args,
         memberRuleSetId: tool.ruleSetId,
+        ...(tool.documents ? { documents: tool.documents } : {}),
         client: { id: auth.client.id, name: auth.client.name },
         toolset: { id: toolset.id, projectId: toolset.projectId },
         callExecutionId
@@ -3091,7 +3092,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           return null;
         }
         seen.add("content_rules");
-        result.push({ kind: "content_rules", ruleSetId });
+        result.push({ kind: "content_rules", ruleSetId, ...(member.documents ? { documents: member.documents } : {}) });
       } else {
         if (!await store.getMcpServer(member.serverId)) {
           reply.code(400).send({ error: `MCP server '${member.serverId}' is not registered` });
@@ -3133,8 +3134,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       resourceType: "mcp_toolset",
       resourceId: toolset.id,
       projectId: toolset.projectId,
-      metadata: { slug: toolset.slug, name: toolset.name, members: toolset.members.length, ...metadata }
+      metadata: { slug: toolset.slug, name: toolset.name, members: toolset.members.length, ...documentScanningOf(toolset), ...metadata }
     });
+  };
+
+  /** The content rules member's document scanning (scan_document, URL fetches and their hosts), for the audit trail. */
+  const documentScanningOf = (toolset: McpToolset): Record<string, unknown> => {
+    const member = toolset.members.find((entry) => entry.kind === "content_rules");
+    const documents = member?.kind === "content_rules" ? member.documents : undefined;
+    return documents?.enabled ? { documentScanning: { allowUrls: documents.allowUrls, allowedHosts: documents.allowedHosts } } : {};
   };
 
   /** 12.2 — "Track outside content per session" turned on or off. */

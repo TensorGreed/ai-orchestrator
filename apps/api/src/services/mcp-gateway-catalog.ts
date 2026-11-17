@@ -17,7 +17,11 @@ import {
   CONTENT_RULES_TOOL_LIST,
   CONTENT_RULES_TOOLS_ADAPTER_ID,
   CONTENT_RULES_TOOLS_SERVER_LABEL,
-  type ContentRulesToolName
+  SCAN_DOCUMENT_TOOL_NAME,
+  scanDocumentDescription,
+  scanDocumentInputSchema,
+  type ContentRulesDocumentsOptions,
+  type ContentRulesGatewayToolName
 } from "@ai-orchestrator/shared";
 import type {
   McpGatewayHiddenToolView,
@@ -67,9 +71,11 @@ export interface GatewayContentRulesTool {
   description: string;
   inputSchema: Record<string, unknown>;
   annotations: McpToolAnnotations;
-  tool: ContentRulesToolName;
+  tool: ContentRulesGatewayToolName;
   /** The member's rule set; null: the built-in detector defaults. */
   ruleSetId: string | null;
+  /** The member's document options (`scan_document`); absent: off. */
+  documents?: ContentRulesDocumentsOptions;
   readOnly: boolean;
 }
 
@@ -173,10 +179,14 @@ export async function buildGatewayCatalog(input: {
       // like a server's, under their own adapter id and server label.
       if (contentRulesAdded) continue;
       contentRulesAdded = true;
-      for (const name of CONTENT_RULES_TOOL_LIST) {
-        // Only detect is read-only: redact keeps a sealed map (and vault tokens), restore gives values back.
-        const readOnly = name === "detect_sensitive_data";
-        const annotations: McpToolAnnotations = { readOnlyHint: readOnly, destructiveHint: false, idempotentHint: readOnly, openWorldHint: false };
+      // scan_document only when the member turns documents on; it reaches the open web only when URLs are allowed.
+      const documents = member.documents?.enabled ? member.documents : undefined;
+      const names: ContentRulesGatewayToolName[] = [...CONTENT_RULES_TOOL_LIST, ...(documents ? [SCAN_DOCUMENT_TOOL_NAME] : [])];
+      for (const name of names) {
+        // Detect and scan_document are read-only: redact keeps a sealed map (and vault tokens), restore gives values back.
+        const readOnly = name === "detect_sensitive_data" || name === SCAN_DOCUMENT_TOOL_NAME;
+        const openWorld = name === SCAN_DOCUMENT_TOOL_NAME && Boolean(documents?.allowUrls);
+        const annotations: McpToolAnnotations = { readOnlyHint: readOnly, destructiveHint: false, idempotentHint: readOnly, openWorldHint: openWorld };
         const decision = evaluateToolForContext(
           {
             rules,
@@ -209,11 +219,12 @@ export async function buildGatewayCatalog(input: {
         candidates.push({
           kind: "content_rules",
           rawName: name,
-          description: CONTENT_RULES_TOOL_DESCRIPTIONS[name],
-          inputSchema: CONTENT_RULES_TOOL_INPUT_SCHEMAS[name],
+          description: name === SCAN_DOCUMENT_TOOL_NAME ? scanDocumentDescription(openWorld) : CONTENT_RULES_TOOL_DESCRIPTIONS[name],
+          inputSchema: name === SCAN_DOCUMENT_TOOL_NAME ? scanDocumentInputSchema(openWorld) : CONTENT_RULES_TOOL_INPUT_SCHEMAS[name],
           annotations,
           tool: name,
           ruleSetId: member.ruleSetId,
+          ...(name === SCAN_DOCUMENT_TOOL_NAME && documents ? { documents } : {}),
           readOnly
         });
       }

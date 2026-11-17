@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { dataClassNameSchema } from "./data-labels";
+import type { SCAN_DOCUMENT_TOOL_NAME } from "./content-documents";
 
 /**
  * Content rules as MCP tools on the gateway: a toolset member of kind `content_rules` (admin-added, off unless added)
@@ -22,6 +23,8 @@ export const CONTENT_RULES_TOOL_NAMES = {
 } as const;
 export type ContentRulesToolName = (typeof CONTENT_RULES_TOOL_NAMES)[keyof typeof CONTENT_RULES_TOOL_NAMES];
 export const CONTENT_RULES_TOOL_LIST: readonly ContentRulesToolName[] = Object.values(CONTENT_RULES_TOOL_NAMES);
+/** Every tool a content rules member can list: the three above, and `scan_document` when the member turns documents on. */
+export type ContentRulesGatewayToolName = ContentRulesToolName | typeof SCAN_DOCUMENT_TOOL_NAME;
 
 /** The adapter id and server label the gateway's tool policy sees for these tools. */
 export const CONTENT_RULES_TOOLS_ADAPTER_ID = "l2m-content-rules";

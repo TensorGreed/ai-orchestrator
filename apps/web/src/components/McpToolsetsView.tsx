@@ -341,6 +341,11 @@ function ToolsetDetail({
                 <span className="mcp-flag mcp-flag-neutral">{member.kind === "workflow" ? "workflow" : member.kind === "content_rules" ? "content rules" : "server"}</span>
                 <span className="mcp-rule-name">{member.label}</span>
                 {member.kind === "server" && <code className="mcp-member-glob">{member.toolGlob ?? "*"}</code>}
+                {member.kind === "content_rules" && member.documents?.enabled && (
+                  <span className="mcp-flag mcp-flag-neutral" title={member.documents.allowUrls ? `Fetches from: ${member.documents.allowedHosts.join(", ")}` : undefined}>
+                    {member.documents.allowUrls ? "scans documents and URLs" : "scans documents"}
+                  </span>
+                )}
                 {member.missing && <span className="mcp-flag">missing</span>}
               </li>
             ))}
@@ -496,6 +501,10 @@ function McpToolsetForm({
   const [contentRuleSetId, setContentRuleSetId] = useState(
     initialContentRules && initialContentRules.kind === "content_rules" ? initialContentRules.ruleSetId ?? "" : ""
   );
+  const initialDocuments = initialContentRules && initialContentRules.kind === "content_rules" ? initialContentRules.documents : undefined;
+  const [scanDocuments, setScanDocuments] = useState(Boolean(initialDocuments?.enabled));
+  const [documentUrls, setDocumentUrls] = useState(Boolean(initialDocuments?.allowUrls));
+  const [documentHosts, setDocumentHosts] = useState((initialDocuments?.allowedHosts ?? []).join("\n"));
   const [ruleSets, setRuleSets] = useState<GuardProfileSummary[]>([]);
   useEffect(() => {
     let live = true;
@@ -542,7 +551,23 @@ function McpToolsetForm({
       ...serverRows
         .filter((row) => row.serverId)
         .map((row) => ({ kind: "server" as const, serverId: row.serverId, toolGlob: row.toolGlob.trim() || null })),
-      ...(contentRules ? [{ kind: "content_rules" as const, ruleSetId: contentRuleSetId || null }] : [])
+      ...(contentRules
+        ? [
+            {
+              kind: "content_rules" as const,
+              ruleSetId: contentRuleSetId || null,
+              ...(scanDocuments
+                ? {
+                    documents: {
+                      enabled: true,
+                      allowUrls: documentUrls,
+                      allowedHosts: documentUrls ? documentHosts.split(/[\s,]+/).map((host) => host.trim()).filter(Boolean) : []
+                    }
+                  }
+                : {})
+            }
+          ]
+        : [])
     ];
     const payload = {
       name: name.trim(),
@@ -693,6 +718,36 @@ function McpToolsetForm({
               {contentRuleSetId && !ruleSets.some((ruleSet) => ruleSet.id === contentRuleSetId) && <option value={contentRuleSetId}>{contentRuleSetId}</option>}
             </select>
           </label>
+        )}
+        {contentRules && (
+          <label className="mcp-check">
+            <input type="checkbox" checked={scanDocuments} onChange={(event) => setScanDocuments(event.target.checked)} />
+            Also offer scan_document (text, Markdown, HTML, JSON and CSV documents sent by the client)
+          </label>
+        )}
+        {contentRules && scanDocuments && (
+          <label className="mcp-check">
+            <input type="checkbox" checked={documentUrls} onChange={(event) => setDocumentUrls(event.target.checked)} aria-describedby="toolset-document-urls-hint" />
+            Let scan_document fetch documents from URLs
+          </label>
+        )}
+        {contentRules && scanDocuments && documentUrls && (
+          <>
+            <label>
+              Hosts documents may be fetched from
+              <textarea
+                aria-label="Document hosts"
+                rows={3}
+                value={documentHosts}
+                placeholder={"docs.example.com\n*.example.org"}
+                onChange={(event) => setDocumentHosts(event.target.value)}
+              />
+            </label>
+            <small id="toolset-document-urls-hint" className="kb-subtle" role="note">
+              Clients of this toolset can make this server fetch pages from these hosts (one per line; *.example.org means its subdomains). Private, loopback and
+              link-local addresses are always refused, and nothing fetched is stored.
+            </small>
+          </>
         )}
         <small id="toolset-content-rules-hint" className="kb-subtle">
           Off by default. Clients of this toolset can find and redact sensitive data with the rule set&apos;s checks. Restore only returns the data classes a

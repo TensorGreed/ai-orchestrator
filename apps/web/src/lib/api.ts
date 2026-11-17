@@ -64,6 +64,7 @@ import type {
   McpImportDecision,
   McpPlaygroundCallResponse
 } from "@ai-orchestrator/shared";
+import type { DocumentScanRequest, DocumentScanResult } from "@ai-orchestrator/shared";
 import { EVAL_RUN_FINISHED_STATUSES } from "@ai-orchestrator/shared";
 import type {
   EvalCaseDetail,
@@ -4511,6 +4512,14 @@ export async function importGuardProfile(payload: { text: string; note?: string 
 /** Phase 15.6 — replay recent recorded runs under an unsaved profile document or a saved version. */
 export async function simulateGuardProfile(id: string, payload: { document: Record<string, unknown> } | { version: number }) {
   return apiRequest<{ simulation: GuardSimulationView }>(`/api/guard/profiles/${encodeURIComponent(id)}/simulate`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+/** Scans a document (an upload as base64, or a URL) with a rule set's draft, a saved version or the latest; nothing is kept. */
+export async function scanGuardDocument(id: string, payload: DocumentScanRequest) {
+  return apiRequest<{ result: DocumentScanResult }>(`/api/guard/profiles/${encodeURIComponent(id)}/scan-document`, {
     method: "POST",
     body: JSON.stringify(payload)
   });

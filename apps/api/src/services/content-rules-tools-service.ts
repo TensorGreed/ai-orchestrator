@@ -47,8 +47,13 @@ import {
   REVEAL_GATEWAY_CLIENT_SOURCE,
   redactSensitiveDataArgsSchema,
   restoreSensitiveDataArgsSchema,
-  type ContentRulesToolName,
+  documentHostAllowed,
+  SCAN_DOCUMENT_TOOL_NAME,
+  scanDocumentArgsSchema,
+  type ContentRulesDocumentsOptions,
+  type ContentRulesGatewayToolName,
   type ContentToolFinding,
+  type DocumentScanResult,
   type ContentToolInputResult,
   type RedactionStyle,
   type RevealClassSummary,
@@ -60,6 +65,8 @@ import type { GuardEventInsert } from "../db/database.js";
 import type { AuditEventInput } from "./audit-service.js";
 import { openRedactionMap, storeRedactionMap, type ContentRedactionMap, type ContentRedactionSealer } from "./content-redaction-books.js";
 import { gatewayVaultScope } from "./guard-service.js";
+import { DocumentError } from "@ai-orchestrator/workflow-engine";
+import { DocumentScanBusyError, documentScanResult, type ContentDocumentScanService, type LoadedDocument } from "./content-document-scan-service.js";
 
 /** What the service needs of GuardService. */
 export interface ContentToolsGuard {
@@ -78,14 +85,18 @@ export interface ContentRulesToolsOptions {
   ttlSeconds: number;
   /** The keyed-hash key of a project scope (derived from the master key); undefined: the hash style is unavailable. */
   hashKey?: (projectScope: string) => Uint8Array | undefined;
+  /** Document scans (`scan_document`); absent: the tool fails on this deployment. */
+  documents?: ContentDocumentScanService;
   now?: () => Date;
 }
 
 export interface ContentToolCall {
-  tool: ContentRulesToolName;
+  tool: ContentRulesGatewayToolName;
   args: Record<string, unknown>;
   /** The toolset member's rule set; null: the built-in detector defaults. */
   memberRuleSetId: string | null;
+  /** The member's document options (`scan_document`); absent: off. */
+  documents?: ContentRulesDocumentsOptions;
   client: { id: string; name: string };
   toolset: { id: string; projectId: string | null };
   /** The call's synthetic `mcpgw_*` execution id: its rule events are recorded under it. */
@@ -156,6 +167,8 @@ export class ContentRulesToolsService {
           return await this.redact(call);
         case "restore_sensitive_data":
           return await this.restore(call);
+        case SCAN_DOCUMENT_TOOL_NAME:
+          return await this.scanDocument(call);
         default:
           return { ok: false, message: `Unknown content rules tool '${String(call.tool)}'` };
       }
@@ -254,25 +267,51 @@ export class ContentRulesToolsService {
   // Rule events
   // ---------------------------------------------------------------------------
 
-  /** One rule event per finding, with masked evidence only. */
   /** One rule event per data class per call (highest score, count, up to EVENT_SAMPLES masked previews): bounded rows. */
   private findingRows(call: ContentToolCall, scanned: ScannedInput[], ruleSet: ResolvedGuardProfile | null, action: string): GuardEventInsert[] {
+    const samples = scanned.flatMap((input) =>
+      input.strings.flatMap((entry) =>
+        entry.findings.map((finding) => ({
+          dataClass: finding.dataClass,
+          score: finding.score,
+          evidence: finding.preview,
+          spans: [{ start: finding.start, end: finding.end }],
+          message: `${call.tool}: ${finding.dataClass} (input ${input.index})`
+        }))
+      )
+    );
+    return this.eventRows(call, ruleSet, action, "tool_arguments", samples);
+  }
+
+  /**
+   * Rule event rows from findings: one per data class (highest score, count, up to EVENT_SAMPLES masked previews).
+   * `counts` gives the full count per class when `findings` lists only some of them.
+   */
+  private eventRows(
+    call: ContentToolCall,
+    ruleSet: ResolvedGuardProfile | null,
+    action: string,
+    channel: string,
+    findings: Array<{ dataClass: string; score: number; evidence: string; spans: Array<{ start: number; end: number }>; message: string }>,
+    counts?: Record<string, number>,
+    scores?: Record<string, number>
+  ): GuardEventInsert[] {
     const verdictId = randomUUID();
     const createdAt = this.now().toISOString();
     const ref = ruleSet ? { profileId: ruleSet.profileId, version: ruleSet.version, hash: ruleSet.hash } : BUILT_IN_REF;
     const byClass = new Map<string, { score: number; count: number; samples: Array<{ evidence: string; spans: Array<{ start: number; end: number }>; message: string }> }>();
-    for (const input of scanned) {
-      for (const entry of input.strings) {
-        for (const finding of entry.findings) {
-          const group = byClass.get(finding.dataClass) ?? { score: 0, count: 0, samples: [] };
-          group.score = Math.max(group.score, finding.score);
-          group.count += 1;
-          if (group.samples.length < EVENT_SAMPLES) {
-            group.samples.push({ evidence: finding.preview, spans: [{ start: finding.start, end: finding.end }], message: `${call.tool}: ${finding.dataClass} (input ${input.index})` });
-          }
-          byClass.set(finding.dataClass, group);
-        }
-      }
+    for (const finding of findings) {
+      const group = byClass.get(finding.dataClass) ?? { score: 0, count: 0, samples: [] };
+      group.score = Math.max(group.score, finding.score);
+      group.count += 1;
+      if (group.samples.length < EVENT_SAMPLES) group.samples.push({ evidence: finding.evidence, spans: finding.spans, message: finding.message });
+      byClass.set(finding.dataClass, group);
+    }
+    for (const [dataClass, count] of Object.entries(counts ?? {})) {
+      const group = byClass.get(dataClass) ?? { score: scores?.[dataClass] ?? 0, count: 0, samples: [] };
+      group.count = Math.max(group.count, count);
+      group.score = Math.max(group.score, scores?.[dataClass] ?? 0);
+      byClass.set(dataClass, group);
     }
     return [...byClass.entries()].map(([dataClass, group]) => ({
       id: randomUUID(),
@@ -284,7 +323,7 @@ export class ContentRulesToolsService {
       placement: "gateway",
       iteration: null,
       toolName: call.tool,
-      channel: "tool_arguments",
+      channel,
       detectorId: DLP_DETECTOR_ID,
       category: "sensitive_data",
       dataClass,
@@ -367,23 +406,7 @@ export class ContentRulesToolsService {
     if (sensitiveKey) throw new ContentToolError(`An object key holds sensitive data (${sensitiveKey.path}); keys cannot be redacted, so send it as a value`);
 
     // Placeholders already in any input are reserved, so a typed `[EMAIL_1]` never reads as one this call issued.
-    const book = new InMemoryPlaceholderBook();
-    const reserved = new Set(scanned.flatMap((input) => input.strings.flatMap((entry) => [...placeholdersIn(entry.text)])));
-    const tokens: ContentRedactionMap["tokens"] = [];
-    const vault = style === "token" ? this.options.guard.vaultFor({ projectId: scope, executionId: call.callExecutionId }) : undefined;
-    const tokenProvider = vault ? createTokenVaultProvider({ storage: vault }) : undefined;
-    const protect: (value: string, dataClass: string) => Promise<string> =
-      style === "placeholder"
-        ? async (value, dataClass) => book.assignNow(dataClass, value, reserved).placeholder
-        : style === "token"
-          ? async (value, dataClass) => {
-              const token = await tokenProvider!.protect(value, { dataClass });
-              tokens.push({ token, dataClass });
-              return token;
-            }
-          : style === "hash"
-            ? this.hashProtector(scope)
-            : async (value, dataClass) => maskForDataClass(value, dataClass);
+    const { book, tokens, protect } = this.protectorFor(style, call, scope, new Set(scanned.flatMap((input) => input.strings.flatMap((entry) => [...placeholdersIn(entry.text)]))));
 
     // Each string's matches, keyed by input and path, rewritten in place.
     const byKey = new Map<string, ScannedString>();
@@ -401,21 +424,7 @@ export class ContentRulesToolsService {
     } else redacted = await mapStrings(args.value, async (text, path) => await rewrite(0, text, path));
 
     const findings = scanned.flatMap((input) => input.strings.flatMap((entry) => entry.findings));
-    let redactionId: string | undefined;
-    let expiresAt: string | undefined;
-    const reversible = style === "placeholder" || style === "token";
-    const state = book.state();
-    if (reversible && (state.entries.length > 0 || tokens.length > 0)) {
-      redactionId = `red_${randomBytes(18).toString("base64url")}`;
-      const record = await storeRedactionMap(
-        this.options.store,
-        this.options.sealer,
-        { id: redactionId, scope: "gateway", clientId: call.client.id, toolsetId: call.toolset.id, projectId: scope, executionId: call.callExecutionId },
-        { book: state, tokens },
-        { now: this.now(), ttlMs: this.ttlMs(args.ttl_seconds) }
-      );
-      expiresAt = record.expiresAt;
-    }
+    const { redactionId, expiresAt } = await this.keepRedaction(call, scope, style, book, tokens, args.ttl_seconds);
     const action = style === "mask" ? "mask" : style === "placeholder" ? "redact" : "protect";
     await this.options.guard.recordGatewayToolEvents(this.findingRows(call, scanned, ruleSet, action));
     const riskLevel = highestRiskLevel(scanned.map((input) => input.riskLevel));
@@ -433,6 +442,169 @@ export class ContentRulesToolsService {
       summary: `${findings.length} value${findings.length === 1 ? "" : "s"} redacted (${style})`,
       restoredClasses: []
     };
+  }
+
+  /** What a redaction style replaces a value with; placeholder and token styles fill `book` and `tokens`. */
+  private protectorFor(style: RedactionStyle, call: ContentToolCall, scope: string, reserved: ReadonlySet<string>) {
+    const book = new InMemoryPlaceholderBook();
+    const tokens: ContentRedactionMap["tokens"] = [];
+    const vault = style === "token" ? this.options.guard.vaultFor({ projectId: scope, executionId: call.callExecutionId }) : undefined;
+    const tokenProvider = vault ? createTokenVaultProvider({ storage: vault }) : undefined;
+    const protect: (value: string, dataClass: string) => Promise<string> =
+      style === "placeholder"
+        ? async (value, dataClass) => book.assignNow(dataClass, value, reserved).placeholder
+        : style === "token"
+          ? async (value, dataClass) => {
+              const token = await tokenProvider!.protect(value, { dataClass });
+              tokens.push({ token, dataClass });
+              return token;
+            }
+          : style === "hash"
+            ? this.hashProtector(scope)
+            : async (value, dataClass) => maskForDataClass(value, dataClass);
+    return { book, tokens, protect };
+  }
+
+  /** Keeps a reversible redaction's map (sealed, expiring, bound to the client and project scope); one-way styles keep nothing. */
+  private async keepRedaction(
+    call: ContentToolCall,
+    scope: string,
+    style: RedactionStyle,
+    book: InMemoryPlaceholderBook,
+    tokens: ContentRedactionMap["tokens"],
+    ttlSeconds: number | undefined
+  ): Promise<{ redactionId?: string; expiresAt?: string }> {
+    const reversible = style === "placeholder" || style === "token";
+    const state = book.state();
+    if (!reversible || (state.entries.length === 0 && tokens.length === 0)) return {};
+    const redactionId = `red_${randomBytes(18).toString("base64url")}`;
+    const record = await storeRedactionMap(
+      this.options.store,
+      this.options.sealer,
+      { id: redactionId, scope: "gateway", clientId: call.client.id, toolsetId: call.toolset.id, projectId: scope, executionId: call.callExecutionId },
+      { book: state, tokens },
+      { now: this.now(), ttlMs: this.ttlMs(ttlSeconds) }
+    );
+    return { redactionId, expiresAt: record.expiresAt };
+  }
+
+  // ---------------------------------------------------------------------------
+  // scan_document
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A document sent as base64 or, when the member allows URLs, fetched from a listed host (private, loopback and
+   * link-local addresses always refused). Findings with locations and masked previews, a risk level, and optionally
+   * the redacted text. Rule events carry masked evidence; the audit entry carries the origin, a hash of the path,
+   * the size, the type and the counts, never content.
+   */
+  private async scanDocument(call: ContentToolCall): Promise<ContentToolOutcome> {
+    const documents = call.documents;
+    const scanner = this.options.documents;
+    if (!documents?.enabled) return { ok: false, message: "Document scanning is not turned on for this toolset" };
+    if (!scanner) return { ok: false, message: "Document scanning is not available on this deployment" };
+    const parsed = scanDocumentArgsSchema.safeParse(call.args);
+    if (!parsed.success) return { ok: false, message: `Invalid arguments: ${issues(parsed.error)}` };
+    const args = parsed.data;
+    if (args.url !== undefined && !documents.allowUrls) return { ok: false, message: "This toolset does not allow fetching documents from URLs; send the content as content_base64" };
+    const ruleSet = await this.ruleSetFor(call, args.rule_set_id);
+    const scope = ContentRulesToolsService.projectScope(call.toolset);
+    let sourceRef: Record<string, unknown> = args.url !== undefined ? ContentRulesToolsService.originOf(args.url) : { source: "upload" };
+
+    try {
+      return await scanner.forGatewayClient(call.client.id, async () =>
+        await scanner.withSlot(async () => {
+          const loaded: LoadedDocument =
+            args.url !== undefined
+              ? await scanner.fetchUrl(args.url, { gateway: true, allowHost: (host) => documentHostAllowed(host, documents.allowedHosts) })
+              : { bytes: scanner.decodeUpload(args.content_base64!), mediaType: args.media_type ?? null, source: { kind: "upload", ...(args.filename ? { filename: args.filename } : {}) } };
+          if (loaded.source.kind === "url") sourceRef = { source: loaded.source.origin, pathHash: loaded.source.pathHash };
+          // A fetched document's declared type is the server's; an upload's is the caller's.
+          const extracted = scanner.extract(loaded.source.kind === "upload" ? loaded : { ...loaded, mediaType: loaded.mediaType ?? args.media_type ?? null });
+          const style = args.redact_style;
+          const protector = style ? this.protectorFor(style, call, scope, new Set(extracted.segments.flatMap((segment) => [...placeholdersIn(segment.text)]))) : undefined;
+          const outcome = await scanner.scan(
+            extracted,
+            loaded,
+            ruleSet?.profile ?? null,
+            {
+              ...(args.entity_types ? { entityTypes: args.entity_types } : {}),
+              ...(args.allow_list ? { allowList: { values: args.allow_list } } : {})
+            },
+            protector?.protect
+          );
+          const kept = style && protector ? await this.keepRedaction(call, scope, style, protector.book, protector.tokens, args.ttl_seconds) : {};
+          const result: DocumentScanResult = documentScanResult(
+            extracted,
+            loaded,
+            outcome,
+            ruleSet ? { id: ruleSet.profileId, version: ruleSet.version } : null,
+            style && outcome.redactedText !== undefined
+              ? { style, text: outcome.redactedText, ...(kept.redactionId ? { redaction_id: kept.redactionId, expires_at: kept.expiresAt! } : {}) }
+              : undefined
+          );
+          const action = !style ? "allow" : style === "mask" ? "mask" : style === "placeholder" ? "redact" : "protect";
+          await this.options.guard.recordGatewayToolEvents(
+            this.eventRows(
+              call,
+              ruleSet,
+              action,
+              loaded.source.kind === "url" ? "tool_result" : "tool_arguments",
+              outcome.findings.map((finding) => ({ dataClass: finding.dataClass, score: finding.score, evidence: finding.maskedPreview, spans: [], message: `${call.tool}: ${finding.dataClass} at ${finding.location.label}` })),
+              outcome.countsByClass,
+              outcome.maxScoreByClass
+            )
+          );
+          await this.auditDocumentScan(call, "success", {
+            ...sourceRef,
+            bytes: result.bytes,
+            type: result.sniffedType,
+            typeMismatch: result.typeMismatch,
+            truncated: result.truncated,
+            findings: outcome.total,
+            counts: result.countsByClass,
+            riskLevel: result.riskLevel,
+            ...(style ? { redactStyle: style } : {})
+          });
+          const total = outcome.total;
+          return { ok: true, result: result as unknown as Record<string, unknown>, summary: `${total} finding${total === 1 ? "" : "s"}; risk ${result.riskLevel}`, restoredClasses: [] };
+        })
+      );
+    } catch (error) {
+      if (error instanceof DocumentError || error instanceof DocumentScanBusyError) {
+        await this.auditDocumentScan(call, error instanceof DocumentError && error.code === "host_not_allowed" ? "denied" : "failure", {
+          ...sourceRef,
+          ...(error instanceof DocumentError ? { code: error.code, ...(error.reason ? { reason: error.reason } : {}) } : { code: "busy" })
+        });
+        return { ok: false, message: error.message };
+      }
+      throw error;
+    }
+  }
+
+  /** The origin of a URL argument for the audit (never its path or query). */
+  private static originOf(url: string): Record<string, unknown> {
+    try {
+      const parsed = new URL(url);
+      return { source: parsed.origin, pathHash: createHash("sha256").update(`${parsed.pathname}${parsed.search}`).digest("hex").slice(0, 16) };
+    } catch {
+      return { source: "url" };
+    }
+  }
+
+  private async auditDocumentScan(call: ContentToolCall, outcome: "success" | "failure" | "denied", metadata: Record<string, unknown>): Promise<void> {
+    await this.options.audit({
+      eventType: "mcp_gateway.content_document_scan",
+      category: "system",
+      action: "execute",
+      outcome,
+      actor: { type: "api_key", email: call.client.name },
+      resourceType: "mcp_toolset",
+      resourceId: call.toolset.id,
+      projectId: call.toolset.projectId,
+      metadata: { clientId: call.client.id, executionId: call.callExecutionId, ...metadata },
+      message: outcome === "success" ? "Document scanned through the MCP gateway" : "Document scan through the MCP gateway refused or failed"
+    });
   }
 
   // ---------------------------------------------------------------------------

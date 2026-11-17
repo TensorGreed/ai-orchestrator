@@ -1109,3 +1109,25 @@
 .guard-dest-rules li .pg-btn {
   margin-left: 8px;
 }
+
+/* Scan a document (rule set editor) */
+.guard-document-drop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.guard-document-drop.active {
+  border-style: solid;
+  background: var(--bg-elev-2);
+}
+
+.guard-document-result {
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+}

@@ -105,7 +105,7 @@ import type {
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
 import type { LegalHoldItemView, LegalHoldRef, LegalHoldStatus, LegalHoldView, RetentionPolicyRecord, RetentionRunView } from "@ai-orchestrator/shared";
-import { parseStoredGatewayRateLimit, type BudgetScopeType, type McpGatewayRateLimit } from "@ai-orchestrator/shared";
+import { contentRulesMemberOptionsJson, parseContentRulesMemberOptions, parseStoredGatewayRateLimit, type BudgetScopeType, type McpGatewayRateLimit } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   mapMcpGatewayApproval,
@@ -985,6 +985,8 @@ interface McpToolsetMemberRow {
   tool_glob: string | null;
   /** v76 — a content_rules member's rule set. */
   rule_set_id?: string | null;
+  /** v77 — a content_rules member's options (`{ documents }`). */
+  options_json?: string | null;
   position: number;
 }
 
@@ -1067,7 +1069,7 @@ function mapMcpToolsetMember(row: McpToolsetMemberRow): McpToolsetMember | null 
     };
   }
   if (toString(row.kind) === "content_rules") {
-    return { id: toString(row.id), kind: "content_rules", ruleSetId: row.rule_set_id ? toString(row.rule_set_id) : null };
+    return { id: toString(row.id), kind: "content_rules", ruleSetId: row.rule_set_id ? toString(row.rule_set_id) : null, ...parseContentRulesMemberOptions(row.options_json) };
   }
   return null;
 }
@@ -4541,6 +4543,8 @@ export class SqliteStore implements Store {
     ensureContentRedactionSchema(this.db);
     this.ensureColumn("mcp_toolset_members", "rule_set_id", "TEXT");
     this.ensureColumn("content_redactions", "version", "INTEGER NOT NULL DEFAULT 0");
+    // v77 — a content rules toolset member's options (document scanning).
+    this.ensureColumn("mcp_toolset_members", "options_json", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -14070,8 +14074,8 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM mcp_toolset_members WHERE toolset_id = ?`, [toolsetId]);
     members.forEach((member, index) => {
       this.exec(
-        `INSERT INTO mcp_toolset_members (id, toolset_id, kind, workflow_id, server_id, tool_glob, rule_set_id, position)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO mcp_toolset_members (id, toolset_id, kind, workflow_id, server_id, tool_glob, rule_set_id, options_json, position)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           member.id ?? `mtm_${randomUUID()}`,
           toolsetId,
@@ -14080,6 +14084,7 @@ export class SqliteStore implements Store {
           member.kind === "server" ? member.serverId : null,
           member.kind === "server" ? member.toolGlob ?? null : null,
           member.kind === "content_rules" ? member.ruleSetId ?? null : null,
+          member.kind === "content_rules" ? contentRulesMemberOptionsJson(member.documents) : null,
           index
         ]
       );
