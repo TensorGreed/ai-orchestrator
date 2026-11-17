@@ -250,6 +250,8 @@ export interface RevealRuleView {
   roles: string[];
   users: string[];
   serviceAccounts: string[];
+  /** MCP gateway client ids whose restore tool call may reveal; absent or empty = none. */
+  gatewayClients?: string[];
   workflows: string[];
   requireApproval: boolean;
 }
@@ -267,6 +269,7 @@ export function revealRulesOf(document: GuardDocument): RevealRuleView[] {
       roles: strings(subjects.roles),
       users: strings(subjects.users),
       serviceAccounts: strings(subjects.serviceAccounts),
+      ...(strings(subjects.gatewayClients).length ? { gatewayClients: strings(subjects.gatewayClients) } : {}),
       workflows: strings(rule.workflows),
       requireApproval: rule.requireApproval === true
     };
@@ -287,7 +290,8 @@ export function setRevealRules(document: GuardDocument, rules: RevealRuleView[])
       subjects: {
         ...(rule.roles.length ? { roles: strings(rule.roles) } : {}),
         ...(rule.users.length ? { users: strings(rule.users) } : {}),
-        ...(rule.serviceAccounts.length ? { serviceAccounts: strings(rule.serviceAccounts) } : {})
+        ...(rule.serviceAccounts.length ? { serviceAccounts: strings(rule.serviceAccounts) } : {}),
+        ...(rule.gatewayClients?.length ? { gatewayClients: strings(rule.gatewayClients) } : {})
       },
       ...(rule.workflows.length ? { workflows: strings(rule.workflows) } : {}),
       ...(rule.requireApproval ? { requireApproval: true } : {})
@@ -301,10 +305,38 @@ export function revealRuleLine(rule: RevealRuleView): string {
   const who = [
     ...rule.roles.map((role) => `${role}s`),
     ...rule.users.map((user) => `user ${user}`),
-    ...rule.serviceAccounts.map((account) => `service account ${account}`)
+    ...rule.serviceAccounts.map((account) => `service account ${account}`),
+    ...(rule.gatewayClients ?? []).map((client) => `gateway client ${client}`)
   ];
   const name = rule.name ? `${rule.name}: ` : "";
   const where = rule.workflows.length ? ` in ${rule.workflows.length === 1 ? "workflow" : "workflows"} ${rule.workflows.join(", ")}` : "";
   const approval = rule.requireApproval ? ", after a person approves" : "";
   return `${name}${who.join(", ") || "nobody"} may reveal ${rule.dataClasses.join(", ") || "nothing"}${where}${approval}.`;
+}
+
+/** The rule set's allow-list: values (exact, without case or separators) and simple `*` / `?` patterns never reported. */
+export interface AllowListView {
+  values: string[];
+  patterns: string[];
+}
+
+const lines = (value: unknown): string[] => [...new Set(strings(value))];
+
+/** The document's allow-list; empty lists when it has none. */
+export function allowListOf(document: GuardDocument): AllowListView {
+  const list = rec(document.allowList);
+  return { values: lines(list.values), patterns: lines(list.patterns) };
+}
+
+/** Replaces the allow-list; both lists empty removes it, so a rule set without one serialises as before. */
+export function setAllowList(document: GuardDocument, list: AllowListView): GuardDocument {
+  const next = cloneDocument(document);
+  const values = lines(list.values);
+  const patterns = lines(list.patterns);
+  if (values.length === 0 && patterns.length === 0) {
+    delete next.allowList;
+    return next;
+  }
+  next.allowList = { ...(values.length ? { values } : {}), ...(patterns.length ? { patterns } : {}) };
+  return next;
 }
