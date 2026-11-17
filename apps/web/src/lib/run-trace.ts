@@ -5,6 +5,7 @@ import type {
   StreamNodeActivityEvent,
   StreamNodeCompleteEvent,
   StreamNodeProgressEvent,
+  StreamNodeRedactedEvent,
   StreamNodeStartEvent
 } from "./api";
 
@@ -109,6 +110,23 @@ export function applyNodeCompleteToExecutionResult(
     completedAt: event.completedAt,
     nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult)
   };
+}
+
+/**
+ * A node's data as the run's history keeps it (values revealed later in the run put back as their tokens): replaces
+ * the input, output, error and activity earlier events showed. Streamed model text is dropped (it may hold the values,
+ * and the server stops streaming once something is revealed); the node's complete event carries the text.
+ */
+export function applyNodeRedactedToExecutionResult(
+  current: WorkflowExecutionResult | null,
+  event: StreamNodeRedactedEvent
+): WorkflowExecutionResult | null {
+  if (!current) return current;
+  const existing = current.nodeResults.find((entry) => entry.nodeId === event.nodeId) as LiveNodeResult | undefined;
+  if (!existing) return current;
+  const next: LiveNodeResult = { ...existing, input: event.input, output: event.output, error: event.error, liveText: undefined };
+  if (event.activity) next.activity = event.activity;
+  return { ...current, nodeResults: upsertNodeResult(current.nodeResults, next) };
 }
 
 /** Phase 10.5 — keep the latest MCP tool progress on the node's result (the run tape shows it). */
@@ -332,6 +350,7 @@ export interface TraceStreamHandlers {
   onNodeComplete: (event: StreamNodeCompleteEvent) => void;
   onNodeProgress: (event: StreamNodeProgressEvent) => void;
   onNodeActivity: (event: StreamNodeActivityEvent) => void;
+  onNodeRedacted: (event: StreamNodeRedactedEvent) => void;
   onLlmDelta: (event: StreamLlmDeltaEvent) => void;
   onError: (event: { message: string }) => void;
   /** Push buffered deltas now and stop the flush timer. */
@@ -347,6 +366,7 @@ export function traceStreamCallbacks(trace: TraceStreamHandlers, onError: (event
     onNodeComplete: trace.onNodeComplete,
     onNodeProgress: trace.onNodeProgress,
     onNodeActivity: trace.onNodeActivity,
+    onNodeRedacted: trace.onNodeRedacted,
     onLlmDelta: trace.onLlmDelta,
     onError: (event: { message: string }) => {
       trace.onError(event);
@@ -419,6 +439,11 @@ export function createTraceStreamHandlers<S extends string = string>(options: Tr
     onNodeActivity: (event) => {
       if (!enabled) return;
       setExecutionResult((current) => applyNodeActivityToExecutionResult(current, event));
+    },
+    onNodeRedacted: (event) => {
+      if (!enabled) return;
+      delete pending[event.nodeId];
+      setExecutionResult((current) => applyNodeRedactedToExecutionResult(current, event));
     },
     onLlmDelta: (event) => {
       if (!enabled || !event.delta) return;

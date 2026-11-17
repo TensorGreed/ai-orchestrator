@@ -223,7 +223,10 @@ export function instrumentMcpAdapter<T extends MCPServerAdapter>(adapter: T, ins
             const result: unknown = await (value as (...callArgs: unknown[]) => Promise<unknown>).apply(target, args);
             if (property === "invokeTool" && result && typeof result === "object") {
               recordToolResult(span, result as MCPToolResult);
-              if ((result as MCPToolResult).ok) captureToolContent(span, "tool_call_result", (result as MCPToolResult).output);
+              // A result that lists sensitive values (a gateway restore) is never exported as content.
+              if ((result as MCPToolResult).ok && (result as MCPToolResult).sensitiveValues === undefined) {
+                captureToolContent(span, "tool_call_result", (result as MCPToolResult).output);
+              }
             }
             return result;
           } catch (error) {

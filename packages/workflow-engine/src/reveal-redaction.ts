@@ -26,41 +26,70 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/** Longer values first, so a value that contains another is replaced whole. */
+function patternOf(values: Map<string, string>): RegExp {
+  return new RegExp([...values.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp).join("|"), "g");
+}
+
 export class RevealRedactor {
   /** Revealed value → its token. */
   private readonly tokens = new Map<string, string>();
+  /**
+   * Values only an unverified source called sensitive → a fixed placeholder. Replaced in a second pass, after the
+   * revealed values: such a value can overlap a revealed one, and must never stop that value from being found whole.
+   */
+  private readonly extra = new Map<string, string>();
   private pattern: RegExp | undefined;
+  private extraPattern: RegExp | undefined;
+  private changes = 0;
 
-  /** Registers a revealed value and the token it came from. */
-  add(value: string, token: string): void {
+  /**
+   * Registers a revealed value and the token it came from. With `unverified`, the value comes from a source the run
+   * cannot check (it can only mask more): it is replaced after every revealed value, never in place of one.
+   */
+  add(value: string, token: string, options: { unverified?: boolean } = {}): void {
     if (value.length < REVEAL_REDACTION_MIN_LENGTH || value === token) return;
+    const into = options.unverified ? this.extra : this.tokens;
     // A value as it appears inside serialised JSON (quotes and backslashes escaped) is put back too.
     const variants = new Set([value, JSON.stringify(value).slice(1, -1)]);
     const tokenVariant = JSON.stringify(token).slice(1, -1);
     for (const variant of variants) {
-      if (!this.tokens.has(variant)) this.tokens.set(variant, variant === value ? token : tokenVariant);
+      if (!into.has(variant)) {
+        into.set(variant, variant === value ? token : tokenVariant);
+        this.changes += 1;
+      }
     }
-    this.pattern = undefined;
+    if (options.unverified) this.extraPattern = undefined;
+    else this.pattern = undefined;
   }
 
   /** True once something was revealed in this run. */
   get active(): boolean {
-    return this.tokens.size > 0;
+    return this.tokens.size > 0 || this.extra.size > 0;
+  }
+
+  /** Grows each time a new value is registered: what was redacted before may hold values redacted now. */
+  get version(): number {
+    return this.changes;
   }
 
   redactText(text: string): string {
-    if (this.tokens.size === 0 || text.length < REVEAL_REDACTION_MIN_LENGTH) return text;
-    if (!this.pattern) {
-      // Longer values first, so a value that contains another is replaced whole.
-      const values = [...this.tokens.keys()].sort((a, b) => b.length - a.length);
-      this.pattern = new RegExp(values.map(escapeRegExp).join("|"), "g");
+    if (!this.active || text.length < REVEAL_REDACTION_MIN_LENGTH) return text;
+    let out = text;
+    if (this.tokens.size > 0) {
+      this.pattern ??= patternOf(this.tokens);
+      out = out.replace(this.pattern, (match) => this.tokens.get(match) ?? match);
     }
-    return text.replace(this.pattern, (match) => this.tokens.get(match) ?? match);
+    if (this.extra.size > 0) {
+      this.extraPattern ??= patternOf(this.extra);
+      out = out.replace(this.extraPattern, (match) => this.extra.get(match) ?? match);
+    }
+    return out;
   }
 
   /** A copy of `value` with every revealed value put back as its token; `value` itself when nothing was revealed. */
   redact<T>(value: T): T {
-    if (this.tokens.size === 0) return value;
+    if (!this.active) return value;
     return this.walk(value, 0, new WeakMap()) as T;
   }
 
@@ -137,21 +166,74 @@ function redactingCallback<A extends unknown[], R>(callback: ((...args: A) => R)
 }
 
 /**
+ * A live event callback for a run whose caller keeps what earlier events showed (`onRunRedacted`): before the event
+ * is passed on, the caller is told about values registered since its last notice, so it can put them back in what
+ * it holds and has sent; then the event goes out redacted. Notices and events keep their order.
+ */
+function liveEventCallback<A extends unknown[], R>(
+  callback: ((...args: A) => R) | undefined,
+  redactor: RevealRedactor,
+  catchUp: () => Promise<void>
+): ((...args: A) => Promise<Awaited<R>>) | undefined {
+  if (!callback) return undefined;
+  return async (...args: A): Promise<Awaited<R>> => {
+    // Redacted now, so an event object the engine changes later is not read later; again after the notice.
+    const early = redactor.redact(args);
+    await catchUp();
+    return await callback(...(redactor.redact(early) as A));
+  };
+}
+
+/**
  * The top-level run's dependencies with everything that leaves the run put back to tokens: live events, the
  * paused state, the error workflow's input, log metadata and the session stores. Streamed model deltas stop once
  * something was revealed (a value can be split across deltas); the node's complete event carries the text.
+ *
+ * Events sent before a value was revealed may hold it (a value the run's input carried in clear, before a content
+ * rules node and a Reveal node turned it into a token and back). With `onRunRedacted`, the caller hears of each newly
+ * revealed value before the next event, and gets the redaction to apply to what it already holds and sent, so what
+ * it shows ends up as the run's history keeps it.
  */
 export function redactingDependencies(dependencies: WorkflowExecutionDependencies, redactor: RevealRedactor): WorkflowExecutionDependencies {
   const onLLMDelta = dependencies.onLLMDelta;
+  const onRunRedacted = dependencies.onRunRedacted;
+  if (!onRunRedacted) {
+    return {
+      ...dependencies,
+      ...redactingSessionStores(dependencies, redactor),
+      onNodeStart: redactingCallback(dependencies.onNodeStart, redactor),
+      onNodeComplete: redactingCallback(dependencies.onNodeComplete, redactor),
+      onLLMDelta: onLLMDelta ? async (event) => (redactor.active ? undefined : await onLLMDelta(event)) : undefined,
+      onMcpProgress: redactingCallback(dependencies.onMcpProgress, redactor),
+      onNodeActivity: redactingCallback(dependencies.onNodeActivity, redactor),
+      onMcpElicitation: redactingCallback(dependencies.onMcpElicitation, redactor),
+      persistPausedExecution: redactingCallback(dependencies.persistPausedExecution, redactor),
+      triggerErrorWorkflow: redactingCallback(dependencies.triggerErrorWorkflow, redactor),
+      logger: redactingCallback(dependencies.logger, redactor)
+    };
+  }
+  let notified = redactor.version;
+  let notices: Promise<void> = Promise.resolve();
+  const redact = <T>(value: T): T => redactor.redact(value);
+  const catchUp = (): Promise<void> => {
+    if (redactor.version !== notified) {
+      notified = redactor.version;
+      // A failing notice never fails the run (the caller reports its own failures).
+      notices = notices.then(async () => await onRunRedacted(redact)).catch(() => undefined);
+    }
+    return notices;
+  };
   return {
     ...dependencies,
     ...redactingSessionStores(dependencies, redactor),
-    onNodeStart: redactingCallback(dependencies.onNodeStart, redactor),
-    onNodeComplete: redactingCallback(dependencies.onNodeComplete, redactor),
+    // Consumed here: nothing below this run calls it.
+    onRunRedacted: undefined,
+    onNodeStart: liveEventCallback(dependencies.onNodeStart, redactor, catchUp),
+    onNodeComplete: liveEventCallback(dependencies.onNodeComplete, redactor, catchUp),
     onLLMDelta: onLLMDelta ? async (event) => (redactor.active ? undefined : await onLLMDelta(event)) : undefined,
-    onMcpProgress: redactingCallback(dependencies.onMcpProgress, redactor),
-    onNodeActivity: redactingCallback(dependencies.onNodeActivity, redactor),
-    onMcpElicitation: redactingCallback(dependencies.onMcpElicitation, redactor),
+    onMcpProgress: liveEventCallback(dependencies.onMcpProgress, redactor, catchUp),
+    onNodeActivity: liveEventCallback(dependencies.onNodeActivity, redactor, catchUp),
+    onMcpElicitation: liveEventCallback(dependencies.onMcpElicitation, redactor, catchUp),
     persistPausedExecution: redactingCallback(dependencies.persistPausedExecution, redactor),
     triggerErrorWorkflow: redactingCallback(dependencies.triggerErrorWorkflow, redactor),
     logger: redactingCallback(dependencies.logger, redactor)

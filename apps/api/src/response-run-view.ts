@@ -48,7 +48,7 @@ export function maskRunNodeData<T>(run: T): T {
  */
 export function maskRunEvent(event: string, payload: unknown): unknown | null {
   if (event === "execution" || event === "result") return maskRunNodeData(payload);
-  if (event === "node_complete") return maskNodeResult(payload);
+  if (event === "node_complete" || event === "node_redacted") return maskNodeResult(payload);
   if (event === "llm_delta" || event === "node_progress" || event === "node_activity") return null;
   return payload;
 }

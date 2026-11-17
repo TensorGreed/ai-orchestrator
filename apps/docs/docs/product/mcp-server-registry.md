@@ -68,7 +68,7 @@ In workflow JSON the reference looks like this:
 }
 ```
 
-`registryServerId` also works inside an agent's `mcpServers` list. When it is set, the runtime takes the adapter, connection and secret from the registry and ignores inline values. If the entry has been deleted, or is blocked by an unaccepted breaking change, the node fails with a message that says so.
+`registryServerId` also works inside an agent's `mcpServers` list. When it is set, the runtime takes the adapter, connection and secret from the registry and ignores inline values. If the entry has been deleted, or is blocked by an unaccepted breaking change, the node fails with a message that says so. A registry entry's id put in `serverId` instead is not looked up in the registry (`serverId` names an adapter, such as `http_mcp`), so the node fails with `Unknown MCP server adapter: mcp_…` and a hint to set it as `registryServerId`. It is not accepted in `serverId`, so the entry's connection, credentials, limits and the rules keyed on its id always apply.
 
 ## Health and status
 

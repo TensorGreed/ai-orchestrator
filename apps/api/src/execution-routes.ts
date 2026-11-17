@@ -418,6 +418,9 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
           onNodeActivity: (event) => {
             sendSseEvent("node_activity", event);
           },
+          onNodeRedacted: (event) => {
+            sendSseEvent("node_redacted", event);
+          },
           // A dispatched run's questions arrive through the relay (an inline run's through the subscription above).
           onMcpElicitation: (event) => {
             sendElicitation({ ...event });

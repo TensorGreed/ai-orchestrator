@@ -181,6 +181,7 @@ import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffS
 import { executeGuardNodeStep } from "./guard-node";
 import { executeRevealNodeStep } from "./reveal-node";
 import { childGuardFor, redactingDependencies, redactingSessionStores, RevealRedactor } from "./reveal-redaction";
+import { observeSensitiveResults, type SensitiveValuesVerifier } from "./sensitive-results";
 import { SessionSensitivity, sensitivityTrackingSessionStores } from "./session-sensitivity";
 import { checkRunResponse, sealRunReply } from "./response-boundary";
 import {
@@ -654,6 +655,18 @@ export interface WorkflowExecutionDependencies {
    * writes to session state written by sensitive work (see session-sensitivity.ts).
    */
   sessionSensitivity?: SessionSensitivity;
+  /**
+   * Values were revealed in this run (a Reveal node, or an MCP tool result that lists sensitive values) after live
+   * events were sent that may hold them. Called before the next live event with the redaction the run's history
+   * gets: the caller applies it to what it holds and corrects what it sent. Optional; without it earlier events stay
+   * as they were sent.
+   */
+  onRunRedacted?: (redact: <T>(value: T) => T) => Promise<void> | void;
+  /**
+   * Says whether a sensitive values marker on an MCP tool result was signed by this deployment (its gateway). A
+   * verified marker puts back the tokens it lists; any other marker masks the values with a fixed placeholder.
+   */
+  verifySensitiveValues?: SensitiveValuesVerifier;
 }
 
 export interface McpToolPolicySnapshot {
@@ -8826,7 +8839,11 @@ export async function executeWorkflow(
     // Phase 12 coverage — revealed values reach this run's own nodes only; the result, the paused state, the live
     // events and the session stores keep the tokens.
     const redactor = new RevealRedactor();
-    const redacting = redactingDependencies(dependencies, redactor);
+    // MCP tool results that list sensitive values (a gateway restore) register them like a Reveal node does.
+    const redacting = {
+      ...redactingDependencies(dependencies, redactor),
+      mcpRegistry: observeSensitiveResults(dependencies.mcpRegistry, redactor, dependencies.verifySensitiveValues)
+    };
     const recorder = createNodeActivityRecorder(redacting.onNodeActivity);
     // Content capture and v73 marks share one check of the run's declared sensitive sources (made at most once).
     let declaredCheck: Promise<boolean> | undefined;
@@ -8856,6 +8873,7 @@ export async function executeWorkflow(
     const redacted = redactor.redact(result);
     if (redactor.active) {
       Object.defineProperty(redacted, REVEALED_VALUES, { value: true, enumerable: true });
+      Object.defineProperty(redacted, RUN_REDACTION, { value: <T>(value: T): T => redactor.redact(value), enumerable: true });
       const labels = runOutputLabels.get(result);
       if (labels) runOutputLabels.set(redacted, labels);
     }
@@ -8942,6 +8960,18 @@ const SENSITIVE_WORK: unique symbol = Symbol("l2m.sensitiveWork");
  */
 export function runWasSensitiveWork(result: object): boolean {
   return (result as { [SENSITIVE_WORK]?: boolean })[SENSITIVE_WORK] === true;
+}
+
+/** The run's redaction of revealed values, on a result whose run revealed something (same kind of key). */
+const RUN_REDACTION: unique symbol = Symbol("l2m.runRedaction");
+
+/**
+ * The redaction the run applied to its result, for what the caller keeps of the run besides the result (the request
+ * input, custom data): each revealed value put back as its token. Undefined when the run revealed nothing.
+ */
+export function runRedaction(result: object): (<T>(value: T) => T) | undefined {
+  const redact = (result as { [RUN_REDACTION]?: <T>(value: T) => T })[RUN_REDACTION];
+  return typeof redact === "function" ? redact : undefined;
 }
 
 /**

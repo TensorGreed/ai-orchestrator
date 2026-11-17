@@ -1,5 +1,5 @@
 import { Ajv, type ValidateFunction } from "ajv";
-import { JSON_SCHEMA_SCORER_MAX_BYTES, jsonSchemaRegexProblem, type MCPToolResult } from "@ai-orchestrator/shared";
+import { JSON_SCHEMA_SCORER_MAX_BYTES, jsonSchemaRegexProblem, SENSITIVE_VALUES_META_KEY, type MCPToolResult } from "@ai-orchestrator/shared";
 
 /**
  * Phase 10.5 — structured tool output (`outputSchema` / `structuredContent`).
@@ -216,6 +216,10 @@ export function buildToolCallResult(
   const content = normalizeToolContent(result.content);
   const rawStructured = result.structuredContent ?? result.structured_content;
   const fallbackOutput = content !== undefined ? content : rawResult;
+  // A marker of sensitive values in the result's `_meta` (L2M's gateway restore): the engine keeps them out of what
+  // the run stores and streams. Kept as sent; the engine decides what it is worth.
+  const meta = toRecord(result._meta);
+  const marked = meta[SENSITIVE_VALUES_META_KEY] !== undefined ? { sensitiveValues: meta[SENSITIVE_VALUES_META_KEY] } : {};
   if (result.isError === true) {
     // Error results are not held to the outputSchema (the spec only requires conforming success results).
     const output = rawStructured !== undefined ? rawStructured : fallbackOutput;
@@ -224,18 +228,20 @@ export function buildToolCallResult(
       output,
       ...(content !== undefined ? { content } : {}),
       error: typeof content === "string" && content.trim() ? content : `MCP tool '${toolName}' reported an error.`,
-      errorKind: "tool"
+      errorKind: "tool",
+      ...marked
     };
   }
   const check = checkStructuredContent(toolName, outputSchema, rawStructured);
   if (!check.ok) {
-    return { ok: false, output: fallbackOutput, ...(content !== undefined ? { content } : {}), error: check.error, errorKind: "output_validation" };
+    return { ok: false, output: fallbackOutput, ...(content !== undefined ? { content } : {}), error: check.error, errorKind: "output_validation", ...marked };
   }
   return {
     ok: true,
     output: check.structured ?? fallbackOutput,
     ...(check.structured ? { structured: check.structured } : {}),
-    ...(content !== undefined ? { content } : {})
+    ...(content !== undefined ? { content } : {}),
+    ...marked
   };
 }
 

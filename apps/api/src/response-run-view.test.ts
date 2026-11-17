@@ -33,5 +33,10 @@ describe("run views below builder under response rules", () => {
     expect(maskRunEvent("node_complete", { nodeId: "a", status: "success", output: "raw" })).toEqual({ nodeId: "a", status: "success", output: HIDDEN_BY_RESPONSE_RULES });
     for (const event of ["llm_delta", "node_progress", "node_activity"]) expect(maskRunEvent(event, { delta: "raw" })).toBeNull();
     expect(maskRunEvent("node_start", { nodeId: "a" })).toEqual({ nodeId: "a" });
+    expect(maskRunEvent("node_redacted", { nodeId: "a", status: "success", input: "raw", output: "raw", activity: [{ args: "raw" }] })).toEqual({
+      nodeId: "a",
+      status: "success",
+      output: HIDDEN_BY_RESPONSE_RULES
+    });
   });
 });
