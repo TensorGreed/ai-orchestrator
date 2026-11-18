@@ -554,6 +554,15 @@ const envSchema = z.object({
    * overloaded and the rule set's failure setting decides.
    */
   CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT: z.coerce.number().int().min(1).max(64).default(4),
+  /**
+   * PDF documents (the scan panel, the gateway's `scan_document` and Extract from File's `pdf` format) are read in a
+   * child process under Node's permission model, one per document: pages read per document, the wall-clock time one
+   * PDF may take (the child is stopped then), and the memory it may use (its heap; its resident memory may exceed that
+   * by 128 MB).
+   */
+  CONTENT_SCAN_MAX_PAGES: z.coerce.number().int().min(1).max(5_000).default(200),
+  CONTENT_SCAN_PDF_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(20_000),
+  CONTENT_SCAN_PDF_MEMORY_MB: z.coerce.number().int().min(64).max(4_096).default(256),
   // Phase 10.7 — MCP runtime safety.
   /** Sandbox mode for stdio servers that do not choose one: `none` (on the host) or `container`. */
   MCP_SANDBOX_DEFAULT: z.enum(["none", "container"]).default("none"),

@@ -109,6 +109,9 @@ RUN mkdir -p /app/apps/api/data && chown -R nodeuser:nodeuser /app/apps/api/data
 
 USER nodeuser
 EXPOSE 4000
+# No SIGUSR1 opens a debugger in any Node process of the chain (pnpm, tsx, the API); see the PDF reader in
+# packages/workflow-engine/src/documents/pdf-child-harden.mjs.
+ENV NODE_OPTIONS=--disable-sigusr1
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD wget --quiet --spider http://127.0.0.1:4000/health || exit 1

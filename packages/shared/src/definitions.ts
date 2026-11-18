@@ -2073,7 +2073,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "extract_from_file_node",
     label: "Extract from File",
     category: "Utility",
-    description: "Parse CSV, JSON, or XML strings/base64 into structured data.",
+    description: "Parse CSV, JSON, or XML strings/base64 into structured data, or read a PDF's text (base64).",
     configSchema: {
       type: "object",
       properties: {

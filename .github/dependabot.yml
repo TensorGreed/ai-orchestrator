@@ -23,6 +23,10 @@ updates:
       day: monday
     open-pull-requests-limit: 10
     groups:
+      # The PDF reader parses untrusted documents: its updates (major ones too) get a pull request of their own, so a
+      # security release is never held back behind the weekly group. Groups match in order, so this one comes first.
+      pdf-reader:
+        patterns: ["pdfjs-dist"]
       npm:
         patterns: ["*"]
         update-types: [minor, patch]

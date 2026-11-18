@@ -31,7 +31,8 @@ const startsWith = (bytes: Uint8Array, prefix: readonly number[]) => bytes.lengt
 
 /** Binary formats refused by magic bytes, with the message the caller sees. */
 const BINARY_MAGIC: ReadonlyArray<{ magic: number[]; message: string }> = [
-  { magic: [0x25, 0x50, 0x44, 0x46, 0x2d], message: "PDF files are not supported yet; send the text, Markdown, HTML, JSON or CSV form" },
+  // PDF documents are read by extractDocumentAsync (in a child process); the synchronous text reader refuses them.
+  { magic: [0x25, 0x50, 0x44, 0x46, 0x2d], message: "PDF files are read by the asynchronous document reader only" },
   { magic: [0x50, 0x4b, 0x03, 0x04], message: "Zip and Office files are not supported yet" },
   { magic: [0x50, 0x4b, 0x05, 0x06], message: "Zip and Office files are not supported yet" },
   { magic: [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1], message: "Older Office files are not supported" },

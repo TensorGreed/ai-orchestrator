@@ -8276,7 +8276,8 @@ async function executeNodeHandler(
       return executePhase2Node(node, config, {
         templateData,
         parentOutputs: context.parentOutputs,
-        getValueByPath
+        getValueByPath,
+        ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {})
       });
     }
 
