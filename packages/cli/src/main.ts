@@ -61,6 +61,7 @@ import { runGoldenExport, runGoldenImport, runGoldenVerify } from "./golden";
 import { JOB_ONLY_BOOLEANS, JOB_ONLY_FLAGS, replayFlags, runReplayJob, runReplayStatus } from "./replay-job";
 import { runReleasePublish } from "./release";
 import { GUARD_BENCHMARK_FLAGS, runGuardBenchmarkCommand } from "./guard-benchmark";
+import { runNerModelsCommand } from "@ai-orchestrator/ner/models";
 import { formatAuditVerifyResult, parsePublicKeyInput, PublicKeyInputError, verifyAuditBundle } from "./audit-verify";
 
 export type { CliIo } from "./api";
@@ -113,8 +114,12 @@ const USAGE = `Usage:
                       [--split main|heldout]... [--category <name>]...
                       [--baseline <report.json>] [--tolerance <0-1>]
                       [--out <report.json>] [--junit <file>] [--json]
-  l2m guard benchmark --entities [--profile <file>] [--split main|heldout]...
+  l2m guard benchmark --entities [--profile <file>] [--endpoint <url>]
+                      [--split main|heldout]...
                       [--out <report.json>] [--junit <file>] [--json]
+  l2m models list   [--dir <folder>] [--manifest <file>]
+  l2m models pull   [<model id>] [--dir <folder>] [--manifest <file>] [--accept-licence]
+  l2m models verify [<model id>] [--dir <folder>] [--manifest <file>]
 
 The API URL and key come from L2M_API_URL and L2M_API_KEY. Prefer the
 environment for the key: --api-key works but shows in the process list and
@@ -140,14 +145,22 @@ when a request fails (unreachable, no answer, 401, 403, 404, 5xx): that is
 long-standing behaviour, kept so existing pipelines keep their meaning.
 release publish: 0 published, 1 blocked by the gate or failed, 4 needs approval.
 golden export, import and verify: request failures exit 1.
-guard benchmark runs offline (no server, network or model): 0 the gate
+guard benchmark runs offline (no server, network or model; --endpoint is
+the one exception): 0 the gate
 passed, 1 below the default rule set's floors (--builtin) or a regression
 against --baseline (detection down, false positives or workflow attack
 success up by more than --tolerance, default 0); without --builtin or
 --baseline it only reports. With --entities it measures names, places and
 street addresses with the data.entities check: 1 below the rules engine's
 floors, on a class without a floor, or when the check did not run on an
-item; with --profile it only reports.
+item; with --profile it only reports. --endpoint <url> measures an entity
+endpoint instead of the rules (l2m-ner or your own; a token comes from
+L2M_NER_TOKEN) and gates on that model's floors in the l2m-ner model
+manifest when it lists them; 1 also when the endpoint is not ready.
+models list, pull and verify manage the l2m-ner model folder (default
+NER_MODEL_DIR, then ./ner-models). pull downloads from the model's
+publisher, checks every file's SHA-256 and needs --accept-licence (or a
+typed "yes"): 0 done, 1 a download or check failed, 2 usage error.
 `;
 
 function loadSnapshot(file: string): McpSnapshotFile {
@@ -537,6 +550,10 @@ function commandOf(positionals: string[]): string | null {
 }
 
 export async function main(argv: string[], io: CliIo): Promise<number> {
+  // `l2m models …` has its own flags (shared with the l2m-ner image), so it is parsed there.
+  if (argv[0] === "models") {
+    return runNerModelsCommand(argv.slice(1), { stdout: io.stdout, stderr: io.stderr, stdin: io.stdin, env: io.env, ...(io.fetch ? { fetchImpl: io.fetch } : {}) });
+  }
   try {
     const args = parseArgs(argv, BOOLEAN_FLAGS, VALUE_FLAGS);
     const [group] = args.positionals;

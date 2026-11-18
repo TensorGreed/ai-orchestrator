@@ -1,0 +1,145 @@
+{
+  "format": "l2m.ner-models",
+  "version": 1,
+  "default": "knowledgator/gliner-pii-base-v1.0",
+  "models": [
+    {
+      "id": "knowledgator/gliner-pii-base-v1.0",
+      "name": "GLiNER-PII base v1.0 (uint8 ONNX)",
+      "publisher": "Knowledgator and Wordcab",
+      "homepage": "https://huggingface.co/knowledgator/gliner-pii-base-v1.0",
+      "revision": "61726e0ad791dcab3e29339bbec3ad42ded65641",
+      "licence": {
+        "id": "Apache-2.0",
+        "url": "https://www.apache.org/licenses/LICENSE-2.0",
+        "trainingData": "Not disclosed by the publisher. The model card names only the evaluation set; the encoder is microsoft/deberta-v3-small (MIT).",
+        "notes": "The licence is stated in the model card (README.md), which is downloaded with the model."
+      },
+      "architecture": "gliner",
+      "files": [
+        {
+          "path": "onnx/model_quint8.onnx",
+          "url": "https://huggingface.co/knowledgator/gliner-pii-base-v1.0/resolve/61726e0ad791dcab3e29339bbec3ad42ded65641/onnx/model_quint8.onnx",
+          "sha256": "0514c8fd86d0513ce5351a3267f132b57d5bcd8f99a90d43cde1228092881d19",
+          "bytes": 196757174
+        },
+        {
+          "path": "tokenizer.json",
+          "url": "https://huggingface.co/knowledgator/gliner-pii-base-v1.0/resolve/61726e0ad791dcab3e29339bbec3ad42ded65641/tokenizer.json",
+          "sha256": "ee028763434d18611c1c36356ea1d050e90a9fa94ede57fac48b39f85f818ad1",
+          "bytes": 8649232
+        },
+        {
+          "path": "tokenizer_config.json",
+          "url": "https://huggingface.co/knowledgator/gliner-pii-base-v1.0/resolve/61726e0ad791dcab3e29339bbec3ad42ded65641/tokenizer_config.json",
+          "sha256": "3ec8a90d8758fbc56d50831990c3a3a65660f020c5b06534adf43b04091ffa9e",
+          "bytes": 1691
+        },
+        {
+          "path": "gliner_config.json",
+          "url": "https://huggingface.co/knowledgator/gliner-pii-base-v1.0/resolve/61726e0ad791dcab3e29339bbec3ad42ded65641/gliner_config.json",
+          "sha256": "e33d3da38e0d369fa7574668d3798ca6c7d2b23cba7d628507112eeb426aaccb",
+          "bytes": 3902
+        },
+        {
+          "path": "added_tokens.json",
+          "url": "https://huggingface.co/knowledgator/gliner-pii-base-v1.0/resolve/61726e0ad791dcab3e29339bbec3ad42ded65641/added_tokens.json",
+          "sha256": "c358eb74586ab438484d8acf4534f67283b33041bc5ffee6b20a4a075cdc3cd6",
+          "bytes": 65
+        },
+        {
+          "path": "README.md",
+          "url": "https://huggingface.co/knowledgator/gliner-pii-base-v1.0/resolve/61726e0ad791dcab3e29339bbec3ad42ded65641/README.md",
+          "sha256": "f715f1ad8ff24c0f6f1b2745684a587dfe7390f8a1f0621deec57243b34a8b5a",
+          "bytes": 15896
+        }
+      ],
+      "onnx": "onnx/model_quint8.onnx",
+      "tokenizer": "tokenizer.json",
+      "tokenizerConfig": "tokenizer_config.json",
+      "glinerConfig": "gliner_config.json",
+      "languages": [
+        "en"
+      ],
+      "window": {
+        "words": 128,
+        "overlap": 16,
+        "maxTokens": 512,
+        "maxWordTokens": 16
+      },
+      "prompts": [
+        {
+          "prompt": "name",
+          "class": "person_name",
+          "threshold": 0.5
+        },
+        {
+          "prompt": "location street",
+          "class": "street_address",
+          "threshold": 0.45
+        },
+        {
+          "prompt": "location city",
+          "class": "location",
+          "addressPart": true,
+          "threshold": 0.4,
+          "joinThreshold": 0.3
+        },
+        {
+          "prompt": "location state",
+          "class": "location",
+          "addressPart": true,
+          "threshold": 0.5,
+          "joinThreshold": 0.3
+        },
+        {
+          "prompt": "location zip",
+          "class": null,
+          "addressPart": true,
+          "threshold": 0.5,
+          "joinThreshold": 0.3
+        },
+        {
+          "prompt": "location country",
+          "class": "location",
+          "addressPart": true,
+          "threshold": 0.5,
+          "joinThreshold": 0.3
+        }
+      ],
+      "addressMaxGap": 6,
+      "benchmarkFloors": {
+        "person_name": {
+          "main": {
+            "precision": 0.97,
+            "recall": 0.8762
+          },
+          "heldout": {
+            "precision": 0.97,
+            "recall": 0.7234
+          }
+        },
+        "location": {
+          "main": {
+            "precision": 0.92,
+            "recall": 0.8747
+          },
+          "heldout": {
+            "precision": 0.6604,
+            "recall": 0.7537
+          }
+        },
+        "street_address": {
+          "main": {
+            "precision": 0.9587,
+            "recall": 0.8866
+          },
+          "heldout": {
+            "precision": 0.97,
+            "recall": 0.8866
+          }
+        }
+      }
+    }
+  ]
+}

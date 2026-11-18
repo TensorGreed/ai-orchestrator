@@ -167,6 +167,8 @@ The options refuse any other key, so a rule set cannot name an endpoint or a mod
 
 **Your own recognizer.** A deployment can plug in its own engine through the `GuardEntityRecognizer` interface: `id`, `version`, the classes and languages it handles, and `recognize(texts, { classes, language, signal })`, which returns spans (`start`, `end`, `dataClass`, `score`, `source`) per text. Pass it as `createDefaultGuardRegistry({ entityRecognizer })`. Its spans go through the same checks as the rules' (malformed spans are ignored), and its id and version are part of the key that lets a clean result be reused within a run, so a changed engine is never answered from an older result. The API builds one detector registry for the whole deployment, so runs, gateway calls, simulations, the benchmark and the content rules tools all use the same engine; the detector list (`GET /api/guard/detectors`) shows it as `engine` on `data.entities`.
 
+**A local model.** [l2m-ner](../operations/entity-service.md) is an optional service that finds these classes with a small local model (names without a cue, places the rules do not list) and answers the entity endpoint contract. It is off by default and ships without model weights; that page covers pulling the model, sizing and its measured accuracy.
+
 ## Spotlighting helpers
 
 `wrapWithDelimiters(content)` wraps untrusted content between random boundary lines and returns the matching system-prompt text; `datamark(content)` replaces whitespace with a marker character and does the same. `PROMPT_HARDENING_TEXT` is a system-prompt paragraph that tells the model what counts as data. `generateCanaryToken()` and `canaryInstruction(token)` plant a canary that `leak.canary` detects in output.

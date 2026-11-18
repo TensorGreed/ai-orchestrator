@@ -41,7 +41,7 @@ import { isObject, readJsonFile, write, writePrivateFile, type CliIo } from "./a
 import { runGuardEntityBenchmarkCommand } from "./guard-entity-benchmark";
 
 export const GUARD_BENCHMARK_FLAGS: CommandFlags = {
-  values: ["profile", "suite", "split", "category", "baseline", "tolerance", "out", "junit"],
+  values: ["profile", "suite", "split", "category", "baseline", "tolerance", "out", "junit", "endpoint"],
   booleans: ["builtin", "entities", "json"]
 };
 
@@ -78,6 +78,7 @@ function loadBaseline(file: string): GuardBenchmarkReport {
 
 export async function runGuardBenchmarkCommand(args: ParsedArgs, io: CliIo): Promise<number> {
   if (args.booleans.has("entities")) return runGuardEntityBenchmarkCommand(args, io);
+  if (oneFlag(args, "endpoint") !== undefined) throw new UsageError("--endpoint only applies to --entities");
   const builtin = args.booleans.has("builtin");
   const profileFile = oneFlag(args, "profile");
   if (builtin === (profileFile !== undefined)) throw new UsageError("l2m guard benchmark needs exactly one of --builtin and --profile <file>");

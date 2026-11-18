@@ -1,0 +1,331 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Entity endpoint (names, places and street addresses)",
+    "version": "1.0.0",
+    "description": "The contract an L2M deployment uses to ask a service for person names, places and street addresses in text. l2m-ner implements it with a local model; any service that speaks it can be used instead. Offsets are UTF-16 code units (JavaScript string indices) into each text, half-open. Errors never quote the input text.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://ner:8000",
+      "description": "The l2m-ner service on the compose network"
+    }
+  ],
+  "paths": {
+    "/v1/entities": {
+      "post": {
+        "operationId": "findEntities",
+        "summary": "Find names, places and street addresses",
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EntitiesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One result per text, in order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitiesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Whether the service runs and has a model loaded",
+        "description": "No token is needed: the answer carries no input, only the model's id, version and checksum. 200 while the service is healthy (with or without a model; see `ready`), 503 when the model folder was refused or the model failed to load.",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Healthy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unhealthy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Required when the service is started with NER_TOKEN or NER_TOKEN_FILE."
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "An error. `code` is one of bad_request, unsupported_language, unauthorized, not_found, method_not_allowed, unsupported_media_type, too_large, busy, not_ready, timeout, failed. 429 and 503 may carry Retry-After.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Label": {
+        "type": "string",
+        "enum": [
+          "person_name",
+          "location",
+          "street_address"
+        ]
+      },
+      "EntitiesRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "texts",
+          "labels",
+          "language"
+        ],
+        "properties": {
+          "texts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "string"
+            },
+            "description": "Each text at most NER_MAX_TEXT_CHARS (default 20000) characters, all together at most NER_MAX_REQUEST_CHARS (default 200000); the body at most NER_MAX_BODY_BYTES (default 2 MiB)."
+          },
+          "labels": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            }
+          },
+          "language": {
+            "type": "string",
+            "description": "A language the model lists (\"en\" for the default model)."
+          },
+          "threshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Lowest score returned, on the calibrated scale (default 0.8: the model's benchmark-calibrated cut-off for every class)."
+          }
+        }
+      },
+      "Entity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "start",
+          "end",
+          "label",
+          "score"
+        ],
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Exclusive."
+          },
+          "label": {
+            "$ref": "#/components/schemas/Label"
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Calibrated: 0.8 is the model's cut-off for the class, set with the entity benchmark."
+          }
+        }
+      },
+      "Model": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "version",
+          "sha256"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "examples": [
+              "knowledgator/gliner-pii-base-v1.0"
+            ]
+          },
+          "version": {
+            "type": "string",
+            "description": "The publisher's revision plus a hash of the service settings that change answers; it changes whenever answers may change."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 of the model's ONNX file."
+          }
+        }
+      },
+      "EntitiesResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "results",
+          "model"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entities"
+              ],
+              "properties": {
+                "entities": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Entity"
+                  }
+                }
+              }
+            }
+          },
+          "model": {
+            "$ref": "#/components/schemas/Model"
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "ready",
+          "model"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "A model is loaded and requests are answered."
+          },
+          "model": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Model"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "Why the service is not ready, when it is not."
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "bad_request",
+                  "unsupported_language",
+                  "unauthorized",
+                  "not_found",
+                  "method_not_allowed",
+                  "unsupported_media_type",
+                  "too_large",
+                  "busy",
+                  "not_ready",
+                  "timeout",
+                  "failed"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

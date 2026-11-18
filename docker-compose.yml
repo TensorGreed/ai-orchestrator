@@ -10,6 +10,9 @@ services:
       WEB_ORIGIN: http://localhost:5173
       SECRET_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
       OLLAMA_BASE_URL: http://host.docker.internal:11434/v1
+      # Off unless set: the l2m-ner service of the `ner` profile below (http://ner:8000), or your own entity endpoint.
+      CONTENT_RULES_NER_ENDPOINT: ${CONTENT_RULES_NER_ENDPOINT:-}
+      CONTENT_RULES_NER_ENDPOINT_TOKEN: ${L2M_NER_TOKEN:-}
     ports:
       - "4000:4000"
     volumes:
@@ -59,6 +62,8 @@ services:
       DB_TYPE: postgres
       # Inside the compose network only, without TLS; use DB_POSTGRESDB_SSL=true (verified) for a remote server.
       DB_POSTGRESDB_URL: postgres://l2m:l2m-local-only@postgres:5432/ai_orchestrator
+      CONTENT_RULES_NER_ENDPOINT: ${CONTENT_RULES_NER_ENDPOINT:-}
+      CONTENT_RULES_NER_ENDPOINT_TOKEN: ${L2M_NER_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,8 +85,31 @@ services:
       - "5174:80"
     networks: [postgres-stack]
 
+  # Optional: l2m-ner, a local model that finds person names, places and street addresses for content rules.
+  # The image has no model weights; pull the model from its publisher into the l2m-ner-models volume first:
+  #   docker compose --profile ner run --rm ner models pull --accept-licence
+  #   CONTENT_RULES_NER_ENDPOINT=http://ner:8000 docker compose --profile ner up -d --build
+  # Without --profile ner it does not start. It is reachable only on the compose network (no published port).
+  # Set L2M_NER_TOKEN (16+ characters) to require a bearer token; the api service sends the same value.
+  ner:
+    profiles: ["ner"]
+    build:
+      context: .
+      dockerfile: apps/ner/Dockerfile
+    environment:
+      NER_TOKEN: ${L2M_NER_TOKEN:-}
+      NER_WORKERS: ${L2M_NER_WORKERS:-1}
+      NER_THREADS: ${L2M_NER_THREADS:-2}
+    volumes:
+      - l2m-ner-models:/models
+    expose:
+      - "8000"
+    # Reachable from the default stack and the Postgres stack's api.
+    networks: [default, postgres-stack]
+
 networks:
   postgres-stack: {}
 
 volumes:
   l2m-postgres: {}
+  l2m-ner-models: {}
