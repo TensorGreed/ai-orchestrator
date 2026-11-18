@@ -235,8 +235,11 @@ function withoutFragment(endpoint: string): string {
  * endpoint, then at the root. Each comes with the resource identifiers its document may name (RFC 9728 section 3.3).
  *
  * The path-specific URL follows RFC 9728 section 3.1: `/.well-known/oauth-protected-resource` goes "between the host
- * component and the path and/or query components", and only "any terminating slash (/) following the host component"
- * is removed. So `https://h/mcp/` looks at `https://h/.well-known/oauth-protected-resource/mcp/` and a query is kept.
+ * component and the path and/or query components", and a query is kept. Section 3.1 says "any terminating slash (/)
+ * following the host component MUST be removed", which can be read as the slash after the host only or (as RFC 8414
+ * section 3.1 has it) the slash ending the path; servers use both, so an endpoint ending in a slash tries
+ * `https://h/.well-known/oauth-protected-resource/mcp/` and then `.../mcp`. Either document must still name the
+ * endpoint itself (section 3.3).
  */
 function protectedResourceMetadataCandidates(endpoint: string): Array<{ url: string; resources: string[] }> {
   const url = new URL(endpoint);
@@ -249,10 +252,9 @@ function protectedResourceMetadataCandidates(endpoint: string): Array<{ url: str
   // it is still the URL the client uses, which is what section 7.3 protects.
   const rootForms = [...new Set([url.origin, `${url.origin}/`, ...serverForms])];
   if (!path && !url.search) return [{ url: root, resources: rootForms }];
-  return [
-    { url: `${root}${path}${url.search}`, resources: serverForms },
-    { url: root, resources: rootForms }
-  ];
+  const trimmed = path.replace(/\/+$/, "");
+  const pathUrls = [...new Set([`${root}${path}${url.search}`, `${root}${trimmed}${url.search}`])].filter((candidate) => candidate !== root);
+  return [...pathUrls.map((candidate) => ({ url: candidate, resources: serverForms })), { url: root, resources: rootForms }];
 }
 
 /**
@@ -304,7 +306,7 @@ function assertProtectedResourceIdentifier(metadata: ProtectedResourceMetadata, 
   }
 }
 
-/** RFC 9728 section 3.1 well-known URLs for a resource, in the order MCP 2026-07-28 tries them: path-specific, then root. */
+/** RFC 9728 section 3.1 well-known URLs for a resource, in the order MCP 2026-07-28 tries them: path-specific (both slash forms), then root. */
 export function protectedResourceMetadataUrls(endpoint: string): string[] {
   return protectedResourceMetadataCandidates(endpoint).map((candidate) => candidate.url);
 }
@@ -471,7 +473,9 @@ export async function discoverMcpOAuth(
   return {
     // RFC 8707 / MCP 2026-07-28 "Resource Parameter Implementation": the resource the server's metadata names, which
     // discoverProtectedResource has checked is identical to the server's URL (RFC 9728 section 3.3).
-    resource: resourceInfo.metadata.resource as string,
+    // Sent with the scheme and host in lower case: the canonical form (MCP 2026-07-28, Canonical Server URI), even when
+    // the metadata spelled them in upper case.
+    resource: foldSchemeAndHost(resourceInfo.metadata.resource as string),
     resourceMetadataUrl: resourceInfo.resourceMetadataUrl,
     resourceMetadata: resourceInfo.metadata,
     authorizationServer,

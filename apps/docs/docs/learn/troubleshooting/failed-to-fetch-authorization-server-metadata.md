@@ -119,7 +119,7 @@ L2M runs discovery when someone presses **Connect** on an OAuth server in the [M
 | "… must use https (got …)." | 6 |
 | "Authorization server metadata lacks authorization_endpoint or token_endpoint." | 7 |
 | "The authorization server does not advertise PKCE with S256 …" | 7 |
-| "The protected resource metadata at … names the resource …, not …" or "… names no resource …" | The MCP server's `resource` differs from its URL; fix the server or enter its URL exactly as its metadata names it. |
+| "The protected resource metadata at … names the resource …, not …" or "… names no resource …" | The MCP server's `resource` differs from the URL you entered. When the server's metadata names another path, port or form of the same endpoint (say `https://mcp.example.com/mcp/` for `https://mcp.example.com/mcp`), enter that URL instead. When it names only the origin (`https://mcp.example.com`) for an endpoint with a path, the server must publish its endpoint URL as `resource`. Pointing L2M at the origin would send MCP requests to the wrong path. |
 
 How L2M discovers:
 

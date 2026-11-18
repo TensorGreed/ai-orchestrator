@@ -309,6 +309,9 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
     expect((await discoverProtectedResource(slashed, { fetchImpl })).metadata.resource).toBe(slashed);
     expect(seen[0]).toBe(`${PATH_WK}/`);
     await expect(resourceFor(slashed, { [`${PATH_WK}/`]: prm("https://mcp.example.com/mcp") })).rejects.toThrow(McpOAuthError);
+    // A server that publishes at the slash-stripped URL (the RFC 8414 reading) is found next; its resource must still be the endpoint.
+    expect(await resourceFor(slashed, { [PATH_WK]: prm(slashed) })).toBe(slashed);
+    await expect(resourceFor(slashed, { [PATH_WK]: prm("https://mcp.example.com/mcp") })).rejects.toThrow(McpOAuthError);
   });
 
   it("accepts either form for a server at the root, where both build the same well-known URL", async () => {
@@ -338,6 +341,15 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
 
   it("accepts an upper-case scheme or host (MCP 2026-07-28, Canonical Server URI: SHOULD accept them)", async () => {
     expect(await resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("HTTPS://MCP.Example.COM/mcp") })).toBe("HTTPS://MCP.Example.COM/mcp");
+    // ...and sends the canonical lower-case form as the RFC 8707 resource.
+    const fetchImpl = (async (request: string | URL | Request, init?: RequestInit) => {
+      const url = String(request);
+      if (init?.method === "POST") return jsonResponse(400, {});
+      if (url === PATH_WK) return jsonResponse(200, prm("HTTPS://MCP.Example.COM/mcp"));
+      if (url === "https://as.example.com/.well-known/oauth-authorization-server/tenant1") return jsonResponse(200, metadataFor(ISSUER));
+      return jsonResponse(404, {});
+    }) as FetchLike;
+    expect((await discoverMcpOAuth("https://mcp.example.com/mcp", { fetchImpl })).resource).toBe("https://mcp.example.com/mcp");
   });
 
   it("keeps a query in the well-known URL and in the comparison", async () => {
@@ -374,7 +386,7 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
 
   it("builds the well-known URLs as RFC 9728 section 3.1 does", () => {
     expect(protectedResourceMetadataUrls("https://mcp.example.com/mcp")).toEqual([PATH_WK, ROOT_WK]);
-    expect(protectedResourceMetadataUrls("https://mcp.example.com/mcp/")).toEqual([`${PATH_WK}/`, ROOT_WK]);
+    expect(protectedResourceMetadataUrls("https://mcp.example.com/mcp/")).toEqual([`${PATH_WK}/`, PATH_WK, ROOT_WK]);
     expect(protectedResourceMetadataUrls("https://mcp.example.com/")).toEqual([ROOT_WK]);
     expect(protectedResourceMetadataUrls("https://mcp.example.com")).toEqual([ROOT_WK]);
     expect(protectedResourceMetadataUrls("https://mcp.example.com/mcp#frag")).toEqual([PATH_WK, ROOT_WK]);

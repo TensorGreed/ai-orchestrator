@@ -483,7 +483,7 @@ export class OidcService {
       }
       return value;
     };
-    this.checkPkceSupport(raw.code_challenge_methods_supported, settings.issuer);
+    this.checkPkceSupport(raw.code_challenge_methods_supported, settings.issuer, !settings.clientSecret);
     const methods = raw.token_endpoint_auth_methods_supported;
     return {
       issuer: settings.issuer,
@@ -503,16 +503,20 @@ export class OidcService {
    *
    * - Lists `S256`: sign-in uses it.
    * - Lists methods, none of them `S256` (for example only `plain`): refused. RFC 7636 section 4.2 says a client that
-   *   can use S256 "MUST use S256", and section 7.2 that clients "MUST NOT downgrade to plain".
+   *   can use S256 "MUST use S256", and section 7.2 that clients "MUST NOT downgrade to "plain" after trying the "S256" method".
    * - Absent, empty or malformed: sign-in still sends S256, as RFC 7636 section 5 says clients "SHOULD send the
    *   additional parameters as defined in Section 4 to all servers" (a provider without PKCE ignores them, and
-   *   `state` and `nonce` still protect the flow). The log says so, once per discovery fetch.
+   *   `state` and `nonce` still protect the flow). The log says so, once per discovery fetch, and more loudly for a
+   *   public client (no client secret), where RFC 8414 section 2 ("If omitted, the authorization server does not support
+   *   PKCE") would leave nothing but `state` and `nonce` binding the code to this login.
    */
-  private checkPkceSupport(value: unknown, issuer: string): void {
+  private checkPkceSupport(value: unknown, issuer: string, publicClient: boolean): void {
     const listed = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
     if (listed.length === 0) {
       this.options.logger?.(
-        "OIDC provider metadata has no code_challenge_methods_supported; sending PKCE S256 anyway (RFC 7636 section 5)",
+        publicClient
+          ? "OIDC provider metadata has no usable code_challenge_methods_supported (absent or malformed) and OIDC_CLIENT_SECRET is not set; sending PKCE S256 anyway, but if the provider ignores PKCE only state and nonce protect the code: turn on PKCE at the provider or use a confidential client"
+          : "OIDC provider metadata has no usable code_challenge_methods_supported (absent or malformed); sending PKCE S256 anyway (RFC 7636 section 5)",
         { issuer }
       );
       return;
