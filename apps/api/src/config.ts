@@ -353,7 +353,7 @@ const envSchema = z.object({
    * MCP 2026-07-28 (Base Protocol, "Error Codes") reserves -32020..-32099 for the specification, so the gateway's own
    * errors use -31029..-31032. `true` sends the pre-2026-11 codes (-32029..-32032) to session (initialize-based)
    * clients while their scripts move to the new codes or to `data.gatewayError`; 2026-07-28 clients always get the
-   * new codes. Unset, empty or false = the new codes.
+   * new codes. Unset, empty or false = the new codes. Deprecated: to be removed in a later release.
    */
   MCP_GATEWAY_LEGACY_ERROR_CODES: optionalBooleanFromEnv,
   /** MCP 2026-07-28 — how long (ms) modern clients may cache `tools/list` and `server/discover` results; 0 = always re-fetch. Unset or empty = 60000. */

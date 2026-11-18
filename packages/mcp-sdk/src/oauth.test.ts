@@ -285,11 +285,43 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
     expect((await discoverMcpOAuth(endpoint, { fetchImpl })).resource).toBe(endpoint);
   });
 
-  it("refuses a resource that is only on the same origin (the check was same-origin before)", async () => {
-    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com") })).rejects.toThrow(
-      /names the resource "https:\/\/mcp\.example\.com", not "https:\/\/mcp\.example\.com\/mcp".*RFC 9728 section 3\.3/
+  // Interoperability exception: the reference MCP TypeScript SDK client (checkResourceAllowed, src/shared/auth-utils.ts,
+  // tag 1.32.2) accepts a same-origin resource whose path is a prefix of the server URL's path.
+  it("accepts a same-origin parent path on a segment boundary, as the reference SDK client does", async () => {
+    expect(await resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com") })).toBe("https://mcp.example.com");
+    expect(await resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com/") })).toBe("https://mcp.example.com/");
+    const nested = "https://mcp.example.com/tenant/mcp";
+    const nestedWk = "https://mcp.example.com/.well-known/oauth-protected-resource/tenant/mcp";
+    expect(await resourceFor(nested, { [nestedWk]: prm("https://mcp.example.com/tenant") })).toBe("https://mcp.example.com/tenant");
+    expect(await resourceFor(nested, { [nestedWk]: prm("https://mcp.example.com/tenant/") })).toBe("https://mcp.example.com/tenant/");
+    // The resource is sent exactly as the server named it.
+    const fetchImpl = (async (request: string | URL | Request, init?: RequestInit) => {
+      const url = String(request);
+      if (init?.method === "POST") return jsonResponse(400, {});
+      if (url === PATH_WK) return jsonResponse(200, prm("https://mcp.example.com"));
+      if (url === "https://as.example.com/.well-known/oauth-authorization-server/tenant1") return jsonResponse(200, metadataFor(ISSUER));
+      return jsonResponse(404, {});
+    }) as FetchLike;
+    expect((await discoverMcpOAuth("https://mcp.example.com/mcp", { fetchImpl })).resource).toBe("https://mcp.example.com");
+  });
+
+  it("refuses anything else: another path, a partial segment, a longer path, another origin, a query", async () => {
+    for (const resource of [
+      "https://mcp.example.com/other",
+      "https://mcp.example.com/m",
+      "https://mcp.example.com/mc",
+      "https://mcp.example.com/mcp/sub",
+      "https://other.example.com",
+      "http://mcp.example.com/mcp",
+      "https://mcp.example.com:8443",
+      "https://mcp.example.com?tenant=a",
+      "https://user@mcp.example.com/mcp"
+    ]) {
+      await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm(resource) }), resource).rejects.toThrow(McpOAuthError);
+    }
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com/other") })).rejects.toThrow(
+      /names the resource "https:\/\/mcp\.example\.com\/other", which is neither "https:\/\/mcp\.example\.com\/mcp" nor a parent path.*RFC 9728/
     );
-    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com/other") })).rejects.toThrow(McpOAuthError);
   });
 
   it("refuses metadata with no resource (RFC 9728 section 2: REQUIRED), or one that is not a URL or has a fragment", async () => {
@@ -308,10 +340,11 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
     const fetchImpl = prmServer({ endpoint: slashed, documents: { [`${PATH_WK}/`]: prm(slashed) }, seen });
     expect((await discoverProtectedResource(slashed, { fetchImpl })).metadata.resource).toBe(slashed);
     expect(seen[0]).toBe(`${PATH_WK}/`);
-    await expect(resourceFor(slashed, { [`${PATH_WK}/`]: prm("https://mcp.example.com/mcp") })).rejects.toThrow(McpOAuthError);
+    // "https://h/mcp" is a parent path of "https://h/mcp/" (segment boundary), so it is accepted; the reverse is not.
+    expect(await resourceFor(slashed, { [`${PATH_WK}/`]: prm("https://mcp.example.com/mcp") })).toBe("https://mcp.example.com/mcp");
     // A server that publishes at the slash-stripped URL (the RFC 8414 reading) is found next; its resource must still be the endpoint.
     expect(await resourceFor(slashed, { [PATH_WK]: prm(slashed) })).toBe(slashed);
-    await expect(resourceFor(slashed, { [PATH_WK]: prm("https://mcp.example.com/mcp") })).rejects.toThrow(McpOAuthError);
+    await expect(resourceFor(slashed, { [PATH_WK]: prm("https://evil.example.com/mcp/") })).rejects.toThrow(McpOAuthError);
   });
 
   it("accepts either form for a server at the root, where both build the same well-known URL", async () => {
@@ -326,9 +359,9 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
     expect(await resourceFor(custom, { [customWk]: prm(custom) })).toBe(custom);
     await expect(resourceFor(custom, { [customWk]: prm("https://mcp.example.com/mcp") })).rejects.toThrow(McpOAuthError);
     await expect(resourceFor(custom, { [customWk]: prm("https://mcp.example.com:9443/mcp") })).rejects.toThrow(McpOAuthError);
-    // A resource naming the default port is not the URL used for the request (which has none)...
-    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com:443/mcp") })).rejects.toThrow(McpOAuthError);
-    // ...unless the server was configured with it: then both the configured and the requested form match.
+    // A resource naming the default port has the same origin, so it is accepted (and sent as named)...
+    expect(await resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com:443/mcp") })).toBe("https://mcp.example.com:443/mcp");
+    // ...and a server configured with it matches both forms.
     expect(await resourceFor("https://mcp.example.com:443/mcp", { [PATH_WK]: prm("https://mcp.example.com:443/mcp") })).toBe("https://mcp.example.com:443/mcp");
     expect(await resourceFor("https://mcp.example.com:443/mcp", { [PATH_WK]: prm("https://mcp.example.com/mcp") })).toBe("https://mcp.example.com/mcp");
   });
@@ -341,7 +374,7 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
 
   it("accepts an upper-case scheme or host (MCP 2026-07-28, Canonical Server URI: SHOULD accept them)", async () => {
     expect(await resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("HTTPS://MCP.Example.COM/mcp") })).toBe("HTTPS://MCP.Example.COM/mcp");
-    // ...and sends the canonical lower-case form as the RFC 8707 resource.
+    // ...and sends it as the server named it (an authorization server matches its registered resource as a string).
     const fetchImpl = (async (request: string | URL | Request, init?: RequestInit) => {
       const url = String(request);
       if (init?.method === "POST") return jsonResponse(400, {});
@@ -349,7 +382,7 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
       if (url === "https://as.example.com/.well-known/oauth-authorization-server/tenant1") return jsonResponse(200, metadataFor(ISSUER));
       return jsonResponse(404, {});
     }) as FetchLike;
-    expect((await discoverMcpOAuth("https://mcp.example.com/mcp", { fetchImpl })).resource).toBe("https://mcp.example.com/mcp");
+    expect((await discoverMcpOAuth("https://mcp.example.com/mcp", { fetchImpl })).resource).toBe("HTTPS://MCP.Example.COM/mcp");
   });
 
   it("keeps a query in the well-known URL and in the comparison", async () => {
@@ -357,7 +390,9 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
     const wk = `${PATH_WK}?tenant=a`;
     expect(protectedResourceMetadataUrls(endpoint)).toEqual([wk, ROOT_WK]);
     expect(await resourceFor(endpoint, { [wk]: prm(endpoint) })).toBe(endpoint);
-    await expect(resourceFor(endpoint, { [wk]: prm("https://mcp.example.com/mcp") })).rejects.toThrow(McpOAuthError);
+    // A resource with another query is refused; one without a query covers the path, as the reference SDK client allows.
+    await expect(resourceFor(endpoint, { [wk]: prm("https://mcp.example.com/mcp?tenant=b") })).rejects.toThrow(McpOAuthError);
+    expect(await resourceFor(endpoint, { [wk]: prm("https://mcp.example.com/mcp") })).toBe("https://mcp.example.com/mcp");
   });
 
   it("at the root fallback, accepts the root identifier or the server URL, and nothing else", async () => {
@@ -378,10 +413,11 @@ describe("protected resource metadata: the resource must be identical (RFC 9728 
     expect(seen).toEqual([PATH_WK]);
   });
 
-  it("with a URL from WWW-Authenticate, requires the URL the request went to, even for a root document", async () => {
+  it("with a URL from WWW-Authenticate, checks against the URL the request went to (or a parent path of it)", async () => {
     const challenge = `Bearer resource_metadata="${ROOT_WK}"`;
     expect(await resourceFor("https://mcp.example.com/mcp", { [ROOT_WK]: prm("https://mcp.example.com/mcp") }, challenge)).toBe("https://mcp.example.com/mcp");
-    await expect(resourceFor("https://mcp.example.com/mcp", { [ROOT_WK]: prm("https://mcp.example.com") }, challenge)).rejects.toThrow(McpOAuthError);
+    expect(await resourceFor("https://mcp.example.com/mcp", { [ROOT_WK]: prm("https://mcp.example.com") }, challenge)).toBe("https://mcp.example.com");
+    await expect(resourceFor("https://mcp.example.com/mcp", { [ROOT_WK]: prm("https://mcp.example.com/other") }, challenge)).rejects.toThrow(McpOAuthError);
   });
 
   it("builds the well-known URLs as RFC 9728 section 3.1 does", () => {

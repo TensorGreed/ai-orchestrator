@@ -283,7 +283,8 @@ function foldSchemeAndHost(value: string): string {
  * RFC 9728 section 3.3: the document's `resource` "MUST be identical" to the resource identifier its URL was built
  * from, or, for a URL the server named in `WWW-Authenticate`, to "the URL that the client used to make the request";
  * otherwise "the data contained in the response MUST NOT be used". Compared code point by code point (section 6),
- * apart from the scheme and host case MCP asks clients to accept. `resource` is REQUIRED (section 2), must be a URL
+ * apart from the scheme and host case MCP says implementations SHOULD accept, and with one interoperability exception
+ * (`isSameOriginPathPrefix`). `resource` is REQUIRED (section 2), must be a URL
  * with no fragment (section 1.2; RFC 8707 section 2), and must be `https` (loopback `http` allowed for local use).
  */
 function assertProtectedResourceIdentifier(metadata: ProtectedResourceMetadata, accepted: string[], metadataUrl: string, endpoint: string): void {
@@ -298,12 +299,39 @@ function assertProtectedResourceIdentifier(metadata: ProtectedResourceMetadata, 
   }
   assertSecureOAuthUrl(resource, "The resource in the protected resource metadata");
   const folded = foldSchemeAndHost(resource);
-  if (!accepted.some((form) => foldSchemeAndHost(form) === folded)) {
-    throw new McpOAuthError(
-      `The protected resource metadata at ${metadataUrl} names the resource ${JSON.stringify(resource.slice(0, 300))}, not ` +
-        `${JSON.stringify(withoutFragment(endpoint).slice(0, 300))}; RFC 9728 section 3.3 requires them to be identical, so it was not used.`
-    );
+  if (accepted.some((form) => foldSchemeAndHost(form) === folded)) return;
+  if (isSameOriginPathPrefix(resource, endpoint)) return;
+  throw new McpOAuthError(
+    `The protected resource metadata at ${metadataUrl} names the resource ${JSON.stringify(resource.slice(0, 300))}, which is ` +
+      `neither ${JSON.stringify(withoutFragment(endpoint).slice(0, 300))} nor a parent path of it on the same origin (RFC 9728 ` +
+      `section 3.3), so it was not used.`
+  );
+}
+
+/**
+ * The one exception to exact matching, for interoperability with servers built on the reference MCP TypeScript SDK:
+ * its client (`checkResourceAllowed` in src/shared/auth-utils.ts, called from `selectResourceURL` in
+ * src/client/auth.ts; tag 1.32.2) accepts a `resource` with the same origin whose path is a prefix of the server
+ * URL's path, so such servers commonly name their origin (`https://h`) for an endpoint such as `https://h/mcp`. This
+ * accepts the same, on a path-segment boundary only: `https://h` and `https://h/mcp` both cover `https://h/mcp`
+ * (and `https://h/mcp/x`), `https://h/m` and `https://h/mcp/` do not. A resource with a query is never a prefix.
+ * The identifier still names this server's origin and a path that contains the endpoint, so a document cannot claim
+ * another server (RFC 9728 section 7.3).
+ */
+function isSameOriginPathPrefix(resource: string, endpoint: string): boolean {
+  let named: URL;
+  let target: URL;
+  try {
+    named = new URL(resource);
+    target = new URL(endpoint);
+  } catch {
+    return false;
   }
+  if (named.origin !== target.origin || named.search !== "" || named.username !== "" || named.password !== "") return false;
+  const prefix = named.pathname;
+  if (prefix === "/") return true;
+  if (target.pathname === prefix) return true;
+  return target.pathname.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`);
 }
 
 /** RFC 9728 section 3.1 well-known URLs for a resource, in the order MCP 2026-07-28 tries them: path-specific (both slash forms), then root. */
@@ -473,9 +501,9 @@ export async function discoverMcpOAuth(
   return {
     // RFC 8707 / MCP 2026-07-28 "Resource Parameter Implementation": the resource the server's metadata names, which
     // discoverProtectedResource has checked is identical to the server's URL (RFC 9728 section 3.3).
-    // Sent with the scheme and host in lower case: the canonical form (MCP 2026-07-28, Canonical Server URI), even when
-    // the metadata spelled them in upper case.
-    resource: foldSchemeAndHost(resourceInfo.metadata.resource as string),
+    // Sent exactly as the server named it: an authorization server matches its registered resource as a string, so
+    // any rewriting (case, slash, default port) risks a rejection.
+    resource: resourceInfo.metadata.resource as string,
     resourceMetadataUrl: resourceInfo.resourceMetadataUrl,
     resourceMetadata: resourceInfo.metadata,
     authorizationServer,

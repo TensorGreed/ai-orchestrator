@@ -119,7 +119,7 @@ L2M runs discovery when someone presses **Connect** on an OAuth server in the [M
 | "… must use https (got …)." | 6 |
 | "Authorization server metadata lacks authorization_endpoint or token_endpoint." | 7 |
 | "The authorization server does not advertise PKCE with S256 …" | 7 |
-| "The protected resource metadata at … names the resource …, not …" or "… names no resource …" | The MCP server's `resource` differs from the URL you entered. When the server's metadata names another path, port or form of the same endpoint (say `https://mcp.example.com/mcp/` for `https://mcp.example.com/mcp`), enter that URL instead. When it names only the origin (`https://mcp.example.com`) for an endpoint with a path, the server must publish its endpoint URL as `resource`. Pointing L2M at the origin would send MCP requests to the wrong path. |
+| "The protected resource metadata at … names the resource …, which is neither … nor a parent path of it …" or "… names no resource …" | The MCP server's `resource` is not its URL or a parent path of it on the same origin (another host, port, scheme or path, a partial path segment such as `/m` for `/mcp`, or a different query). Enter the server URL its metadata describes, or have the server publish its own URL as `resource`. |
 
 How L2M discovers:
 
@@ -127,7 +127,7 @@ How L2M discovers:
 - It uses the first entry of `authorization_servers` and tries the URLs in the table above, in that order.
 - Every OAuth request has a 15-second timeout, and redirects are never followed.
 - HTTPS is required except on loopback addresses, so a local test identity provider on `localhost` works.
-- The protected resource metadata must name a `resource`, and it must be identical to the MCP server's URL as you entered it (RFC 9728, section 3.3): same scheme, host, port, path, trailing slash and query. Only the case of the scheme and host and a default port are forgiven. A document from the root well-known URL may also name the bare origin. Anything else is refused with "… names the resource …, not …; RFC 9728 section 3.3 requires them to be identical".
+- The protected resource metadata must name a `resource`. RFC 9728, section 3.3, requires it to be identical to the MCP server's URL as you entered it. L2M also accepts, as the reference MCP TypeScript SDK client does, a parent path on the same origin, on a path-segment boundary: `https://mcp.example.com` or `https://mcp.example.com/mcp` for `https://mcp.example.com/mcp`, but not `https://mcp.example.com/m`. Anything else (another host, port or scheme, another path, a different query, a fragment) is refused, and the `resource` is sent exactly as the server named it.
 - With the opt-in `MCP_OAUTH_BLOCK_PRIVATE_HOSTS=true`, OAuth requests to private, loopback, link-local and cloud metadata addresses are refused (the MCP server's own host and port stay allowed) with a message that names `MCP_OAUTH_PRIVATE_HOST_ALLOWLIST`. Add an identity provider on a private network to that list; link-local and cloud metadata addresses stay refused even when listed. This setting is a defence against <Term id="ssrf">server-side request forgery</Term> through hostile metadata.
 
 The L2M API is a Node.js process, so the `NODE_EXTRA_CA_CERTS` advice above applies to it. Set it in the API's environment and restart the API.

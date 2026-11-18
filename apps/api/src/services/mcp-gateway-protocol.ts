@@ -71,8 +71,9 @@ export const JSON_RPC_ERRORS = {
  * for other purposes "SHOULD be allocated outside the JSON-RPC reserved range (`-32768` to `-32000`)". The gateway's
  * codes were `-32029` to `-32032` until 2026-11; they are now `-31029` to `-31032` (same last digits) for every
  * client. Each such error's `data` also carries `gatewayError` (the name below, stable across releases; match on it)
- * and `legacyCode` (the code earlier releases sent). MCP_GATEWAY_LEGACY_ERROR_CODES=true keeps the old codes for
- * session (initialize-based) clients during a migration; 2026-07-28 clients always get the new ones.
+ * and `legacyCode` (the code earlier releases sent). MCP_GATEWAY_LEGACY_ERROR_CODES=true (deprecated, to be removed
+ * in a later release) keeps the old codes for session (initialize-based) clients during a migration; 2026-07-28
+ * clients always get the new ones.
  */
 export const GATEWAY_ERROR_NAMES: ReadonlyMap<number, string> = new Map([
   [JSON_RPC_ERRORS.retryLater, "retry_later"],
