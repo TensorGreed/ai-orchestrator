@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type DragEvent,
@@ -40,6 +41,7 @@ import {
   type Point
 } from "../lib/stages";
 import { NodePalette, paletteKey, type PaletteDefinition, type PaletteSection } from "./NodePalette";
+import { CanvasInsertContext, type CanvasInsertActions } from "./canvas-insert-context";
 import { RunTape } from "./RunTape";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import type { LiveNodeResult } from "../lib/run-trace";
@@ -50,6 +52,8 @@ import type { ImportChecklistNode } from "../lib/external-import";
 import type { McpCanvasMarker, McpNavTarget } from "../lib/mcp-control-plane";
 
 type DefinitionNode = PaletteDefinition;
+
+const ATTACHMENT_HANDLE_IDS = new Set<string>(AGENT_ATTACHMENT_HANDLES);
 
 type LogsTab = "logs" | "inputs";
 type PanelTab = "tape" | "logs";
@@ -187,6 +191,13 @@ interface WorkflowCanvasAreaProps {
   nodeDrawerContext?: NodeDrawerContext | null;
   onCloseNodeDrawer: () => void;
   onOpenNodeDrawer: () => void;
+  /**
+   * Opens the palette to add a node after a node's output: from the `+` on the output, or from a connection dragged
+   * out of it and dropped on empty canvas (then `position` is the drop point).
+   */
+  onInsertFromHandle?: (nodeId: string, handle: string | null, position?: Point) => void;
+  /** Name of the node a step picked in the palette will be connected after, if any. */
+  insertAfterLabel?: string | null;
   groupedDefinitions: Map<string, DefinitionNode[]>;
   onCreateNodeFromDefinition: (definition: DefinitionNode) => void;
   onOpenAgentAttachmentDrawer?: (sourceNodeId: string, sourceHandle: AgentAttachmentHandle) => void;
@@ -195,6 +206,10 @@ interface WorkflowCanvasAreaProps {
   nodeTypes: NodeTypes;
   edgeTypes: EdgeTypes;
   onNodesChange: (changes: NodeChange[]) => void;
+  /** A node drag began (before anything moved): lets the app keep the graph for one undo step. */
+  onNodeDragStart?: () => void;
+  /** A node drag ended; `draggedNodes` carry their final positions. */
+  onNodeDragStop?: (draggedNodes: Array<Pick<Node<EditorNodeData>, "id" | "position">>) => void;
   onEdgesChange: (changes: EdgeChange[]) => void;
   onConnect: (connection: Connection) => void;
   onDeleteEdge: (edgeId: string) => void;
@@ -267,6 +282,8 @@ export function WorkflowCanvasArea({
   nodeDrawerContext,
   onCloseNodeDrawer,
   onOpenNodeDrawer,
+  onInsertFromHandle,
+  insertAfterLabel,
   groupedDefinitions,
   onCreateNodeFromDefinition,
   onOpenAgentAttachmentDrawer,
@@ -275,6 +292,8 @@ export function WorkflowCanvasArea({
   nodeTypes,
   edgeTypes,
   onNodesChange,
+  onNodeDragStart,
+  onNodeDragStop,
   onEdgesChange,
   onConnect,
   onDeleteEdge,
@@ -559,7 +578,56 @@ export function WorkflowCanvasArea({
   );
 
   const paletteTitle = nodeDrawerContext?.title ?? "Add a node";
-  const paletteSubtitle = nodeDrawerContext?.description ?? "Search or browse by category. Drag onto the canvas or press Enter.";
+  const paletteSubtitle =
+    nodeDrawerContext?.description ??
+    (insertAfterLabel
+      ? `Connects after “${insertAfterLabel}”. Search or browse, then press Enter.`
+      : "Search or browse by category. Drag onto the canvas or press Enter.");
+
+  // ------------------------------------------------- `+` on outputs, dropped connections
+  const connectedHandles = useMemo(() => {
+    const byNode = new Map<string, Set<string | null>>();
+    for (const edge of edges) {
+      const set = byNode.get(edge.source) ?? new Set<string | null>();
+      set.add(edge.sourceHandle ?? null);
+      byNode.set(edge.source, set);
+    }
+    return byNode;
+  }, [edges]);
+
+  const insertActions = useMemo<CanvasInsertActions | null>(
+    () =>
+      onInsertFromHandle
+        ? {
+            onAddAfter: (nodeId, handle) => onInsertFromHandle(nodeId, handle),
+            isConnected: (nodeId, handle) => connectedHandles.get(nodeId)?.has(handle) ?? false
+          }
+        : null,
+    [connectedHandles, onInsertFromHandle]
+  );
+
+  const pendingConnectionRef = useRef<{ nodeId: string; handle: string | null } | null>(null);
+  const onConnectStart = useCallback((_event: unknown, params: { nodeId: string | null; handleId: string | null; handleType: string | null }) => {
+    pendingConnectionRef.current =
+      params.nodeId && params.handleType === "source" && !(params.handleId && ATTACHMENT_HANDLE_IDS.has(params.handleId))
+        ? { nodeId: params.nodeId, handle: params.handleId ?? null }
+        : null;
+  }, []);
+  const onConnectEnd = useCallback(
+    (event: MouseEvent | TouchEvent) => {
+      const pending = pendingConnectionRef.current;
+      pendingConnectionRef.current = null;
+      if (!pending || !onInsertFromHandle || !reactFlowInstance) return;
+      const target = event.target as Element | null;
+      if (!target?.classList?.contains("react-flow__pane")) return;
+      const point = "changedTouches" in event ? event.changedTouches[0] : (event as MouseEvent);
+      const bounds = flowWrapperRef.current?.getBoundingClientRect();
+      if (!point || !bounds) return;
+      const dropped = reactFlowInstance.project({ x: point.clientX - bounds.left, y: point.clientY - bounds.top });
+      onInsertFromHandle(pending.nodeId, pending.handle, { x: dropped.x, y: dropped.y - ORBIT.cardHeight / 2 });
+    },
+    [flowWrapperRef, onInsertFromHandle, reactFlowInstance]
+  );
 
   const onStageDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
@@ -616,14 +684,19 @@ export function WorkflowCanvasArea({
               </div>
             )}
 
+            <CanvasInsertContext.Provider value={insertActions}>
             <ReactFlow
               nodes={renderNodes}
               edges={renderEdges}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               onNodesChange={handleNodesChange}
+              onNodeDragStart={() => onNodeDragStart?.()}
+              onNodeDragStop={(_event, node, draggedNodes) => onNodeDragStop?.(draggedNodes.length ? draggedNodes : [node])}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
+              onConnectStart={onConnectStart}
+              onConnectEnd={onConnectEnd}
               onEdgeDoubleClick={(event, edge) => {
                 event.preventDefault();
                 onDeleteEdge(edge.id);
@@ -658,6 +731,7 @@ export function WorkflowCanvasArea({
               />
               <Controls showInteractive={false} position="bottom-left" />
             </ReactFlow>
+            </CanvasInsertContext.Provider>
 
             <div className="canvas-toolbar" role="toolbar" aria-label="Canvas tools">
               {!showNodeDrawer && (

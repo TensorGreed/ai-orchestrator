@@ -264,6 +264,47 @@
   background: var(--err);
 }
 
+/* `+` beside a step output: adds a node connected after it. Shown on open outputs, and on hover or selection. */
+.wf-handle-add {
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  font: 600 13px/1 var(--font-body);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  pointer-events: all;
+  opacity: 0.75;
+  transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.wf-handle-add-connected {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.react-flow__node:hover .wf-handle-add,
+.react-flow__node.selected .wf-handle-add,
+.wf-handle-add:focus-visible {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.wf-handle-add:hover,
+.wf-handle-add:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .wf-handle-hidden {
   width: 1px;
   height: 1px;
@@ -1651,6 +1692,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.node-palette-best {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  color: var(--accent);
+  font: 600 10px var(--font-body);
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
 }
 
 .node-palette-row-type {
