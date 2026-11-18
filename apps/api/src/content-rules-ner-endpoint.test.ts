@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
+import type { McpToolset } from "@ai-orchestrator/shared";
 import { createApp, type CreateAppOptions } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
@@ -205,5 +206,57 @@ describe("the judge option when a rule set is saved", () => {
     expect((await save(builder, "j3", custom)).statusCode).toBe(400);
     expect((await save(admin, "j4", custom)).statusCode).toBe(201);
     expect((await save(builder, "j5", { enabled: true, model: { providerId: "openai", model: "gpt-test" } })).statusCode).toBe(201);
+  });
+});
+
+describe("content rules tools through the service", () => {
+  async function gatewayTools(context: TestContext) {
+    const admin = await login(context, "admin");
+    const call = caller(context);
+    expect((await call(admin, "POST", "/api/guard/profiles", { document: namesRuleSet("names", { classes: ["person_name"] }) })).statusCode).toBe(201);
+    const toolset = (await call(admin, "POST", "/api/mcp/toolsets", { name: "Privacy tools", projectId: "default", members: [{ kind: "content_rules", ruleSetId: "names" }] })).json<{ toolset: McpToolset }>().toolset;
+    const created = await call(admin, "POST", "/api/mcp/clients", { name: "Agent", toolsetIds: [toolset.id], role: "builder" });
+    expect(created.statusCode, created.body).toBe(201);
+    const token = created.json<{ token: string }>().token;
+    const rpc = (body: unknown, session?: string) =>
+      context.app.inject({
+        method: "POST",
+        url: `/mcp/${toolset.slug}`,
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}) },
+        payload: JSON.stringify(body)
+      });
+    const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "ner-test", version: "1" } } });
+    const session = init.headers["mcp-session-id"] as string;
+    return async (args: Record<string, unknown>) => {
+      const response = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "detect_sensitive_data", arguments: args } }, session);
+      expect(response.statusCode, response.body).toBe(200);
+      const result = response.json<{ result: { isError?: boolean; content: Array<{ text: string }>; structuredContent?: Record<string, any> } }>().result;
+      return { error: result.isError === true, text: result.content.map((entry) => entry.text).join("\n"), data: result.structuredContent ?? {} };
+    };
+  }
+
+  it("send the strings of a call in few requests", async () => {
+    const server = await serve();
+    const context = await createTestContext({ CONTENT_RULES_NER_ENDPOINT: server.url });
+    const detect = await gatewayTools(context);
+    const texts = Array.from({ length: 200 }, (_, index) => (index % 50 === 0 ? `Alan Doyle ${index}` : `note ${index}`));
+    // One JSON value with 200 strings: each string is a text to the service.
+    const result = await detect({ value: { rows: texts }, entity_types: ["person_name"] });
+    expect(result.error, result.text).toBe(false);
+    expect(result.data.inputs[0].counts).toEqual({ person_name: 4 });
+    expect(server.requests.length).toBe(Math.ceil(200 / 64));
+    expect(result.text).not.toContain("Doyle");
+  });
+
+  it("stop at the overall time limit", async () => {
+    const server = await serve({ delayMs: 400 });
+    const context = await createTestContext({ CONTENT_RULES_NER_ENDPOINT: server.url, CONTENT_SCAN_TIME_LIMIT_MS: "1000", CONTENT_RULES_NER_ENDPOINT_MAX_REQUEST_CHARS: "5000" });
+    const detect = await gatewayTools(context);
+    const texts = Array.from({ length: 100 }, (_, index) => `${index} ${"word ".repeat(200)}`);
+    const started = Date.now();
+    const result = await detect({ texts, entity_types: ["person_name"] });
+    expect(result.error).toBe(true);
+    expect(result.text).toContain("took longer than 1 s");
+    expect(Date.now() - started).toBeLessThan(4_000);
   });
 });

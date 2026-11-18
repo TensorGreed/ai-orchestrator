@@ -19,7 +19,7 @@
 
 import { ENTITY_DATA_CLASSES, ENTITY_ENDPOINT_MAX_TEXTS, entityEndpointErrorSchema, entityEndpointHealthSchema, entityEndpointResponseSchema, readCapped, type GuardEntityEngineInfo, type GuardEntityModelInfo } from "@ai-orchestrator/shared";
 import { parseIp, type DnsResolver, type GuardEntityRecognizer, type GuardEntityRequest, type GuardEntitySpan } from "@ai-orchestrator/guard-sdk";
-import { abortableResolver, guardedFetch, nodeDnsResolver, type OutboundGuardConfig } from "@ai-orchestrator/workflow-engine";
+import { abortableResolver, guardedFetch, nodeDnsResolver, OutboundUrlBlockedError, type OutboundGuardConfig } from "@ai-orchestrator/workflow-engine";
 
 export const ENDPOINT_ENTITY_RECOGNIZER_ID = "endpoint";
 /** Largest answer read from the service (64 texts' worth of spans with room to spare). */
@@ -164,6 +164,9 @@ export class EndpointEntityRecognizer implements GuardEntityRecognizer {
     try {
       answer = JSON.parse(await readCapped(response, ENDPOINT_MAX_RESPONSE_BYTES));
     } catch {
+      // Stopped or out of time while the answer was read: not the service's fault.
+      if (signal?.aborted) throw new EntityEndpointError("The names and addresses check was stopped");
+      if (this.timedOut(response)) throw this.timeoutError();
       throw this.contractError("The names and addresses service's answer is not JSON or is too large");
     }
     const parsed = entityEndpointResponseSchema.safeParse(answer);
@@ -218,20 +221,44 @@ export class EndpointEntityRecognizer implements GuardEntityRecognizer {
       maxRedirects: 0,
       ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {})
     });
+    let response: Response;
     try {
-      return await raceAbort(attempt, combined);
-    } catch {
+      response = await raceAbort(attempt, combined);
+    } catch (error) {
       if (signal?.aborted) throw new EntityEndpointError("The names and addresses check was stopped");
-      const message = timeout.aborted ? `The names and addresses service did not answer within ${timeoutMs} ms` : "The names and addresses service cannot be reached";
+      // A block names its reason (an address class, a redirect), never input text: it helps an operator fix the setting.
+      const message = timeout.aborted
+        ? `The names and addresses service did not answer within ${timeoutMs} ms`
+        : error instanceof OutboundUrlBlockedError && error.message.startsWith("Too many redirects")
+          ? "The names and addresses service answered with a redirect, which is never followed"
+          : error instanceof OutboundUrlBlockedError
+            ? `The names and addresses service is refused by the outbound URL checks (${error.reason})`
+          : "The names and addresses service cannot be reached";
       this.state = { status: "error", error: message };
       throw new EntityEndpointError(message);
     }
+    this.deadlines.set(response, timeout);
+    return response;
+  }
+
+  /** The time limit of each response's request, so a body read cut off by it is reported as a timeout. */
+  private readonly deadlines = new WeakMap<Response, AbortSignal>();
+
+  private timedOut(response: Response): boolean {
+    return this.deadlines.get(response)?.aborted === true;
+  }
+
+  private timeoutError(): EntityEndpointError {
+    const message = `The names and addresses service did not answer within ${this.options.timeoutMs} ms`;
+    this.state = { status: "error", error: message };
+    return new EntityEndpointError(message);
   }
 }
 
 /** The allow-list entry that lets the configured service through OUTBOUND_DENY_PRIVATE: its host and port, or its address. */
 function allowEntryFor(base: URL): string {
-  const host = base.hostname.replace(/^\[|\]$/g, "");
+  // The checks compare hosts without a trailing dot.
+  const host = base.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "");
   const literal = parseIp(host);
   if (literal) return `${host}/${literal.bytes.length * 8}`;
   return `${host}:${base.port || (base.protocol === "https:" ? "443" : "80")}`;

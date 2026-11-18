@@ -13048,6 +13048,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       ttlSeconds: config.CONTENT_REDACTION_TTL_SECONDS ?? CONTENT_REDACTION_DEFAULT_TTL_SECONDS,
       hashKey: (scope) => (runtimeMasterKey.length === 32 ? deriveContentHashKey(runtimeMasterKey, scope) : undefined),
       ...(guardDetectors.entityRecognizer ? { entityRecognizer: guardDetectors.entityRecognizer } : {}),
+      scanTimeLimitMs: config.CONTENT_SCAN_TIME_LIMIT_MS ?? 120_000,
       documents: contentDocumentScans,
       scanSettings: contentScanSettings
     }),

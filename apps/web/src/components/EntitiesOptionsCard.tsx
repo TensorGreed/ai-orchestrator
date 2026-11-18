@@ -170,8 +170,9 @@ export function EntitiesOptionsCard({
       {judge.enabled && (
         <div className="guard-entity-judge" role="group" aria-label="Judge">
           <p className="guard-warning" data-testid="entities-judge-warning">
-            Each uncertain span and up to 120 characters around it go to the model named here. If that model is an external service, this text leaves the
-            deployment. Confirmed spans are reported; rejected ones are dropped. Not available on AI gateway routes.
+            Each uncertain span (scored in this band and below its class&apos;s lowest score) and up to 120 characters around it go to the model named here. If
+            that model is an external service, this text leaves the deployment. Confirmed spans are reported; the judge never removes a finding. Not
+            available on AI gateway routes.
           </p>
           <ModelInputs label="Judge model" model={judge.model} onModel={(next) => onChange(withEntityJudge(options, { model: next }))} />
           <label>

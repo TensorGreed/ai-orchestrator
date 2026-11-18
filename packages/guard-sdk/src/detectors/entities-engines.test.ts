@@ -128,6 +128,15 @@ describe("data.entities engines", () => {
     expect(calls[1]!.request.minScore).toBe(0.3);
   });
 
+  it("lets a span that would be reported win an overlap over a higher-scored one that would be suppressed", async () => {
+    const text = "Ship it to 12 Baker Street today.";
+    const at = text.indexOf("Baker Street");
+    const { recognizer } = recording(() => [{ start: at, end: at + "Baker Street".length, dataClass: "location", score: 0.78, source: "svc" }]);
+    const [matches] = await findEntitiesMany([text], parseEntitiesOptions({ classes: ["location", "street_address"], engine: "union" }), { recognizer });
+    const reported = matches!.filter((match) => match.score >= match.minScore);
+    expect(reported.map((match) => [match.dataClass, text.slice(match.start, match.end)])).toEqual([["street_address", "12 Baker Street"]]);
+  });
+
   it("fails when a recognizer answers a different number of results than texts", async () => {
     const short: GuardEntityRecognizer = { ...recording(() => []).recognizer, recognize: async () => [[]] };
     await expect(findEntitiesMany(["a text", "another"], parseEntitiesOptions({ classes: ["location"] }), { recognizer: short })).rejects.toThrow("returned 1 results for 2 texts");
@@ -179,7 +188,8 @@ describe("data.entities judge", () => {
     { start: town, end: town + "Springfield".length, dataClass: "location", score: 0.6, source: "svc:location" }
   ]).recognizer;
   const registry = createDefaultGuardRegistry({ entityRecognizer: uncertain });
-  const judged = (extra: Record<string, unknown> = {}) => profileWith({ classes: ["person_name", "location"], judge: { enabled: true, model: judgeModel, ...extra } });
+  const judged = (extra: Record<string, unknown> = {}, options: Record<string, unknown> = {}) =>
+    profileWith({ classes: ["person_name", "location"], judge: { enabled: true, model: judgeModel, ...extra }, ...options });
 
   it("is off by default, needs a model when on, and refuses credentials in the model", () => {
     expect(guardEntitiesOptionsSchema.parse({ classes: ["location"] }).judge).toBeUndefined();
@@ -190,10 +200,11 @@ describe("data.entities judge", () => {
     expect(() => parseEntitiesOptions({ classes: ["location"], judge: { enabled: true, model: { ...judgeModel, token: "t" } } })).toThrow("judge.model");
   });
 
-  it("reports confirmed spans, drops rejected ones, and sends only the spans and their surroundings, fenced", async () => {
+  it("reports confirmed spans, leaves rejected ones suppressed, and sends only the spans and their surroundings, fenced", async () => {
     const { models, requests } = judgeServices(() => '{"verdicts":[{"i":0,"sensitive":true},{"i":1,"sensitive":false}]}');
     const verdict = await evaluateGuard(judged(), { channel: "prompt", content: text }, { registry, models });
-    expect(verdict.findings.map((finding) => [finding.dataClass, finding.score, finding.metadata?.source])).toEqual([["person_name", 0.75, "svc:person_name+judge"]]);
+    expect(verdict.findings.map((finding) => [finding.dataClass, finding.score, finding.metadata?.source, finding.metadata?.judge])).toEqual([["person_name", 0.75, "svc:person_name+judge", "confirmed"]]);
+    expect(verdict.suppressed.map((finding) => [finding.dataClass, finding.score])).toEqual([["location", 0.6]]);
     expect(verdict.action).toBe("redact");
     expect(requests).toHaveLength(1);
     expect(requests[0]!.model).toEqual(judgeModel);
@@ -222,12 +233,32 @@ describe("data.entities judge", () => {
     expect(requests[0]!.prompt).not.toContain('"span":"Springfield"');
   });
 
-  it("fails the check on an answer without verdicts, or where no model calls are offered", async () => {
-    const { models } = judgeServices(() => "These are all fine. {\"verdicts\": []}");
-    const loose = await evaluateGuard(judged(), { channel: "prompt", content: text }, { registry, models });
-    expect(loose.timings.detectors[0]).toMatchObject({ status: "error", error: expect.stringContaining("held no verdicts") });
-    const offline = await evaluateGuard(judged(), { channel: "prompt", content: text }, { registry });
-    expect(offline.timings.detectors[0]).toMatchObject({ status: "error", error: expect.stringContaining("offers no model calls") });
+  it("never clears a span the recognizer reports, even when the band covers it and the model says no", async () => {
+    const confident = createDefaultGuardRegistry({
+      entityRecognizer: recording(() => [{ start: jordan, end: jordan + "Jordan Blake".length, dataClass: "person_name", score: 0.8, source: "svc" }]).recognizer
+    });
+    const { models, requests } = judgeServices(() => '{"verdicts":[{"i":0,"sensitive":false}]}');
+    const verdict = await evaluateGuard(judged({ band: [0.3, 0.9] }), { channel: "prompt", content: text }, { registry: confident, models });
+    expect(verdict.findings.map((finding) => [finding.dataClass, finding.score])).toEqual([["person_name", 0.8]]);
+    expect(requests).toHaveLength(0);
+  });
+
+  it("keeps the recognizer's findings when the judge fails, answers without verdicts, is slow or is not offered", async () => {
+    const reported = createDefaultGuardRegistry({
+      entityRecognizer: recording(() => [
+        { start: jordan, end: jordan + "Jordan Blake".length, dataClass: "person_name", score: 0.95, source: "svc" },
+        { start: town, end: town + "Springfield".length, dataClass: "location", score: 0.6, source: "svc" }
+      ]).recognizer
+    });
+    const loose = judgeServices(() => 'These are all fine. {"verdicts": []}');
+    const broken: GuardModelServices = { complete: async () => Promise.reject(new Error("model down")) };
+    const slow: GuardModelServices = { complete: () => new Promise(() => undefined) };
+    for (const models of [loose.models, broken, slow, undefined]) {
+      const verdict = await evaluateGuard(judged({}, { timeoutMs: 1000 }), { channel: "prompt", content: text }, { registry: reported, ...(models ? { models } : {}) });
+      expect(verdict.timings.detectors[0]!.status).toBe("ran");
+      expect(verdict.findings.map((finding) => finding.dataClass)).toEqual(["person_name"]);
+      expect(verdict.suppressed.find((finding) => finding.dataClass === "location")?.metadata?.judge).toBe("failed");
+    }
   });
 
   it("reads verdicts strictly: integer indexes in range, booleans, the first verdict per item", () => {

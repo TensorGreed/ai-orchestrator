@@ -519,8 +519,9 @@ const envSchema = z.object({
   /** Document scans running at once in this process; more wait their turn (briefly) or are refused. */
   CONTENT_SCAN_MAX_CONCURRENT: z.coerce.number().int().min(1).max(32).default(2),
   /**
-   * The longest one document scan may spend checking its extracted text (names and addresses through a service can
-   * take a while on a large CSV or JSON file); past it the scan stops with a timeout. The fetch has its own limits.
+   * The longest one document scan may spend checking its extracted text, and one content rules tool call its names
+   * and addresses check (a service can take a while on a large CSV or JSON input); past it the scan stops with a
+   * timeout. A document fetch has its own limits.
    */
   CONTENT_SCAN_TIME_LIMIT_MS: z.coerce.number().int().min(1000).max(900_000).default(120_000),
   /**

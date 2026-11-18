@@ -321,7 +321,12 @@ function checkedMatches(text: string, raw: readonly GuardEntitySpan[], wanted: r
     }
     matches.push({ start: span.start, end: span.end, dataClass: span.dataClass, score: Math.round(score * 1000) / 1000, source: String(span.source ?? recognizer.id).slice(0, 64), minScore: entityMinScore(options, span.dataClass) });
   }
-  return resolveOverlaps(matches);
+  // Where spans overlap, one that would be reported beats one that would be suppressed, whatever their raw scores:
+  // a low-scored span of another class must never hide a finding.
+  const ranked = matches.map((match) => ({ start: match.start, end: match.end, score: (match.score >= match.minScore ? 1 : 0) + match.score, match }));
+  return resolveOverlaps(ranked)
+    .map((entry) => entry.match)
+    .sort((a, b) => a.start - b.start);
 }
 
 const CONTEXT_WINDOW = 40;
@@ -450,7 +455,8 @@ export function createEntitiesDetector(defaults: EntitiesDetectorOptions = {}): 
         ...(context.signal ? { signal: context.signal } : {}),
         ...(input.issuedSurrogates ? { issuedSurrogates: input.issuedSurrogates } : {})
       });
-      const matches = options.judge?.enabled ? await judgeEntities(context.text, found, options.judge, context) : found;
+      // The judge gets half of the check's own time limit, so a slow model never costs the recognizer's findings.
+      const matches: Array<EntityMatch & { judge?: string }> = options.judge?.enabled ? await judgeEntities(context.text, found, options.judge, context, (options.timeoutMs ?? 30_000) / 2) : found;
       return matches.map<GuardFinding>((match) => ({
         detectorId: ENTITIES_DETECTOR_ID,
         category: "sensitive_data",
@@ -460,7 +466,7 @@ export function createEntitiesDetector(defaults: EntitiesDetectorOptions = {}): 
         spans: [{ start: match.start, end: match.end }],
         evidence: maskedEvidence(context.text.slice(match.start, match.end), match.dataClass),
         message: ENTITY_MESSAGES[match.dataClass],
-        metadata: { source: match.source }
+        metadata: { source: match.source, ...(match.judge ? { judge: match.judge } : {}) }
       }));
     }
   };

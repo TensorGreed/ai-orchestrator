@@ -173,11 +173,36 @@ describe("names and addresses service as a recognizer", () => {
     await expect(recognizerFor(server).recognize(["Oslo"], { ...ALL, signal: stop.signal })).rejects.toThrow("was stopped");
   });
 
+  it("reports a time limit hit while the answer is read as a timeout, not as a broken answer", async () => {
+    const slowBody = (async () => {
+      const http = await import("node:http");
+      const server = http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.write('{"results":[');
+        // The rest never comes.
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      return server;
+    })();
+    const server = await slowBody;
+    try {
+      const { port } = server.address() as { port: number };
+      const recognizer = recognizerFor({ url: `http://127.0.0.1:${port}` }, { timeoutMs: 200 });
+      await expect(recognizer.recognize(["Oslo"], ALL)).rejects.toThrow("did not answer within 200 ms");
+      const stop = new AbortController();
+      setTimeout(() => stop.abort(), 50);
+      await expect(recognizerFor({ url: `http://127.0.0.1:${port}` }).recognize(["Oslo"], { ...ALL, signal: stop.signal })).rejects.toThrow("was stopped");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("never follows a redirect", async () => {
     const server = await serve();
     const elsewhere = await serve();
     server.answerNext(307, "", { location: `${elsewhere.url}/v1/entities` });
-    await expect(recognizerFor(server).recognize(["Oslo"], ALL)).rejects.toThrow("cannot be reached");
+    await expect(recognizerFor(server).recognize(["Oslo"], ALL)).rejects.toThrow("answered with a redirect, which is never followed");
     expect(elsewhere.requests).toHaveLength(0);
   });
 
@@ -194,9 +219,13 @@ describe("names and addresses service as a recognizer", () => {
     });
     expect((await named.recognize(["Oslo"], ALL))[0]).toHaveLength(1);
     const metadata = new EndpointEntityRecognizer({ baseUrl: "http://169.254.169.254/", timeoutMs: 500, maxRequestChars: 50_000, outbound: { denyPrivate: false, allowlist: [] } });
-    await expect(metadata.recognize(["Oslo"], ALL)).rejects.toThrow("cannot be reached");
+    await expect(metadata.recognize(["Oslo"], ALL)).rejects.toThrow("refused by the outbound URL checks (address_blocked)");
+    expect(metadata.status().error).toContain("outbound URL checks");
     const rebinding = new EndpointEntityRecognizer({ baseUrl: "http://ner.internal:8080", timeoutMs: 500, maxRequestChars: 50_000, outbound: { denyPrivate: true, allowlist: [] }, resolver: async () => ["169.254.169.254"] });
-    await expect(rebinding.recognize(["Oslo"], ALL)).rejects.toThrow("cannot be reached");
+    await expect(rebinding.recognize(["Oslo"], ALL)).rejects.toThrow("refused by the outbound URL checks");
+    // A trailing dot names the same host.
+    const dotted = new EndpointEntityRecognizer({ baseUrl: `http://ner.internal.:${server.port}`, timeoutMs: 2_000, maxRequestChars: 50_000, outbound: { denyPrivate: true, allowlist: [] }, resolver: async () => ["127.0.0.1"] });
+    expect((await dotted.recognize(["Oslo"], ALL))[0]).toHaveLength(1);
   });
 
   it("asks for health at most once per interval, and reports ready, not ready and unreachable", async () => {
