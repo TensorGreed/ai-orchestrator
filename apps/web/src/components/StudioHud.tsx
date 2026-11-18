@@ -54,6 +54,9 @@ export interface StudioHudProps {
   /** 13.3 — the workflow's subject references (stored as keyed hashes for data-subject requests); the item opens their settings. */
   subjectRefsSet?: boolean;
   onEditSubjectRefs?: () => void;
+  /** The workflow's error workflow (runs when a run fails); the item opens its setting. */
+  errorWorkflowSet?: boolean;
+  onEditErrorWorkflow?: () => void;
   /** Phase 10.8 — record the MCP calls of manual runs into a cassette; the menu item shows only when the toggle handler is set. */
   recordMcp?: boolean;
   onToggleRecordMcp?: () => void;
@@ -123,6 +126,8 @@ export function StudioHud({
   onEditWriteToolApproval,
   subjectRefsSet = false,
   onEditSubjectRefs,
+  errorWorkflowSet = false,
+  onEditErrorWorkflow,
   recordMcp = false,
   onToggleRecordMcp,
   extraItems = NO_EXTRA_ITEMS,
@@ -527,6 +532,24 @@ export function StudioHud({
                       {subjectRefsSet ? "✓" : ""}
                     </span>
                     Subject references…
+                  </button>
+                )}
+                {onEditErrorWorkflow && (
+                  <button
+                    type="button"
+                    className="hud-dropdown-item hud-dropdown-check"
+                    role="menuitemcheckbox"
+                    aria-checked={errorWorkflowSet}
+                    title="Pick a workflow that starts when a run of this one fails, for alerts or clean-up"
+                    onClick={() => {
+                      setOverflowOpen(false);
+                      onEditErrorWorkflow();
+                    }}
+                  >
+                    <span className="hud-check-box" aria-hidden="true">
+                      {errorWorkflowSet ? "✓" : ""}
+                    </span>
+                    Error workflow…
                   </button>
                 )}
                 {onToggleRecordMcp && (

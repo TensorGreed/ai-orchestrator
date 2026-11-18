@@ -3,7 +3,8 @@ import {
   AnthropicProviderAdapter,
   DEFAULT_ANTHROPIC_MODEL,
   anthropicModelRejectsSampling,
-  describeAnthropicFailure
+  describeAnthropicFailure,
+  extractAnthropicUsage
 } from "./anthropic";
 
 const ctx = { resolveSecret: async () => "test-key" };
@@ -147,5 +148,33 @@ describe("AnthropicProviderAdapter errors", () => {
     } finally {
       if (previous !== undefined) process.env.ANTHROPIC_API_KEY = previous;
     }
+  });
+});
+
+describe("Anthropic usage", () => {
+  it("counts the whole prompt as input: uncached, cache reads and cache writes", async () => {
+    const adapter = new AnthropicProviderAdapter();
+    stubFetch(
+      jsonResponse(200, {
+        content: [{ type: "text", text: "hi" }],
+        usage: { input_tokens: 50, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200, output_tokens: 20 }
+      })
+    );
+    const response = await adapter.generate(request("claude-sonnet-5-5"), ctx);
+    expect(response.usage).toEqual({ inputTokens: 1250, outputTokens: 20, totalTokens: 1270, cachedInputTokens: 1000 });
+  });
+
+  it("keeps a response without cache fields as it was", async () => {
+    const adapter = new AnthropicProviderAdapter();
+    stubFetch(jsonResponse(200, okBody));
+    const response = await adapter.generate(request("claude-sonnet-5-5"), ctx);
+    expect(response.usage).toEqual({ inputTokens: 3, outputTokens: 1, totalTokens: 4 });
+  });
+
+  it("ignores counts that are not numbers and answers undefined for no usage", () => {
+    expect(extractAnthropicUsage(undefined)).toBeUndefined();
+    expect(extractAnthropicUsage({})).toBeUndefined();
+    expect(extractAnthropicUsage({ input_tokens: "7", output_tokens: -1, cache_read_input_tokens: null })).toBeUndefined();
+    expect(extractAnthropicUsage({ cache_read_input_tokens: 0, input_tokens: 9 })).toEqual({ inputTokens: 9, cachedInputTokens: 0 });
   });
 });

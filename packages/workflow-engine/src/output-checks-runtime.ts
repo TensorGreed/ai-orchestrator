@@ -12,7 +12,7 @@ import {
   type GuardSource
 } from "@ai-orchestrator/guard-sdk";
 import type { EmbeddingProviderRegistry, ProviderExecutionContext, ProviderRegistry } from "@ai-orchestrator/provider-sdk";
-import { OUTPUT_GUARDRAIL_CHECK_VALUES, llmProviderConfigSchema, type LLMProviderConfig, type Workflow } from "@ai-orchestrator/shared";
+import { OUTPUT_GUARDRAIL_CHECK_VALUES, effectiveModelName, llmProviderConfigSchema, type LLMProviderConfig, type Workflow } from "@ai-orchestrator/shared";
 import { isExecutionEdge } from "./graph";
 import type { ResolvedGuardProfile } from "./guard-runtime";
 import type { EmbeddingModelTarget } from "./rag-adapters";
@@ -96,7 +96,7 @@ export function createGuardModelServices(input: GuardModelServicesInput): GuardM
       );
       input.usage.push({
         providerId: provider.providerId,
-        model: provider.model,
+        model: effectiveModelName(provider),
         usage: { ...(response.usage ?? {}) },
         llmCallCount: 1,
         ...(typeof response.latencyMs === "number" ? { latencyMs: response.latencyMs } : {}),
@@ -122,7 +122,7 @@ export function createGuardModelServices(input: GuardModelServicesInput): GuardM
       const response = await adapter.embed({ provider, input: texts }, callContext(input.providerContext(), request.signal));
       input.usage.push({
         providerId: provider.providerId,
-        model: provider.model,
+        model: effectiveModelName(provider),
         usage: {
           ...(response.usage?.inputTokens !== undefined ? { inputTokens: response.usage.inputTokens } : {}),
           ...(response.usage?.totalTokens !== undefined ? { totalTokens: response.usage.totalTokens } : {})

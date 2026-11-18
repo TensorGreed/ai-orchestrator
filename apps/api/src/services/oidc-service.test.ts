@@ -407,6 +407,75 @@ describe("OIDC login flow (service level)", () => {
     expect(profile3.emailVerified).toBe(false);
   });
 
+  // RFC 7636 section 4.2: a client capable of S256 "MUST use S256"; section 7.2: "Clients MUST NOT downgrade to "plain" after trying the "S256" method."
+  // RFC 8414 section 2: code_challenge_methods_supported lists the methods; OpenID Connect Discovery 1.0 section 3
+  // does not define it, but section 3 allows "Additional OpenID Provider Metadata parameters".
+  describe("PKCE method from the provider's metadata", () => {
+    async function loginWith(methods: unknown, logs: string[] = []) {
+      const provider = await MockOidcProvider.create();
+      provider.codeChallengeMethods = methods;
+      const service = new OidcService(noStore, settingsFor(provider), {
+        flowKey: crypto.randomBytes(32),
+        fetch: provider.fetch,
+        logger: (message) => logs.push(message)
+      });
+      return { provider, service };
+    }
+
+    it("sends S256 when the provider lists it, alone or with plain", async () => {
+      for (const methods of [["S256"], ["plain", "S256"]]) {
+        const { provider, service } = await loginWith(methods);
+        const begun = await service.beginLogin();
+        expect(new URL(begun.authorizationUrl).searchParams.get("code_challenge_method")).toBe("S256");
+        const callback = new URL(provider.authorize(begun.authorizationUrl));
+        await expect(
+          service.completeLogin({ query: Object.fromEntries(callback.searchParams), flowCookie: begun.flowCookie })
+        ).resolves.toMatchObject({ subject: "user-1" });
+      }
+    });
+
+    it("refuses a provider that lists methods without S256, and never falls back to plain", async () => {
+      for (const methods of [["plain"], ["s256"], ["S512"]]) {
+        const { service } = await loginWith(methods);
+        await expect(service.beginLogin()).rejects.toMatchObject({
+          code: "discovery_failed",
+          message: expect.stringMatching(/code_challenge_methods_supported.*S256/)
+        });
+      }
+    });
+
+    it("still sends S256 when the provider does not say (RFC 7636 section 5), and notes it in the log", async () => {
+      for (const methods of [undefined, [], "S256", null]) {
+        const logs: string[] = [];
+        const { provider, service } = await loginWith(methods, logs);
+        const begun = await service.beginLogin();
+        expect(new URL(begun.authorizationUrl).searchParams.get("code_challenge_method")).toBe("S256");
+        const callback = new URL(provider.authorize(begun.authorizationUrl));
+        await expect(
+          service.completeLogin({ query: Object.fromEntries(callback.searchParams), flowCookie: begun.flowCookie })
+        ).resolves.toMatchObject({ subject: "user-1" });
+        expect(logs.filter((line) => line.includes("code_challenge_methods_supported"))).toHaveLength(1);
+      }
+    });
+
+    it("warns that only state and nonce protect the code when a public client's provider does not list its methods", async () => {
+      const publicLogs: string[] = [];
+      await (await loginWith(undefined, publicLogs)).service.beginLogin();
+      expect(publicLogs.join("\n")).toMatch(/OIDC_CLIENT_SECRET is not set.*only state and nonce protect the code/);
+      const confidential = await MockOidcProvider.create({ clientSecret: "s3cret" });
+      confidential.codeChallengeMethods = undefined;
+      const confidentialLogs: string[] = [];
+      const service = new OidcService(noStore, settingsFor(confidential), {
+        flowKey: crypto.randomBytes(32),
+        fetch: confidential.fetch,
+        logger: (message) => confidentialLogs.push(message)
+      });
+      await service.beginLogin();
+      expect(confidentialLogs.join("\n")).toMatch(/absent or malformed\); sending PKCE S256 anyway/);
+      expect(confidentialLogs.join("\n")).not.toMatch(/OIDC_CLIENT_SECRET/);
+    });
+  });
+
   it("refuses a discovery document with a plain-http jwks_uri or token_endpoint on a non-loopback host", async () => {
     for (const key of ["jwks_uri", "token_endpoint"]) {
       const provider = await MockOidcProvider.create();

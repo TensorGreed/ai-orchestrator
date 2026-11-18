@@ -1566,7 +1566,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "if_node",
     label: "IF",
     category: "Utility",
-    description: "Evaluates a condition and routes execution to the true or false branch.",
+    description: "Evaluates a condition and routes execution to the true or false branch. A condition with text outside its template braces is one JavaScript expression with each template replaced by its value.",
     configSchema: {
       type: "object",
       properties: {
@@ -1682,7 +1682,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     label: "Error Trigger",
     category: "Input",
     effectFreeEntry: true,
-    description: "Fires when a designated production workflow fails. Configure target workflows in their Error Workflow setting. Its output names the failed run: source_workflow_id, source_workflow_name, execution_id (the failed run's id), error, error_stack and timestamp.",
+    description: "Fires when a run of a workflow that names this one as its error workflow fails (set it in that workflow's editor menu, Error workflow). Replays never fire it. Its output names the failed run: source_workflow_id, source_workflow_name, execution_id (the failed run's id), error, error_stack and timestamp.",
     configSchema: {
       type: "object",
       properties: {}

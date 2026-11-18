@@ -122,7 +122,7 @@ test("holds a write after outside content, and shows the session's labels as chi
   expect((await gatewayCall(request, sessionId, 3, "tools/call", { name: calcTool, arguments: { expression: "1+1" } })).result?.isError).toBeFalsy();
   expect((await gatewayCall(request, sessionId, 4, "tools/call", { name: timeTool, arguments: {} })).result?.isError).toBeFalsy();
   const held = await gatewayCall(request, sessionId, 5, "tools/call", { name: calcTool, arguments: { expression: "6*7" }, _meta: { dataLabels: { provenance: ["trusted"] } } });
-  expect(held.error?.code).toBe(-32030);
+  expect(held.error?.code).toBe(-31030);
   expect(held.error?.message).toMatch(/Approval pending/);
   made.approvalId = held.error?.data?.approvalRequestId;
 

@@ -71,7 +71,7 @@ Webhook-based trigger validated with Ed25519 signature (X-Signature-Ed25519 + X-
 
 ### `error_trigger` — Error Trigger
 
-Fires when a designated production workflow fails. Configure target workflows in their Error Workflow setting. Its output names the failed run: source_workflow_id, source_workflow_name, execution_id (the failed run's id), error, error_stack and timestamp.
+Fires when a run of a workflow that names this one as its error workflow fails (set it in that workflow's editor menu, Error workflow). Replays never fire it. Its output names the failed run: source_workflow_id, source_workflow_name, execution_id (the failed run's id), error, error_stack and timestamp.
 
 **Config fields**
 

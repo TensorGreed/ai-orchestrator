@@ -197,8 +197,8 @@ run("gateway limits and budgets across replicas on one Postgres database", () =>
     expect((await onB()).result).toBeDefined();
     expect((await onA()).result).toBeDefined();
     // The fourth call in the minute, on either replica, is over the shared count.
-    expect((await onB()).error).toMatchObject({ code: -32029, data: { reason: "rate_limited" } });
-    expect((await onA()).error?.code).toBe(-32029);
+    expect((await onB()).error).toMatchObject({ code: -31029, data: { reason: "rate_limited" } });
+    expect((await onA()).error?.code).toBe(-31029);
     const buckets = await sql<{ key: string; count: number }>(`SELECT key, count FROM rate_limit_buckets WHERE key LIKE 'rl:mcp-gateway:%'`);
     expect(buckets.map((row) => row.key)).toEqual([`rl:mcp-gateway:client:${client.id}:3:3`]);
   });

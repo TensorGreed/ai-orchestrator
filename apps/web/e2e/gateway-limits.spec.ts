@@ -144,7 +144,7 @@ test("sets the client's own rate limit in Governance, and refuses its calls over
   expect((await calculate(request)).result?.isError).toBeFalsy();
   expect((await calculate(request)).result?.isError).toBeFalsy();
   const refused = await calculate(request);
-  expect(refused.error).toMatchObject({ code: -32029, data: { reason: "rate_limited" } });
+  expect(refused.error).toMatchObject({ code: -31029, data: { reason: "rate_limited" } });
   expect(refused.error?.message).toContain("2 calls per minute");
   // Lift the limit again for the budget test.
   await limits.getByLabel("Calls per minute").fill("");
@@ -181,7 +181,7 @@ test("creates a budget for the client in Settings, shows its usage in Governance
   const summary = await gatewayCall(request, "tools/call", { name: made.toolName!.replace(/__calculator$/, "__summarize_with_model"), arguments: { text: "Budgets cap what a client spends." } });
   expect(summary.result?.isError).toBeFalsy();
   // Used up: the client's next call is refused before it reaches the server.
-  await expect.poll(async () => (await calculate(request)).error?.code, { timeout: 10_000 }).toBe(-32032);
+  await expect.poll(async () => (await calculate(request)).error?.code, { timeout: 10_000 }).toBe(-31032);
   await page.reload();
   await sidebarItem("Clients").click();
   const row = page.getByRole("list", { name: "MCP clients" }).getByRole("listitem").filter({ hasText: made.clientName! });

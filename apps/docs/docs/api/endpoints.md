@@ -111,7 +111,7 @@ See [MCP server registry](../product/mcp-server-registry.md).
 - `GET /api/mcp/connections` (operator; your connections to delegated servers in projects where you may run workflows)
 - `POST /api/mcp/connections/:serverId/connect` (operator; `{ scope? }` → `{ authorizationUrl, expiresAt, redirectUri }`)
 - `DELETE /api/mcp/connections/:serverId` (operator; disconnect your own account)
-- Server create and update accept `sandbox`, `limits`, `credentialMode` and `delegatedFallback`; see [Sandboxed stdio servers](../product/mcp-server-registry.md#sandboxed-stdio-servers), [Rate limits, concurrency and the circuit breaker](../product/mcp-server-registry.md#rate-limits-concurrency-and-the-circuit-breaker) and [Delegated credentials](../product/mcp-server-registry.md#delegated-credentials). Gateway calls refused by a limit or an open breaker return JSON-RPC error `-32029` with `data.retryAfterMs`.
+- Server create and update accept `sandbox`, `limits`, `credentialMode` and `delegatedFallback`; see [Sandboxed stdio servers](../product/mcp-server-registry.md#sandboxed-stdio-servers), [Rate limits, concurrency and the circuit breaker](../product/mcp-server-registry.md#rate-limits-concurrency-and-the-circuit-breaker) and [Delegated credentials](../product/mcp-server-registry.md#delegated-credentials). Gateway calls refused by a limit or an open breaker return JSON-RPC error `-31029` with `data.retryAfterMs`.
 - `GET /api/mcp/telemetry?window=24h|7d|30d` (servers configured inline on nodes)
 - `GET /api/mcp/servers/:id/resources?projectId=&refresh=` (builder; resources and templates with `access` marks)
 - `POST /api/mcp/servers/:id/resources/read` (builder; `{ uri, projectId? }`; 413 over `MCP_RESOURCE_MAX_BYTES`)

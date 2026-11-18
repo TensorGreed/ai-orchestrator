@@ -8,6 +8,31 @@ const ANTHROPIC_TIMEOUT_MS = 60_000;
 /** Model used when an Anthropic provider config names none. */
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5";
 
+/**
+ * Anthropic's usage in L2M's terms. Anthropic reports the prompt in three parts: `input_tokens` (after the last cache
+ * breakpoint), `cache_read_input_tokens` and `cache_creation_input_tokens`. L2M's `inputTokens` is the whole prompt,
+ * as OpenAI's `prompt_tokens` and Gemini's `promptTokenCount` are, with the cache reads also in `cachedInputTokens`,
+ * so cost estimates bill the reads at the cached rate and the rest at the input rate. Cache writes are billed at the
+ * input rate (Anthropic charges more for them; L2M never asks Anthropic to cache, so it sends none).
+ */
+export function extractAnthropicUsage(raw: unknown): LLMUsage | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const fields = raw as Record<string, unknown>;
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined);
+  const uncached = count(fields.input_tokens);
+  const cacheRead = count(fields.cache_read_input_tokens);
+  const cacheWrite = count(fields.cache_creation_input_tokens);
+  const usage: LLMUsage = {};
+  if (uncached !== undefined || cacheRead !== undefined || cacheWrite !== undefined) {
+    usage.inputTokens = (uncached ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
+  }
+  const output = count(fields.output_tokens);
+  if (output !== undefined) usage.outputTokens = output;
+  if (cacheRead !== undefined) usage.cachedInputTokens = cacheRead;
+  if (usage.inputTokens !== undefined && usage.outputTokens !== undefined) usage.totalTokens = usage.inputTokens + usage.outputTokens;
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
 const SAMPLING_PARAMS = ["temperature", "top_p", "top_k"] as const;
 
 /**
@@ -244,17 +269,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       }
     }
 
-    let usage: LLMUsage | undefined;
-    if (json.usage && typeof json.usage === "object") {
-      usage = {};
-      if (typeof json.usage.input_tokens === "number") usage.inputTokens = json.usage.input_tokens;
-      if (typeof json.usage.output_tokens === "number") usage.outputTokens = json.usage.output_tokens;
-      if (typeof json.usage.cache_read_input_tokens === "number") usage.cachedInputTokens = json.usage.cache_read_input_tokens;
-      if (usage.inputTokens !== undefined && usage.outputTokens !== undefined) {
-        usage.totalTokens = usage.inputTokens + usage.outputTokens;
-      }
-      if (Object.keys(usage).length === 0) usage = undefined;
-    }
+    const usage = extractAnthropicUsage(json.usage);
 
     return {
       content,

@@ -139,6 +139,28 @@ describe("StudioHud", () => {
     expect(screen.queryByRole("menuitemcheckbox", { name: "No write tools" })).not.toBeInTheDocument();
   });
 
+  it("opens the error workflow setting from the overflow menu, checked when one is set", async () => {
+    const user = userEvent.setup();
+    const onEditErrorWorkflow = vi.fn();
+    const { rerender } = render(<StudioHud {...makeProps({ onEditErrorWorkflow, errorWorkflowSet: false })} />);
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    const item = screen.getByRole("menuitemcheckbox", { name: "Error workflow…" });
+    expect(item).toHaveAttribute("aria-checked", "false");
+    await user.click(item);
+    expect(onEditErrorWorkflow).toHaveBeenCalledTimes(1);
+
+    rerender(<StudioHud {...makeProps({ onEditErrorWorkflow, errorWorkflowSet: true })} />);
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "Error workflow…" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("hides the error workflow item when the user cannot edit workflows", async () => {
+    const user = userEvent.setup();
+    render(<StudioHud {...makeProps()} />);
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Error workflow…" })).not.toBeInTheDocument();
+  });
+
   it("toggles Record MCP calls from the overflow menu and marks the Run button while recording", async () => {
     const user = userEvent.setup();
     const onToggleRecordMcp = vi.fn();

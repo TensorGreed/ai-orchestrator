@@ -34,7 +34,31 @@ interface GeminiResponse {
     candidatesTokenCount?: number;
     totalTokenCount?: number;
     cachedContentTokenCount?: number;
+    thoughtsTokenCount?: number;
+    toolUsePromptTokenCount?: number;
   };
+}
+
+/**
+ * Gemini's usage in L2M's terms. `promptTokenCount` already includes `cachedContentTokenCount`; the prompt of a
+ * built-in tool (`toolUsePromptTokenCount`) is billed as input, and thinking (`thoughtsTokenCount`) is billed as
+ * output but is not in `candidatesTokenCount`, so both are added in.
+ */
+export function extractGeminiUsage(um: GeminiResponse["usageMetadata"]): LLMUsage | undefined {
+  if (!um || typeof um !== "object") return undefined;
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined);
+  const prompt = count(um.promptTokenCount);
+  const toolPrompt = count(um.toolUsePromptTokenCount);
+  const candidates = count(um.candidatesTokenCount);
+  const thoughts = count(um.thoughtsTokenCount);
+  const usage: LLMUsage = {};
+  if (prompt !== undefined || toolPrompt !== undefined) usage.inputTokens = (prompt ?? 0) + (toolPrompt ?? 0);
+  if (candidates !== undefined || thoughts !== undefined) usage.outputTokens = (candidates ?? 0) + (thoughts ?? 0);
+  const total = count(um.totalTokenCount);
+  if (total !== undefined) usage.totalTokens = total;
+  const cached = count(um.cachedContentTokenCount);
+  if (cached !== undefined) usage.cachedInputTokens = cached;
+  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
 function sanitizeSchemaForGemini(schema: unknown): unknown {
@@ -266,16 +290,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       }
     }
 
-    let usage: LLMUsage | undefined;
-    const um = json.usageMetadata;
-    if (um) {
-      usage = {};
-      if (typeof um.promptTokenCount === "number") usage.inputTokens = um.promptTokenCount;
-      if (typeof um.candidatesTokenCount === "number") usage.outputTokens = um.candidatesTokenCount;
-      if (typeof um.totalTokenCount === "number") usage.totalTokens = um.totalTokenCount;
-      if (typeof um.cachedContentTokenCount === "number") usage.cachedInputTokens = um.cachedContentTokenCount;
-      if (Object.keys(usage).length === 0) usage = undefined;
-    }
+    const usage = extractGeminiUsage(json.usageMetadata);
 
     return {
       content,

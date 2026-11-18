@@ -402,7 +402,7 @@ describe("rate limits and the circuit breaker", () => {
     expect(first.json<{ result: { isError?: boolean } }>().result.isError).not.toBe(true);
     const second = await rpc({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name, arguments: { expression: "1+1" } } }, { "mcp-session-id": session });
     const error = second.json<{ error: { code: number; message: string; data: { reason: string; retryAfterMs: number; retryAfterSeconds: number } } }>().error;
-    expect(error.code).toBe(-32029);
+    expect(error.code).toBe(-31029);
     expect(error.message).toMatch(/^Rate limited:/);
     expect(error.data.reason).toBe("rate_limited");
     expect(error.data.retryAfterMs).toBeGreaterThan(0);

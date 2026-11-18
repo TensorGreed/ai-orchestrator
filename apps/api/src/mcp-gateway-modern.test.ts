@@ -561,7 +561,7 @@ describe("modern mode on", () => {
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mock_tools__calculator", arguments: { expression: "1+1" } } },
       { "mcp-session-id": sessionId }
     );
-    expect(legacy.json().error).toMatchObject({ code: -32030, data: { approvalRequestId: held.json().error.data.approvalRequestId } });
+    expect(legacy.json().error).toMatchObject({ code: -31030, data: { approvalRequestId: held.json().error.data.approvalRequestId } });
 
     // A rate limit: -31029 for modern callers.
     const limited = await api(fixture.context, fixture.cookie, "PATCH", `/api/mcp/clients/${fixture.client.id}`, { rateLimit: { requestsPerMinute: 1, burst: 1, maxConcurrent: null } });
@@ -592,7 +592,7 @@ describe("modern mode on", () => {
       { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "mock_tools__calculator", arguments: { expression: "2+2" } } },
       { "mcp-session-id": sessionId }
     );
-    expect(legacy.json().error).toMatchObject({ code: -32030 });
+    expect(legacy.json().error).toMatchObject({ code: -31030 });
   });
 
   it("pools upstream stdio servers per principal and stops them when the client is revoked", async () => {
