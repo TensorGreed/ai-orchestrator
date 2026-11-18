@@ -64,7 +64,7 @@ function stubStatuses(statuses: Array<number | { status: number; headers?: Recor
       calls.push(String(input));
       const next = statuses[Math.min(calls.length - 1, statuses.length - 1)]!;
       const spec = typeof next === "number" ? { status: next } : next;
-      return new Response(JSON.stringify({ attempt: calls.length }), {
+      return new Response(spec.status === 304 ? null : JSON.stringify({ attempt: calls.length }), {
         status: spec.status,
         headers: { "content-type": "application/json", ...(spec.headers ?? {}) }
       });
@@ -74,6 +74,8 @@ function stubStatuses(statuses: Array<number | { status: number; headers?: Recor
 }
 
 const resultOf = (result: Awaited<ReturnType<typeof executeWorkflow>>, nodeId: string) => result.nodeResults.find((entry) => entry.nodeId === nodeId)!;
+const result_statuses = (result: Awaited<ReturnType<typeof executeWorkflow>>, nodeId: string) =>
+  result.nodeResults.filter((entry) => entry.nodeId === nodeId).map((entry) => entry.status);
 const retryEvents = (result: Awaited<ReturnType<typeof executeWorkflow>>, nodeId: string) =>
   (resultOf(result, nodeId).activity ?? []).filter((event): event is Extract<NodeActivityEvent, { kind: "retry" }> => event.kind === "retry");
 
@@ -317,6 +319,61 @@ describe("error output (On Error = branch)", () => {
     expect(resultOf(result, "ok").status).toBe("skipped");
     expect(resultOf(result, "handled").status).toBe("success");
     expect(JSON.stringify(resultOf(result, "handled").output)).toContain("boom");
+  });
+
+  it("is not part of a Loop's body: it is skipped when the loop succeeds", async () => {
+    const loopFlow = (items: string) =>
+      workflow(
+        [
+          node("start", "set_node", { assignments: [{ key: "list", valueTemplate: items }] }),
+          node("loop", "loop_node", { inputKey: "list", itemVariable: "item", onError: "branch" }),
+          node("body", "set_node", { assignments: [{ key: "seen", valueTemplate: "{{item}}" }] }),
+          node("handler", "set_node", { assignments: [{ key: "handled", valueTemplate: "{{error}}" }] }),
+          node("out", "output")
+        ],
+        [edge("start", "loop"), edge("loop", "body"), edge("loop", "handler", "error"), edge("body", "out")]
+      );
+    const ok = await executeWorkflow({ workflow: loopFlow("{{ ['a', 'b'] }}") }, deps());
+    expect(result_statuses(ok, "handler")).toEqual(["skipped"]);
+    expect(result_statuses(ok, "body")).toEqual(["success", "success"]);
+  });
+
+  it("lets a node's own connected Error output win over an enclosing Try/Catch", async () => {
+    stubStatuses([500]);
+    const result = await executeWorkflow(
+      {
+        workflow: workflow(
+          [
+            node("start", "manual_trigger"),
+            node("try", "try_catch"),
+            node("http", "http_request", { method: "GET", urlTemplate: "https://api.example.com/x", failOnHttpError: true, onError: "branch", retryCount: 0 }),
+            node("own", "set_node", { assignments: [{ key: "by", valueTemplate: "own" }] }),
+            node("catch", "set_node", { assignments: [{ key: "by", valueTemplate: "catch" }] }),
+            node("out", "output")
+          ],
+          [edge("start", "try"), edge("try", "http", "success"), edge("try", "catch", "error"), edge("http", "own", "error"), edge("own", "out")]
+        )
+      },
+      deps()
+    );
+    expect(resultOf(result, "own").status).toBe("success");
+    expect(resultOf(result, "catch").status).toBe("skipped");
+  });
+
+  it("retries a URL whose path contains words like billing or quota", async () => {
+    const calls = stubStatuses([503, 503, 200]);
+    const result = await executeWorkflow(
+      { workflow: single({ urlTemplate: "https://api.example.com/billing/quota", failOnHttpError: true, retryCount: 2, retryDelayMs: 1 }) },
+      deps()
+    );
+    expect(calls).toHaveLength(3);
+    expect(result.status).toBe("success");
+  });
+
+  it("does not fail on 304 Not Modified", async () => {
+    stubStatuses([304]);
+    const result = await executeWorkflow({ workflow: single({ urlTemplate: "https://api.example.com/x", failOnHttpError: true, retryCount: 0 }) }, deps());
+    expect(resultOf(result, "http").status).toBe("success");
   });
 
   it("is checked by validation", () => {

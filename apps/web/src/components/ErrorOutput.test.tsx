@@ -63,6 +63,12 @@ describe("Error output on the canvas", () => {
     }
   });
 
+  it("is not added to a Switch with a case named error, which owns that handle", () => {
+    const { container } = renderCanvasNode({ nodeType: "switch_node", config: { onError: "branch", cases: [{ label: "error", value: "x" }] } });
+    expect(container.querySelectorAll('[data-handleid="error"]')).toHaveLength(1);
+    expect(screen.queryByTestId("node-error-output")).toBeNull();
+  });
+
   it("is not added to Try/Catch, which has its own Catch output", () => {
     const { container } = renderCanvasNode({ nodeType: "try_catch", config: { onError: "branch" } });
     expect(container.querySelectorAll('[data-handleid="error"]')).toHaveLength(1);

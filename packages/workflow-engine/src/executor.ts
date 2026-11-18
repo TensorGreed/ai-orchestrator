@@ -4715,7 +4715,8 @@ async function executeNodeHandler(
           responseHeaders[key] = value;
         });
 
-        if (!response.ok && httpFailsOnErrorStatus(config, node.errorConfig)) {
+        // 304 Not Modified answers a conditional request: it is not an error.
+        if (!response.ok && response.status !== 304 && httpFailsOnErrorStatus(config, node.errorConfig)) {
           // The error body is not read into the run: it is outside content the error output would carry unlabelled.
           await response.body?.cancel().catch(() => undefined);
           throw HttpStatusError.fromResponse({
@@ -8598,7 +8599,9 @@ async function executeNodeWithRetry(
       if (error instanceof HttpStatusError && !error.retryable) {
         throw error;
       }
-      const errMsg = lastError.message.toLowerCase();
+      // An HTTP status or connection error carries the URL in its message, which can contain these words.
+      const namesRequest = error instanceof HttpStatusError || (error instanceof WorkflowError && error.category === ErrorCategory.CONNECTOR_TRANSIENT);
+      const errMsg = namesRequest ? "" : lastError.message.toLowerCase();
       if (errMsg.includes("quota") || errMsg.includes("billing") || errMsg.includes("limit: 0") || errMsg.includes("rate_limit_exceeded")) {
         throw lastError;
       }
@@ -9656,6 +9659,8 @@ async function executeWorkflowRun(
       // Nothing more to record: the routed output or the re-run carries on below.
     } else if (request.approvalDecision.decision === "approve") {
       nodeOutputs.set(waitingNode.id, decisionPayload);
+      // An approval is a success: the node's Error output (On Error = branch) does not run.
+      applySuccessfulNodeRouting(waitingNode, decisionPayload);
       // Phase 16 — the decision comes from a person.
       labelState.set(waitingNode.id, unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]));
       endorseApproval(waitingNode.id, "human_approval", request.approvalDecision.actedBy, decidedAt, shownAtPause);
@@ -10199,7 +10204,10 @@ async function executeWorkflowRun(
         }
         const rawItems = Array.isArray(candidateItems) ? candidateItems : [candidateItems];
         const scopedItems = rawItems.slice(0, maxIterations);
-        const downstreamNodeIds = graphIndexes.outgoingExecution.get(node.id) ?? [];
+        // The loop's Error output is not part of its body: it runs only when the loop fails.
+        const downstreamNodeIds = [
+          ...new Set(workflow.edges.filter((edge) => edge.source === node.id && isExecutionEdge(edge) && edge.sourceHandle !== ERROR_OUTPUT_HANDLE).map((edge) => edge.target))
+        ];
         const downstreamNodes = downstreamNodeIds
           .map((childId) => graphIndexes.nodeById.get(childId))
           .filter((child): child is WorkflowNode => Boolean(child));
@@ -10376,6 +10384,7 @@ async function executeWorkflowRun(
 
         nodeOutputs.set(node.id, output);
         labelState.set(node.id, labelState.finalize(unionLabels([itemLabels, ...passLabels]), output));
+        applySuccessfulNodeRouting(node, output);
         nodeResults.push({
           nodeId: node.id,
           status: "success",
@@ -10571,9 +10580,10 @@ async function executeWorkflowRun(
         ...(nodeCheckUsage.length > 0 ? { output: withRecordedCheckUsage({}, nodeCheckUsage) } : {})
       };
 
-      // Check if this node is inside a try_catch scope
+      // Check if this node is inside a try_catch scope (a node's own connected Error output wins over an enclosing Try/Catch)
       let caughtByTryCatch = false;
-      for (const [tryCatchId, scope] of tryCatchScopes.entries()) {
+      const ownErrorOutput = onError === "branch" && (branchTargets.get(node.id)?.get(ERROR_OUTPUT_HANDLE)?.length ?? 0) > 0;
+      for (const [tryCatchId, scope] of ownErrorOutput ? [] : tryCatchScopes.entries()) {
         if (scope.successDescendants.has(node.id)) {
           // Skip remaining nodes in the success branch
           for (const desc of scope.successDescendants) {
@@ -10652,14 +10662,15 @@ async function executeWorkflowRun(
           if (routeFailureToErrorOutput(node.id)) {
             // The error output carries the item the node failed on (so the fallback reads the same fields) and the error.
             nodeOutputs.set(node.id, {
-              ...withoutRoutingKeys(merged),
+              ...withoutUsage(withoutRoutingKeys(merged)),
               error: errorMessage,
               errorCategory: errorCategoryName,
               failedNodeId: node.id,
               failedNodeType: node.type,
               ...(error instanceof HttpStatusError ? { status: error.status } : {})
             });
-            labelState.set(node.id, labelScope.pendingLabels());
+            // The raw input item goes on: it keeps all of its input labels (nothing was declassified on the way out).
+            labelState.set(node.id, labelScope.inputLabels());
             nodeResults.push({
               nodeId: node.id,
               status: "error",

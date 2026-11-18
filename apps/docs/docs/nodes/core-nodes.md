@@ -102,13 +102,18 @@ Every node has the same error settings on its **Settings** tab.
   node failed on, plus `error` (the message), `errorCategory`, `failedNodeId`, `failedNodeType` and, for an HTTP status
   error, `status`. So a fallback step can use the same templates as the normal path, for example
   <span v-pre>`{{customer}}: {{error}}`</span>. The editor warns when the option is set and nothing is connected, and when
-  something is connected but the option is not set. Try/Catch keeps its own Catch output.
+  something is connected but the option is not set. Try/Catch keeps its own Catch output; a node inside a Try/Catch
+  whose own Error output is connected uses that output instead of the Catch. A Loop's Error output is not part of its
+  body: it runs only when the loop fails. Nodes inside a loop body do not use their own On Error setting: a failure
+  there fails the Loop (use the Loop's Error output). A replayed run (the release gate) gives a recorded failure's Error
+  output only `error`, without `status` or the original `errorCategory`.
 
 ### HTTP Request status codes
 
 - **Fail on HTTP error status** (`failOnHttpError`): a status outside 200–299 fails the node, so retries and the Error
   output apply. The error names the status, the method and the URL (without user name, password, query or fragment).
   Off, the response is returned as before, with `status` and `ok: false`. New HTTP Request nodes have it on.
+  `304 Not Modified` is not an error.
 - **Retry on status** (`retryOnStatus`): the statuses that are retried, as codes (`503`), classes (`5xx`) or ranges
   (`500-504`). Empty means `429, 5xx`. Any other status fails at once, without retrying.
 - An HTTP Request node saved before the option existed has no `failOnHttpError` and keeps returning the response,
