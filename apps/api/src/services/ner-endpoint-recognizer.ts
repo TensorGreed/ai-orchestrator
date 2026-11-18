@@ -11,6 +11,12 @@
  *   longer than one request allows is sent as overlapping pieces, and each span is taken from the piece that has the
  *   most text around it.
  * - Each request has its own time limit (CONTENT_RULES_NER_ENDPOINT_TIMEOUT_MS) and stops when the check is stopped.
+ * - At most CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT requests are in flight at once from this process; more wait in a
+ *   short queue (QUEUE_PER_SLOT per slot) for at most the request time limit. A 429, or a 503 that says the service is
+ *   busy or not ready, is retried after its Retry-After (capped at RETRY_AFTER_CAP_MS, at most MAX_RETRIES times, and
+ *   never past the check's own time limit). A full queue, a wait that runs out or a service still busy after the
+ *   retries fails the check as overloaded: the rule set's failure setting decides, and the overload is counted in the
+ *   service's status and reported through `onOverload`, so names and addresses that went unchecked are never silent.
  * - The answer is read with a size cap and checked against the contract: one result per text, offsets inside the
  *   text, only the labels asked for. Anything else fails the check, and the rule set's failure setting decides.
  * - Errors name the HTTP status and the service's error code only; they never quote texts, and neither does the
@@ -34,6 +40,23 @@ const HEALTH_TIMEOUT_MS = 3_000;
 const PIECE_OVERLAP = 400;
 /** Longest piece of a text in one request (the service reads it in short windows anyway). */
 const MAX_PIECE_CHARS = 10_000;
+/** Requests that may wait for a slot, per slot. */
+export const QUEUE_PER_SLOT = 4;
+/** Longest wait a Retry-After may ask for (a longer one is shortened to this). */
+export const RETRY_AFTER_CAP_MS = 5_000;
+/** Wait before a retry when a 429 or 503 has no usable Retry-After. */
+const DEFAULT_RETRY_MS = 1_000;
+/** Retries of one request after a 429 or 503. */
+export const MAX_RETRIES = 2;
+
+/** Why a check failed as overloaded. */
+export type EntityEndpointOverloadReason = "queue_full" | "queue_wait" | "busy";
+
+export interface EntityEndpointOverload {
+  reason: EntityEndpointOverloadReason;
+  /** Overloads since the process started. */
+  count: number;
+}
 
 export interface EndpointEntityRecognizerOptions {
   /** CONTENT_RULES_NER_ENDPOINT: an http(s) base URL. */
@@ -42,6 +65,10 @@ export interface EndpointEntityRecognizerOptions {
   token?: string;
   timeoutMs: number;
   maxRequestChars: number;
+  /** CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT: requests in flight at once (default 4). */
+  maxConcurrent?: number;
+  /** Called each time a check fails because the service is overloaded (never with texts). */
+  onOverload?: (event: EntityEndpointOverload) => void;
   /** The deployment's outbound policy (OUTBOUND_DENY_PRIVATE, OUTBOUND_ALLOWLIST); the configured host is added to it. */
   outbound: OutboundGuardConfig;
   resolver?: DnsResolver;
@@ -82,6 +109,10 @@ export class EndpointEntityRecognizer implements GuardEntityRecognizer {
   private state: EngineStatus = { status: "not_ready", message: "Not checked yet" };
   private checkedAt: number | null = null;
   private pendingHealth: Promise<void> | null = null;
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+  private overloads = 0;
+  private lastOverloadAt: number | null = null;
 
   constructor(private readonly options: EndpointEntityRecognizerOptions) {
     const base = new URL(options.baseUrl);
@@ -102,7 +133,17 @@ export class EndpointEntityRecognizer implements GuardEntityRecognizer {
   }
 
   status(): EngineStatus {
-    return { ...this.state, ...(this.model && !this.state.model ? { model: this.model } : {}) };
+    const status: EngineStatus = { ...this.state, ...(this.model && !this.state.model ? { model: this.model } : {}) };
+    if (this.overloads > 0 && this.lastOverloadAt !== null) {
+      const note = `Overloaded ${this.overloads} time${this.overloads === 1 ? "" : "s"} since the API started (last at ${new Date(this.lastOverloadAt).toISOString()}); those checks did not check names and addresses, and the rule set's failure setting decided`;
+      status.message = status.message ? `${status.message}. ${note}` : note;
+    }
+    return status;
+  }
+
+  /** Requests in flight and waiting for a slot now. */
+  get load(): { active: number; waiting: number } {
+    return { active: this.active, waiting: this.waiters.length };
   }
 
   /** Asks the service's health when the last answer is older than `maxAgeMs`; never throws. */
@@ -152,13 +193,36 @@ export class EndpointEntityRecognizer implements GuardEntityRecognizer {
 
   /** One `POST /v1/entities`; the results, one per text. */
   private async post(texts: string[], labels: string[], threshold: number | undefined, signal: AbortSignal | undefined) {
-    const body = { texts, labels, language: "en", ...(threshold !== undefined ? { threshold } : {}) };
-    const response = await this.request("v1/entities", { method: "POST", body: JSON.stringify(body) }, this.options.timeoutMs, signal);
-    if (!response.ok) {
-      const code = await errorCodeOf(response);
-      const message = `The names and addresses service answered ${response.status}${code ? ` (${code})` : ""}`;
-      this.state = response.status === 503 ? { status: "not_ready", message } : { status: "error", error: message };
-      throw new EntityEndpointError(message);
+    const body = JSON.stringify({ texts, labels, language: "en", ...(threshold !== undefined ? { threshold } : {}) });
+    let response: Response;
+    for (let attempt = 0; ; attempt += 1) {
+      const release = await this.slot(signal);
+      try {
+        response = await this.request("v1/entities", { method: "POST", body }, this.options.timeoutMs, signal);
+        if (response.ok) break;
+        // The error answer is read inside the slot, so the next request waits for this one to finish.
+        const code = await errorCodeOf(response);
+        const message = `The names and addresses service answered ${response.status}${code ? ` (${code})` : ""}`;
+        const retryable = response.status === 429 || response.status === 503;
+        if (!retryable) {
+          this.state = { status: "error", error: message };
+          throw new EntityEndpointError(message);
+        }
+        if (attempt >= MAX_RETRIES) {
+          if (response.status === 503 && code !== "busy") {
+            this.state = { status: "not_ready", message };
+            throw new EntityEndpointError(message);
+          }
+          const overload = `The names and addresses service is overloaded (${message.slice("The names and addresses service ".length)} after ${MAX_RETRIES} retries); names and addresses went unchecked`;
+          this.state = { status: "error", error: overload };
+          throw this.overloaded("busy", overload);
+        }
+        release.later = retryDelayMs(response.headers.get("retry-after"), this.now());
+      } finally {
+        release();
+      }
+      // Waits outside the slot, and stops when the check is stopped or runs out of time.
+      await this.pause(release.later ?? DEFAULT_RETRY_MS, signal);
     }
     let answer: unknown;
     try {
@@ -176,6 +240,80 @@ export class EndpointEntityRecognizer implements GuardEntityRecognizer {
     this.state = { status: "loaded", model: parsed.data.model };
     this.checkedAt = this.now();
     return parsed.data.results.map((result) => result.entities);
+  }
+
+  /** A slot for one request: at once while fewer than `maxConcurrent` are in flight, else from the short queue. */
+  private async slot(signal: AbortSignal | undefined): Promise<Release> {
+    const limit = this.options.maxConcurrent ?? 4;
+    if (signal?.aborted) throw new EntityEndpointError("The names and addresses check was stopped");
+    if (this.active < limit) {
+      this.active += 1;
+      return this.releaser();
+    }
+    if (this.waiters.length >= limit * QUEUE_PER_SLOT) {
+      throw this.overloaded("queue_full", `The names and addresses service is overloaded (${this.active} requests in flight and ${this.waiters.length} waiting); names and addresses went unchecked`);
+    }
+    const waitLimit = AbortSignal.timeout(this.options.timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, waitLimit]) : waitLimit;
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        const position = this.waiters.indexOf(granted);
+        if (position >= 0) this.waiters.splice(position, 1);
+        reject(
+          signal?.aborted
+            ? new EntityEndpointError("The names and addresses check was stopped")
+            : this.overloaded("queue_wait", `The names and addresses service is overloaded (no request slot within ${this.options.timeoutMs} ms); names and addresses went unchecked`)
+        );
+      };
+      // A slot handed over by a finished request (`active` stays counted for it).
+      const granted = () => {
+        combined.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      this.waiters.push(granted);
+      combined.addEventListener("abort", onAbort, { once: true });
+    });
+    return this.releaser();
+  }
+
+  private releaser(): Release {
+    let done = false;
+    const release = (() => {
+      if (done) return;
+      done = true;
+      const next = this.waiters.shift();
+      if (next) next();
+      else this.active -= 1;
+    }) as Release;
+    return release;
+  }
+
+  /** Waits `ms`, or fails when the check is stopped (its own time limit included) first. */
+  private async pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+    if (ms <= 0) return;
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new EntityEndpointError("The names and addresses check was stopped"));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private overloaded(reason: EntityEndpointOverloadReason, message: string): EntityEndpointError {
+    this.overloads += 1;
+    this.lastOverloadAt = this.now();
+    try {
+      this.options.onOverload?.({ reason, count: this.overloads });
+    } catch {
+      // A failing listener must not change the check's outcome.
+    }
+    return new EntityEndpointError(message);
   }
 
   private async checkHealth(): Promise<void> {
@@ -253,6 +391,18 @@ export class EndpointEntityRecognizer implements GuardEntityRecognizer {
     this.state = { status: "error", error: message };
     return new EntityEndpointError(message);
   }
+}
+
+/** Releases a request slot; `later` carries a retry's wait out of the slot. */
+type Release = (() => void) & { later?: number };
+
+/** A Retry-After (seconds or an HTTP date) as a wait, capped at RETRY_AFTER_CAP_MS; DEFAULT_RETRY_MS when unusable. */
+export function retryDelayMs(header: string | null, now: number): number {
+  const value = header?.trim();
+  if (!value) return DEFAULT_RETRY_MS;
+  const ms = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - now;
+  if (!Number.isFinite(ms)) return DEFAULT_RETRY_MS;
+  return Math.min(RETRY_AFTER_CAP_MS, Math.max(0, ms));
 }
 
 /** The allow-list entry that lets the configured service through OUTBOUND_DENY_PRIVATE: its host and port, or its address. */

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ENTITIES_DETECTOR_ID, evaluateGuard, parseGuardProfile, scanSensitiveTextsAsync } from "@ai-orchestrator/guard-sdk";
 import { startMockNerEndpoint, MOCK_NER_MODEL, type MockNerEndpoint, type MockNerEndpointOptions } from "../test-support/mock-ner-endpoint.js";
 import { createDeploymentGuardRegistry } from "./guard-registry.js";
-import { batchesOf, EndpointEntityRecognizer, EntityEndpointError, piecesOf, type EndpointEntityRecognizerOptions } from "./ner-endpoint-recognizer.js";
+import { batchesOf, EndpointEntityRecognizer, EntityEndpointError, MAX_RETRIES, piecesOf, retryDelayMs, type EndpointEntityRecognizerOptions, type EntityEndpointOverload } from "./ner-endpoint-recognizer.js";
 
 const servers: MockNerEndpoint[] = [];
 afterEach(async () => {
@@ -143,10 +143,10 @@ describe("names and addresses service as a recognizer", () => {
   it("reports the service's errors by status and code only, never its message or the texts", async () => {
     const server = await serve();
     const recognizer = recognizerFor(server);
-    server.answerNext(429, { error: { code: "rate_limited", message: "slow down Alan Doyle" } });
+    server.answerNext(401, { error: { code: "unauthorized", message: "who is Alan Doyle" } });
     const error = (await recognizer.recognize(["Alan Doyle"], ALL).catch((caught: unknown) => caught)) as Error;
     expect(error).toBeInstanceOf(EntityEndpointError);
-    expect(error.message).toBe("The names and addresses service answered 429 (rate_limited)");
+    expect(error.message).toBe("The names and addresses service answered 401 (unauthorized)");
     server.answerNext(413, { error: { code: "too_large", message: "x" } });
     await expect(recognizer.recognize(["Oslo"], ALL)).rejects.toThrow("answered 413 (too_large)");
     server.answerNext(500, "<html>Alan Doyle</html>");
@@ -155,6 +155,90 @@ describe("names and addresses service as a recognizer", () => {
     await expect(recognizer.recognize(["Oslo"], ALL)).rejects.toThrow("answered 503 (not_ready)");
     expect(recognizer.status()).toMatchObject({ status: "not_ready" });
     expect(JSON.stringify(recognizer.status())).not.toContain("Alan");
+  });
+
+  it("keeps at most maxConcurrent requests in flight, queues a few more, and fails the rest as overloaded", async () => {
+    const server = await serve({ delayMs: 150 });
+    const overloads: EntityEndpointOverload[] = [];
+    const recognizer = recognizerFor(server, { maxConcurrent: 2, onOverload: (event) => overloads.push(event) });
+    // 2 in flight + 8 queued (4 per slot) are served; the 11th and 12th find the queue full.
+    const calls = Array.from({ length: 12 }, () => recognizer.recognize(["Alan Doyle"], ALL).then(() => "ok", (error: Error) => error.message));
+    const outcomes = await Promise.all(calls);
+    expect(server.maxInFlight).toBe(2);
+    expect(outcomes.filter((outcome) => outcome === "ok")).toHaveLength(10);
+    expect(outcomes.filter((outcome) => outcome !== "ok")).toEqual([
+      "The names and addresses service is overloaded (2 requests in flight and 8 waiting); names and addresses went unchecked",
+      "The names and addresses service is overloaded (2 requests in flight and 8 waiting); names and addresses went unchecked"
+    ]);
+    expect(overloads).toEqual([{ reason: "queue_full", count: 1 }, { reason: "queue_full", count: 2 }]);
+    expect(recognizer.load).toEqual({ active: 0, waiting: 0 });
+    expect(recognizer.status().message).toMatch(/^Overloaded 2 times since the API started \(last at .+\); those checks did not check names and addresses/);
+  });
+
+  it("fails a request that waits for a slot longer than the request time limit as overloaded, and frees its place", async () => {
+    // The first answers at 700 ms and frees the slot for the second; the third is still waiting at 1000 ms.
+    const server = await serve({ delayMs: 700 });
+    const overloads: EntityEndpointOverload[] = [];
+    const recognizer = recognizerFor(server, { maxConcurrent: 1, timeoutMs: 1_000, onOverload: (event) => overloads.push(event) });
+    const first = recognizer.recognize(["Alan Doyle"], ALL);
+    const second = recognizer.recognize(["Alan Doyle"], ALL);
+    const third = recognizer.recognize(["Alan Doyle"], ALL).catch((error: Error) => error.message);
+    await expect(first).resolves.toHaveLength(1);
+    await expect(second).resolves.toHaveLength(1);
+    expect(await third).toBe("The names and addresses service is overloaded (no request slot within 1000 ms); names and addresses went unchecked");
+    expect(overloads).toEqual([{ reason: "queue_wait", count: 1 }]);
+    expect(recognizer.load).toEqual({ active: 0, waiting: 0 });
+  });
+
+  it("leaves the queue when the check is stopped while waiting", async () => {
+    const server = await serve({ delayMs: 200 });
+    const recognizer = recognizerFor(server, { maxConcurrent: 1 });
+    const first = recognizer.recognize(["Alan Doyle"], ALL);
+    const controller = new AbortController();
+    const waiting = recognizer.recognize(["Alan Doyle"], { ...ALL, signal: controller.signal }).catch((error: Error) => error.message);
+    controller.abort();
+    expect(await waiting).toBe("The names and addresses check was stopped");
+    await first;
+    expect(server.requests).toHaveLength(1);
+    expect(recognizer.load).toEqual({ active: 0, waiting: 0 });
+    expect(recognizer.status().message ?? "").not.toContain("Overloaded");
+  });
+
+  it("retries a 429 or busy 503 after its Retry-After, and fails as overloaded when the service stays busy", async () => {
+    const server = await serve();
+    const overloads: EntityEndpointOverload[] = [];
+    const recognizer = recognizerFor(server, { onOverload: (event) => overloads.push(event) });
+    server.answerNext(429, { error: { code: "rate_limited", message: "slow down Alan Doyle" } }, { "retry-after": "1" });
+    server.answerNext(503, { error: { code: "busy", message: "busy" } }, { "retry-after": "0" });
+    const started = Date.now();
+    const spans = await recognizer.recognize(["Alan Doyle"], ALL);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(950);
+    expect(spans[0]).toHaveLength(1);
+    expect(server.requests).toHaveLength(3);
+    expect(overloads).toEqual([]);
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) server.answerNext(429, { error: { code: "rate_limited", message: "Alan Doyle" } }, { "retry-after": "0" });
+    const error = (await recognizer.recognize(["Alan Doyle"], ALL).catch((caught: unknown) => caught)) as Error;
+    expect(error).toBeInstanceOf(EntityEndpointError);
+    expect(error.message).toBe(`The names and addresses service is overloaded (answered 429 (rate_limited) after ${MAX_RETRIES} retries); names and addresses went unchecked`);
+    expect(server.requests).toHaveLength(3 + MAX_RETRIES + 1);
+    expect(overloads).toEqual([{ reason: "busy", count: 1 }]);
+    expect(JSON.stringify(recognizer.status())).not.toContain("Alan");
+  });
+
+  it("caps Retry-After at 5 s and stops waiting when the check is stopped", async () => {
+    expect(retryDelayMs("3", 0)).toBe(3_000);
+    expect(retryDelayMs("3600", 0)).toBe(5_000);
+    expect(retryDelayMs(new Date(2_000).toUTCString(), 0)).toBe(2_000);
+    expect(retryDelayMs("soon", 0)).toBe(1_000);
+    expect(retryDelayMs(null, 0)).toBe(1_000);
+    const server = await serve();
+    const recognizer = recognizerFor(server);
+    server.answerNext(429, { error: { code: "rate_limited", message: "x" } }, { "retry-after": "3600" });
+    const started = Date.now();
+    const error = await recognizer.recognize(["Oslo"], { ...ALL, signal: AbortSignal.timeout(300) }).catch((caught: Error) => caught.message);
+    expect(error).toBe("The names and addresses check was stopped");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(server.requests).toHaveLength(1);
   });
 
   it("fails on a missing or wrong token", async () => {
@@ -299,5 +383,19 @@ describe("the service as the deployment's engine", () => {
     const results = await scanSensitiveTextsAsync(cells, { dictionaries: [] }, { entityTypes: ["person_name"] }, { recognizer });
     expect(server.requests.length).toBe(10);
     expect(results.filter((result) => result.findings.length > 0)).toHaveLength(10);
+  });
+
+  it("records names and addresses left unchecked by an overloaded service in the check's timings, under either failure setting", async () => {
+    const server = await serve();
+    const recognizer = recognizerFor(server);
+    const deployment = createDeploymentGuardRegistry({ entityRecognizer: recognizer });
+    for (const onExceeded of ["fail_open", "fail_closed"] as const) {
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) server.answerNext(429, { error: { code: "rate_limited", message: "x" } }, { "retry-after": "0" });
+      const verdict = await evaluateGuard(profileWith(ALL, onExceeded), { channel: "prompt", content: "Alan Doyle" }, { registry: deployment.registry });
+      expect(verdict.action).toBe(onExceeded === "fail_closed" ? "block" : "allow");
+      expect(verdict.timings.detectors[0]!.status).toBe("error");
+    }
+    expect(recognizer.status()).toMatchObject({ status: "error", error: expect.stringContaining("overloaded") });
+    expect(recognizer.status().message).toMatch(/^Overloaded 2 times/);
   });
 });

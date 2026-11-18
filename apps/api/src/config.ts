@@ -548,6 +548,12 @@ const envSchema = z.object({
   CONTENT_RULES_NER_ENDPOINT_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).default(10_000),
   /** Characters sent in one request at most (up to 64 texts each); lower it if the service answers 413. */
   CONTENT_RULES_NER_ENDPOINT_MAX_REQUEST_CHARS: z.coerce.number().int().min(1000).max(1_000_000).default(50_000),
+  /**
+   * Requests in flight to the service at once from this process. Further requests wait in a short queue (four per
+   * slot); when it is full, or a request waits longer than CONTENT_RULES_NER_ENDPOINT_TIMEOUT_MS, the check fails as
+   * overloaded and the rule set's failure setting decides.
+   */
+  CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT: z.coerce.number().int().min(1).max(64).default(4),
   // Phase 10.7 — MCP runtime safety.
   /** Sandbox mode for stdio servers that do not choose one: `none` (on the host) or `container`. */
   MCP_SANDBOX_DEFAULT: z.enum(["none", "container"]).default("none"),

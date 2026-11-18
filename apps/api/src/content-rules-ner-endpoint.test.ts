@@ -117,6 +117,9 @@ describe("names and addresses service configuration", () => {
     }
     expect(parseConfig({}).CONTENT_SCAN_TIME_LIMIT_MS).toBe(120_000);
     expect(parseConfig({}).CONTENT_RULES_NER_ENDPOINT_TIMEOUT_MS).toBe(10_000);
+    expect(parseConfig({}).CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT).toBe(4);
+    expect(parseConfig({ CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT: "16" }).CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT).toBe(16);
+    for (const bad of ["0", "65", "two"]) expect(() => parseConfig({ CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT: bad })).toThrow();
   });
 });
 
@@ -139,6 +142,20 @@ describe("the detector list", () => {
     const idle = await serve({ ready: false });
     const other = await createTestContext({ CONTENT_RULES_NER_ENDPOINT: idle.url });
     expect(await engineOf(other, await login(other, "viewer"))).toMatchObject({ kind: "endpoint", status: "not_ready", message: expect.stringContaining("No model is loaded") });
+  });
+
+  it("notes checks that went unchecked because the service was overloaded", async () => {
+    const server = await serve();
+    const context = await createTestContext({ CONTENT_RULES_NER_ENDPOINT: server.url });
+    const builder = await login(context, "builder");
+    const call = caller(context);
+    expect((await call(builder, "POST", "/api/guard/profiles", { document: namesRuleSet("names", { classes: ["person_name"], engine: "endpoint" }) })).statusCode).toBe(201);
+    for (let attempt = 0; attempt < 3; attempt += 1) server.answerNext(429, { error: { code: "rate_limited", message: "x" } }, { "retry-after": "0" });
+    const response = await call(builder, "POST", "/api/guard/profiles/names/scan-document", { source: { kind: "upload", contentBase64: b64("Dear Alan Doyle"), mediaType: "text/plain" } });
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain("Doyle");
+    const engine = await engineOf(context, await login(context, "viewer"));
+    expect(engine.message).toEqual(expect.stringMatching(/Overloaded 1 time since the API started .*did not check names and addresses/));
   });
 });
 

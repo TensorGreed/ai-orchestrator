@@ -21,6 +21,8 @@ export interface MockNerEndpointOptions {
   maxChars?: number;
   /** Delay before each answer. */
   delayMs?: number;
+  /** Retry-After sent with a not-ready 503 (default "0"; null sends none). */
+  retryAfter?: string | null;
 }
 
 export interface MockNerEndpoint {
@@ -31,6 +33,8 @@ export interface MockNerEndpoint {
   /** Authorization headers seen. */
   authorizations: Array<string | undefined>;
   healthChecks: number;
+  /** Most entities requests the mock was answering at once. */
+  maxInFlight: number;
   /** Replaces the next entities answers (status, raw body and extra headers), one per request. */
   answerNext(status: number, body: unknown, headers?: Record<string, string>): void;
   set(options: Partial<MockNerEndpointOptions>): void;
@@ -45,14 +49,23 @@ export async function startMockNerEndpoint(initial: MockNerEndpointOptions = {})
   const authorizations: Array<string | undefined> = [];
   const scripted: Array<{ status: number; body: unknown; headers?: Record<string, string> }> = [];
   let healthChecks = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
 
   const send = (res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
     res.writeHead(status, { "content-type": "application/json", ...headers });
     res.end(typeof body === "string" ? body : JSON.stringify(body));
   };
-  const fail = (res: http.ServerResponse, status: number, code: string, message: string) => send(res, status, { error: { code, message } });
+  const fail = (res: http.ServerResponse, status: number, code: string, message: string, headers: Record<string, string> = {}) => send(res, status, { error: { code, message } }, headers);
 
   const server = http.createServer((req, res) => {
+    if (req.method === "POST") {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      res.on("close", () => {
+        inFlight -= 1;
+      });
+    }
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
@@ -78,7 +91,10 @@ export async function startMockNerEndpoint(initial: MockNerEndpointOptions = {})
         if (next) return send(res, next.status, next.body, next.headers);
         const chars = parsed.data.texts.reduce((sum, text) => sum + text.length, 0);
         if (chars > (options.maxChars ?? Infinity)) return fail(res, 413, "too_large", "The request carries too much text");
-        if (options.ready === false) return fail(res, 503, "not_ready", "No model is loaded");
+        if (options.ready === false) {
+          const retryAfter = options.retryAfter === undefined ? "0" : options.retryAfter;
+          return fail(res, 503, "not_ready", "No model is loaded", retryAfter === null ? {} : { "retry-after": retryAfter });
+        }
         const threshold = parsed.data.threshold ?? 0;
         const results = parsed.data.texts.map((text) => ({
           entities: Object.entries(options.vocabulary ?? {}).flatMap(([phrase, { label, score }]) => {
@@ -101,6 +117,9 @@ export async function startMockNerEndpoint(initial: MockNerEndpointOptions = {})
     authorizations,
     get healthChecks() {
       return healthChecks;
+    },
+    get maxInFlight() {
+      return maxInFlight;
     },
     answerNext: (status, body, headers) => scripted.push({ status, body, ...(headers ? { headers } : {}) }),
     set: (changes) => {

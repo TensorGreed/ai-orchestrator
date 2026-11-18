@@ -1807,6 +1807,9 @@ export async function createApp(
         ...(config.CONTENT_RULES_NER_ENDPOINT_TOKEN ? { token: config.CONTENT_RULES_NER_ENDPOINT_TOKEN } : {}),
         timeoutMs: config.CONTENT_RULES_NER_ENDPOINT_TIMEOUT_MS ?? 10_000,
         maxRequestChars: config.CONTENT_RULES_NER_ENDPOINT_MAX_REQUEST_CHARS ?? 50_000,
+        maxConcurrent: config.CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT ?? 4,
+        // Names and addresses that went unchecked because the service was busy: never silent, even when the rule set fails open.
+        onOverload: (event) => app.log.warn({ origin: config.CONTENT_RULES_NER_ENDPOINT ? new URL(config.CONTENT_RULES_NER_ENDPOINT).origin : undefined, reason: event.reason, overloads: event.count }, "Names and addresses service overloaded; a check failed (the rule set's failure setting decides)"),
         outbound: { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST },
         ...(options.nerEndpointNetwork?.resolver ? { resolver: options.nerEndpointNetwork.resolver } : {}),
         ...(options.nerEndpointNetwork?.fetchImpl ? { fetchImpl: options.nerEndpointNetwork.fetchImpl } : {})
