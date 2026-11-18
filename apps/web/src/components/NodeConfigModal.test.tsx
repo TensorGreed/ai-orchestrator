@@ -577,9 +577,39 @@ describe("NodeInspector", () => {
     expect(picker.value).toBe("");
     expect(picker.selectedOptions[0]?.textContent).toContain("Not set");
   });
+
+  it("lets a chain node go back to the upstream model after picking a provider", async () => {
+    render(
+      <NodeInspector
+        {...makeProps({
+          node: { id: "tc2", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Classify", nodeType: "text_classifier", config: { textKey: "text", provider: { providerId: "echo", model: "echo" } } } }
+        })}
+      />
+    );
+    const picker = screen.getByRole("combobox", { name: "Provider" }) as HTMLSelectElement;
+    expect(picker.value).toBe("echo");
+    await userEvent.selectOptions(picker, "");
+    expect(picker.value).toBe("");
+  });
+
+  it("offers no upstream model on an LLM Call that names a provider", () => {
+    render(
+      <NodeInspector
+        {...makeProps({
+          node: { id: "llm-o", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "LLM Call", nodeType: "llm_call", config: { provider: { providerId: "openai", model: "gpt-4o-mini" } } } }
+        })}
+      />
+    );
+    const picker = screen.getByRole("combobox", { name: "Provider" }) as HTMLSelectElement;
+    expect([...picker.options].some((option) => option.value === "")).toBe(false);
+  });
 });
 
 describe("switchedModelProvider", () => {
+  it("removes the provider for Not set", () => {
+    expect(switchedModelProvider({ providerId: "echo", model: "echo" }, "")).toBeUndefined();
+  });
+
   it("drops the endpoint and key for Echo and sets its model", () => {
     expect(
       switchedModelProvider({ providerId: "ollama", model: "llama3.1", baseUrl: "http://localhost:11434/v1", secretRef: { secretId: "s" }, temperature: 0.4 }, "echo")

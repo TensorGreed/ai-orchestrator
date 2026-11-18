@@ -340,7 +340,9 @@ export function withOpenDefaults(
  * A node's `config.provider` after the Provider picker changes to `next`. Echo needs no endpoint or key, so those go
  * and the model becomes "echo"; leaving Echo clears that placeholder model. Other switches keep the rest as it was.
  */
-export function switchedModelProvider(current: Record<string, unknown>, next: string): Record<string, unknown> {
+export function switchedModelProvider(current: Record<string, unknown>, next: string): Record<string, unknown> | undefined {
+  // "Not set": a chain node then uses the model of an upstream model node.
+  if (!next) return undefined;
   if (next === "echo") {
     const rest = { ...current };
     delete rest.baseUrl;
@@ -1515,7 +1517,13 @@ export function NodeInspector({
       if (request !== llmModelsRequest.current) return;
       const models = result.models.map((m) => ({ value: m.id, label: m.label }));
       setLlmModels(models.length > 0 ? models : null);
-      setLlmModelsNote(models.length > 0 ? `${models.length} model${models.length === 1 ? "" : "s"} loaded.` : "No models found. Check the key and base URL, or type the model name.");
+      setLlmModelsNote(
+        models.length > 0
+          ? `${models.length} model${models.length === 1 ? "" : "s"} loaded.`
+          : modelLookup.providerId === "ollama" && !modelListBaseUrl
+            ? "No models listed: set the Base URL to list an Ollama server's models, or type the model name."
+            : "No models found. Check the key and base URL, or type the model name."
+      );
     } catch (error) {
       if (request !== llmModelsRequest.current) return;
       setLlmModels(null);
@@ -2668,9 +2676,22 @@ export function NodeInspector({
         <SelectField
           label="Provider"
           value={providerId}
-          onChange={(next) => setConfig((current) => ({ ...current, provider: switchedModelProvider(asRecord(current.provider), next) }))}
+          onChange={(next) =>
+            setConfig((current) => {
+              const switched = switchedModelProvider(asRecord(current.provider), next);
+              if (switched) return { ...current, provider: switched };
+              const rest = { ...current };
+              delete rest.provider;
+              return rest;
+            })
+          }
           options={[
-            ...(providerId ? [] : [{ value: "", label: "Not set (uses the upstream model)" }]),
+            // A chain node may always go back to the upstream model; LLM Call needs its own provider.
+            ...(node.data.nodeType !== "llm_call"
+              ? [{ value: "", label: "Not set (uses the upstream model)" }]
+              : providerId
+                ? []
+                : [{ value: "", label: "Not set" }]),
             ...MODEL_PROVIDER_CHOICES,
             ...(providerId && !MODEL_PROVIDER_CHOICES.some((choice) => choice.value === providerId) ? [{ value: providerId, label: providerId }] : [])
           ]}

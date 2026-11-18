@@ -41,6 +41,12 @@ export const PROVIDER_CONFIG_NODE_TYPES: ReadonlySet<string> = new Set([
   "ai_transform"
 ]);
 
+/**
+ * Node types a NEW node of which starts on the default model. Only LLM Call: the chain nodes start without a provider
+ * on purpose, so they use the model of an upstream model node (the engine reads `config.provider` first).
+ */
+export const DEFAULT_MODEL_NODE_TYPES: ReadonlySet<string> = new Set(["llm_call"]);
+
 /** Hosted providers a key makes usable, in the order a default is picked, with the model a new node starts on. */
 export const HOSTED_MODEL_DEFAULTS: ReadonlyArray<{ providerId: string; model: string; envVar: string }> = Object.freeze([
   { providerId: "openai", model: "gpt-4o-mini", envVar: "OPENAI_API_KEY" },
@@ -75,14 +81,14 @@ export function pickDefaultModelProvider(input: {
 }
 
 /**
- * A NEW node's config with the default model in place of the catalog's sample one, for node types that keep their
- * model in `config.provider`. Only for nodes being created: a saved node keeps the provider it has.
+ * A NEW node's config with the default model in place of the catalog's sample one, for LLM Call
+ * (`DEFAULT_MODEL_NODE_TYPES`). Only for nodes being created: a saved node keeps the provider it has.
  */
 export function withDefaultModelProvider(
   nodeType: string,
   config: Record<string, unknown>,
   provider: DefaultModelProvider
 ): Record<string, unknown> {
-  if (!PROVIDER_CONFIG_NODE_TYPES.has(nodeType)) return config;
+  if (!DEFAULT_MODEL_NODE_TYPES.has(nodeType)) return config;
   return { ...config, provider: { ...provider, ...(provider.secretRef ? { secretRef: { ...provider.secretRef } } : {}) } };
 }

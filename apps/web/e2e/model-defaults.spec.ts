@@ -101,7 +101,7 @@ test("a new LLM Call starts on Echo and opening it lists no models", async () =>
 
   // Only the click asks, and it goes through the API, never from the browser to a local port.
   await loadModels.click();
-  await expect(inspector.getByText(/No models found|models? loaded|fetch failed|Could not load/)).toBeVisible({ timeout: 15_000 });
+  await expect(inspector.getByText(/No models (found|listed)|models? loaded|fetch failed|Could not load/)).toBeVisible({ timeout: 15_000 });
   expect(modelListRequests).toHaveLength(1);
   expect(modelListRequests[0]).toMatchObject({ providerId: "ollama" });
 

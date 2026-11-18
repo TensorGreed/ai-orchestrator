@@ -44,11 +44,18 @@ describe("the default model of a new node", () => {
 });
 
 describe("withDefaultModelProvider", () => {
-  it("puts the default in place of the catalog's sample provider for every provider-config node type", () => {
+  it("puts the default in place of the LLM Call catalog's sample provider", () => {
+    const sample = (getNodeDefinition("llm_call")?.sampleConfig ?? {}) as Record<string, unknown>;
+    const config = withDefaultModelProvider("llm_call", sample, { providerId: "openai", model: "gpt-4o-mini", secretRef: { secretId: "s" } });
+    expect(config.provider).toEqual({ providerId: "openai", model: "gpt-4o-mini", secretRef: { secretId: "s" } });
+  });
+
+  it("leaves chain nodes without a provider, so they keep using an upstream model node", () => {
     for (const nodeType of PROVIDER_CONFIG_NODE_TYPES) {
+      if (nodeType === "llm_call") continue;
       const sample = (getNodeDefinition(nodeType)?.sampleConfig ?? {}) as Record<string, unknown>;
-      const config = withDefaultModelProvider(nodeType, sample, { providerId: "openai", model: "gpt-4o-mini", secretRef: { secretId: "s" } });
-      expect(config.provider).toEqual({ providerId: "openai", model: "gpt-4o-mini", secretRef: { secretId: "s" } });
+      expect(withDefaultModelProvider(nodeType, sample, ECHO_MODEL_PROVIDER), nodeType).toBe(sample);
+      expect(sample.provider, nodeType).toBeUndefined();
     }
   });
 

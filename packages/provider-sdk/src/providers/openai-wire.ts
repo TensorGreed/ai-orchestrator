@@ -267,6 +267,8 @@ export async function* readOpenAIStream(
   const observe = (rawEvent: string, payload: string) => {
     sawEvent = true;
     plainBody = null;
+    // Any finish reason counts as an answer, including ones outside the OpenAI vocabulary (`eos` and the like).
+    if (!sawAnswer && hasFinishReason(payload)) sawAnswer = true;
     if (input.strict && orderlyEndIn(rawEvent, payload, input.provider)) orderly = true;
   };
   const noteAnswer = (chunk: LLMStreamChunk) => {
@@ -324,6 +326,17 @@ export async function* readOpenAIStream(
   }
   if (input.strict && !orderly) throw streamFailure(input.provider, "ended the stream without finishing");
   if (!sawAnswer) throw streamFailure(input.provider, "ended the stream without any answer (no text, tool call or finish reason)");
+}
+
+/** Whether an SSE payload carries a non-empty finish reason of any spelling. */
+function hasFinishReason(payload: string): boolean {
+  if (!payload.includes("finish_reason")) return false;
+  try {
+    const reason = (JSON.parse(payload) as OpenAIWireStreamResponse).choices?.[0]?.finish_reason;
+    return typeof reason === "string" && reason.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** The most of a body kept while looking for a plain JSON answer instead of a stream. */

@@ -133,6 +133,11 @@ describe("an empty stream", () => {
     expect(chunks).toEqual([{ type: "finish", reason: "length" }]);
   });
 
+  it("accepts a finish reason outside the OpenAI vocabulary with no text", async () => {
+    stubFetch(bodyResponse(sse([JSON.stringify({ choices: [{ delta: {}, finish_reason: "eos" }] }), "[DONE]"]), "text/event-stream"));
+    expect(await collect(new OpenAICompatibleProviderAdapter().generateStream!({ provider, messages }, ctx))).toEqual([]);
+  });
+
   it("still reads a normal stream unchanged", async () => {
     stubFetch(
       bodyResponse(
