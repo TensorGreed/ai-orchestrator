@@ -567,7 +567,7 @@ export class ContentRulesToolsService {
               : { bytes: scanner.decodeUpload(args.content_base64!), mediaType: args.media_type ?? null, source: { kind: "upload", ...(args.filename ? { filename: args.filename } : {}) } };
           if (loaded.source.kind === "url") sourceRef = { source: loaded.source.origin, pathHash: loaded.source.pathHash };
           // A fetched document's declared type is the server's; an upload's is the caller's.
-          const extracted = scanner.extract(loaded.source.kind === "upload" ? loaded : { ...loaded, mediaType: loaded.mediaType ?? args.media_type ?? null });
+          const extracted = await scanner.extract(loaded.source.kind === "upload" ? loaded : { ...loaded, mediaType: loaded.mediaType ?? args.media_type ?? null }, call.signal);
           const style = args.redact_style;
           const protector = style ? this.protectorFor(style, call, scope, new Set(extracted.segments.flatMap((segment) => [...placeholdersIn(segment.text)]))) : undefined;
           const outcome = await scanner.scan(
@@ -611,6 +611,7 @@ export class ContentRulesToolsService {
             type: result.sniffedType,
             typeMismatch: result.typeMismatch,
             truncated: result.truncated,
+            ...(result.pages ? { pages: result.pages, textLayer: result.textLayer } : {}),
             findings: outcome.total,
             counts: result.countsByClass,
             riskLevel: result.riskLevel,

@@ -1,13 +1,15 @@
-import { CONTENT_SCAN_LIMITS, type DocumentKind, type DocumentLocation } from "@ai-orchestrator/shared";
+import { CONTENT_SCAN_LIMITS, type DocumentKind, type DocumentLocation, type PdfTextLayer } from "@ai-orchestrator/shared";
 import { csvField, parseCsv } from "./csv.js";
 import { DocumentError } from "./errors.js";
 import { extractHtmlText, normalizeExtractedText } from "./html.js";
+import { isPdf, readPdf, textLayerOf, type PdfLimits, type PdfRead } from "./pdf.js";
 import { csvDelimiter, decodeDocument, parseMediaType, sniffKind } from "./sniff.js";
 
 /**
- * A document as text segments with locations. Text, Markdown and the parts of an HTML page are line-based segments
- * (a finding's line and column are counted inside them); CSV cells and JSON strings are one segment each. `render`
- * rebuilds the document's text from (possibly rewritten) segment texts: the redacted view.
+ * A document as text segments with locations. Text, Markdown, the parts of an HTML page and a PDF page's text are
+ * line-based segments (a finding's line and column are counted inside them); CSV cells, JSON strings, PDF comments,
+ * form field values, links and properties are one segment each. `render` rebuilds the document's text from (possibly
+ * rewritten) segment texts: the redacted view.
  */
 
 export interface DocumentLimits {
@@ -60,6 +62,8 @@ export interface ExtractedDocument {
   covered?: { chars: number; of: number };
   /** The document's text from these segment texts (one per segment, same order); unchecked parts are left out. */
   render(texts: readonly string[]): string;
+  /** PDF: pages in the document and pages read, and whether they had a text layer. */
+  pdf?: { pages: { total: number; checked: number }; textLayer: PdfTextLayer; pagesWithoutText: number };
 }
 
 const NOT_CHECKED = "[not checked: past the size limit]";
@@ -272,6 +276,75 @@ export function extractDocument(input: ExtractInput): ExtractedDocument {
   };
 }
 
+export interface ExtractAsyncInput extends ExtractInput {
+  /** PDF limits instead of the deployment's (configurePdfExtraction). */
+  pdfLimits?: Partial<PdfLimits>;
+  /** Cancels reading a PDF (its worker is stopped). */
+  signal?: AbortSignal;
+}
+
+/**
+ * Like extractDocument, and also reads PDF documents (sniffed by their `%PDF-` header, whatever the declared type),
+ * in a worker with memory and time limits. Throws DocumentError as extractDocument does, and as readPdf does for PDFs.
+ */
+export async function extractDocumentAsync(input: ExtractAsyncInput): Promise<ExtractedDocument> {
+  const limits: DocumentLimits = { ...DEFAULT_DOCUMENT_LIMITS, ...input.limits };
+  const { bytes } = input;
+  if (bytes.byteLength > limits.maxBytes) throw new DocumentError("too_large", `The document is larger than ${limits.maxBytes} bytes`);
+  if (!isPdf(bytes)) return extractDocument(input);
+  const read = await readPdf(bytes, { maxChars: limits.maxChars, ...(input.pdfLimits ? { limits: input.pdfLimits } : {}), ...(input.signal ? { signal: input.signal } : {}) });
+  const declared = parseMediaType(input.mediaType);
+  return pdfDocument(read, { bytes: bytes.byteLength, mediaType: declared.essence, typeMismatch: declared.essence !== null && declared.essence !== "application/pdf" }, limits.maxChars);
+}
+
+const PDF_ITEM_LABEL = { comment: "comment", comment_author: "comment author", form_field: "form field", link: "link" } as const;
+
+/** A read PDF as segments: each page's text (line-based), then its annotations, then the document properties. */
+export function pdfDocument(read: PdfRead, base: { bytes: number; mediaType: string | null; typeMismatch: boolean }, maxChars: number): ExtractedDocument {
+  const all: DocumentSegment[] = [];
+  read.pages.forEach((page, index) => {
+    const number = index + 1;
+    if (page.text.length > 0) all.push({ text: page.text, where: { kind: "pdf", page: number, part: "text" }, lines: true });
+    for (const item of page.items) all.push({ text: item.text, where: { kind: "pdf", page: number, part: item.part, item: item.item }, lines: false });
+  });
+  for (const property of read.properties) all.push({ text: property.text, where: { kind: "pdf", part: "properties", attribute: property.name }, lines: false });
+  const covered = cover(all, maxChars);
+  const { textLayer, pagesWithoutText } = textLayerOf(read.pages);
+  const pageLimited = read.pages.length < read.numPages;
+  return {
+    kind: "pdf",
+    ...base,
+    encoding: "pdf",
+    ...covered,
+    truncated: covered.truncated || pageLimited,
+    pdf: { pages: { total: read.numPages, checked: read.pages.length }, textLayer, pagesWithoutText },
+    render(texts) {
+      const parts: string[] = [];
+      let lastPage = 0;
+      let inProperties = false;
+      covered.segments.forEach((segment, index) => {
+        const text = texts[index] ?? "";
+        const where = segment.where;
+        if (where.part === "properties") {
+          if (!inProperties) parts.push("--- document properties ---");
+          inProperties = true;
+          parts.push(`${where.attribute}: ${text}`);
+          return;
+        }
+        if (where.page !== lastPage) {
+          parts.push(`--- page ${where.page} ---`);
+          lastPage = where.page!;
+        }
+        if (where.part === "text") parts.push(text);
+        else parts.push(`[${PDF_ITEM_LABEL[where.part as keyof typeof PDF_ITEM_LABEL]} ${where.item}] ${text}`);
+      });
+      if (covered.truncated) parts.push(NOT_CHECKED);
+      if (pageLimited && !read.stoppedAtChars) parts.push(`[not checked: pages ${read.pages.length + 1} to ${read.numPages}, past the page limit]`);
+      return parts.join("\n");
+    }
+  };
+}
+
 function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, "\n");
 }
@@ -308,6 +381,10 @@ export function locationLabel(location: Omit<DocumentLocation, "label">): string
     case "html":
       if (location.part === "attribute") return `${location.attribute ?? "attribute"}`;
       return `${location.part === "hidden" ? "hidden text" : "visible text"}, ${at}`;
+    case "pdf":
+      if (location.part === "properties") return `document properties (${location.attribute ?? "property"})`;
+      if (location.part === "text") return `page ${location.page}, ${at}`;
+      return `page ${location.page}, ${PDF_ITEM_LABEL[location.part as keyof typeof PDF_ITEM_LABEL] ?? "annotation"} ${location.item ?? ""}`.trimEnd();
     default:
       return at;
   }

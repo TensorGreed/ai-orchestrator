@@ -8304,9 +8304,16 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, data: next }))}
               rows={6}
             />
-            {(format === "pdf" || format === "excel") && (
+            {format === "pdf" && (
               <div className="cfg-tip">
-                Note: <strong>{format.toUpperCase()}</strong> extraction is not yet implemented in the core executor.
+                Put the PDF in Data as base64 (a template such as a previous step&apos;s base64 body works). The output has the text per page with
+                comments, form field values and links, and the document properties. Scanned pages have no text layer and are reported as such, since
+                there is no text recognition (OCR).
+              </div>
+            )}
+            {format === "excel" && (
+              <div className="cfg-tip">
+                Note: <strong>EXCEL</strong> extraction is not yet implemented in the core executor.
               </div>
             )}
           </>

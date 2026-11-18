@@ -2,9 +2,11 @@ import { z } from "zod";
 import { dataClassNameSchema } from "./data-labels";
 
 /**
- * Scanning documents with content rules: a text, Markdown, HTML, JSON or CSV document, uploaded or fetched from a URL,
- * turned into text segments with locations (line:column, row:column, a JSON pointer, or the part of an HTML page) and
- * checked with a rule set's data scan.
+ * Scanning documents with content rules: a text, Markdown, HTML, JSON, CSV or PDF document, uploaded or fetched from a
+ * URL, turned into text segments with locations (line:column, row:column, a JSON pointer, the part of an HTML page, or
+ * a PDF page and line) and checked with a rule set's data scan. A PDF's text layer, comments, form field values, links
+ * and document properties are read in a worker thread with memory and time limits; scanned pages (images of text) have
+ * no text layer and are reported as such, since there is no text recognition.
  *
  * - The rule set page's "Scan a document" panel (`POST /api/guard/profiles/:id/scan-document`): a test, like a
  *   simulation; no rule events.
@@ -13,11 +15,11 @@ import { dataClassNameSchema } from "./data-labels";
  *   private, loopback or link-local addresses.
  *
  * Nothing fetched or uploaded is stored: bytes and text live for the call only. Findings carry masked previews only.
- * PDF, zip and Office files are not supported yet.
+ * Zip and Office files are not supported yet.
  */
 
 /** Document kinds the extractor reads. */
-export const DOCUMENT_KINDS = ["text", "markdown", "html", "json", "csv"] as const;
+export const DOCUMENT_KINDS = ["text", "markdown", "html", "json", "csv", "pdf"] as const;
 export type DocumentKind = (typeof DOCUMENT_KINDS)[number];
 
 /** Defaults and hard ceilings of the document scan limits (the deployment sets them with CONTENT_SCAN_*). */
@@ -40,7 +42,17 @@ export const CONTENT_SCAN_LIMITS = {
   /** Each CSV cell is checked on its own; more cells than this are refused. */
   csvMaxCells: 500_000,
   /** Findings listed per document (counts always cover all of them). */
-  maxFindings: 1_000
+  maxFindings: 1_000,
+  /** PDF pages read per document; past this the result says how many were checked. */
+  maxPages: 200,
+  maxPagesCeiling: 5_000,
+  /** Wall-clock time for reading one PDF; the worker reading it is stopped at this point. */
+  pdfTimeoutMs: 20_000,
+  pdfTimeoutMsCeiling: 300_000,
+  /** Memory for reading one PDF (the worker's heap, and separately its buffers); past this the worker is stopped. */
+  pdfMemoryMb: 256,
+  pdfMemoryMbFloor: 64,
+  pdfMemoryMbCeiling: 4_096
 } as const;
 
 /** Where a finding is in the document. `label` is the human form ("line 3, column 7", "row 2, column email"). */
@@ -55,10 +67,28 @@ export interface DocumentLocation {
   /** JSON: an RFC 6901 pointer to the string (`/items/0/email`); `key` when the text is an object key. */
   pointer?: string;
   key?: boolean;
-  /** HTML: visible text, an `alt`/`title`/`aria-label` attribute, or text the page hides (hidden, aria-hidden, display:none). */
-  part?: "visible" | "attribute" | "hidden";
+  /**
+   * HTML: visible text, an `alt`/`title`/`aria-label` attribute, or text the page hides (hidden, aria-hidden, display:none).
+   * PDF: the page's text, a comment (its text or author), a form field's value, a link's address, or a document property.
+   */
+  part?: "visible" | "attribute" | "hidden" | PdfPart;
+  /** HTML: the attribute and its tag. PDF: the document property's name (Title, Author, ...). */
   attribute?: string;
+  /** PDF: the 1-based page. */
+  page?: number;
+  /** PDF: the comment, form field or link's 1-based position on its page. */
+  item?: number;
 }
+
+/** Where a PDF finding is: page text, a comment, a comment's author, a form field value, a link address, or a property. */
+export const PDF_PARTS = ["text", "comment", "comment_author", "form_field", "link", "properties"] as const;
+export type PdfPart = (typeof PDF_PARTS)[number];
+
+/**
+ * Whether a PDF had text to check: `present` on every page read, `partial` when some pages have none, `empty` when no
+ * page has any (a scanned document: there is no text recognition, so its pages were not checked).
+ */
+export type PdfTextLayer = "present" | "partial" | "empty";
 
 export interface DocumentFinding {
   dataClass: string;
@@ -94,6 +124,11 @@ export interface DocumentScanResult {
   findings: DocumentFinding[];
   /** More findings than CONTENT_SCAN_LIMITS.maxFindings: `findings` lists the first ones, the counts cover all. */
   findingsTruncated: boolean;
+  /** PDF: pages in the document and pages read (fewer when the document has more than CONTENT_SCAN_MAX_PAGES). */
+  pages?: { total: number; checked: number };
+  /** PDF: whether the pages read had a text layer, and how many had none (scanned pages are not checked). */
+  textLayer?: PdfTextLayer;
+  pagesWithoutText?: number;
   /** Plain text with the findings replaced, when asked for. Never a document file. */
   redacted?: { style: string; text: string; redaction_id?: string; expires_at?: string };
   ruleSet: { id: string; version: number } | null;
@@ -224,7 +259,7 @@ export function scanDocumentInputSchema(allowUrls: boolean): Record<string, unkn
   return {
     type: "object",
     properties: {
-      content_base64: { type: "string", description: "The document's bytes, base64 (text, Markdown, HTML, JSON or CSV)." },
+      content_base64: { type: "string", description: "The document's bytes, base64 (text, Markdown, HTML, JSON, CSV or PDF)." },
       ...(allowUrls ? { url: { type: "string", description: "An http(s) URL on a host this toolset allows; fetched without cookies or credentials." } } : {}),
       media_type: { type: "string", description: "The document's type, e.g. text/csv (the content decides when they disagree)." },
       filename: { type: "string", description: "The file name, reported back; never used to choose the type." },
@@ -239,7 +274,7 @@ export function scanDocumentInputSchema(allowUrls: boolean): Record<string, unkn
 }
 
 export function scanDocumentDescription(allowUrls: boolean): string {
-  return `Check a document for sensitive data: text, Markdown, HTML, JSON or CSV${allowUrls ? ", sent as base64 or fetched from an allowed URL" : ", sent as base64"}. Returns each finding's data class, location (line and column, CSV row and column, JSON pointer, or the part of an HTML page), a masked preview and a score, and a risk level. Optionally returns the text with findings replaced. Values are never returned, and nothing is stored.`;
+  return `Check a document for sensitive data: text, Markdown, HTML, JSON, CSV or PDF${allowUrls ? ", sent as base64 or fetched from an allowed URL" : ", sent as base64"}. Returns each finding's data class, location (line and column, CSV row and column, JSON pointer, the part of an HTML page, or a PDF page and line, comment or form field), a masked preview and a score, and a risk level. A PDF without a text layer (a scanned document) is reported as such, since there is no text recognition. Optionally returns the text with findings replaced. Values are never returned, and nothing is stored.`;
 }
 
 // ---------------------------------------------------------------------------

@@ -5,12 +5,13 @@ import { ApiError, scanGuardDocument } from "../lib/api";
 /**
  * "Scan a document" on a rule set: an uploaded file (read in the browser and sent as base64) or a URL, checked with
  * the rule set's unsaved changes or its latest version. Shows each finding's location, data class, score and masked
- * preview, the risk level, and optionally the text with findings replaced. Nothing is saved.
+ * preview, the risk level, and optionally the text with findings replaced. For a PDF it also says how many pages were
+ * read and whether they had a text layer (a scanned PDF has none and is not checked). Nothing is saved.
  */
 
 type Redact = "" | "mask" | "placeholder";
 
-const KIND_LABEL: Record<string, string> = { text: "Plain text", markdown: "Markdown", html: "HTML", json: "JSON", csv: "CSV" };
+const KIND_LABEL: Record<string, string> = { text: "Plain text", markdown: "Markdown", html: "HTML", json: "JSON", csv: "CSV", pdf: "PDF" };
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) return err.message;
@@ -79,7 +80,8 @@ export function GuardDocumentScanPanel({ profileId, draft }: { profileId: string
     <section className="kb-section guard-document-scan" aria-label="Scan a document">
       <h4>Scan a document</h4>
       <p className="kb-subtle">
-        Check a text, Markdown, HTML, JSON or CSV document with this rule set&apos;s data checks. Nothing is saved; PDF and Office files are not supported yet.
+        Check a text, Markdown, HTML, JSON, CSV or PDF document with this rule set&apos;s data checks. Nothing is saved; Office files are not supported yet,
+        and scanned PDFs (images of text) cannot be checked.
       </p>
       <div className="finops-range" role="radiogroup" aria-label="Document source">
         {(["upload", "url"] as const).map((entry) => (
@@ -112,7 +114,7 @@ export function GuardDocumentScanPanel({ profileId, draft }: { profileId: string
         >
           <label>
             Document
-            <input type="file" accept=".txt,.md,.markdown,.html,.htm,.json,.csv,.tsv,text/*,application/json" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
+            <input type="file" accept=".txt,.md,.markdown,.html,.htm,.json,.csv,.tsv,.pdf,text/*,application/json,application/pdf" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
           </label>
           <span className="kb-subtle">{file ? `${file.name} (${formatBytes(file.size)})` : "or drop a file here"}</span>
         </div>
@@ -160,12 +162,31 @@ function DocumentScanResultView({ result, showRedacted, onShowRedacted }: { resu
     <div className="guard-document-result" role="status" aria-label="Scan result">
       <p>
         <strong>Risk: {result.riskLevel}</strong> · {KIND_LABEL[result.sniffedType] ?? result.sniffedType}, {formatBytes(result.bytes)}
+        {result.pages && <> · {result.pages.total.toLocaleString()} page{result.pages.total === 1 ? "" : "s"}</>}
         {result.typeMismatch && <> · read as {KIND_LABEL[result.sniffedType] ?? result.sniffedType}, not as the declared {result.mediaType ?? "type"}</>}
         {counts.length > 0 ? <> · {counts.map(([dataClass, count]) => `${count} ${dataClass}`).join(", ")}</> : <> · no findings</>}
       </p>
+      {result.textLayer === "empty" && (
+        <p className="settings-error" role="note">
+          No text layer: this looks like a scanned PDF. Text recognition (OCR) is not supported, so nothing in it was checked.
+        </p>
+      )}
+      {result.textLayer === "partial" && (
+        <p className="kb-subtle" role="note">
+          {result.pagesWithoutText} of the pages read {result.pagesWithoutText === 1 ? "has" : "have"} no text layer (scanned) and {result.pagesWithoutText === 1 ? "was" : "were"} not checked; text
+          recognition (OCR) is not supported.
+        </p>
+      )}
+      {result.pages && result.pages.checked < result.pages.total && (
+        <p className="kb-subtle" role="note">
+          Only {result.pages.checked.toLocaleString()} of {result.pages.total.toLocaleString()} pages were read.
+        </p>
+      )}
       {result.truncated && result.covered && (
         <p className="kb-subtle" role="note">
-          Only the first {result.covered.chars.toLocaleString()} of {result.covered.of.toLocaleString()} characters were checked.
+          {result.sniffedType === "pdf"
+            ? `Text past the first ${result.covered.chars.toLocaleString()} characters was not checked.`
+            : `Only the first ${result.covered.chars.toLocaleString()} of ${result.covered.of.toLocaleString()} characters were checked.`}
         </p>
       )}
       {result.findings.length > 0 && (

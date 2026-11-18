@@ -1,6 +1,7 @@
 /**
  * Scanning documents with content rules: the bytes of an upload or a URL fetched through the outbound URL checks,
- * extracted to text segments with locations (workflow-engine `documents/`), then checked with a rule set's data scan.
+ * extracted to text segments with locations (workflow-engine `documents/`; a PDF in a worker with memory and time
+ * limits), then checked with a rule set's data scan.
  *
  * Two callers:
  * - the rule set page's "Scan a document" test (`POST /api/guard/profiles/:id/scan-document`, builders): the rule set's
@@ -18,7 +19,7 @@ import { InMemoryPlaceholderBook, maskForDataClass, placeholdersIn, type DnsReso
 import { type DocumentScanRequest, type DocumentScanResult, type DocumentSource } from "@ai-orchestrator/shared";
 import {
   DocumentError,
-  extractDocument,
+  extractDocumentAsync,
   fetchDocument,
   nodeDnsResolver,
   scanExtractedDocument,
@@ -191,9 +192,13 @@ export class ContentDocumentScanService {
     return { bytes: fetched.bytes, mediaType: fetched.mediaType, source: { kind: "url", origin: fetched.origin, pathHash: fetched.pathHash } };
   }
 
-  extract(document: LoadedDocument): ExtractedDocument {
+  /**
+   * The document's text segments. A PDF is read in a worker under the deployment's PDF limits (configurePdfExtraction:
+   * CONTENT_SCAN_MAX_PAGES, CONTENT_SCAN_PDF_TIMEOUT_MS, CONTENT_SCAN_PDF_MEMORY_MB); `signal` stops it.
+   */
+  async extract(document: LoadedDocument, signal?: AbortSignal): Promise<ExtractedDocument> {
     const limits = this.options.limits;
-    return extractDocument({ bytes: document.bytes, mediaType: document.mediaType, limits: { maxBytes: limits.maxBytes, maxChars: limits.maxChars } });
+    return await extractDocumentAsync({ bytes: document.bytes, mediaType: document.mediaType, limits: { maxBytes: limits.maxBytes, maxChars: limits.maxChars }, ...(signal ? { signal } : {}) });
   }
 
   /**
@@ -234,7 +239,7 @@ export class ContentDocumentScanService {
               source: { kind: "upload", ...(request.source.filename ? { filename: request.source.filename } : {}) }
             }
           : await this.fetchUrl(request.source.url, { gateway: false }, signal);
-      const extracted = this.extract(loaded);
+      const extracted = await this.extract(loaded, signal);
       let protect: ((value: string, dataClass: string) => Promise<string>) | undefined;
       if (request.redact === "mask") protect = async (value, dataClass) => maskForDataClass(value, dataClass);
       else if (request.redact === "placeholder") {
@@ -270,6 +275,7 @@ export function documentScanResult(
     chars: extracted.chars,
     truncated: extracted.truncated,
     ...(extracted.covered ? { covered: extracted.covered } : {}),
+    ...(extracted.pdf ? { pages: extracted.pdf.pages, textLayer: extracted.pdf.textLayer, pagesWithoutText: extracted.pdf.pagesWithoutText } : {}),
     riskLevel: outcome.riskLevel,
     countsByClass: outcome.countsByClass,
     findings: outcome.findings,

@@ -349,6 +349,7 @@ import {
   resolveCodeSandboxPlan,
   describeCodeSandboxPlan,
   configureExpressionSandbox,
+  configurePdfExtraction,
   expressionSandboxLimits,
   nodeDnsResolver,
   guardedFetch,
@@ -1845,6 +1846,13 @@ export async function createApp(
   const outboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
   // One per process: a rule set version with invalid stored names and addresses options is logged once.
   const contentScanSettings = new ContentScanSettings((message, metadata) => app.log.warn(metadata, message));
+  // PDF documents (scans and Extract from File) are read in a worker per document under these limits.
+  configurePdfExtraction({
+    maxPages: config.CONTENT_SCAN_MAX_PAGES,
+    timeoutMs: config.CONTENT_SCAN_PDF_TIMEOUT_MS,
+    memoryMb: config.CONTENT_SCAN_PDF_MEMORY_MB,
+    maxConcurrent: config.CONTENT_SCAN_MAX_CONCURRENT
+  });
   // Document scans with content rules: the rule set test follows the outbound policy; the gateway tool always refuses private ranges.
   const contentDocumentScans = new ContentDocumentScanService({
     limits: {

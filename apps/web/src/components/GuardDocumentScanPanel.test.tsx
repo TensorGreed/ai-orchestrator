@@ -76,6 +76,39 @@ describe("Scan a document", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("private address");
   });
 
+  it("shows a PDF's pages, page locations, and that a scanned PDF was not checked", async () => {
+    const user = userEvent.setup();
+    const pdf: DocumentScanResult = {
+      ...result,
+      source: { kind: "upload", filename: "form.pdf" },
+      mediaType: "application/pdf",
+      sniffedType: "pdf",
+      typeMismatch: false,
+      encoding: "pdf",
+      truncated: true,
+      covered: { chars: 1000, of: 1001 },
+      pages: { total: 300, checked: 200 },
+      textLayer: "partial",
+      pagesWithoutText: 2,
+      findings: [{ dataClass: "email", score: 0.95, location: { kind: "pdf", page: 3, part: "text", line: 4, column: 9, label: "page 3, line 4, column 9" }, maskedPreview: "j•••@e••••.com" }],
+      findingsTruncated: false
+    };
+    vi.mocked(api.scanGuardDocument).mockResolvedValue({ result: pdf });
+    render(<GuardDocumentScanPanel profileId="pii" draft={null} />);
+    await user.upload(screen.getByLabelText("Document"), new File(["%PDF-1.7"], "form.pdf", { type: "application/pdf" }));
+    await user.click(screen.getByRole("button", { name: "Scan document" }));
+    const view = await screen.findByRole("status", { name: "Scan result" });
+    expect(view).toHaveTextContent("PDF, 2.0 KB · 300 pages");
+    expect(view).toHaveTextContent("Only 200 of 300 pages were read.");
+    expect(view).toHaveTextContent("2 of the pages read have no text layer (scanned) and were not checked");
+    expect(view).toHaveTextContent("Text past the first 1,000 characters was not checked.");
+    expect(within(view).getAllByRole("row")[1]).toHaveTextContent("page 3, line 4, column 9");
+
+    vi.mocked(api.scanGuardDocument).mockResolvedValue({ result: { ...pdf, truncated: false, pages: { total: 2, checked: 2 }, textLayer: "empty", pagesWithoutText: 2, findings: [], countsByClass: {}, riskLevel: "none" } });
+    await user.click(screen.getByRole("button", { name: "Scan document" }));
+    expect(await screen.findByText(/No text layer: this looks like a scanned PDF/)).toBeInTheDocument();
+  });
+
   it("encodes large files in chunks", async () => {
     const bytes = new Uint8Array(100_000).map((_, index) => index % 251);
     const encoded = await fileToBase64(new Blob([bytes]));

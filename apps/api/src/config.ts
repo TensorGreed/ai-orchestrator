@@ -518,6 +518,14 @@ const envSchema = z.object({
   CONTENT_SCAN_FIRST_BYTE_TIMEOUT_MS: z.coerce.number().int().min(500).max(120_000).default(10_000),
   /** Document scans running at once in this process; more wait their turn (briefly) or are refused. */
   CONTENT_SCAN_MAX_CONCURRENT: z.coerce.number().int().min(1).max(32).default(2),
+  /**
+   * PDF documents (the scan panel, the gateway's `scan_document` and Extract from File's `pdf` format) are read in a
+   * worker thread, one per document: pages read per document, the wall-clock time one PDF may take (the worker is
+   * stopped then), and the memory it may use (its heap, and separately its decoded buffers).
+   */
+  CONTENT_SCAN_MAX_PAGES: z.coerce.number().int().min(1).max(5_000).default(200),
+  CONTENT_SCAN_PDF_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(20_000),
+  CONTENT_SCAN_PDF_MEMORY_MB: z.coerce.number().int().min(64).max(4_096).default(256),
   // Phase 10.7 — MCP runtime safety.
   /** Sandbox mode for stdio servers that do not choose one: `none` (on the host) or `container`. */
   MCP_SANDBOX_DEFAULT: z.enum(["none", "container"]).default("none"),

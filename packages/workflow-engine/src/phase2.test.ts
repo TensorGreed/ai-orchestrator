@@ -38,6 +38,7 @@ import {
   toCsv,
   xmlToJson
 } from "./transformations";
+import { textPdf } from "./documents/pdf-fixtures";
 
 class FakeProvider implements LLMProviderAdapter {
   readonly definition = { id: "fake", label: "Fake", supportsTools: true, configSchema: {} };
@@ -385,6 +386,21 @@ describe("Phase 2.1 — convert_to_file / extract_from_file", () => {
   it("convert_to_file_node json output", async () => {
     const { output } = await runNode("convert_to_file_node", { format: "json", inputKey: "items" });
     expect(output?.mimeType).toBe("application/json");
+  });
+});
+
+describe("extract_from_file_node pdf format", () => {
+  it("reads a PDF given as base64 (no optional dependency error)", async () => {
+    const data = Buffer.from(textPdf([["Hello from a PDF"]])).toString("base64");
+    const { node, output } = await runNode("extract_from_file_node", { format: "pdf", encoding: "base64", data });
+    expect(node?.status).toBe("success");
+    expect(output).toMatchObject({ text: "Hello from a PDF", pageCount: 1, textLayer: "present", truncated: false });
+  });
+  it("fails the node for data that is not a PDF", async () => {
+    const { node } = await runNode("extract_from_file_node", { format: "pdf", encoding: "base64", data: Buffer.from("plain text").toString("base64") });
+    expect(node?.status).toBe("error");
+    expect(node?.error).toMatch(/not a PDF/);
+    expect(node?.error).not.toMatch(/optional dependency/);
   });
 });
 
