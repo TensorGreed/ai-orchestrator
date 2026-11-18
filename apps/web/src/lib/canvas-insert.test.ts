@@ -57,6 +57,9 @@ describe("canAutoConnect", () => {
     expect(canAutoConnect("agent_orchestrator", "openai_chat_model")).toBe(false);
     expect(canAutoConnect("supervisor_node", "mcp_tool")).toBe(false);
     expect(canAutoConnect("agent_orchestrator", "local_memory")).toBe(false);
+    expect(canAutoConnect("llm_call", "agent_orchestrator")).toBe(false);
+    expect(canAutoConnect("mcp_tool", "supervisor_node")).toBe(false);
+    expect(canAutoConnect("guard", "guard_protection")).toBe(false);
     // Another agent after an agent is a step; a Supervisor's workers have their own `+ worker` slot.
     expect(canAutoConnect("agent_orchestrator", "agent_orchestrator")).toBe(true);
   });

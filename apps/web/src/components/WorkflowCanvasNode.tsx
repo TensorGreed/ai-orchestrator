@@ -80,8 +80,22 @@ interface VariantProps {
  * A step output on the right edge of a card or hub, with a `+` beside it that opens the palette to add a node
  * connected after this output. The `+` shows on an output with no connection yet, and on hover or selection.
  */
-function SourceHandle({ nodeId, id, className, style }: { nodeId: string; id?: string; className: string; style?: CSSProperties }) {
-  const actions = useContext(CanvasInsertContext);
+function SourceHandle({
+  nodeId,
+  id,
+  className,
+  style,
+  noAdd = false
+}: {
+  nodeId: string;
+  id?: string;
+  className: string;
+  style?: CSSProperties;
+  /** No `+`: a worker agent on a Supervisor's port has no step output. */
+  noAdd?: boolean;
+}) {
+  const insertActions = useContext(CanvasInsertContext);
+  const actions = noAdd ? null : insertActions;
   const handle = id ?? null;
   const connected = actions?.isConnected(nodeId, handle) ?? false;
   return (
@@ -428,7 +442,7 @@ function HubNode({ id, data, selected }: VariantProps) {
       </div>
       <Badges data={data} />
       <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />
-      <SourceHandle nodeId={id} className="wf-handle wf-handle-main" />
+      <SourceHandle nodeId={id} className="wf-handle wf-handle-main" noAdd={Boolean(data.attachedAs)} />
       <Handle id="chat_model" type="source" position={Position.Bottom} className="wf-handle-hidden" />
       <Handle id="memory" type="source" position={Position.Bottom} className="wf-handle-hidden" />
       <Handle id="tool" type="source" position={Position.Bottom} className="wf-handle-hidden" />

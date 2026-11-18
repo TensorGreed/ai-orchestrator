@@ -1635,7 +1635,10 @@ function StudioApp() {
     const before = dragStartSnapshotRef.current;
     dragStartSnapshotRef.current = null;
     if (!before || suppressHistoryRef.current) return;
-    if (movedNodeIds(before.nodes, draggedNodes).length > 0) historyRef.current.push(before);
+    // A node on an agent's port snaps back onto its orbit, so dragging one changes nothing.
+    const attached = attachedNodeIds(computeAttachmentSlots(before.nodes, before.edges));
+    const moved = movedNodeIds(before.nodes, draggedNodes).filter((id) => !attached.has(id));
+    if (moved.length > 0) historyRef.current.push(before);
   }, []);
 
   useEffect(() => {
@@ -2210,6 +2213,9 @@ function StudioApp() {
       const editor = workflowToEditor(workflow);
       const decoratedEdges = editor.edges.map((edge) => decorateEdge(edge, editor.nodes as EditorNode[]));
 
+      // The graph is replaced from the server: undo must not bring back the graph from before.
+      historyRef.current.clear();
+      dragStartSnapshotRef.current = null;
       setCurrentWorkflow(workflow);
       setNodes(editor.nodes as EditorNode[]);
       setEdges(decoratedEdges);
@@ -4365,15 +4371,16 @@ function StudioApp() {
    */
   const resolveInsertSource = useCallback(
     (explicit: PaletteInsertSource | null): { node: EditorNode; handle: string | null; position?: { x: number; y: number } } | null => {
+      const attached = attachedNodeIds(computeAttachmentSlots(nodes as EditorNode[], edges));
       if (explicit) {
         const node = (nodes as EditorNode[]).find((candidate) => candidate.id === explicit.nodeId);
-        return node ? { node, handle: explicit.handle, position: explicit.position } : null;
+        return node && !attached.has(node.id) ? { node, handle: explicit.handle, position: explicit.position } : null;
       }
       const selected = (nodes as EditorNode[]).filter((node) => node.selected);
       if (selected.length !== 1) return null;
       const node = selected[0]!;
       if (node.data.nodeType === "sticky_note") return null;
-      if (attachedNodeIds(computeAttachmentSlots(nodes as EditorNode[], edges)).has(node.id)) return null;
+      if (attached.has(node.id)) return null;
       return { node, handle: chooseSourceHandle(node, edges) };
     },
     [edges, nodes]

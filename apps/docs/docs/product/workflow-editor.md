@@ -45,7 +45,7 @@ The canvas pans to show a node it adds when the node would land out of view.
 `Ctrl+Z` undoes the last canvas change and `Ctrl+Shift+Z` or `Ctrl+Y` redoes it (`Cmd` on macOS). Every change is
 one step: adding, deleting, moving (one step per drag), connecting and removing a connection (double-click or
 right-click an edge), **Clear**, paste, duplicate, a node's settings, and **Tidy**. **Clear** asks before it removes
-the nodes, and can be undone. Opening another workflow starts a fresh history.
+the nodes, and can be undone. Opening or reloading a workflow starts a fresh history.
 
 ## Workflow settings
 

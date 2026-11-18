@@ -459,3 +459,17 @@ describe("adding a node after an output", () => {
     expect(screen.getByText(/Connects after “Fetch orders”/)).toBeInTheDocument();
   });
 });
+
+describe("adding a node after a worker agent", () => {
+  it("draws no + on a Supervisor's worker, which has no step output", () => {
+    const worker = makeNode("w", "agent_orchestrator", "Worker", { x: 0, y: 0 }, { attachedTo: "sup", attachedAs: "worker" });
+    render(
+      <ReactFlowProvider>
+        <CanvasInsertContext.Provider value={{ onAddAfter: vi.fn(), isConnected: () => false }}>
+          <WorkflowCanvasNode {...nodeProps(worker)} />
+        </CanvasInsertContext.Provider>
+      </ReactFlowProvider>
+    );
+    expect(screen.queryByRole("button", { name: "Add a node after this step" })).toBeNull();
+  });
+});

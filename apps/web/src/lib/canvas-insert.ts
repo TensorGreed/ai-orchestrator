@@ -90,6 +90,10 @@ export function canAutoConnect(sourceType: string, targetType: string): boolean 
   if (sourceType === "sticky_note" || targetType === "sticky_note") return false;
   if (isInputType(targetType)) return false;
   if (isHubType(sourceType) && AGENT_PORT_TYPES.has(targetType)) return false;
+  // A model, memory, tool or content rules node is attached from the agent's port, never fed into the agent.
+  if (isHubType(targetType) && AGENT_PORT_TYPES.has(sourceType)) return false;
+  // A protection provider only hangs off a Content Rules node's protection port.
+  if (targetType === "guard_protection") return false;
   return true;
 }
 

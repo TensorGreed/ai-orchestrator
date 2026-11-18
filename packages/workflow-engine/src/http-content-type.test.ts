@@ -45,7 +45,7 @@ function deps(): WorkflowExecutionDependencies {
     agentRuntime: new DefaultAgentRuntime(),
     resolveSecret: async () => undefined,
     codeSandbox: IN_PROCESS_CODE_SANDBOX,
-    outboundGuard: { ...DEFAULT_OUTBOUND_GUARD, allowPrivateNetworks: true }
+    outboundGuard: DEFAULT_OUTBOUND_GUARD
   };
 }
 

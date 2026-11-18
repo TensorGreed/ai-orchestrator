@@ -13,6 +13,11 @@ function track(): void {
   document.addEventListener("pointerdown", () => (pointerDown = true), true);
   document.addEventListener("pointerup", () => (pointerDown = false), true);
   document.addEventListener("pointercancel", () => (pointerDown = false), true);
+  // A release outside the window (or over a frame) never reaches the document.
+  document.addEventListener("pointermove", (event) => {
+    if (event.buttons === 0) pointerDown = false;
+  }, true);
+  if (typeof window !== "undefined") window.addEventListener("blur", () => (pointerDown = false));
 }
 
 if (typeof document !== "undefined") track();

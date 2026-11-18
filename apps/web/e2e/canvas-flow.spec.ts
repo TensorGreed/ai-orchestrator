@@ -81,13 +81,17 @@ async function addFromPalette(page: Page, query: string): Promise<void> {
 }
 
 async function expectInView(page: Page, locator: Locator): Promise<void> {
-  const canvas = await page.locator(".canvas-stage").boundingBox();
-  const box = await locator.boundingBox();
-  expect(canvas && box).toBeTruthy();
-  expect(box!.x).toBeGreaterThanOrEqual(canvas!.x);
-  expect(box!.y).toBeGreaterThanOrEqual(canvas!.y);
-  expect(box!.x + box!.width).toBeLessThanOrEqual(canvas!.x + canvas!.width);
-  expect(box!.y + box!.height).toBeLessThanOrEqual(canvas!.y + canvas!.height);
+  // The canvas pans with a short animation.
+  await expect
+    .poll(async () => {
+      const canvas = await page.locator(".canvas-stage").boundingBox();
+      const box = await locator.boundingBox();
+      if (!canvas || !box) return false;
+      return (
+        box.x >= canvas.x && box.y >= canvas.y && box.x + box.width <= canvas.x + canvas.width && box.y + box.height <= canvas.y + canvas.height
+      );
+    })
+    .toBe(true);
 }
 
 async function undo(page: Page): Promise<void> {
@@ -252,6 +256,47 @@ test.describe("palette and canvas flow", () => {
     await expect.poll(() => edgeCount(page)).toBe(before);
     await page.keyboard.press("Control+y");
     await expect.poll(() => edgeCount(page)).toBe(before + 1);
+  });
+
+  test("double-clicking an agent's subtitle after Fit opens it and never deletes it", async ({ page }) => {
+    await openStudio(page);
+    const id = `wf-e2e-canvas-agent-${Date.now()}`;
+    made.push(id);
+    await page.route(/\/api\/providers\//, (route) => route.abort());
+    const response = await page.request.post("/api/workflows", {
+      data: {
+        id,
+        name: `E2E Canvas flow ${id}`,
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        nodes: [
+          { id: "in", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "hi" } },
+          { id: "agent", type: "agent_orchestrator", name: "Agent", position: { x: 320, y: -30 }, config: { maxIterations: 3, userPromptTemplate: "{{text}}" } },
+          { id: "model", type: "llm_call", name: "Model", position: { x: 320, y: 200 }, config: { provider: { providerId: "echo", model: "echo" } } },
+          { id: "out", type: "output", name: "Output", position: { x: 640, y: 0 }, config: {} }
+        ],
+        edges: [
+          { id: "e1", source: "in", target: "agent" },
+          { id: "e2", source: "agent", target: "out" },
+          { id: "e3", source: "agent", target: "model", sourceHandle: "chat_model" }
+        ]
+      }
+    });
+    expect(response.ok(), await response.text()).toBeTruthy();
+    await page.reload();
+    await page.getByLabel("Workflow", { exact: true }).selectOption(id);
+    await sidebarItem(page, "Editor").click();
+    const agent = page.locator('.react-flow__node[data-id="agent"]');
+    await expect(agent).toBeVisible();
+    await page.getByRole("button", { name: "Fit", exact: true }).click();
+    await page.waitForTimeout(400);
+    const nodes = await nodeCount(page);
+    // The first click selects the agent and shows its action ring, whose Delete button sat over the subtitle.
+    await agent.locator(".wf-hub-type").dblclick();
+    await expect(page.getByRole("dialog", { name: "Inspect Agent" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(agent).toBeVisible();
+    expect(await nodeCount(page)).toBe(nodes);
   });
 
   test("HTTP Request: Advanced opens on the first click after typing, and POST shows Headers and Body", async ({ page }) => {

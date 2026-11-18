@@ -39,4 +39,12 @@ describe("runAfterPointerRelease", () => {
     vi.runAllTimers();
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  it("forgets a press released outside the window", () => {
+    const fn = vi.fn();
+    press("pointerdown");
+    window.dispatchEvent(new Event("blur"));
+    runAfterPointerRelease(fn);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
 });

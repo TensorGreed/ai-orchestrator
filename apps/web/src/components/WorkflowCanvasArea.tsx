@@ -609,20 +609,32 @@ export function WorkflowCanvasArea({
   const pendingConnectionRef = useRef<{ nodeId: string; handle: string | null } | null>(null);
   const onConnectStart = useCallback((_event: unknown, params: { nodeId: string | null; handleId: string | null; handleType: string | null }) => {
     pendingConnectionRef.current =
-      params.nodeId && params.handleType === "source" && !(params.handleId && ATTACHMENT_HANDLE_IDS.has(params.handleId))
+      params.nodeId &&
+      params.handleType === "source" &&
+      !attached.has(params.nodeId) &&
+      !(params.handleId && ATTACHMENT_HANDLE_IDS.has(params.handleId))
         ? { nodeId: params.nodeId, handle: params.handleId ?? null }
         : null;
-  }, []);
+  }, [attached]);
+  // React Flow calls onConnectEnd after a successful connection too (also one snapped to a handle within its radius).
+  const handleConnect = useCallback(
+    (connection: Connection) => {
+      pendingConnectionRef.current = null;
+      onConnect(connection);
+    },
+    [onConnect]
+  );
   const onConnectEnd = useCallback(
     (event: MouseEvent | TouchEvent) => {
       const pending = pendingConnectionRef.current;
       pendingConnectionRef.current = null;
       if (!pending || !onInsertFromHandle || !reactFlowInstance) return;
-      const target = event.target as Element | null;
-      if (!target?.classList?.contains("react-flow__pane")) return;
       const point = "changedTouches" in event ? event.changedTouches[0] : (event as MouseEvent);
       const bounds = flowWrapperRef.current?.getBoundingClientRect();
       if (!point || !bounds) return;
+      // A touch's target is where it started, so look at what is under the release point.
+      const target = document.elementFromPoint(point.clientX, point.clientY) ?? (event.target as Element | null);
+      if (!target?.classList?.contains("react-flow__pane")) return;
       const dropped = reactFlowInstance.project({ x: point.clientX - bounds.left, y: point.clientY - bounds.top });
       onInsertFromHandle(pending.nodeId, pending.handle, { x: dropped.x, y: dropped.y - ORBIT.cardHeight / 2 });
     },
@@ -693,8 +705,10 @@ export function WorkflowCanvasArea({
               onNodesChange={handleNodesChange}
               onNodeDragStart={() => onNodeDragStart?.()}
               onNodeDragStop={(_event, node, draggedNodes) => onNodeDragStop?.(draggedNodes.length ? draggedNodes : [node])}
+              onSelectionDragStart={() => onNodeDragStart?.()}
+              onSelectionDragStop={(_event, draggedNodes) => onNodeDragStop?.(draggedNodes)}
               onEdgesChange={onEdgesChange}
-              onConnect={onConnect}
+              onConnect={handleConnect}
               onConnectStart={onConnectStart}
               onConnectEnd={onConnectEnd}
               onEdgeDoubleClick={(event, edge) => {
