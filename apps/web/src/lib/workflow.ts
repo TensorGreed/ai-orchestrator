@@ -85,6 +85,11 @@ export interface EditorNodeData {
    */
   mcpMarker?: McpCanvasMarker;
   onOpenMcpTarget?: (target: McpNavTarget) => void;
+  /**
+   * Node fields the editor does not edit (errorConfig, and anything else a
+   * workflow JSON carries), kept as they are so a save does not drop them.
+   */
+  nodeExtras?: Record<string, unknown>;
   /** Render-time only: an edge leaves this node's Error output (so the handle stays visible even if On Error changed). */
   errorOutputConnected?: boolean;
 }
@@ -124,19 +129,23 @@ export function workflowToEditor(workflow: Workflow): { nodes: EditorNode[]; edg
     }
   }
 
-  const nodes: EditorNode[] = workflow.nodes.map((node) => ({
-    id: node.id,
-    type: node.type === "sticky_note" ? "stickyNote" : "workflowNode",
-    position: laidOut[node.id] ?? orbit[node.id] ?? node.position,
-    data: {
-      label: node.name,
-      nodeType: node.type,
-      config: (node.config ?? {}) as Record<string, unknown>,
-      pinned: Boolean(workflow.pinnedData && Object.prototype.hasOwnProperty.call(workflow.pinnedData, node.id)),
-      disabled: node.disabled,
-      color: node.color as NodeColorKey | undefined
-    }
-  }));
+  const nodes: EditorNode[] = workflow.nodes.map((node) => {
+    const { id: _id, type: _type, name: _name, position: _position, config: _config, disabled: _disabled, color: _color, ...extras } = node;
+    return {
+      id: node.id,
+      type: node.type === "sticky_note" ? "stickyNote" : "workflowNode",
+      position: laidOut[node.id] ?? orbit[node.id] ?? node.position,
+      data: {
+        label: node.name,
+        nodeType: node.type,
+        config: (node.config ?? {}) as Record<string, unknown>,
+        pinned: Boolean(workflow.pinnedData && Object.prototype.hasOwnProperty.call(workflow.pinnedData, node.id)),
+        disabled: node.disabled,
+        color: node.color as NodeColorKey | undefined,
+        ...(Object.keys(extras).length > 0 ? { nodeExtras: extras as Record<string, unknown> } : {})
+      }
+    };
+  });
 
   const edges: Edge[] = workflow.edges.map((edge) => ({
     id: edge.id,
@@ -152,6 +161,7 @@ export function workflowToEditor(workflow: Workflow): { nodes: EditorNode[]; edg
 
 export function editorToWorkflow(base: Workflow, nodes: EditorNode[], edges: Edge[]): Workflow {
   const normalizedNodes: WorkflowNode[] = nodes.map((node) => ({
+    ...(node.data.nodeExtras ?? {}),
     id: node.id,
     type: node.data.nodeType,
     name: node.data.label,

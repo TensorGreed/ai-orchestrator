@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import type {
   LLMProviderConfig,
+  NodeErrorConfig,
   MCPToolDefinition,
   McpElicitationTraceEntry,
   McpSamplingTraceEntry,
@@ -18,7 +19,7 @@ import {
   DEFAULT_RETRY_MAX_DELAY_MS,
   WORKFLOW_TOOL_ADAPTER_ID,
   builtInToolProviderOf,
-  httpFailsOnErrorStatus,
+  httpErrorStatusMode,
   parseStatusList,
   deriveWorkflowToolDescriptor,
   getNodeDefinition,
@@ -642,16 +643,19 @@ function ToggleField({
 /**
  * HTTP Request: fail on a status outside 200–299 (so retries and the Error
  * output apply), and which statuses are retried. New nodes have it on; a node
- * saved before the option shows what it does now (on only if it asks for retries).
+ * saved before the option that asks for retries fails only on its retried statuses, and says so.
  */
 function HttpErrorStatusFields({
   config,
+  errorConfig,
   setConfig
 }: {
   config: Record<string, unknown>;
+  errorConfig?: NodeErrorConfig;
   setConfig: React.Dispatch<React.SetStateAction<Record<string, unknown>>>;
 }) {
-  const failOn = httpFailsOnErrorStatus(config);
+  const mode = httpErrorStatusMode(config, errorConfig);
+  const failOn = mode === "all";
   const retryOn = typeof config.retryOnStatus === "string" ? config.retryOnStatus : Array.isArray(config.retryOnStatus) ? config.retryOnStatus.join(", ") : "";
   const invalid = parseStatusList(retryOn).invalid;
   return (
@@ -662,7 +666,13 @@ function HttpErrorStatusFields({
         onChange={(next) => setConfig((current) => ({ ...current, failOnHttpError: next }))}
         help="On a status outside 200–299 the node fails, so Retries on Failure and the Error output apply. Off: the response is returned with ok: false and the run goes on."
       />
-      {failOn && (
+      {mode === "retry_list" && (
+        <div className="cfg-tip" data-testid="http-retry-list-only-tip">
+          This node was saved before this option. Because it retries, it retries the statuses below and fails if they
+          persist; other error statuses are returned with <code>ok: false</code>. Turn the option on to fail on every error status.
+        </div>
+      )}
+      {mode !== "none" && (
         <label className="cfg-field">
           <FieldLabel
             label="Retry on status"
@@ -1193,6 +1203,8 @@ export function NodeInspector({
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
   const [nodeDisabled, setNodeDisabled] = useState<boolean>(Boolean(node.data.disabled));
+  // Retry and continue settings a workflow JSON (or an import) set on the node; the engine reads them before the fields below.
+  const nodeErrorConfig = node.data.nodeExtras?.errorConfig && typeof node.data.nodeExtras.errorConfig === "object" ? (node.data.nodeExtras.errorConfig as NodeErrorConfig) : undefined;
   const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
   const [activeTab, setActiveTab] = useState<InspectorTab>("parameters");
   // A new node starts from its definition's sample config: those values count as defaults on the Advanced sections.
@@ -6527,7 +6539,7 @@ export function NodeInspector({
               />
             </div>
             </AdvancedFields>
-            <HttpErrorStatusFields config={config} setConfig={setConfig} />
+            <HttpErrorStatusFields config={config} errorConfig={nodeErrorConfig} setConfig={setConfig} />
           </>
         );
       case "set_node": {
@@ -9629,6 +9641,15 @@ export function NodeInspector({
         </section>
         <section className="insp-settings-group" aria-label="Error handling">
           <h4>Error handling</h4>
+          {(nodeErrorConfig?.retryOnFail === true || nodeErrorConfig?.continueOnFail === true) && (
+            <div className="cfg-tip" data-testid="node-error-config-tip">
+              This node&apos;s workflow JSON sets its error handling (<code>errorConfig</code>), which takes precedence:
+              {nodeErrorConfig.retryOnFail === true &&
+                ` ${nodeErrorConfig.maxRetries ?? 2} retries, first wait ${nodeErrorConfig.retryIntervalMs ?? 1000} ms`}
+              {nodeErrorConfig.retryOnFail === true && nodeErrorConfig.continueOnFail === true && ";"}
+              {nodeErrorConfig.continueOnFail === true && " a failure continues the run"}.
+            </div>
+          )}
           <div className="cfg-grid-2">
             <NumberField
               label="Retries on Failure"

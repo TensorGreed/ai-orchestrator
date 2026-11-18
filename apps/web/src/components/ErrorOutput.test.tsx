@@ -117,13 +117,10 @@ describe("HTTP Request: fail on HTTP error status", () => {
     expect(screen.getByLabelText(/Retry on status/)).toHaveAttribute("placeholder", "429, 5xx");
   });
 
-  it("shows an older node as off, unless it asks for retries", () => {
-    const { unmount } = render(<NodeInspector {...inspectorProps({ method: "GET", urlTemplate: "https://x.test" })} />);
+  it("shows an older node without retries as off", () => {
+    render(<NodeInspector {...inspectorProps({ method: "GET", urlTemplate: "https://x.test" })} />);
     expect(failToggle()).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByLabelText(/Retry on status/)).toBeNull();
-    unmount();
-    render(<NodeInspector {...inspectorProps({ method: "GET", urlTemplate: "https://x.test", retryCount: 2 })} />);
-    expect(failToggle()).toHaveAttribute("aria-pressed", "true");
   });
 
   it("flags entries that are not status codes", async () => {
@@ -141,5 +138,29 @@ describe("HTTP Request: fail on HTTP error status", () => {
     expect(within(group).getByLabelText(/Max delay between Retries/)).toHaveValue(30000);
     await user.selectOptions(within(group).getByLabelText("On Error Behavior"), "branch");
     expect(screen.getByTestId("error-output-tip")).toHaveTextContent(/red Error output/);
+  });
+});
+
+describe("HTTP Request saved before the option", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(api.previewExpression).mockResolvedValue({ ok: true, result: "" });
+  });
+
+  it("explains that a node with retries fails only on its retried statuses", () => {
+    render(<NodeInspector {...inspectorProps({ method: "GET", urlTemplate: "https://x.test", retryCount: 2 })} />);
+    expect(failToggle()).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("http-retry-list-only-tip")).toBeInTheDocument();
+    expect(screen.getByLabelText(/Retry on status/)).toBeInTheDocument();
+  });
+
+  it("reads retries from the node's errorConfig and shows them in Settings", async () => {
+    const user = userEvent.setup();
+    const props = inspectorProps({ method: "GET", urlTemplate: "https://x.test" });
+    props.node = { ...props.node, data: { ...props.node.data, nodeExtras: { errorConfig: { retryOnFail: true, maxRetries: 3, retryIntervalMs: 250 } } } };
+    render(<NodeInspector {...props} />);
+    expect(screen.getByTestId("http-retry-list-only-tip")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /Settings/ }));
+    expect(screen.getByTestId("node-error-config-tip")).toHaveTextContent("3 retries, first wait 250 ms");
   });
 });

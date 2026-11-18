@@ -188,7 +188,17 @@ export const workflowNodeSchema = z.object({
     }
   }),
   disabled: z.boolean().optional(),
-  color: z.string().optional()
+  color: z.string().optional(),
+  /** Per-node retry and continue settings (imported workflows and the JSON contract); the engine reads them before `config`. */
+  errorConfig: z
+    .object({
+      continueOnFail: z.boolean().optional(),
+      retryOnFail: z.boolean().optional(),
+      maxRetries: z.number().int().min(0).optional(),
+      retryIntervalMs: z.number().min(0).optional(),
+      alwaysOutputData: z.boolean().optional()
+    })
+    .optional()
 });
 
 export const workflowEdgeSchema = z.object({

@@ -116,9 +116,12 @@ Every node has the same error settings on its **Settings** tab.
   `304 Not Modified` is not an error.
 - **Retry on status** (`retryOnStatus`): the statuses that are retried, as codes (`503`), classes (`5xx`) or ranges
   (`500-504`). Empty means `429, 5xx`. Any other status fails at once, without retrying.
-- An HTTP Request node saved before the option existed has no `failOnHttpError` and keeps returning the response,
-  unless it asks for retries (Retries on Failure above 0): such a node now fails on an error status, so its retries
-  apply. Set the option off to keep the old behaviour.
+- An HTTP Request node saved before the option existed has no `failOnHttpError` and keeps returning the response
+  with `ok: false`. If it asks for retries (Retries on Failure above 0, or retries in its `errorConfig`), the
+  statuses on its retry list are retried and fail the node once the retries are spent; other error statuses are still
+  returned. The editor says so on such a node. Turn the option on to fail on every error status, or off to never fail.
+- A node's `errorConfig` in the workflow JSON (`retryOnFail`, `maxRetries`, `retryIntervalMs`, `continueOnFail`) is
+  kept when the workflow is saved and takes precedence over the Settings fields; the Settings tab shows it.
 - Network failures and timeouts name the method and URL the same way and are retried as set under Retries on Failure.
 
 ## Output Parser (`output_parser`)

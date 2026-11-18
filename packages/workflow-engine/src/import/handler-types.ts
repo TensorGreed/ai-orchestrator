@@ -20,6 +20,17 @@ export interface SourceNode {
   credentials: Record<string, Record<string, unknown>>;
   disabled: boolean;
   notes?: string;
+  /** The node's own error settings in the source (all optional). */
+  errorSettings?: SourceNodeErrorSettings;
+}
+
+/** A source node's error settings: what happens on failure, and retries (total tries and the wait between them). */
+export interface SourceNodeErrorSettings {
+  onError?: string;
+  continueOnFail?: boolean;
+  retryOnFail?: boolean;
+  maxTries?: number;
+  waitBetweenTries?: number;
 }
 
 export interface SourceConnectionTarget {
@@ -63,6 +74,10 @@ export interface ConvertedNode {
   outputHandles?: string[];
   /** Nodes that only make sense as agent attachments and must not be wired into the DAG. */
   attachmentOnly?: boolean;
+  /** The source output index of the node's error output (connections from it go to the `error` handle). */
+  errorOutputIndex?: number;
+  /** How many regular outputs the source node has, when it differs from `outputHandles` (the error output follows them). */
+  sourceOutputCount?: number;
 }
 
 export interface ConversionContext {

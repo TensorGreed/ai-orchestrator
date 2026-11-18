@@ -131,7 +131,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
         responseType: { type: "string", enum: ["json", "text"] },
         secretRef: { type: "object" },
         timeoutMs: { type: "number" },
-        // Fail on a status outside 200–299 (new nodes: true; unset: only when the node asks for retries).
+        // Fail on a status outside 200–299 (new nodes: true; unset: only its retried statuses, when the node asks for retries).
         failOnHttpError: { type: "boolean" },
         // Statuses retried when failing on them: codes, Nxx classes, ranges ("429, 5xx" when empty).
         retryOnStatus: { type: "string" }

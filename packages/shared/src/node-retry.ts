@@ -84,14 +84,28 @@ export function nodeSetsRetries(config: Record<string, unknown> | undefined, err
 }
 
 /**
- * Whether an HTTP Request node fails on a status outside 200–299. New nodes
- * store `failOnHttpError: true`. A node saved before the option existed keeps
- * returning the response (`ok: false`) unless it asks for retries, which
- * could never apply to an error status otherwise.
+ * Which error statuses (outside 200–299) fail an HTTP Request node:
+ * - `all`: every one (`failOnHttpError: true`, stored on new nodes);
+ * - `retry_list`: only those on its retry list, once retries are spent, for a
+ *   node saved before the option existed that asks for retries; it returns
+ *   other error statuses with `ok: false` as before;
+ * - `none`: none (`failOnHttpError: false`, or an older node without retries).
  */
-export function httpFailsOnErrorStatus(config: Record<string, unknown> | undefined, errorConfig?: RetrySettingsLike): boolean {
-  if (typeof config?.failOnHttpError === "boolean") return config.failOnHttpError;
-  return nodeSetsRetries(config, errorConfig);
+export type HttpErrorStatusMode = "all" | "retry_list" | "none";
+
+export function httpErrorStatusMode(config: Record<string, unknown> | undefined, errorConfig?: RetrySettingsLike): HttpErrorStatusMode {
+  if (typeof config?.failOnHttpError === "boolean") return config.failOnHttpError ? "all" : "none";
+  return nodeSetsRetries(config, errorConfig) ? "retry_list" : "none";
+}
+
+/** True when the status fails the node under its mode (304 Not Modified never does). */
+export function httpStatusFailsNode(status: number, config: Record<string, unknown> | undefined, errorConfig?: RetrySettingsLike): boolean {
+  if (status >= 200 && status < 300) return false;
+  if (status === 304) return false;
+  const mode = httpErrorStatusMode(config, errorConfig);
+  if (mode === "all") return true;
+  if (mode === "retry_list") return statusInList(status, config?.retryOnStatus);
+  return false;
 }
 
 export interface RetryBackoff {

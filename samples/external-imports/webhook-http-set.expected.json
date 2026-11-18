@@ -36,9 +36,11 @@
           "responseType": "json",
           "headersTemplate": "{\n  \"Accept\": \"application/json\",\n  \"X-Request-Id\": \"{{execution.id}}\"\n}",
           "timeoutMs": 10000,
+          "failOnHttpError": true,
           "secretRef": {
             "secretId": "import-httpheaderauth-enrichment_api_key"
-          }
+          },
+          "retryCount": 0
         }
       },
       {

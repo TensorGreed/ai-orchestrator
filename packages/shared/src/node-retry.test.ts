@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RETRY_MAX_DELAY_MS,
-  httpFailsOnErrorStatus,
+  httpErrorStatusMode,
+  httpStatusFailsNode,
   nodeSetsRetries,
   parseRetryAfterMs,
   parseStatusList,
@@ -29,17 +30,23 @@ describe("status lists", () => {
 
 describe("fail on HTTP error status", () => {
   it("follows the stored option", () => {
-    expect(httpFailsOnErrorStatus({ failOnHttpError: true })).toBe(true);
-    expect(httpFailsOnErrorStatus({ failOnHttpError: false, retryCount: 3 })).toBe(false);
+    expect(httpErrorStatusMode({ failOnHttpError: true })).toBe("all");
+    expect(httpErrorStatusMode({ failOnHttpError: false, retryCount: 3 })).toBe("none");
+    expect(httpStatusFailsNode(404, { failOnHttpError: true })).toBe(true);
+    expect(httpStatusFailsNode(304, { failOnHttpError: true })).toBe(false);
   });
 
-  it("keeps older nodes returning the response unless they ask for retries", () => {
-    expect(httpFailsOnErrorStatus({})).toBe(false);
-    expect(httpFailsOnErrorStatus({ retryCount: 0 })).toBe(false);
-    expect(httpFailsOnErrorStatus({ retryCount: 2 })).toBe(true);
-    expect(httpFailsOnErrorStatus({ retry: { enabled: true } })).toBe(true);
-    expect(httpFailsOnErrorStatus({}, { retryOnFail: true })).toBe(true);
+  it("keeps older nodes returning the response, except retried statuses when they ask for retries", () => {
+    expect(httpErrorStatusMode({})).toBe("none");
+    expect(httpErrorStatusMode({ retryCount: 0 })).toBe("none");
+    expect(httpErrorStatusMode({ retryCount: 2 })).toBe("retry_list");
+    expect(httpErrorStatusMode({ retry: { enabled: true } })).toBe("retry_list");
+    expect(httpErrorStatusMode({}, { retryOnFail: true })).toBe("retry_list");
     expect(nodeSetsRetries({ retry: { enabled: false } })).toBe(false);
+    expect(httpStatusFailsNode(503, { retryCount: 2 })).toBe(true);
+    expect(httpStatusFailsNode(404, { retryCount: 2 })).toBe(false);
+    expect(httpStatusFailsNode(404, { retryCount: 2, retryOnStatus: "404" })).toBe(true);
+    expect(httpStatusFailsNode(500, {})).toBe(false);
   });
 });
 
@@ -77,5 +84,22 @@ describe("Retry-After", () => {
   it("ignores a missing or unreadable header", () => {
     expect(parseRetryAfterMs(null)).toBeUndefined();
     expect(parseRetryAfterMs("soon")).toBeUndefined();
+  });
+});
+
+describe("errorConfig in the workflow contract", () => {
+  it("is kept when a workflow is parsed (saved through the API)", async () => {
+    const { workflowSchema } = await import("./schemas");
+    const parsed = workflowSchema.parse({
+      id: "wf",
+      name: "wf",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "a", type: "http_request", name: "a", position: { x: 0, y: 0 }, config: {}, errorConfig: { retryOnFail: true, maxRetries: 2, retryIntervalMs: 500, continueOnFail: false } }
+      ],
+      edges: []
+    });
+    expect(parsed.nodes[0]!.errorConfig).toEqual({ retryOnFail: true, maxRetries: 2, retryIntervalMs: 500, continueOnFail: false });
   });
 });

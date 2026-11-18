@@ -140,11 +140,30 @@ describe("HTTP Request: fail on HTTP error status", () => {
     expect(resultOf(result, "http").output).toMatchObject({ status: 500, ok: false });
   });
 
-  it("makes an older node that asks for retries fail on an error status, so the retries apply", async () => {
+  it("makes an older node that asks for retries retry its retried statuses and fail once they are spent", async () => {
     const calls = stubStatuses([503]);
     const result = await executeWorkflow({ workflow: single({ urlTemplate: "https://api.example.com/x", retryCount: 1, retryDelayMs: 1 }) }, deps());
     expect(calls).toHaveLength(2);
     expect(result.status).toBe("error");
+    expect(resultOf(result, "http").error).toContain("HTTP 503");
+  });
+
+  it("keeps an older node that asks for retries returning other error statuses", async () => {
+    const calls = stubStatuses([404]);
+    const result = await executeWorkflow({ workflow: single({ urlTemplate: "https://api.example.com/x", retryCount: 2, retryDelayMs: 1 }) }, deps());
+    expect(calls).toHaveLength(1);
+    expect(result.status).toBe("success");
+    expect(resultOf(result, "http").output).toMatchObject({ status: 404, ok: false });
+  });
+
+  it("treats errorConfig.retryOnFail on an older node the same way", async () => {
+    const calls = stubStatuses([502, 200]);
+    const result = await executeWorkflow(
+      { workflow: single({ urlTemplate: "https://api.example.com/x" }, { retryOnFail: true, maxRetries: 2, retryIntervalMs: 1 }) },
+      deps()
+    );
+    expect(calls).toHaveLength(2);
+    expect(result.status).toBe("success");
   });
 });
 
@@ -374,6 +393,57 @@ describe("error output (On Error = branch)", () => {
     stubStatuses([304]);
     const result = await executeWorkflow({ workflow: single({ urlTemplate: "https://api.example.com/x", failOnHttpError: true, retryCount: 0 }) }, deps());
     expect(resultOf(result, "http").status).toBe("success");
+  });
+
+  it("does not run a node an IF skipped just because a failed node's Error output also reaches it", async () => {
+    stubStatuses([500]);
+    // start → gate(IF, false) ─true→ a → x;  start → http ─error→ e → x.  The IF skips x (not reachable from its taken branch).
+    const run = (ifFirst: boolean) => {
+      const ifNodes = [node("gate", "if_node", { condition: "{{ false }}" }), node("a", "set_node", { assignments: [{ key: "from", valueTemplate: "a" }] })];
+      const httpNodes = [
+        node("http", "http_request", { method: "GET", urlTemplate: "https://api.example.com/x", failOnHttpError: true, onError: "branch", retryCount: 0 }),
+        node("e", "set_node", { assignments: [{ key: "from", valueTemplate: "e" }] })
+      ];
+      return executeWorkflow(
+        {
+          workflow: workflow(
+            [node("start", "manual_trigger"), ...(ifFirst ? [...ifNodes, ...httpNodes] : [...httpNodes, ...ifNodes]), node("x", "set_node", { assignments: [{ key: "shared", valueTemplate: "x" }] }), node("out", "output")],
+            [edge("start", "gate"), edge("gate", "a", "true"), edge("a", "x"), edge("start", "http"), edge("http", "e", "error"), edge("e", "x"), edge("x", "out")]
+          )
+        },
+        deps()
+      );
+    };
+    const statuses = async (ifFirst: boolean) => {
+      const result = await run(ifFirst);
+      return ["a", "e", "x"].map((id) => resultOf(result, id).status);
+    };
+    const ifFirst = await statuses(true);
+    const httpFirst = await statuses(false);
+    expect(ifFirst).toEqual(httpFirst);
+    expect(ifFirst).toEqual(["skipped", "success", "skipped"]);
+  });
+
+  it("runs an error handler shared by two nodes when one of them fails, in either node order", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => new Response("{}", { status: String(input).includes("/bad") ? 500 : 200, headers: { "content-type": "application/json" } }))
+    );
+    const http = (id: string, path: string) =>
+      node(id, "http_request", { method: "GET", urlTemplate: `https://api.example.com${path}`, failOnHttpError: true, onError: "branch", retryCount: 0 });
+    for (const goodFirst of [true, false]) {
+      const pair = goodFirst ? [http("good", "/ok"), http("bad", "/bad")] : [http("bad", "/bad"), http("good", "/ok")];
+      const result = await executeWorkflow(
+        {
+          workflow: workflow(
+            [node("start", "manual_trigger"), ...pair, node("handler", "set_node", { assignments: [{ key: "handled", valueTemplate: "{{error}}" }] }), node("out", "output")],
+            [edge("start", "good"), edge("start", "bad"), edge("good", "handler", "error"), edge("bad", "handler", "error"), edge("good", "out"), edge("bad", "out")]
+          )
+        },
+        deps()
+      );
+      expect([goodFirst, resultOf(result, "handler").status]).toEqual([goodFirst, "success"]);
+    }
   });
 
   it("is checked by validation", () => {

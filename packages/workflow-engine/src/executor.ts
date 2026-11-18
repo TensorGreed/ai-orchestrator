@@ -68,7 +68,7 @@ import {
   workflowToolServerKey,
   effectiveModelName,
   DEFAULT_RETRY_MAX_DELAY_MS,
-  httpFailsOnErrorStatus,
+  httpStatusFailsNode,
   parseRetryAfterMs,
   retryDelayFor,
   statusInList,
@@ -4715,8 +4715,8 @@ async function executeNodeHandler(
           responseHeaders[key] = value;
         });
 
-        // 304 Not Modified answers a conditional request: it is not an error.
-        if (!response.ok && response.status !== 304 && httpFailsOnErrorStatus(config, node.errorConfig)) {
+        // 304 Not Modified answers a conditional request: it is not an error. An older node fails only on its retried statuses.
+        if (!response.ok && httpStatusFailsNode(response.status, config, node.errorConfig)) {
           // The error body is not read into the run: it is outside content the error output would carry unlabelled.
           await response.body?.cancel().catch(() => undefined);
           throw HttpStatusError.fromResponse({
@@ -9424,6 +9424,13 @@ async function executeWorkflowRun(
   // When a branching node (if_node, switch_node, try_catch) runs, we add
   // all nodes on non-taken branches to this set.
   const skippedByBranch = new Set<string>(request.resumeState?.skippedByBranch ?? []);
+  /**
+   * Nodes skipped only because a node whose Error output reaches them succeeded. Another node's failure can still
+   * route to them (a shared error handler); a skip by an IF, a Switch or another branch is final.
+   */
+  const errorOutputOnlySkips = new Set<string>();
+  /** Nodes a failed node's Error output routed to: a later success of another node does not skip them. */
+  const errorOutputActivated = new Set<string>();
   const loopInlineExecutedNodes = new Set<string>();
 
   // try_catch error routing: maps try_catch nodeId -> error branch target nodeIds
@@ -9490,6 +9497,7 @@ async function executeWorkflowRun(
           for (const candidate of descendantCache.getNodeAndDescendants(target)) {
             if (!protectedNodes.has(candidate)) {
               skippedByBranch.add(candidate);
+              errorOutputOnlySkips.delete(candidate);
             }
           }
         }
@@ -9512,8 +9520,11 @@ async function executeWorkflowRun(
         const protectedNodes = descendantCache.getReachableFromRoots(takenTargets);
         for (const target of errorTargets) {
           for (const candidate of descendantCache.getNodeAndDescendants(target)) {
-            if (!protectedNodes.has(candidate)) {
-              skippedByBranch.add(candidate);
+            if (!protectedNodes.has(candidate) && !errorOutputActivated.has(candidate)) {
+              if (!skippedByBranch.has(candidate)) {
+                skippedByBranch.add(candidate);
+                errorOutputOnlySkips.add(candidate);
+              }
             }
           }
         }
@@ -9539,17 +9550,24 @@ async function executeWorkflowRun(
    * On Error = branch: the targets of the failed node's `error` output run and
    * every other output (the main one included) is skipped, except nodes the
    * error output also reaches. False when nothing is connected to `error`.
+   *
+   * A node another branch (an IF, a Switch) already skipped stays skipped, as
+   * when the branch runs after this node. Only a resumed approval clears skips
+   * on its error output (the state it was paused with, as before).
    */
-  const routeFailureToErrorOutput = (nodeId: string): boolean => {
+  const routeFailureToErrorOutput = (nodeId: string, options: { clearSkips?: boolean } = {}): boolean => {
     const errorTargets = branchTargets.get(nodeId)?.get(ERROR_OUTPUT_HANDLE) ?? [];
     if (errorTargets.length === 0) {
       return false;
     }
     const protectedNodes = descendantCache.getReachableFromRoots(errorTargets);
     for (const target of errorTargets) {
-      skippedByBranch.delete(target);
-      for (const descendant of descendantCache.getDescendants(target)) {
-        skippedByBranch.delete(descendant);
+      for (const candidate of [target, ...descendantCache.getDescendants(target)]) {
+        if (options.clearSkips || errorOutputOnlySkips.has(candidate)) {
+          skippedByBranch.delete(candidate);
+          errorOutputOnlySkips.delete(candidate);
+        }
+        errorOutputActivated.add(candidate);
       }
     }
     for (const edge of workflow.edges) {
@@ -9559,6 +9577,7 @@ async function executeWorkflowRun(
       for (const candidate of descendantCache.getNodeAndDescendants(edge.target)) {
         if (!protectedNodes.has(candidate)) {
           skippedByBranch.add(candidate);
+          errorOutputOnlySkips.delete(candidate);
         }
       }
     }
@@ -9694,6 +9713,7 @@ async function executeWorkflowRun(
           for (const desc of scope.successDescendants) {
             if (desc !== waitingNode.id) {
               skippedByBranch.add(desc);
+              errorOutputOnlySkips.delete(desc);
             }
           }
           for (const errorTarget of scope.errorTargets) {
@@ -9726,7 +9746,7 @@ async function executeWorkflowRun(
           });
           hadContinuedErrors = true;
         } else if (onError === "branch" && branchTargets.has(waitingNode.id)) {
-          if (routeFailureToErrorOutput(waitingNode.id)) {
+          if (routeFailureToErrorOutput(waitingNode.id, { clearSkips: true })) {
             nodeOutputs.set(waitingNode.id, {
               ...decisionPayload,
               error: rejectionError
@@ -10589,6 +10609,7 @@ async function executeWorkflowRun(
           for (const desc of scope.successDescendants) {
             if (desc !== node.id) {
               skippedByBranch.add(desc);
+              errorOutputOnlySkips.delete(desc);
             }
           }
           // Un-skip error branch targets (they were initially skipped by branch routing)
