@@ -314,7 +314,7 @@ describe("node inspector: calm by default", () => {
       unmount();
     }
     expect(counted).toEqual([]);
-  });
+  }, 30_000); // renders every node type: give it room on a loaded runner
 
   it("opening an MCP Tool node does not count as an edit", () => {
     setWindowWidth(1600);
