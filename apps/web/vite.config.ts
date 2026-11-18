@@ -42,7 +42,7 @@ function demoMode(): Plugin {
   };
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode, command }) => {
   const isWidgetBuild = mode === "widget";
   const envDir = path.resolve(__dirname, "../../");
   const env = loadEnv(mode, envDir, "");
@@ -98,6 +98,8 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    // The dev server tells the app which port it proxies the API to, so a webhook's direct API URL names the real one.
+    ...(command === "serve" ? { define: { "import.meta.env.VITE_API_PORT": JSON.stringify(String(targetPort)) } } : {}),
     resolve: {
       extensions: [".tsx", ".ts", ".jsx", ".js", ".mjs", ".json"]
     },

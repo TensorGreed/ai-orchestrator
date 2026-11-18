@@ -1058,6 +1058,8 @@ export async function runWebhookStream(
     system_prompt?: string;
     user_prompt?: string;
     variables?: Record<string, unknown>;
+    /** The request body the webhook receives: what `{{webhook.<field>}}` reads. */
+    payload?: Record<string, unknown>;
   },
   handlers: WorkflowExecuteStreamHandlers = {}
 ) {

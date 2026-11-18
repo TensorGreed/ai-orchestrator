@@ -153,7 +153,7 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
         </span>
       </div>
       <div className="run-tape-lanes">
-        {lanes.map((lane) => {
+        {lanes.map((lane, laneIndex) => {
           const left = (lane.startMs / denominator) * 100;
           const width = Math.max((lane.durationMs / denominator) * 100, 0.6);
           const llmWidth = lane.llmMs !== null && lane.durationMs > 0 ? Math.min((lane.llmMs / lane.durationMs) * 100, 100) : 0;
@@ -172,7 +172,8 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
           const Tag = onSelectNode ? "button" : "div";
           return (
             <Tag
-              key={lane.nodeId}
+              // A Loop body's node has one lane per pass, so its id alone is not a unique key.
+              key={`${lane.nodeId}#${laneIndex}`}
               type={onSelectNode ? "button" : undefined}
               className={`run-tape-lane run-tape-lane-${lane.status}`}
               role="row"
