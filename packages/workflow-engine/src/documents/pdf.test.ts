@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -319,18 +320,23 @@ describe("the reader child process", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
     const child = spawnPdfChild(64, fileURLToPath(new URL("./pdf-child-probe.fixture.mjs", import.meta.url)));
+    const victim = spawn("sleep", ["30"], { stdio: "ignore" });
     try {
       await new Promise<void>((resolve) => child.once("message", () => resolve()));
       const report = await new Promise<Record<string, unknown>>((resolve) => {
         child.once("message", (message) => resolve(message as Record<string, unknown>));
-        child.send({ secretFile, writeFile: join(dir, "written.txt"), port, parentPid: process.pid });
+        child.send({ secretFile, writeFile: join(dir, "written.txt"), port, parentPid: process.pid, victimPid: victim.pid });
       });
-      expect(report).toMatchObject({ readOutside: "denied", readEnviron: "denied", readPackage: "allowed", write: "denied", childProcess: "denied", worker: "denied", evalCode: "denied", envKeys: 0, signal: "denied", binding: "denied" });
+      expect(report).toMatchObject({ readOutside: "denied", readEnviron: "denied", readPackage: "allowed", write: "denied", childProcess: "denied", worker: "denied", evalCode: "denied", envKeys: 0, signal: "denied", debugProcess: "denied", leftFunctions: [] });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(victim.exitCode).toBeNull();
+      expect(victim.signalCode).toBeNull();
       expect(existsSync(join(dir, "written.txt"))).toBe(false);
       // The permission model covers sockets from Node 25 on (the API image runs Node 26).
       if (process.allowedNodeEnvironmentFlags.has("--allow-net")) expect(report.network).toBe("denied");
     } finally {
       child.kill("SIGKILL");
+      victim.kill("SIGKILL");
       server.close();
       rmSync(dir, { recursive: true, force: true });
     }

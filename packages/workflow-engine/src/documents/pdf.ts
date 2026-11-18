@@ -69,6 +69,8 @@ export function configurePdfExtraction(limits: Partial<PdfLimits>): void {
   if (positiveInt(limits.maxBytes)) next.maxBytes = Math.floor(limits.maxBytes);
   if (positiveInt(limits.maxChars)) next.maxChars = Math.floor(limits.maxChars);
   configured = next;
+  // A raised cap may let waiting readers start now.
+  pump();
 }
 
 /** The PDF limits in force. */

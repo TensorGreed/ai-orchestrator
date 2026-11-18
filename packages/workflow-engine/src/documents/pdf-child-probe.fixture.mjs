@@ -2,7 +2,7 @@
 // place of pdf-child.mjs) and hardened the same way first, it tries what a document must never make the reader do and
 // reports each outcome.
 
-import "./pdf-child-harden.mjs";
+import { REMOVED_PROCESS_FUNCTIONS } from "./pdf-child-harden.mjs";
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
@@ -17,7 +17,7 @@ const attempt = (run) => {
   }
 };
 
-process.once("message", async ({ secretFile, writeFile, port, parentPid }) => {
+process.once("message", async ({ secretFile, writeFile, port, parentPid, victimPid }) => {
   const assetRoot = process.argv[2];
   const network = await new Promise((resolve) => {
     try {
@@ -54,7 +54,16 @@ process.once("message", async ({ secretFile, writeFile, port, parentPid }) => {
         return error instanceof TypeError ? "denied" : `error:${error?.name}`;
       }
     })(),
-    binding: attempt(() => process.binding("fs")),
+    // _debugProcess sends SIGUSR1, which ends a process that is not Node: the victim must still be alive afterwards.
+    debugProcess: (() => {
+      try {
+        process._debugProcess(victimPid);
+        return "allowed";
+      } catch (error) {
+        return error instanceof TypeError ? "denied" : `error:${error?.name}`;
+      }
+    })(),
+    leftFunctions: REMOVED_PROCESS_FUNCTIONS.filter((name) => typeof process[name] === "function"),
     network
   });
 });
