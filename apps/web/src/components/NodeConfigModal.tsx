@@ -6824,6 +6824,7 @@ export function NodeInspector({
                 </div>
               ) : null}
               <JsonDraftField<Record<string, unknown> | undefined>
+                key={`${node.id}:vectorStoreConfig`}
                 label="Vector Store Extra Config (JSON)"
                 value={asRecord(config.vectorStoreConfig)}
                 accept={(parsed) =>
@@ -6839,6 +6840,7 @@ export function NodeInspector({
                 }
               />
               <JsonDraftField<unknown[]>
+                key={`${node.id}:documents`}
                 label="Inline Documents (JSON array)"
                 value={inlineDocuments}
                 accept={(parsed) => (Array.isArray(parsed) ? parsed : undefined)}

@@ -59,4 +59,26 @@ describe("ErrorWorkflowDialog", () => {
     await userEvent.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps focus where the user put it when the host re-renders with a new onClose", async () => {
+    const { rerender } = render(<ErrorWorkflowDialog workflowId="wf-1" errorWorkflowId={undefined} workflows={WORKFLOWS} onChange={vi.fn()} onClose={() => undefined} />);
+    const done = screen.getByRole("button", { name: "Done" });
+    done.focus();
+    const onClose = vi.fn();
+    rerender(<ErrorWorkflowDialog workflowId="wf-1" errorWorkflowId="wf-alerts" workflows={WORKFLOWS} onChange={vi.fn()} onClose={onClose} />);
+    expect(done).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns focus to the element that opened it when it closes", () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    const { unmount } = render(<ErrorWorkflowDialog workflowId="wf-1" errorWorkflowId={undefined} workflows={WORKFLOWS} onChange={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByLabelText("Run on failure")).toHaveFocus();
+    unmount();
+    expect(opener).toHaveFocus();
+    opener.remove();
+  });
 });

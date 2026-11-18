@@ -135,6 +135,9 @@ describe("evaluateConditionTemplate failures", () => {
     reads.length = 0;
     runInLabelScope(scope, () => evaluateConditionTemplate("{{score}} > results.limits.max", { score: 95, results: { limits: { max: 90 } } }));
     expect(reads).toEqual(["expr:0  > results.limits.max", "path:score"]);
+    reads.length = 0;
+    runInLabelScope(scope, () => evaluateConditionTemplate("{{a}} && `${$json.b}` === 'x'", { a: 1, b: "x" }));
+    expect(reads[0]).toBe("expr:0  && `${$json.b}` === 'x'");
   });
 
   it("allows a trailing line comment", () => {

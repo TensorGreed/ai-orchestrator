@@ -123,6 +123,8 @@ const CONDITION_KEYWORDS = new Set(["true", "false", "null", "undefined", "NaN",
 
 /** True when a condition's text outside its `{{ }}` names something (a variable, `$json`, `results`), not only operators and literals. */
 function conditionTextReadsData(outside: string): boolean {
+  // A template literal can hold code in `${ }`: counted as a read rather than parsed.
+  if (outside.includes("`")) return true;
   const code = outside.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g, "");
   for (const word of code.match(/[A-Za-z_$][\w$]*/g) ?? []) if (!CONDITION_KEYWORDS.has(word)) return true;
   return false;

@@ -22,19 +22,23 @@ interface ErrorWorkflowDialogProps {
 export function ErrorWorkflowDialog({ workflowId, errorWorkflowId, workflows, onChange, onClose }: ErrorWorkflowDialogProps) {
   const selectId = useId();
   const selectRef = useRef<HTMLSelectElement>(null);
-  // Focus starts on the picker and goes back where it was when the dialog closes; Escape closes it from anywhere.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  // Focus starts on the picker once, when the dialog opens, and goes back where it was when it closes (if that is
+  // still on the page; otherwise to the editor's menu button). Escape closes it from anywhere.
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     selectRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onCloseRef.current();
     };
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
-      previous?.focus();
+      const target = previous?.isConnected ? previous : document.querySelector<HTMLElement>('button[aria-label="More actions"]');
+      target?.focus();
     };
-  }, [onClose]);
+  }, []);
   const current = errorWorkflowId ?? "";
   const options = workflows.filter((workflow) => workflow.id !== workflowId);
   // A saved id that is not in the list (another project's shared workflow, or one deleted since) stays visible.
