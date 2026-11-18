@@ -314,3 +314,26 @@ describe("llm_call usage on providers without a streaming adapter", () => {
     });
   }
 });
+
+describe("Azure OpenAI usage model name", () => {
+  // Prices for Azure are filed by deployment name, the name the adapter calls, as model allowlists and spans read it.
+  const provider: LLMProviderConfig = { providerId: "azure_openai", model: "gpt-4o-mini", baseUrl: "https://x.openai.azure.com", secretRef, extra: { deployment: "prod-mini" } };
+
+  it("records the deployment as the model of a non-streamed call", async () => {
+    stubFetch(() => jsonResponse({ choices: [{ message: { content: ANSWER }, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 } }));
+    const { telemetry } = await runLlm(provider, { stream: false });
+    expect(telemetry).toMatchObject({ providerId: "azure_openai", model: "prod-mini", usage: { inputTokens: 7, outputTokens: 2 } });
+  });
+
+  it("records the deployment as the model of a streamed call", async () => {
+    stubFetch(() => openAIStream({ prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 }));
+    const { telemetry } = await runLlm(provider, { stream: true });
+    expect(telemetry).toMatchObject({ providerId: "azure_openai", model: "prod-mini" });
+  });
+
+  it("keeps the model field for an Azure model without a separate deployment", async () => {
+    stubFetch(() => jsonResponse({ choices: [{ message: { content: ANSWER }, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 } }));
+    const { telemetry } = await runLlm({ ...provider, extra: undefined }, { stream: false });
+    expect(telemetry.model).toBe("gpt-4o-mini");
+  });
+});

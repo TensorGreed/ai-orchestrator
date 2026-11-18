@@ -15,9 +15,15 @@
  *     `LLM_PRICING_OVERRIDES_JSON` (see config.ts) rather than fork.
  *   - Models not in the table emit cost=$0 with a warn log. Better to
  *     under-report than to invent a bogus number.
- *   - `cachedInputTokens` are billed at the cached-input rate when the
- *     provider exposes one (Anthropic, Gemini, OpenAI prompt-caching);
- *     otherwise they fall through to the standard input rate.
+ *   - Usage arrives in one shape from every adapter: `inputTokens` is the
+ *     whole prompt and `cachedInputTokens` the part of it served from the
+ *     provider's cache (the Anthropic and Gemini adapters convert their
+ *     counts to this). Cached tokens are billed at the cached-input rate
+ *     where the table has one, else at the input rate; the rest of the
+ *     prompt at the input rate.
+ *   - Provider ids are matched in their canonical form (`azure_openai`,
+ *     `openai_compatible`): the table, overrides and lookups all accept
+ *     `azure-openai` or `Azure_OpenAI` for the same provider.
  */
 
 import { randomUUID } from "node:crypto";
@@ -83,8 +89,8 @@ export const DEFAULT_PRICING: PricingTable = {
   // operators override (e.g. self-hosted GPU costs amortized per-token).
   ollama: {},
   echo: {},
-  "openai-compatible": {},
-  "azure-openai": {}
+  openai_compatible: {},
+  azure_openai: {}
 };
 
 /**
@@ -319,7 +325,7 @@ export class UsageService {
    * so callers can tell "free" apart from "unknown" (Phase 10.1 tool telemetry).
    */
   estimateCostUsd(providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number): number | null {
-    const p = this.pricing[providerId]?.[model];
+    const p = this.pricing[canonicalPricingProviderId(providerId)]?.[model];
     return p ? costOf(p, inputTokens, outputTokens, cachedInputTokens) : null;
   }
 
@@ -328,12 +334,23 @@ export class UsageService {
    * Null when neither prices the model.
    */
   estimateAiGatewayCostUsd(providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number): number | null {
-    const p = this.pricing[providerId]?.[model] ?? AI_GATEWAY_PRICING[providerId]?.[model];
+    const provider = canonicalPricingProviderId(providerId);
+    const p = this.pricing[provider]?.[model] ?? AI_GATEWAY_PRICING[provider]?.[model];
     return p ? costOf(p, inputTokens, outputTokens, cachedInputTokens) : null;
   }
 }
 
+/**
+ * The provider id a price is filed under: trimmed, lower case, `-` as `_`, so `azure-openai` (how some pages and older
+ * override files spell it) finds the prices of the `azure_openai` adapter.
+ */
+export function canonicalPricingProviderId(providerId: string): string {
+  return providerId.trim().toLowerCase().replace(/-/g, "_");
+}
+
 function costOf(p: ModelPricing, inputTokens: number, outputTokens: number, cachedInputTokens: number): number {
+  // Cached tokens are part of the prompt; a count above the prompt (a provider quirk) is capped at it.
+  cachedInputTokens = Math.min(Math.max(0, cachedInputTokens), Math.max(0, inputTokens));
   const billableInput = Math.max(0, inputTokens - cachedInputTokens);
   const cachedRate = p.cachedInputUsdPer1M ?? p.inputUsdPer1M;
   const inputCost = (billableInput / 1_000_000) * p.inputUsdPer1M;
@@ -373,7 +390,9 @@ function mergePricing(base: PricingTable, overridesJson?: string): PricingTable 
 
 function mergePricingTables(base: PricingTable, overrides: PricingTable): PricingTable {
   const out = cloneTable(base);
-  for (const [providerId, models] of Object.entries(overrides)) {
+  for (const [rawProviderId, models] of Object.entries(overrides)) {
+    if (!models || typeof models !== "object") continue;
+    const providerId = canonicalPricingProviderId(rawProviderId);
     if (!out[providerId]) out[providerId] = {};
     for (const [model, pricing] of Object.entries(models)) {
       out[providerId]![model] = pricing;
@@ -384,7 +403,10 @@ function mergePricingTables(base: PricingTable, overrides: PricingTable): Pricin
 
 function cloneTable(t: PricingTable): PricingTable {
   const out: PricingTable = {};
-  for (const [k, v] of Object.entries(t)) out[k] = { ...v };
+  for (const [k, v] of Object.entries(t)) {
+    const providerId = canonicalPricingProviderId(k);
+    out[providerId] = { ...out[providerId], ...v };
+  }
   return out;
 }
 
