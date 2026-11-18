@@ -43,7 +43,7 @@ When the authorization server supports the parameter, the token that comes back 
 
 ## In L2M
 
-L2M sends `resource` on the authorization request, the token request and every refresh ([OAuth for remote servers](/product/mcp-server-registry#oauth-for-remote-servers)). It uses the `resource` from the server's protected resource metadata, after checking that it is on the server's own origin, and otherwise the server's URL with the fragment removed and the scheme and host in lowercase. The [MCP gateway](/product/mcp-gateway#clients) does not take OAuth tokens from its clients, and calls upstream servers with the registry's own credentials, never a client's token.
+L2M sends `resource` on the authorization request, the token request and every refresh ([OAuth for remote servers](/product/mcp-server-registry#oauth-for-remote-servers)). It uses the `resource` from the server's protected resource metadata, after checking that it is the server's URL, as RFC 9728 requires, or a parent path of it on the same origin; it sends the value exactly as the server named it. A document with no `resource` is refused. The [MCP gateway](/product/mcp-gateway#clients) does not take OAuth tokens from its clients, and calls upstream servers with the registry's own credentials, never a client's token.
 
 ## Further reading
 

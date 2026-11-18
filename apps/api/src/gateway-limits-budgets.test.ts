@@ -4,7 +4,7 @@
  * - Gateway usage is attributed to the client (usage_events.client_id, v54) and counts toward the toolset's project;
  *   gateway server calls record their sampling cost. Budgets get the `mcp_client` scope.
  * - A used-up `block` budget of the client, the toolset's project or the deployment refuses a gateway call (JSON-RPC
- *   -32032) before the tool policy; warn budgets only alert.
+ *   -31032) before the tool policy; warn budgets only alert.
  * - A block budget refuses runs from every trigger (webhooks 402, a schedule as a failed run, chat, forms, retries);
  *   replays of a run's MCP calls are not refused.
  * - Optional per-client rate limits (client overrides toolset): requests per minute with a burst, and concurrency.
@@ -502,10 +502,10 @@ describe("client and project budgets on the gateway", () => {
     const before = (await gatewayRows(store)).length;
     const runsBefore = (await runs(store)).length;
     const refused = await call("calculator", { expression: "2+2" });
-    expect(refused).toMatchObject({ outcome: "rpc_error", error: { code: -32032, message: 'Budget "IDE cap" exceeded for the current month.', data: { budgetId, period: "month" } } });
+    expect(refused).toMatchObject({ outcome: "rpc_error", error: { code: -31032, message: 'Budget "IDE cap" exceeded for the current month.', data: { budgetId, period: "month" } } });
     expect(refused.error!.data!.retryAfterSeconds).toBeGreaterThan(0);
     const workflowRefused = await call("lookup");
-    expect(workflowRefused.error?.code).toBe(-32032);
+    expect(workflowRefused.error?.code).toBe(-31032);
     // Neither call reached the server or started a run.
     expect((await gatewayRows(store)).length).toBe(before);
     expect((await runs(store)).length).toBe(runsBefore);
@@ -527,7 +527,7 @@ describe("client and project budgets on the gateway", () => {
     const fixture = await setup();
     await createBudget(fixture, { name: "IDE cap", scopeType: "mcp_client", scopeId: fixture.client.id, limitType: "tokens", limitValue: 50, action: "block" });
     await seedRunUsage(fixture.context.store, { tokens: 80, userId: `mcp-client:${fixture.client.name}` });
-    expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error?.code).toBe(-32032);
+    expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error?.code).toBe(-31032);
     expect((await clientBudgets(fixture, fixture.admin, fixture.client.id))[0]!.current).toBe(80);
   });
 
@@ -547,7 +547,7 @@ describe("client and project budgets on the gateway", () => {
     await createBudget(fixture, { name: "Gateway project", scopeType: "project", scopeId: "proj-gw", limitType: "usd", limitValue: 1, action: "block" });
     // Sampling through the toolset (no workflow in the project at all).
     await seedSampling(fixture.context.store, { clientId: fixture.peer.id, toolsetId: fixture.toolset.id, tokens: 3, costUsd: 2 });
-    expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error).toMatchObject({ code: -32032, message: 'Budget "Gateway project" exceeded for the current month.' });
+    expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error).toMatchObject({ code: -31032, message: 'Budget "Gateway project" exceeded for the current month.' });
     // A run of the project's own workflows (not a gateway call) is refused by the same budget.
     await fixture.context.store.upsertWorkflow({ ...triggerWorkflow("wf-proj-hook", "webhook_input"), projectId: "proj-gw" });
     expect((await fixture.context.app.inject({ method: "POST", url: "/webhook/hook-wf-proj-hook", payload: {} })).statusCode).toBe(402);
@@ -736,7 +736,7 @@ describe("a block budget refuses runs from every trigger", () => {
     await createBudget(fixture, { name: "Lookup cap", scopeType: "workflow", scopeId: "wf-lookup", limitType: "tokens", limitValue: 10, action: "block" });
     await seedRunUsage(fixture.context.store, { tokens: 50, workflowId: "wf-lookup" });
     const call = toolCaller(fixture);
-    expect((await call("lookup")).error).toMatchObject({ code: -32032, message: 'Budget "Lookup cap" exceeded for the current month.' });
+    expect((await call("lookup")).error).toMatchObject({ code: -31032, message: 'Budget "Lookup cap" exceeded for the current month.' });
     // Server tools and other workflows are not in that budget.
     expect((await call("calculator", { expression: "1+1" })).outcome).toBe("ok");
     expect((await call("ask", { text: "x" })).outcome).toBe("ok");
@@ -762,7 +762,7 @@ describe("a block budget refuses runs from every trigger", () => {
 
   it("refuses a gateway call under a used-up global block budget", async () => {
     const fixture = await overGlobalBudget();
-    expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error?.code).toBe(-32032);
+    expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error?.code).toBe(-31032);
   });
 });
 
@@ -781,10 +781,10 @@ describe("per-client rate limits", () => {
     expect((await call("calculator", { expression: "1+1" })).outcome).toBe("ok");
     expect((await call("lookup")).outcome).toBe("ok");
     const refused = await call("calculator", { expression: "1+1" });
-    expect(refused.error).toMatchObject({ code: -32029, data: { reason: "rate_limited" } });
+    expect(refused.error).toMatchObject({ code: -31029, data: { reason: "rate_limited" } });
     expect(refused.error!.message).toContain("2 calls per minute");
     expect(Number(refused.error!.data!.retryAfterMs)).toBeGreaterThan(0);
-    expect((await call("lookup")).error?.code).toBe(-32029);
+    expect((await call("lookup")).error?.code).toBe(-31029);
     const audits = await auditEvents(fixture.context.store, "mcp_gateway.rate_limited");
     expect(audits).toHaveLength(1);
     expect(audits[0]!.metadata).toMatchObject({ clientId: fixture.client.id, reason: "rate_limited", limitSource: "client" });
@@ -826,7 +826,7 @@ describe("per-client rate limits", () => {
     const inFlight = callNamed(fixture.context, fixture.toolset.slug, fixture.token, session, name, { expression: "1+1" });
     await started;
     const second = await callNamed(fixture.context, fixture.toolset.slug, fixture.token, session, name, { expression: "2+2" });
-    expect(second.error).toMatchObject({ code: -32029, data: { reason: "concurrency_limited" } });
+    expect(second.error).toMatchObject({ code: -31029, data: { reason: "concurrency_limited" } });
     releaseSlow();
     expect((await inFlight).outcome).toBe("ok");
     // The slot is free again.
@@ -845,7 +845,7 @@ describe("per-client rate limits", () => {
     const client = toolCaller(fixture);
     const peer = toolCaller(fixture, "peer");
     expect((await client("calculator", { expression: "1+1" })).outcome).toBe("ok");
-    expect((await client("calculator", { expression: "1+1" })).error).toMatchObject({ code: -32029 });
+    expect((await client("calculator", { expression: "1+1" })).error).toMatchObject({ code: -31029 });
     for (let index = 0; index < 3; index += 1) expect((await peer("calculator", { expression: "1+1" })).outcome).toBe("ok");
     const audits = await auditEvents(fixture.context.store, "mcp_gateway.rate_limited");
     expect(audits[0]!.metadata).toMatchObject({ limitSource: "toolset" });
@@ -1122,7 +1122,7 @@ describe("review M3: the client's Governance lists every budget that applies", (
       [global, "Deployment", true]
     ]);
     // The refusing one is what the client's calls get.
-    expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error).toMatchObject({ code: -32032, data: { budgetId: global } });
+    expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error).toMatchObject({ code: -31032, data: { budgetId: global } });
   });
 
   it("N-M1: a builder sees no amounts of the deployment's budget and no project they cannot read; an admin sees all", async () => {
@@ -1395,7 +1395,7 @@ describe("review L4: a gateway workflow tool's budgets are checked once, at the 
     await createBudget(fixture, { name: "Workflow project", scopeType: "project", scopeId: "proj-wf", limitType: "tokens", limitValue: 10, action: "block" });
     await seedRunUsage(store, { tokens: 50, projectId: "proj-wf" });
     const runsBefore = (await runs(store)).length;
-    expect((await tools("lookup")).error).toMatchObject({ code: -32032, message: 'Budget "Workflow project" exceeded for the current month.' });
+    expect((await tools("lookup")).error).toMatchObject({ code: -31032, message: 'Budget "Workflow project" exceeded for the current month.' });
     expect((await runs(store)).length).toBe(runsBefore);
     // The toolset's server tools are not in that project.
     expect((await tools("calculator", { expression: "1+1" })).outcome).toBe("ok");

@@ -105,6 +105,7 @@ import {
   toolError,
   toolSuccess,
   versionAllowsBatches,
+  withLegacyGatewayErrorCode,
   type ClassifiedMessage,
   type JsonRpcNotification,
   type JsonRpcRequest,
@@ -471,6 +472,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   const approvalWindowMs = config.MCP_GATEWAY_APPROVAL_WINDOW_MS ?? DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS;
   // MCP 2026-07-28 — modern callers are served only when switched on (D2: off by default).
   const modernMode: GatewayModernMode = config.MCP_GATEWAY_MODERN_PROTOCOL === "on" ? "on" : "off";
+  /** A session client's response: the pre-2026-11 codes of the gateway's own errors when MCP_GATEWAY_LEGACY_ERROR_CODES is on. */
+  const sessionResponse = (response: JsonRpcResponse): JsonRpcResponse =>
+    config.MCP_GATEWAY_LEGACY_ERROR_CODES === true ? withLegacyGatewayErrorCode(response) : response;
   const listTtlMs = config.MCP_GATEWAY_LIST_TTL_MS ?? DEFAULT_MCP_GATEWAY_LIST_TTL_MS;
   const listenMaxMs = config.MCP_GATEWAY_LISTEN_MAX_MS ?? DEFAULT_MCP_GATEWAY_LISTEN_MAX_MS;
   const listenMaxPerClient = config.MCP_GATEWAY_LISTEN_MAX_PER_CLIENT ?? DEFAULT_MCP_GATEWAY_LISTEN_MAX_PER_CLIENT;
@@ -3011,7 +3015,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           await Promise.all(
             requests.map(async (entry) => {
               const response = await dispatch(session, auth, toolset, entry, emit);
-              if (response !== SUPPRESSED) writeSse(reply, response);
+              if (response !== SUPPRESSED) writeSse(reply, sessionResponse(response));
             })
           );
         } finally {
@@ -3027,7 +3031,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           const response = await dispatch(session, auth, toolset, entry, noEmit);
           return response === SUPPRESSED
             ? rpcError(entry.id, JSON_RPC_ERRORS.requestCancelled, "Request cancelled.")
-            : response;
+            : sessionResponse(response);
         })
       );
       const all = [...responses, ...results];

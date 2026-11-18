@@ -9,6 +9,8 @@ socialCard: true
 
 # Supporting MCP 2026-07-28 next to older servers
 
+> **Update (2026-11-18):** session-based clients now get the gateway's `-31029` to `-31032` codes too, not only 2026-07-28 clients. The deprecated `MCP_GATEWAY_LEGACY_ERROR_CODES=true` setting gives session clients the old `-32029` to `-32032` while they migrate. See [Gateway error codes](/product/mcp-gateway#gateway-error-codes).
+
 The 2026-07-28 revision of the <Term id="model-context-protocol">Model Context Protocol</Term> changes the protocol's shape: the `initialize` handshake is gone, protocol sessions are gone, and every request describes itself. Between 12 and 13 November 2026 we merged support for it in L2M, as an <Term id="mcp-client">MCP client</Term> over HTTP and stdio and as a server on the <Term id="mcp-gateway">MCP gateway</Term>, next to the older revisions. This post explains what changed in the protocol, the problems that come with speaking two eras at once, and how we test that we got it right.
 
 ## What changed in the protocol

@@ -158,11 +158,11 @@ function rpcErrorFrom(id: JsonRpcRequest["id"] | null, error: { code: number; me
 }
 
 /**
- * D7 — the code a modern response carries for one of the gateway's own error codes. 2026-07-28 reserves
- * -32099..-32020 for codes the specification defines, so the gateway's -32029..-32032 (retry later, approval pending,
- * approval rejected, budget exceeded) move outside the JSON-RPC reserved range, keeping their last digits:
- * -31029..-31032. Codes the specification defines (-32020..-32022) and every other code are unchanged. Legacy
- * sessions keep the old codes.
+ * D7 — the code a modern response carries. MCP 2026-07-28 (Base Protocol, "Error Codes") reserves -32099..-32020 for
+ * codes the specification defines. The gateway's own codes already sit outside that range (-31029..-31032, see
+ * GATEWAY_ERROR_NAMES), and so do their pre-2026-11 equivalents once mapped; any other code from the reserved
+ * sub-range that the specification does not define moves out of it the same way (+1000). Codes the specification
+ * defines (-32020..-32022) and every other code are unchanged.
  */
 export function modernGatewayErrorCode(code: number): number {
   if (isMcpSpecReservedErrorCode(code) && !MCP_MODERN_ERROR_CODES.has(code)) return code + 1000;

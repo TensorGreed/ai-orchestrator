@@ -411,6 +411,14 @@ unless `OIDC_ENABLED=true`; with it unset nothing changes and none of the other
 SSO (OIDC)** under the password form.
 
 The API uses the Authorization Code flow with PKCE (S256), `state` and `nonce`.
+It reads `code_challenge_methods_supported` from the IdP's discovery document.
+When the list leaves out `S256` (for example only `plain`), sign-in is refused
+with "Single sign-on is unavailable", and the API log names the field: RFC 7636
+says a client that can use S256 must, and must not fall back to `plain`. When
+the field is missing or malformed, sign-in still sends S256 and the log notes it
+once per discovery fetch (RFC 7636, section 5: a provider without PKCE ignores
+it). Without `OIDC_CLIENT_SECRET` the note is a warning, because then only
+`state` and `nonce` protect the code if the provider ignores PKCE.
 The ID token must be signed with an asymmetric algorithm (RS*, PS* or ES*; `none`
 and HS* are refused) by a key in the IdP's JWKS, and its `iss`, `aud` (your client
 id), `azp`, `exp`, `iat` (60 seconds of clock skew, at most ten minutes old) and

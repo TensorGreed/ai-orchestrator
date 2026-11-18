@@ -161,17 +161,17 @@ A gateway client cannot wait inside one call, so a held-back gateway call return
   "jsonrpc": "2.0",
   "id": 7,
   "error": {
-    "code": -32030,
+    "code": -31030,
     "message": "Approval pending: MCP tool 'push' on server 'GitHub' needs approval by policy 'Prod pushes' (mtp_…). Ask an admin to approve request mga_…, then retry the same call with the same arguments.",
-    "data": { "approvalRequestId": "mga_…", "status": "pending", "ruleId": "mtp_…", "ruleName": "Prod pushes", "expiresAt": "…", "approvalWindowMs": 900000 }
+    "data": { "approvalRequestId": "mga_…", "status": "pending", "ruleId": "mtp_…", "ruleName": "Prod pushes", "expiresAt": "…", "approvalWindowMs": 900000, "gatewayError": "approval_pending", "legacyCode": -32030 }
   }
 }
 ```
 
 Admins see the request under **MCP → Policies → Gateway approvals**, with the client, the tool, the rule and the arguments, and approve or reject it. After an approval, the **identical** call (same client, server, tool, and arguments, whatever their key order) goes through **once** within `MCP_GATEWAY_APPROVAL_WINDOW_MS` (default 900000, 15 minutes). A call with other arguments, from another client, after the window, or a second retry asks again. Asking again before a decision returns the same pending request. A pending request that nobody decides expires after 24 hours.
 
-- **A rejection sticks.** After an admin rejects a request, the identical call is refused at once with JSON-RPC error **-32031** (`data.status: "rejected"`, the reason, and `retryAfter`, the decision time plus the approval window) and opens no new request. Once that window has passed, the identical call asks again. The first refused retry is audited (`mcp_gateway.approval_refused_rejected`), later ones are not.
-- **At most 20 pending requests per client.** Past that, a call that would open a new request gets **-32029** "retry later" (`data.reason: "approval_requests_pending"`) until some are decided or expire, audited once per client per approval window (`mcp_gateway.approval_capped`). The identical call of a request already pending still gets that request back.
+- **A rejection sticks.** After an admin rejects a request, the identical call is refused at once with JSON-RPC error **-31031** (`data.status: "rejected"`, the reason, and `retryAfter`, the decision time plus the approval window) and opens no new request. Once that window has passed, the identical call asks again. The first refused retry is audited (`mcp_gateway.approval_refused_rejected`), later ones are not.
+- **At most 20 pending requests per client.** Past that, a call that would open a new request gets **-31029** "retry later" (`data.reason: "approval_requests_pending"`) until some are decided or expire, audited once per client per approval window (`mcp_gateway.approval_capped`). The identical call of a request already pending still gets that request back.
 - **An approval is not lost to a refusal.** If the approved retry is refused before it reaches the server (rate limit, concurrency cap, open circuit), the approval is put back for a later retry inside the same window, also when the client cancelled the call while it waited for its turn. A cancelled call that went on to reach the server has used its approval. If two identical retries race, one runs and the other is told the approval was just used (`data.status: "used"`) instead of opening a new request.
 - **Retention.** Decided and expired requests are deleted 30 days after they were made, and sooner with the run history retention.
 - **Telemetry.** Gateway calls a rule denied, held for approval or refused after a rejection are in the audit log only: they have no tool-call telemetry row, so their `policy_decision_json` is never recorded. Rows exist for calls that ran (allow, shadow, approved).

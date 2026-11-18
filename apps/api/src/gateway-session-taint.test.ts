@@ -604,7 +604,7 @@ describe("what raises a session's mark", () => {
     const other = await openSession(fixture);
     expect((await callTool(fixture, other, "get_current_time")).outcome).toBe("ok");
     const limited = await callTool(fixture, sessionId, "get_current_time");
-    expect((limited.body.error as { code?: number } | undefined)?.code).toBe(-32029);
+    expect((limited.body.error as { code?: number } | undefined)?.code).toBe(-31029);
     expect((await sessionView(fixture, sessionId))?.labels).toEqual({ provenance: [], dataClasses: [] });
     expect((await sessionView(fixture, other))?.labels?.provenance).toEqual(["untrusted_external"]);
     expect(await auditEvents(fixture.context.store, "mcp_gateway.session_labels_raised")).toHaveLength(1);

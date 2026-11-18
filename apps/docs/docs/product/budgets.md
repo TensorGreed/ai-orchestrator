@@ -41,7 +41,7 @@ A used-up block budget stops a run before it starts, whatever started it:
 | Webhooks (`/webhook/` and `/webhook-test/`), chat, forms and app webhooks | HTTP 402, as above. A webhook's idempotency key is not used up by a refused request. |
 | Schedules, app and polling triggers | Nothing waits for an answer, so a failed run is recorded: `Budget "…" exceeded for the current month. The run did not start.` |
 | Replays that may call models or tools live | HTTP 402, as above (see below) |
-| MCP gateway tool calls | JSON-RPC error `-32032` (see [MCP gateway](./mcp-gateway.md#budgets-and-rate-limits)) |
+| MCP gateway tool calls | JSON-RPC error `-31032` (see [MCP gateway](./mcp-gateway.md#budgets-and-rate-limits)) |
 
 Runs dispatched to queue workers are checked on the instance that takes the request, before they are queued.
 

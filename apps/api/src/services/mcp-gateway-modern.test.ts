@@ -11,7 +11,7 @@ import {
   stripDescriptorHeaderAnnotations,
   validateModernGatewayMessage
 } from "./mcp-gateway-modern.js";
-import { JSON_RPC_ERRORS, rpcError, rpcResult } from "./mcp-gateway-protocol.js";
+import { GATEWAY_ERROR_NAMES, JSON_RPC_ERRORS, legacyGatewayErrorCode, rpcError, rpcResult, withLegacyGatewayErrorCode } from "./mcp-gateway-protocol.js";
 import crypto from "node:crypto";
 import { parseConfig, resolveNetworkSettings } from "../config.js";
 
@@ -124,7 +124,11 @@ describe("validateModernGatewayMessage", () => {
 });
 
 describe("modern error codes (D7)", () => {
-  it("moves the gateway's own reserved-range codes out of the JSON-RPC range and keeps everything else", () => {
+  it("keeps a code from the reserved sub-range that the specification does not define out of it", () => {
+    for (const legacy of [-32029, -32030, -32031, -32032, -32099]) expect(modernGatewayErrorCode(legacy)).toBe(legacy + 1000);
+  });
+
+  it("leaves the gateway's own codes outside the JSON-RPC range and keeps everything else", () => {
     expect(modernGatewayErrorCode(JSON_RPC_ERRORS.retryLater)).toBe(-31029);
     expect(modernGatewayErrorCode(JSON_RPC_ERRORS.approvalPending)).toBe(-31030);
     expect(modernGatewayErrorCode(JSON_RPC_ERRORS.approvalRejected)).toBe(-31031);
@@ -140,7 +144,7 @@ describe("modern error codes (D7)", () => {
 
   it("modernizes results and errors without changing message or data", () => {
     const error = modernizeGatewayResponse(rpcError(3, JSON_RPC_ERRORS.approvalPending, "Approval pending: x", { approvalRequestId: "mga_1" }), SERVER_INFO);
-    expect(error).toEqual({ jsonrpc: "2.0", id: 3, error: { code: -31030, message: "Approval pending: x", data: { approvalRequestId: "mga_1" } } });
+    expect(error).toEqual({ jsonrpc: "2.0", id: 3, error: { code: -31030, message: "Approval pending: x", data: { approvalRequestId: "mga_1", gatewayError: "approval_pending", legacyCode: -32030 } } });
     const result = modernizeGatewayResponse(rpcResult(4, { content: [], _meta: { executionId: "e1" } }), SERVER_INFO);
     expect(result).toEqual({
       jsonrpc: "2.0",
@@ -267,5 +271,51 @@ describe("subscriptions/listen helpers", () => {
       method: "notifications/tools/list_changed",
       params: { _meta: { "io.modelcontextprotocol/subscriptionId": "s" } }
     });
+  });
+});
+
+// MCP 2026-07-28, Base Protocol, "Error Codes": -32020..-32099 are "reserved for the MCP specification" and new codes
+// "SHOULD be allocated outside the JSON-RPC reserved range (-32768 to -32000)".
+describe("the gateway's own error codes", () => {
+  it("sit outside the JSON-RPC reserved range and name themselves in data", () => {
+    expect([...GATEWAY_ERROR_NAMES.entries()]).toEqual([
+      [-31029, "retry_later"],
+      [-31030, "approval_pending"],
+      [-31031, "approval_rejected"],
+      [-31032, "budget_exceeded"]
+    ]);
+    for (const code of GATEWAY_ERROR_NAMES.keys()) expect(code < -32768 || code > -32000).toBe(true);
+    expect(rpcError(1, JSON_RPC_ERRORS.retryLater, "Rate limited: x", { reason: "rate_limited", retryAfterMs: 5 }).error).toEqual({
+      code: -31029,
+      message: "Rate limited: x",
+      data: { reason: "rate_limited", retryAfterMs: 5, gatewayError: "retry_later", legacyCode: -32029 }
+    });
+    expect(rpcError(2, JSON_RPC_ERRORS.budgetExceeded, "Budget").error.data).toEqual({ gatewayError: "budget_exceeded", legacyCode: -32032 });
+    // Other codes are left alone.
+    expect(rpcError(3, JSON_RPC_ERRORS.invalidParams, "bad").error).toEqual({ code: -32602, message: "bad" });
+    expect(legacyGatewayErrorCode(-32602)).toBeUndefined();
+  });
+
+  it("can be sent with their earlier codes (MCP_GATEWAY_LEGACY_ERROR_CODES), data unchanged", () => {
+    const pending = rpcError(4, JSON_RPC_ERRORS.approvalPending, "Approval pending: x", { approvalRequestId: "mga_1" });
+    expect(withLegacyGatewayErrorCode(pending)).toEqual({
+      jsonrpc: "2.0",
+      id: 4,
+      error: { code: -32030, message: "Approval pending: x", data: { approvalRequestId: "mga_1", gatewayError: "approval_pending", legacyCode: -32030 } }
+    });
+    const other = rpcError(5, JSON_RPC_ERRORS.methodNotFound, "Method not found");
+    expect(withLegacyGatewayErrorCode(other)).toBe(other);
+    const result = rpcResult(6, { content: [] });
+    expect(withLegacyGatewayErrorCode(result)).toBe(result);
+  });
+});
+
+describe("MCP_GATEWAY_LEGACY_ERROR_CODES", () => {
+  const base = { SECRET_MASTER_KEY_BASE64: crypto.randomBytes(32).toString("base64") };
+  it("is off unless set to true", () => {
+    expect(parseConfig(base).MCP_GATEWAY_LEGACY_ERROR_CODES).toBeUndefined();
+    expect(parseConfig({ ...base, MCP_GATEWAY_LEGACY_ERROR_CODES: "" }).MCP_GATEWAY_LEGACY_ERROR_CODES).toBeUndefined();
+    expect(parseConfig({ ...base, MCP_GATEWAY_LEGACY_ERROR_CODES: "false" }).MCP_GATEWAY_LEGACY_ERROR_CODES).toBe(false);
+    expect(parseConfig({ ...base, MCP_GATEWAY_LEGACY_ERROR_CODES: "true" }).MCP_GATEWAY_LEGACY_ERROR_CODES).toBe(true);
   });
 });
