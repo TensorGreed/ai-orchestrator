@@ -19,6 +19,22 @@ Concepts: [Workflows vs agents](/learn/agents/workflows-vs-agents) explains when
 - Per-node run data on the canvas and in the node inspector (see [Run data](#run-data))
 - Agent port `+` buttons that open filtered drawers for Language Models, Memory, Tools, and Workers
 
+## Model nodes
+
+A new **LLM Call** (and a new chain node such as **Text Classifier** or **Summarization Chain**) starts on a model that
+works right away. When the API server's environment sets `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`
+(checked in that order), the node starts on that provider; otherwise, when you have saved a secret for OpenAI,
+Anthropic or Gemini, it starts on that provider with that secret; otherwise it starts on **Echo**, the built-in demo
+model. Echo answers with the prompt it receives, needs no key and calls nothing, so a new workflow runs on the first
+try. Pick a real provider in the node's **Provider** list when you are ready. A local Ollama is never picked for you.
+Nodes you already have keep the model they name.
+
+Opening a model node never contacts a model server. To pick from the models a provider offers, click **Load models**
+under the model field; until then, type the model name. Model lists for Ollama come only from the node's base URL or
+the server's `OLLAMA_BASE_URL`.
+
+The agent's **Language Models** drawer offers **LLM Call** too, so an agent can run on Echo before it has a real model.
+
 ## Workflow settings
 
 The **⋯** menu in the editor's top bar holds the settings of the whole workflow (they are saved with it):

@@ -337,3 +337,27 @@ describe("Azure OpenAI usage model name", () => {
     expect(telemetry.model).toBe("gpt-4o-mini");
   });
 });
+
+describe("a streamed llm_call whose server ignores stream:true", () => {
+  const compat: LLMProviderConfig = { providerId: "openai_compatible", model: "local-model", baseUrl: "http://compat.test/v1" };
+
+  it("answers with the JSON body's text instead of an empty success", async () => {
+    stubFetch(() => jsonResponse({ choices: [{ message: { content: "billing" }, finish_reason: "stop" }], usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 } }));
+    const { output, deltas, telemetry } = await runLlm(compat, { stream: true });
+    expect(output.answer).toBe("billing");
+    expect(deltas).toEqual(["billing"]);
+    expect(telemetry.usage).toMatchObject({ inputTokens: 4, outputTokens: 1, totalTokens: 5 });
+  });
+
+  it("fails the node on an empty stream instead of succeeding with no answer", async () => {
+    stubFetch(() => new Response("", { status: 200, headers: { "content-type": "text/event-stream" } }));
+    const { error } = await runLlm(compat, { stream: true, expectError: true });
+    expect(error).toContain("empty stream");
+  });
+
+  it("fails the node on a stream that ends with no answer at all", async () => {
+    stubFetch(() => sseResponse(["[DONE]"]));
+    const { error } = await runLlm(compat, { stream: true, expectError: true });
+    expect(error).toContain("without any answer");
+  });
+});

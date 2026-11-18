@@ -18,6 +18,8 @@ import {
   WORKFLOW_SCHEMA_VERSION,
   editorRunPrompts,
   nodeDefinitions,
+  pickDefaultModelProvider,
+  withDefaultModelProvider,
   type Folder,
   type McpElicitationView,
   type Project,
@@ -319,14 +321,15 @@ const chatModelNodeTypes: EditorNodeData["nodeType"][] = [
   "google_gemini_chat_model",
   "llm_call"
 ];
-const chatModelDrawerNodeTypes = chatModelNodeTypes.filter((type) => type !== "llm_call");
+// LLM Call is offered too: its provider picker includes the built-in Echo model, which runs without a key.
+const chatModelDrawerNodeTypes = chatModelNodeTypes;
 const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook_input", "text_input", "user_prompt"]);
 
 function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: AgentAttachmentHandle): NodeDrawerContext {
   if (sourceHandle === "chat_model") {
     return {
       title: "Language Models",
-      description: "Choose a chat model to attach to this AI Agent.",
+      description: "Choose a chat model to attach to this AI Agent. LLM Call can use the built-in Echo model, no key needed.",
       allowedTypes: chatModelDrawerNodeTypes,
       sourceNodeId,
       sourceHandle
@@ -1170,6 +1173,8 @@ function StudioApp() {
 
   const [definitions, setDefinitions] = useState<DefinitionNode[]>(nodeDefinitions as unknown as DefinitionNode[]);
   const [mcpServerDefinitions, setMcpServerDefinitions] = useState<MCPServerDefinition[]>([]);
+  // Hosted model providers whose key the API server's environment sets (from /api/definitions, builders only).
+  const [envModelProviders, setEnvModelProviders] = useState<string[]>([]);
   const [secrets, setSecrets] = useState<SecretListItem[]>([]);
 
   const [loading, setLoading] = useState(false);
@@ -2356,6 +2361,7 @@ function StudioApp() {
         }
         setDefinitions(definitionPayload.nodes);
         setMcpServerDefinitions(definitionPayload.mcpServers);
+        setEnvModelProviders(definitionPayload.envModelProviders ?? []);
       } catch (definitionError) {
         if (cancelled) {
           return;
@@ -4356,7 +4362,12 @@ function StudioApp() {
         data: {
           label: definition.label,
           nodeType: definition.type as EditorNodeData["nodeType"],
-          config: newNodeConfig(definition.type, definition.sampleConfig)
+          // A new model node starts on a configured provider (a server key, else a saved secret) or on Echo.
+          config: withDefaultModelProvider(
+            definition.type,
+            newNodeConfig(definition.type, definition.sampleConfig),
+            pickDefaultModelProvider({ envProviders: envModelProviders, secrets })
+          )
         }
       };
 
@@ -4389,7 +4400,7 @@ function StudioApp() {
       }
       setError(null);
     },
-    [edges, nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]
+    [edges, envModelProviders, nodes, pushHistorySnapshot, reactFlowInstance, secrets, setEdges, setNodes]
   );
 
   const onConnect = useCallback(

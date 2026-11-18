@@ -28,9 +28,20 @@ const PROVIDER_DEPENDENCIES: Record<string, { label: string; envVar?: string } |
   anthropic: { label: "Anthropic", envVar: "ANTHROPIC_API_KEY" },
   gemini: { label: "Google Gemini", envVar: "GEMINI_API_KEY" },
   azure_openai: { label: "Azure OpenAI" },
-  ollama: { label: "Ollama (local)" },
+  ollama: { label: "Ollama (local model server)" },
   openai_compatible: { label: "OpenAI-compatible endpoint" },
   ai_gateway: { label: "AI Gateway" }
+};
+
+/** The provider a dedicated chat model node calls (its type names it; it has no `config.provider`). */
+const CHAT_MODEL_NODE_PROVIDERS: Record<string, string> = {
+  openai_chat_model: "openai",
+  anthropic_chat_model: "anthropic",
+  ollama_chat_model: "ollama",
+  openai_compatible_chat_model: "openai_compatible",
+  ai_gateway_chat_model: "ai_gateway",
+  azure_openai_chat_model: "azure_openai",
+  google_gemini_chat_model: "gemini"
 };
 
 const VECTOR_STORE_DEPENDENCIES: Record<string, { label: string; envVar?: string } | null> = {
@@ -130,10 +141,12 @@ export function computeTemplateDependencies(rawWorkflow: unknown): TemplateDepen
     const type = String(node.type ?? "");
     const config = asRecord(node.config);
 
-    // 1. Provider on llm_call / *_chat_model nodes lives at config.provider.providerId
+    // 1. Provider on llm_call and the AI chain nodes lives at config.provider.providerId; a dedicated chat model
+    // node (OpenAI Chat Model and the rest) names it in its type.
     const provider = asRecord(config.provider);
-    if (Object.keys(provider).length > 0) {
-      const providerId = String(provider.providerId ?? "").trim();
+    const chatModelProvider = CHAT_MODEL_NODE_PROVIDERS[type];
+    if (Object.keys(provider).length > 0 || chatModelProvider) {
+      const providerId = chatModelProvider ?? String(provider.providerId ?? "").trim();
       if (providerId in PROVIDER_DEPENDENCIES) {
         const dep = PROVIDER_DEPENDENCIES[providerId];
         if (dep) add("provider", dep.label, dep.envVar);

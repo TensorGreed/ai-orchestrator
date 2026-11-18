@@ -5,7 +5,7 @@ import type { Node } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
 import * as api from "../lib/api";
 import { AGENT_DEFAULT_MAX_ITERATIONS } from "@ai-orchestrator/shared";
-import { NodeConfigModal, NodeInspector, buildNodeTrace } from "./NodeConfigModal";
+import { NodeConfigModal, NodeInspector, buildNodeTrace, switchedModelProvider } from "./NodeConfigModal";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -512,6 +512,9 @@ describe("NodeInspector", () => {
       />
     );
 
+    // Opening the node lists nothing: the list loads on the explicit action.
+    expect(api.fetchProviderModels).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Load models" }));
     await waitFor(() => {
       expect(api.fetchProviderModels).toHaveBeenCalledWith({
         providerId: "anthropic",
@@ -520,6 +523,76 @@ describe("NodeInspector", () => {
       });
     });
     expect(await screen.findByRole("option", { name: "Claude Haiku 4.5" })).toBeInTheDocument();
+  });
+
+  it("never asks a model server for its models just because a model node opened", async () => {
+    vi.mocked(api.fetchProviderModels).mockResolvedValue({ models: [{ id: "llama3.1", label: "llama3.1" }] });
+    const nodes = [
+      { nodeType: "llm_call", config: { provider: { providerId: "ollama", model: "llama3.1", baseUrl: "http://localhost:11434/v1" } } },
+      { nodeType: "ollama_chat_model", config: { baseUrl: "http://localhost:11434/v1", model: "llama3.1" } },
+      { nodeType: "text_classifier", config: { provider: { providerId: "ollama", model: "llama3.1" } } },
+      { nodeType: "openai_chat_model", config: { model: "gpt-4o-mini" } }
+    ];
+    for (const entry of nodes) {
+      const { unmount } = render(
+        <NodeInspector
+          {...makeProps({
+            node: { id: `n-${entry.nodeType}`, type: "workflowNode", position: { x: 0, y: 0 }, data: { label: entry.nodeType, nodeType: entry.nodeType as EditorNodeData["nodeType"], config: entry.config } }
+          })}
+        />
+      );
+      expect(screen.getByRole("button", { name: "Load models" })).toBeInTheDocument();
+      unmount();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(api.fetchProviderModels).not.toHaveBeenCalled();
+  });
+
+  it("offers Echo in the provider picker, and an Echo node shows no key, endpoint or model list", async () => {
+    render(
+      <NodeInspector
+        {...makeProps({
+          node: { id: "llm-echo", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "LLM Call", nodeType: "llm_call", config: { provider: { providerId: "echo", model: "echo" } } } }
+        })}
+      />
+    );
+    const picker = screen.getByRole("combobox", { name: "Provider" }) as HTMLSelectElement;
+    expect(picker.value).toBe("echo");
+    expect([...picker.options].map((option) => option.value)).toEqual(expect.arrayContaining(["echo", "ollama", "openai", "anthropic", "gemini", "azure_openai", "openai_compatible"]));
+    expect(screen.getByTestId("echo-provider-tip")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load models" })).toBeNull();
+    expect(screen.queryByText("API Key Secret")).toBeNull();
+    expect(screen.queryByLabelText("Base URL")).toBeNull();
+  });
+
+  it("shows a node with no provider as not set, not as Ollama", () => {
+    render(
+      <NodeInspector
+        {...makeProps({
+          node: { id: "tc", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Classify", nodeType: "text_classifier", config: { textKey: "text" } } }
+        })}
+      />
+    );
+    const picker = screen.getByRole("combobox", { name: "Provider" }) as HTMLSelectElement;
+    expect(picker.value).toBe("");
+    expect(picker.selectedOptions[0]?.textContent).toContain("Not set");
+  });
+});
+
+describe("switchedModelProvider", () => {
+  it("drops the endpoint and key for Echo and sets its model", () => {
+    expect(
+      switchedModelProvider({ providerId: "ollama", model: "llama3.1", baseUrl: "http://localhost:11434/v1", secretRef: { secretId: "s" }, temperature: 0.4 }, "echo")
+    ).toEqual({ providerId: "echo", model: "echo", temperature: 0.4 });
+  });
+
+  it("clears Echo's placeholder model when leaving it, and keeps the rest for other switches", () => {
+    expect(switchedModelProvider({ providerId: "echo", model: "echo" }, "openai")).toEqual({ providerId: "openai", model: "" });
+    expect(switchedModelProvider({ providerId: "openai", model: "gpt-4o", baseUrl: "https://x/v1" }, "anthropic")).toEqual({
+      providerId: "anthropic",
+      model: "gpt-4o",
+      baseUrl: "https://x/v1"
+    });
   });
 });
 

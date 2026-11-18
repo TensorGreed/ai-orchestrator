@@ -14,6 +14,8 @@ import {
   BUILT_IN_TOOL_PROVIDERS,
   BUILT_IN_TOOL_PROVIDER_INFO,
   BUILT_IN_TOOLS_ADAPTER_ID,
+  MODEL_PROVIDER_CHOICES,
+  PROVIDER_CONFIG_NODE_TYPES,
   WORKFLOW_TOOL_ADAPTER_ID,
   builtInToolProviderOf,
   deriveWorkflowToolDescriptor,
@@ -332,6 +334,23 @@ export function withOpenDefaults(
     return { ...initialConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS };
   }
   return initialConfig;
+}
+
+/**
+ * A node's `config.provider` after the Provider picker changes to `next`. Echo needs no endpoint or key, so those go
+ * and the model becomes "echo"; leaving Echo clears that placeholder model. Other switches keep the rest as it was.
+ */
+export function switchedModelProvider(current: Record<string, unknown>, next: string): Record<string, unknown> {
+  if (next === "echo") {
+    const rest = { ...current };
+    delete rest.baseUrl;
+    delete rest.secretRef;
+    delete rest.extra;
+    return { ...rest, providerId: "echo", model: "echo" };
+  }
+  const switched: Record<string, unknown> = { ...current, providerId: next };
+  if (current.providerId === "echo" && current.model === "echo") switched.model = "";
+  return switched;
 }
 
 function stripAgentOnlyKeys(nodeType: string, value: Record<string, unknown>): Record<string, unknown> {
@@ -1379,6 +1398,8 @@ export function NodeInspector({
   const [inlineCreatedSecrets, setInlineCreatedSecrets] = useState<SecretListItem[]>([]);
   const [llmModels, setLlmModels] = useState<ModelOption[] | null>(null);
   const [llmModelsLoading, setLlmModelsLoading] = useState(false);
+  const [llmModelsNote, setLlmModelsNote] = useState<string | null>(null);
+  const llmModelsRequest = useRef(0);
   const [activeSecretFieldKey, setActiveSecretFieldKey] = useState<string | null>(null);
   const [inlineSecretProvider, setInlineSecretProvider] = useState("custom");
   const [inlineSecretName, setInlineSecretName] = useState("");
@@ -1399,8 +1420,10 @@ export function NodeInspector({
   const modelLookup = useMemo(() => {
     const type = node.data.nodeType;
 
-    if (type === "llm_call") {
-      const providerId = toStringValue(provider.providerId, "ollama").trim() || "ollama";
+    if (PROVIDER_CONFIG_NODE_TYPES.has(type)) {
+      // No provider set, or the built-in Echo provider: there is no model list to load.
+      const providerId = toStringValue(provider.providerId).trim();
+      if (!providerId || providerId === "echo") return null;
       const secretId = getSecretId(provider.secretRef);
       const baseUrl = toStringValue(provider.baseUrl).trim();
       const extra = asRecord(provider.extra);
@@ -1461,40 +1484,46 @@ export function NodeInspector({
     azureApiVersion
   ]);
 
+  // A model list is loaded only when the user asks for it (Load models): opening a node never calls a model server,
+  // so a node that names a local model server does not probe it just by being looked at.
   useEffect(() => {
-    if (!modelLookup?.providerId) {
-      setLlmModels(null);
-      setLlmModelsLoading(false);
-      return;
-    }
-
-    const baseUrl = modelLookup.baseUrl?.trim() ?? "";
-    if ((modelLookup.requiresBaseUrl && !baseUrl) || (baseUrl && !isHttpUrl(baseUrl))) {
-      setLlmModels(null);
-      setLlmModelsLoading(false);
-      return;
-    }
-
-    let canceled = false;
-    setLlmModelsLoading(true);
-    fetchProviderModels({
-      providerId: modelLookup.providerId,
-      ...(modelLookup.secretId ? { secretRef: { secretId: modelLookup.secretId } } : {}),
-      ...(baseUrl ? { baseUrl } : {}),
-      ...(modelLookup.extra ? { extra: modelLookup.extra } : {})
-    })
-      .then((result) => {
-        if (canceled) return;
-        setLlmModels(result.models.map((m) => ({ value: m.id, label: m.label })));
-      })
-      .catch(() => {
-        if (!canceled) setLlmModels(null);
-      })
-      .finally(() => {
-        if (!canceled) setLlmModelsLoading(false);
-      });
-    return () => { canceled = true; };
+    llmModelsRequest.current += 1;
+    setLlmModels(null);
+    setLlmModelsLoading(false);
+    setLlmModelsNote(null);
   }, [modelLookup]);
+
+  const modelListBaseUrl = modelLookup?.baseUrl?.trim() ?? "";
+  const modelListReady = Boolean(
+    modelLookup?.providerId &&
+      !(modelLookup.requiresBaseUrl && !modelListBaseUrl) &&
+      !(modelListBaseUrl && !isHttpUrl(modelListBaseUrl))
+  );
+
+  const loadModelList = useCallback(async () => {
+    if (!modelLookup?.providerId || !modelListReady) return;
+    const request = ++llmModelsRequest.current;
+    setLlmModelsLoading(true);
+    setLlmModelsNote(null);
+    try {
+      const result = await fetchProviderModels({
+        providerId: modelLookup.providerId,
+        ...(modelLookup.secretId ? { secretRef: { secretId: modelLookup.secretId } } : {}),
+        ...(modelListBaseUrl ? { baseUrl: modelListBaseUrl } : {}),
+        ...(modelLookup.extra ? { extra: modelLookup.extra } : {})
+      });
+      if (request !== llmModelsRequest.current) return;
+      const models = result.models.map((m) => ({ value: m.id, label: m.label }));
+      setLlmModels(models.length > 0 ? models : null);
+      setLlmModelsNote(models.length > 0 ? `${models.length} model${models.length === 1 ? "" : "s"} loaded.` : "No models found. Check the key and base URL, or type the model name.");
+    } catch (error) {
+      if (request !== llmModelsRequest.current) return;
+      setLlmModels(null);
+      setLlmModelsNote(error instanceof Error ? error.message : "Could not load models.");
+    } finally {
+      if (request === llmModelsRequest.current) setLlmModelsLoading(false);
+    }
+  }, [modelLookup, modelListBaseUrl, modelListReady]);
 
   useEffect(() => {
     // The defaults filled in on open are not edits of the user's: isDirty compares against the same fill.
@@ -2346,7 +2375,7 @@ export function NodeInspector({
   const buildProviderTestConfig = useCallback((): { provider: LLMProviderConfig; prompt?: string; systemPrompt?: string } | null => {
     if (node.data.nodeType === "llm_call") {
       const providerConfig = asRecord(config.provider);
-      const providerId = toStringValue(providerConfig.providerId, "ollama").trim();
+      const providerId = toStringValue(providerConfig.providerId).trim();
       const model = toStringValue(providerConfig.model).trim();
       if (!providerId || !model) {
         return null;
@@ -2555,24 +2584,44 @@ export function NodeInspector({
     const currentValue = input.value.trim() || input.fallbackValue?.trim() || "";
     const fieldLabel = llmModelsLoading ? `${label} (loading...)` : label;
 
-    if (llmModels && llmModels.length > 0) {
-      return (
-        <SelectField
-          label={fieldLabel}
-          value={currentValue}
-          options={withCurrentModelOption(llmModels, currentValue, input.emptyLabel ?? `Select ${label.toLowerCase()}`)}
-          onChange={input.onChange}
-        />
-      );
-    }
-
     return (
-      <TextField
-        label={fieldLabel}
-        value={currentValue}
-        onChange={input.onChange}
-        placeholder={input.placeholder}
-      />
+      <>
+        {llmModels && llmModels.length > 0 ? (
+          <SelectField
+            label={fieldLabel}
+            value={currentValue}
+            options={withCurrentModelOption(llmModels, currentValue, input.emptyLabel ?? `Select ${label.toLowerCase()}`)}
+            onChange={input.onChange}
+          />
+        ) : (
+          <TextField
+            label={fieldLabel}
+            value={currentValue}
+            onChange={input.onChange}
+            placeholder={input.placeholder}
+          />
+        )}
+        {renderLoadModelsAction()}
+      </>
+    );
+  };
+
+  /** The explicit "Load models" action: the only way a node's editor asks a model server for its model list. */
+  const renderLoadModelsAction = () => {
+    if (!modelLookup) return null;
+    return (
+      <div className="cfg-inline-actions">
+        <button
+          type="button"
+          className="insp-btn"
+          onClick={() => void loadModelList()}
+          disabled={llmModelsLoading || !modelListReady}
+          title={modelListReady ? "Ask the model server for its models" : "Set the base URL first"}
+        >
+          {llmModelsLoading ? "Loading models..." : llmModels ? "Reload models" : "Load models"}
+        </button>
+        {llmModelsNote && <span className="muted">{llmModelsNote}</span>}
+      </div>
     );
   };
 
@@ -2581,10 +2630,12 @@ export function NodeInspector({
    * temperature, max tokens and the node's own rarely used fields (`advanced`) sit under Advanced.
    */
   const renderProviderSection = (advanced?: { content: React.ReactNode; setCount: number }) => {
-    const providerId = toStringValue(provider.providerId, "ollama");
+    const providerId = toStringValue(provider.providerId).trim();
     const providerExtra = asRecord(provider.extra);
     const isAzureOpenAI = providerId === "azure_openai";
-    const hideBaseUrl = providerId === "gemini";
+    // Echo is built in: no endpoint, no key, any model name.
+    const isEcho = providerId === "echo";
+    const hideBaseUrl = providerId === "gemini" || isEcho || !providerId;
     const baseUrlLabel =
       isAzureOpenAI
         ? "Endpoint"
@@ -2598,7 +2649,9 @@ export function NodeInspector({
           ? "https://api.anthropic.com/v1"
           : providerId === "openai"
             ? "https://api.openai.com/v1"
-            : "http://localhost:11434/v1";
+            : providerId === "ollama"
+              ? "http://localhost:11434/v1"
+              : "https://llm.example.com/v1";
 
     const optionalBaseUrl = providerId === "openai" || providerId === "anthropic";
     const baseUrlField = (
@@ -2615,16 +2668,19 @@ export function NodeInspector({
         <SelectField
           label="Provider"
           value={providerId}
-          onChange={(next) => setProvider({ providerId: next })}
+          onChange={(next) => setConfig((current) => ({ ...current, provider: switchedModelProvider(asRecord(current.provider), next) }))}
           options={[
-            { value: "ollama", label: "Ollama" },
-            { value: "openai_compatible", label: "OpenAI Compatible" },
-            { value: "openai", label: "OpenAI" },
-            { value: "azure_openai", label: "Azure OpenAI" },
-            { value: "gemini", label: "Gemini" },
-            { value: "anthropic", label: "Anthropic" }
+            ...(providerId ? [] : [{ value: "", label: "Not set (uses the upstream model)" }]),
+            ...MODEL_PROVIDER_CHOICES,
+            ...(providerId && !MODEL_PROVIDER_CHOICES.some((choice) => choice.value === providerId) ? [{ value: providerId, label: providerId }] : [])
           ]}
         />
+        {isEcho && (
+          <div className="cfg-tip" data-testid="echo-provider-tip">
+            Echo is the built-in demo model: it answers with the prompt it receives, needs no key and calls nothing. Pick a
+            real provider when the workflow is ready.
+          </div>
+        )}
         {!isAzureOpenAI ? (
           renderModelChoiceField({
             value: toStringValue(provider.model),
@@ -2632,12 +2688,15 @@ export function NodeInspector({
             onChange: (next) => setProvider({ model: next })
           })
         ) : (
-          <TextField
-            label={llmModelsLoading ? "Deployment (loading...)" : "Deployment"}
-            value={toStringValue(provider.model)}
-            onChange={(next) => setProvider({ model: next })}
-            placeholder="gpt-4o-mini"
-          />
+          <>
+            <TextField
+              label={llmModelsLoading ? "Deployment (loading...)" : "Deployment"}
+              value={toStringValue(provider.model)}
+              onChange={(next) => setProvider({ model: next })}
+              placeholder="gpt-4o-mini"
+            />
+            {renderLoadModelsAction()}
+          </>
         )}
         {!hideBaseUrl && !optionalBaseUrl && baseUrlField}
         {isAzureOpenAI && (
@@ -2648,7 +2707,7 @@ export function NodeInspector({
             placeholder="2024-10-21"
           />
         )}
-        {renderCredentialSecretField({
+        {!isEcho && providerId && renderCredentialSecretField({
           fieldKey: "llm_provider_secret",
           label: "API Key Secret",
           value: toStringValue(asRecord(provider.secretRef).secretId, ""),
@@ -5245,6 +5304,7 @@ export function NodeInspector({
           options={withCurrentModelOption(modelOptions, modelValue)}
           onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
         />
+        {renderLoadModelsAction()}
         <div className="cfg-grid-2">
           <NumberField
             label="Temperature"

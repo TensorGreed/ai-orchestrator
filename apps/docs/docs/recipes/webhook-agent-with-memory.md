@@ -1,8 +1,8 @@
 ---
 title: "Webhook to AI agent with memory and MCP tools"
 description: "Trigger an agent from a webhook, give it session memory and MCP tools, and secure the webhook with a bearer token or HMAC signature."
-keys: "model"
-keysNote: "A model: local Ollama or a provider key"
+keys: "none"
+keysNote: "None: runs on the built-in Echo model; a real model to see tool calls"
 tags: ["agent","mcp","webhook","memory"]
 nodeCount: 7
 sample: "agentic-mcp-flow.json"
@@ -20,9 +20,9 @@ related: ["ai-agent","human-in-the-loop","mcp-tool"]
 
 **What you get:** An agent behind a webhook URL, with per-session memory and two MCP tools, that any app can call with a question and a session id.
 
-**Needs:** A model: local Ollama or a provider key · **Nodes:** 7
+**Needs:** None: runs on the built-in Echo model; a real model to see tool calls · **Nodes:** 7
 
-A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `user_prompt` and `session_id` from the request body to an Agent Orchestrator. The agent has a chat model, a **Simple Memory** node keyed by the session id, and two tools from the mock MCP server built into L2M. As shipped, the chat model points at a local Ollama server (`http://localhost:11434/v1`, model `qwen2.5:7b`), so you need that model, or you point the node at another one. As shipped, the webhook also has no authentication: secure it before you expose it.
+A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `user_prompt` and `session_id` from the request body to an Agent Orchestrator. The agent has a chat model, a **Simple Memory** node keyed by the session id, and two tools from the mock MCP server built into L2M. As shipped, the chat model is the built-in Echo model, so the workflow runs with no key and no model server; Echo never calls tools, so attach a real model to see tool calls. As shipped, the webhook also has no authentication: secure it before you expose it.
 
 <div class="recipe-actions">
   <a class="hub-button" href="/docs/recipes/files/agentic-mcp-flow.json" download>Download the workflow JSON</a>
@@ -33,7 +33,7 @@ A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `
 
 1. Download <a href="/docs/recipes/files/agentic-mcp-flow.json" download>agentic-mcp-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/agentic-mcp-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. Open the chat model node and point it at a model you have: pull `qwen2.5:7b` into Ollama, type another model name, or switch the provider. In Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `api` service). Then save. To check the webhook and memory first without a model, use echo: the **Provider** list has no echo entry, so set the chat model node's `providerId` to `echo` in the JSON file and import it again.
+3. To try the webhook and memory, keep the built-in Echo model. For real answers and tool calls, open the chat model node, pick a provider in the **Provider** list (OpenAI, Anthropic, Gemini, Azure OpenAI, an OpenAI-compatible server or Ollama), set the model and, for a hosted provider, its key, then save. **Load models** lists the models the provider offers. For Ollama in Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `api` service).
 4. Send a request:
 
    ```bash
@@ -69,7 +69,7 @@ Two things are worth knowing before you call it from an app.
 
 **A model error comes back as the answer.** If the chat model call fails (the model is not pulled, the server is down, the key is wrong), the agent usually does not fail the run. It returns the error message as its answer, such as `Provider ollama request failed (404): ...`, with `stopReason: "error"`, and the webhook replies with that text in `output.result`. If an app gets text like that back, open the run and look at the Agent node.
 
-**Memory, checked with the echo model.** To test the webhook and memory without a model, we set the chat model to the built-in echo provider. Two requests with `session_id: "demo-2"` returned `Echo: What is 12 * 7?` and then `Echo: And what time is it in Toronto?`. The second run's agent messages held the first question and answer before the new question: that is the memory. Echo never calls tools, so this check says nothing about tool use; a model that supports tool calling can call `get_current_time` and `calculator`.
+**Memory, checked with the echo model.** The shipped chat model is the built-in echo provider. Two requests with `session_id: "demo-2"` returned `Echo: What is 12 * 7?` and then `Echo: And what time is it in Toronto?`. The second run's agent messages held the first question and answer before the new question: that is the memory. Echo never calls tools, so this check says nothing about tool use; a model that supports tool calling can call `get_current_time` and `calculator`.
 
 Memory keeps the last 20 messages of a session (`maxMessages`) and, with **Persist Tool Messages** off, leaves tool results out of it. The tools' connection names an HTTP endpoint (`http://127.0.0.1:7001/mcp`), but the `mock-mcp` server runs inside L2M: nothing has to listen on that port.
 

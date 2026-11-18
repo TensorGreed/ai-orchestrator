@@ -1,8 +1,8 @@
 ---
 title: "Branch a workflow on an LLM result"
 description: "Send a webhook payload through a model, test the answer with an If node, and route it to one of two outputs. Plus what to do when the model call fails."
-keys: "model"
-keysNote: "A model: local Ollama as shipped, or a provider key"
+keys: "none"
+keysNote: "None: runs on the built-in Echo model; a provider key for real answers"
 tags: ["webhook","branching","starter"]
 nodeCount: 5
 sample: "conditional-flow.json"
@@ -20,9 +20,9 @@ related: ["workflow-dag","improper-output-handling"]
 
 **What you get:** A webhook workflow that asks a model, checks the answer with an If node, and returns either the answer or "No answer generated".
 
-**Needs:** A model: local Ollama as shipped, or a provider key · **Time:** 10 minutes · **Nodes:** 5
+**Needs:** None: runs on the built-in Echo model; a provider key for real answers · **Time:** 10 minutes · **Nodes:** 5
 
-A **Webhook Input** at `POST /webhook/conditional-demo` passes `user_prompt`, `system_prompt` and `session_id` from the request body to an **LLM Call**. The **Check Answer** If node tests <span v-pre>`{{answer}}`</span>: if the model said anything, the **Success Output** returns it; if not, the **Error Output** returns "No answer generated". Only one output runs. As shipped, the model is `llama3.1` on a local Ollama server, and the webhook has no authentication.
+A **Webhook Input** at `POST /webhook/conditional-demo` passes `user_prompt`, `system_prompt` and `session_id` from the request body to an **LLM Call**. The **Check Answer** If node tests <span v-pre>`{{answer}}`</span>: if the model said anything, the **Success Output** returns it; if not, the **Error Output** returns "No answer generated". Only one output runs. As shipped, the model is the built-in Echo model, which answers with the prompt it gets and needs no key, and the webhook has no authentication.
 
 <div class="recipe-actions">
   <a class="hub-button" href="/docs/recipes/files/conditional-flow.json" download>Download the workflow JSON</a>
@@ -33,7 +33,7 @@ A **Webhook Input** at `POST /webhook/conditional-demo` passes `user_prompt`, `s
 
 1. Download <a href="/docs/recipes/files/conditional-flow.json" download>conditional-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/conditional-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
-3. Open the **LLM Call** node and point it at a model you have: pull `llama3.1` into Ollama, or switch the provider. In Docker, use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `api` service). Save. To check the branching first without a model, use echo: the **Provider** list has no echo entry, so set the node's `providerId` to `echo` in the JSON file and import it again.
+3. Keep the built-in Echo model to check the branching first. For real answers, open the **LLM Call** node, pick a provider in the **Provider** list, set the model (**Load models** lists what the provider offers) and, for a hosted provider, its key, then save. For Ollama in Docker, use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `api` service).
 4. Send a request:
 
    ```bash

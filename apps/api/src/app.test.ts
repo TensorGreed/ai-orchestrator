@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http, { type IncomingHttpHeaders } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { WORKFLOW_SCHEMA_VERSION, type Workflow } from "@ai-orchestrator/shared";
 import { parseTrustProxy, type AppConfig } from "./config.js";
@@ -989,6 +989,58 @@ describe("auth + rbac API", () => {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
+    }
+  });
+
+  it("never lists models of a local Ollama the node and the server do not name", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-ollama-list@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+    const savedBase = process.env.OLLAMA_BASE_URL;
+    delete process.env.OLLAMA_BASE_URL;
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      const response = await context.app.inject({
+        method: "POST",
+        url: "/api/providers/models",
+        headers: { cookie: builderCookie },
+        payload: { providerId: "ollama" }
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ models: [] });
+      expect(fetchSpy.mock.calls.map((call) => String(call[0]))).not.toEqual(expect.arrayContaining([expect.stringContaining("11434")]));
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      if (savedBase === undefined) delete process.env.OLLAMA_BASE_URL;
+      else process.env.OLLAMA_BASE_URL = savedBase;
+    }
+  });
+
+  it("tells builders which hosted model keys the server sets, as provider ids only", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, { email: "builder-env-models@example.com", password: "BuilderPass123!", role: "builder" });
+    const viewerCookie = await createRoleSession(context, { email: "viewer-env-models@example.com", password: "ViewerPass123!", role: "viewer" });
+    const saved = { openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY, gemini: process.env.GEMINI_API_KEY };
+    process.env.OPENAI_API_KEY = "sk-env-model-test";
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    try {
+      const builder = await context.app.inject({ method: "GET", url: "/api/definitions", headers: { cookie: builderCookie } });
+      expect(builder.statusCode).toBe(200);
+      expect(builder.json().envModelProviders).toEqual(["openai"]);
+      expect(builder.body).not.toContain("sk-env-model-test");
+      const viewer = await context.app.inject({ method: "GET", url: "/api/definitions", headers: { cookie: viewerCookie } });
+      expect(viewer.statusCode).toBe(200);
+      expect(viewer.json().envModelProviders).toBeUndefined();
+    } finally {
+      for (const [key, value] of [["OPENAI_API_KEY", saved.openai], ["ANTHROPIC_API_KEY", saved.anthropic], ["GEMINI_API_KEY", saved.gemini]] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 

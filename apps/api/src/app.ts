@@ -272,6 +272,7 @@ import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { envModelProviders } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
   RESPONSE_WITHHELD_MESSAGE,
@@ -10845,7 +10846,10 @@ export async function createApp(
       nodes: nodeDefinitions,
       providers: providerRegistry.listDefinitions(),
       connectors: connectorRegistry.listDefinitions(),
-      mcpServers: mcpRegistry.listDefinitions()
+      mcpServers: mcpRegistry.listDefinitions(),
+      // The hosted providers whose API key the server's environment sets, so a new model node a builder adds starts
+      // on one of them instead of the built-in Echo provider. Provider ids only, never a key; builders only.
+      ...(hasRequiredRole(user, ["builder"]) ? { envModelProviders: envModelProviders(process.env) } : {})
     };
   });
 
@@ -12029,7 +12033,10 @@ export async function createApp(
       }
 
       if (providerId === "ollama") {
-        const ollamaBase = (baseUrl ?? process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1").replace(/\/v1\/?$/, "");
+        // Only an Ollama the node or the server names: listing never falls back to probing a local daemon.
+        const configuredBase = baseUrl?.trim() || process.env.OLLAMA_BASE_URL?.trim();
+        if (!configuredBase) return { models: [] };
+        const ollamaBase = configuredBase.replace(/\/v1\/?$/, "");
         const res = await fetch(`${ollamaBase}/api/tags`);
         if (!res.ok) return { models: [] };
         const json = await res.json() as { models?: Array<{ name: string; modified_at?: string }> };

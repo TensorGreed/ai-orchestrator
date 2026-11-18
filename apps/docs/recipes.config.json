@@ -63,8 +63,8 @@
       "slug": "webhook-agent-with-memory",
       "title": "Webhook to AI agent with memory and MCP tools",
       "description": "Trigger an agent from a webhook, give it session memory and MCP tools, and secure the webhook with a bearer token or HMAC signature.",
-      "keys": "model",
-      "keysNote": "A model: local Ollama or a provider key",
+      "keys": "none",
+      "keysNote": "None: runs on the built-in Echo model; a real model to see tool calls",
       "tags": [
         "agent",
         "mcp",
@@ -72,9 +72,9 @@
         "memory"
       ],
       "whatYouGet": "An agent behind a webhook URL, with per-session memory and two MCP tools, that any app can call with a question and a session id.",
-      "summary": "A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `user_prompt` and `session_id` from the request body to an Agent Orchestrator. The agent has a chat model, a **Simple Memory** node keyed by the session id, and two tools from the mock MCP server built into L2M. As shipped, the chat model points at a local Ollama server (`http://localhost:11434/v1`, model `qwen2.5:7b`), so you need that model, or you point the node at another one. As shipped, the webhook also has no authentication: secure it before you expose it.",
+      "summary": "A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `user_prompt` and `session_id` from the request body to an Agent Orchestrator. The agent has a chat model, a **Simple Memory** node keyed by the session id, and two tools from the mock MCP server built into L2M. As shipped, the chat model is the built-in Echo model, so the workflow runs with no key and no model server; Echo never calls tools, so attach a real model to see tool calls. As shipped, the webhook also has no authentication: secure it before you expose it.",
       "steps": [
-        "Open the chat model node and point it at a model you have: pull `qwen2.5:7b` into Ollama, type another model name, or switch the provider. In Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: [\"host.docker.internal:host-gateway\"]` to the `api` service). Then save. To check the webhook and memory first without a model, use echo: the **Provider** list has no echo entry, so set the chat model node's `providerId` to `echo` in the JSON file and import it again.",
+        "To try the webhook and memory, keep the built-in Echo model. For real answers and tool calls, open the chat model node, pick a provider in the **Provider** list (OpenAI, Anthropic, Gemini, Azure OpenAI, an OpenAI-compatible server or Ollama), set the model and, for a hosted provider, its key, then save. **Load models** lists the models the provider offers. For Ollama in Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: [\"host.docker.internal:host-gateway\"]` to the `api` service).",
         "Send a request:\n\n   ```bash\n   curl -X POST http://localhost:4000/webhook/agent-demo \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"system_prompt\": \"You are a helpful assistant.\", \"user_prompt\": \"What is 12 * 7?\", \"session_id\": \"demo-2\"}'\n   ```",
         "Send a second request with the same `session_id` and a follow-up question. The agent now sees the first exchange.",
         "Before anyone else can reach the URL, secure it (see below)."
@@ -82,7 +82,7 @@
       "sections": [
         {
           "heading": "What a run does",
-          "body": "Two things are worth knowing before you call it from an app.\n\n**A model error comes back as the answer.** If the chat model call fails (the model is not pulled, the server is down, the key is wrong), the agent usually does not fail the run. It returns the error message as its answer, such as `Provider ollama request failed (404): ...`, with `stopReason: \"error\"`, and the webhook replies with that text in `output.result`. If an app gets text like that back, open the run and look at the Agent node.\n\n**Memory, checked with the echo model.** To test the webhook and memory without a model, we set the chat model to the built-in echo provider. Two requests with `session_id: \"demo-2\"` returned `Echo: What is 12 * 7?` and then `Echo: And what time is it in Toronto?`. The second run's agent messages held the first question and answer before the new question: that is the memory. Echo never calls tools, so this check says nothing about tool use; a model that supports tool calling can call `get_current_time` and `calculator`.\n\nMemory keeps the last 20 messages of a session (`maxMessages`) and, with **Persist Tool Messages** off, leaves tool results out of it. The tools' connection names an HTTP endpoint (`http://127.0.0.1:7001/mcp`), but the `mock-mcp` server runs inside L2M: nothing has to listen on that port."
+          "body": "Two things are worth knowing before you call it from an app.\n\n**A model error comes back as the answer.** If the chat model call fails (the model is not pulled, the server is down, the key is wrong), the agent usually does not fail the run. It returns the error message as its answer, such as `Provider ollama request failed (404): ...`, with `stopReason: \"error\"`, and the webhook replies with that text in `output.result`. If an app gets text like that back, open the run and look at the Agent node.\n\n**Memory, checked with the echo model.** The shipped chat model is the built-in echo provider. Two requests with `session_id: \"demo-2\"` returned `Echo: What is 12 * 7?` and then `Echo: And what time is it in Toronto?`. The second run's agent messages held the first question and answer before the new question: that is the memory. Echo never calls tools, so this check says nothing about tool use; a model that supports tool calling can call `get_current_time` and `calculator`.\n\nMemory keeps the last 20 messages of a session (`maxMessages`) and, with **Persist Tool Messages** off, leaves tool results out of it. The tools' connection names an HTTP endpoint (`http://127.0.0.1:7001/mcp`), but the `mock-mcp` server runs inside L2M: nothing has to listen on that port."
         },
         {
           "heading": "Secure the webhook",
@@ -266,7 +266,7 @@
         },
         {
           "heading": "Variant: retrieve from a connector",
-          "body": "[`rag-flow.json`](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-flow.json) loads documents from a **Connector Source** (Google Drive) on every run and retrieves from them in memory, with no knowledge base. As shipped it calls a local Ollama model (`llama3.1`). We ran it with the echo model and no Google credentials: the connector ran in demo-fallback mode and returned five built-in sample documents, and retrieval put the three closest to \"How does MCP fit into an AI workflow builder?\" into the prompt. Use a knowledge base when the documents should be ingested once and kept; use a connector for small sets that change between runs."
+          "body": "[`rag-flow.json`](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-flow.json) loads documents from a **Connector Source** (Google Drive) on every run and retrieves from them in memory, with no knowledge base. As shipped it runs on the built-in echo model. We ran it that way with no Google credentials: the connector ran in demo-fallback mode and returned five built-in sample documents, and retrieval put the three closest to \"How does MCP fit into an AI workflow builder?\" into the prompt. Use a knowledge base when the documents should be ingested once and kept; use a connector for small sets that change between runs."
         }
       ],
       "makeItYours": "- Use a real embedder (for example `openai-embedder`, with its key as a [secret](/security/secrets)) for the knowledge base and the same `embedderId` on the node. A knowledge base keeps the vector size of its first chunks, so start a new one when you change embedders.\n- Replace the echo model with a real one on the **LLM** node.\n- Set `searchMode` to `hybrid` to add keyword (BM25) matches to vector search, and add a **Rerank** node for better ordering. See [hybrid search](/nodes/knowledge-bases#hybrid-search-phase-9-3).",
@@ -752,8 +752,8 @@
       "slug": "branch-on-llm-output",
       "title": "Branch a workflow on an LLM result",
       "description": "Send a webhook payload through a model, test the answer with an If node, and route it to one of two outputs. Plus what to do when the model call fails.",
-      "keys": "model",
-      "keysNote": "A model: local Ollama as shipped, or a provider key",
+      "keys": "none",
+      "keysNote": "None: runs on the built-in Echo model; a provider key for real answers",
       "time": "10 minutes",
       "tags": [
         "webhook",
@@ -761,9 +761,9 @@
         "starter"
       ],
       "whatYouGet": "A webhook workflow that asks a model, checks the answer with an If node, and returns either the answer or \"No answer generated\".",
-      "summary": "A **Webhook Input** at `POST /webhook/conditional-demo` passes `user_prompt`, `system_prompt` and `session_id` from the request body to an **LLM Call**. The **Check Answer** If node tests <span v-pre>`{{answer}}`</span>: if the model said anything, the **Success Output** returns it; if not, the **Error Output** returns \"No answer generated\". Only one output runs. As shipped, the model is `llama3.1` on a local Ollama server, and the webhook has no authentication.",
+      "summary": "A **Webhook Input** at `POST /webhook/conditional-demo` passes `user_prompt`, `system_prompt` and `session_id` from the request body to an **LLM Call**. The **Check Answer** If node tests <span v-pre>`{{answer}}`</span>: if the model said anything, the **Success Output** returns it; if not, the **Error Output** returns \"No answer generated\". Only one output runs. As shipped, the model is the built-in Echo model, which answers with the prompt it gets and needs no key, and the webhook has no authentication.",
       "steps": [
-        "Open the **LLM Call** node and point it at a model you have: pull `llama3.1` into Ollama, or switch the provider. In Docker, use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: [\"host.docker.internal:host-gateway\"]` to the `api` service). Save. To check the branching first without a model, use echo: the **Provider** list has no echo entry, so set the node's `providerId` to `echo` in the JSON file and import it again.",
+        "Keep the built-in Echo model to check the branching first. For real answers, open the **LLM Call** node, pick a provider in the **Provider** list, set the model (**Load models** lists what the provider offers) and, for a hosted provider, its key, then save. For Ollama in Docker, use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: [\"host.docker.internal:host-gateway\"]` to the `api` service).",
         "Send a request:\n\n   ```bash\n   curl -X POST http://localhost:4000/webhook/conditional-demo \\\n     -H \"Content-Type: application/json\" \\\n     -d '{\"user_prompt\": \"Is order 1042 late?\"}'\n   ```",
         "Open the run and click **Check Answer** to see `evaluatedValue` and which branch it took."
       ],

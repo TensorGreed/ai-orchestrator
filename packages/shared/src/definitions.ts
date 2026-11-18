@@ -297,7 +297,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
       required: ["provider"]
     },
     sampleConfig: {
-      provider: { providerId: "ollama", model: "llama3.1", baseUrl: "http://localhost:11434/v1" },
+      provider: { providerId: "echo", model: "echo" },
       promptKey: "prompt",
       systemPromptKey: "system_prompt"
     }
