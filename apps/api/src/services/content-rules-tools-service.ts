@@ -27,7 +27,7 @@ import {
   revealTokens,
   rewriteMatches,
   riskLevelOf,
-  scanSensitiveTextAsync,
+  scanSensitiveTextsAsync,
   EntityScanError,
   ENTITIES_DETECTOR_ID,
   type GuardEntityRecognizer,
@@ -270,18 +270,26 @@ export class ContentRulesToolsService {
       ...(request.signal ? { signal: request.signal } : {}),
       maxChars: CONTENT_TOOLS_MAX_CHARS
     };
+    // Every string of every input in one scan: a names and addresses service gets few requests of many texts.
+    let results: Awaited<ReturnType<typeof scanSensitiveTextsAsync>>;
+    try {
+      results = await scanSensitiveTextsAsync(
+        inputs.flatMap((input) => input.strings.map((entry) => entry.text)),
+        settings,
+        scanRequest,
+        context
+      );
+    } catch (error) {
+      if (!(error instanceof EntityScanError)) throw error;
+      // The recognizer's own message stays on the server: it could quote the input.
+      throw new ContentToolError("Names and addresses could not be checked; try again, or leave person_name, location and street_address out of entity_types");
+    }
+    let next = 0;
     const out: ScannedInput[] = [];
     for (const input of inputs) {
       const strings: ScannedString[] = [];
       for (const entry of input.strings) {
-        let scanned: Awaited<ReturnType<typeof scanSensitiveTextAsync>>;
-        try {
-          scanned = await scanSensitiveTextAsync(entry.text, settings, scanRequest, context);
-        } catch (error) {
-          if (!(error instanceof EntityScanError)) throw error;
-          // The recognizer's own message stays on the server: it could quote the input.
-          throw new ContentToolError("Names and addresses could not be checked; try again, or leave person_name, location and street_address out of entity_types");
-        }
+        const scanned = results[next++]!;
         strings.push({
           ...(entry.path !== undefined ? { path: entry.path } : {}),
           text: entry.text,

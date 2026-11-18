@@ -37,6 +37,8 @@ export interface ContentDocumentScanLimits {
   fetchTimeoutMs: number;
   firstByteTimeoutMs: number;
   maxConcurrent: number;
+  /** CONTENT_SCAN_TIME_LIMIT_MS: the longest checking one document's text may take. Absent: no limit of its own. */
+  timeLimitMs?: number;
 }
 
 export interface ContentDocumentScanOptions {
@@ -209,12 +211,24 @@ export class ContentDocumentScanService {
     protect?: (value: string, dataClass: string) => Promise<string>,
     signal?: AbortSignal
   ): Promise<DocumentScanOutcome> {
-    const scanner = sensitiveDocumentScanner(this.scanSettings.settingsOf(ruleSet), request, {
-      ...(this.options.entityRecognizer ? { recognizer: this.options.entityRecognizer } : {}),
-      ...(signal ? { signal } : {}),
-      maxChars: this.options.limits.maxChars
-    });
-    return await scanExtractedDocument(extracted, loaded.bytes, { scanner, ...(protect ? { protect } : {}) });
+    // The whole check has one time limit (names and addresses through a service can take long on a big CSV or JSON
+    // file); the scan stops at it with a timeout. A caller that goes away still cancels it.
+    const limitMs = this.options.limits.timeLimitMs;
+    const timer = new AbortController();
+    const timeout = limitMs
+      ? setTimeout(() => timer.abort(new DocumentError("timeout", `Checking the document took longer than ${Math.ceil(limitMs / 1000)} s; scan a smaller document`)), limitMs)
+      : undefined;
+    const stop = signal ? AbortSignal.any([signal, timer.signal]) : timer.signal;
+    try {
+      const scanner = sensitiveDocumentScanner(this.scanSettings.settingsOf(ruleSet), request, {
+        ...(this.options.entityRecognizer ? { recognizer: this.options.entityRecognizer } : {}),
+        signal: stop,
+        maxChars: this.options.limits.maxChars
+      });
+      return await scanExtractedDocument(extracted, loaded.bytes, { scanner, ...(protect ? { protect } : {}) });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   /** The rule set page's test: load, extract and scan, with an optional mask or placeholder view (nothing kept). */

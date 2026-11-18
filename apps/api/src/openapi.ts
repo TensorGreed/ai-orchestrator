@@ -2190,12 +2190,17 @@ export const openApiSpec = {
           "429": { description: "Too many scans" },
           "502": { description: "The document server answered with an error" },
           "503": { description: "Names and addresses could not be checked (code check_failed)" },
-          "504": { description: "The document server was too slow" }
+          "504": { description: "The document server was too slow, or checking the text took longer than CONTENT_SCAN_TIME_LIMIT_MS (code timeout)" }
         }
       }
     },
     "/api/guard/detectors": {
-      get: { tags: ["Content rules"], summary: "Detector catalogue with the channels each one checks (viewers)", responses: { "200": { description: "{ channels, detectors }" } } }
+      get: {
+        tags: ["Content rules"],
+        summary:
+          "Detector catalogue with the channels each one checks (viewers). data.entities also carries `engine`: { id, version, status (rules | loaded | idle | not_ready | error), kind (rules | endpoint), model?, message?, error? }; with a names and addresses service configured, its health is asked at most every 30 s.",
+        responses: { "200": { description: "{ channels, detectors }" } }
+      }
     },
     "/api/guard/bindings/projects/{projectId}": {
       get: {

@@ -246,6 +246,7 @@ import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
 import { registerGuardBenchmarkRoutes } from "./guard-benchmark-routes.js";
 import { GuardBenchmarkService } from "./services/guard-benchmark-service.js";
 import { createDeploymentGuardRegistry } from "./services/guard-registry.js";
+import { EndpointEntityRecognizer } from "./services/ner-endpoint-recognizer.js";
 import { registerMcpPolicyLearningRoutes } from "./mcp-policy-learning-routes.js";
 import { loadMcpOpenWorldContext, resolveOpenWorldFor } from "./services/mcp-open-world.js";
 import { registerMcpSafetyPresetRoutes } from "./mcp-safety-preset-routes.js";
@@ -1514,6 +1515,8 @@ export interface CreateAppOptions {
    * fetch that replaces the pinned one. The outbound checks still run on every URL and redirect.
    */
   documentScanNetwork?: { resolver?: DnsResolver; fetchImpl?: typeof fetch };
+  /** The names and addresses service (CONTENT_RULES_NER_ENDPOINT): the DNS resolver and, for tests only, a fetch that replaces the pinned one. */
+  nerEndpointNetwork?: { resolver?: DnsResolver; fetchImpl?: typeof fetch };
 }
 
 /** What provisionSsoUser needs to link or create the local user of an SSO login. */
@@ -1797,7 +1800,26 @@ export async function createApp(
   const runtimeMasterKey = Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64");
   // The deployment's one detector registry: runs, gateway calls, simulations, the detector list, the benchmark and the
   // content rules tools all check with it (names and addresses use the built-in rules unless a recognizer is set up).
-  const guardDetectors = createDeploymentGuardRegistry();
+  // CONTENT_RULES_NER_ENDPOINT: the deployment's names and addresses service; without it the built-in rules stand in.
+  const nerEndpoint = config.CONTENT_RULES_NER_ENDPOINT
+    ? new EndpointEntityRecognizer({
+        baseUrl: config.CONTENT_RULES_NER_ENDPOINT,
+        ...(config.CONTENT_RULES_NER_ENDPOINT_TOKEN ? { token: config.CONTENT_RULES_NER_ENDPOINT_TOKEN } : {}),
+        timeoutMs: config.CONTENT_RULES_NER_ENDPOINT_TIMEOUT_MS ?? 10_000,
+        maxRequestChars: config.CONTENT_RULES_NER_ENDPOINT_MAX_REQUEST_CHARS ?? 50_000,
+        outbound: { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST },
+        ...(options.nerEndpointNetwork?.resolver ? { resolver: options.nerEndpointNetwork.resolver } : {}),
+        ...(options.nerEndpointNetwork?.fetchImpl ? { fetchImpl: options.nerEndpointNetwork.fetchImpl } : {})
+      })
+    : undefined;
+  const guardDetectors = createDeploymentGuardRegistry(nerEndpoint ? { entityRecognizer: nerEndpoint } : {});
+  if (nerEndpoint) {
+    // Ask the service's health once at startup (in the background), so the first editor view and the log say whether it answers.
+    void nerEndpoint.refreshStatus(0).then(() => {
+      const status = nerEndpoint.status();
+      app.log.info({ origin: nerEndpoint.origin, status: status.status, ...(status.model ? { model: `${status.model.id}@${status.model.version}` } : {}) }, "Names and addresses service configured");
+    });
+  }
   // The gateway signs the sensitive values marker on a restore's result; runs trust only markers that verify.
   const sensitiveValuesSigner = createSensitiveValuesSigner(runtimeMasterKey);
   const verifySensitiveValues = sensitiveValuesSigner ? (marker: SensitiveValuesMarker) => sensitiveValuesSigner.verify(marker) : undefined;
@@ -1852,7 +1874,8 @@ export async function createApp(
       maxChars: config.CONTENT_SCAN_MAX_CHARS,
       fetchTimeoutMs: config.CONTENT_SCAN_FETCH_TIMEOUT_MS,
       firstByteTimeoutMs: config.CONTENT_SCAN_FIRST_BYTE_TIMEOUT_MS,
-      maxConcurrent: config.CONTENT_SCAN_MAX_CONCURRENT
+      maxConcurrent: config.CONTENT_SCAN_MAX_CONCURRENT,
+      timeLimitMs: config.CONTENT_SCAN_TIME_LIMIT_MS ?? 120_000
     },
     outbound: outboundGuard,
     resolver: options.documentScanNetwork?.resolver ?? nodeDnsResolver,

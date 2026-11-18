@@ -4,7 +4,10 @@ import {
   contextWordsText,
   defaultEntitiesOptions,
   entityClassesOf,
+  entityEngineOf,
+  entityJudgeOf,
   entityMinScoreOf,
+  withEntityJudge,
   withContextWords,
   withEntityClass,
   withEntityMinScore,
@@ -45,5 +48,24 @@ describe("names and addresses options", () => {
     expect(options.contextWords).toEqual({ boost: ["patient", "doctor"] });
     expect(contextWordsText(options, "boost")).toBe("patient, doctor");
     expect(withContextWords(options, "boost", " ")).toEqual({ classes: ["person_name"] });
+  });
+
+  it("reads the engine, defaulting to auto", () => {
+    expect(entityEngineOf({})).toBe("auto");
+    expect(entityEngineOf({ engine: "union" })).toBe("union");
+    expect(entityEngineOf({ engine: "bogus" })).toBe("auto");
+  });
+
+  it("edits the judge, storing defaults as nothing and removing it all when turned off", () => {
+    const on = withEntityJudge({ classes: ["person_name"] }, { enabled: true });
+    expect(on).toEqual({ classes: ["person_name"], judge: { enabled: true } });
+    expect(entityJudgeOf(on)).toEqual({ enabled: true, model: undefined, band: [0.35, 0.7], maxSpans: 20 });
+    const model = withEntityJudge(on, { model: { providerId: "openai", model: "gpt-test" } });
+    const band = withEntityJudge(model, { band: [0.2, 1.5] });
+    expect(band.judge).toEqual({ enabled: true, model: { providerId: "openai", model: "gpt-test" }, band: [0.2, 1] });
+    expect(withEntityJudge(band, { band: [0.35, 0.7] }).judge).not.toHaveProperty("band");
+    expect(withEntityJudge(band, { maxSpans: 80 }).judge).toMatchObject({ maxSpans: 50 });
+    expect(withEntityJudge(band, { maxSpans: 20 }).judge).not.toHaveProperty("maxSpans");
+    expect(withEntityJudge(band, { enabled: false })).toEqual({ classes: ["person_name"] });
   });
 });
