@@ -55,6 +55,16 @@ describe("DraftWarnings", () => {
     expect(onDismiss).toHaveBeenCalled();
   });
 
+  it("says live triggers are paused only when the API says production would run this unfinished version", () => {
+    const { rerender } = render(<DraftWarnings issues={issues} nodeLabel={() => undefined} onDismiss={() => undefined} />);
+    expect(screen.queryByTestId("live-triggers-paused")).toBeNull();
+    rerender(<DraftWarnings issues={issues} liveTriggersPaused nodeLabel={() => undefined} onDismiss={() => undefined} />);
+    expect(screen.getByTestId("live-triggers-paused")).toHaveTextContent("Live triggers (webhooks, schedules, forms and app triggers) are paused until it is finished");
+    // Shown even when the draft lists nothing left to finish (production's version is the unfinished one).
+    rerender(<DraftWarnings issues={[]} liveTriggersPaused nodeLabel={() => undefined} onDismiss={() => undefined} />);
+    expect(screen.getByTestId("live-triggers-paused")).toBeInTheDocument();
+  });
+
   it("shows notes alone without the draft heading", () => {
     render(<DraftWarnings issues={[issues[1]!]} nodeLabel={() => undefined} onDismiss={() => undefined} />);
     expect(screen.getByTestId("draft-warnings")).not.toHaveTextContent("Unfinished draft");

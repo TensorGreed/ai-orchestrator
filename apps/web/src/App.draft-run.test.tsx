@@ -113,6 +113,30 @@ describe("editor drafts and run feedback", () => {
     expect((saveWorkflowMock.mock.calls[0]![0] as Workflow).name).toBe("Order intake");
   });
 
+  it("saves once when Save is pressed while a new workflow's first-edit save is still running", async () => {
+    let finishSave: (() => void) | undefined;
+    saveWorkflowMock.mockImplementation(
+      (workflow: Workflow) =>
+        new Promise<Workflow>((resolve) => {
+          finishSave = () => resolve({ ...workflow, updatedAt: new Date().toISOString() });
+        })
+    );
+    render(<App />);
+    await screen.findByRole("heading", { name: "Orders hook" });
+    fireEvent.click(await screen.findByRole("button", { name: "New workflow" }));
+    const name = await screen.findByLabelText("Workflow name");
+    fireEvent.change(name, { target: { value: "Order intake" } });
+    await waitFor(() => expect(saveWorkflowMock).toHaveBeenCalledTimes(1));
+
+    // Save while the first-edit save is in flight: it joins that save rather than writing a second version.
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    finishSave?.();
+    await waitFor(() => expect(name).toHaveValue("Order intake"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(saveWorkflowMock).toHaveBeenCalledTimes(1);
+  });
+
   it("asks for the webhook test payload, refuses credentials, and runs with it", async () => {
     runWebhookStreamMock.mockResolvedValue({
       workflowId: "wf-hook",

@@ -1740,7 +1740,7 @@ function StudioApp() {
   }, [currentWorkflow.id]);
 
   // What the saved workflow still lacks (a draft saves with unfinished node settings), for the editor's notice.
-  const [draftIssues, setDraftIssues] = useState<{ workflowId: string; issues: WorkflowValidationIssue[] } | null>(null);
+  const [draftIssues, setDraftIssues] = useState<{ workflowId: string; issues: WorkflowValidationIssue[]; liveTriggersPaused: boolean } | null>(null);
   const draftIssuesWorkflowIdRef = useRef<string | null>(null);
   useEffect(() => {
     setDraftIssues((current) => (current && current.workflowId !== currentWorkflow.id ? null : current));
@@ -1754,7 +1754,7 @@ function StudioApp() {
       .then((validation) => {
         if (cancelled) return;
         const issues = (validation.issues ?? []).filter((issue) => afterSave || issue.severity !== "warning");
-        setDraftIssues({ workflowId, issues });
+        setDraftIssues({ workflowId, issues, liveTriggersPaused: validation.liveTriggersPaused === true });
       })
       .catch(() => {
         // The notice is a hint: without it the editor works as before, and a run still reports what is missing.
@@ -3067,17 +3067,37 @@ function StudioApp() {
     return editorToWorkflow(currentWorkflow, nodes as EditorNode[], edges as Edge[]);
   }, [currentWorkflow, edges, nodes]);
 
+  /**
+   * The save in flight. Saves run one after another, and a save of the same content as the one in flight (Save
+   * clicked while a new workflow's first-edit save runs, a run that saves first) joins it: each save is a version.
+   */
+  const saveInFlightRef = useRef<{ content: string; promise: Promise<Workflow> } | null>(null);
+
   const persistWorkflow = useCallback(async (adjust?: (workflow: Workflow) => Workflow) => {
     const built = buildCurrentWorkflow();
     const workflow = adjust ? adjust(built) : built;
-    const saved = await saveWorkflow(workflow);
-    const workflows = await fetchWorkflows({ projectId: activeProjectId });
-    setWorkflowList(workflows);
-    setCurrentWorkflow(saved);
-    storeLocalWipWorkflow(saved);
-    // Phase 15.4 — a save is a new version: the version pill reloads.
-    setReleaseRefreshKey((key) => key + 1);
-    return saved;
+    const { updatedAt: _updatedAt, ...comparable } = workflow;
+    const content = JSON.stringify(comparable);
+    const previous = saveInFlightRef.current;
+    if (previous && previous.content === content) return await previous.promise;
+    const promise = (async () => {
+      if (previous) await previous.promise.catch(() => undefined);
+      const saved = await saveWorkflow(workflow);
+      const workflows = await fetchWorkflows({ projectId: activeProjectId });
+      setWorkflowList(workflows);
+      setCurrentWorkflow(saved);
+      storeLocalWipWorkflow(saved);
+      // Phase 15.4 — a save is a new version: the version pill reloads.
+      setReleaseRefreshKey((key) => key + 1);
+      return saved;
+    })();
+    const entry = { content, promise };
+    saveInFlightRef.current = entry;
+    try {
+      return await promise;
+    } finally {
+      if (saveInFlightRef.current === entry) saveInFlightRef.current = null;
+    }
   }, [buildCurrentWorkflow]);
 
   // The pill opens Evaluations on Release gates once; the next visit starts on Golden sets.
@@ -5073,6 +5093,7 @@ function StudioApp() {
           {activeMode === "editor" && draftIssues && draftIssues.workflowId === currentWorkflow.id ? (
             <DraftWarnings
               issues={draftIssues.issues}
+              liveTriggersPaused={draftIssues.liveTriggersPaused}
               nodeLabel={(nodeId) => (nodes as EditorNode[]).find((node) => node.id === nodeId)?.data.label}
               onSelectNode={openNodeConfig}
               onDismiss={() => setDraftIssues(null)}

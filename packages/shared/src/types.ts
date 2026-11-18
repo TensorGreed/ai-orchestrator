@@ -710,6 +710,8 @@ export interface WorkflowValidationResult {
   valid: boolean;
   issues: WorkflowValidationIssue[];
   orderedNodeIds?: string[];
+  /** A saved workflow's check only: production's version has unfinished settings, so its live triggers do not run it. */
+  liveTriggersPaused?: boolean;
 }
 
 export interface SecretReference {

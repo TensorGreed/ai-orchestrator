@@ -5,7 +5,7 @@ import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import { createDefaultProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { nodeDefinitions, type Workflow } from "@ai-orchestrator/shared";
 import { executeWorkflow } from "./executor";
-import { saveBlockingIssues, validateWorkflowGraph } from "./validation";
+import { saveBlockingIssues, unfinishedDraftIssues, validateWorkflowGraph } from "./validation";
 
 const position = { x: 0, y: 0 };
 const dependencies = () => ({
@@ -186,5 +186,24 @@ describe("saveBlockingIssues", () => {
 
   it("never blocks on a warning", () => {
     expect(saveBlockingIssues({ valid: true, issues: [{ code: "cycle_detected", message: "x", severity: "warning" }] })).toEqual([]);
+  });
+});
+
+describe("unfinishedDraftIssues", () => {
+  it("lists the unfinished node settings only: not notes, not a broken graph", () => {
+    const draft = workflowOf(
+      [
+        { id: "hook", type: "webhook_input", name: "Hook", position, config: { path: "orders", method: "POST" } },
+        { id: "http", type: "http_request", name: "HTTP", position, config: { method: "POST" } }
+      ],
+      [
+        { id: "e1", source: "hook", target: "http" },
+        { id: "e2", source: "http", target: "missing" }
+      ]
+    );
+    const codes = unfinishedDraftIssues(validateWorkflowGraph(draft)).map((issue) => issue.code);
+    expect(codes).toEqual(["missing_http_request_url_template"]);
+    const finished = workflowOf([{ id: "hook", type: "webhook_input", name: "Hook", position, config: { path: "orders", method: "POST" } }], []);
+    expect(unfinishedDraftIssues(validateWorkflowGraph(finished))).toEqual([]);
   });
 });

@@ -1477,6 +1477,14 @@ const DRAFT_SAVEABLE_ISSUE_CODES = new Set([
 ]);
 
 /**
+ * The unfinished node settings a saved draft may have (each stops a run): production does not serve such a version
+ * from its live triggers.
+ */
+export function unfinishedDraftIssues(validation: WorkflowValidationResult): WorkflowValidationIssue[] {
+  return validation.issues.filter((issue) => issue.severity !== "warning" && DRAFT_SAVEABLE_ISSUE_CODES.has(issue.code));
+}
+
+/**
  * The issues that stop a workflow from being saved: every error except the unfinished-node settings a draft may keep.
  * Warnings never block. The editor shows the rest as warnings, and a run still refuses the workflow until they are fixed.
  */

@@ -14,6 +14,7 @@ import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
+import { SchedulerService } from "./services/scheduler-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
@@ -23,11 +24,13 @@ interface TestContext {
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
+  scheduler?: SchedulerService;
+  secretService: SecretService;
 }
 
 const contexts: TestContext[] = [];
 
-async function createTestContext(): Promise<TestContext> {
+async function createTestContext(options: { scheduler?: boolean } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-draft-save-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
@@ -42,9 +45,10 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = await createApp(config, store, secretService, authService);
+  const scheduler = options.scheduler ? new SchedulerService(store, () => undefined) : undefined;
+  const app = await createApp(config, store, secretService, authService, scheduler);
   await app.ready();
-  const context = { app, store, authService, config, tempDir };
+  const context: TestContext = { app, store, authService, config, tempDir, secretService, ...(scheduler ? { scheduler } : {}) };
   contexts.push(context);
   return context;
 }
@@ -52,6 +56,7 @@ async function createTestContext(): Promise<TestContext> {
 afterEach(async () => {
   while (contexts.length > 0) {
     const context = contexts.pop()!;
+    context.scheduler?.stop();
     await context.app.close();
     try {
       await context.store.close();
@@ -236,5 +241,149 @@ describe("the webhook test payload", () => {
     const run = await context.app.inject({ method: "POST", url: "/api/webhooks/execute", headers: { cookie }, payload: { workflow_id: "wf-hook-draft" } });
     expect(run.statusCode).toBe(200);
     expect(JSON.stringify((run.json() as { output: unknown }).output)).toContain("order for ");
+  });
+});
+
+describe("live triggers of an unfinished draft", () => {
+  const unfinished = (extra: Partial<Workflow> = {}): Workflow =>
+    hookFlow({
+      nodes: [...hookFlow().nodes, { id: "http", type: "http_request", name: "HTTP", position, config: { method: "POST" } }],
+      edges: [...hookFlow().edges, { id: "e2", source: "set", target: "http" }],
+      ...extra
+    });
+  const pausedNotes = async (context: TestContext, workflowId: string) =>
+    (await context.store.listAuditLogs({ eventType: "workflow.triggers_paused", resourceId: workflowId, page: 1, pageSize: 50 })).items;
+  const runs = async (context: TestContext, workflowId: string) =>
+    (await context.store.listExecutionHistory({ workflowId, page: 1, pageSize: 50 })).items;
+
+  it("a production webhook answers 409 without a run, notes the pause once per version, and serves once finished", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: unfinished() })).statusCode).toBe(200);
+
+    for (let fire = 0; fire < 3; fire += 1) {
+      const response = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: { customer: "Ana" } });
+      expect(response.statusCode).toBe(409);
+      const body = response.json() as { error: string; code: string };
+      expect(body.code).toBe("workflow_unfinished");
+      expect(body.error).toContain("Live triggers of this workflow are paused");
+      // An anonymous caller is not told which settings; the audit entry and the editor say.
+      expect(body.error).not.toContain("urlTemplate");
+    }
+    expect(await runs(context, "wf-hook-draft")).toHaveLength(0);
+    const notes = await pausedNotes(context, "wf-hook-draft");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.message).toBe("Live triggers paused: unfinished settings");
+    expect(notes[0]!.metadata).toMatchObject({ version: 1, issues: ["missing_http_request_url_template"] });
+
+    // The editor says so.
+    const validation = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/validate", headers: { cookie }, payload: {} });
+    expect((validation.json() as { liveTriggersPaused?: boolean }).liveTriggersPaused).toBe(true);
+
+    // A new unfinished version is noted once more.
+    expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: unfinished({ name: "Hook draft 2" }) })).statusCode).toBe(200);
+    expect((await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: {} })).statusCode).toBe(409);
+    expect((await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: {} })).statusCode).toBe(409);
+    expect(await pausedNotes(context, "wf-hook-draft")).toHaveLength(2);
+
+    // The editor's test route still runs the draft (and reports what is missing).
+    const tested = await context.app.inject({ method: "POST", url: "/webhook-test/draft-orders", payload: { customer: "Ana" } });
+    expect(tested.statusCode).not.toBe(409);
+
+    // Finished: production serves it again.
+    expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: hookFlow() })).statusCode).toBe(200);
+    const served = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: { customer: "Ana" } });
+    expect(served.statusCode, served.body).toBe(200);
+    const finishedValidation = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/validate", headers: { cookie }, payload: {} });
+    expect((finishedValidation.json() as { liveTriggersPaused?: boolean }).liveTriggersPaused).toBe(false);
+  });
+
+  it("a schedule stays registered but skips its ticks without a run, noting the pause once", async () => {
+    const context = await createTestContext({ scheduler: true });
+    const cookie = await login(context);
+    const scheduled = unfinished({
+      id: "wf-cron-draft",
+      nodes: [
+        { id: "tick", type: "schedule_trigger", name: "Tick", position, config: { cronExpression: "0 3 * * *", timezone: "UTC", active: true } },
+        { id: "http", type: "http_request", name: "HTTP", position, config: { method: "POST" } }
+      ],
+      edges: [{ id: "e1", source: "tick", target: "http" }]
+    });
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: scheduled })).statusCode).toBe(200);
+    await context.scheduler!.reloadWorkflow("wf-cron-draft");
+    const jobs = (context.scheduler as unknown as { jobs: Map<string, unknown> }).jobs;
+    expect([...jobs.keys()]).toHaveLength(1);
+
+    const handler = (context.scheduler as unknown as { executeHandler: (input: Record<string, string>) => Promise<void> }).executeHandler;
+    for (let tick = 0; tick < 3; tick += 1) {
+      await handler({ workflowId: "wf-cron-draft", workflowName: "Hook draft", scheduleNodeId: "tick", cronExpression: "0 3 * * *", timezone: "UTC", firedAt: new Date().toISOString() });
+    }
+    expect(await runs(context, "wf-cron-draft")).toHaveLength(0);
+    expect(await pausedNotes(context, "wf-cron-draft")).toHaveLength(1);
+  });
+
+  it("checks the webhook's own authentication before saying it is paused, and keeps 405 for a method nobody serves", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const secretRef = await context.secretService.createSecret({ name: "hook-token", provider: "webhook", value: "s3cret-token" });
+    const guarded = unfinished({
+      nodes: [
+        { id: "hook", type: "webhook_input", name: "Hook", position, config: { path: "draft-orders", method: "POST", authMode: "bearer_token", authHeaderName: "authorization", secretRef } },
+        { id: "http", type: "http_request", name: "HTTP", position, config: { method: "POST" } }
+      ],
+      edges: [{ id: "e1", source: "hook", target: "http" }]
+    });
+    const saved = await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: guarded });
+    expect(saved.statusCode, saved.body).toBe(200);
+    expect((await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: {} })).statusCode).toBe(401);
+    expect(await pausedNotes(context, "wf-hook-draft")).toHaveLength(0);
+    const authorized = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", headers: { authorization: "Bearer s3cret-token" }, payload: {} });
+    expect(authorized.statusCode, authorized.body).toBe(409);
+    expect((await context.app.inject({ method: "PUT", url: "/webhook/draft-orders", payload: {} })).statusCode).toBe(405);
+    expect(await runs(context, "wf-hook-draft")).toHaveLength(0);
+  });
+
+  it("a form submission and an MCP trigger call answer 409 without a run; the form and the tool still show", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const http = { id: "http", type: "http_request" as const, name: "HTTP", position, config: { method: "POST" } };
+    const form = unfinished({
+      id: "wf-form-draft",
+      nodes: [{ id: "form", type: "form_trigger", name: "Form", position, config: { path: "draft-form", title: "Contact", authMode: "public", fields: [{ name: "name", label: "Name", type: "text" }] } }, http],
+      edges: [{ id: "e1", source: "form", target: "http" }]
+    });
+    const mcp = unfinished({
+      id: "wf-mcp-draft",
+      nodes: [{ id: "mcp", type: "mcp_server_trigger", name: "Tool", position, config: { path: "draft-tool", toolName: "echo", toolDescription: "Echo", authMode: "public", inputSchema: { type: "object" } } }, http],
+      edges: [{ id: "e1", source: "mcp", target: "http" }]
+    });
+    for (const workflow of [form, mcp]) {
+      const saved = await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: workflow });
+      expect(saved.statusCode, saved.body).toBe(200);
+    }
+    expect((await context.app.inject({ method: "GET", url: "/api/forms/draft-form" })).statusCode).toBe(200);
+    const submitted = await context.app.inject({ method: "POST", url: "/api/forms/draft-form", payload: { name: "Ana" } });
+    expect(submitted.statusCode).toBe(409);
+    expect((submitted.json() as { code: string }).code).toBe("workflow_unfinished");
+    expect((await context.app.inject({ method: "GET", url: "/api/mcp-server/draft-tool/manifest" })).statusCode).toBe(200);
+    const called = await context.app.inject({ method: "POST", url: "/api/mcp-server/draft-tool/invoke", payload: { arguments: {} } });
+    expect(called.statusCode).toBe(409);
+    expect((called.json() as { code: string }).code).toBe("workflow_unfinished");
+    expect(await runs(context, "wf-form-draft")).toHaveLength(0);
+    expect(await runs(context, "wf-mcp-draft")).toHaveLength(0);
+  });
+
+  it("a finished published version keeps serving while the draft after it is unfinished", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: hookFlow() })).statusCode).toBe(200);
+    const published = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/publish", headers: { cookie }, payload: { version: 1 } });
+    expect(published.statusCode, published.body).toBe(200);
+    expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: unfinished() })).statusCode).toBe(200);
+    const served = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: { customer: "Ana" } });
+    expect(served.statusCode, served.body).toBe(200);
+    const validation = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/validate", headers: { cookie }, payload: {} });
+    expect((validation.json() as { liveTriggersPaused?: boolean }).liveTriggersPaused).toBe(false);
+    expect(await pausedNotes(context, "wf-hook-draft")).toHaveLength(0);
   });
 });

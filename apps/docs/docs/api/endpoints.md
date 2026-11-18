@@ -363,7 +363,7 @@ See [Approval gates](../product/approvals.md). Release requests (Phase 15.4) app
 ## Webhooks
 
 - `POST /api/webhooks/execute` and `POST /api/webhooks/execute/stream` (builder; `{ workflow_id?, webhook_path?, session_id?, system_prompt?, user_prompt?, variables?, customData?, payload? }`). `payload` is the request body the run's webhook receives (what <span v-pre>`{{webhook.<field>}}`</span> reads), with the prompt fields on top of it, as a call to `/webhook/:path` gets them; without it the body holds the prompt fields only.
-- `ANY /webhook/:path`
+- `ANY /webhook/:path` (production: answers `409` with `code: "workflow_unfinished"`, and starts no run, while the version production would run has unfinished node settings)
 - `ANY /webhook-test/:path`
 
 ### Content rules on responses (`content_filter`)

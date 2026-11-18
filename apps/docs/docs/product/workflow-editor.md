@@ -153,10 +153,35 @@ lists it as a note, not an error.
 
 Saving keeps a draft: node settings you have not filled in yet (an HTTP Request URL, an IF condition, a model, a
 Set node's fields and the like) do not stop a save. The editor lists them above the canvas after the save, with a
-link to each node, and a run stops at them until they are fixed. Such a version cannot be published either. A
-saved workflow's production webhooks and schedules are live, so each trigger of an unfinished draft records a failed
-run until it is finished. A save is still refused for a broken graph (a
-cycle, an edge to a missing node, a repeated node id) and for settings that are live as soon as the workflow is
-saved: trigger and webhook authentication settings, approval and content-rule rules, and attachment rules.
+link to each node, and a run stops at them until they are fixed. Such a version cannot be published either. A save is
+still refused for a broken graph (a cycle, an edge to a missing node, a repeated node id) and for settings that are
+live as soon as the workflow is saved: trigger and webhook authentication settings, approval and content-rule rules,
+and attachment rules.
+
+### Settings that may be unfinished in a draft
+
+These save unfinished; each one stops a run until it is filled in:
+
+- Templates: a Prompt Template's template, an HTTP Request URL, a Set node's fields (and their names and values)
+- Branching: an IF condition, a Switch value and its cases, a Merge node's combine key and its second input
+- Loops: a Loop's input key and item variable
+- Models: an LLM Call's provider, a Gemini model, a chat model's model or gateway base URL, an agent's attached chat
+  model
+- Azure: the Azure OpenAI secret, endpoint and deployment, the Azure embedding secret and settings, and the
+  operation of an Azure Storage, Monitor, Cosmos DB or AI Search node
+- Tools and data: an MCP tool or resource, a connector, a Qdrant operation, an output parser's schema, an input
+  validator's rules
+- Code and sub-workflows: a code node's script, the workflow an Execute Workflow or Workflow Tool node calls
+
+### Live triggers of an unfinished draft
+
+While the version production would run has unfinished settings (a saved draft with nothing published), its live
+triggers are paused and the editor says so above the canvas: a production webhook (`/webhook/:path`, after its own
+address and authentication checks), form submission, chat message or MCP trigger call answers `409` with
+`code: "workflow_unfinished"` and starts no run (the form page and the tool's manifest still show), and a schedule or
+app trigger skips its tick. Other production runs of that version (an API key's `/execute`, a sub-workflow call) are
+refused with `409` too. The audit log records the pause once per version (`workflow.triggers_paused`, "Live triggers paused:
+unfinished settings"). Webhook run and the test webhook URL (`/webhook-test/:path`) still run the draft, so you can
+see where it stops. Save it finished and the triggers serve again.
 
 Non-connected nodes are not executed.

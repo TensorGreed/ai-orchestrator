@@ -78,6 +78,8 @@ test.describe("editor drafts and run feedback", () => {
       const notice = page.getByTestId("draft-warnings");
       await expect(notice).toContainText("Unfinished draft");
       await expect(notice).toContainText("HTTP Request node requires a non-empty urlTemplate.");
+      // Nothing is published, so production would run this draft: its live triggers are paused.
+      await expect(notice.getByTestId("live-triggers-paused")).toContainText("Live triggers");
 
       const saved = page.waitForResponse((response) => response.url().includes(`/api/workflows`) && response.request().method() === "POST");
       await page.getByRole("banner").getByRole("button", { name: /^Save/ }).click();
