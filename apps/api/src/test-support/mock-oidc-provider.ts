@@ -56,6 +56,8 @@ export class MockOidcProvider {
   idTokenOverrides: Record<string, unknown> = {};
   /** Claims the userinfo endpoint returns in addition to the user. */
   userinfoExtra: Record<string, unknown> = {};
+  /** `code_challenge_methods_supported` in the discovery document; undefined leaves the field out. */
+  codeChallengeMethods: unknown = ["S256"];
   /** Claims left out of the ID token (they are still in userinfo). */
   omitFromIdToken: string[] = [];
   jwksFetches = 0;
@@ -112,7 +114,7 @@ export class MockOidcProvider {
       response_types_supported: ["code"],
       subject_types_supported: ["public"],
       id_token_signing_alg_values_supported: [this.alg],
-      code_challenge_methods_supported: ["S256"],
+      ...(this.codeChallengeMethods === undefined ? {} : { code_challenge_methods_supported: this.codeChallengeMethods }),
       ...(this.authMethods ? { token_endpoint_auth_methods_supported: this.authMethods } : {})
     };
   }

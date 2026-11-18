@@ -1,7 +1,8 @@
 /**
  * Phase 13.2 — OpenID Connect single sign-on (Authorization Code flow with PKCE).
  *
- * Flow: `beginLogin` reads the IdP's discovery document, creates `state`, `nonce` and a PKCE (S256) pair, and returns
+ * Flow: `beginLogin` reads the IdP's discovery document (refusing one whose `code_challenge_methods_supported` lists
+ * methods but not S256), creates `state`, `nonce` and a PKCE (S256) pair, and returns
  * the authorization URL plus a sealed flow cookie (AES-256-GCM, HttpOnly, ten minutes). `completeLogin` opens that
  * cookie, checks `state`, exchanges the code (with the PKCE verifier and, for confidential clients, the client
  * secret), and validates the ID token: signature against the IdP's JWKS (asymmetric algorithms only, so `none` and
@@ -482,6 +483,7 @@ export class OidcService {
       }
       return value;
     };
+    this.checkPkceSupport(raw.code_challenge_methods_supported, settings.issuer);
     const methods = raw.token_endpoint_auth_methods_supported;
     return {
       issuer: settings.issuer,
@@ -493,6 +495,35 @@ export class OidcService {
         ? methods.filter((value): value is string => typeof value === "string")
         : undefined
     };
+  }
+
+  /**
+   * The provider's PKCE methods, from `code_challenge_methods_supported` (RFC 8414 section 2; OpenID Connect Discovery
+   * 1.0 section 3 does not define it but allows additional provider metadata, and most providers publish it).
+   *
+   * - Lists `S256`: sign-in uses it.
+   * - Lists methods, none of them `S256` (for example only `plain`): refused. RFC 7636 section 4.2 says a client that
+   *   can use S256 "MUST use S256", and section 7.2 that clients "MUST NOT downgrade to plain".
+   * - Absent, empty or malformed: sign-in still sends S256, as RFC 7636 section 5 says clients "SHOULD send the
+   *   additional parameters as defined in Section 4 to all servers" (a provider without PKCE ignores them, and
+   *   `state` and `nonce` still protect the flow). The log says so, once per discovery fetch.
+   */
+  private checkPkceSupport(value: unknown, issuer: string): void {
+    const listed = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+    if (listed.length === 0) {
+      this.options.logger?.(
+        "OIDC provider metadata has no code_challenge_methods_supported; sending PKCE S256 anyway (RFC 7636 section 5)",
+        { issuer }
+      );
+      return;
+    }
+    if (!listed.includes("S256")) {
+      const shown = listed.slice(0, 5).map((entry) => entry.slice(0, 20)).join(", ");
+      throw new OidcError(
+        "discovery_failed",
+        `Discovery code_challenge_methods_supported lists ${shown} but not S256; sign-in needs PKCE S256 (RFC 7636 section 4.2) and never falls back to plain`
+      );
+    }
   }
 
   /** Starts a login: the IdP authorization URL and the sealed flow cookie value to set on the browser. */
