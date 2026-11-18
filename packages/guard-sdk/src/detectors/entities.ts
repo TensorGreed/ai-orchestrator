@@ -52,6 +52,12 @@ export interface GuardEntitySpan {
   source: string;
   /** A name found through a cue word; recognizers that do not know leave it out. */
   cue?: boolean;
+  /**
+   * The score is calibrated so that `ENTITY_ENDPOINT_CALIBRATED_CUT` (0.8) is the class's benchmark cut, as a names and
+   * addresses service's scores are. Such a span is reported from that cut when the rule set sets no `minScore` for its
+   * class; other spans use the built-in rules' defaults.
+   */
+  calibrated?: boolean;
 }
 
 export interface GuardEntityRequest {
@@ -60,6 +66,12 @@ export interface GuardEntityRequest {
   signal?: AbortSignal;
   /** The lowest score worth returning (the lowest class `minScore`, or the judge's band); recognizers may return lower. */
   minScore?: number;
+  /**
+   * The same for a recognizer whose spans are `calibrated` (a names and addresses service): classes without their own
+   * `minScore` count from the calibrated cut, so it is never lower than that unless the rule set (a class `minScore`,
+   * the judge's band or context words) asks for lower. Send it as the service's `threshold`.
+   */
+  calibratedMinScore?: number;
 }
 
 export interface GuardEntityRecognizer {
@@ -270,7 +282,8 @@ export async function findEntitiesMany(texts: readonly string[], options: GuardE
         classes: wanted,
         ...(options.languages[0] ? { language: options.languages[0] } : {}),
         ...(context.signal ? { signal: context.signal } : {}),
-        minScore: lowestWantedScore(options, wanted)
+        minScore: lowestWantedScore(options, wanted, false),
+        calibratedMinScore: lowestWantedScore(options, wanted, true)
       }
     );
   } catch {
@@ -289,8 +302,8 @@ export async function findEntitiesMany(texts: readonly string[], options: GuardE
  * The lowest score a span can matter at: the lowest `minScore` of the asked classes, or lower when the judge looks at
  * spans below it. Context words can raise a score by 0.1, so a little below that too.
  */
-function lowestWantedScore(options: GuardEntitiesOptions, classes: readonly string[]): number {
-  const scores = classes.filter(isEntityDataClass).map((dataClass) => entityMinScore(options, dataClass));
+function lowestWantedScore(options: GuardEntitiesOptions, classes: readonly string[], calibrated: boolean): number {
+  const scores = classes.filter(isEntityDataClass).map((dataClass) => entityMinScore(options, dataClass, calibrated));
   if (options.judge?.enabled) scores.push(options.judge.band[0]);
   const lowest = Math.min(1, ...scores) - (options.contextWords.boost.length > 0 ? 0.1 : 0);
   return Math.max(0, Math.round(lowest * 1000) / 1000);
@@ -319,7 +332,7 @@ function checkedMatches(text: string, raw: readonly GuardEntitySpan[], wanted: r
       if (boost.some((word) => containsWord(around, word))) score = clampScore(score + 0.1);
       if (suppress.some((word) => containsWord(around, word))) score = clampScore(score - 0.3);
     }
-    matches.push({ start: span.start, end: span.end, dataClass: span.dataClass, score: Math.round(score * 1000) / 1000, source: String(span.source ?? recognizer.id).slice(0, 64), minScore: entityMinScore(options, span.dataClass) });
+    matches.push({ start: span.start, end: span.end, dataClass: span.dataClass, score: Math.round(score * 1000) / 1000, source: String(span.source ?? recognizer.id).slice(0, 64), minScore: entityMinScore(options, span.dataClass, span.calibrated === true) });
   }
   // Where spans overlap, one that would be reported beats one that would be suppressed, whatever their raw scores:
   // a low-scored span of another class must never hide a finding.

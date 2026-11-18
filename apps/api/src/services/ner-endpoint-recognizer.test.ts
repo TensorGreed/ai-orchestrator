@@ -341,10 +341,28 @@ describe("the service as the deployment's engine", () => {
       ["person_name", "A••• D••••"],
       ["location", "O•••"]
     ]);
-    // Lund scores 0.4: the service is asked for spans down to the lowest class minimum, so it is never sent back.
-    expect(server.requests[0]!.threshold).toBe(0.7);
+    // A default rule set asks from the service's calibrated cut (0.8), whatever the built-in rules' defaults are.
+    expect(server.requests[0]!.threshold).toBe(0.8);
     expect(deployment.registry.get(ENTITIES_DETECTOR_ID)!.version).toContain(`endpoint@${MOCK_NER_MODEL.id}@${MOCK_NER_MODEL.version}`);
     expect(deployment.entityEngine()).toMatchObject({ id: "endpoint", kind: "endpoint", status: "loaded", model: MOCK_NER_MODEL });
+  });
+
+  it("reports the service's spans from its calibrated cut by default, and from a class's own lower minScore", async () => {
+    const server = await serve({ vocabulary: { ...VOCABULARY, "Mara Lind": { label: "person_name", score: 0.78 }, "9 Quay Road": { label: "street_address", score: 0.74 } } });
+    const deployment = createDeploymentGuardRegistry({ entityRecognizer: recognizerFor(server) });
+    const content = "Dear Mara Lind, ship to 9 Quay Road. Alan Doyle agreed.";
+    // Default: 0.78 and 0.74 are below the cut, so they are not even asked for (the rules' 0.75 and 0.7 do not apply).
+    const plain = await evaluateGuard(profileWith(ALL), { channel: "prompt", content }, { registry: deployment.registry });
+    expect(plain.findings.map((finding) => finding.dataClass)).toEqual(["person_name"]);
+    expect(server.requests.at(-1)!.threshold).toBe(0.8);
+    // A class's own minScore below the cut is honoured: the threshold goes down to it, and only that class gains.
+    const lowered = await evaluateGuard(profileWith({ ...ALL, minScore: { person_name: 0.75 } }), { channel: "prompt", content }, { registry: deployment.registry });
+    expect(server.requests.at(-1)!.threshold).toBe(0.75);
+    expect(lowered.findings.map((finding) => finding.dataClass).sort()).toEqual(["person_name", "person_name"]);
+    // union: the built-in rules' spans keep the rules' defaults (a street line alone scores 0.75 >= 0.7).
+    const union = await evaluateGuard(profileWith({ ...ALL, engine: "union" }), { channel: "prompt", content: "Ship to 9 Quay Road." }, { registry: deployment.registry });
+    expect(union.findings.map((finding) => finding.dataClass)).toEqual(["street_address"]);
+    expect(server.requests.at(-1)!.threshold).toBe(0.8);
   });
 
   it("is timed apart from the latency budget, and a failure follows the rule set's setting", async () => {

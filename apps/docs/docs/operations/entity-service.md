@@ -199,6 +199,10 @@ the model's raw score there was, and scores above it spread up to 1. So one thre
 and addresses, and a check's per-class minimum scores apply directly. Asking for a lower `threshold` returns more
 findings below the calibrated cut, down to a raw score of 0.15.
 
+Content rules report the service's findings from 0.8 by default and send no lower `threshold`, so a rule set with the
+default settings gets the precision and recall in [Accuracy](#accuracy). A rule set that sets a class's own `minScore`
+below 0.8 gets more findings than the benchmark measured; the rule set editor says so.
+
 ### How text is read
 
 Text is split into words (letters and digits, with hyphenated words kept whole, and each other character on its own)

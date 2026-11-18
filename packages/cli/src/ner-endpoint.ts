@@ -138,7 +138,7 @@ function spansOf(result: unknown, text: string, wanted: ReadonlySet<string>, sou
       throw new NerEndpointError("The entity endpoint's answer has an entity out of range");
     }
     if (!wanted.has(label)) continue;
-    spans.push({ start: start as number, end: end as number, dataClass: label, score, source });
+    spans.push({ start: start as number, end: end as number, dataClass: label, score, source, calibrated: true });
   }
   return spans;
 }
@@ -158,7 +158,7 @@ export function createNerEndpointRecognizer(options: NerEndpointOptions, model: 
       for (let first = 0; first < texts.length; first += MAX_TEXTS_PER_REQUEST) {
         request.signal?.throwIfAborted();
         const batch = texts.slice(first, first + MAX_TEXTS_PER_REQUEST);
-        const { status, body } = await call(options, "/v1/entities", { method: "POST", body: JSON.stringify({ texts: batch, labels, language: request.language ?? "en" }) });
+        const { status, body } = await call(options, "/v1/entities", { method: "POST", body: JSON.stringify({ texts: batch, labels, language: request.language ?? "en", ...(request.calibratedMinScore !== undefined ? { threshold: request.calibratedMinScore } : {}) }) });
         if (status !== 200) throw new NerEndpointError(`The entity endpoint refused the request: ${errorOf(status, body)}`);
         const results = isObject(body) && Array.isArray(body.results) ? (body.results as unknown[]) : undefined;
         if (!isObject(body) || !results || results.length !== batch.length) throw new NerEndpointError("The entity endpoint's answer does not line up with the texts");

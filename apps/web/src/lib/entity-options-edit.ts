@@ -8,6 +8,7 @@ import {
   DEFAULT_ENTITY_MAX_CHARS,
   DEFAULT_ENTITY_MIN_SCORES,
   ENTITIES_DETECTOR_ID,
+  ENTITY_ENDPOINT_CALIBRATED_CUT,
   ENTITY_DATA_CLASSES,
   ENTITY_ENGINES,
   MAX_ENTITY_CONTEXT_WORDS,
@@ -47,16 +48,41 @@ export function withEntityClass(options: Record<string, unknown>, dataClass: Ent
   return { ...rest, classes: next, ...(Object.keys(kept).length > 0 ? { minScore: kept } : {}) };
 }
 
-export function entityMinScoreOf(options: Record<string, unknown>, dataClass: EntityDataClass): number {
-  const value = rec(options.minScore)[dataClass];
-  return typeof value === "number" ? value : DEFAULT_ENTITY_MIN_SCORES[dataClass];
+/**
+ * The default lowest score of a class: the service's calibrated cut when the rule set uses the deployment's names and
+ * addresses service (its findings count from there), else the built-in rules' default.
+ */
+export function entityDefaultMinScore(dataClass: EntityDataClass, usesService: boolean): number {
+  return usesService ? ENTITY_ENDPOINT_CALIBRATED_CUT : DEFAULT_ENTITY_MIN_SCORES[dataClass];
 }
 
-/** Set a class's lowest reported score (0..1); the default value is stored as nothing. */
-export function withEntityMinScore(options: Record<string, unknown>, dataClass: EntityDataClass, value: number): Record<string, unknown> {
+/** The class's own lowest score when the rule set sets one. */
+export function entityExplicitMinScore(options: Record<string, unknown>, dataClass: EntityDataClass): number | undefined {
+  const value = rec(options.minScore)[dataClass];
+  return typeof value === "number" ? value : undefined;
+}
+
+export function entityMinScoreOf(options: Record<string, unknown>, dataClass: EntityDataClass, usesService = false): number {
+  return entityExplicitMinScore(options, dataClass) ?? entityDefaultMinScore(dataClass, usesService);
+}
+
+/**
+ * Classes whose own lowest score is below the service's benchmark cut, when the rule set uses the service: their
+ * service findings are reported below what the service's measured precision covers.
+ */
+export function entityClassesBelowServiceCut(options: Record<string, unknown>, usesService: boolean): EntityDataClass[] {
+  if (!usesService) return [];
+  return entityClassesOf(options).filter((dataClass) => {
+    const own = entityExplicitMinScore(options, dataClass);
+    return own !== undefined && own < ENTITY_ENDPOINT_CALIBRATED_CUT;
+  });
+}
+
+/** Set a class's lowest reported score (0..1); the default value (for the engine in use) is stored as nothing. */
+export function withEntityMinScore(options: Record<string, unknown>, dataClass: EntityDataClass, value: number, usesService = false): Record<string, unknown> {
   const clamped = Math.round(Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0)) * 100) / 100;
   const minScore = { ...rec(options.minScore) };
-  if (clamped === DEFAULT_ENTITY_MIN_SCORES[dataClass]) delete minScore[dataClass];
+  if (clamped === entityDefaultMinScore(dataClass, usesService)) delete minScore[dataClass];
   else minScore[dataClass] = clamped;
   const { minScore: _old, ...rest } = options;
   return Object.keys(minScore).length > 0 ? { ...rest, minScore } : rest;

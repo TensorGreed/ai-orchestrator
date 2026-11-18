@@ -1,9 +1,10 @@
-import { ENTITY_SERVICE_ENABLE_COMMAND, type EntityEngine, type GuardEntityEngineInfo } from "@ai-orchestrator/shared";
+import { ENTITY_ENDPOINT_CALIBRATED_CUT, ENTITY_SERVICE_ENABLE_COMMAND, type EntityEngine, type GuardEntityEngineInfo } from "@ai-orchestrator/shared";
 import {
   contextWordsText,
   DEFAULT_ENTITY_MAX_CHARS,
   ENTITY_CLASS_LABELS,
   ENTITY_DATA_CLASSES,
+  entityClassesBelowServiceCut,
   entityClassesOf,
   entityEngineOf,
   entityJudgeOf,
@@ -86,6 +87,9 @@ export function EntitiesOptionsCard({
   const judge = entityJudgeOf(options);
   // Loaded engine info says whether a service is set up; while it loads, no warning.
   const missingService = Boolean(engine) && !hasService && (chosen === "endpoint" || chosen === "union");
+  // The service's findings count from its calibrated cut unless a class sets its own lowest score.
+  const usesService = hasService && chosen !== "rules";
+  const belowCut = entityClassesBelowServiceCut(options, usesService);
   const waits = judge.enabled || (hasService && engine?.kind === "endpoint" && chosen !== "rules");
   return (
     <fieldset className="guard-output-check" disabled={readOnly} aria-label="Names and addresses settings">
@@ -113,14 +117,26 @@ export function EntitiesOptionsCard({
                 min={0}
                 max={1}
                 step={0.05}
-                value={entityMinScoreOf(options, dataClass)}
+                value={entityMinScoreOf(options, dataClass, usesService)}
                 disabled={readOnly || !on}
-                onChange={(event) => onChange(withEntityMinScore(options, dataClass, Number(event.target.value)))}
+                onChange={(event) => onChange(withEntityMinScore(options, dataClass, Number(event.target.value), usesService))}
               />
             </span>
           );
         })}
       </div>
+      {usesService && (
+        <p className="kb-subtle" data-testid="entities-service-cut">
+          The service&apos;s findings are reported from {ENTITY_ENDPOINT_CALIBRATED_CUT}, its benchmark cut, unless a class sets its own lowest score
+          {chosen === "union" ? "; the built-in rules' findings keep their own defaults" : ""}.
+        </p>
+      )}
+      {belowCut.length > 0 && (
+        <p className="guard-warning" data-testid="entities-below-cut">
+          {belowCut.map((dataClass) => ENTITY_CLASS_LABELS[dataClass]).join(", ")}: the lowest score is below the service&apos;s benchmark cut (
+          {ENTITY_ENDPOINT_CALIBRATED_CUT}), so more is reported than the measured precision covers.
+        </p>
+      )}
       <label>
         <span>Engine</span>
         <select value={chosen} onChange={(event) => onChange(withEntityOption(options, "engine", event.target.value === "auto" ? undefined : event.target.value))}>

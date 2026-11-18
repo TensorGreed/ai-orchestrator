@@ -166,7 +166,8 @@ export class EndpointEntityRecognizer implements GuardEntityRecognizer {
     const pieces = texts.flatMap((text, index) => piecesOf(text, index, pieceChars));
     for (const batch of batchesOf(pieces, this.options.maxRequestChars)) {
       if (request.signal?.aborted) throw new EntityEndpointError("The names and addresses check was stopped");
-      const results = await this.post(batch.map((piece) => piece.value), labels, request.minScore, request.signal);
+      // Calibrated scores: the threshold counts from the service's cut unless the rule set asks for lower.
+      const results = await this.post(batch.map((piece) => piece.value), labels, request.calibratedMinScore ?? request.minScore, request.signal);
       batch.forEach((piece, position) => {
         for (const entity of results[position]!) {
           if (entity.end > piece.value.length || entity.end <= entity.start) {
@@ -175,7 +176,7 @@ export class EndpointEntityRecognizer implements GuardEntityRecognizer {
           if (!(labels as readonly string[]).includes(entity.label)) throw this.contractError("The names and addresses service answered a label that was not asked for");
           const start = entity.start + piece.offset;
           if (start < piece.from || start >= piece.to) continue;
-          out[piece.text]!.push({ start, end: entity.end + piece.offset, dataClass: entity.label, score: entity.score, source: `${this.id}:${entity.label}` });
+          out[piece.text]!.push({ start, end: entity.end + piece.offset, dataClass: entity.label, score: entity.score, source: `${this.id}:${entity.label}`, calibrated: true });
         }
       });
     }

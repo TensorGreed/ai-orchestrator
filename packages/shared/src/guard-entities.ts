@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ENTITY_ENDPOINT_LABELS } from "./guard-entity-endpoint";
+import { ENTITY_ENDPOINT_CALIBRATED_CUT, ENTITY_ENDPOINT_LABELS } from "./guard-entity-endpoint";
 
 /**
  * Person names, locations and street addresses as data classes of content rules: the `data.entities` detector.
@@ -35,7 +35,10 @@ export type EntityEngine = (typeof ENTITY_ENGINES)[number];
 /** Languages the detector accepts in v1. */
 export const ENTITY_LANGUAGES = ["en"] as const;
 
-/** Default lowest score reported per class: lower scores are kept as suppressed findings. */
+/**
+ * Default lowest score reported per class for the built-in rules: lower scores are kept as suppressed findings. Spans
+ * from the names and addresses service default to its calibrated cut instead (`ENTITY_ENDPOINT_CALIBRATED_CUT`).
+ */
 export const DEFAULT_ENTITY_MIN_SCORES: Readonly<Record<EntityDataClass, number>> = {
   person_name: 0.75,
   street_address: 0.7,
@@ -119,9 +122,13 @@ export const guardEntitiesOptionsSchema = z
 export type GuardEntitiesOptions = z.output<typeof guardEntitiesOptionsSchema>;
 export type GuardEntitiesOptionsInput = z.input<typeof guardEntitiesOptionsSchema>;
 
-/** The lowest score reported for a class under these options. */
-export function entityMinScore(options: Pick<GuardEntitiesOptions, "minScore">, dataClass: EntityDataClass): number {
-  return options.minScore[dataClass] ?? DEFAULT_ENTITY_MIN_SCORES[dataClass];
+/**
+ * The lowest score reported for a class under these options: the rule set's own `minScore` for the class when it sets
+ * one; otherwise the built-in rules' default, or, for a span from the names and addresses service (`calibrated`), the
+ * service's calibrated cut, so a default rule set gets what the service's benchmark measured.
+ */
+export function entityMinScore(options: Pick<GuardEntitiesOptions, "minScore">, dataClass: EntityDataClass, calibrated = false): number {
+  return options.minScore[dataClass] ?? (calibrated ? ENTITY_ENDPOINT_CALIBRATED_CUT : DEFAULT_ENTITY_MIN_SCORES[dataClass]);
 }
 
 /** What the detector list reports about the recognizer behind `data.entities`. */

@@ -13,7 +13,7 @@ const otherModel = { id: "example/other", version: "1", sha256: "a".repeat(64) }
 
 interface Endpoint {
   fetch: typeof fetch;
-  calls: Array<{ url: string; authorization?: string; body?: { texts: string[]; labels: string[] } }>;
+  calls: Array<{ url: string; authorization?: string; body?: { texts: string[]; labels: string[]; threshold?: number } }>;
 }
 
 function endpoint(options: { model?: typeof bundledModel; ready?: boolean; answer?: (body: { texts: string[]; labels: string[] }) => { status: number; json: unknown } } = {}): Endpoint {
@@ -89,10 +89,14 @@ describe("the entity endpoint recognizer", () => {
     const texts = Array.from({ length: 130 }, (_, i) => `Anna ${i}`);
     const spans = await recognizer.recognize(texts, { classes: ["person_name", "email"], language: "en" });
     expect(spans).toHaveLength(130);
-    expect(spans[129]).toEqual([{ start: 0, end: 4, dataClass: "person_name", score: 0.9, source: `endpoint:${bundledModel.id}` }]);
+    expect(spans[129]).toEqual([{ start: 0, end: 4, dataClass: "person_name", score: 0.9, source: `endpoint:${bundledModel.id}`, calibrated: true }]);
     const posts = fake.calls.filter((call) => call.body);
     expect(posts.map((call) => call.body!.texts.length)).toEqual([64, 64, 2]);
     expect(posts[0]!.body!.labels).toEqual(["person_name"]);
+    expect(posts[0]!.body!.threshold).toBeUndefined();
+    // The detector's threshold for a calibrated service goes along as the request threshold.
+    await recognizer.recognize(["Anna"], { classes: ["person_name"], language: "en", minScore: 0.7, calibratedMinScore: 0.8 });
+    expect(fake.calls.filter((call) => call.body).at(-1)!.body!.threshold).toBe(0.8);
     expect(posts[0]!.url).toBe("https://ner.test:8000/v1/entities");
     expect(posts[0]!.authorization).toBe("Bearer a-long-enough-token-1234");
   });

@@ -58,6 +58,27 @@ describe("Names and addresses card", () => {
     model: { id: "gliner-pii-base", version: "1.0", sha256: "a".repeat(64) }
   };
 
+  it("counts the service's findings from its benchmark cut, and warns about a class set below it", () => {
+    const seen: Array<Record<string, unknown>> = [];
+    render(<Harness initial={{ classes: ["person_name", "location"] }} seen={seen} engine={SERVICE} />);
+    expect(screen.getByLabelText("Lowest score for person names")).toHaveValue(0.8);
+    expect(screen.getByTestId("entities-service-cut")).toHaveTextContent("reported from 0.8, its benchmark cut");
+    expect(screen.queryByTestId("entities-below-cut")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Lowest score for person names"), { target: { value: "0.6" } });
+    expect(seen.at(-1)!.minScore).toEqual({ person_name: 0.6 });
+    expect(screen.getByTestId("entities-below-cut")).toHaveTextContent("Person names: the lowest score is below the service's benchmark cut");
+    // Back to the cut: stored as nothing again.
+    fireEvent.change(screen.getByLabelText("Lowest score for person names"), { target: { value: "0.8" } });
+    expect(seen.at(-1)!.minScore).toBeUndefined();
+  });
+
+  it("keeps the built-in rules' defaults when the rule set uses the rules only", () => {
+    render(<Harness initial={{ classes: ["person_name"], engine: "rules", minScore: { person_name: 0.6 } }} seen={[]} engine={SERVICE} />);
+    expect(screen.getByLabelText("Lowest score for person names")).toHaveValue(0.6);
+    expect(screen.queryByTestId("entities-service-cut")).toBeNull();
+    expect(screen.queryByTestId("entities-below-cut")).toBeNull();
+  });
+
   it("shows the service's health and model, and that a rules-only rule set does not use it", async () => {
     const seen: Array<Record<string, unknown>> = [];
     render(<Harness initial={{ classes: ["location"] }} seen={seen} engine={SERVICE} />);

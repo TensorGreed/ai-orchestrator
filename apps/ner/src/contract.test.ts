@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import {
+  ENTITY_ENDPOINT_CALIBRATED_CUT,
   ENTITY_ENDPOINT_ERROR_CODES,
   ENTITY_ENDPOINT_LABELS,
   ENTITY_ENDPOINT_MAX_TEXTS,
@@ -10,6 +11,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { NER_ERROR_CODES, NER_MAX_TEXTS, nerEntitiesRequestSchema } from "./contract.js";
 import { NER_ENTITY_CLASSES } from "./models/manifest.js";
+import { NER_CALIBRATED_CUT } from "./spans.js";
 
 /** openapi.json is the published contract: it has to say what the service does. */
 const openapi = JSON.parse(readFileSync(new URL("../openapi.json", import.meta.url), "utf8"));
@@ -40,6 +42,8 @@ describe("the shared contract (packages/shared, used by the API's client)", () =
     expect(NER_MAX_TEXTS).toBe(ENTITY_ENDPOINT_MAX_TEXTS);
     expect([...NER_ENTITY_CLASSES]).toEqual([...ENTITY_ENDPOINT_LABELS]);
     expect([...NER_ERROR_CODES]).toEqual([...ENTITY_ENDPOINT_ERROR_CODES]);
+    // The API reports the service's spans from this cut by default; the server maps each class's cut to it.
+    expect(NER_CALIBRATED_CUT).toBe(ENTITY_ENDPOINT_CALIBRATED_CUT);
   });
 
   it("accepts every request the client sends and the server accepts", () => {

@@ -19,6 +19,13 @@ import { z } from "zod";
 export const ENTITY_ENDPOINT_LABELS = ["person_name", "location", "street_address"] as const;
 export type EntityEndpointLabel = (typeof ENTITY_ENDPOINT_LABELS)[number];
 
+/**
+ * A service's scores are read as calibrated per class: this score is each class's benchmark cut (l2m-ner maps every
+ * class's cut to it, and it is the service's default `threshold`). Content rules report a service's spans from this
+ * score unless a rule set sets its own `minScore` for the class.
+ */
+export const ENTITY_ENDPOINT_CALIBRATED_CUT = 0.8;
+
 /** Texts in one request at most. */
 export const ENTITY_ENDPOINT_MAX_TEXTS = 64;
 

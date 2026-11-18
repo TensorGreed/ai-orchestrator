@@ -304,3 +304,36 @@ describe("content tools: names and addresses in many texts", () => {
     expect(calls).toHaveLength(1);
   });
 });
+
+describe("calibrated spans (a names and addresses service)", () => {
+  const spansIn = (text: string, calibrated: boolean): GuardEntitySpan[] => {
+    const at = text.indexOf("Mara Lind");
+    return at < 0 ? [] : [{ start: at, end: at + 9, dataClass: "person_name", score: 0.78, source: "svc", calibrated }];
+  };
+
+  it("count from the calibrated cut unless the class sets its own minScore; other spans keep the rules' defaults", async () => {
+    const service = recording((text) => spansIn(text, true));
+    const plain = parseEntitiesOptions({ classes: ["person_name", "street_address"] });
+    const [found] = await findEntitiesMany(["Dear Mara Lind"], plain, { recognizer: service.recognizer });
+    expect(found).toEqual([expect.objectContaining({ dataClass: "person_name", score: 0.78, minScore: 0.8 })]);
+    expect(service.calls[0]!.request).toMatchObject({ minScore: 0.7, calibratedMinScore: 0.8 });
+
+    const own = parseEntitiesOptions({ classes: ["person_name", "street_address"], minScore: { person_name: 0.75 } });
+    const [lowered] = await findEntitiesMany(["Dear Mara Lind"], own, { recognizer: service.recognizer });
+    expect(lowered).toEqual([expect.objectContaining({ minScore: 0.75 })]);
+    expect(service.calls[1]!.request.calibratedMinScore).toBe(0.75);
+
+    const uncalibrated = recording((text) => spansIn(text, false));
+    const [other] = await findEntitiesMany(["Dear Mara Lind"], plain, { recognizer: uncalibrated.recognizer });
+    expect(other).toEqual([expect.objectContaining({ minScore: 0.75 })]);
+  });
+
+  it("reports a default rule set's service findings only at or above the cut", async () => {
+    const service = recording((text) => spansIn(text, true));
+    const registry = createDefaultGuardRegistry({ entityRecognizer: service.recognizer });
+    const verdict = await evaluateGuard(profileWith({ classes: ["person_name"] }), { channel: "prompt", content: "Dear Mara Lind" }, { registry });
+    expect(verdict.findings).toEqual([]);
+    const ownCut = await evaluateGuard(profileWith({ classes: ["person_name"], minScore: { person_name: 0.7 } }), { channel: "prompt", content: "Dear Mara Lind" }, { registry });
+    expect(ownCut.findings.map((finding) => finding.dataClass)).toEqual(["person_name"]);
+  });
+});
