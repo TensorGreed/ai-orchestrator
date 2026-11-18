@@ -1,20 +1,35 @@
 import { z } from "zod";
+import type {
+  EntityEndpointErrorCode,
+  EntityEndpointHealth,
+  EntityEndpointLabel,
+  EntityEndpointModel,
+  EntityEndpointRequest,
+  EntityEndpointResponse
+} from "@ai-orchestrator/shared/src/guard-entity-endpoint.js";
 import { NER_ENTITY_CLASSES } from "./models/manifest.js";
 
 /**
- * The entity endpoint contract (also in openapi.json). Any service that speaks it can be the deployment's names and
- * addresses recognizer; l2m-ner is the reference implementation.
+ * The entity endpoint contract is defined once, in packages/shared (`guard-entity-endpoint.ts`, which the API's
+ * client uses); this service imports its types only, so the image does not carry the shared package. The few runtime
+ * values the server needs are repeated here, checked against the shared ones by type below and by value in
+ * contract.test.ts, and published in openapi.json (also checked there).
  *
  *   POST /v1/entities  { texts: string[1..64], labels: (person_name|location|street_address)[], language: "en", threshold?: 0..1 }
  *     → { results: [{ entities: [{ start, end, label, score }] }], model: { id, version, sha256 } }
  *   GET  /health       → { ok, ready, model: { id, version, sha256 } | null, message? }
  *
  * Offsets are UTF-16 code units (JavaScript string indices) into each text, half-open; results line up with texts.
- * Errors are `{ error: { code, message } }` with 400, 401, 413, 429 or 503, and never quote the input.
+ * Errors are `{ error: { code, message } }` with 400, 401, 413, 429 or 503, and never quote the input; `busy` (429)
+ * is the overload answer.
  */
 
 export const NER_MAX_TEXTS = 64;
 
+/**
+ * The server's request check. Looser than the shared schema on `language` (any string, so an unknown language gets
+ * `unsupported_language` rather than `bad_request`) and stricter on labels (each once).
+ */
 export const nerEntitiesRequestSchema = z
   .object({
     texts: z.array(z.string()).min(1).max(NER_MAX_TEXTS),
@@ -29,24 +44,9 @@ export const nerEntitiesRequestSchema = z
   .strict();
 
 export type NerEntitiesRequest = z.output<typeof nerEntitiesRequestSchema>;
-
-export interface NerModelInfo {
-  id: string;
-  version: string;
-  sha256: string;
-}
-
-export interface NerEntitiesResponse {
-  results: Array<{ entities: Array<{ start: number; end: number; label: string; score: number }> }>;
-  model: NerModelInfo;
-}
-
-export interface NerHealthResponse {
-  ok: boolean;
-  ready: boolean;
-  model: NerModelInfo | null;
-  message?: string;
-}
+export type NerModelInfo = EntityEndpointModel;
+export type NerEntitiesResponse = EntityEndpointResponse;
+export type NerHealthResponse = EntityEndpointHealth;
 
 export const NER_ERROR_CODES = [
   "bad_request",
@@ -60,8 +60,18 @@ export const NER_ERROR_CODES = [
   "not_ready",
   "timeout",
   "failed"
-] as const;
-export type NerErrorCode = (typeof NER_ERROR_CODES)[number];
+] as const satisfies readonly EntityEndpointErrorCode[];
+export type NerErrorCode = EntityEndpointErrorCode;
+
+// The repeated values must say exactly what the shared contract says (both directions).
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const contractChecks: [
+  Same<(typeof NER_ERROR_CODES)[number], EntityEndpointErrorCode>,
+  Same<(typeof NER_ENTITY_CLASSES)[number], EntityEndpointLabel>,
+  Same<NerEntitiesRequest["texts"], EntityEndpointRequest["texts"]>,
+  Same<NerEntitiesRequest["labels"][number], EntityEndpointRequest["labels"][number]>
+] = [true, true, true, true];
+void contractChecks;
 
 export class NerHttpError extends Error {
   constructor(

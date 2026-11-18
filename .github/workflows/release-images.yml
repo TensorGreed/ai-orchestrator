@@ -53,6 +53,7 @@ on:
       - "apps/web/Dockerfile"
       - "apps/web/nginx.conf"
       - "apps/ner/**"
+      - "packages/shared/src/guard-entity-endpoint.ts"
       - ".dockerignore"
       # Dependency changes (Dependabot's included) change what the images contain.
       - "pnpm-lock.yaml"

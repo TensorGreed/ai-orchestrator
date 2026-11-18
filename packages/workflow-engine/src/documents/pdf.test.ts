@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { DocumentError } from "./errors.js";
 import { extractDocument, extractDocumentAsync } from "./extract.js";
-import { checkedAnswer, configurePdfExtraction, DEFAULT_PDF_LIMITS, isPdf, pdfExtractionLimits, readPdf, spawnPdfChild, stopPdfReaders } from "./pdf.js";
+import { checkedAnswer, configurePdfExtraction, DEFAULT_PDF_LIMITS, isPdf, pdfExtractionLimits, pdfReaderDeniesNetwork, readPdf, spawnPdfChild, stopPdfReaders } from "./pdf.js";
 import { extractPdfForNode } from "./pdf-node.js";
 import {
   deepNestingPdf,
@@ -80,6 +80,14 @@ describe("reading a PDF", () => {
       { name: "Author", text: "author@example.com" }
     ]);
     expect(read.stoppedAtChars).toBe(false);
+  });
+
+  it("says from which Node version the reader child's sockets are denied (25 and later)", () => {
+    expect(pdfReaderDeniesNetwork("24.14.0")).toBe(false);
+    expect(pdfReaderDeniesNetwork("25.0.0")).toBe(true);
+    expect(pdfReaderDeniesNetwork("26.1.0")).toBe(true);
+    expect(pdfReaderDeniesNetwork("not a version")).toBe(false);
+    expect(pdfReaderDeniesNetwork()).toBe(Number(process.versions.node.split(".")[0]) >= 25);
   });
 
   it("is sniffed by its bytes, and the synchronous reader still refuses it", async () => {

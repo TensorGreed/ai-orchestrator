@@ -173,7 +173,7 @@ The options refuse any other key, so a rule set cannot name an endpoint; the jud
 
 - `POST {base}/v1/entities` with `{ "texts": [...], "labels": ["person_name", "location", "street_address"], "language": "en", "threshold": 0.7 }` (1 to 64 texts) answers `{ "results": [{ "entities": [{ "start", "end", "label", "score" }] }], "model": { "id", "version", "sha256" } }`, one result per text in order. Offsets are UTF-16 code units into each text (JavaScript string indices), end exclusive.
 - `GET {base}/health` answers `{ "ok", "ready", "model": { … } | null, "message"? }`; `ready` is false while no model is loaded.
-- Errors are `{ "error": { "code", "message" } }` with 400, 401, 413, 429 or 503, and never quote the input.
+- Errors are `{ "error": { "code", "message" } }` with 400, 401, 413, 429 or 503, and never quote the input. An overloaded service answers 429 with code `busy` and a `Retry-After`.
 
 How the API uses it:
 

@@ -23,10 +23,14 @@ WORKDIR /app
 RUN npm install --global corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/ner/package.json apps/ner/
+# The entity endpoint contract's types live in packages/shared; the build type-checks against that one file (type
+# imports only, so nothing of the shared package is in the image).
+COPY packages/shared/package.json packages/shared/
 
 # ---------- build: type-check and compile to dist/ ----------
 FROM toolchain AS build
-RUN pnpm install --frozen-lockfile --filter "@ai-orchestrator/ner" --filter "ai-orchestrator"
+RUN pnpm install --frozen-lockfile --filter "@ai-orchestrator/ner..." --filter "ai-orchestrator"
+COPY packages/shared/src/guard-entity-endpoint.ts packages/shared/src/
 COPY apps/ner apps/ner
 RUN pnpm --filter @ai-orchestrator/ner compile
 

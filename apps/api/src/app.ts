@@ -351,6 +351,8 @@ import {
   describeCodeSandboxPlan,
   configureExpressionSandbox,
   configurePdfExtraction,
+  PDF_READER_NETWORK_WARNING,
+  pdfReaderDeniesNetwork,
   expressionSandboxLimits,
   nodeDnsResolver,
   guardedFetch,
@@ -1580,6 +1582,9 @@ export const SCHEDULE_SYNC_INTERVAL_MS = 15_000;
 /** Phase 13.1 — how often the leader samples the queue depth for /metrics. */
 const QUEUE_DEPTH_SAMPLE_INTERVAL_MS = 15_000;
 
+/** The PDF reader's Node-version warning is logged once per process, not once per app instance. */
+let pdfNetworkWarningLogged = false;
+
 export async function createApp(
   config: AppConfig,
   store: Store,
@@ -1881,6 +1886,11 @@ export async function createApp(
     maxBytes: config.CONTENT_SCAN_MAX_BYTES,
     maxChars: config.CONTENT_SCAN_MAX_CHARS
   });
+  // Node 24 (development, CI) cannot deny the reader child's sockets; allowed, with one warning per process.
+  if (!pdfReaderDeniesNetwork() && !pdfNetworkWarningLogged) {
+    pdfNetworkWarningLogged = true;
+    app.log.warn({ node: process.versions.node }, PDF_READER_NETWORK_WARNING);
+  }
   // Document scans with content rules: the rule set test follows the outbound policy; the gateway tool always refuses private ranges.
   const contentDocumentScans = new ContentDocumentScanService({
     limits: {

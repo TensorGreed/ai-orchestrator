@@ -56,6 +56,20 @@ let configured: PdfLimits = { ...DEFAULT_PDF_LIMITS };
 const positiveInt = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 1;
 
 /**
+ * Whether the PDF reader child's permission model also denies network connections: from Node 25 on (the API image
+ * runs Node 26). On Node 24 the child still cannot read files, write, start processes or signal others, and its
+ * `fetch`/`WebSocket` globals are removed, but a flaw in pdf.js could open a socket; the API logs one warning at start.
+ */
+export function pdfReaderDeniesNetwork(nodeVersion: string = process.versions.node): boolean {
+  const major = Number.parseInt(nodeVersion.split(".")[0] ?? "", 10);
+  return Number.isInteger(major) && major >= 25;
+}
+
+/** The startup warning for a Node version whose permission model cannot deny the PDF reader's sockets. */
+export const PDF_READER_NETWORK_WARNING =
+  "PDF documents are read in a child process that cannot deny network connections on this Node version (Node 25 or later denies them, as in the API image); upgrade Node where PDFs from untrusted sources are scanned";
+
+/**
  * Sets the deployment's PDF limits (API startup): CONTENT_SCAN_MAX_PAGES, CONTENT_SCAN_PDF_TIMEOUT_MS,
  * CONTENT_SCAN_PDF_MEMORY_MB, CONTENT_SCAN_MAX_CONCURRENT, and for Extract from File CONTENT_SCAN_MAX_BYTES and
  * CONTENT_SCAN_MAX_CHARS.

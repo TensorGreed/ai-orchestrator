@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ENTITY_ENDPOINT_LABELS } from "./guard-entity-endpoint";
 
 /**
  * Person names, locations and street addresses as data classes of content rules: the `data.entities` detector.
@@ -13,7 +14,8 @@ import { z } from "zod";
 
 export const ENTITIES_DETECTOR_ID = "data.entities";
 
-export const ENTITY_DATA_CLASSES = ["person_name", "location", "street_address"] as const;
+/** The same classes the names and addresses service contract labels (one list). */
+export const ENTITY_DATA_CLASSES = ENTITY_ENDPOINT_LABELS;
 export type EntityDataClass = (typeof ENTITY_DATA_CLASSES)[number];
 
 export function isEntityDataClass(value: unknown): value is EntityDataClass {
@@ -154,5 +156,10 @@ export interface GuardEntityModelInfo {
   sha256: string;
 }
 
-/** The commands that turn on the local names and addresses service (shown when only the built-in rules run). */
-export const ENTITY_SERVICE_ENABLE_COMMAND = "l2m models pull --accept-licence && docker compose --profile ner up -d";
+/**
+ * The commands that turn on the local names and addresses service with the root docker-compose.yml (shown when only
+ * the built-in rules run): pull the model into the l2m-ner-models volume, then start the `ner` profile with the API
+ * pointed at it. Keep in step with docker-compose.yml and /docs/operations/entity-service.
+ */
+export const ENTITY_SERVICE_ENABLE_COMMAND =
+  "docker compose run --rm ner-models pull --accept-licence && CONTENT_RULES_NER_ENDPOINT=http://ner:8000 docker compose --profile ner up -d --build";

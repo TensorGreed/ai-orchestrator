@@ -54,8 +54,13 @@ The `ner` service publishes no port and sits on an internal network (`ner-intern
 services, so it can neither be reached from outside nor connect out. It mounts the model volume read-only, has a
 read-only root filesystem, and runs with no capabilities and `no-new-privileges`. To require a bearer token, set
 `L2M_NER_TOKEN` (16 or more printable characters) for both commands; the compose file passes it to l2m-ner as
-`NER_TOKEN` and to the API as the endpoint token (an environment value shows in `docker inspect`; outside compose,
-prefer `NER_TOKEN_FILE`). Without the profile, nothing starts.
+`NER_TOKEN` and to the API as the endpoint token, unless `CONTENT_RULES_NER_ENDPOINT_TOKEN` is set on its own (for
+your own endpoint). An environment value shows in `docker inspect`; outside compose, prefer `NER_TOKEN_FILE`. Without
+the profile, nothing starts.
+
+Compose cannot attach a network to a service only under a profile, so the `api` and `api-postgres` services always
+join `ner-internal`. Without the `ner` profile that network holds only them and has no route out, so it changes
+nothing.
 
 Until a model is in the volume, the service starts anyway: `GET /health` reports `ready: false` with the pull
 command, entity requests get `503 not_ready`, and the service looks for the model again every 15 seconds. A pull

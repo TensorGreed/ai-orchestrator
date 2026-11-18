@@ -12,12 +12,15 @@ services:
       OLLAMA_BASE_URL: http://host.docker.internal:11434/v1
       # Off unless set: the l2m-ner service of the `ner` profile below (http://ner:8000), or your own entity endpoint.
       CONTENT_RULES_NER_ENDPOINT: ${CONTENT_RULES_NER_ENDPOINT:-}
-      CONTENT_RULES_NER_ENDPOINT_TOKEN: ${L2M_NER_TOKEN:-}
+      # The token defaults to L2M_NER_TOKEN (the one the `ner` service requires); set it on its own for your own endpoint.
+      CONTENT_RULES_NER_ENDPOINT_TOKEN: ${CONTENT_RULES_NER_ENDPOINT_TOKEN:-${L2M_NER_TOKEN:-}}
     ports:
       - "4000:4000"
     volumes:
       - ./apps/api/data:/app/apps/api/data
-    # ner-internal reaches the optional l2m-ner service and nothing else; it is empty without the `ner` profile.
+    # ner-internal reaches the optional l2m-ner service and nothing else. Compose cannot attach a network by profile,
+    # so the api services always join it; without the `ner` profile it holds only them, is internal (no way out) and
+    # changes nothing.
     networks: [default, ner-internal]
 
   web:
@@ -65,7 +68,7 @@ services:
       # Inside the compose network only, without TLS; use DB_POSTGRESDB_SSL=true (verified) for a remote server.
       DB_POSTGRESDB_URL: postgres://l2m:l2m-local-only@postgres:5432/ai_orchestrator
       CONTENT_RULES_NER_ENDPOINT: ${CONTENT_RULES_NER_ENDPOINT:-}
-      CONTENT_RULES_NER_ENDPOINT_TOKEN: ${L2M_NER_TOKEN:-}
+      CONTENT_RULES_NER_ENDPOINT_TOKEN: ${CONTENT_RULES_NER_ENDPOINT_TOKEN:-${L2M_NER_TOKEN:-}}
     depends_on:
       postgres:
         condition: service_healthy
@@ -134,6 +137,7 @@ services:
 
 networks:
   postgres-stack: {}
+  # Internal: no route out. Only the api services and, with the `ner` profile, l2m-ner join it.
   ner-internal:
     internal: true
 
