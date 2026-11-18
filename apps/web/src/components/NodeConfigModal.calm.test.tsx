@@ -485,3 +485,28 @@ describe("node inspector: focus after a mouse close", () => {
     }
   });
 });
+
+describe("node inspector: corrected data after node_redacted", () => {
+  it("shows the node's data as the run keeps it once the live trace replaces it", async () => {
+    const { applyNodeRedactedToExecutionResult } = await import("../lib/run-trace");
+    setWindowWidth(1600);
+    const clear = {
+      ...run,
+      nodeResults: run.nodeResults.map((entry) =>
+        entry.nodeId === "fetch" ? { ...entry, input: { email: "ana@example.org" }, output: { to: "ana@example.org" } } : entry
+      )
+    } as WorkflowExecutionResult;
+    const { rerender } = render(<NodeInspector {...props({ executionResult: clear })} />);
+    expect(screen.getByRole("region", { name: "Output" })).toHaveTextContent("ana@example.org");
+    const corrected = applyNodeRedactedToExecutionResult(clear, {
+      nodeId: "fetch",
+      status: "success",
+      input: { email: "[EMAIL_1]" },
+      output: { to: "[EMAIL_1]" }
+    })!;
+    rerender(<NodeInspector {...props({ executionResult: corrected })} />);
+    expect(screen.getByRole("region", { name: "Output" })).toHaveTextContent("[EMAIL_1]");
+    expect(screen.getByRole("region", { name: "Input" })).toHaveTextContent("[EMAIL_1]");
+    expect(screen.getByRole("dialog", { name: "Inspect Fetch orders" })).not.toHaveTextContent("ana@example.org");
+  });
+});
