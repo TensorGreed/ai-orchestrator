@@ -153,7 +153,7 @@ import {
   type EgressUrlJudge,
   type OutboundGuardConfig
 } from "./outbound-url-guard";
-import { bindCheckedRenderings, renderTemplate, tryParseJson, type TemplatePiece } from "./template";
+import { bindCheckedRenderings, evaluateConditionTemplate, renderTemplate, tryParseJson, type TemplatePiece } from "./template";
 import {
   createMcpElicitationHandler,
   createMcpSamplingHandler,
@@ -7613,7 +7613,9 @@ async function executeNodeHandler(
           : resolvedInput === undefined || resolvedInput === null
             ? ""
             : JSON.stringify(resolvedInput);
-      const maxRetries = typeof config.maxRetries === "number" && config.maxRetries > 0 ? Math.floor(config.maxRetries) : 2;
+      // 0 means no retry call; a missing, negative or non-numeric value uses the default of 2.
+      const maxRetries =
+        typeof config.maxRetries === "number" && Number.isFinite(config.maxRetries) && config.maxRetries >= 0 ? Math.floor(config.maxRetries) : 2;
 
       if (!rawInput.trim()) {
         throw new Error(`Output Parser input is empty for key '${inputKey}'.`);
@@ -8034,8 +8036,7 @@ async function executeNodeHandler(
 
     case "if_node": {
       const conditionTemplate = typeof config.condition === "string" ? config.condition : "";
-      const evaluated = renderTemplate(conditionTemplate, templateData).trim();
-      const isTruthy = Boolean(evaluated) && evaluated !== "false" && evaluated !== "0" && evaluated !== "null" && evaluated !== "undefined";
+      const { result: isTruthy, evaluatedValue: evaluated } = evaluateConditionTemplate(conditionTemplate, templateData);
       return {
         ...branchPassthrough(templateData),
         result: isTruthy,

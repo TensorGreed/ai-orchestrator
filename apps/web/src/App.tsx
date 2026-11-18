@@ -164,6 +164,7 @@ import { INVITE_SIGNED_IN_NOTICE, inviteTokenFromLocation, stripInviteParam } fr
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WriteToolApprovalDialog } from "./components/WriteToolApprovalDialog";
 import { SubjectRefsDialog } from "./components/SubjectRefsDialog";
+import { ErrorWorkflowDialog } from "./components/ErrorWorkflowDialog";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
@@ -1169,6 +1170,7 @@ function StudioApp() {
   const [templateInitialCategory, setTemplateInitialCategory] = useState<string | undefined>(undefined);
   const [writeToolDialogOpen, setWriteToolDialogOpen] = useState(false);
   const [subjectRefsDialogOpen, setSubjectRefsDialogOpen] = useState(false);
+  const [errorWorkflowDialogOpen, setErrorWorkflowDialogOpen] = useState(false);
   const [shareWorkflowTarget, setShareWorkflowTarget] = useState<{
     id: string;
     name: string;
@@ -4991,6 +4993,8 @@ function StudioApp() {
           onEditWriteToolApproval={canManageWorkflows ? () => setWriteToolDialogOpen(true) : undefined}
           subjectRefsSet={(currentWorkflow.settings?.dataProtection?.subjectRefs?.length ?? 0) > 0}
           onEditSubjectRefs={canManageWorkflows ? () => setSubjectRefsDialogOpen(true) : undefined}
+          errorWorkflowSet={Boolean(currentWorkflow.settings?.errorWorkflowId)}
+          onEditErrorWorkflow={canManageWorkflows ? () => setErrorWorkflowDialogOpen(true) : undefined}
           recordMcp={recordMcp}
           onToggleRecordMcp={canManageWorkflows ? () => setRecordMcp((value) => !value) : undefined}
           docsUrl={docsUrl}
@@ -5970,6 +5974,21 @@ function StudioApp() {
             })
           }
           onClose={() => setSubjectRefsDialogOpen(false)}
+        />
+      )}
+
+      {errorWorkflowDialogOpen && (
+        <ErrorWorkflowDialog
+          workflowId={currentWorkflow.id}
+          errorWorkflowId={currentWorkflow.settings?.errorWorkflowId}
+          workflows={workflowList}
+          onChange={(errorWorkflowId) =>
+            setCurrentWorkflow((current) => {
+              const { errorWorkflowId: _previous, ...rest } = current.settings ?? {};
+              return { ...current, settings: errorWorkflowId ? { ...rest, errorWorkflowId } : rest };
+            })
+          }
+          onClose={() => setErrorWorkflowDialogOpen(false)}
         />
       )}
 

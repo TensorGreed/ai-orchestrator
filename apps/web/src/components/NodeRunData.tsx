@@ -85,9 +85,73 @@ function fullCellText(value: unknown): string {
   return safeStringify(value);
 }
 
-/** A table cell: clipped, with the full value (up to the JSON limit) in its tooltip. */
+/** Nested values whose JSON is longer than this show as a one-line preview that expands. */
+export const CELL_NESTED_INLINE_CHARS = 80;
+const PREVIEW_MAX_CHARS = 120;
+const PREVIEW_STRING_CHARS = 40;
+
+function previewScalar(value: unknown): string {
+  if (typeof value === "string") {
+    const clipped = value.length > PREVIEW_STRING_CHARS ? `${value.slice(0, PREVIEW_STRING_CHARS - 1)}…` : value;
+    return JSON.stringify(clipped);
+  }
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return String(value);
+  if (Array.isArray(value)) return value.length === 0 ? "[]" : `[${value.length}]`;
+  return Object.keys(value as object).length === 0 ? "{}" : "{…}";
+}
+
+/**
+ * One line that says what a nested value holds: an object's first keys with short values (`{ status: 200, body:
+ * {…} }`), a list's length and first items (`3 items [ {…}, {…}, … ]`). Children are summarised, never expanded.
+ */
+export function previewNestedValue(value: unknown): string {
+  const parts: string[] = [];
+  let length = 0;
+  let more = false;
+  const add = (part: string) => {
+    if (length + part.length > PREVIEW_MAX_CHARS && parts.length > 0) {
+      more = true;
+      return false;
+    }
+    parts.push(part);
+    length += part.length + 2;
+    return true;
+  };
+  if (Array.isArray(value)) {
+    for (const item of value) if (!add(previewScalar(item))) break;
+    if (parts.length < value.length) more = true;
+    const count = `${value.length} item${value.length === 1 ? "" : "s"}`;
+    return `${count} [ ${parts.join(", ")}${more ? ", …" : ""} ]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  for (const [key, child] of entries) if (!add(`${key}: ${previewScalar(child)}`)) break;
+  if (parts.length < entries.length) more = true;
+  return `{ ${parts.join(", ")}${more ? ", …" : ""} }`;
+}
+
+/** A big nested value: one line until opened, then its JSON (cut at the JSON limit until asked). */
+function NestedCell({ value, className }: { value: unknown; className: string }) {
+  const [open, setOpen] = useState(false);
+  const preview = useMemo(() => previewNestedValue(value), [value]);
+  return (
+    <td className={`${className} run-data-nested`}>
+      <details open={open} onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}>
+        <summary title={open ? "Hide the full value" : "Show the full value"}>
+          <span className="run-data-preview">{preview}</span>
+        </summary>
+        {open ? <JsonBlock value={value} /> : null}
+      </details>
+    </td>
+  );
+}
+
+/** A table cell: clipped, with the full value (up to the JSON limit) in its tooltip; big nested values expand. */
 function Cell({ value, className }: { value: unknown; className: string }) {
   const text = fullCellText(value);
+  if (value !== null && typeof value === "object" && text.length > CELL_NESTED_INLINE_CHARS) {
+    return <NestedCell value={value} className={className} />;
+  }
   if (text.length <= CELL_MAX_CHARS) return <td className={className}>{text}</td>;
   return (
     <td className={className} title={text.slice(0, RUN_DATA_JSON_LIMIT)}>

@@ -47,7 +47,7 @@ async function boot() {
   await authService.register({ email: "builder@example.com", password: "Builder-Pass-123!", role: "admin" });
   const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { email: "builder@example.com", password: "Builder-Pass-123!" } });
   const cookie = String(login.headers["set-cookie"]).split(";")[0]!;
-  const preview = async (expression: string, mode: "template" | "expression", context: Record<string, unknown>) => {
+  const preview = async (expression: string, mode: "template" | "expression" | "condition", context: Record<string, unknown>) => {
     const response = await app.inject({ method: "POST", url: "/api/expressions/preview", headers: { cookie }, payload: { expression, mode, context } });
     expect(response.statusCode).toBe(200);
     return response.json() as { ok: boolean; result?: unknown; error?: string };
@@ -76,5 +76,17 @@ describe("expression preview", () => {
     const { preview } = await boot();
     expect(await preview("$vars.region + '-' + $node('http_request-abc12').output.id", "expression", CONTEXT)).toEqual({ ok: true, result: "eu-42" });
     expect(await preview("{{ note.toUpperCase() }}", "expression", CONTEXT)).toEqual({ ok: true, result: "BETWEEN" });
+  });
+
+  it("condition mode judges the text as an IF node does", async () => {
+    const { preview } = await boot();
+    const context = { ...CONTEXT, input: { ...CONTEXT.input, userScore: 95, answer: "no" } };
+    expect(await preview("{{userScore}} > 90", "condition", context)).toEqual({ ok: true, result: true });
+    expect(await preview("{{answer}} === 'true'", "condition", context)).toEqual({ ok: true, result: false });
+    expect(await preview("{{results.http_request-abc12.id}} === '42'", "condition", context)).toEqual({ ok: true, result: true });
+    expect(await preview("{{note}}", "condition", context)).toEqual({ ok: true, result: true });
+    const bad = await preview("{{answer}} == done", "condition", context);
+    expect(bad.ok).toBe(false);
+    expect(bad.error).toMatch(/IF condition/);
   });
 });

@@ -65,6 +65,11 @@ covers what a templated field can read from earlier steps.
 - Disconnected nodes are skipped.
 - IF nodes take the `true` or `false` branch; Switch nodes route branches by evaluated case. Branches not taken are
   skipped.
+- An IF condition that is one template (<span v-pre>`{{answer}}`</span>, <span v-pre>`{{ score > 90 }}`</span>) is rendered and is false when the text is
+  empty, `false`, `0`, `null` or `undefined`, true otherwise. A condition with text outside its braces
+  (<span v-pre>`{{score}} > 90`</span>, <span v-pre>`{{status}} === 'done'`</span>) is one JavaScript expression in the sandbox: each <span v-pre>`{{ }}`</span> is replaced by
+  its value (numbers stay numbers, text stays text, a missing value is `undefined`). Quote text you compare with; a
+  condition that is not a valid expression once filled in fails the node.
 - Nodes on an agent's attachment ports (`chat_model`, `memory`, `tool`, `worker`) are not DAG steps: the agent uses
   them when it runs.
 - Node execution status is persisted in execution history.
@@ -81,6 +86,13 @@ covers what a templated field can read from earlier steps.
   - `strict`
   - `lenient`
   - `anything_goes`
+
+### Retries
+
+In `json_schema` and `auto_fix` modes, output that does not parse is sent back to the upstream model with a request to
+fix it, up to `maxRetries` times (**LLM Max Auto-Retries**, default 2). `0` makes no retry call: the node fails at once
+(or, with `parsingMode: anything_goes`, returns `parsed: null` with a warning). A negative or non-numeric value uses
+the default.
 
 ### `parsingMode` behavior
 

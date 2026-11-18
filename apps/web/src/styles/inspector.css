@@ -1671,6 +1671,41 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* A big nested value: one clipped line with a disclosure arrow, its JSON below when opened. */
+.run-data-nested > details > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+  min-width: 0;
+}
+.run-data-nested > details > summary::-webkit-details-marker {
+  display: none;
+}
+.run-data-nested > details > summary::before {
+  content: "▸";
+  flex: none;
+  color: var(--fg-muted);
+}
+.run-data-nested > details[open] > summary::before {
+  content: "▾";
+}
+.run-data-nested > details > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.run-data-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 60ch;
+  color: var(--fg-muted);
+}
+.run-data-nested > details[open] > .run-data-json {
+  margin-top: 6px;
+}
 .run-data-index {
   font-family: var(--font-mono);
   color: var(--fg-faint);

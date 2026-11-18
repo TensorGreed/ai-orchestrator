@@ -106,6 +106,75 @@ export function renderTemplate(template: string, values: Record<string, unknown>
   return renderTemplateAdvanced(template, values, options).rendered;
 }
 
+/** The truthiness an IF node has always used for its rendered condition. */
+function isTruthyConditionText(text: string): boolean {
+  return Boolean(text) && text !== "false" && text !== "0" && text !== "null" && text !== "undefined";
+}
+
+function stringifyConditionValue(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try { return JSON.stringify(value) ?? ""; } catch { return String(value); }
+}
+
+/**
+ * An IF node's condition. A condition that is one `{{ }}` (or plain text) renders and is judged by its text, as
+ * before. A condition with text outside its `{{ }}`, such as `{{userScore}} > 90` or `{{answer}} === 'true'`, is
+ * one JavaScript expression: each `{{ }}` becomes its value (a number stays a number, a string a string, a
+ * missing value `undefined`) and the whole expression runs in the expression sandbox. Values go in as JSON
+ * literals, never as code, so a value cannot change the expression. A condition that is not a valid expression
+ * once filled in throws (the node fails rather than taking a branch); the error names the condition, not values.
+ */
+export function evaluateConditionTemplate(template: string, values: Record<string, unknown>): { result: boolean; evaluatedValue: string } {
+  const matches = [...template.matchAll(TEMPLATE_BODY)];
+  const outside = template.replace(TEMPLATE_BODY, "").trim();
+  if (matches.length === 0 || !outside) {
+    const evaluated = renderTemplate(template, values).trim();
+    return { result: isTruthyConditionText(evaluated), evaluatedValue: evaluated };
+  }
+  return withExpressionEvaluator(expressionContextFor(values), (evaluate) => {
+    let expression = "";
+    let last = 0;
+    for (const match of matches) {
+      const offset = match.index ?? 0;
+      expression += template.slice(last, offset);
+      last = offset + match[0].length;
+      const body = (match[1] ?? "").trim();
+      let value: unknown;
+      if (SIMPLE_PATH.test(body)) {
+        recordTemplateRead(body, true);
+        value = resolvePath(values, body);
+      } else {
+        recordTemplateRead(body, false);
+        try {
+          value = evaluate(body);
+        } catch (error) {
+          if (isExpressionSandboxFailure(error)) throw error;
+          value = undefined;
+        }
+      }
+      // JSON has no `undefined`; JSON.stringify of a string is a safe JS string literal.
+      const literal = value === undefined ? "undefined" : JSON.stringify(value);
+      expression += ` (${literal ?? "undefined"}) `;
+    }
+    expression += template.slice(last);
+    let result: unknown;
+    try {
+      result = evaluate(expression);
+    } catch (error) {
+      if (isExpressionSandboxFailure(error)) throw error;
+      throw new Error(
+        `IF condition '${template}' is not a valid expression once its {{ }} values are filled in. ` +
+          "Text outside {{ }} is evaluated as JavaScript: quote text values, for example {{status}} === 'done', " +
+          "or put the whole condition inside one {{ }}."
+      );
+    }
+    const evaluatedValue = stringifyConditionValue(result).trim();
+    return { result: isTruthyConditionText(evaluatedValue), evaluatedValue };
+  });
+}
+
 function resolvePath(values: Record<string, unknown>, path: string): unknown {
   const segments = path.split(".");
   let current: unknown = values;

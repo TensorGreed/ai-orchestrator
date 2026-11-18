@@ -90,6 +90,7 @@ import {
   importWorkflowFromJson,
   renderExpressionTemplate,
   renderTemplate,
+  evaluateConditionTemplate,
   runWithSandboxOwner,
   validateWorkflowGraph,
   KnowledgeBaseVectorStoreAdapter,
@@ -656,7 +657,8 @@ const pinDataSchema = z
 
 const expressionPreviewSchema = z.object({
   expression: z.string(),
-  mode: z.enum(["expression", "template"]).optional(),
+  /** `condition` judges the text as an IF node does and returns true or false. */
+  mode: z.enum(["expression", "template", "condition"]).optional(),
   context: z
     .object({
       input: z.unknown().optional(),
@@ -12072,6 +12074,8 @@ export async function createApp(
       const result = runWithSandboxOwner(`user:${user.id}`, () =>
         parsed.data.mode === "template"
           ? renderTemplate(parsed.data.expression, templateData)
+          : parsed.data.mode === "condition"
+            ? evaluateConditionTemplate(parsed.data.expression, templateData).result
           : parsed.data.expression.includes("{{")
             ? renderExpressionTemplate(parsed.data.expression, expressionContext)
             : evaluateExpression(parsed.data.expression, expressionContext)
