@@ -7,7 +7,8 @@
  * errs on the side of "reads": a node counts when
  *   - it is a type whose handler falls back to the run's prompt when its own input has none (`IMPLICIT_*` below),
  *   - it is a type whose template defaults to `{{user_prompt}}` and it sets no template of its own, or
- *   - any text in its settings names `user_prompt` / `system_prompt`: a template, a key to read, code, a rule field.
+ *   - any text in its settings names `user_prompt` / `system_prompt`: a template, a key to read, code, a rule field,
+ *     or a path its `inputMapping` reads (the mapping's keys).
  * Handlers that only pass the whole input along (an Output with no answer to show, a Code node, a Sub-workflow
  * Trigger) do not count by themselves: there the prompt is not something the workflow asked for.
  */
@@ -86,6 +87,14 @@ function mentions(value: unknown, needle: string, depth = 0): boolean {
   return entries.some((entry) => mentions(entry, needle, depth + 1));
 }
 
+/**
+ * Whether the node's `inputMapping` reads `needle`: its keys are the paths read (`{ "user_prompt": "question" }`
+ * copies the prompt to `question`), both for any node's template data and for Execute Workflow's child input.
+ */
+function mapsFrom(config: Record<string, unknown>, needle: string): boolean {
+  return Object.keys(asRecord(config.inputMapping)).some((path) => path.includes(needle));
+}
+
 /** Which run prompts the nodes can read. */
 export function runPromptReads(nodes: ReadonlyArray<RunPromptNode>): RunPromptReads {
   let userPrompt = false;
@@ -96,14 +105,16 @@ export function runPromptReads(nodes: ReadonlyArray<RunPromptNode>): RunPromptRe
       userPrompt =
         IMPLICIT_USER_PROMPT_READERS.has(node.type) ||
         DEFAULT_USER_PROMPT_TEMPLATES[node.type]?.(config) === true ||
-        mentions(config, "user_prompt");
+        mentions(config, "user_prompt") ||
+        mapsFrom(config, "user_prompt");
     }
     if (!systemPrompt) {
       systemPrompt =
         IMPLICIT_SYSTEM_PROMPT_READERS.has(node.type) ||
         // A System Prompt node reads the run's prompt only when it has no text of its own.
         (node.type === "system_prompt" && typeof config.text !== "string") ||
-        mentions(config, "system_prompt");
+        mentions(config, "system_prompt") ||
+        mapsFrom(config, "system_prompt");
     }
     if (userPrompt && systemPrompt) break;
   }

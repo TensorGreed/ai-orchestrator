@@ -46,8 +46,11 @@ describe("runPromptReads", () => {
     expect(runPromptReads([{ type: "set_node", config: { fields: [{ value: { nested: ["{{webhook.user_prompt}}"] } }] } }]).userPrompt).toBe(true);
   });
 
-  it("does not count a setting's name, only its value", () => {
-    expect(runPromptReads([{ type: "execute_workflow", config: { inputMapping: { user_prompt: "{{answer}}" } } }]).userPrompt).toBe(false);
+  it("counts a path an input mapping reads (its keys), but not other setting names", () => {
+    expect(runPromptReads([{ type: "execute_workflow", config: { inputMapping: { user_prompt: "question" } } }]).userPrompt).toBe(true);
+    expect(runPromptReads([{ type: "code_node", config: { code: "return input", inputMapping: { system_prompt: "rules" } } }]).systemPrompt).toBe(true);
+    expect(runPromptReads([{ type: "execute_workflow", config: { inputMapping: { answer: "user_prompt" } } }]).userPrompt).toBe(true);
+    expect(runPromptReads([{ type: "set_node", config: { assignments: { user_prompt: "fixed" } } }]).userPrompt).toBe(false);
   });
 });
 

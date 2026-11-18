@@ -25,16 +25,18 @@ Concepts: [Workflows vs agents](/learn/agents/workflows-vs-agents) explains when
 Use tools when needed.", with the system prompt "You are a precise tool-using AI assistant.", and sends each one as the
 run's `user_prompt` and `system_prompt` only when the workflow can read it:
 
-- a model, chain, embeddings, Agent or Supervisor node, which falls back to the run's prompts;
+- a model, chain, Azure OpenAI Embeddings, Agent or Supervisor node, which falls back to the run's prompts;
 - a Text Input, User Prompt or Chat Trigger node (`user_prompt`), or a System Prompt node with no text
   (`system_prompt`);
 - a Prompt Template, RAG Retrieve, Rerank or Chat Intent Router node that keeps its default `{{user_prompt}}`
   template;
-- any node setting that names `user_prompt` or `system_prompt`, such as a `{{user_prompt}}` template.
+- any node setting that names `user_prompt` or `system_prompt`, such as a `{{user_prompt}}` template or an input
+  mapping that reads one.
 
 A Text Input or User Prompt node with text keeps the test prompt out, so the node's text is used, and a System
 Prompt node with text does the same for the system prompt. A workflow that reads neither, for example an HTTP
 Request followed by an Output, runs with no prompt, so the test prompt does not show up in its input or its output.
+The chat panel sends the message you type, and its system prompt on the same rule.
 
 ## Run data
 

@@ -110,6 +110,23 @@ describe("a workflow the editor sends no prompt to", () => {
     expect(JSON.stringify(result.nodeResults.find((node) => node.nodeId === "out")?.output)).toContain("ping from the run");
   });
 
+  it("counts a node whose input mapping copies the prompt, as the engine reads mapping keys", async () => {
+    const workflow: Workflow = {
+      id: "wf-maps",
+      name: "Maps",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "start", type: "noop_node", name: "Start", position, config: {} },
+        { id: "out", type: "output", name: "Out", position, config: { responseTemplate: "Q: {{question}}", inputMapping: { user_prompt: "question" } } }
+      ],
+      edges: [{ id: "e1", source: "start", target: "out" }]
+    };
+    expect(runPromptReads(workflow.nodes).userPrompt).toBe(true);
+    const result = await executeWorkflow({ workflow, userPrompt: "mapped prompt" }, dependencies());
+    expect(JSON.stringify(result.nodeResults.find((node) => node.nodeId === "out")?.output)).toContain("Q: mapped prompt");
+  });
+
   it("does not show the editor's prompt as the output of a workflow that does not read it", async () => {
     const workflow: Workflow = {
       id: "wf-no-read",

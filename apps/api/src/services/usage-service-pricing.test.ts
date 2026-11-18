@@ -46,7 +46,8 @@ describe("pricing provider ids", () => {
   it("files every built-in price under an adapter's id", () => {
     for (const providerId of Object.keys(DEFAULT_PRICING)) expect(providerId).toBe(canonicalPricingProviderId(providerId));
     const { usage } = service();
-    expect(Object.keys(usage.getPricing())).toEqual(expect.arrayContaining(["azure_openai", "openai_compatible"]));
+    // No empty entries under a spelling no run records; Azure stays out of the run table (see phase8_2.test.ts).
+    expect(usage.getPricing()).not.toHaveProperty("azure_openai");
     expect(usage.getPricing()).not.toHaveProperty("azure-openai");
     expect(usage.getPricing()).not.toHaveProperty("openai-compatible");
   });

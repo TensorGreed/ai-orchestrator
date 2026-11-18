@@ -88,9 +88,9 @@ export const DEFAULT_PRICING: PricingTable = {
   // Local / open-weight providers: tokens are tracked but cost is $0 unless
   // operators override (e.g. self-hosted GPU costs amortized per-token).
   ollama: {},
-  echo: {},
-  openai_compatible: {},
-  azure_openai: {}
+  echo: {}
+  // OpenAI-compatible servers and Azure OpenAI deployments have no list price here: an override prices them
+  // (under `openai_compatible` / `azure_openai`, or the same ids with `-`). /v1 gateway Azure prices are below.
 };
 
 /**
