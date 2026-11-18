@@ -69,6 +69,19 @@ export function pdfReaderDeniesNetwork(nodeVersion: string = process.versions.no
 export const PDF_READER_NETWORK_WARNING =
   "PDF documents are read in a child process that cannot deny network connections on this Node version (Node 25 or later denies them, as in the API image); upgrade Node where PDFs from untrusted sources are scanned";
 
+let networkWarningGiven = false;
+
+/**
+ * Calls `warn` with PDF_READER_NETWORK_WARNING when this Node version cannot deny the reader child's sockets, once per
+ * process however many times it is called (the API calls it at every app start). Returns whether it warned.
+ */
+export function warnPdfReaderNetworkOnce(warn: (message: string) => void, nodeVersion: string = process.versions.node): boolean {
+  if (networkWarningGiven || pdfReaderDeniesNetwork(nodeVersion)) return false;
+  networkWarningGiven = true;
+  warn(PDF_READER_NETWORK_WARNING);
+  return true;
+}
+
 /**
  * Sets the deployment's PDF limits (API startup): CONTENT_SCAN_MAX_PAGES, CONTENT_SCAN_PDF_TIMEOUT_MS,
  * CONTENT_SCAN_PDF_MEMORY_MB, CONTENT_SCAN_MAX_CONCURRENT, and for Extract from File CONTENT_SCAN_MAX_BYTES and

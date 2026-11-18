@@ -50,6 +50,10 @@ Then start the stack with the profile and point the API at the service:
 CONTENT_RULES_NER_ENDPOINT=http://ner:8000 docker compose --profile ner up -d --build
 ```
 
+To keep the API pointed at the service across later `docker compose up` runs, put
+`CONTENT_RULES_NER_ENDPOINT=http://ner:8000` in the `.env` file next to `docker-compose.yml`; otherwise a plain
+`docker compose up` recreates the API without it and content rules fall back to the built-in rules.
+
 The `ner` service publishes no port and sits on an internal network (`ner-internal`) shared only with the API
 services, so it can neither be reached from outside nor connect out. It mounts the model volume read-only, has a
 read-only root filesystem, and runs with no capabilities and `no-new-privileges`. To require a bearer token, set
