@@ -26,7 +26,9 @@ describe("Names and addresses card", () => {
   it("says the engine is rules only, and edits classes and thresholds", async () => {
     const seen: Array<Record<string, unknown>> = [];
     render(<Harness initial={{ classes: ["person_name", "street_address"] }} seen={seen} engine={RULES} />);
-    expect(screen.getByTestId("entities-engine")).toHaveTextContent("Rules only: street addresses in 6 countries");
+    expect(screen.getByTestId("entities-engine")).toHaveTextContent("Basic: built-in rules only. Good on street addresses in 6 countries");
+    expect(screen.getByTestId("entities-engine")).toHaveTextContent("docker compose --profile ner up -d");
+    expect(screen.getByTestId("entities-engine")).toHaveTextContent("CONTENT_RULES_NER_ENDPOINT");
     expect(screen.getByLabelText("Lowest score for locations")).toBeDisabled();
     await userEvent.click(screen.getByLabelText("Locations"));
     expect(seen.at(-1)!.classes).toEqual(["person_name", "location", "street_address"]);
@@ -44,7 +46,80 @@ describe("Names and addresses card", () => {
 
   it("shows a configured engine and its status", () => {
     render(<Harness initial={{ classes: ["location"] }} seen={[]} engine={{ ...RULES, id: "local-model", version: "2", status: "error", error: "model file missing" }} />);
-    expect(screen.getByTestId("entities-engine")).toHaveTextContent("Engine: local-model 2 (error: model file missing)");
+    expect(screen.getByTestId("entities-engine")).toHaveTextContent("Engine local-model 2: not working (model file missing).");
+  });
+
+  const SERVICE: GuardEntityEngineInfo = {
+    ...RULES,
+    id: "endpoint",
+    version: "gliner@1#abc",
+    kind: "endpoint",
+    status: "loaded",
+    model: { id: "gliner-pii-base", version: "1.0", sha256: "a".repeat(64) }
+  };
+
+  it("counts the service's findings from its benchmark cut, and warns about a class set below it", () => {
+    const seen: Array<Record<string, unknown>> = [];
+    render(<Harness initial={{ classes: ["person_name", "location"] }} seen={seen} engine={SERVICE} />);
+    expect(screen.getByLabelText("Lowest score for person names")).toHaveValue(0.8);
+    expect(screen.getByTestId("entities-service-cut")).toHaveTextContent("reported from 0.8, its benchmark cut");
+    expect(screen.queryByTestId("entities-below-cut")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Lowest score for person names"), { target: { value: "0.6" } });
+    expect(seen.at(-1)!.minScore).toEqual({ person_name: 0.6 });
+    expect(screen.getByTestId("entities-below-cut")).toHaveTextContent("Person names: the lowest score is below the service's benchmark cut");
+    // Back to the cut: stored as nothing again.
+    fireEvent.change(screen.getByLabelText("Lowest score for person names"), { target: { value: "0.8" } });
+    expect(seen.at(-1)!.minScore).toBeUndefined();
+  });
+
+  it("keeps the built-in rules' defaults when the rule set uses the rules only", () => {
+    render(<Harness initial={{ classes: ["person_name"], engine: "rules", minScore: { person_name: 0.6 } }} seen={[]} engine={SERVICE} />);
+    expect(screen.getByLabelText("Lowest score for person names")).toHaveValue(0.6);
+    expect(screen.queryByTestId("entities-service-cut")).toBeNull();
+    expect(screen.queryByTestId("entities-below-cut")).toBeNull();
+  });
+
+  it("shows the service's health and model, and that a rules-only rule set does not use it", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    render(<Harness initial={{ classes: ["location"] }} seen={seen} engine={SERVICE} />);
+    expect(screen.getByTestId("entities-engine")).toHaveTextContent("Names and addresses service: ready, model gliner-pii-base 1.0.");
+    expect(screen.getByLabelText("Time limit of this check")).toHaveValue(30000);
+    await userEvent.selectOptions(screen.getByLabelText("Engine"), "union");
+    expect(seen.at(-1)!.engine).toBe("union");
+    expect(screen.getByTestId("entities-engine")).toHaveTextContent("The built-in rules run as well.");
+    await userEvent.selectOptions(screen.getByLabelText("Engine"), "rules");
+    expect(screen.getByTestId("entities-engine")).toHaveTextContent("does not use the deployment's names and addresses service");
+    expect(screen.queryByLabelText("Time limit of this check")).toBeNull();
+    await userEvent.selectOptions(screen.getByLabelText("Engine"), "auto");
+    expect(seen.at(-1)!.engine).toBeUndefined();
+  });
+
+  it("shows a service that runs without a model", () => {
+    render(<Harness initial={{ classes: ["location"] }} seen={[]} engine={{ ...SERVICE, status: "not_ready", model: undefined, message: "No model is loaded" }} />);
+    expect(screen.getByTestId("entities-engine")).toHaveTextContent("Names and addresses service: running, no model loaded (No model is loaded).");
+  });
+
+  it("warns when the service engine is picked and the deployment has none", () => {
+    render(<Harness initial={{ classes: ["location"], engine: "endpoint" }} seen={[]} engine={RULES} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("no names and addresses service");
+  });
+
+  it("turns the judge on with a warning about where spans go, and off without leaving its settings behind", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    render(<Harness initial={{ classes: ["person_name"] }} seen={seen} engine={RULES} />);
+    expect(screen.queryByTestId("entities-judge-warning")).toBeNull();
+    await userEvent.click(screen.getByLabelText("Ask a chat model about uncertain spans (counted in the run's cost)"));
+    expect(seen.at(-1)!.judge).toEqual({ enabled: true });
+    expect(screen.getByTestId("entities-judge-warning")).toHaveTextContent("leaves the deployment");
+    fireEvent.change(screen.getByLabelText("Judge model: provider"), { target: { value: "openai" } });
+    fireEvent.change(screen.getByLabelText("Judge model: model"), { target: { value: "gpt-test" } });
+    expect((seen.at(-1)!.judge as Record<string, unknown>).model).toMatchObject({ providerId: "openai", model: "gpt-test" });
+    fireEvent.change(screen.getByLabelText("Uncertain from score"), { target: { value: "0.4" } });
+    expect((seen.at(-1)!.judge as Record<string, unknown>).band).toEqual([0.4, 0.7]);
+    fireEvent.change(screen.getByLabelText("Time limit of this check"), { target: { value: "15000" } });
+    expect(seen.at(-1)!.timeoutMs).toBe(15000);
+    await userEvent.click(screen.getByLabelText("Ask a chat model about uncertain spans (counted in the run's cost)"));
+    expect(seen.at(-1)!.judge).toBeUndefined();
   });
 
   it("saves context words when the field is left and the text limit when changed", () => {

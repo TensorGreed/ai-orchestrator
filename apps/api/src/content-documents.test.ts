@@ -19,6 +19,7 @@ import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
 import { DEFAULT_GUARD_PROFILE_DOCUMENT, parseGuardProfile } from "@ai-orchestrator/guard-sdk";
 import { ContentDocumentScanService } from "./services/content-document-scan-service.js";
+import { pdfExtractionLimits } from "@ai-orchestrator/workflow-engine";
 import { testSql } from "./test-support/test-sql.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
@@ -93,6 +94,31 @@ const SUPPORT = "support@acme.example";
 const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64");
 const LETTER = `Dear Mr. Alan Doyle,\nPlease send the forms to 42 Dunmore Street, Springfield, IL 62704.\nMail ${EMAIL}\n`;
 
+/** A small PDF: one page per entry (its lines), and a comment on the first page. */
+function pdf(pages: string[][], comment?: string): Buffer {
+  const esc = (text: string) => `(${text.replace(/[\\()]/g, (char) => `\\${char}`)})`;
+  const objects = ["<< /Type /Catalog /Pages 2 0 R >>", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"];
+  const kids: number[] = [];
+  pages.forEach((lines, index) => {
+    const content = `BT /F1 12 Tf 72 720 Td 14 TL ${lines.map((line) => `${esc(line)} Tj T*`).join(" ")} ET`;
+    objects.push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+    const annots = index === 0 && comment ? ` /Annots [<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] /Contents ${esc(comment)} >>]` : "";
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${objects.length} 0 R${annots} >>`);
+    kids.push(objects.length);
+  });
+  objects[1] = `<< /Type /Pages /Kids [${kids.map((kid) => `${kid} 0 R`).join(" ")}] /Count ${kids.length} >>`;
+  let out = "%PDF-1.7\n";
+  const offsets = objects.map((body, index) => {
+    const at = out.length;
+    out += `${index + 1} 0 obj\n${body}\nendobj\n`;
+    return at;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((at) => `${String(at).padStart(10, "0")} 00000 n \n`).join("")}`;
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, "latin1");
+}
+
 function ruleSet(id: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return { id, name: `Rules ${id}`, version: "1", allowList: { values: [SUPPORT] }, ...extra };
 }
@@ -104,6 +130,12 @@ const served: string[] = [];
 beforeAll(async () => {
   server = http.createServer((request, response) => {
     served.push(request.url ?? "");
+    if ((request.url ?? "").startsWith("/form.pdf")) {
+      // Declared as a download: the bytes decide that it is a PDF.
+      response.setHeader("content-type", "application/octet-stream");
+      response.end(pdf([["Applicant", `Email ${EMAIL}`]]));
+      return;
+    }
     if ((request.url ?? "").startsWith("/people.csv")) {
       response.setHeader("content-type", "text/csv");
       response.end(`name,email\nJane,${EMAIL}\nSupport,${SUPPORT}\n`);
@@ -175,6 +207,11 @@ describe("the rule set page's document scan", () => {
     expect(audit).not.toContain("secret-token");
     expect(audit).not.toContain("/page");
 
+    // A PDF served as a generic download is read as a PDF (the bytes decide).
+    const fetchedPdf = await caller(open)(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "url", url: `${base}/form.pdf` } });
+    expect(fetchedPdf.statusCode, fetchedPdf.body).toBe(200);
+    expect(fetchedPdf.json<{ result: Record<string, unknown> }>().result).toMatchObject({ sniffedType: "pdf", mediaType: "application/octet-stream", typeMismatch: true, countsByClass: { email: 1 } });
+
     const closed = await createTestContext({ OUTBOUND_DENY_PRIVATE: "true" });
     const closedBuilder = await login(closed, "builder");
     const before = served.length;
@@ -231,17 +268,41 @@ describe("the rule set page's document scan", () => {
     await expect(service.withSlot(async () => "free")).resolves.toBe("free");
   });
 
+  it("reads a PDF's pages and comments, reports a page limit, and says when a PDF has no text layer", async () => {
+    const context = await createTestContext({ CONTENT_SCAN_MAX_PAGES: "2" });
+    const call = caller(context);
+    const builder = await login(context, "builder");
+    const document = pdf([["Applicant", `Email ${EMAIL}`], [`Card ${CARD}`], ["third page"]], `Call ${SUPPORT} or ${EMAIL}`);
+    const response = await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: document.toString("base64"), filename: "form.pdf", mediaType: "application/pdf" }, redact: "mask" });
+    expect(response.statusCode, response.body).toBe(200);
+    const { result } = response.json<{ result: Record<string, any> }>();
+    expect(result).toMatchObject({ sniffedType: "pdf", typeMismatch: false, encoding: "pdf", truncated: true, pages: { total: 3, checked: 2 }, textLayer: "present", pagesWithoutText: 0 });
+    expect(result.findings.map((finding: { location: { label: string } }) => finding.location.label)).toEqual(["page 1, line 2, column 7", "page 1, comment 1", "page 1, comment 1", "page 2, line 1, column 6"]);
+    expect(result.redacted.text).toContain("[not checked: pages 3 to 3, past the page limit]");
+    expect(response.body).not.toContain(EMAIL);
+    expect(response.body).not.toContain(CARD);
+    const audit = await auditRows(context.store, "guard.document_scan_test");
+    expect(JSON.parse(String(audit.at(-1)!.metadata_json ?? audit.at(-1)!.metadata ?? "{}"))).toMatchObject({ type: "pdf", pages: { total: 3, checked: 2 }, textLayer: "present" });
+
+    // A page with no text drawn on it reads as a PDF without a text layer, not as a clean one.
+    const blank = await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: pdf([[]]).toString("base64") } });
+    expect(blank.statusCode, blank.body).toBe(200);
+    expect(blank.json<{ result: Record<string, unknown> }>().result).toMatchObject({ sniffedType: "pdf", textLayer: "empty", pagesWithoutText: 1, findings: [] });
+    // Extract from File gets the deployment's byte and character limits too.
+    expect(pdfExtractionLimits()).toMatchObject({ maxPages: 2, maxBytes: context.config.CONTENT_SCAN_MAX_BYTES, maxChars: context.config.CONTENT_SCAN_MAX_CHARS });
+  });
+
   it("refuses unsupported files, viewers, and more than 10 scans a minute", async () => {
     const context = await createTestContext();
     const call = caller(context);
     const builder = await login(context, "builder");
-    const pdf = await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: b64("%PDF-1.7 ..."), mediaType: "application/pdf" } });
-    expect(pdf.statusCode).toBe(400);
-    expect(pdf.json()).toMatchObject({ code: "unsupported_type" });
+    const broken = await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: b64("%PDF-1.7 ..."), mediaType: "application/pdf" } });
+    expect(broken.statusCode).toBe(400);
+    expect(broken.json()).toMatchObject({ code: "invalid_document", error: expect.stringMatching(/could not be read .*nothing in it was checked/) });
     const viewer = await login(context, "viewer");
     expect((await call(viewer, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: b64("x") } })).statusCode).toBe(403);
     expect((await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "ftp" } })).statusCode).toBe(400);
-    // The PDF counted as one of the ten.
+    // The broken PDF counted as one of the ten.
     for (let i = 0; i < 9; i += 1) {
       expect((await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: b64("hello") } })).statusCode).toBe(200);
     }
@@ -374,6 +435,21 @@ describe("the scan_document gateway tool", () => {
     expect(both.error).toBe(true);
     const zip = await client.call("scan_document", { content_base64: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0]).toString("base64") });
     expect(zip.text).toMatch(/Zip and Office/);
+    const document = await client.call("scan_document", { content_base64: pdf([[`Email ${EMAIL}`]]).toString("base64"), filename: "form.pdf" });
+    expect(document.error, document.text).toBe(false);
+    expect(document.data).toMatchObject({ sniffedType: "pdf", pages: { total: 1, checked: 1 }, textLayer: "present", countsByClass: { email: 1 } });
+    expect(document.data.findings[0].location).toMatchObject({ kind: "pdf", page: 1, line: 1, column: 7, label: "page 1, line 1, column 7" });
+    expect(document.text).not.toContain(EMAIL);
+    // A scanned PDF's summary says it was not checked, not just "0 findings".
+    const scanned = await client.call("scan_document", { content_base64: pdf([[]]).toString("base64") });
+    expect(scanned.data).toMatchObject({ textLayer: "empty", findings: [] });
+    expect(scanned.text).toMatch(/NOT CHECKED: the PDF has no text layer/);
+    expect(document.data.notice).toMatch(/^Never read in a PDF: form field values without a widget on a page, pop-up notes, outlines/);
+    // A damaged PDF is an error that says nothing was checked, never a clean result.
+    const damaged = await client.call("scan_document", { content_base64: b64("%PDF-1.7\nnot a real document") });
+    expect(damaged.error).toBe(true);
+    expect(damaged.text).toMatch(/could not be read \(it may be damaged\), so nothing in it was checked/);
+    expect(result.data.notice).toBeUndefined();
   });
 
   it("fetches only from listed hosts, through the outbound checks, and never from private addresses", async () => {

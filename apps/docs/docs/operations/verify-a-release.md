@@ -5,12 +5,13 @@ description: "Check an L2M release before you run it: keyless cosign signatures,
 
 # Verify a release
 
-Every `v*` release tag publishes two multi-arch images (`linux/amd64`, `linux/arm64`) to GHCR:
+Every `v*` release tag publishes three multi-arch images (`linux/amd64`, `linux/arm64`) to GHCR:
 
 | Image | What it is |
 | --- | --- |
 | `ghcr.io/tensorgreed/ai-orchestrator` | The API (Fastify) |
 | `ghcr.io/tensorgreed/ai-orchestrator-web` | The Studio web UI (Nginx) |
+| `ghcr.io/tensorgreed/ai-orchestrator-ner` | [l2m-ner](./entity-service.md), the optional entity service (no model weights; you pull the model yourself) |
 
 The release workflow ([`.github/workflows/release-images.yml`](https://github.com/TensorGreed/ai-orchestrator/blob/main/.github/workflows/release-images.yml)) builds them in GitHub Actions and, before the tags are added, signs and attests them with keyless Sigstore certificates issued for that workflow run (GitHub OIDC; no long-lived keys exist). This page shows how to check, without trusting the project's word:
 
@@ -38,9 +39,10 @@ On the GitHub Release for the tag:
 | --- | --- |
 | `l2m-api-<tag>-linux-amd64.cdx.json`, `l2m-api-<tag>-linux-arm64.cdx.json` | CycloneDX SBOMs of the API image, one per platform |
 | `l2m-web-<tag>-linux-amd64.cdx.json`, `l2m-web-<tag>-linux-arm64.cdx.json` | CycloneDX SBOMs of the web image, one per platform |
+| `l2m-ner-<tag>-linux-amd64.cdx.json`, `l2m-ner-<tag>-linux-arm64.cdx.json` | CycloneDX SBOMs of the l2m-ner image, one per platform |
 | `l2m-source-<tag>.cdx.json` | CycloneDX SBOM of the source tree (`pnpm-lock.yaml` and the workspace packages) |
 | `l2m-api-<tag>.platforms.txt`, `l2m-web-<tag>.platforms.txt` | Platform and platform digest of each image, one per line |
-| `l2m-images-<tag>.txt` | `image:tag@index digest` of both images |
+| `l2m-images-<tag>.txt` | `image:tag@index digest` of every image |
 | `SHA256SUMS` | SHA-256 of every asset above |
 
 Every `.cdx.json` file also has a build provenance attestation, so a downloaded SBOM can be checked on its own.
@@ -52,9 +54,12 @@ VERSION=v0.1.0   # the release tag
 REPO=TensorGreed/ai-orchestrator
 API=ghcr.io/tensorgreed/ai-orchestrator
 WEB=ghcr.io/tensorgreed/ai-orchestrator-web
+NER=ghcr.io/tensorgreed/ai-orchestrator-ner   # only if you run l2m-ner
 ISSUER=https://token.actions.githubusercontent.com
 IDENTITY="https://github.com/$REPO/.github/workflows/release-images.yml@refs/tags/$VERSION"
 ```
+
+The commands show the API and web images; for l2m-ner, run the same commands with `$NER`.
 
 ## 1. Resolve the digest
 

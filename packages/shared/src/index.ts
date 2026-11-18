@@ -9,6 +9,7 @@ export * from "./data-label-provenance";
 export * from "./guard";
 export * from "./content-rules-tools";
 export * from "./guard-entities";
+export * from "./guard-entity-endpoint";
 export * from "./response-boundary";
 export * from "./data-destinations";
 export * from "./network-controls";

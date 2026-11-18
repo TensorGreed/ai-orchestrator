@@ -491,7 +491,9 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.get("/api/guard/detectors", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    // The deployment's registry: what runs actually use, with the engine behind names and addresses.
+    // The deployment's registry: what runs actually use, with the engine behind names and addresses (a service's
+    // health is asked at most every 30 s, with a short time limit).
+    await guard.detectors.refreshEntityEngine();
     const registry = guard.detectors.registry;
     return {
       channels: GUARD_CHANNELS,

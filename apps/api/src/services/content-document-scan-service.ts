@@ -1,6 +1,7 @@
 /**
  * Scanning documents with content rules: the bytes of an upload or a URL fetched through the outbound URL checks,
- * extracted to text segments with locations (workflow-engine `documents/`), then checked with a rule set's data scan.
+ * extracted to text segments with locations (workflow-engine `documents/`; a PDF in a child process with memory and time
+ * limits), then checked with a rule set's data scan.
  *
  * Two callers:
  * - the rule set page's "Scan a document" test (`POST /api/guard/profiles/:id/scan-document`, builders): the rule set's
@@ -15,10 +16,10 @@
  */
 
 import { InMemoryPlaceholderBook, maskForDataClass, placeholdersIn, type DnsResolver, type GuardEntityRecognizer, type GuardProfile, type SensitiveScanRequest } from "@ai-orchestrator/guard-sdk";
-import { type DocumentScanRequest, type DocumentScanResult, type DocumentSource } from "@ai-orchestrator/shared";
+import { PDF_NOT_READ, type DocumentScanRequest, type DocumentScanResult, type DocumentSource } from "@ai-orchestrator/shared";
 import {
   DocumentError,
-  extractDocument,
+  extractDocumentAsync,
   fetchDocument,
   nodeDnsResolver,
   scanExtractedDocument,
@@ -37,6 +38,8 @@ export interface ContentDocumentScanLimits {
   fetchTimeoutMs: number;
   firstByteTimeoutMs: number;
   maxConcurrent: number;
+  /** CONTENT_SCAN_TIME_LIMIT_MS: the longest checking one document's text may take. Absent: no limit of its own. */
+  timeLimitMs?: number;
 }
 
 export interface ContentDocumentScanOptions {
@@ -191,9 +194,13 @@ export class ContentDocumentScanService {
     return { bytes: fetched.bytes, mediaType: fetched.mediaType, source: { kind: "url", origin: fetched.origin, pathHash: fetched.pathHash } };
   }
 
-  extract(document: LoadedDocument): ExtractedDocument {
+  /**
+   * The document's text segments. A PDF is read in a child process under the deployment's PDF limits (configurePdfExtraction:
+   * CONTENT_SCAN_MAX_PAGES, CONTENT_SCAN_PDF_TIMEOUT_MS, CONTENT_SCAN_PDF_MEMORY_MB); `signal` stops it.
+   */
+  async extract(document: LoadedDocument, signal?: AbortSignal): Promise<ExtractedDocument> {
     const limits = this.options.limits;
-    return extractDocument({ bytes: document.bytes, mediaType: document.mediaType, limits: { maxBytes: limits.maxBytes, maxChars: limits.maxChars } });
+    return await extractDocumentAsync({ bytes: document.bytes, mediaType: document.mediaType, limits: { maxBytes: limits.maxBytes, maxChars: limits.maxChars }, ...(signal ? { signal } : {}) });
   }
 
   /**
@@ -209,12 +216,24 @@ export class ContentDocumentScanService {
     protect?: (value: string, dataClass: string) => Promise<string>,
     signal?: AbortSignal
   ): Promise<DocumentScanOutcome> {
-    const scanner = sensitiveDocumentScanner(this.scanSettings.settingsOf(ruleSet), request, {
-      ...(this.options.entityRecognizer ? { recognizer: this.options.entityRecognizer } : {}),
-      ...(signal ? { signal } : {}),
-      maxChars: this.options.limits.maxChars
-    });
-    return await scanExtractedDocument(extracted, loaded.bytes, { scanner, ...(protect ? { protect } : {}) });
+    // The whole check has one time limit (names and addresses through a service can take long on a big CSV or JSON
+    // file); the scan stops at it with a timeout. A caller that goes away still cancels it.
+    const limitMs = this.options.limits.timeLimitMs;
+    const timer = new AbortController();
+    const timeout = limitMs
+      ? setTimeout(() => timer.abort(new DocumentError("timeout", `Checking the document took longer than ${Math.ceil(limitMs / 1000)} s; scan a smaller document`)), limitMs)
+      : undefined;
+    const stop = signal ? AbortSignal.any([signal, timer.signal]) : timer.signal;
+    try {
+      const scanner = sensitiveDocumentScanner(this.scanSettings.settingsOf(ruleSet), request, {
+        ...(this.options.entityRecognizer ? { recognizer: this.options.entityRecognizer } : {}),
+        signal: stop,
+        maxChars: this.options.limits.maxChars
+      });
+      return await scanExtractedDocument(extracted, loaded.bytes, { scanner, ...(protect ? { protect } : {}) });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   /** The rule set page's test: load, extract and scan, with an optional mask or placeholder view (nothing kept). */
@@ -234,7 +253,7 @@ export class ContentDocumentScanService {
               source: { kind: "upload", ...(request.source.filename ? { filename: request.source.filename } : {}) }
             }
           : await this.fetchUrl(request.source.url, { gateway: false }, signal);
-      const extracted = this.extract(loaded);
+      const extracted = await this.extract(loaded, signal);
       let protect: ((value: string, dataClass: string) => Promise<string>) | undefined;
       if (request.redact === "mask") protect = async (value, dataClass) => maskForDataClass(value, dataClass);
       else if (request.redact === "placeholder") {
@@ -251,6 +270,22 @@ export class ContentDocumentScanService {
   }
 }
 
+/**
+ * What a scan did not check, in words, or undefined when it checked everything: a PDF without a text layer, scanned
+ * pages, pages or text past the limits, attached files. Clients that read only text see it next to the counts.
+ */
+export function documentScanNotice(result: Omit<DocumentScanResult, "notice">): string | undefined {
+  const notes: string[] = [];
+  if (result.textLayer === "empty") notes.push("NOT CHECKED: the PDF has no text layer (a scanned document; there is no text recognition)");
+  else if (result.textLayer === "partial") notes.push(`${result.pagesWithoutText} page${result.pagesWithoutText === 1 ? " has" : "s have"} no text layer and ${result.pagesWithoutText === 1 ? "was" : "were"} not checked`);
+  if (result.pages?.cutAt) notes.push(`only part of the text was checked: reading stopped in page ${result.pages.cutAt} of ${result.pages.total}`);
+  else if (result.pages && result.pages.checked < result.pages.total) notes.push(`only ${result.pages.checked} of ${result.pages.total} pages were checked`);
+  else if (result.truncated) notes.push("only part of the text was checked");
+  if (result.attachmentsNotChecked) notes.push(`${result.attachmentsNotChecked} attached file${result.attachmentsNotChecked === 1 ? " was" : "s were"} not checked`);
+  if (result.sniffedType === "pdf") notes.push(PDF_NOT_READ);
+  return notes.length > 0 ? `${notes.join("; ")}.` : undefined;
+}
+
 /** The result shape both callers return. */
 export function documentScanResult(
   extracted: ExtractedDocument,
@@ -259,7 +294,7 @@ export function documentScanResult(
   ruleSet: { id: string; version: number } | null,
   redacted?: DocumentScanResult["redacted"]
 ): DocumentScanResult {
-  return {
+  const result: DocumentScanResult = {
     documentId: outcome.documentId,
     source: loaded.source,
     mediaType: extracted.mediaType,
@@ -270,6 +305,14 @@ export function documentScanResult(
     chars: extracted.chars,
     truncated: extracted.truncated,
     ...(extracted.covered ? { covered: extracted.covered } : {}),
+    ...(extracted.pdf
+      ? {
+          pages: extracted.pdf.pages,
+          textLayer: extracted.pdf.textLayer,
+          pagesWithoutText: extracted.pdf.pagesWithoutText,
+          ...(extracted.pdf.attachments > 0 ? { attachmentsNotChecked: extracted.pdf.attachments } : {})
+        }
+      : {}),
     riskLevel: outcome.riskLevel,
     countsByClass: outcome.countsByClass,
     findings: outcome.findings,
@@ -277,4 +320,6 @@ export function documentScanResult(
     ...(redacted ? { redacted } : {}),
     ruleSet
   };
+  const notice = documentScanNotice(result);
+  return notice ? { ...result, notice } : result;
 }

@@ -5,6 +5,7 @@
 import type { WorkflowNode } from "@ai-orchestrator/shared";
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
 import { renderTemplate } from "./template";
+import { extractPdfForNode } from "./documents/pdf-node";
 import {
   aggregateItems,
   compareDatasets,
@@ -40,6 +41,8 @@ import {
 } from "./transformations";
 
 export interface Phase2Context {
+  /** The run's abort signal (Stop, the execution timeout): stops a PDF being read. */
+  signal?: AbortSignal;
   templateData: Record<string, unknown>;
   parentOutputs: Record<string, unknown>;
   getValueByPath: (input: Record<string, unknown>, path: string) => unknown;
@@ -271,10 +274,17 @@ export function executePhase2Node(
       }
       case "extract_from_file_node": {
         const format = getStringConfig(config, "format");
-        const encoding = (getStringConfig(config, "encoding") || "utf8") as "utf8" | "base64";
         const raw =
           getStringConfig(config, "data") ||
           (typeof config.inputKey === "string" ? String(ctx.templateData[config.inputKey] ?? "") : "");
+        if (format === "pdf") {
+          // promise-ok: the executor awaits the node's result; this catch maps a failure the way the outer one does
+          return extractPdfForNode(raw, getStringConfig(config, "encoding"), ctx.signal).catch((err: unknown) => {
+            if (err instanceof WorkflowError) throw err;
+            throw new WorkflowError(err instanceof Error ? err.message : String(err), ErrorCategory.UNKNOWN, false, { nodeId: node.id, nodeType: node.type });
+          });
+        }
+        const encoding = (getStringConfig(config, "encoding") || "utf8") as "utf8" | "base64";
         const decoded = encoding === "base64" ? Buffer.from(raw, "base64").toString("utf8") : raw;
         if (format === "csv") return { rows: fromCsv(decoded) };
         if (format === "json") {
@@ -289,9 +299,9 @@ export function executePhase2Node(
           }
         }
         if (format === "xml") return { data: xmlToJson(decoded) };
-        if (format === "pdf" || format === "excel") {
+        if (format === "excel") {
           throw new WorkflowError(
-            "extract_from_file_node: " + format + " parsing requires an optional dependency that is not installed in this build.",
+            "extract_from_file_node: excel parsing requires an optional dependency that is not installed in this build.",
             ErrorCategory.NOT_IMPLEMENTED,
             false
           );

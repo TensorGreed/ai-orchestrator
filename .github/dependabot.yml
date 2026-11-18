@@ -23,18 +23,23 @@ updates:
       day: monday
     open-pull-requests-limit: 10
     groups:
+      # The PDF reader parses untrusted documents: its updates (major ones too) get a pull request of their own, so a
+      # security release is never held back behind the weekly group. Groups match in order, so this one comes first.
+      pdf-reader:
+        patterns: ["pdfjs-dist"]
       npm:
         patterns: ["*"]
         update-types: [minor, patch]
     commit-message:
       prefix: "deps"
 
-  # Base images of the released API and Web images. They are pinned by digest (image:tag@sha256:...);
+  # Base images of the released API, Web and l2m-ner images. They are pinned by digest (image:tag@sha256:...);
   # Dependabot updates the digest when the tag is rebuilt, and the tag when a newer version exists.
   - package-ecosystem: docker
     directories:
       - /apps/api
       - /apps/web
+      - /apps/ner
     schedule:
       interval: weekly
       day: monday

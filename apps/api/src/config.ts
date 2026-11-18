@@ -518,6 +518,51 @@ const envSchema = z.object({
   CONTENT_SCAN_FIRST_BYTE_TIMEOUT_MS: z.coerce.number().int().min(500).max(120_000).default(10_000),
   /** Document scans running at once in this process; more wait their turn (briefly) or are refused. */
   CONTENT_SCAN_MAX_CONCURRENT: z.coerce.number().int().min(1).max(32).default(2),
+  /**
+   * The longest one document scan may spend checking its extracted text, and one content rules tool call its names
+   * and addresses check (a service can take a while on a large CSV or JSON input); past it the scan stops with a
+   * timeout. A document fetch has its own limits.
+   */
+  CONTENT_SCAN_TIME_LIMIT_MS: z.coerce.number().int().min(1000).max(900_000).default(120_000),
+  /**
+   * The deployment's names and addresses service (the l2m-ner container, or any service that speaks the same
+   * contract: `POST {base}/v1/entities`, `GET {base}/health`). Unset (the default): content rules use the built-in
+   * rules for person names, locations and street addresses. An http(s) base URL without credentials, query or
+   * fragment. The operator chose this host, so it is reached even when OUTBOUND_DENY_PRIVATE is on (it usually runs on
+   * the internal network); metadata and link-local addresses stay refused, and redirects are never followed.
+   */
+  CONTENT_RULES_NER_ENDPOINT: blankAsUndefined(
+    z
+      .string()
+      .trim()
+      .url()
+      .refine((value) => {
+        const url = new URL(value);
+        return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password && !url.search && !url.hash;
+      }, "Use an http(s) base URL without credentials, query or fragment (the token goes in CONTENT_RULES_NER_ENDPOINT_TOKEN)")
+      .optional()
+  ),
+  /** Bearer token the service expects, if it expects one. A deployment secret, like OPENAI_API_KEY; never logged. */
+  CONTENT_RULES_NER_ENDPOINT_TOKEN: blankAsUndefined(z.string().min(1).max(4096).optional()),
+  /** Time limit of one request to the service. A long text or a large document is sent as several requests. */
+  CONTENT_RULES_NER_ENDPOINT_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).default(10_000),
+  /** Characters sent in one request at most (up to 64 texts each); lower it if the service answers 413. */
+  CONTENT_RULES_NER_ENDPOINT_MAX_REQUEST_CHARS: z.coerce.number().int().min(1000).max(1_000_000).default(50_000),
+  /**
+   * Requests in flight to the service at once from this process. Further requests wait in a short queue (four per
+   * slot); when it is full, or a request waits longer than CONTENT_RULES_NER_ENDPOINT_TIMEOUT_MS, the check fails as
+   * overloaded and the rule set's failure setting decides.
+   */
+  CONTENT_RULES_NER_ENDPOINT_MAX_CONCURRENT: z.coerce.number().int().min(1).max(64).default(4),
+  /**
+   * PDF documents (the scan panel, the gateway's `scan_document` and Extract from File's `pdf` format) are read in a
+   * child process under Node's permission model, one per document: pages read per document, the wall-clock time one
+   * PDF may take (the child is stopped then), and the memory it may use (its heap; its resident memory may exceed that
+   * by 128 MB).
+   */
+  CONTENT_SCAN_MAX_PAGES: z.coerce.number().int().min(1).max(5_000).default(200),
+  CONTENT_SCAN_PDF_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(20_000),
+  CONTENT_SCAN_PDF_MEMORY_MB: z.coerce.number().int().min(64).max(4_096).default(256),
   // Phase 10.7 — MCP runtime safety.
   /** Sandbox mode for stdio servers that do not choose one: `none` (on the host) or `container`. */
   MCP_SANDBOX_DEFAULT: z.enum(["none", "container"]).default("none"),

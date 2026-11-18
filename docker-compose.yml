@@ -10,10 +10,18 @@ services:
       WEB_ORIGIN: http://localhost:5173
       SECRET_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
       OLLAMA_BASE_URL: http://host.docker.internal:11434/v1
+      # Off unless set: the l2m-ner service of the `ner` profile below (http://ner:8000), or your own entity endpoint.
+      CONTENT_RULES_NER_ENDPOINT: ${CONTENT_RULES_NER_ENDPOINT:-}
+      # The token defaults to L2M_NER_TOKEN (the one the `ner` service requires); set it on its own for your own endpoint.
+      CONTENT_RULES_NER_ENDPOINT_TOKEN: ${CONTENT_RULES_NER_ENDPOINT_TOKEN:-${L2M_NER_TOKEN:-}}
     ports:
       - "4000:4000"
     volumes:
       - ./apps/api/data:/app/apps/api/data
+    # ner-internal reaches the optional l2m-ner service and nothing else. Compose cannot attach a network by profile,
+    # so the api services always join it; without the `ner` profile it holds only them, is internal (no way out) and
+    # changes nothing.
+    networks: [default, ner-internal]
 
   web:
     build:
@@ -59,6 +67,8 @@ services:
       DB_TYPE: postgres
       # Inside the compose network only, without TLS; use DB_POSTGRESDB_SSL=true (verified) for a remote server.
       DB_POSTGRESDB_URL: postgres://l2m:l2m-local-only@postgres:5432/ai_orchestrator
+      CONTENT_RULES_NER_ENDPOINT: ${CONTENT_RULES_NER_ENDPOINT:-}
+      CONTENT_RULES_NER_ENDPOINT_TOKEN: ${CONTENT_RULES_NER_ENDPOINT_TOKEN:-${L2M_NER_TOKEN:-}}
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,6 +78,7 @@ services:
       postgres-stack:
         # The web image proxies to http://api:4000.
         aliases: [api]
+      ner-internal: {}
 
   web-postgres:
     profiles: ["postgres"]
@@ -80,8 +91,56 @@ services:
       - "5174:80"
     networks: [postgres-stack]
 
+  # Optional: l2m-ner, a local model that finds person names, places and street addresses for content rules.
+  # The image has no model weights; pull the model from its publisher into the l2m-ner-models volume first
+  # (ner-models is the only service here that downloads; it prints the licence):
+  #   docker compose run --rm ner-models pull --accept-licence
+  #   CONTENT_RULES_NER_ENDPOINT=http://ner:8000 docker compose --profile ner up -d --build
+  # Without --profile ner it does not start. It runs on an internal network with the api services only (no
+  # published port, no way out), reads the model read-only, and has a read-only root filesystem.
+  # Set L2M_NER_TOKEN (16+ characters) to require a bearer token; the api service sends the same value.
+  ner:
+    profiles: ["ner"]
+    image: l2m-ner:local
+    build:
+      context: .
+      dockerfile: apps/ner/Dockerfile
+    environment:
+      NER_TOKEN: ${L2M_NER_TOKEN:-}
+      NER_WORKERS: ${L2M_NER_WORKERS:-1}
+      NER_THREADS: ${L2M_NER_THREADS:-2}
+    volumes:
+      - l2m-ner-models:/models:ro
+    expose:
+      - "8000"
+    networks: [ner-internal]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  # `l2m-ner models …` with the volume writable and internet access, for pull, verify and list only.
+  ner-models:
+    profiles: ["ner-models"]
+    image: l2m-ner:local
+    build:
+      context: .
+      dockerfile: apps/ner/Dockerfile
+    entrypoint: ["node", "dist/main.js", "models"]
+    command: ["list"]
+    volumes:
+      - l2m-ner-models:/models
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
 networks:
   postgres-stack: {}
+  # Internal: no route out. Only the api services and, with the `ner` profile, l2m-ner join it.
+  ner-internal:
+    internal: true
 
 volumes:
   l2m-postgres: {}
+  l2m-ner-models: {}

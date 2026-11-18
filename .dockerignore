@@ -19,3 +19,6 @@ ROADMAP.md
 VSCODE_L2M_AGENT_IMPLEMENTATION_PLAN.md
 SprintPlan.md
 PRODUCTION_BEGINNER_ROADMAP.md
+apps/ner/dist
+ner-models
+**/*.onnx

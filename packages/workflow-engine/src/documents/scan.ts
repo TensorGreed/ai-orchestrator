@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { EntityScanError, riskLevelOf, scanSensitiveTextAsync, type SensitiveScanContext, type SensitiveScanRequest, type SensitiveScanSettings } from "@ai-orchestrator/guard-sdk";
+import { EntityScanError, riskLevelOf, scanSensitiveTextsAsync, type SensitiveScanContext, type SensitiveScanRequest, type SensitiveScanSettings } from "@ai-orchestrator/guard-sdk";
 import { CONTENT_SCAN_LIMITS, type DocumentFinding, type DocumentRiskLevel } from "@ai-orchestrator/shared";
 import { DocumentError } from "./errors.js";
 import { csvFieldName, jsonPointerOf, lineLocator, locationLabel, type DocumentSegment, type ExtractedDocument } from "./extract.js";
@@ -19,8 +19,14 @@ export interface DocumentTextFinding {
   preview: string;
 }
 
-/** Finds sensitive data in one text; spans must be disjoint (as the data scan returns them). */
-export type DocumentTextScanner = (text: string) => Promise<DocumentTextFinding[]> | DocumentTextFinding[];
+/**
+ * Finds sensitive data in one text; spans must be disjoint (as the data scan returns them). `many`, when present,
+ * scans a group of texts at once (one result per text, in order), so a names and addresses service gets few requests
+ * of many texts rather than one per CSV cell or JSON string.
+ */
+export type DocumentTextScanner = ((text: string) => Promise<DocumentTextFinding[]> | DocumentTextFinding[]) & {
+  many?: (texts: string[]) => Promise<DocumentTextFinding[][]>;
+};
 
 /**
  * The content rules data scan with a rule set's settings and a call's narrowing (entity types, allow-list), plus person
@@ -29,17 +35,27 @@ export type DocumentTextScanner = (text: string) => Promise<DocumentTextFinding[
  * recognizer's own message stays on the server.
  */
 export function sensitiveDocumentScanner(settings: SensitiveScanSettings, request: SensitiveScanRequest = {}, context: SensitiveScanContext = {}): DocumentTextScanner {
-  return async (text) => {
-    if (context.signal?.aborted) throw new DocumentError("cancelled", "The scan was cancelled");
+  const many = async (texts: string[]): Promise<DocumentTextFinding[][]> => {
+    if (context.signal?.aborted) throw stopped(context.signal);
     try {
-      return (await scanSensitiveTextAsync(text, settings, request, context)).findings;
+      return (await scanSensitiveTextsAsync(texts, settings, request, context)).map((result) => result.findings);
     } catch (error) {
       if (!(error instanceof EntityScanError)) throw error;
-      if (context.signal?.aborted) throw new DocumentError("cancelled", "The scan was cancelled");
+      if (context.signal?.aborted) throw stopped(context.signal);
       throw new DocumentError("check_failed", "Names and addresses could not be checked; try again, or leave person_name, location and street_address out of the entity types");
     }
   };
+  return Object.assign(async (text: string) => (await many([text]))[0] ?? [], { many });
 }
+
+/** Why a scan stopped: its time limit (`timeout`, when the signal's reason is a DocumentError) or the caller left. */
+function stopped(signal: AbortSignal): DocumentError {
+  return signal.reason instanceof DocumentError ? signal.reason : new DocumentError("cancelled", "The scan was cancelled");
+}
+
+/** Segments scanned together at most (and about this many characters); the event loop gets a turn between groups. */
+const SEGMENT_GROUP = 500;
+const SEGMENT_GROUP_CHARS = 200_000;
 
 export interface DocumentScanOptions {
   scanner: DocumentTextScanner;
@@ -76,12 +92,36 @@ export async function scanExtractedDocument(document: ExtractedDocument, bytes: 
   // Pass one: every segment's findings. JSON keys and CSV headers that hold one are then never echoed in a location.
   const allHits: DocumentTextFinding[][] = [];
   const unsafeNames = new Set<string>();
+  const scanMany = options.scanner.many;
+  if (scanMany) {
+    // Segments in groups: a names and addresses service then gets requests of many texts, not one per cell or string.
+    let group: string[] = [];
+    let groupChars = 0;
+    const flush = async () => {
+      if (group.length === 0) return;
+      if (allHits.length > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      const nonEmpty = group.filter((text) => text.length > 0);
+      const found = nonEmpty.length > 0 ? await scanMany(nonEmpty) : [];
+      let next = 0;
+      for (const text of group) allHits.push(text.length === 0 ? [] : [...(found[next++] ?? [])].sort((a, b) => a.start - b.start));
+      group = [];
+      groupChars = 0;
+    };
+    for (const segment of document.segments) {
+      if (group.length > 0 && (group.length >= SEGMENT_GROUP || groupChars + segment.text.length > SEGMENT_GROUP_CHARS)) await flush();
+      group.push(segment.text);
+      groupChars += segment.text.length;
+    }
+    await flush();
+  } else {
+    for (const [index, segment] of document.segments.entries()) {
+      // Many small segments (CSV cells, JSON strings) are checked synchronously: give the event loop a turn now and then.
+      if (index > 0 && index % 500 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      allHits.push(segment.text.length === 0 ? [] : [...(await options.scanner(segment.text))].sort((a, b) => a.start - b.start));
+    }
+  }
   for (const [index, segment] of document.segments.entries()) {
-    // Many small segments (CSV cells, JSON strings) are checked synchronously: give the event loop a turn now and then.
-    if (index > 0 && index % 500 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
-    const hits = segment.text.length === 0 ? [] : [...(await options.scanner(segment.text))].sort((a, b) => a.start - b.start);
-    allHits.push(hits);
-    if (hits.length > 0 && (segment.where.key || (segment.where.kind === "csv" && segment.where.row === 1))) unsafeNames.add(segment.text);
+    if ((allHits[index] ?? []).length > 0 && (segment.where.key || (segment.where.kind === "csv" && segment.where.row === 1))) unsafeNames.add(segment.text);
   }
   const whereOf = (segment: DocumentSegment) => {
     if (segment.where.kind === "json") return { ...segment.where, pointer: jsonPointerOf(segment.path, unsafeNames) };

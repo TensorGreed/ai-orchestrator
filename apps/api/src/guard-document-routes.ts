@@ -97,7 +97,8 @@ export function registerGuardDocumentRoutes(deps: GuardDocumentRoutesDeps): void
         type: result.sniffedType,
         findings: total,
         counts: result.countsByClass,
-        truncated: result.truncated
+        truncated: result.truncated,
+        ...(result.pages ? { pages: result.pages, textLayer: result.textLayer } : {})
       });
       return { result };
     } catch (error) {

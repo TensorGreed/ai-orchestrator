@@ -21,3 +21,7 @@ apps/web/demo-screenshots
 # Assembled Pages site (scripts/assemble-pages-site.mjs)
 _site/
 apps/docs/docs/public/site-consent.js
+
+# l2m-ner model folders (weights are never committed or sent into a build)
+ner-models
+**/*.onnx

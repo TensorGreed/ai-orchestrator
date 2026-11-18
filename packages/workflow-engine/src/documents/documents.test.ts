@@ -431,4 +431,38 @@ describe("names, locations and street addresses in documents", () => {
     gone.abort();
     await expectDocumentError(scanExtractedDocument(document, bytes, { scanner: sensitiveDocumentScanner({ dictionaries: [] }, { entityTypes: ["person_name"] }, { signal: gone.signal }) }), "cancelled");
   });
+
+  it("send many CSV cells to the recognizer in few calls of at most 64 texts, with each finding at its cell", async () => {
+    const calls: number[] = [];
+    const counting: GuardEntityRecognizer = {
+      id: "svc",
+      version: "1",
+      classes: ["location"],
+      languages: ["en"],
+      remote: true,
+      recognize: async (texts) => {
+        calls.push(texts.length);
+        return texts.map((cell) => (cell.startsWith("Oslo") ? [{ start: 0, end: 4, dataClass: "location", score: 0.95, source: "svc" }] : []));
+      }
+    };
+    const rows = ["id,city,note"];
+    for (let row = 1; row <= 300; row += 1) rows.push(`${row},${row % 50 === 0 ? "Oslo" : "Lund"},note ${row}`);
+    const bytes = utf8(rows.join("\n"));
+    const document = extractDocument({ bytes, mediaType: "text/csv" });
+    const batched = sensitiveDocumentScanner({ dictionaries: [], entities: parseEntitiesOptions({ classes: ["location"] }) }, {}, { recognizer: counting });
+    const outcome = await scanExtractedDocument(document, bytes, { scanner: batched });
+    expect(outcome.countsByClass).toEqual({ location: 6 });
+    expect(outcome.findings[0]!.location.label).toContain("row 51");
+    // About 900 cells: one recognizer call per 64, not one per cell.
+    expect(calls.length).toBeLessThanOrEqual(Math.ceil(document.segments.length / 64) + 2);
+    expect(Math.max(...calls)).toBeLessThanOrEqual(64);
+  });
+
+  it("stop with the abort's own DocumentError (a time limit) rather than as cancelled", async () => {
+    const bytes = utf8(text);
+    const document = extractDocument({ bytes, mediaType: "text/plain" });
+    const limit = new AbortController();
+    limit.abort(new DocumentError("timeout", "Checking the document took too long"));
+    await expectDocumentError(scanExtractedDocument(document, bytes, { scanner: sensitiveDocumentScanner({ dictionaries: [] }, { entityTypes: ["person_name"] }, { signal: limit.signal }) }), "timeout");
+  });
 });

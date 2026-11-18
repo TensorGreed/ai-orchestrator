@@ -356,7 +356,7 @@ Executes another workflow as a reusable sub-workflow.
 
 ### `extract_from_file_node` — Extract from File
 
-Parse CSV, JSON, or XML strings/base64 into structured data.
+Parse CSV, JSON, or XML strings/base64 into structured data, or read a PDF's text (base64).
 
 **Config fields**
 

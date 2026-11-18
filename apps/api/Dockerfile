@@ -8,9 +8,12 @@
 #   installed and nothing is compiled; its install script still starts
 #   node-gyp, which needs python3 and make to find the prebuilt binary.
 # - deps stage installs every dependency, dev tools included, for the build.
-# - build stage runs `pnpm --filter api build` (tsc --noEmit) so a TS error
-#   fails the image build instead of crashing the container at startup, and
-#   collects the api and workspace package sources (without node_modules).
+# - build stage type-checks what the container runs (tsconfig.image.json: the
+#   api's tsconfig without its *.test.ts files, which may import tools such as
+#   packages/cli that are not part of the image; CI's `pnpm build` checks them)
+#   so a TS error fails the image build instead of crashing the container at
+#   startup, and collects the api and workspace package sources (without
+#   node_modules).
 # - prod-deps stage installs the production dependencies of the api and the
 #   workspace packages it loads (`--prod --filter @ai-orchestrator/api...`), so
 #   no test or build tool (vitest, vite, typescript, concurrently, ...) reaches
@@ -67,7 +70,7 @@ RUN pnpm install --frozen-lockfile
 FROM deps AS build
 COPY apps/api apps/api
 COPY packages packages
-RUN pnpm --filter @ai-orchestrator/api build \
+RUN pnpm --filter @ai-orchestrator/api exec tsc -p tsconfig.image.json --noEmit \
     && mkdir /sources \
     && tar -cf - --exclude=node_modules apps/api packages | tar -xf - -C /sources
 
@@ -109,6 +112,9 @@ RUN mkdir -p /app/apps/api/data && chown -R nodeuser:nodeuser /app/apps/api/data
 
 USER nodeuser
 EXPOSE 4000
+# No SIGUSR1 opens a debugger in any Node process of the chain (pnpm, tsx, the API); see the PDF reader in
+# packages/workflow-engine/src/documents/pdf-child-harden.mjs.
+ENV NODE_OPTIONS=--disable-sigusr1
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD wget --quiet --spider http://127.0.0.1:4000/health || exit 1
