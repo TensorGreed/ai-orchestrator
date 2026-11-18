@@ -15,9 +15,15 @@
  *     `LLM_PRICING_OVERRIDES_JSON` (see config.ts) rather than fork.
  *   - Models not in the table emit cost=$0 with a warn log. Better to
  *     under-report than to invent a bogus number.
- *   - `cachedInputTokens` are billed at the cached-input rate when the
- *     provider exposes one (Anthropic, Gemini, OpenAI prompt-caching);
- *     otherwise they fall through to the standard input rate.
+ *   - Usage arrives in one shape from every adapter: `inputTokens` is the
+ *     whole prompt and `cachedInputTokens` the part of it served from the
+ *     provider's cache (the Anthropic and Gemini adapters convert their
+ *     counts to this). Cached tokens are billed at the cached-input rate
+ *     where the table has one, else at the input rate; the rest of the
+ *     prompt at the input rate.
+ *   - Provider ids are matched in their canonical form (`azure_openai`,
+ *     `openai_compatible`): the table, overrides and lookups all accept
+ *     `azure-openai` or `Azure_OpenAI` for the same provider.
  */
 
 import { randomUUID } from "node:crypto";
@@ -48,23 +54,24 @@ export const DEFAULT_PRICING: PricingTable = {
     "o3-mini": { inputUsdPer1M: 1.1, outputUsdPer1M: 4.4 }
   },
   anthropic: {
-    // Current Claude models (first-party API list prices). A cache-read rate is
-    // set only where one is listed; without it cached input is costed at the input rate.
+    // First-party API list prices; cache reads ("cache hits and refreshes") per
+    // https://platform.claude.com/docs/en/about-claude/pricing (read 2026-11-18). Cache writes are not priced
+    // separately (L2M sends no cache_control). Models below without a cache-read rate are not on that page.
     "claude-fable-5-1": { inputUsdPer1M: 10, outputUsdPer1M: 50, cachedInputUsdPer1M: 0.25 },
     "claude-mythos-5-1": { inputUsdPer1M: 10, outputUsdPer1M: 50, cachedInputUsdPer1M: 0.25 },
     "claude-fable-5": { inputUsdPer1M: 10, outputUsdPer1M: 50, cachedInputUsdPer1M: 1 },
     "claude-opus-5-5": { inputUsdPer1M: 4, outputUsdPer1M: 20, cachedInputUsdPer1M: 0.2 },
-    "claude-opus-5": { inputUsdPer1M: 5, outputUsdPer1M: 25 },
-    "claude-opus-4-8": { inputUsdPer1M: 5, outputUsdPer1M: 25 },
-    "claude-opus-4-7": { inputUsdPer1M: 5, outputUsdPer1M: 25 },
-    "claude-opus-4-6": { inputUsdPer1M: 5, outputUsdPer1M: 25 },
-    "claude-sonnet-5-5": { inputUsdPer1M: 2, outputUsdPer1M: 10, cachedInputUsdPer1M: 0.2 },
-    "claude-sonnet-5": { inputUsdPer1M: 2, outputUsdPer1M: 10 },
-    "claude-sonnet-4-6": { inputUsdPer1M: 3, outputUsdPer1M: 15 },
+    "claude-opus-5": { inputUsdPer1M: 5, outputUsdPer1M: 25, cachedInputUsdPer1M: 0.5 },
+    "claude-opus-4-8": { inputUsdPer1M: 5, outputUsdPer1M: 25, cachedInputUsdPer1M: 0.5 },
+    "claude-opus-4-7": { inputUsdPer1M: 5, outputUsdPer1M: 25, cachedInputUsdPer1M: 0.5 },
+    "claude-opus-4-6": { inputUsdPer1M: 5, outputUsdPer1M: 25, cachedInputUsdPer1M: 0.5 },
+    "claude-sonnet-5-5": { inputUsdPer1M: 2, outputUsdPer1M: 10, cachedInputUsdPer1M: 0.1 },
+    "claude-sonnet-5": { inputUsdPer1M: 2, outputUsdPer1M: 10, cachedInputUsdPer1M: 0.2 },
+    "claude-sonnet-4-6": { inputUsdPer1M: 3, outputUsdPer1M: 15, cachedInputUsdPer1M: 0.3 },
     // Haiku 5.5 list price is for prompts up to 100K tokens.
-    "claude-haiku-5-5": { inputUsdPer1M: 0.1, outputUsdPer1M: 0.5 },
-    "claude-haiku-4-5": { inputUsdPer1M: 1, outputUsdPer1M: 5 },
-    "claude-haiku-4-5-20251001": { inputUsdPer1M: 1, outputUsdPer1M: 5 },
+    "claude-haiku-5-5": { inputUsdPer1M: 0.1, outputUsdPer1M: 0.5, cachedInputUsdPer1M: 0.01 },
+    "claude-haiku-4-5": { inputUsdPer1M: 1, outputUsdPer1M: 5, cachedInputUsdPer1M: 0.1 },
+    "claude-haiku-4-5-20251001": { inputUsdPer1M: 1, outputUsdPer1M: 5, cachedInputUsdPer1M: 0.1 },
     // Older and retired models, kept so historical usage keeps its cost.
     "claude-opus-4": { inputUsdPer1M: 15, outputUsdPer1M: 75, cachedInputUsdPer1M: 1.5 },
     "claude-sonnet-4": { inputUsdPer1M: 3, outputUsdPer1M: 15, cachedInputUsdPer1M: 0.3 },
@@ -74,6 +81,12 @@ export const DEFAULT_PRICING: PricingTable = {
     "claude-3-opus": { inputUsdPer1M: 15, outputUsdPer1M: 75 }
   },
   gemini: {
+    // Gemini 2.5 paid-tier standard prices for text, image and video input, per
+    // https://aistudio.google.com/docs/pricing (read 2026-11-18); output includes thinking. 2.5 Pro is the price for
+    // prompts up to 200K tokens (longer prompts cost more). The page marks these models deprecated.
+    "gemini-2.5-pro": { inputUsdPer1M: 1.25, outputUsdPer1M: 10, cachedInputUsdPer1M: 0.125 },
+    "gemini-2.5-flash": { inputUsdPer1M: 0.3, outputUsdPer1M: 2.5, cachedInputUsdPer1M: 0.03 },
+    "gemini-2.5-flash-lite": { inputUsdPer1M: 0.1, outputUsdPer1M: 0.4, cachedInputUsdPer1M: 0.01 },
     "gemini-2.0-flash": { inputUsdPer1M: 0.1, outputUsdPer1M: 0.4 },
     "gemini-2.0-flash-lite": { inputUsdPer1M: 0.075, outputUsdPer1M: 0.3 },
     "gemini-1.5-pro": { inputUsdPer1M: 1.25, outputUsdPer1M: 5 },
@@ -82,9 +95,9 @@ export const DEFAULT_PRICING: PricingTable = {
   // Local / open-weight providers: tokens are tracked but cost is $0 unless
   // operators override (e.g. self-hosted GPU costs amortized per-token).
   ollama: {},
-  echo: {},
-  "openai-compatible": {},
-  "azure-openai": {}
+  echo: {}
+  // OpenAI-compatible servers and Azure OpenAI deployments have no list price here: an override prices them
+  // (under `openai_compatible` / `azure_openai`, or the same ids with `-`). /v1 gateway Azure prices are below.
 };
 
 /**
@@ -319,7 +332,7 @@ export class UsageService {
    * so callers can tell "free" apart from "unknown" (Phase 10.1 tool telemetry).
    */
   estimateCostUsd(providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number): number | null {
-    const p = this.pricing[providerId]?.[model];
+    const p = this.pricing[canonicalPricingProviderId(providerId)]?.[model];
     return p ? costOf(p, inputTokens, outputTokens, cachedInputTokens) : null;
   }
 
@@ -328,12 +341,23 @@ export class UsageService {
    * Null when neither prices the model.
    */
   estimateAiGatewayCostUsd(providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number): number | null {
-    const p = this.pricing[providerId]?.[model] ?? AI_GATEWAY_PRICING[providerId]?.[model];
+    const provider = canonicalPricingProviderId(providerId);
+    const p = this.pricing[provider]?.[model] ?? AI_GATEWAY_PRICING[provider]?.[model];
     return p ? costOf(p, inputTokens, outputTokens, cachedInputTokens) : null;
   }
 }
 
+/**
+ * The provider id a price is filed under: trimmed, lower case, `-` as `_`, so `azure-openai` (how some pages and older
+ * override files spell it) finds the prices of the `azure_openai` adapter.
+ */
+export function canonicalPricingProviderId(providerId: string): string {
+  return providerId.trim().toLowerCase().replace(/-/g, "_");
+}
+
 function costOf(p: ModelPricing, inputTokens: number, outputTokens: number, cachedInputTokens: number): number {
+  // Cached tokens are part of the prompt; a count above the prompt (a provider quirk) is capped at it.
+  cachedInputTokens = Math.min(Math.max(0, cachedInputTokens), Math.max(0, inputTokens));
   const billableInput = Math.max(0, inputTokens - cachedInputTokens);
   const cachedRate = p.cachedInputUsdPer1M ?? p.inputUsdPer1M;
   const inputCost = (billableInput / 1_000_000) * p.inputUsdPer1M;
@@ -373,7 +397,9 @@ function mergePricing(base: PricingTable, overridesJson?: string): PricingTable 
 
 function mergePricingTables(base: PricingTable, overrides: PricingTable): PricingTable {
   const out = cloneTable(base);
-  for (const [providerId, models] of Object.entries(overrides)) {
+  for (const [rawProviderId, models] of Object.entries(overrides)) {
+    if (!models || typeof models !== "object") continue;
+    const providerId = canonicalPricingProviderId(rawProviderId);
     if (!out[providerId]) out[providerId] = {};
     for (const [model, pricing] of Object.entries(models)) {
       out[providerId]![model] = pricing;
@@ -384,7 +410,10 @@ function mergePricingTables(base: PricingTable, overrides: PricingTable): Pricin
 
 function cloneTable(t: PricingTable): PricingTable {
   const out: PricingTable = {};
-  for (const [k, v] of Object.entries(t)) out[k] = { ...v };
+  for (const [k, v] of Object.entries(t)) {
+    const providerId = canonicalPricingProviderId(k);
+    out[providerId] = { ...out[providerId], ...v };
+  }
   return out;
 }
 

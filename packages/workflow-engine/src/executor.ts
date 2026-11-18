@@ -66,6 +66,7 @@ import {
   WORKFLOW_TOOL_ADAPTER_ID,
   deriveWorkflowToolDescriptor,
   workflowToolServerKey,
+  effectiveModelName,
   type DataDestinationRow,
   type DestinationRef,
   type McpToolOpenWorldOverride
@@ -3978,7 +3979,7 @@ async function runLlmCall(
       if (answering) {
         await reportUnrecordedUsage(input.dependencies, {
           providerId: input.provider.providerId,
-          model: input.provider.model,
+          model: effectiveModelName(input.provider),
           ...estimateStream(),
           latencyMs: Math.max(0, Date.now() - streamStartedMs)
         });
@@ -4014,7 +4015,7 @@ async function runLlmCall(
       _provider: input.provider,
       _telemetry: ownUsage({
         providerId: input.provider.providerId,
-        model: input.provider.model,
+        model: effectiveModelName(input.provider),
         usage: charged.usage,
         ...(charged.estimated ? { usageEstimated: true } : {}),
         latencyMs: Math.max(0, Date.now() - streamStartedMs)
@@ -4045,7 +4046,7 @@ async function runLlmCall(
     // these via getExecutionHistory's nodeResults.
     _telemetry: ownUsage({
       providerId: input.provider.providerId,
-      model: input.provider.model,
+      model: effectiveModelName(input.provider),
       usage: charged.usage,
       ...(charged.estimated ? { usageEstimated: true } : {}),
       latencyMs: response.latencyMs
@@ -7574,7 +7575,7 @@ async function executeNodeHandler(
           // Phase 7.1 — surface cumulative agent telemetry on the node output.
           _telemetry: ownUsage({
             providerId: provider.providerId,
-            model: provider.model,
+            model: effectiveModelName(provider),
             usage: usageWithSampling,
             latencyMs: agentState.llmLatencyMs,
             llmCallCount: (agentState.llmCallCount ?? 0) + samplingRequests || agentState.llmCallCount,
@@ -7892,7 +7893,7 @@ async function executeNodeHandler(
           // Phase 12 coverage — retries are model calls too: counted in the run's usage.
           checkUsage.push({
             providerId: provider.providerId,
-            model: provider.model,
+            model: effectiveModelName(provider),
             usage: { ...(retryResponse.usage ?? {}) },
             llmCallCount: 1,
             ...(typeof retryResponse.latencyMs === "number" ? { latencyMs: retryResponse.latencyMs } : {}),

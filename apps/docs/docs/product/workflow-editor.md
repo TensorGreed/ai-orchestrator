@@ -32,6 +32,25 @@ run's caller still gets the error, replays never start it, and an error workflow
 that project shared it with execute access (see [what a running workflow can reach](../security/auth-rbac.md#what-a-running-workflow-can-reach)). Pick **None** to turn it
 off.
 
+## Running from the editor
+
+**Run workflow** runs the saved workflow. The editor has a built-in test prompt, "What time is it in America/Toronto?
+Use tools when needed.", with the system prompt "You are a precise tool-using AI assistant.", and sends each one as the
+run's `user_prompt` and `system_prompt` only when the workflow can read it:
+
+- a model, chain, Azure OpenAI Embeddings, Agent or Supervisor node, which falls back to the run's prompts;
+- a Text Input, User Prompt or Chat Trigger node (`user_prompt`), or a System Prompt node with no text
+  (`system_prompt`);
+- a Prompt Template, RAG Retrieve, Rerank or Chat Intent Router node that keeps its default `{{user_prompt}}`
+  template;
+- any node setting that names `user_prompt` or `system_prompt`, such as a `{{user_prompt}}` template or an input
+  mapping that reads one.
+
+A Text Input or User Prompt node with text keeps the test prompt out, so the node's text is used, and a System
+Prompt node with text does the same for the system prompt. A workflow that reads neither, for example an HTTP
+Request followed by an Output, runs with no prompt, so the test prompt does not show up in its input or its output.
+The chat panel sends the message you type, and its system prompt on the same rule.
+
 ## Run data
 
 Run a workflow from the editor with **Debug** on (the default) and the canvas shows that run on every node, with

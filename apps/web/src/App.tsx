@@ -16,6 +16,7 @@ import ReactFlow, {
 import {
   DEFAULT_PROJECT_ID,
   WORKFLOW_SCHEMA_VERSION,
+  editorRunPrompts,
   nodeDefinitions,
   type Folder,
   type McpElicitationView,
@@ -830,16 +831,6 @@ function normalizeEditorExecutionStatus(value: unknown): EditorNodeData["executi
   return undefined;
 }
 
-function hasConfiguredNodeText(node: EditorNode): boolean {
-  const config = node.data.config;
-  if (!config || typeof config !== "object" || Array.isArray(config)) {
-    return false;
-  }
-
-  const text = (config as Record<string, unknown>).text;
-  return typeof text === "string" && text.trim().length > 0;
-}
-
 function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
   const source = nodes.find((node) => node.id === edge.source);
   const target = nodes.find((node) => node.id === edge.target);
@@ -1345,19 +1336,10 @@ function StudioApp() {
       });
   }, [editingNode, edges, nodes]);
 
-  const promptNodeSources = useMemo(
-    () => ({
-      userPromptFromNodes: nodes.some(
-        (node) =>
-          (node.data.nodeType === "text_input" || node.data.nodeType === "user_prompt") &&
-          hasConfiguredNodeText(node as EditorNode)
-      ),
-      systemPromptFromNodes: nodes.some(
-        (node) => node.data.nodeType === "system_prompt" && hasConfiguredNodeText(node as EditorNode)
-      )
-    }),
-    [nodes]
-  );
+  // The editor's built-in prompts go only to workflows that read them, and not where a prompt node's text supplies one.
+  const editorPrompts = useMemo(() => {
+    return editorRunPrompts(nodes.map((node) => ({ type: node.data.nodeType, config: node.data.config })));
+  }, [nodes]);
 
   const groupedDefinitions = useMemo(() => {
     const grouped = new Map<string, DefinitionNode[]>();
@@ -3321,16 +3303,16 @@ function StudioApp() {
       if (executionResult?.executionId) payload.nodeOutputsExecutionId = executionResult.executionId;
     }
 
-    if (!promptNodeSources.systemPromptFromNodes) {
+    if (editorPrompts.sendSystemPrompt) {
       payload.system_prompt = systemPrompt;
     }
 
-    if (!promptNodeSources.userPromptFromNodes) {
+    if (editorPrompts.sendUserPrompt) {
       payload.user_prompt = userPrompt;
     }
 
     return payload;
-  }, [executionResult, promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, recordMcp, sessionId, systemPrompt, userPrompt]);
+  }, [executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
 
   const buildWebhookExecutionPayload = useCallback(() => {
     const payload: {
@@ -3341,16 +3323,16 @@ function StudioApp() {
       session_id: sessionId
     };
 
-    if (!promptNodeSources.systemPromptFromNodes) {
+    if (editorPrompts.sendSystemPrompt) {
       payload.system_prompt = systemPrompt;
     }
 
-    if (!promptNodeSources.userPromptFromNodes) {
+    if (editorPrompts.sendUserPrompt) {
       payload.user_prompt = userPrompt;
     }
 
     return payload;
-  }, [promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, sessionId, systemPrompt, userPrompt]);
+  }, [editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, sessionId, systemPrompt, userPrompt]);
 
   const createRunTraceHandlers = useCallback(
     (workflowId: string) =>
@@ -3539,7 +3521,7 @@ function StudioApp() {
         session_id: sessionForWorkflow,
         ...(pendingImages.length > 0 ? { images: pendingImages } : {})
       };
-      if (!promptNodeSources.systemPromptFromNodes) {
+      if (editorPrompts.sendSystemPrompt) {
         chatExecutionPayload.system_prompt = chatSystemPrompt;
       }
 
@@ -3668,7 +3650,7 @@ function StudioApp() {
     reportStreamFailure,
     isDebugMode,
     persistWorkflow,
-    promptNodeSources.systemPromptFromNodes,
+    editorPrompts.sendSystemPrompt,
     refreshExecutionHistory,
     setChatMessageStatus,
     setChatMessageCitations,
