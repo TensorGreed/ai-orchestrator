@@ -27,7 +27,7 @@ import {
   revealTokens,
   rewriteMatches,
   riskLevelOf,
-  scanSensitiveTextAsync,
+  scanSensitiveTextsAsync,
   EntityScanError,
   ENTITIES_DETECTOR_ID,
   type GuardEntityRecognizer,
@@ -95,6 +95,8 @@ export interface ContentRulesToolsOptions {
   documents?: ContentDocumentScanService;
   /** A rule set's scan settings (warns once per version about invalid stored names and addresses options). */
   scanSettings?: ContentScanSettings;
+  /** CONTENT_SCAN_TIME_LIMIT_MS: the longest the names and addresses check of one call may take. Absent: no limit of its own. */
+  scanTimeLimitMs?: number;
   now?: () => Date;
 }
 
@@ -264,24 +266,37 @@ export class ContentRulesToolsService {
       ...(request.entityTypes ? { entityTypes: request.entityTypes } : {}),
       ...(request.allowList ? { allowList: { values: request.allowList } } : {})
     };
-    // The input is already capped at CONTENT_TOOLS_MAX_CHARS in all, so names and addresses are looked for in all of it.
+    // The input is already capped at CONTENT_TOOLS_MAX_CHARS in all, so names and addresses are looked for in all of it,
+    // within one time limit for the whole call (a service may need many requests for a large input).
+    const limitMs = this.options.scanTimeLimitMs;
+    const limit = limitMs ? AbortSignal.timeout(limitMs) : undefined;
+    const signal = limit && request.signal ? AbortSignal.any([request.signal, limit]) : (limit ?? request.signal);
     const context = {
       ...(this.options.entityRecognizer ? { recognizer: this.options.entityRecognizer } : {}),
-      ...(request.signal ? { signal: request.signal } : {}),
+      ...(signal ? { signal } : {}),
       maxChars: CONTENT_TOOLS_MAX_CHARS
     };
+    // Every string of every input in one scan: a names and addresses service gets few requests of many texts.
+    let results: Awaited<ReturnType<typeof scanSensitiveTextsAsync>>;
+    try {
+      results = await scanSensitiveTextsAsync(
+        inputs.flatMap((input) => input.strings.map((entry) => entry.text)),
+        settings,
+        scanRequest,
+        context
+      );
+    } catch (error) {
+      if (!(error instanceof EntityScanError)) throw error;
+      if (limit?.aborted && !request.signal?.aborted) throw new ContentToolError(`Checking names and addresses took longer than ${Math.ceil(limitMs! / 1000)} s; send less text in one call`);
+      // The recognizer's own message stays on the server: it could quote the input.
+      throw new ContentToolError("Names and addresses could not be checked; try again, or leave person_name, location and street_address out of entity_types");
+    }
+    let next = 0;
     const out: ScannedInput[] = [];
     for (const input of inputs) {
       const strings: ScannedString[] = [];
       for (const entry of input.strings) {
-        let scanned: Awaited<ReturnType<typeof scanSensitiveTextAsync>>;
-        try {
-          scanned = await scanSensitiveTextAsync(entry.text, settings, scanRequest, context);
-        } catch (error) {
-          if (!(error instanceof EntityScanError)) throw error;
-          // The recognizer's own message stays on the server: it could quote the input.
-          throw new ContentToolError("Names and addresses could not be checked; try again, or leave person_name, location and street_address out of entity_types");
-        }
+        const scanned = results[next++]!;
         strings.push({
           ...(entry.path !== undefined ? { path: entry.path } : {}),
           text: entry.text,

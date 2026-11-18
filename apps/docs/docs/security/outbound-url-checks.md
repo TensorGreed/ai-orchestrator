@@ -25,6 +25,14 @@ from the hosts its toolset lists (on the scheme's default port unless the
 entry names one). Their fetch timeout covers DNS lookups, and a caller that
 goes away stops the fetch.
 
+Requests to the deployment's
+[names and addresses service](/product/content-rules-engine#names-locations-and-street-addresses)
+(`CONTENT_RULES_NER_ENDPOINT`) go through the same checks with one deliberate
+exception: the configured host and port are allowed even under
+`OUTBOUND_DENY_PRIVATE`, because an admin named them and the service usually
+runs on the internal network. Metadata and link-local addresses stay refused,
+and redirects are never followed.
+
 Concepts: [the lethal trifecta](/learn/security/lethal-trifecta) shows how URLs become a way for data to leave an agent.
 
 MCP HTTP servers do not go through these checks. For the OAuth discovery,

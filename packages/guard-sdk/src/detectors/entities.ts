@@ -10,6 +10,8 @@ import {
   type GuardEntityEngineInfo
 } from "@ai-orchestrator/shared";
 import { maskedEvidence } from "../masking";
+import { judgeEntities } from "./entities-judge";
+import { guardModelRefIssue } from "./output-model";
 import { PLACEHOLDER_PATTERN } from "../protection/placeholder";
 import type { DetectorContext, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
 import { clampScore } from "../types";
@@ -32,7 +34,11 @@ export { ENTITIES_DETECTOR_ID, ENTITY_DATA_CLASSES } from "@ai-orchestrator/shar
  *
  * The rule set's allow-list and dictionaries apply as for every data detector. Nothing in this package downloads or
  * runs models: a deployment plugs a model or its own service in through `GuardEntityRecognizer`, and without one
- * `RuleBasedEntityRecognizer` stands in.
+ * `RuleBasedEntityRecognizer` stands in. The `engine` option picks the rules, the deployment's service, or both.
+ *
+ * With `judge.enabled`, spans scored inside `judge.band` are put to the chat model `judge.model` names (through the
+ * host's `DetectorContext.models`): a confirmed span is reported, a rejected one dropped. A check that waits on a
+ * service or a model gets its own time limit (`timeoutMs`) instead of the rule set's latency budget.
  */
 
 export interface GuardEntitySpan {
@@ -52,6 +58,8 @@ export interface GuardEntityRequest {
   classes: string[];
   language?: string;
   signal?: AbortSignal;
+  /** The lowest score worth returning (the lowest class `minScore`, or the judge's band); recognizers may return lower. */
+  minScore?: number;
 }
 
 export interface GuardEntityRecognizer {
@@ -64,7 +72,12 @@ export interface GuardEntityRecognizer {
   /** One list of spans per text, in order. */
   recognize(texts: string[], request: GuardEntityRequest): Promise<GuardEntitySpan[][]>;
   /** For the detector list: whether a model is loaded, idle or failed. Absent: `loaded`. */
-  status?(): Pick<GuardEntityEngineInfo, "status" | "error">;
+  status?(): Pick<GuardEntityEngineInfo, "status" | "error" | "model" | "message">;
+  /**
+   * True when spans come from a service over the network (the deployment's names and addresses endpoint): a check
+   * that uses it is timed like a model check (`timeoutMs`), not against the rule set's latency budget.
+   */
+  remote?: boolean;
 }
 
 export const RULE_BASED_ENTITY_RECOGNIZER_ID = "rules";
@@ -95,20 +108,24 @@ export function parseEntitiesOptions(options: unknown): GuardEntitiesOptions {
   if (!parsed.success) {
     throw new Error(`Invalid ${ENTITIES_DETECTOR_ID} options: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "options"}: ${issue.message}`).join("; ")}`);
   }
+  const modelIssue = guardModelRefIssue(parsed.data.judge?.model);
+  if (modelIssue) throw new Error(`Invalid ${ENTITIES_DETECTOR_ID} options: judge.model: ${modelIssue}`);
   return parsed.data;
 }
 
 /** The options parsed, or null when they are unusable. */
 export function guardEntitiesOptionsOrNull(options: unknown): GuardEntitiesOptions | null {
   const parsed = guardEntitiesOptionsSchema.safeParse(stripDictionaries(options));
-  return parsed.success ? parsed.data : null;
+  return parsed.success && !guardModelRefIssue(parsed.data.judge?.model) ? parsed.data : null;
 }
 
 /** Why a `data.entities` options object is unusable, keyed by option; empty when fine (checked when a rule set is saved). */
 export function entitiesOptionIssues(options: Record<string, unknown>): Array<{ option: string; message: string }> {
   const parsed = guardEntitiesOptionsSchema.safeParse(stripDictionaries(options));
-  if (parsed.success) return [];
-  return parsed.error.issues.map((issue) => ({ option: issue.path.map(String).join(".") || "classes", message: issue.message }));
+  if (!parsed.success) return parsed.error.issues.map((issue) => ({ option: issue.path.map(String).join(".") || "classes", message: issue.message }));
+  // The judge's model: model config fields only, no credentials (a key is a stored secret named by secretRef.secretId).
+  const modelIssue = guardModelRefIssue(parsed.data.judge?.model);
+  return modelIssue ? [{ option: "judge.model", message: modelIssue }] : [];
 }
 
 /** Option problems of every `data.entities` entry in a rule set, with dotted paths; empty when there are none. */
@@ -152,28 +169,136 @@ export interface FindEntitiesContext {
 
 const RULES = new RuleBasedEntityRecognizer();
 
-/** The recognizer these options use. */
+/**
+ * The built-in rules and a deployment's recognizer asked together; their spans are pooled, and `findEntities` keeps the
+ * higher-scored of two overlapping ones.
+ */
+export class UnionEntityRecognizer implements GuardEntityRecognizer {
+  readonly id: string;
+  readonly classes: readonly string[];
+  readonly languages: readonly string[] | "any";
+  readonly remote: boolean;
+  constructor(private readonly other: GuardEntityRecognizer) {
+    this.id = `${RULE_BASED_ENTITY_RECOGNIZER_ID}+${other.id}`;
+    this.classes = [...new Set([...RULES.classes, ...other.classes])];
+    this.languages = other.languages;
+    this.remote = other.remote === true;
+  }
+
+  get version(): string {
+    return `${RULES.version}+${this.other.version}`;
+  }
+
+  async recognize(texts: string[], request: GuardEntityRequest): Promise<GuardEntitySpan[][]> {
+    const forRules = request.classes.filter((dataClass) => (RULES.classes as readonly string[]).includes(dataClass));
+    const forOther = request.classes.filter((dataClass) => this.other.classes.includes(dataClass));
+    const [rules, other] = await Promise.all([
+      forRules.length > 0 ? RULES.recognize(texts, { ...request, classes: forRules }) : texts.map(() => []),
+      forOther.length > 0 ? this.other.recognize(texts, { ...request, classes: forOther }) : texts.map(() => [])
+    ]);
+    return texts.map((_, index) => [...(rules[index] ?? []), ...(other[index] ?? [])]);
+  }
+
+  status(): Pick<GuardEntityEngineInfo, "status" | "error" | "model" | "message"> {
+    return this.other.status?.() ?? { status: "loaded" };
+  }
+}
+
+const unions = new WeakMap<GuardEntityRecognizer, UnionEntityRecognizer>();
+
+/** Asked for `endpoint` or `union` on a deployment that configured no names and addresses service. */
+export class EntityEngineUnavailableError extends Error {
+  constructor(engine: string) {
+    super(`The names and addresses engine '${engine}' needs the deployment's names and addresses service, and none is configured`);
+    this.name = "EntityEngineUnavailableError";
+  }
+}
+
+/** The recognizer these options use. `endpoint` and `union` throw when the deployment has no recognizer of its own. */
 export function entityRecognizerFor(options: Pick<GuardEntitiesOptions, "engine">, deployment: GuardEntityRecognizer | undefined): GuardEntityRecognizer {
-  return options.engine === "rules" || !deployment ? RULES : deployment;
+  switch (options.engine) {
+    case "rules":
+      return RULES;
+    case "endpoint":
+      if (!deployment) throw new EntityEngineUnavailableError("endpoint");
+      return deployment;
+    case "union": {
+      if (!deployment) throw new EntityEngineUnavailableError("union");
+      let union = unions.get(deployment);
+      if (!union) {
+        union = new UnionEntityRecognizer(deployment);
+        unions.set(deployment, union);
+      }
+      return union;
+    }
+    default:
+      return deployment ?? RULES;
+  }
+}
+
+/** True when these options make the check wait on a network service (the deployment's recognizer is remote and used). */
+export function entityEngineIsRemote(options: Pick<GuardEntitiesOptions, "engine">, deployment: GuardEntityRecognizer | undefined): boolean {
+  return options.engine !== "rules" && deployment?.remote === true;
 }
 
 /** Entity matches in a text after the false-positive controls (suppressed ones included, marked by `minScore`). */
 export async function findEntities(text: string, options: GuardEntitiesOptions, context: FindEntitiesContext = {}): Promise<EntityMatch[]> {
+  return (await findEntitiesMany([text], options, context))[0] ?? [];
+}
+
+/**
+ * `findEntities` for many texts with one recognizer call (a service batches them into few requests). Each text is held
+ * to the length limit on its own; one list of matches per text, in order.
+ */
+export async function findEntitiesMany(texts: readonly string[], options: GuardEntitiesOptions, context: FindEntitiesContext = {}): Promise<EntityMatch[][]> {
   const maxChars = context.maxChars ?? options.maxChars;
-  if (text.length > maxChars) throw new Error(`text longer than maxChars (${text.length} > ${maxChars})`);
+  for (const text of texts) {
+    if (text.length > maxChars) throw new Error(`text longer than maxChars (${text.length} > ${maxChars})`);
+  }
+  const out: EntityMatch[][] = texts.map(() => []);
   const classes = [...new Set(options.classes)];
-  if (classes.length === 0 || text.length === 0) return [];
+  const asked = texts.flatMap((text, index) => (text.length > 0 ? [index] : []));
+  if (classes.length === 0 || asked.length === 0) return out;
   const recognizer = entityRecognizerFor(options, context.recognizer);
   const wanted = classes.filter((dataClass) => recognizer.classes.includes(dataClass));
-  if (wanted.length === 0) return [];
+  if (wanted.length === 0) return out;
   let results: GuardEntitySpan[][];
   try {
-    results = await recognizer.recognize([text], { classes: wanted, ...(options.languages[0] ? { language: options.languages[0] } : {}), ...(context.signal ? { signal: context.signal } : {}) });
+    results = await recognizer.recognize(
+      asked.map((index) => texts[index]!),
+      {
+        classes: wanted,
+        ...(options.languages[0] ? { language: options.languages[0] } : {}),
+        ...(context.signal ? { signal: context.signal } : {}),
+        minScore: lowestWantedScore(options, wanted)
+      }
+    );
   } catch {
     // A fixed message: a recognizer's own error text could quote the input, and it would reach traces and logs.
     throw new Error(`Entity recognizer ${recognizer.id} failed`);
   }
-  const raw = Array.isArray(results) ? results[0] ?? [] : [];
+  if (!Array.isArray(results) || results.length !== asked.length) throw new Error(`Entity recognizer ${recognizer.id} returned ${Array.isArray(results) ? results.length : 0} results for ${asked.length} texts`);
+  asked.forEach((textIndex, position) => {
+    const found = results[position];
+    out[textIndex] = checkedMatches(texts[textIndex]!, Array.isArray(found) ? found : [], wanted, options, recognizer, context);
+  });
+  return out;
+}
+
+/**
+ * The lowest score a span can matter at: the lowest `minScore` of the asked classes, or lower when the judge looks at
+ * spans below it. Context words can raise a score by 0.1, so a little below that too.
+ */
+function lowestWantedScore(options: GuardEntitiesOptions, classes: readonly string[]): number {
+  const scores = classes.filter(isEntityDataClass).map((dataClass) => entityMinScore(options, dataClass));
+  if (options.judge?.enabled) scores.push(options.judge.band[0]);
+  const lowest = Math.min(1, ...scores) - (options.contextWords.boost.length > 0 ? 0.1 : 0);
+  return Math.max(0, Math.round(lowest * 1000) / 1000);
+}
+
+/** A recognizer's spans for one text after the false-positive controls. */
+function checkedMatches(text: string, raw: readonly GuardEntitySpan[], wanted: readonly string[], options: GuardEntitiesOptions, recognizer: GuardEntityRecognizer, context: FindEntitiesContext): EntityMatch[] {
+  if (raw.length === 0) return [];
   const wantedSet = new Set<string>(wanted);
   const blocked = protectedRegions(text, context.issuedSurrogates);
   const dataSpans = mergeRegions(scanDlp(text).map((match) => match.span));
@@ -196,7 +321,12 @@ export async function findEntities(text: string, options: GuardEntitiesOptions, 
     }
     matches.push({ start: span.start, end: span.end, dataClass: span.dataClass, score: Math.round(score * 1000) / 1000, source: String(span.source ?? recognizer.id).slice(0, 64), minScore: entityMinScore(options, span.dataClass) });
   }
-  return resolveOverlaps(matches);
+  // Where spans overlap, one that would be reported beats one that would be suppressed, whatever their raw scores:
+  // a low-scored span of another class must never hide a finding.
+  const ranked = matches.map((match) => ({ start: match.start, end: match.end, score: (match.score >= match.minScore ? 1 : 0) + match.score, match }));
+  return resolveOverlaps(ranked)
+    .map((entry) => entry.match)
+    .sort((a, b) => a.start - b.start);
 }
 
 const CONTEXT_WINDOW = 40;
@@ -280,15 +410,19 @@ export interface EntitiesDetectorOptions {
 
 /** The engine behind `data.entities` for the detector list. */
 export function entityEngineInfo(recognizer: GuardEntityRecognizer | undefined): GuardEntityEngineInfo {
-  const engine = recognizer ?? RULES;
-  const status: Pick<GuardEntityEngineInfo, "status" | "error"> = engine.status?.() ?? { status: "loaded" };
+  const engine: GuardEntityRecognizer = recognizer ?? RULES;
+  const status: Pick<GuardEntityEngineInfo, "status" | "error" | "model" | "message"> = engine.status?.() ?? { status: "loaded" };
+  const kind = engine === RULES ? "rules" : engine.remote ? "endpoint" : undefined;
   return {
     id: engine.id,
     version: engine.version,
     status: status.status,
     languages: engine.languages,
     classes: [...engine.classes],
-    ...(status.error ? { error: status.error } : {})
+    ...(kind ? { kind } : {}),
+    ...(status.error ? { error: status.error } : {}),
+    ...(status.model ? { model: status.model } : {}),
+    ...(status.message ? { message: status.message } : {})
   };
 }
 
@@ -302,16 +436,27 @@ export function createEntitiesDetector(defaults: EntitiesDetectorOptions = {}): 
       : "Person names (with a cue such as a title or a field label), locations and street addresses (US, UK, CA, AU, DE, FR) by built-in rules. Classes are opt-in.",
     channels: ["prompt", "model_output", "tool_arguments", "tool_result", "final_output", "response", "trigger_input"],
     categories: ["sensitive_data"],
-    // The recognizer in use, so a clean verdict kept in a memo is never reused after the engine changed.
-    version: `rules:${RULE_ENTITY_RECOGNIZER_VERSION}${deployment ? `;auto:${deployment.id}@${deployment.version}` : ""}`,
+    // The recognizer in use, so a clean verdict kept in a memo is never reused after the engine changed. Read on every
+    // use: a service reports its model, and a new model changes the version.
+    get version() {
+      return `rules:${RULE_ENTITY_RECOGNIZER_VERSION}${deployment ? `;auto:${deployment.id}@${deployment.version}` : ""}`;
+    },
     engine: () => entityEngineInfo(deployment),
+    // A check that waits on the deployment's service or on the judge's model is timed apart from the latency budget.
+    callsModel: (raw) => {
+      const options = guardEntitiesOptionsOrNull(raw);
+      if (!options) return false;
+      return options.judge?.enabled === true || entityEngineIsRemote(options, deployment);
+    },
     async detect(input: GuardInput, context: DetectorContext) {
       const options = parseEntitiesOptions(context.options);
-      const matches = await findEntities(context.text, options, {
+      const found = await findEntities(context.text, options, {
         ...(deployment ? { recognizer: deployment } : {}),
         ...(context.signal ? { signal: context.signal } : {}),
         ...(input.issuedSurrogates ? { issuedSurrogates: input.issuedSurrogates } : {})
       });
+      // The judge gets half of the check's own time limit, so a slow model never costs the recognizer's findings.
+      const matches: Array<EntityMatch & { judge?: string }> = options.judge?.enabled ? await judgeEntities(context.text, found, options.judge, context, (options.timeoutMs ?? 30_000) / 2) : found;
       return matches.map<GuardFinding>((match) => ({
         detectorId: ENTITIES_DETECTOR_ID,
         category: "sensitive_data",
@@ -321,7 +466,7 @@ export function createEntitiesDetector(defaults: EntitiesDetectorOptions = {}): 
         spans: [{ start: match.start, end: match.end }],
         evidence: maskedEvidence(context.text.slice(match.start, match.end), match.dataClass),
         message: ENTITY_MESSAGES[match.dataClass],
-        metadata: { source: match.source }
+        metadata: { source: match.source, ...(match.judge ? { judge: match.judge } : {}) }
       }));
     }
   };

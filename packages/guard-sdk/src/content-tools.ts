@@ -1,7 +1,7 @@
 import { compileAllowList, type AllowListInput } from "./allow-list";
 import { ENTITIES_DETECTOR_ID, isEntityDataClass, type EntityDataClass, type GuardEntitiesOptions } from "@ai-orchestrator/shared";
 import { DLP_DETECTOR_ID, scanDlp, type DlpMatch, type DlpScanOptions } from "./detectors/dlp";
-import { defaultEntitiesOptions, findEntities, guardEntitiesOptionsOrNull, type GuardEntityRecognizer } from "./detectors/entities";
+import { defaultEntitiesOptions, findEntitiesMany, guardEntitiesOptionsOrNull, type EntityMatch, type GuardEntityRecognizer } from "./detectors/entities";
 import { maskForDataClass } from "./masking";
 import type { GuardProfile } from "./profile";
 import type { GuardDataClass } from "./types";
@@ -177,69 +177,130 @@ export async function scanSensitiveTextAsync(
   request: SensitiveScanRequest = {},
   context: SensitiveScanContext = {}
 ): Promise<{ matches: DlpMatch[]; findings: SensitiveTextFinding[] }> {
-  const base = scanSensitiveText(text, settings, request);
+  return (await scanSensitiveTextsAsync([text], settings, request, context))[0]!;
+}
+
+/**
+ * `scanSensitiveTextAsync` for many texts (the cells of a CSV file, the strings of a JSON value): names and addresses
+ * are looked for in all of them together, so a service recognizer gets few requests of many texts instead of one per
+ * text. One result per text, in order.
+ */
+export async function scanSensitiveTextsAsync(
+  texts: readonly string[],
+  settings: SensitiveScanSettings,
+  request: SensitiveScanRequest = {},
+  context: SensitiveScanContext = {}
+): Promise<Array<{ matches: DlpMatch[]; findings: SensitiveTextFinding[] }>> {
+  const bases = texts.map((text) => scanSensitiveText(text, settings, request));
   const classes = entityClassesFor(settings, request);
-  if (classes.length === 0) return base;
+  if (classes.length === 0) return bases;
   const options = settings.entities ? { ...settings.entities, classes } : defaultEntitiesOptions(classes);
-  let found: Awaited<ReturnType<typeof findEntities>>;
+  let found: EntityMatch[][];
   try {
-    found = await findEntitiesInChunks(text, options, context);
+    found = await findEntitiesInPieces(texts, options, context);
   } catch (error) {
     throw new EntityScanError(error);
   }
   const allowList = compileAllowList(settings.allowList, request.allowList);
-  const entities: DlpMatch[] = found
-    .filter((match) => match.score >= match.minScore && !(allowList.allows(text.slice(match.start, match.end))))
-    .filter(notOverlapping(base.matches))
-    .map((match) => ({ dataClass: match.dataClass, span: { start: match.start, end: match.end }, score: match.score, message: ENTITY_LABELS[match.dataClass] }));
-  if (entities.length === 0) return base;
-  return disjointResult(text, [...base.matches, ...entities]);
+  return texts.map((text, index) => {
+    const base = bases[index]!;
+    const entities: DlpMatch[] = (found[index] ?? [])
+      .filter((match) => match.score >= match.minScore && !(allowList.allows(text.slice(match.start, match.end))))
+      .filter(notOverlapping(base.matches))
+      .map((match) => ({ dataClass: match.dataClass, span: { start: match.start, end: match.end }, score: match.score, message: ENTITY_LABELS[match.dataClass] }));
+    return entities.length === 0 ? base : disjointResult(text, [...base.matches, ...entities]);
+  });
 }
 
 /** Names and addresses are looked for in pieces of this many characters at most, so a long text does not hold the event loop. */
 export const ENTITY_SCAN_CHUNK_CHARS = 20_000;
 /** Pieces overlap by this much; a span is taken from the piece that has at least half of it as context on each side. */
 const ENTITY_SCAN_CHUNK_OVERLAP = 2_000;
+/** Pieces asked for in one recognizer call at most (a service's request takes up to 64 texts). */
+export const ENTITY_SCAN_BATCH_TEXTS = 64;
+/** Characters asked for in one recognizer call at most; the event loop gets a turn between calls. */
+export const ENTITY_SCAN_BATCH_CHARS = ENTITY_SCAN_CHUNK_CHARS * 2;
 
 const nextTurn = () => new Promise<void>((resolve) => (typeof setImmediate === "function" ? setImmediate(resolve) : setTimeout(resolve, 0)));
 
+interface EntityPiece {
+  /** The text it belongs to. */
+  text: number;
+  /** Where the piece starts in that text. */
+  offset: number;
+  /** The piece owns spans that start in [from, to) of the text: the overlap is split in the middle between neighbours. */
+  from: number;
+  to: number;
+  value: string;
+}
+
+/** A text as overlapping pieces of at most ENTITY_SCAN_CHUNK_CHARS (one piece when it is short enough). */
+function piecesOf(text: string, index: number): EntityPiece[] {
+  if (text.length <= ENTITY_SCAN_CHUNK_CHARS) return text.length === 0 ? [] : [{ text: index, offset: 0, from: 0, to: text.length, value: text }];
+  const step = ENTITY_SCAN_CHUNK_CHARS - ENTITY_SCAN_CHUNK_OVERLAP;
+  const half = ENTITY_SCAN_CHUNK_OVERLAP / 2;
+  const pieces: EntityPiece[] = [];
+  for (let start = 0; start < text.length; start += step) {
+    const end = Math.min(text.length, start + ENTITY_SCAN_CHUNK_CHARS);
+    const last = end === text.length;
+    pieces.push({ text: index, offset: start, from: start === 0 ? 0 : start + half, to: last ? text.length : start + step + half, value: text.slice(start, end) });
+    if (last) break;
+  }
+  return pieces;
+}
+
 /**
- * `findEntities` over a long text in overlapping pieces, yielding to the event loop between them and stopping when
- * `signal` aborts. A text over the limit (the context's `maxChars`, else the options') still fails as a whole.
+ * `findEntitiesMany` over many texts: long texts in overlapping pieces, pieces asked for in batches (at most
+ * ENTITY_SCAN_BATCH_TEXTS pieces and about ENTITY_SCAN_BATCH_CHARS characters per recognizer call), yielding to the
+ * event loop between batches and stopping when `signal` aborts. A text over the limit (the context's `maxChars`,
+ * else the options') fails the whole scan.
  */
-async function findEntitiesInChunks(text: string, options: GuardEntitiesOptions, context: SensitiveScanContext): Promise<Awaited<ReturnType<typeof findEntities>>> {
+async function findEntitiesInPieces(texts: readonly string[], options: GuardEntitiesOptions, context: SensitiveScanContext): Promise<EntityMatch[][]> {
   const findContext = {
     ...(context.recognizer ? { recognizer: context.recognizer } : {}),
     ...(context.signal ? { signal: context.signal } : {}),
     ...(context.maxChars !== undefined ? { maxChars: context.maxChars } : {})
   };
   const limit = context.maxChars ?? options.maxChars;
-  if (text.length <= ENTITY_SCAN_CHUNK_CHARS || text.length > limit) return await findEntities(text, options, findContext);
-  const step = ENTITY_SCAN_CHUNK_CHARS - ENTITY_SCAN_CHUNK_OVERLAP;
-  const half = ENTITY_SCAN_CHUNK_OVERLAP / 2;
-  const out: Awaited<ReturnType<typeof findEntities>> = [];
-  for (let start = 0; start < text.length; start += step) {
-    if (start > 0) await nextTurn();
+  for (const text of texts) {
+    if (text.length > limit) throw new Error(`text longer than maxChars (${text.length} > ${limit})`);
+  }
+  const pieces = texts.flatMap((text, index) => piecesOf(text, index));
+  const out: EntityMatch[][] = texts.map(() => []);
+  let batch: EntityPiece[] = [];
+  let batchChars = 0;
+  let calls = 0;
+  const run = async () => {
+    if (batch.length === 0) return;
+    if (calls > 0) await nextTurn();
+    calls += 1;
     if (context.signal?.aborted) throw new Error("The names and addresses check was cancelled");
-    const end = Math.min(text.length, start + ENTITY_SCAN_CHUNK_CHARS);
-    const last = end === text.length;
-    // This piece owns spans that start in [from, to): the overlap is split in the middle between neighbours.
-    const from = start === 0 ? 0 : start + half;
-    const to = last ? text.length : start + step + half;
-    for (const match of await findEntities(text.slice(start, end), options, findContext)) {
-      const at = match.start + start;
-      if (at >= from && at < to) out.push({ ...match, start: at, end: match.end + start });
+    const found = await findEntitiesMany(batch.map((piece) => piece.value), options, findContext);
+    batch.forEach((piece, position) => {
+      for (const match of found[position] ?? []) {
+        const at = match.start + piece.offset;
+        if (at >= piece.from && at < piece.to) out[piece.text]!.push({ ...match, start: at, end: match.end + piece.offset });
+      }
+    });
+    batch = [];
+    batchChars = 0;
+  };
+  for (const piece of pieces) {
+    if (batch.length > 0 && (batch.length >= ENTITY_SCAN_BATCH_TEXTS || batchChars + piece.value.length > ENTITY_SCAN_BATCH_CHARS)) await run();
+    batch.push(piece);
+    batchChars += piece.value.length;
+  }
+  await run();
+  // Pieces are in order, so each text's spans are in start order; one that crosses into the next piece's first span keeps the earlier.
+  return out.map((matches) => {
+    const disjoint: EntityMatch[] = [];
+    for (const match of matches) {
+      const previous = disjoint[disjoint.length - 1];
+      if (previous && match.start < previous.end) continue;
+      disjoint.push(match);
     }
-    if (last) break;
-  }
-  // Pieces are in order, so spans are in start order; one that crosses into the next piece's first span keeps the earlier.
-  const disjoint: typeof out = [];
-  for (const match of out) {
-    const previous = disjoint[disjoint.length - 1];
-    if (previous && match.start < previous.end) continue;
-    disjoint.push(match);
-  }
-  return disjoint;
+    return disjoint;
+  });
 }
 
 /** A filter for spans in start order: false for one that overlaps a match (matches disjoint, in start order). */

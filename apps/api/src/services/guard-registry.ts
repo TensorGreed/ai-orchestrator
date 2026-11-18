@@ -24,10 +24,15 @@ export interface DeploymentGuardRegistry {
   entityRecognizer?: GuardEntityRecognizer;
   /** What the detector list shows about the `data.entities` engine. */
   entityEngine(): GuardEntityEngineInfo;
+  /** Brings the engine's status up to date (a service's health), at most once per its own interval; never throws. */
+  refreshEntityEngine(): Promise<void>;
 }
 
+/** A recognizer whose status comes from somewhere it has to ask (a service's health). */
+export type RefreshableEntityRecognizer = GuardEntityRecognizer & { refreshStatus?(): Promise<void> };
+
 export interface DeploymentGuardRegistryOptions {
-  entityRecognizer?: GuardEntityRecognizer;
+  entityRecognizer?: RefreshableEntityRecognizer;
   /** Default: the system resolver. */
   resolver?: DnsResolver;
 }
@@ -41,6 +46,13 @@ export function createDeploymentGuardRegistry(options: DeploymentGuardRegistryOp
   return {
     registry,
     ...(entityRecognizer ? { entityRecognizer } : {}),
-    entityEngine: () => entityEngineInfo(entityRecognizer)
+    entityEngine: () => entityEngineInfo(entityRecognizer),
+    refreshEntityEngine: async () => {
+      try {
+        await entityRecognizer?.refreshStatus?.();
+      } catch {
+        // The status says what went wrong; the detector list still answers.
+      }
+    }
   };
 }

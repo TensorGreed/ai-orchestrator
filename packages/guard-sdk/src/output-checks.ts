@@ -1,3 +1,4 @@
+import { ENTITIES_DETECTOR_ID } from "@ai-orchestrator/shared";
 import { OUTPUT_GROUNDING_DETECTOR_ID, outputGroundingOptionIssues } from "./detectors/output-grounding";
 import { guardModelCustomEndpoint } from "./detectors/output-model";
 import { OUTPUT_SAFETY_DETECTOR_ID, outputSafetyOptionIssues } from "./detectors/output-safety";
@@ -44,7 +45,16 @@ export function outputCheckOptionIssues(profile: Pick<GuardProfile, "channels" |
   return issues;
 }
 
-/** Secret ids the output checks' model options name (to check that each is a stored secret). */
+/** Checks whose options may name a model: the output checks, and names and addresses (its judge). */
+const MODEL_OPTION_DETECTOR_IDS: readonly string[] = [...OUTPUT_CHECK_DETECTOR_IDS, ENTITIES_DETECTOR_ID];
+
+/** True when a names and addresses entry turns its judge on. */
+function entitiesJudgeOn(options: Record<string, unknown> | undefined): boolean {
+  const judge = options?.judge;
+  return Boolean(judge && typeof judge === "object" && (judge as Record<string, unknown>).enabled === true);
+}
+
+/** Secret ids the output checks' (and the names and addresses judge's) model options name (to check that each is a stored secret). */
 export function outputCheckSecretRefs(profile: Pick<GuardProfile, "channels">): Array<{ path: string; secretId: string }> {
   const refs: Array<{ path: string; secretId: string }> = [];
   const visit = (value: unknown, path: string) => {
@@ -56,7 +66,7 @@ export function outputCheckSecretRefs(profile: Pick<GuardProfile, "channels">): 
   };
   for (const [channel, config] of Object.entries(profile.channels)) {
     config?.detectors.forEach((entry, index) => {
-      if (!(OUTPUT_CHECK_DETECTOR_IDS as readonly string[]).includes(entry.id)) return;
+      if (!MODEL_OPTION_DETECTOR_IDS.includes(entry.id)) return;
       const at = `channels.${channel}.detectors.${index}.options`;
       visit(entry.options.model, `${at}.model`);
       const judge = entry.options.judge;
@@ -71,7 +81,7 @@ export function outputCheckCustomEndpoints(profile: Pick<GuardProfile, "channels
   const found: Array<{ path: string }> = [];
   for (const [channel, config] of Object.entries(profile.channels)) {
     config?.detectors.forEach((entry, index) => {
-      if (!(OUTPUT_CHECK_DETECTOR_IDS as readonly string[]).includes(entry.id)) return;
+      if (!MODEL_OPTION_DETECTOR_IDS.includes(entry.id)) return;
       const at = `channels.${channel}.detectors.${index}.options`;
       const model = guardModelCustomEndpoint(entry.options.model);
       if (model) found.push({ path: `${at}.model.${model}` });
@@ -85,7 +95,7 @@ export function outputCheckCustomEndpoints(profile: Pick<GuardProfile, "channels
   return found;
 }
 
-/** Output checks set to call a model (safety by model, semantic topics, the grounding judge). */
+/** Checks set to call a model (safety by model, semantic topics, the grounding judge, the names and addresses judge). */
 export function outputCheckModelUses(profile: Pick<GuardProfile, "channels">): Array<{ path: string; detectorId: string }> {
   const found: Array<{ path: string; detectorId: string }> = [];
   for (const [channel, config] of Object.entries(profile.channels)) {
@@ -95,6 +105,7 @@ export function outputCheckModelUses(profile: Pick<GuardProfile, "channels">): A
       if (entry.id === OUTPUT_SAFETY_DETECTOR_ID && options.mode === "model") found.push({ path: `${at}.mode`, detectorId: entry.id });
       if (entry.id === OUTPUT_TOPIC_DETECTOR_ID && options.mode === "semantic") found.push({ path: `${at}.mode`, detectorId: entry.id });
       if (entry.id === OUTPUT_GROUNDING_DETECTOR_ID && (options.judge === true || (options.judge && typeof options.judge === "object"))) found.push({ path: `${at}.judge`, detectorId: entry.id });
+      if (entry.id === ENTITIES_DETECTOR_ID && entitiesJudgeOn(options)) found.push({ path: `${at}.judge.enabled`, detectorId: entry.id });
     });
   }
   return found;
