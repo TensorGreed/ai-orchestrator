@@ -1656,7 +1656,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
       type: "object",
       properties: { responseTemplate: { type: "string" }, outputKey: { type: "string" } }
     },
-    sampleConfig: { responseTemplate: "{{answer}}", outputKey: "result" }
+    sampleConfig: { outputKey: "result" }
   },
   {
     type: "sub_workflow_trigger",

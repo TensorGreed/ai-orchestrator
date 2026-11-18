@@ -93,6 +93,7 @@ import {
   evaluateConditionTemplate,
   runWithSandboxOwner,
   validateWorkflowGraph,
+  saveBlockingIssues,
   KnowledgeBaseVectorStoreAdapter,
   TokenEmbeddingAdapter,
   OpenAIEmbeddingAdapter,
@@ -10972,12 +10973,14 @@ export async function createApp(
       };
     }
 
+    // A draft saves with unfinished node settings (the editor shows them as warnings); a broken graph does not.
     const validation = validateWorkflowGraph(parsed.data);
-    if (!validation.valid) {
+    const blocking = saveBlockingIssues(validation);
+    if (blocking.length > 0) {
       reply.code(400);
       return {
-        error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-        validation
+        error: `Workflow validation failed: ${blocking.map((issue) => issue.message).join("; ")}`,
+        validation: { ...validation, issues: blocking }
       };
     }
 
@@ -11019,12 +11022,14 @@ export async function createApp(
       return { error: "Workflow ID mismatch between path and payload" };
     }
 
+    // A draft saves with unfinished node settings (the editor shows them as warnings); a broken graph does not.
     const validation = validateWorkflowGraph(parsed.data);
-    if (!validation.valid) {
+    const blocking = saveBlockingIssues(validation);
+    if (blocking.length > 0) {
       reply.code(400);
       return {
-        error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-        validation
+        error: `Workflow validation failed: ${blocking.map((issue) => issue.message).join("; ")}`,
+        validation: { ...validation, issues: blocking }
       };
     }
 
@@ -11243,11 +11248,12 @@ export async function createApp(
         : workflowSchema.parse(parsed.data.workflow);
 
       const validation = validateWorkflowGraph(workflow);
-      if (!validation.valid) {
+      const blocking = saveBlockingIssues(validation);
+      if (blocking.length > 0) {
         reply.code(400);
         return {
-          error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-          validation
+          error: `Workflow validation failed: ${blocking.map((issue) => issue.message).join("; ")}`,
+          validation: { ...validation, issues: blocking }
         };
       }
 
@@ -12157,6 +12163,27 @@ export async function createApp(
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
 
+  /**
+   * What a webhook run started from the API receives as its webhook body: the request's `payload` (the editor's test
+   * payload) with the run's prompt fields on top, as a call to the webhook URL gets them; without one, the prompt fields only.
+   */
+  const agentWebhookRunPayload = (data: z.infer<typeof agentWebhookPayloadSchema>): Record<string, unknown> =>
+    data.payload
+      ? {
+          ...data.payload,
+          ...(data.system_prompt !== undefined ? { system_prompt: data.system_prompt } : {}),
+          ...(data.user_prompt !== undefined ? { user_prompt: data.user_prompt } : {}),
+          ...(data.session_id !== undefined ? { session_id: data.session_id } : {}),
+          ...(data.variables !== undefined ? { variables: data.variables } : {})
+        }
+      : { system_prompt: data.system_prompt, user_prompt: data.user_prompt, session_id: data.session_id, variables: data.variables };
+
+  /** The run's stored request input: the payload's fields at the top level, as a webhook call stores its body, so a replay sends them again. */
+  const agentWebhookRequestInput = (data: z.infer<typeof agentWebhookPayloadSchema>): Record<string, unknown> => {
+    const { payload, ...rest } = data;
+    return payload ? { ...payload, ...rest } : rest;
+  };
+
   app.post<{ Body: unknown }>("/api/webhooks/execute", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) {
@@ -12198,12 +12225,7 @@ export async function createApp(
           channel: "production",
           policyActor: user,
           workflow,
-          webhookPayload: {
-            system_prompt: parsed.data.system_prompt,
-            user_prompt: parsed.data.user_prompt,
-            session_id: parsed.data.session_id,
-            variables: parsed.data.variables
-          },
+          webhookPayload: agentWebhookRunPayload(parsed.data),
           variables: parsed.data.variables,
           systemPrompt: parsed.data.system_prompt,
           userPrompt: parsed.data.user_prompt,
@@ -12218,8 +12240,8 @@ export async function createApp(
           triggerType: "webhook_api",
           triggeredBy: user.email
         },
-        progress: { requestInput: parsed.data, customData: parsed.data.customData },
-        history: { requestInput: parsed.data, customData: parsed.data.customData }
+        progress: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData },
+        history: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData }
       },
       { pool: dispatchPoolOf(workflow) }
     );
@@ -13306,12 +13328,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             channel: "production",
             policyActor: user,
             workflow,
-            webhookPayload: {
-              system_prompt: parsed.data.system_prompt,
-              user_prompt: parsed.data.user_prompt,
-              session_id: parsed.data.session_id,
-              variables: parsed.data.variables
-            },
+            webhookPayload: agentWebhookRunPayload(parsed.data),
             variables: parsed.data.variables,
             systemPrompt: parsed.data.system_prompt,
             userPrompt: parsed.data.user_prompt,
@@ -13325,8 +13342,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             triggerType: "webhook_api_stream",
             triggeredBy: user.email
           },
-          progress: { requestInput: parsed.data },
-          history: { requestInput: parsed.data }
+          progress: { requestInput: agentWebhookRequestInput(parsed.data) },
+          history: { requestInput: agentWebhookRequestInput(parsed.data) }
         },
         { pool: dispatchPoolOf(workflow), closed: clientGone, admitted: true, passthrough: {
           onNodeStart: (event) => {

@@ -8206,12 +8206,27 @@ async function executeNodeHandler(
       if (responseTemplate) {
         value = renderTemplate(responseTemplate, templateData);
       } else {
+        // No template: the node's answer, text or prompt; else the run's prompt when one was given (an empty one is not
+        // an answer); else what the parent node(s) sent; else everything. A flow without a prompt or an answer used to
+        // return "" here; it now returns its parent's output.
+        // Each value is read only when the ones before it are missing, so a run's labels come from what it returns.
+        const runPrompt = (key: string) => {
+          const prompt = readData(templateData, key);
+          return prompt === "" ? undefined : prompt;
+        };
+        const parentResult = () => {
+          const parentOutputs = toRecord(readData(templateData, "parent_outputs") ?? context.parentOutputs);
+          const parentIds = Object.keys(parentOutputs);
+          if (parentIds.length === 1) return parentOutputs[parentIds[0]!];
+          return parentIds.length > 1 ? parentOutputs : undefined;
+        };
         value =
           readData(templateData, "answer") ??
           readData(templateData, "text") ??
           readData(templateData, "prompt") ??
-          readData(templateData, "user_prompt") ??
-          readData(templateData, "system_prompt") ??
+          runPrompt("user_prompt") ??
+          runPrompt("system_prompt") ??
+          parentResult() ??
           readWholeData(templateData);
       }
 
@@ -10662,9 +10677,17 @@ async function executeWorkflowRun(
     }
   }
 
+  // No Output node ran: the result is the output of the last node, in run order, that produced one (a skipped branch has none).
   if (finalOutput === undefined && nodeOrder.length > 0) {
-    finalOutput = nodeOutputs.get(nodeOrder[nodeOrder.length - 1]);
-    labelState.outputNodeId = nodeOrder[nodeOrder.length - 1];
+    let lastNodeId = nodeOrder[nodeOrder.length - 1];
+    for (let position = nodeOrder.length - 1; position >= 0; position -= 1) {
+      if (nodeOutputs.get(nodeOrder[position]!) !== undefined) {
+        lastNodeId = nodeOrder[position]!;
+        break;
+      }
+    }
+    finalOutput = nodeOutputs.get(lastNodeId);
+    labelState.outputNodeId = lastNodeId;
   }
 
   // Phase: agent_clarify — surface the clarification at the top of the

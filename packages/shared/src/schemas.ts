@@ -203,6 +203,45 @@ export const workflowEdgeSchema = z.object({
 /** Phase 13.1 — a queue worker pool name: a letter or digit, then letters, digits, `_` or `-` (at most 63). */
 export const QUEUE_POOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 
+/** The largest test webhook payload a workflow keeps, as JSON text. */
+export const TEST_WEBHOOK_PAYLOAD_MAX_CHARS = 64 * 1024;
+
+/** Field names that hold credentials. A test payload is stored with the workflow and shown to its readers, so it refuses them. */
+const CREDENTIAL_FIELD_NAME = /^(?:.*[_-])?(?:password|passwd|secret|token|api[_-]?key|apikey|authorization|cookie|private[_-]?key|client[_-]?secret|access[_-]?key)(?:[_-].*)?$/i;
+
+/** The field paths of a test payload whose names look like credentials (nested objects and arrays included). */
+export function testWebhookPayloadCredentialFields(value: unknown, path: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => testWebhookPayloadCredentialFields(item, [...path, String(index)]));
+  }
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, child]) => {
+    const childPath = [...path, key];
+    const words = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2");
+    return CREDENTIAL_FIELD_NAME.test(words) ? [childPath.join(".")] : testWebhookPayloadCredentialFields(child, childPath);
+  });
+}
+
+export const testWebhookPayloadSchema = z.record(z.string(), z.unknown()).superRefine((payload, ctx) => {
+  let size = 0;
+  try {
+    size = JSON.stringify(payload).length;
+  } catch {
+    ctx.addIssue({ code: "custom", message: "The test payload must be JSON" });
+    return;
+  }
+  if (size > TEST_WEBHOOK_PAYLOAD_MAX_CHARS) {
+    ctx.addIssue({ code: "custom", message: `The test payload is larger than ${TEST_WEBHOOK_PAYLOAD_MAX_CHARS / 1024} KB` });
+  }
+  const credentials = testWebhookPayloadCredentialFields(payload);
+  if (credentials.length > 0) {
+    ctx.addIssue({
+      code: "custom",
+      message: `The test payload is saved with the workflow, so it cannot hold credentials: remove ${credentials.join(", ")}`
+    });
+  }
+});
+
 export const workflowSettingsSchema = z
   .object({
     errorWorkflowId: z.string().min(1).optional(),
@@ -220,7 +259,9 @@ export const workflowSettingsSchema = z
     /** Phase 11.2 — agents pause for approval before calling an MCP write tool. */
     writeToolApproval: writeToolApprovalSettingsSchema.optional(),
     /** 13.3 — subject references: which values of a run name the person it is about (stored as keyed hashes only). */
-    dataProtection: workflowDataProtectionSchema.optional()
+    dataProtection: workflowDataProtectionSchema.optional(),
+    /** The editor's test payload for "Webhook run". Stored with the workflow, so it must not hold credentials. */
+    testWebhookPayload: testWebhookPayloadSchema.optional()
   })
   .passthrough();
 
@@ -292,7 +333,9 @@ export const agentWebhookPayloadSchema = z.object({
   customData: z.record(z.string(), z.unknown()).transform((v) => stripReservedCustomData(v)).optional(),
   system_prompt: z.string().optional(),
   user_prompt: z.string().optional(),
-  variables: z.record(z.string(), z.unknown()).optional()
+  variables: z.record(z.string(), z.unknown()).optional(),
+  /** The request body a webhook run receives (the editor's test payload): what `{{webhook.<field>}}` reads. */
+  payload: z.record(z.string(), z.unknown()).optional()
 });
 
 export type WorkflowSchemaInput = z.input<typeof workflowSchema>;
