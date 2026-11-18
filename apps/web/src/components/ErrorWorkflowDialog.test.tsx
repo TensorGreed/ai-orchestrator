@@ -45,15 +45,17 @@ describe("ErrorWorkflowDialog", () => {
   it("keeps a saved id that is not in the list visible", () => {
     render(<Harness initial="wf-shared-elsewhere" onChange={vi.fn()} />);
     expect(screen.getByLabelText("Run on failure")).toHaveValue("wf-shared-elsewhere");
-    expect(screen.getByText(/not in this project's list/, { selector: ".cfg-help" })).toBeInTheDocument();
+    expect(screen.getByText(/not in the list of this project's workflows/, { selector: ".cfg-help" })).toBeInTheDocument();
   });
 
   it("closes with Done and with Escape", async () => {
     const onClose = vi.fn();
     render(<ErrorWorkflowDialog workflowId="wf-1" errorWorkflowId={undefined} workflows={WORKFLOWS} onChange={vi.fn()} onClose={onClose} />);
+    // Focus starts on the picker.
+    expect(screen.getByLabelText("Run on failure")).toHaveFocus();
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(onClose).toHaveBeenCalledTimes(1);
-    screen.getByLabelText("Run on failure").focus();
+    (document.activeElement as HTMLElement | null)?.blur();
     await userEvent.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledTimes(2);
   });

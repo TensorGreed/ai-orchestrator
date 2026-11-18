@@ -2,7 +2,7 @@
  * The workflow's error workflow (`settings.errorWorkflowId`): another workflow that starts when a run of this one
  * fails, with the failed run's details as its input. Off when none is picked.
  */
-import { useId } from "react";
+import { useEffect, useId, useRef } from "react";
 
 export interface ErrorWorkflowOption {
   id: string;
@@ -21,6 +21,20 @@ interface ErrorWorkflowDialogProps {
 
 export function ErrorWorkflowDialog({ workflowId, errorWorkflowId, workflows, onChange, onClose }: ErrorWorkflowDialogProps) {
   const selectId = useId();
+  const selectRef = useRef<HTMLSelectElement>(null);
+  // Focus starts on the picker and goes back where it was when the dialog closes; Escape closes it from anywhere.
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    selectRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      previous?.focus();
+    };
+  }, [onClose]);
   const current = errorWorkflowId ?? "";
   const options = workflows.filter((workflow) => workflow.id !== workflowId);
   // A saved id that is not in the list (another project's shared workflow, or one deleted since) stays visible.
@@ -34,9 +48,6 @@ export function ErrorWorkflowDialog({ workflowId, errorWorkflowId, workflows, on
         aria-modal="true"
         aria-labelledby="error-workflow-title"
         onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") onClose();
-        }}
       >
         <header className="pg-modal-header">
           <div>
@@ -60,6 +71,7 @@ export function ErrorWorkflowDialog({ workflowId, errorWorkflowId, workflows, on
             </label>
             <select
               id={selectId}
+              ref={selectRef}
               className="cfg-input"
               value={current}
               onChange={(event) => onChange(event.target.value || undefined)}
@@ -75,8 +87,9 @@ export function ErrorWorkflowDialog({ workflowId, errorWorkflowId, workflows, on
           </div>
           {unknownCurrent && (
             <div className="cfg-help">
-              The saved error workflow is not in this project&apos;s list. A workflow shared to this project with execute
-              access still works; one that was deleted is skipped when a run fails.
+              The saved error workflow is not in the list of this project&apos;s workflows. A workflow shared to this project
+              with execute access still runs; one that was deleted, or that this project cannot reach, is skipped when a run
+              fails.
             </div>
           )}
           <div className="cfg-help">

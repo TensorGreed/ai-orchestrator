@@ -849,6 +849,69 @@ function TextAreaField({
   );
 }
 
+/**
+ * A JSON field that keeps what is typed while it is not valid JSON yet: the config changes only when the text parses
+ * (and `accept` takes it), and the field says why it has not changed. A config change from elsewhere replaces the text.
+ */
+function JsonDraftField<T>({
+  label,
+  value,
+  onCommit,
+  accept,
+  invalidMessage,
+  rows = 3
+}: {
+  label: string;
+  /** The config value the field shows. */
+  value: T;
+  onCommit: (next: T) => void;
+  /** Returns the value to store, or undefined when the parsed JSON is not acceptable. */
+  accept: (parsed: unknown) => T | undefined;
+  invalidMessage: string;
+  rows?: number;
+}) {
+  const shown = JSON.stringify(value ?? null, null, 2);
+  const [draft, setDraft] = useState(shown);
+  const [error, setError] = useState("");
+  const lastCommitted = useRef(shown);
+  useEffect(() => {
+    // A change that did not come from this field (another field, a reset) replaces the draft.
+    if (shown !== lastCommitted.current) {
+      lastCommitted.current = shown;
+      setDraft(shown);
+      setError("");
+    }
+  }, [shown]);
+  return (
+    <>
+      <TextAreaField
+        label={label}
+        value={draft}
+        rows={rows}
+        onChange={(next) => {
+          setDraft(next);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(next);
+          } catch {
+            setError("Not valid JSON yet; the node keeps its last valid value.");
+            return;
+          }
+          const accepted = accept(parsed);
+          if (accepted === undefined) {
+            setError(invalidMessage);
+            return;
+          }
+          setError("");
+          lastCommitted.current = JSON.stringify(accepted ?? null, null, 2);
+          onCommit(accepted);
+        }}
+      />
+      {error ? <div className="cfg-field-error">{error}</div> : null}
+    </>
+  );
+}
+
 interface ExpressionPreviewContext {
   input?: unknown;
   vars?: Record<string, unknown>;
@@ -1525,6 +1588,7 @@ export function NodeInspector({
         cancelled = true;
       };
     }
+    setKnowledgeBaseOptions([]);
     setKnowledgeBaseOptionsError(null);
     fetchKnowledgeBases(workflowContext?.projectId ?? undefined)
       .then(({ knowledgeBases }) => {
@@ -6630,7 +6694,15 @@ export function NodeInspector({
             <SelectField
               label="Vector Store"
               value={vectorStoreId}
-              onChange={(next) => setConfig((current) => ({ ...current, vectorStoreId: next }))}
+              onChange={(next) =>
+                setConfig((current) => {
+                  if (next === "knowledge-base") return { ...current, vectorStoreId: next };
+                  // Knowledge-base search settings mean nothing to another store: they are not kept out of sight.
+                  const { knowledgeBaseId: _kb, searchMode: _mode, candidatesPerRanker: _c, bm25Weight: _b, vectorWeight: _v, rrfK: _k, ...rest } = current;
+                  const { knowledgeBaseId: _storeKb, ...storeConfig } = asRecord(current.vectorStoreConfig);
+                  return { ...rest, vectorStoreId: next, vectorStoreConfig: Object.keys(storeConfig).length > 0 ? storeConfig : undefined };
+                })
+              }
               options={vectorStoreOptions}
             />
             {usesKnowledgeBase ? (
@@ -6751,30 +6823,27 @@ export function NodeInspector({
                   />
                 </div>
               ) : null}
-              <TextAreaField
+              <JsonDraftField<Record<string, unknown> | undefined>
                 label="Vector Store Extra Config (JSON)"
-                value={JSON.stringify(asRecord(config.vectorStoreConfig), null, 2)}
-                onChange={(next) => {
-                  try {
-                     const parsed = JSON.parse(next);
-                     setConfig(current => ({...current, vectorStoreConfig: parsed}));
-                  } catch { /* ignore typing errors */ }
-                }}
-                rows={3}
+                value={asRecord(config.vectorStoreConfig)}
+                accept={(parsed) =>
+                  parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                    ? Object.keys(parsed).length > 0
+                      ? (parsed as Record<string, unknown>)
+                      : {}
+                    : undefined
+                }
+                invalidMessage="Use a JSON object."
+                onCommit={(next) =>
+                  setConfig((current) => ({ ...current, vectorStoreConfig: next && Object.keys(next).length > 0 ? next : undefined }))
+                }
               />
-              <TextAreaField
+              <JsonDraftField<unknown[]>
                 label="Inline Documents (JSON array)"
-                value={JSON.stringify(inlineDocuments, null, 2)}
-                onChange={(next) => {
-                  try {
-                    const parsed = JSON.parse(next) as unknown;
-                    if (!Array.isArray(parsed)) return;
-                    setConfig((current) => ({ ...current, documents: parsed.length > 0 ? parsed : undefined }));
-                  } catch {
-                    // ignore typing errors
-                  }
-                }}
-                rows={3}
+                value={inlineDocuments}
+                accept={(parsed) => (Array.isArray(parsed) ? parsed : undefined)}
+                invalidMessage="Use a JSON array of documents (text, or objects with text)."
+                onCommit={(next) => setConfig((current) => ({ ...current, documents: next.length > 0 ? next : undefined }))}
               />
             </AdvancedFields>
           </>
@@ -6984,7 +7053,7 @@ export function NodeInspector({
           <>
             <ExpressionField
               label="Condition Statement"
-              value={toStringValue(config.condition, "{{answer}} === 'true'")}
+              value={toStringValue(config.condition)}
               onChange={(next) => setConfig((current) => ({ ...current, condition: next }))}
               rows={2}
               mode="condition"
@@ -6994,7 +7063,7 @@ export function NodeInspector({
                   A JavaScript expression that is true or false, with values in <code>{"{{ }}"}</code>, for example{" "}
                   <code>{`{{userScore}} > 90`}</code> or <code>{`{{status}} === 'done'`}</code> (quote text). A condition
                   that is only one <code>{"{{ }}"}</code> is true unless it is empty, <code>false</code>, <code>0</code>,{" "}
-                  <code>null</code> or <code>undefined</code>.
+                  <code>null</code> or <code>undefined</code>. Text without any <code>{"{{ }}"}</code> is not evaluated.
                 </>
               }
             />

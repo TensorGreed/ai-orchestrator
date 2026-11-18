@@ -1,5 +1,5 @@
 import { withExpressionEvaluator, isComplexExpression, type ExpressionContext } from "./expression";
-import { isExpressionSandboxFailure } from "./expression-sandbox";
+import { isExpressionSandboxFailure, toSandboxJson } from "./expression-sandbox";
 import { recordTemplateRead } from "./data-labels";
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -118,22 +118,52 @@ function stringifyConditionValue(value: unknown): string {
   try { return JSON.stringify(value) ?? ""; } catch { return String(value); }
 }
 
+/** Words in a condition's own text that read no data. */
+const CONDITION_KEYWORDS = new Set(["true", "false", "null", "undefined", "NaN", "Infinity", "typeof", "instanceof", "in", "void", "new"]);
+
+/** True when a condition's text outside its `{{ }}` names something (a variable, `$json`, `results`), not only operators and literals. */
+function conditionTextReadsData(outside: string): boolean {
+  const code = outside.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g, "");
+  for (const word of code.match(/[A-Za-z_$][\w$]*/g) ?? []) if (!CONDITION_KEYWORDS.has(word)) return true;
+  return false;
+}
+
+/**
+ * What kind of error a failed condition hit (`SyntaxError`, `ReferenceError`, `TypeError`, a timeout), read from the
+ * sandbox's message, which is not repeated: a guest message may hold values.
+ */
+function conditionErrorKind(error: unknown, expression: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const prefix = `Expression evaluation failed for '${expression.trim()}': `;
+  const inner = message.startsWith(prefix) ? message.slice(prefix.length) : "";
+  if (/^timed out/.test(inner)) return "it timed out";
+  if (/SyntaxError|unexpected|expecting|unterminated|invalid (?:token|regular|number)/i.test(inner)) return "SyntaxError";
+  if (/ReferenceError|is not defined/i.test(inner)) return "ReferenceError";
+  if (/TypeError|cannot read|not a function|not an object|cannot convert/i.test(inner)) return "TypeError";
+  return "an error";
+}
+
 /**
  * An IF node's condition. A condition that is one `{{ }}` (or plain text) renders and is judged by its text, as
  * before. A condition with text outside its `{{ }}`, such as `{{userScore}} > 90` or `{{answer}} === 'true'`, is
  * one JavaScript expression: each `{{ }}` becomes its value (a number stays a number, a string a string, a
- * missing value `undefined`) and the whole expression runs in the expression sandbox. Values go in as JSON
- * literals, never as code, so a value cannot change the expression. A condition that is not a valid expression
- * once filled in throws (the node fails rather than taking a branch); the error names the condition, not values.
+ * missing value `undefined`) and the whole expression runs in the expression sandbox. Values go in as JSON literals
+ * in the form the sandbox gets all its data (Dates as ISO text, cycles and BigInts as text), never as code, so a
+ * value cannot change the expression. A
+ * condition that fails (not a valid expression once filled in, an error while it runs, a timeout) throws after the
+ * sandbox session has closed, so it fails the node without counting as a sandbox crash; the error names the
+ * condition and the error's class, not values.
  */
 export function evaluateConditionTemplate(template: string, values: Record<string, unknown>): { result: boolean; evaluatedValue: string } {
   const matches = [...template.matchAll(TEMPLATE_BODY)];
-  const outside = template.replace(TEMPLATE_BODY, "").trim();
-  if (matches.length === 0 || !outside) {
+  const outside = template.replace(TEMPLATE_BODY, " ");
+  if (matches.length === 0 || !outside.trim()) {
     const evaluated = renderTemplate(template, values).trim();
     return { result: isTruthyConditionText(evaluated), evaluatedValue: evaluated };
   }
-  return withExpressionEvaluator(expressionContextFor(values), (evaluate) => {
+  // Text outside the braces that names data reads it as a computed expression does (its labels follow).
+  if (conditionTextReadsData(outside)) recordTemplateRead(template.replace(TEMPLATE_BODY, " 0 ").trim(), false);
+  const outcome = withExpressionEvaluator(expressionContextFor(values), (evaluate): { ok: true; value: unknown } | { ok: false; kind: string } => {
     let expression = "";
     let last = 0;
     for (const match of matches) {
@@ -154,25 +184,27 @@ export function evaluateConditionTemplate(template: string, values: Record<strin
           value = undefined;
         }
       }
-      // JSON has no `undefined`; JSON.stringify of a string is a safe JS string literal.
-      const literal = value === undefined ? "undefined" : JSON.stringify(value);
-      expression += ` (${literal ?? "undefined"}) `;
+      expression += value === undefined ? " (undefined) " : ` (${toSandboxJson(value)}) `;
     }
     expression += template.slice(last);
-    let result: unknown;
+    // On lines of its own inside parentheses, so a trailing `//` comment ends before the sandbox closes the expression.
+    expression = `(\n${expression}\n)`;
     try {
-      result = evaluate(expression);
+      return { ok: true, value: evaluate(expression) };
     } catch (error) {
       if (isExpressionSandboxFailure(error)) throw error;
-      throw new Error(
-        `IF condition '${template}' is not a valid expression once its {{ }} values are filled in. ` +
-          "Text outside {{ }} is evaluated as JavaScript: quote text values, for example {{status}} === 'done', " +
-          "or put the whole condition inside one {{ }}."
-      );
+      return { ok: false, kind: conditionErrorKind(error, expression) };
     }
-    const evaluatedValue = stringifyConditionValue(result).trim();
-    return { result: isTruthyConditionText(evaluatedValue), evaluatedValue };
   });
+  if (!outcome.ok) {
+    throw new Error(
+      `IF condition '${template}' could not be evaluated once its {{ }} values were filled in (${outcome.kind}). ` +
+        "Text outside {{ }} is evaluated as JavaScript: quote text values, for example {{status}} === 'done', " +
+        "or put the whole condition inside one {{ }}."
+    );
+  }
+  const evaluatedValue = stringifyConditionValue(outcome.value).trim();
+  return { result: isTruthyConditionText(evaluatedValue), evaluatedValue };
 }
 
 function resolvePath(values: Record<string, unknown>, path: string): unknown {

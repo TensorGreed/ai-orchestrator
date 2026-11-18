@@ -69,7 +69,8 @@ covers what a templated field can read from earlier steps.
   empty, `false`, `0`, `null` or `undefined`, true otherwise. A condition with text outside its braces
   (<span v-pre>`{{score}} > 90`</span>, <span v-pre>`{{status}} === 'done'`</span>) is one JavaScript expression in the sandbox: each <span v-pre>`{{ }}`</span> is replaced by
   its value (numbers stay numbers, text stays text, a missing value is `undefined`). Quote text you compare with; a
-  condition that is not a valid expression once filled in fails the node.
+  condition that fails once filled in (not a valid expression, an error while it runs, a timeout) fails the node with
+  an error that names the condition and the kind of error, never the values.
 - Nodes on an agent's attachment ports (`chat_model`, `memory`, `tool`, `worker`) are not DAG steps: the agent uses
   them when it runs.
 - Node execution status is persisted in execution history.

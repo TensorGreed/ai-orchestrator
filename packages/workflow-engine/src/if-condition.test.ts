@@ -7,6 +7,9 @@ import type { Workflow } from "@ai-orchestrator/shared";
 import { executeWorkflow, type WorkflowExecutionDependencies } from "./executor";
 import { IN_PROCESS_CODE_SANDBOX } from "./code-sandbox";
 import { evaluateConditionTemplate } from "./template";
+import { isExpressionSandboxFailure } from "./expression-sandbox";
+import { runInLabelScope, type NodeLabelScope } from "./data-labels";
+import { resetSandboxBreakerForTesting, runWithSandboxOwner } from "./quickjs-sandbox";
 
 function deps(): WorkflowExecutionDependencies {
   return {
@@ -84,6 +87,58 @@ describe("evaluateConditionTemplate", () => {
     } catch (error) {
       expect(String(error)).not.toContain("secret-value");
     }
+  });
+});
+
+describe("evaluateConditionTemplate failures", () => {
+  it("a failing condition is the node's error, not a sandbox crash: it never opens the owner's breaker", () => {
+    resetSandboxBreakerForTesting();
+    runWithSandboxOwner("user:typist", () => {
+      for (const condition of ["{{score}} >", "{{status}} == done", "{{items}}.length > 0"]) {
+        let caught: unknown;
+        try {
+          evaluateConditionTemplate(condition, { score: 1, status: "open" });
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect(isExpressionSandboxFailure(caught)).toBe(false);
+      }
+      expect(evaluateConditionTemplate("{{ score + 1 }}", { score: 1 }).evaluatedValue).toBe("2");
+      expect(evaluateConditionTemplate("{{score}} > 0", { score: 1 }).result).toBe(true);
+    });
+    resetSandboxBreakerForTesting();
+  });
+
+  it("names the error's class, so a syntax error and a runtime error read differently", () => {
+    expect(() => evaluateConditionTemplate("{{score}} >", { score: 1 })).toThrow(/\(SyntaxError\)/);
+    expect(() => evaluateConditionTemplate("{{items}}.length > 0", {})).toThrow(/\(TypeError\)/);
+    expect(() => evaluateConditionTemplate("{{status}} == done", { status: "x" })).toThrow(/\(ReferenceError\)/);
+  });
+
+  it("takes values the sandbox can represent: BigInt, cycles, dates", () => {
+    const cyclic: Record<string, unknown> = { name: "a" };
+    cyclic.self = cyclic;
+    expect(evaluateConditionTemplate("{{n}} === '5'", { n: BigInt(5) }).result).toBe(true);
+    expect(evaluateConditionTemplate("{{c}}.name === 'a'", { c: cyclic }).result).toBe(true);
+    expect(evaluateConditionTemplate("{{d}} > '2025'", { d: new Date("2026-01-01T00:00:00Z") }).result).toBe(true);
+  });
+
+  it("records what the condition reads: each {{ }} and any data the text outside names", () => {
+    const reads: string[] = [];
+    const scope = {
+      readPath: (path: string) => reads.push(`path:${path}`),
+      readExpression: (expression: string) => reads.push(`expr:${expression}`)
+    } as unknown as NodeLabelScope;
+    runInLabelScope(scope, () => evaluateConditionTemplate("{{score}} > 90", { score: 95 }));
+    expect(reads).toEqual(["path:score"]);
+    reads.length = 0;
+    runInLabelScope(scope, () => evaluateConditionTemplate("{{score}} > results.limits.max", { score: 95, results: { limits: { max: 90 } } }));
+    expect(reads).toEqual(["expr:0  > results.limits.max", "path:score"]);
+  });
+
+  it("allows a trailing line comment", () => {
+    expect(evaluateConditionTemplate("{{x}} > 1 // more than one", { x: 2 }).result).toBe(true);
   });
 });
 

@@ -120,6 +120,55 @@ describe("RAG Retrieve fields", () => {
     expect(config.vectorStoreConfig).toBeUndefined();
   });
 
+  it("keeps typed JSON until it parses: inline documents can be typed key by key", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<NodeInspector {...props(node("rag_retrieve", {}), { onSave })} />);
+    await user.click(within(screen.getByTestId("advanced-fields")).getByText("Advanced"));
+    const field = screen.getByLabelText(/Inline Documents/);
+    await user.clear(field);
+    await user.type(field, '[["Refunds take 5 days."]');
+    expect(field).toHaveValue('["Refunds take 5 days."]');
+    const config = await save(onSave);
+    expect(config.documents).toEqual(["Refunds take 5 days."]);
+  });
+
+  it("says why a JSON field has not changed the node", async () => {
+    const user = userEvent.setup();
+    render(<NodeInspector {...props(node("rag_retrieve", {}))} />);
+    await user.click(within(screen.getByTestId("advanced-fields")).getByText("Advanced"));
+    const field = screen.getByLabelText(/Inline Documents/);
+    await user.clear(field);
+    await user.type(field, "{{");
+    expect(field).toHaveValue("{");
+    expect(screen.getByText(/Not valid JSON yet/)).toBeInTheDocument();
+    await user.type(field, "}");
+    expect(screen.getByText(/Use a JSON array/)).toBeInTheDocument();
+  });
+
+  it("drops the knowledge-base settings when the store changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(
+      <NodeInspector
+        {...props(
+          node("rag_retrieve", {
+            vectorStoreId: "knowledge-base",
+            knowledgeBaseId: "kb-docs",
+            searchMode: "hybrid",
+            rrfK: 30,
+            vectorStoreConfig: { knowledgeBaseId: "kb-docs", indexName: "x" }
+          }),
+          { onSave }
+        )}
+      />
+    );
+    await user.selectOptions(screen.getByRole("combobox", { name: "Vector Store" }), "qdrant-vector-store");
+    const config = await save(onSave);
+    expect(config).toMatchObject({ vectorStoreId: "qdrant-vector-store", vectorStoreConfig: { indexName: "x" } });
+    for (const key of ["knowledgeBaseId", "searchMode", "rrfK"]) expect(config).not.toHaveProperty(key);
+  });
+
   it("says when the knowledge bases cannot be loaded", async () => {
     vi.mocked(api.fetchKnowledgeBases).mockRejectedValue(new Error("forbidden"));
     render(<NodeInspector {...props(node("rag_retrieve", { vectorStoreId: "knowledge-base" }))} />);
