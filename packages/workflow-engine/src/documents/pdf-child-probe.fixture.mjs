@@ -1,6 +1,8 @@
 // Test fixture for pdf.test.ts: started exactly like the PDF reader child (same Node options, its own script in
-// place of pdf-child.mjs), it tries what a document must never make the reader do and reports each outcome.
+// place of pdf-child.mjs) and hardened the same way first, it tries what a document must never make the reader do and
+// reports each outcome.
 
+import "./pdf-child-harden.mjs";
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
@@ -15,7 +17,7 @@ const attempt = (run) => {
   }
 };
 
-process.once("message", async ({ secretFile, writeFile, port }) => {
+process.once("message", async ({ secretFile, writeFile, port, parentPid }) => {
   const assetRoot = process.argv[2];
   const network = await new Promise((resolve) => {
     try {
@@ -44,6 +46,15 @@ process.once("message", async ({ secretFile, writeFile, port }) => {
       }
     })(),
     envKeys: Object.keys(process.env).length,
+    signal: (() => {
+      try {
+        process.kill(parentPid, 0);
+        return "allowed";
+      } catch (error) {
+        return error instanceof TypeError ? "denied" : `error:${error?.name}`;
+      }
+    })(),
+    binding: attempt(() => process.binding("fs")),
     network
   });
 });

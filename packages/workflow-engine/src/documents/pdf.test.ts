@@ -234,6 +234,14 @@ describe("reading a PDF", () => {
     expect(((await slowWorkflow) as DocumentError).code).toBe("too_large");
   });
 
+  it("with a cap of 1, a workflow run holding the slot still leaves room for one interactive scan", async () => {
+    configurePdfExtraction({ maxConcurrent: 1 });
+    const slowWorkflow = readPdf(endlessContentPdf(), { maxChars: 100_000, reader: "workflow", limits: { timeoutMs: 2_000 } }).catch((error: unknown) => error);
+    await expectDocumentError(readPdf(sample(), { maxChars: 100_000, reader: "workflow", limits: { timeoutMs: 400 } }), "busy");
+    expect((await readPdf(sample(), { maxChars: 100_000 })).numPages).toBe(2);
+    expect(((await slowWorkflow) as DocumentError).code).toBe("too_large");
+  });
+
   it("keeps the configured limits within their floors", () => {
     configurePdfExtraction({ memoryMb: 1, maxPages: 0, timeoutMs: Number.NaN });
     expect(pdfExtractionLimits()).toMatchObject({ memoryMb: 64, maxPages: DEFAULT_PDF_LIMITS.maxPages, timeoutMs: DEFAULT_PDF_LIMITS.timeoutMs });
@@ -303,7 +311,7 @@ describe("malicious PDF shapes stay inside the limits", () => {
 });
 
 describe("the reader child process", () => {
-  it("cannot read files outside pdf.js, write, start processes or threads, compile strings, see the environment or (Node 25+) use the network", async () => {
+  it("cannot read files outside pdf.js, write, start processes or threads, signal other processes, compile strings, see the environment or (Node 25+) use the network", async () => {
     const dir = mkdtempSync(join(tmpdir(), "l2m-pdf-perm-"));
     const secretFile = join(dir, "secret.txt");
     writeFileSync(secretFile, "SECRET_MASTER_KEY");
@@ -315,9 +323,9 @@ describe("the reader child process", () => {
       await new Promise<void>((resolve) => child.once("message", () => resolve()));
       const report = await new Promise<Record<string, unknown>>((resolve) => {
         child.once("message", (message) => resolve(message as Record<string, unknown>));
-        child.send({ secretFile, writeFile: join(dir, "written.txt"), port });
+        child.send({ secretFile, writeFile: join(dir, "written.txt"), port, parentPid: process.pid });
       });
-      expect(report).toMatchObject({ readOutside: "denied", readEnviron: "denied", readPackage: "allowed", write: "denied", childProcess: "denied", worker: "denied", evalCode: "denied", envKeys: 0 });
+      expect(report).toMatchObject({ readOutside: "denied", readEnviron: "denied", readPackage: "allowed", write: "denied", childProcess: "denied", worker: "denied", evalCode: "denied", envKeys: 0, signal: "denied", binding: "denied" });
       expect(existsSync(join(dir, "written.txt"))).toBe(false);
       // The permission model covers sockets from Node 25 on (the API image runs Node 26).
       if (process.allowedNodeEnvironmentFlags.has("--allow-net")) expect(report.network).toBe("denied");
@@ -362,7 +370,7 @@ describe("Extract from File's pdf format", () => {
       properties: { Title: "Invoice", Author: "author@example.com" }
     });
     expect(output.pages[0]!.annotations).toContainEqual({ type: "form_field", item: 1, text: "form.filler@example.net" });
-    expect(output.notice).toBeUndefined();
+    expect(output.notice).toBe("Never read in a PDF: form field values without a widget on a page, pop-up notes, outlines (bookmarks), earlier revisions of the document, and attached files.");
     // Without an encoding, base64 is read as base64; a binary string that starts with %PDF- as bytes.
     expect((await extractPdfForNode(base64, "")).pageCount).toBe(2);
     expect((await extractPdfForNode(Buffer.from(sample()).toString("latin1"), "utf8")).pageCount).toBe(2);
@@ -370,7 +378,7 @@ describe("Extract from File's pdf format", () => {
 
   it("says when a scanned document has no text", async () => {
     const output = await extractPdfForNode(Buffer.from(scannedPdf()).toString("base64"), "base64");
-    expect(output).toMatchObject({ text: "", textLayer: "empty", notice: expect.stringMatching(/OCR\) is not supported/) });
+    expect(output).toMatchObject({ text: "", textLayer: "empty", notice: expect.stringMatching(/OCR\) is not supported, so there is no text\. Never read in a PDF: /) });
   });
 
   it("refuses data that is not a PDF, too large, or not base64", async () => {

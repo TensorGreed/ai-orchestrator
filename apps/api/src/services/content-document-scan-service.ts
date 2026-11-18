@@ -16,7 +16,7 @@
  */
 
 import { InMemoryPlaceholderBook, maskForDataClass, placeholdersIn, type DnsResolver, type GuardEntityRecognizer, type GuardProfile, type SensitiveScanRequest } from "@ai-orchestrator/guard-sdk";
-import { type DocumentScanRequest, type DocumentScanResult, type DocumentSource } from "@ai-orchestrator/shared";
+import { PDF_NOT_READ, type DocumentScanRequest, type DocumentScanResult, type DocumentSource } from "@ai-orchestrator/shared";
 import {
   DocumentError,
   extractDocumentAsync,
@@ -255,9 +255,6 @@ export class ContentDocumentScanService {
     });
   }
 }
-
-/** Parts of any PDF the reader never reads. */
-export const PDF_NOT_READ = "Never read in a PDF: form field values without a widget on a page, pop-up notes, outlines (bookmarks), earlier revisions of the document, and attached files";
 
 /**
  * What a scan did not check, in words, or undefined when it checked everything: a PDF without a text layer, scanned

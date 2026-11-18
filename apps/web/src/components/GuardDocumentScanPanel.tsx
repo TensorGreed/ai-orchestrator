@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { DocumentScanRequest, DocumentScanResult } from "@ai-orchestrator/shared";
+import { PDF_NOT_READ, type DocumentScanRequest, type DocumentScanResult } from "@ai-orchestrator/shared";
 import { ApiError, scanGuardDocument } from "../lib/api";
 
 /**
@@ -193,7 +193,7 @@ function DocumentScanResultView({ result, showRedacted, onShowRedacted }: { resu
       )}
       {result.sniffedType === "pdf" && (
         <p className="kb-subtle" role="note">
-          Never read in a PDF: form field values without a widget on a page, pop-up notes, outlines (bookmarks), earlier revisions and attached files.
+          {PDF_NOT_READ}.
         </p>
       )}
       {result.attachmentsNotChecked ? (

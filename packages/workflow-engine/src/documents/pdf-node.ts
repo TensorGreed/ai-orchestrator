@@ -1,4 +1,4 @@
-import { ErrorCategory, WorkflowError, type PdfTextLayer } from "@ai-orchestrator/shared";
+import { ErrorCategory, PDF_NOT_READ, WorkflowError, type PdfTextLayer } from "@ai-orchestrator/shared";
 import { DocumentError } from "./errors.js";
 import { isPdf, pdfExtractionLimits, readPdf, textLayerOf, type PdfItem } from "./pdf.js";
 
@@ -22,7 +22,8 @@ export interface PdfNodeOutput {
   truncated: boolean;
   /** Files embedded in the PDF (not read). */
   attachments: number;
-  notice?: string;
+  /** What was not read: no or partial text layer, and the parts of any PDF the reader never reads. */
+  notice: string;
 }
 
 const BASE64 = /^[A-Za-z0-9+/_-]*={0,2}$/;
@@ -75,10 +76,15 @@ export async function extractPdfForNode(raw: string, encoding: string, signal?: 
     pagesWithoutText,
     truncated: read.pages.length < read.numPages || read.stoppedAtChars,
     attachments: read.attachments,
-    ...(textLayer === "empty"
-      ? { notice: "No text layer: this looks like a scanned PDF. Text recognition (OCR) is not supported, so there is no text." }
-      : textLayer === "partial"
-        ? { notice: `${pagesWithoutText} page${pagesWithoutText === 1 ? " has" : "s have"} no text layer (scanned); text recognition (OCR) is not supported.` }
-        : {})
+    notice: [
+      textLayer === "empty"
+        ? "No text layer: this looks like a scanned PDF. Text recognition (OCR) is not supported, so there is no text."
+        : textLayer === "partial"
+          ? `${pagesWithoutText} page${pagesWithoutText === 1 ? " has" : "s have"} no text layer (scanned); text recognition (OCR) is not supported.`
+          : "",
+      `${PDF_NOT_READ}.`
+    ]
+      .filter(Boolean)
+      .join(" ")
   };
 }

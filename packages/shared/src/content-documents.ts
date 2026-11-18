@@ -84,6 +84,10 @@ export interface DocumentLocation {
 export const PDF_PARTS = ["text", "comment", "comment_author", "form_field", "link", "properties"] as const;
 export type PdfPart = (typeof PDF_PARTS)[number];
 
+/** Parts of any PDF the reader never reads; every PDF result says so (scan notice, panel, Extract from File). */
+export const PDF_NOT_READ =
+  "Never read in a PDF: form field values without a widget on a page, pop-up notes, outlines (bookmarks), earlier revisions of the document, and attached files";
+
 /**
  * Whether a PDF had text to check: `present` on every page read, `partial` when some pages have none, `empty` when no
  * page has any (a scanned document: there is no text recognition, so its pages were not checked).

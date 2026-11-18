@@ -124,26 +124,28 @@ type WorkerAnswer = ({ ok: true } & PdfRead) | { ok: false; code: "password" | "
 // The child process
 // ---------------------------------------------------------------------------
 
-let pathsCache: { script: string; assetRoot: string } | undefined;
+let pathsCache: { script: string; harden: string; assetRoot: string } | undefined;
 
 /** The child's script and the pdfjs-dist package folder (real paths, with a trailing slash for the folder). */
-export function pdfChildPaths(): { script: string; assetRoot: string } {
+export function pdfChildPaths(): { script: string; harden: string; assetRoot: string } {
   pathsCache ??= {
     script: realpathSync(fileURLToPath(new URL("./pdf-child.mjs", import.meta.url))),
+    harden: realpathSync(fileURLToPath(new URL("./pdf-child-harden.mjs", import.meta.url))),
     assetRoot: `${realpathSync(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")))}/`
   };
   return pathsCache;
 }
 
 /**
- * The Node options a reader child runs with: the permission model with reads of `script` and the pdfjs-dist folder
- * only, no string compilation, and the heap limit. Exported for the tests that prove what the child cannot do.
+ * The Node options a reader child runs with: the permission model with reads of `script`, pdf-child-harden.mjs and
+ * the pdfjs-dist folder only, no string compilation, and the heap limit. Exported for the tests that prove what the child cannot do.
  */
 export function pdfChildArgs(script: string, memoryMb: number): string[] {
-  const { assetRoot } = pdfChildPaths();
+  const { harden, assetRoot } = pdfChildPaths();
   return [
     "--permission",
     `--allow-fs-read=${script}`,
+    `--allow-fs-read=${harden}`,
     `--allow-fs-read=${assetRoot}`,
     "--disallow-code-generation-from-strings",
     `--max-old-space-size=${memoryMb}`,
@@ -200,9 +202,14 @@ function takeChild(memoryMb: number): WarmChild {
   }
   entry.child.ref();
   (entry.child.channel as { ref?: () => void } | null | undefined)?.ref?.();
-  const next = startChild(memoryMb);
-  warm = next;
-  park(next);
+  // The next document's child starts now; if it cannot, the next read starts its own.
+  try {
+    const next = startChild(memoryMb);
+    warm = next;
+    park(next);
+  } catch {
+    warm = undefined;
+  }
   return entry;
 }
 
@@ -222,13 +229,17 @@ export type PdfReader = "interactive" | "workflow";
 
 let running = 0;
 let runningWorkflow = 0;
-const waiters: Array<{ reader: PdfReader; limits: PdfLimits; wake: () => void }> = [];
+const waiters: Array<{ reader: PdfReader; wake: () => void }> = [];
 
-/** Whether a reader may start now: workflow runs leave one slot free for interactive scans when there are two or more. */
-function canStart(reader: PdfReader, limits: PdfLimits): boolean {
-  if (running >= limits.maxConcurrent) return false;
-  if (reader === "workflow" && limits.maxConcurrent >= 2 && runningWorkflow >= limits.maxConcurrent - 1) return false;
-  return true;
+/**
+ * Whether a reader may start now, by the configured cap (CONTENT_SCAN_MAX_CONCURRENT): workflow runs may hold all but
+ * one slot, so an interactive scan always has one. With a cap of 1, a workflow run and an interactive scan may each
+ * read one PDF (two at most), so workflow runs can still read PDFs and interactive scans are never blocked by them.
+ */
+function canStart(reader: PdfReader): boolean {
+  const cap = configured.maxConcurrent;
+  if (reader === "workflow") return running < Math.max(2, cap) && runningWorkflow < Math.max(1, cap - 1);
+  return running < Math.max(2, cap) && running - runningWorkflow < cap;
 }
 
 function take(reader: PdfReader): void {
@@ -241,7 +252,7 @@ function pump(): void {
   for (const reader of ["interactive", "workflow"] as const) {
     for (let index = 0; index < waiters.length; ) {
       const waiter = waiters[index]!;
-      if (waiter.reader === reader && canStart(reader, waiter.limits)) {
+      if (waiter.reader === reader && canStart(reader)) {
         waiters.splice(index, 1);
         take(reader);
         waiter.wake();
@@ -253,12 +264,12 @@ function pump(): void {
 }
 
 async function acquire(reader: PdfReader, limits: PdfLimits, signal?: AbortSignal): Promise<void> {
-  if (waiters.length === 0 && canStart(reader, limits)) {
+  if (waiters.length === 0 && canStart(reader)) {
     take(reader);
     return;
   }
   const acquired = await new Promise<boolean>((resolve) => {
-    let waiter: { reader: PdfReader; limits: PdfLimits; wake: () => void };
+    let waiter: { reader: PdfReader; wake: () => void };
     const done = (value: boolean) => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
@@ -268,7 +279,7 @@ async function acquire(reader: PdfReader, limits: PdfLimits, signal?: AbortSigna
     };
     const onAbort = () => done(false);
     const timer = setTimeout(() => done(false), limits.timeoutMs);
-    waiter = { reader, limits, wake: () => done(true) };
+    waiter = { reader, wake: () => done(true) };
     signal?.addEventListener("abort", onAbort, { once: true });
     waiters.push(waiter);
     pump();
@@ -293,6 +304,8 @@ const MB = 1024 * 1024;
 const MEMORY_POLL_MS = 100;
 /** Resident memory Node and a loaded pdf.js need besides the document (about 85 MB measured), with room to spare. */
 const RSS_HEADROOM_MB = 128;
+/** How long a stopped child is waited for before its slot is given back anyway. */
+const EXIT_WAIT_MS = 5_000;
 
 export interface ReadPdfOptions {
   /** Characters of text after which reading stops (the rest of the document is reported as not checked). */
@@ -347,8 +360,18 @@ async function runChild(bytes: Uint8Array, limits: PdfLimits, options: ReadPdfOp
       clearInterval(poll);
       options.signal?.removeEventListener("abort", onAbort);
       child.removeAllListeners("message");
-      // The slot is given back only once the child has exited, so the concurrency cap holds.
-      const exited = child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise<void>((done) => child.once("exit", () => done()));
+      // The slot is given back only once the child has exited, so the concurrency cap holds (a child that never
+      // started has nothing to wait for; the wait is bounded in case no exit event comes).
+      const exited =
+        child.pid === undefined || child.exitCode !== null || child.signalCode !== null
+          ? Promise.resolve()
+          : new Promise<void>((done) => {
+              const bound = setTimeout(done, EXIT_WAIT_MS);
+              child.once("exit", () => {
+                clearTimeout(bound);
+                done();
+              });
+            });
       child.kill("SIGKILL");
       void exited.then(() => {
         if ("value" in outcome) resolve(outcome.value);
@@ -386,6 +409,8 @@ async function runChild(bytes: Uint8Array, limits: PdfLimits, options: ReadPdfOp
         finish({ error: damaged() });
       }
     };
+    // A child that cannot start reports an error and may never exit.
+    child.once("error", () => finish({ error: new DocumentError("invalid_document", "The PDF reader could not start, so nothing in the document was checked") }));
     // A child that dies on its own (out of heap, crashed) has given no answer: the document is refused.
     child.once("exit", (code, signal) => {
       if (code === null && signal === "SIGKILL") return finish({ error: damaged() });

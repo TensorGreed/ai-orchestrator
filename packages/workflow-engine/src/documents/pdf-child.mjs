@@ -1,7 +1,9 @@
 // Reads a PDF's text in a child process that pdf.ts starts with Node's permission model: it may read only this
 // script and the pdfjs-dist package folder, and may not write files, start processes or threads, load addons or (on
-// Node 25 and later) use the network; string compilation (eval, new Function) is switched off; the heap is capped and
-// the environment is empty. pdf.ts also stops it on a timer and when its memory passes the limit.
+// Node 25 and later) use the network; pdf-child-harden.mjs, loaded first, removes process.kill (no signals to other
+// processes) and the web network APIs and silences the console; string compilation (eval, new Function) is switched
+// off; the heap is capped and the environment is empty. pdf.ts also stops it on a timer and when its memory passes
+// the limit.
 //
 // Plain JavaScript on purpose: it runs without the TypeScript loader. It loads pdf.js first and says `{ ready: true }`
 // over the IPC channel; then it reads one document, sent as `{ bytes, maxPages, maxChars }`, and answers once. One
@@ -10,25 +12,14 @@
 // It reads, for each page up to `maxPages`, the text layer (as lines), the text of comments and their authors, form
 // field values and link addresses, and the document properties. It never renders, never loads system fonts, never
 // fetches anything (the character maps and standard font data are read from the pdfjs-dist package folder), and stops
-// reading once `maxChars` characters of text are collected. Nothing is logged: the console is silenced, and the
-// parent discards the process's output.
+// reading once `maxChars` characters of text are collected. Nothing is logged, and the parent discards the process's
+// output.
 //
 // Answer: { ok: true, numPages, pages: [{ text, items: [{ part, item, text }] }], properties: [{ name, text }],
 // stoppedAtChars, attachments } or { ok: false, code: "password" | "invalid" | "nesting" }.
 
+import "./pdf-child-harden.mjs";
 import { pathToFileURL } from "node:url";
-
-for (const method of ["log", "info", "warn", "error", "debug", "trace", "dir", "table"]) {
-  console[method] = () => {};
-}
-// No way out over the web APIs either (the permission model covers sockets from Node 25 on).
-for (const name of ["fetch", "WebSocket", "EventSource", "XMLHttpRequest"]) {
-  try {
-    delete globalThis[name];
-  } catch {
-    globalThis[name] = undefined;
-  }
-}
 
 /** The pdfjs-dist package folder, with a trailing slash. */
 const assetRoot = process.argv[2];
@@ -155,7 +146,9 @@ async function read(pdfjs, { bytes, maxPages, maxChars }) {
   };
   // The properties first: they are short and often name people, so the character limit never leaves them out.
   const properties = [];
-  for (const property of propertyItems(await doc.getMetadata().catch(() => null))) {
+  // Like any other part, properties or attachments that cannot be read refuse the whole document (strict reading:
+  // nothing is reported as checked that was not).
+  for (const property of propertyItems(await doc.getMetadata())) {
     if (budget() === 0) break;
     properties.push({ name: property.name, text: take(property.text) });
   }
@@ -176,8 +169,7 @@ async function read(pdfjs, { bytes, maxPages, maxChars }) {
   // Embedded files are not read; the caller is told how many there are.
   const attachments = await doc
     .getAttachments()
-    .then((found) => (found instanceof Map ? found.size : found && typeof found === "object" ? Object.keys(found).length : 0))
-    .catch(() => 0);
+    .then((found) => (found instanceof Map ? found.size : found && typeof found === "object" ? Object.keys(found).length : 0));
   return { ok: true, numPages: doc.numPages, pages, properties, stoppedAtChars: chars > maxChars, attachments };
 }
 
