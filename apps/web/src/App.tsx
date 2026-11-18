@@ -110,7 +110,7 @@ import {
   type TraceStreamHandlers
 } from "./lib/run-trace";
 import { ORBIT, attachedNodeIds, computeAttachmentSlots, orbitPositions } from "./lib/stages";
-import { canAutoConnect, chooseSourceHandle, findFreePosition, insertPositionAfter } from "./lib/canvas-insert";
+import { chooseSourceHandle, findFreePosition, insertPositionAfter, planInsertConnection } from "./lib/canvas-insert";
 import { canvasRunPreview, hasTestData } from "./lib/run-data";
 import { newNodeConfig } from "./lib/trigger-paths";
 import {
@@ -185,6 +185,7 @@ import { StepUpPrompt } from "./components/StepUpPrompt";
 import { isPaletteDefinition, withAgentToolPresets } from "./lib/agent-tool-presets";
 import { paletteKey } from "./components/NodePalette";
 import { GraphHistory, movedNodeIds } from "./lib/graph-history";
+import { AUXILIARY_HANDLES, CHAT_MODEL_NODE_TYPES, validateConnection } from "./lib/connection-rules";
 import { BreakGlassBanner } from "./components/BreakGlassBanner";
 import { BreakGlassConfirmCard } from "./components/BreakGlassConfirmCard";
 import { breakGlassLinkFromHash, stripBreakGlassFragment, type BreakGlassLink } from "./lib/break-glass";
@@ -317,19 +318,9 @@ const statusColors: Record<string, string> = {
   waiting_approval: "#a154f2",
   canceled: "#8a5a44"
 };
-const auxiliaryHandles = new Set(["chat_model", "memory", "tool", "worker", "guard", "protection"]);
-const chatModelNodeTypes: EditorNodeData["nodeType"][] = [
-  "openai_chat_model",
-  "anthropic_chat_model",
-  "ollama_chat_model",
-  "openai_compatible_chat_model",
-  "ai_gateway_chat_model",
-  "azure_openai_chat_model",
-  "google_gemini_chat_model",
-  "llm_call"
-];
+const auxiliaryHandles = AUXILIARY_HANDLES;
+const chatModelNodeTypes = CHAT_MODEL_NODE_TYPES;
 const chatModelDrawerNodeTypes = chatModelNodeTypes.filter((type) => type !== "llm_call");
-const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook_input", "text_input", "user_prompt"]);
 
 function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: AgentAttachmentHandle): NodeDrawerContext {
   if (sourceHandle === "chat_model") {
@@ -4424,7 +4415,17 @@ function StudioApp() {
       const insertPosition = insertAfter
         ? insertAfter.position ?? insertPositionAfter(insertAfter.node, insertAfter.handle, nodes as EditorNode[])
         : undefined;
-      const connectAfter = insertAfter && canAutoConnect(insertAfter.node.data.nodeType, definition.type) ? insertAfter : null;
+      // The same rules as dragging a connection: a refused edge leaves the node placed but unconnected, with the notice.
+      const connectPlan = insertAfter
+        ? planInsertConnection(
+            insertAfter.node,
+            insertAfter.handle,
+            { id, data: { nodeType: definition.type, label: definition.label } },
+            nodes as EditorNode[],
+            edges
+          )
+        : null;
+      const connectAfter = insertAfter && connectPlan?.kind === "connect" ? { node: insertAfter.node, handle: connectPlan.sourceHandle } : null;
 
       const newNode: Node<EditorNodeData> = {
         id,
@@ -4482,7 +4483,7 @@ function StudioApp() {
         setEdges((existing) => addEdge(edge, existing.map((candidate) => (candidate.selected ? { ...candidate, selected: false } : candidate))));
       }
       if (!attachContext?.sourceHandle) revealCanvasPosition(newNode.position);
-      setError(null);
+      setError(connectPlan?.kind === "refused" ? connectPlan.message : null);
     },
     [edges, nodes, pushHistorySnapshot, reactFlowInstance, resolveInsertSource, revealCanvasPosition, setEdges, setNodes]
   );
@@ -4494,110 +4495,12 @@ function StudioApp() {
       }
       const source = connection.source;
       const target = connection.target;
-      const sourceNode = nodes.find((node) => node.id === source);
-      const targetNode = nodes.find((node) => node.id === target);
-      const expectedTargetType: Record<string, EditorNodeData["nodeType"] | EditorNodeData["nodeType"][]> = {
-        chat_model: chatModelNodeTypes,
-        memory: "local_memory",
-        tool: ["mcp_tool", "workflow_tool"],
-        worker: ["agent_orchestrator", "supervisor_node"],
-        guard: "guard",
-        protection: "guard_protection"
-      };
-      const expectedHandleByTargetType: Partial<Record<EditorNodeData["nodeType"], string>> = {
-        llm_call: "chat_model",
-        openai_chat_model: "chat_model",
-        anthropic_chat_model: "chat_model",
-        ollama_chat_model: "chat_model",
-        openai_compatible_chat_model: "chat_model",
-        ai_gateway_chat_model: "chat_model",
-        azure_openai_chat_model: "chat_model",
-        google_gemini_chat_model: "chat_model",
-        local_memory: "memory",
-        mcp_tool: "tool",
-        workflow_tool: "tool"
-      };
-
-      let sourceHandle = connection.sourceHandle ?? "";
-      if ((sourceNode?.data.nodeType === "agent_orchestrator" || sourceNode?.data.nodeType === "supervisor_node") && !sourceHandle && targetNode) {
-        const inferred = expectedHandleByTargetType[targetNode.data.nodeType];
-        if (inferred) {
-          sourceHandle = inferred;
-        } else if (targetNode.data.nodeType === "agent_orchestrator" || targetNode.data.nodeType === "supervisor_node") {
-          sourceHandle = "worker";
-        } else if (targetNode.data.nodeType === "guard") {
-          sourceHandle = "guard";
-        }
+      const verdict = validateConnection({ source, target, sourceHandle: connection.sourceHandle }, nodes as EditorNode[], edges);
+      if (!verdict.ok) {
+        setError(verdict.message);
+        return;
       }
-      if (sourceNode?.data.nodeType === "guard" && targetNode?.data.nodeType === "guard_protection" && (!sourceHandle || sourceHandle === "pass")) {
-        sourceHandle = "protection";
-      }
-
-      if ((targetNode?.data.nodeType === "agent_orchestrator" || targetNode?.data.nodeType === "supervisor_node") && sourceNode) {
-        const requiredHandle = expectedHandleByTargetType[sourceNode.data.nodeType];
-        if (requiredHandle) {
-          setError(
-            `Attach '${sourceNode.data.label}' from the Agent '${requiredHandle}' port (drag edge from Agent to node).`
-          );
-          return;
-        }
-      }
-
-      const isAgentAttachmentHandle = auxiliaryHandles.has(sourceHandle);
-
-      if (isAgentAttachmentHandle) {
-        const carrierOk =
-          sourceHandle === "protection"
-            ? sourceNode?.data.nodeType === "guard"
-            : sourceNode?.data.nodeType === "agent_orchestrator" || sourceNode?.data.nodeType === "supervisor_node";
-        if (!carrierOk) {
-          setError(
-            sourceHandle === "protection"
-              ? "The protection handle can only be used from a Content Rules node."
-              : "chat_model/memory/tool/worker/guard handles can only be used from an Agent Orchestrator or Supervisor node."
-          );
-          return;
-        }
-
-        const requiredType = expectedTargetType[sourceHandle];
-        if (requiredType) {
-          const typeMatches = Array.isArray(requiredType) 
-            ? requiredType.includes(targetNode?.data.nodeType as any)
-            : targetNode?.data.nodeType === requiredType;
-            
-          if (!typeMatches) {
-            setError(`Invalid attachment. '${sourceHandle}' must connect to a '${Array.isArray(requiredType) ? requiredType.join(" or ") : requiredType}' node.`);
-            return;
-          }
-        }
-      }
-
-      if (!isAgentAttachmentHandle && targetNode?.data.nodeType === "agent_orchestrator" && sourceNode) {
-        const incomingPrimaryInputTypes = new Set<EditorNodeData["nodeType"]>();
-
-        for (const edge of edges) {
-          const existingIsAttachment = edge.sourceHandle ? auxiliaryHandles.has(edge.sourceHandle) : false;
-          if (existingIsAttachment || edge.target !== target) {
-            continue;
-          }
-          const existingSourceNode = nodes.find((node) => node.id === edge.source);
-          const existingSourceType = existingSourceNode?.data.nodeType;
-          if (existingSourceType && agentPrimaryInputNodeTypes.has(existingSourceType)) {
-            incomingPrimaryInputTypes.add(existingSourceType);
-          }
-        }
-
-        if (agentPrimaryInputNodeTypes.has(sourceNode.data.nodeType)) {
-          incomingPrimaryInputTypes.add(sourceNode.data.nodeType);
-        }
-
-        if (incomingPrimaryInputTypes.size > 1) {
-          setError(
-            `Agent can only use one primary input type. Found: ${[...incomingPrimaryInputTypes].sort().join(", ")}.`
-          );
-          return;
-        }
-      }
+      const sourceHandle = verdict.sourceHandle ?? "";
 
       const alreadyConnected = edges.some(
         (edge) =>

@@ -3,6 +3,7 @@
  * `+` was clicked), to the right of it and clear of other nodes, joined by an edge from that node's first free output.
  */
 import { ORBIT, isHubType } from "./stages";
+import { validateConnection, type RuleEdge, type RuleNode } from "./connection-rules";
 
 export interface InsertNode {
   id: string;
@@ -85,15 +86,15 @@ export function chooseSourceHandle(node: InsertNode, edges: readonly InsertEdge[
   return handles.find((handle) => !used.has(handle)) ?? handles[0] ?? null;
 }
 
-/** Whether a node of `targetType` added after a node of `sourceType` gets a step edge from it. */
+/**
+ * Whether a node of `targetType` added after a node of `sourceType` is offered an edge at all (start nodes, sticky
+ * notes and an agent's port nodes are simply placed). An offered edge still goes through the editor's connection
+ * rules (`validateConnection`), which may refuse it with a notice.
+ */
 export function canAutoConnect(sourceType: string, targetType: string): boolean {
   if (sourceType === "sticky_note" || targetType === "sticky_note") return false;
   if (isInputType(targetType)) return false;
   if (isHubType(sourceType) && AGENT_PORT_TYPES.has(targetType)) return false;
-  // A model, memory, tool or content rules node is attached from the agent's port, never fed into the agent.
-  if (isHubType(targetType) && AGENT_PORT_TYPES.has(sourceType)) return false;
-  // A protection provider only hangs off a Content Rules node's protection port.
-  if (targetType === "guard_protection") return false;
   return true;
 }
 
@@ -135,4 +136,25 @@ export function insertPositionAfter(source: InsertNode, handle: string | null, n
     y: source.position.y + index * INSERT_ROW_STEP
   };
   return findFreePosition(candidate, nodes);
+}
+
+export type InsertConnectionPlan =
+  | { kind: "connect"; sourceHandle: string | null }
+  | { kind: "place" }
+  | { kind: "refused"; message: string };
+
+/**
+ * Whether a node inserted after `source`'s `handle` gets an edge: none for nodes that are only placed, else the
+ * verdict of the editor's connection rules (the same ones a dragged connection goes through).
+ */
+export function planInsertConnection(
+  source: RuleNode,
+  handle: string | null,
+  inserted: RuleNode,
+  nodes: readonly RuleNode[],
+  edges: readonly RuleEdge[]
+): InsertConnectionPlan {
+  if (!canAutoConnect(source.data.nodeType, inserted.data.nodeType)) return { kind: "place" };
+  const verdict = validateConnection({ source: source.id, target: inserted.id, sourceHandle: handle }, [...nodes, inserted], edges);
+  return verdict.ok ? { kind: "connect", sourceHandle: verdict.sourceHandle } : { kind: "refused", message: verdict.message };
 }

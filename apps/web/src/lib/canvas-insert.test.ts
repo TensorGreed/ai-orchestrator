@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canAutoConnect, chooseSourceHandle, findFreePosition, insertPositionAfter, sourceHandleIds, type InsertNode } from "./canvas-insert";
+import { canAutoConnect, planInsertConnection, chooseSourceHandle, findFreePosition, insertPositionAfter, sourceHandleIds, type InsertNode } from "./canvas-insert";
 
 function node(id: string, nodeType: string, x: number, y: number, config: Record<string, unknown> = {}): InsertNode {
   return { id, position: { x, y }, data: { nodeType, config } };
@@ -57,9 +57,6 @@ describe("canAutoConnect", () => {
     expect(canAutoConnect("agent_orchestrator", "openai_chat_model")).toBe(false);
     expect(canAutoConnect("supervisor_node", "mcp_tool")).toBe(false);
     expect(canAutoConnect("agent_orchestrator", "local_memory")).toBe(false);
-    expect(canAutoConnect("llm_call", "agent_orchestrator")).toBe(false);
-    expect(canAutoConnect("mcp_tool", "supervisor_node")).toBe(false);
-    expect(canAutoConnect("guard", "guard_protection")).toBe(false);
     // Another agent after an agent is a step; a Supervisor's workers have their own `+ worker` slot.
     expect(canAutoConnect("agent_orchestrator", "agent_orchestrator")).toBe(true);
   });
@@ -93,5 +90,36 @@ describe("findFreePosition", () => {
     const spot = findFreePosition({ x: 0, y: 0 }, [node("a", "set_node", 10, 10), node("b", "set_node", 10, 130)]);
     expect(spot.x).toBe(0);
     expect(spot.y).toBeGreaterThanOrEqual(130 + 96);
+  });
+});
+
+describe("planInsertConnection", () => {
+  const rule = (id: string, nodeType: string, label = id) => ({ id, data: { nodeType, label } });
+
+  it("connects through the editor's connection rules, with the handle they settle on", () => {
+    const rules = rule("rules", "guard");
+    expect(planInsertConnection(rules, "pass", rule("p", "guard_protection"), [rules], [])).toEqual({ kind: "connect", sourceHandle: "protection" });
+    const ifNode = rule("if", "if_node");
+    expect(planInsertConnection(ifNode, "false", rule("x", "set_node"), [ifNode], [])).toEqual({ kind: "connect", sourceHandle: "false" });
+  });
+
+  it("refuses with the same notice as a dragged connection, so the node is placed unconnected", () => {
+    const model = rule("m", "llm_call", "Model");
+    expect(planInsertConnection(model, null, rule("a", "agent_orchestrator", "Agent"), [model], [])).toEqual({
+      kind: "refused",
+      message: "Attach 'Model' from the Agent 'chat_model' port (drag edge from Agent to node)."
+    });
+    const set = rule("s", "set_node");
+    expect(planInsertConnection(set, "tool", rule("x", "output"), [set], [])).toEqual({
+      kind: "refused",
+      message: "chat_model/memory/tool/worker/guard handles can only be used from an Agent Orchestrator or Supervisor node."
+    });
+  });
+
+  it("only places start nodes, sticky notes and an agent's port nodes", () => {
+    const set = rule("s", "set_node");
+    expect(planInsertConnection(set, null, rule("w", "webhook_input"), [set], [])).toEqual({ kind: "place" });
+    const agent = rule("a", "agent_orchestrator");
+    expect(planInsertConnection(agent, null, rule("m", "openai_chat_model"), [agent], [])).toEqual({ kind: "place" });
   });
 });

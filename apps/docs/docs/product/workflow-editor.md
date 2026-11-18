@@ -32,7 +32,8 @@ Open the palette with **Add node**, a double-click on empty canvas, or the `+` b
   nodes, and connected from its first output that has no connection yet. The new node is selected, so adding several
   in a row builds a chain. The palette's subtitle names the node it connects after. A trigger or input node, a sticky
   note, and a model, memory or tool picked after an agent are placed but not connected (attach those through the
-  agent's ports).
+  agent's ports). The connection follows the same rules as one you drag: when they refuse it (for example a model
+  picked before an agent), the node is placed unconnected and the editor shows why.
 - **From an output**: the `+` beside an output (shown on outputs with no connection, and on hover) opens the palette
   connected after that output, for example an IF node's **false** branch. Dragging a connection out of an output and
   dropping it on empty canvas does the same, and places the node where you dropped it.
