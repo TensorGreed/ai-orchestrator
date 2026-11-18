@@ -223,14 +223,90 @@ async function readJson(response: Response, what: string): Promise<Record<string
   throw new McpOAuthError(`${what} did not return a JSON object (HTTP ${response.status}).`);
 }
 
-/** RFC 9728 §3.1 well-known URLs for a resource: path-specific first, then the origin root. */
-export function protectedResourceMetadataUrls(endpoint: string): string[] {
+/** The endpoint's URL without its fragment (RFC 9728 section 1.2: a resource identifier "has no fragment component"). */
+function withoutFragment(endpoint: string): string {
+  const hash = endpoint.indexOf("#");
+  return hash === -1 ? endpoint : endpoint.slice(0, hash);
+}
+
+/**
+ * Where to look for an MCP server's protected resource metadata when its 401 names none, in the order MCP 2026-07-28
+ * gives (Authorization Server Discovery, "Protected Resource Metadata Discovery Requirements"): at the path of the
+ * endpoint, then at the root. Each comes with the resource identifiers its document may name (RFC 9728 section 3.3).
+ *
+ * The path-specific URL follows RFC 9728 section 3.1: `/.well-known/oauth-protected-resource` goes "between the host
+ * component and the path and/or query components", and only "any terminating slash (/) following the host component"
+ * is removed. So `https://h/mcp/` looks at `https://h/.well-known/oauth-protected-resource/mcp/` and a query is kept.
+ */
+function protectedResourceMetadataCandidates(endpoint: string): Array<{ url: string; resources: string[] }> {
   const url = new URL(endpoint);
-  const path = url.pathname.replace(/\/+$/, "");
-  const urls = [];
-  if (path) urls.push(`${url.origin}/.well-known/oauth-protected-resource${path}`);
-  urls.push(`${url.origin}/.well-known/oauth-protected-resource`);
-  return urls;
+  url.hash = "";
+  const path = url.pathname === "/" ? "" : url.pathname;
+  const root = `${url.origin}/.well-known/oauth-protected-resource`;
+  const serverForms = endpointResourceForms(endpoint);
+  // The root document's identifier is the origin (with or without the slash RFC 9728 section 3.1 removes). MCP also
+  // lets a server whose endpoint has a path publish its metadata there, so the endpoint itself is accepted as well:
+  // it is still the URL the client uses, which is what section 7.3 protects.
+  const rootForms = [...new Set([url.origin, `${url.origin}/`, ...serverForms])];
+  if (!path && !url.search) return [{ url: root, resources: rootForms }];
+  return [
+    { url: `${root}${path}${url.search}`, resources: serverForms },
+    { url: root, resources: rootForms }
+  ];
+}
+
+/**
+ * The strings that count as "the URL that the client used to make the request" for an endpoint: as configured
+ * (fragment removed) and as the request actually goes out (WHATWG URL serialisation: lower-case scheme and host, no
+ * default port). For a server at the root, the forms with and without the trailing slash, which RFC 9728 section 3.1
+ * treats alike and MCP 2026-07-28 ("Canonical Server URI") prefers without.
+ */
+function endpointResourceForms(endpoint: string): string[] {
+  const url = new URL(endpoint);
+  url.hash = "";
+  const forms = [withoutFragment(endpoint), url.href, canonicalResourceUri(endpoint)];
+  if (url.pathname === "/" && !url.search) forms.push(url.origin, `${url.origin}/`);
+  return [...new Set(forms)];
+}
+
+/**
+ * MCP 2026-07-28 ("Canonical Server URI"): "implementations SHOULD accept uppercase scheme and host components". The
+ * scheme and authority are lower-cased for the comparison; the path and query are compared exactly.
+ */
+function foldSchemeAndHost(value: string): string {
+  return value.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*)/, (prefix) => prefix.toLowerCase());
+}
+
+/**
+ * RFC 9728 section 3.3: the document's `resource` "MUST be identical" to the resource identifier its URL was built
+ * from, or, for a URL the server named in `WWW-Authenticate`, to "the URL that the client used to make the request";
+ * otherwise "the data contained in the response MUST NOT be used". Compared code point by code point (section 6),
+ * apart from the scheme and host case MCP asks clients to accept. `resource` is REQUIRED (section 2), must be a URL
+ * with no fragment (section 1.2; RFC 8707 section 2), and must be `https` (loopback `http` allowed for local use).
+ */
+function assertProtectedResourceIdentifier(metadata: ProtectedResourceMetadata, accepted: string[], metadataUrl: string, endpoint: string): void {
+  const resource = metadata.resource;
+  if (typeof resource !== "string" || !resource) {
+    throw new McpOAuthError(
+      `The protected resource metadata at ${metadataUrl} names no resource (RFC 9728 section 2 requires one); refusing to use it.`
+    );
+  }
+  if (resource.includes("#")) {
+    throw new McpOAuthError(`The protected resource metadata at ${metadataUrl} names a resource with a fragment; refusing to use it.`);
+  }
+  assertSecureOAuthUrl(resource, "The resource in the protected resource metadata");
+  const folded = foldSchemeAndHost(resource);
+  if (!accepted.some((form) => foldSchemeAndHost(form) === folded)) {
+    throw new McpOAuthError(
+      `The protected resource metadata at ${metadataUrl} names the resource ${JSON.stringify(resource.slice(0, 300))}, not ` +
+        `${JSON.stringify(withoutFragment(endpoint).slice(0, 300))}; RFC 9728 section 3.3 requires them to be identical, so it was not used.`
+    );
+  }
+}
+
+/** RFC 9728 section 3.1 well-known URLs for a resource, in the order MCP 2026-07-28 tries them: path-specific, then root. */
+export function protectedResourceMetadataUrls(endpoint: string): string[] {
+  return protectedResourceMetadataCandidates(endpoint).map((candidate) => candidate.url);
 }
 
 /** RFC 8414 §3.1 and OpenID Connect discovery URLs for an issuer, in the order the MCP spec gives. */
@@ -314,31 +390,27 @@ export async function discoverProtectedResource(
     }
   }
 
+  // RFC 9728 section 3.3: a document found through the server's challenge must name the URL the request went to; one
+  // found at a well-known URL must name the identifier that URL was built from.
   const candidates = challenge?.resource_metadata
-    ? [challenge.resource_metadata]
-    : protectedResourceMetadataUrls(endpoint);
+    ? [{ url: challenge.resource_metadata, resources: endpointResourceForms(endpoint) }]
+    : protectedResourceMetadataCandidates(endpoint);
   let lastError = "no metadata URL answered";
   for (const candidate of candidates) {
-    assertSecureOAuthUrl(candidate, "Protected resource metadata URL");
-    const response = await fetchWithTimeout(fetchImpl, candidate, { headers: { accept: "application/json" } });
+    assertSecureOAuthUrl(candidate.url, "Protected resource metadata URL");
+    const response = await fetchWithTimeout(fetchImpl, candidate.url, { headers: { accept: "application/json" } });
     if (!response.ok) {
-      lastError = `${candidate} answered HTTP ${response.status}`;
+      lastError = `${candidate.url} answered HTTP ${response.status}`;
       continue;
     }
     const metadata = (await readJson(response, "Protected resource metadata")) as ProtectedResourceMetadata;
+    // A document that fails a check is refused outright, not skipped for the next URL: it was the server's answer.
+    assertProtectedResourceIdentifier(metadata, candidate.resources, candidate.url, endpoint);
     if (!Array.isArray(metadata.authorization_servers) || metadata.authorization_servers.length === 0) {
       throw new McpOAuthError("The server's protected resource metadata names no authorization server.");
     }
-    if (typeof metadata.resource === "string" && metadata.resource) {
-      const declared = new URL(metadata.resource);
-      if (declared.origin !== new URL(endpoint).origin) {
-        throw new McpOAuthError(
-          `The protected resource metadata is for ${declared.origin}, not ${new URL(endpoint).origin}; refusing to use it.`
-        );
-      }
-    }
     return {
-      resourceMetadataUrl: candidate,
+      resourceMetadataUrl: candidate.url,
       metadata,
       ...(challenge?.scope ? { scopeHint: challenge.scope } : {})
     };
@@ -396,12 +468,10 @@ export async function discoverMcpOAuth(
   const resourceInfo = await discoverProtectedResource(endpoint, options);
   const issuer = resourceInfo.metadata.authorization_servers![0];
   const authorizationServer = await discoverAuthorizationServer(issuer, options);
-  const resource =
-    typeof resourceInfo.metadata.resource === "string" && resourceInfo.metadata.resource
-      ? resourceInfo.metadata.resource
-      : canonicalResourceUri(endpoint);
   return {
-    resource,
+    // RFC 8707 / MCP 2026-07-28 "Resource Parameter Implementation": the resource the server's metadata names, which
+    // discoverProtectedResource has checked is identical to the server's URL (RFC 9728 section 3.3).
+    resource: resourceInfo.metadata.resource as string,
     resourceMetadataUrl: resourceInfo.resourceMetadataUrl,
     resourceMetadata: resourceInfo.metadata,
     authorizationServer,

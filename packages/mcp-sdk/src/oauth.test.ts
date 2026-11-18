@@ -3,8 +3,10 @@ import {
   McpOAuthError,
   assertSecureOAuthUrl,
   discoverAuthorizationServer,
+  discoverMcpOAuth,
   discoverProtectedResource,
   isLoopbackHost,
+  protectedResourceMetadataUrls,
   oauthApplicationType,
   readInsufficientScopeChallenge,
   registerOAuthClient,
@@ -236,6 +238,146 @@ describe("discoverProtectedResource: the 401 challenge probe", () => {
     const found = await discoverProtectedResource(endpoint, { fetchImpl });
     expect(found.resourceMetadataUrl).toBe("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
     expect(posts.map((post) => post.body.method)).toEqual(["initialize"]);
+  });
+});
+
+/**
+ * RFC 9728 section 3.3: "The resource value returned MUST be identical to the protected resource's resource identifier
+ * value into which the well-known URI path suffix was inserted to create the URL used to retrieve the metadata", and,
+ * for a URL from the WWW-Authenticate `resource_metadata` parameter, "identical to the URL that the client used to make
+ * the request to the resource server". Otherwise "the data contained in the response MUST NOT be used". Section 6
+ * compares code point by code point; section 7.3 says why (impersonation).
+ */
+describe("protected resource metadata: the resource must be identical (RFC 9728 section 3.3)", () => {
+  /**
+   * An MCP server at `endpoint`: its POSTs answer 401 (with `challenge` when given) or 400, and `documents` maps
+   * metadata URLs to their bodies (others 404). `seen` records every GET.
+   */
+  function prmServer(input: { endpoint: string; documents: Record<string, unknown>; challenge?: string; seen?: string[] }): FetchLike {
+    return (async (request: string | URL | Request, init?: RequestInit) => {
+      const url = String(request);
+      if (init?.method === "POST") {
+        return input.challenge ? new Response("", { status: 401, headers: { "www-authenticate": input.challenge } }) : jsonResponse(400, {});
+      }
+      input.seen?.push(url);
+      if (url in input.documents) return jsonResponse(200, input.documents[url]);
+      return jsonResponse(404, {});
+    }) as FetchLike;
+  }
+  const prm = (resource: unknown) => ({ ...(resource === undefined ? {} : { resource }), authorization_servers: [ISSUER] });
+  const PATH_WK = "https://mcp.example.com/.well-known/oauth-protected-resource/mcp";
+  const ROOT_WK = "https://mcp.example.com/.well-known/oauth-protected-resource";
+
+  async function resourceFor(endpoint: string, documents: Record<string, unknown>, challenge?: string) {
+    return (await discoverProtectedResource(endpoint, { fetchImpl: prmServer({ endpoint, documents, challenge }) })).metadata.resource;
+  }
+
+  it("accepts a resource identical to the MCP server URL, and discovery sends exactly that value", async () => {
+    const endpoint = "https://mcp.example.com/mcp";
+    expect(await resourceFor(endpoint, { [PATH_WK]: prm(endpoint) })).toBe(endpoint);
+    const fetchImpl = (async (request: string | URL | Request, init?: RequestInit) => {
+      const url = String(request);
+      if (init?.method === "POST") return jsonResponse(400, {});
+      if (url === PATH_WK) return jsonResponse(200, prm(endpoint));
+      if (url === "https://as.example.com/.well-known/oauth-authorization-server/tenant1") return jsonResponse(200, metadataFor(ISSUER));
+      return jsonResponse(404, {});
+    }) as FetchLike;
+    expect((await discoverMcpOAuth(endpoint, { fetchImpl })).resource).toBe(endpoint);
+  });
+
+  it("refuses a resource that is only on the same origin (the check was same-origin before)", async () => {
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com") })).rejects.toThrow(
+      /names the resource "https:\/\/mcp\.example\.com", not "https:\/\/mcp\.example\.com\/mcp".*RFC 9728 section 3\.3/
+    );
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com/other") })).rejects.toThrow(McpOAuthError);
+  });
+
+  it("refuses metadata with no resource (RFC 9728 section 2: REQUIRED), or one that is not a URL or has a fragment", async () => {
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm(undefined) })).rejects.toThrow(/names no resource/);
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("") })).rejects.toThrow(/names no resource/);
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm(42) })).rejects.toThrow(/names no resource/);
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com/mcp#x") })).rejects.toThrow(/fragment/);
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("/mcp") })).rejects.toThrow(McpOAuthError);
+  });
+
+  it("treats a trailing slash on a path as significant", async () => {
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com/mcp/") })).rejects.toThrow(McpOAuthError);
+    // An endpoint ending in a slash: its well-known URL keeps the slash (RFC 9728 section 3.1 removes only a slash right after the host).
+    const slashed = "https://mcp.example.com/mcp/";
+    const seen: string[] = [];
+    const fetchImpl = prmServer({ endpoint: slashed, documents: { [`${PATH_WK}/`]: prm(slashed) }, seen });
+    expect((await discoverProtectedResource(slashed, { fetchImpl })).metadata.resource).toBe(slashed);
+    expect(seen[0]).toBe(`${PATH_WK}/`);
+    await expect(resourceFor(slashed, { [`${PATH_WK}/`]: prm("https://mcp.example.com/mcp") })).rejects.toThrow(McpOAuthError);
+  });
+
+  it("accepts either form for a server at the root, where both build the same well-known URL", async () => {
+    expect(await resourceFor("https://mcp.example.com", { [ROOT_WK]: prm("https://mcp.example.com") })).toBe("https://mcp.example.com");
+    expect(await resourceFor("https://mcp.example.com/", { [ROOT_WK]: prm("https://mcp.example.com") })).toBe("https://mcp.example.com");
+    expect(await resourceFor("https://mcp.example.com", { [ROOT_WK]: prm("https://mcp.example.com/") })).toBe("https://mcp.example.com/");
+  });
+
+  it("compares ports exactly, apart from the default port the URL used for the request leaves out", async () => {
+    const custom = "https://mcp.example.com:8443/mcp";
+    const customWk = "https://mcp.example.com:8443/.well-known/oauth-protected-resource/mcp";
+    expect(await resourceFor(custom, { [customWk]: prm(custom) })).toBe(custom);
+    await expect(resourceFor(custom, { [customWk]: prm("https://mcp.example.com/mcp") })).rejects.toThrow(McpOAuthError);
+    await expect(resourceFor(custom, { [customWk]: prm("https://mcp.example.com:9443/mcp") })).rejects.toThrow(McpOAuthError);
+    // A resource naming the default port is not the URL used for the request (which has none)...
+    await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("https://mcp.example.com:443/mcp") })).rejects.toThrow(McpOAuthError);
+    // ...unless the server was configured with it: then both the configured and the requested form match.
+    expect(await resourceFor("https://mcp.example.com:443/mcp", { [PATH_WK]: prm("https://mcp.example.com:443/mcp") })).toBe("https://mcp.example.com:443/mcp");
+    expect(await resourceFor("https://mcp.example.com:443/mcp", { [PATH_WK]: prm("https://mcp.example.com/mcp") })).toBe("https://mcp.example.com/mcp");
+  });
+
+  it("compares the path code point by code point: case, prefixes and percent-encoding all count", async () => {
+    for (const resource of ["https://mcp.example.com/MCP", "https://mcp.example.com/mcp/sub", "https://mcp.example.com/mc", "https://mcp.example.com/%6Dcp"]) {
+      await expect(resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm(resource) }), resource).rejects.toThrow(McpOAuthError);
+    }
+  });
+
+  it("accepts an upper-case scheme or host (MCP 2026-07-28, Canonical Server URI: SHOULD accept them)", async () => {
+    expect(await resourceFor("https://mcp.example.com/mcp", { [PATH_WK]: prm("HTTPS://MCP.Example.COM/mcp") })).toBe("HTTPS://MCP.Example.COM/mcp");
+  });
+
+  it("keeps a query in the well-known URL and in the comparison", async () => {
+    const endpoint = "https://mcp.example.com/mcp?tenant=a";
+    const wk = `${PATH_WK}?tenant=a`;
+    expect(protectedResourceMetadataUrls(endpoint)).toEqual([wk, ROOT_WK]);
+    expect(await resourceFor(endpoint, { [wk]: prm(endpoint) })).toBe(endpoint);
+    await expect(resourceFor(endpoint, { [wk]: prm("https://mcp.example.com/mcp") })).rejects.toThrow(McpOAuthError);
+  });
+
+  it("at the root fallback, accepts the root identifier or the server URL, and nothing else", async () => {
+    // MCP 2026-07-28 Authorization Server Discovery: path-specific well-known URL first, then the root one.
+    expect(await resourceFor("https://mcp.example.com/mcp", { [ROOT_WK]: prm("https://mcp.example.com") })).toBe("https://mcp.example.com");
+    expect(await resourceFor("https://mcp.example.com/mcp", { [ROOT_WK]: prm("https://mcp.example.com/mcp") })).toBe("https://mcp.example.com/mcp");
+    await expect(resourceFor("https://mcp.example.com/mcp", { [ROOT_WK]: prm("https://mcp.example.com/other") })).rejects.toThrow(McpOAuthError);
+  });
+
+  it("does not move on to the root URL when the path-specific document names another resource", async () => {
+    const seen: string[] = [];
+    const fetchImpl = prmServer({
+      endpoint: "https://mcp.example.com/mcp",
+      documents: { [PATH_WK]: prm("https://evil.example.com/mcp"), [ROOT_WK]: prm("https://mcp.example.com/mcp") },
+      seen
+    });
+    await expect(discoverProtectedResource("https://mcp.example.com/mcp", { fetchImpl })).rejects.toThrow(McpOAuthError);
+    expect(seen).toEqual([PATH_WK]);
+  });
+
+  it("with a URL from WWW-Authenticate, requires the URL the request went to, even for a root document", async () => {
+    const challenge = `Bearer resource_metadata="${ROOT_WK}"`;
+    expect(await resourceFor("https://mcp.example.com/mcp", { [ROOT_WK]: prm("https://mcp.example.com/mcp") }, challenge)).toBe("https://mcp.example.com/mcp");
+    await expect(resourceFor("https://mcp.example.com/mcp", { [ROOT_WK]: prm("https://mcp.example.com") }, challenge)).rejects.toThrow(McpOAuthError);
+  });
+
+  it("builds the well-known URLs as RFC 9728 section 3.1 does", () => {
+    expect(protectedResourceMetadataUrls("https://mcp.example.com/mcp")).toEqual([PATH_WK, ROOT_WK]);
+    expect(protectedResourceMetadataUrls("https://mcp.example.com/mcp/")).toEqual([`${PATH_WK}/`, ROOT_WK]);
+    expect(protectedResourceMetadataUrls("https://mcp.example.com/")).toEqual([ROOT_WK]);
+    expect(protectedResourceMetadataUrls("https://mcp.example.com")).toEqual([ROOT_WK]);
+    expect(protectedResourceMetadataUrls("https://mcp.example.com/mcp#frag")).toEqual([PATH_WK, ROOT_WK]);
   });
 });
 
