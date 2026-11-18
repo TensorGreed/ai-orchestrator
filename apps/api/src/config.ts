@@ -179,6 +179,28 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
   OLLAMA_BASE_URL: z.string().optional(),
+  // Base URLs (comma-separated) a deployment model key such as OPENAI_API_KEY may also be sent to, besides each
+  // provider's own endpoint (for example a corporate gateway). Any other base URL a node or request names gets no env
+  // key and must use a secret. Unset: provider endpoints only.
+  PROVIDER_ENV_KEY_BASE_URLS: z
+    .string()
+    .optional()
+    .refine(
+      (value) =>
+        !value ||
+        value
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+          .every((entry) => {
+            try {
+              return ["http:", "https:"].includes(new URL(entry).protocol);
+            } catch {
+              return false;
+            }
+          }),
+      { message: "PROVIDER_ENV_KEY_BASE_URLS must be comma-separated http(s) URLs" }
+    ),
 
   // Phase 5.1 — Authentication enhancements
   API_KEY_DEFAULT_EXPIRY_DAYS: z.coerce.number().int().nonnegative().default(0),

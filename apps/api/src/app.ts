@@ -30,7 +30,7 @@ import {
   type MCPExecutionContext,
   type McpSandboxPolicy
 } from "@ai-orchestrator/mcp-sdk";
-import { createDefaultEmbeddingRegistry, createDefaultProviderRegistry, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import { createDefaultEmbeddingRegistry, createDefaultProviderRegistry, createGatedProviderRegistry, envKeyMayGoTo, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
   CONTENT_RULES_TOOLS_ADAPTER_ID,
@@ -356,6 +356,8 @@ import {
   expressionSandboxLimits,
   nodeDnsResolver,
   guardedFetch,
+  checkOutboundUrl,
+  OutboundUrlBlockedError,
   type CodeSandboxPlan,
   type OutboundGuardConfig,
   type SubWorkflowAdmission,
@@ -959,7 +961,8 @@ async function buildEmbedderFromKbConfig(
       return new TokenEmbeddingAdapter();
     case "openai-embedder":
       return new OpenAIEmbeddingAdapter({
-        apiKey: apiKey ?? process.env.OPENAI_API_KEY ?? "",
+        // The deployment key only goes to OpenAI's own endpoint (or one the operator allows), not to a KB's base URL.
+        apiKey: apiKey ?? (envKeyMayGoTo("openai", typeof cfg.baseUrl === "string" ? cfg.baseUrl : undefined) ? process.env.OPENAI_API_KEY : undefined) ?? "",
         baseUrl: typeof cfg.baseUrl === "string" ? cfg.baseUrl : undefined,
         model: typeof cfg.model === "string" ? cfg.model : undefined
       });
@@ -973,7 +976,12 @@ async function buildEmbedderFromKbConfig(
               ? cfg.model
               : "text-embedding-3-small",
         apiVersion: typeof cfg.apiVersion === "string" ? cfg.apiVersion : process.env.AZURE_OPENAI_API_VERSION,
-        apiKey: apiKey ?? process.env.AZURE_OPENAI_API_KEY ?? ""
+        apiKey:
+          apiKey ??
+          (envKeyMayGoTo("azure_openai", typeof cfg.endpoint === "string" ? cfg.endpoint : process.env.AZURE_OPENAI_ENDPOINT)
+            ? process.env.AZURE_OPENAI_API_KEY
+            : undefined) ??
+          ""
       });
     case "cohere-embedder":
       return new CohereEmbeddingAdapter({
@@ -1760,7 +1768,35 @@ export async function createApp(
   await modelAllowlistService.start();
   app.addHook("onClose", async () => modelAllowlistService.stop());
   // Instrumented at the base too, so a call through any other view (a tape miss, a recorded run) is recorded once.
-  const baseProviderRegistry = modelTelemetry.providers(createDefaultProviderRegistry());
+  // A base URL or endpoint a model node (or a provider test, or a /v1 route) names goes through the outbound URL
+  // checks before the call: metadata and link-local addresses always, private ones under OUTBOUND_DENY_PRIVATE. A
+  // provider's own default endpoint and the operator's env endpoints are not checked here (the operator chose them).
+  const providerOutboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
+  const urlOrigin = (value: string | undefined): string => {
+    try {
+      return value ? new URL(value.trim()).origin.toLowerCase() : "";
+    } catch {
+      return "";
+    }
+  };
+  /** Model endpoints the operator set in the server's environment. */
+  const operatorModelOrigins = (): Set<string> =>
+    new Set(
+      [process.env.OLLAMA_BASE_URL, process.env.AZURE_OPENAI_ENDPOINT, process.env.EVAL_JUDGE_BASE_URL, ...(process.env.PROVIDER_ENV_KEY_BASE_URLS ?? "").split(",")]
+        .map((value) => urlOrigin(value))
+        .filter(Boolean)
+    );
+  const providerEgressGate = async (call: { provider: { baseUrl?: unknown; extra?: unknown } }) => {
+    const extra = call.provider.extra && typeof call.provider.extra === "object" ? (call.provider.extra as Record<string, unknown>) : {};
+    const target = [call.provider.baseUrl, extra.endpoint].find((value): value is string => typeof value === "string" && value.trim().length > 0);
+    if (!target) return;
+    if (operatorModelOrigins().has(urlOrigin(target))) return;
+    // Model base URLs are never templated, so "{{" is literal text: it is checked like any other URL. A name that
+    // does not resolve is refused here too, so the provider client's own lookup cannot get a different answer.
+    const check = await checkOutboundUrl(target.trim(), providerOutboundGuard, nodeDnsResolver);
+    if (!check.ok) throw new OutboundUrlBlockedError(check);
+  };
+  const baseProviderRegistry = modelTelemetry.providers(createGatedProviderRegistry(createDefaultProviderRegistry(), providerEgressGate));
   // The embedding adapters /v1 and the runs' output checks call (instrumented the same way).
   const runEmbeddingRegistry = modelTelemetry.embeddings(createDefaultEmbeddingRegistry());
   const providerRegistry = modelAllowlistService.registry(baseProviderRegistry, { projectId: null, source: "deployment" });
@@ -11984,6 +12020,12 @@ export async function createApp(
     }
 
     const { providerId, secretRef, baseUrl, extra } = parsed.data;
+    // A base URL from the request is the caller's choice: it goes through the outbound URL checks (pinned, and auth
+    // headers are dropped on a cross-origin redirect), and a deployment env key is never sent to it unless it is the
+    // provider's own endpoint or one the operator allows (envKeyMayGoTo).
+    const listFetch = (url: string, init: RequestInit = {}) => guardedFetch(url, init, { config: outboundGuard, resolver: nodeDnsResolver });
+    const envKeyFor = (envName: string, target: string | undefined) =>
+      envKeyMayGoTo(providerId, target) ? process.env[envName] : undefined;
 
     try {
       if (providerId === "gemini") {
@@ -12001,11 +12043,11 @@ export async function createApp(
       }
 
       if (providerId === "openai") {
-        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.OPENAI_API_KEY;
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || envKeyFor("OPENAI_API_KEY", baseUrl);
         if (!apiKey) return { models: [] };
         const modelBaseUrl = (baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
-        const res = await fetch(modelEndpoint, {
+        const res = await listFetch(modelEndpoint, {
           headers: { "Authorization": `Bearer ${apiKey}` }
         });
         if (!res.ok) return { models: [] };
@@ -12018,11 +12060,11 @@ export async function createApp(
       }
 
       if (providerId === "anthropic") {
-        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.ANTHROPIC_API_KEY;
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || envKeyFor("ANTHROPIC_API_KEY", baseUrl);
         if (!apiKey) return { models: [] };
         const modelBaseUrl = (baseUrl || "https://api.anthropic.com/v1").replace(/\/+$/, "");
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
-        const res = await fetch(modelEndpoint, {
+        const res = await listFetch(modelEndpoint, {
           headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
         });
         if (!res.ok) return { models: [] };
@@ -12037,7 +12079,7 @@ export async function createApp(
         const configuredBase = baseUrl?.trim() || process.env.OLLAMA_BASE_URL?.trim();
         if (!configuredBase) return { models: [] };
         const ollamaBase = configuredBase.replace(/\/v1\/?$/, "");
-        const res = await fetch(`${ollamaBase}/api/tags`);
+        const res = await listFetch(`${ollamaBase}/api/tags`);
         if (!res.ok) return { models: [] };
         const json = await res.json() as { models?: Array<{ name: string; modified_at?: string }> };
         return {
@@ -12052,7 +12094,7 @@ export async function createApp(
         if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
         const modelBaseUrl = baseUrl.replace(/\/+$/, "");
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
-        const res = await fetch(modelEndpoint, { headers });
+        const res = await listFetch(modelEndpoint, { headers });
         if (!res.ok) return { models: [] };
         const json = await res.json() as { data?: Array<{ id: string }> };
         return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
@@ -12060,17 +12102,21 @@ export async function createApp(
 
       if (providerId === "azure_openai") {
         const endpoint = (baseUrl ?? process.env.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/+$/, "");
-        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.AZURE_OPENAI_API_KEY;
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || envKeyFor("AZURE_OPENAI_API_KEY", endpoint);
         if (!endpoint || !apiKey) return { models: [] };
         const apiVersion = (typeof extra?.apiVersion === "string" && extra.apiVersion.trim()) ? extra.apiVersion.trim() : "2024-10-21";
-        const res = await fetch(`${endpoint}/openai/models?api-version=${apiVersion}`, {
+        const res = await listFetch(`${endpoint}/openai/models?api-version=${apiVersion}`, {
           headers: { "api-key": apiKey }
         });
         if (!res.ok) return { models: [] };
         const json = await res.json() as { data?: Array<{ id: string }> };
         return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof OutboundUrlBlockedError) {
+        reply.code(400);
+        return { models: [], error: error.message };
+      }
       return { models: [] };
     }
 

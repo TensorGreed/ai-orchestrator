@@ -90,6 +90,30 @@ describe("resilientFetch", () => {
 });
 
 describe("bounded body reads", () => {
+  it("fails a body larger than 8 MB instead of holding it", async () => {
+    const block = new TextEncoder().encode("x".repeat(1024 * 1024));
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent++ < 10) controller.enqueue(block);
+        else controller.close();
+      }
+    });
+    await expect(readResponseText(new Response(body), { timeoutMs: 5_000, provider: "test" })).rejects.toThrow(/larger than 8 MB/);
+    expect(sent).toBeLessThanOrEqual(10);
+  });
+
+  it("model calls ask fetch not to follow redirects", async () => {
+    const seen: RequestInit[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      seen.push(init);
+      return new Response(null, { status: 307, headers: { location: "http://169.254.169.254/" } });
+    }));
+    const response = await resilientFetch("https://provider.test", {}, { provider: "test", maxRetries: 0 });
+    expect(response.status).toBe(307);
+    expect(seen[0]?.redirect).toBe("manual");
+  });
+
   it("fails a body that stalls after the headers instead of waiting forever", async () => {
     const response = new Response(stallingBody(['{"choices":']), { status: 200 });
     await expect(readResponseText(response, { timeoutMs: 50, provider: "test" })).rejects.toMatchObject({

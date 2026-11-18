@@ -251,6 +251,9 @@ export async function readStreamChunk(
   }
 }
 
+/** The most of a (non-stream) response body read into memory: past it the call fails. */
+export const RESPONSE_TEXT_MAX_CHARS = 8 * 1024 * 1024;
+
 /**
  * Reads a whole response body as text within `timeoutMs`. `fetch` resolves
  * once headers arrive, so without a bound a server that stalls mid-body
@@ -275,6 +278,10 @@ export async function readResponseText(response: Response, options: BoundedReadO
       break;
     }
     text += decoder.decode(value, { stream: true });
+    if (text.length > RESPONSE_TEXT_MAX_CHARS) {
+      void reader.cancel().catch(() => undefined);
+      throw new Error(`${options.provider} sent a response body larger than 8 MB.`);
+    }
   }
   return text + decoder.decode();
 }
@@ -347,6 +354,10 @@ export async function resilientFetch(
 
     try {
       const response = await fetch(url, {
+        // Model calls never follow redirects: a redirect could lead past the outbound URL checks the base URL passed,
+        // and undici only strips Authorization (not api-key or x-api-key) on a cross-origin hop. A 3xx is returned
+        // as the (failed) response.
+        redirect: "manual",
         ...init,
         signal
       });

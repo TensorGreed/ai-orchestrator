@@ -1,5 +1,6 @@
 import type { ProviderDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import { envKeyMayGoTo } from "../default-base-urls";
 import { providerHttpError, readResponseJson, readResponseText, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
 import {
   applyOpenAIParameters,
@@ -83,10 +84,17 @@ export async function resolveAzureOpenAIConnection(
 
   const resolvedSecret = normalizeApiKey(await context.resolveSecret(provider.secretRef));
   const explicitApiKey = normalizeApiKey(typeof extra.apiKey === "string" ? extra.apiKey : undefined);
-  const envApiKey = normalizeApiKey(process.env.AZURE_OPENAI_API_KEY);
+  // AZURE_OPENAI_API_KEY only goes to AZURE_OPENAI_ENDPOINT (or an endpoint the operator allows), never to an
+  // endpoint a node or a request chose.
+  const envKeyAllowed = envKeyMayGoTo("azure_openai", endpoint);
+  const envApiKey = envKeyAllowed ? normalizeApiKey(process.env.AZURE_OPENAI_API_KEY) : undefined;
   const authValue = resolvedSecret ?? explicitApiKey ?? envApiKey;
   if (!authValue) {
-    throw new Error("Provider azure_openai requires an API key via secretRef or AZURE_OPENAI_API_KEY.");
+    throw new Error(
+      envKeyAllowed
+        ? "Provider azure_openai requires an API key via secretRef or AZURE_OPENAI_API_KEY."
+        : "Provider azure_openai requires an API key secret for this endpoint: AZURE_OPENAI_API_KEY is only sent to AZURE_OPENAI_ENDPOINT."
+    );
   }
 
   const useBearer = authValue.split(".").length === 3 || /^bearer\s+/i.test(authValue);

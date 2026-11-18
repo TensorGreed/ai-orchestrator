@@ -33,6 +33,23 @@ exception: the configured host and port are allowed even under
 runs on the internal network. Metadata and link-local addresses stay refused,
 and redirects are never followed.
 
+A model's **base URL** set on a model node, in a provider test or in the
+editor's **Load models** request goes through the same policy before the
+call, and a name that does not resolve is refused. Model listing is pinned
+like HTTP Request; a model call is checked before it is sent, but the
+provider client then resolves the name itself, so it is not pinned (a
+short-TTL rebinding name is the remaining gap). Model calls never follow
+redirects. Base URLs that come from the server's environment
+(`OLLAMA_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, `PROVIDER_ENV_KEY_BASE_URLS`)
+and each provider's own endpoint are not checked. A server model key
+(`OPENAI_API_KEY` and the rest) is only ever sent to that provider's own
+endpoint, to `AZURE_OPENAI_ENDPOINT` for Azure OpenAI, or to a base URL
+listed in `PROVIDER_ENV_KEY_BASE_URLS` (same origin, and a path under the
+listed path), or to `EVAL_JUDGE_BASE_URL` when
+`EVAL_JUDGE_ALLOW_ENV_CREDENTIALS` is on; a node with any other base URL must
+use a secret. A listed base URL receives the key of whichever provider a node
+picks with it.
+
 Concepts: [the lethal trifecta](/learn/security/lethal-trifecta) shows how URLs become a way for data to leave an agent.
 
 MCP HTTP servers do not go through these checks. For the OAuth discovery,
@@ -97,6 +114,7 @@ the `Host` header are unchanged.
 |---|---|---|
 | `OUTBOUND_DENY_PRIVATE` | `false` | Also block private ranges and localhost for the checked nodes. |
 | `OUTBOUND_ALLOWLIST` | empty | Comma-separated hosts or CIDRs allowed through under `OUTBOUND_DENY_PRIVATE`, e.g. `10.0.0.0/8,*.internal,db.corp:5432`. |
+| `PROVIDER_ENV_KEY_BASE_URLS` | empty | Comma-separated base URLs a server model key may also be sent to, besides each provider's own endpoint (for example your own model gateway). |
 
 ## What is not covered
 
@@ -117,7 +135,7 @@ the `Host` header are unchanged.
 - **Other browser channels.** WebRTC, and requests a service worker makes,
   are not routed through the checks.
 - **Deployment-level endpoints** are infrastructure settings and are not
-  checked: LLM provider base URLs, connector SDK endpoints, and RAG endpoints
+  checked: LLM provider base URLs from the environment, connector SDK endpoints, and RAG endpoints
   that come from environment variables (`QDRANT_ENDPOINT`, `CHROMA_ENDPOINT`
   and the like) rather than from a node. MCP HTTP servers and MCP OAuth
   discovery are not checked either (see above).

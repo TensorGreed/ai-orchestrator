@@ -4,7 +4,7 @@ import type { LLMStreamChunk } from "../types";
 import { LLMProviderError } from "../resilient-fetch";
 import { OpenAICompatibleProviderAdapter } from "./openai-compatible";
 import { OllamaProviderAdapter } from "./ollama";
-import { readOpenAIStream } from "./openai-wire";
+import { readOpenAIStream, STREAM_BUFFER_MAX_CHARS } from "./openai-wire";
 
 const ctx = { resolveSecret: async () => undefined };
 const provider = { providerId: "openai_compatible", model: "local", baseUrl: "http://compat.test/v1" };
@@ -166,5 +166,58 @@ describe("an empty stream", () => {
       readOpenAIStream(body, { idleTimeoutMs: 5_000, provider: "openai_compatible", timeoutMessage: "stalled" })
     );
     expect(chunks[0]).toEqual({ type: "text_delta", textDelta: "split answer" });
+  });
+});
+
+describe("memory caps on a response", () => {
+  function chunked(parts: string[]): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const part of parts) controller.enqueue(encoder.encode(part));
+        controller.close();
+      }
+    });
+  }
+  const read = (body: ReadableStream<Uint8Array>) =>
+    collect(readOpenAIStream(body, { idleTimeoutMs: 5_000, provider: "openai_compatible", timeoutMessage: "stalled" }));
+  const MB = 1024 * 1024;
+
+  it("fails on a plain body larger than the cap instead of holding it", async () => {
+    const block = "x".repeat(MB);
+    const failure = await read(chunked(['{"choices":[{"message":{"content":"', ...Array.from({ length: 9 }, () => block), '"}}]}'])).then(
+      () => null,
+      (error: unknown) => error as Error
+    );
+    expect(failure).toBeInstanceOf(LLMProviderError);
+    expect(failure!.message).toContain("larger than 8 MB");
+    expect(STREAM_BUFFER_MAX_CHARS).toBe(8 * MB);
+  });
+
+  it("fails on one SSE event larger than the cap", async () => {
+    const block = "y".repeat(MB);
+    const failure = await read(
+      chunked([`data: ${JSON.stringify({ choices: [{ delta: { content: "a" } }] })}\n\n`, "data: {\"choices\":[{\"delta\":{\"content\":\"", ...Array.from({ length: 9 }, () => block)])
+    ).then(
+      () => null,
+      (error: unknown) => error as Error
+    );
+    expect(failure).toBeInstanceOf(LLMProviderError);
+    expect(failure!.message).toContain("stream event larger than 8 MB");
+  });
+
+  it("finds event boundaries split across chunks, including CRLF ones", async () => {
+    const event = `data: ${JSON.stringify({ choices: [{ delta: { content: "a" } }] })}`;
+    const stop = `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}`;
+    const chunks = await read(chunked([event + "\r\n", "\r", "\n" + event + "\n", "\n" + stop + "\r\n\r", "\n"]));
+    expect(chunks.filter((chunk) => chunk.type === "text_delta")).toHaveLength(2);
+    expect(chunks.some((chunk) => chunk.type === "finish")).toBe(true);
+  });
+
+  it("reads a long stream of small events whose total is past the cap", async () => {
+    const event = `data: ${JSON.stringify({ choices: [{ delta: { content: "z".repeat(1000) } }] })}\n\n`;
+    const parts = Array.from({ length: 9 * 1024 }, () => event);
+    const chunks = await read(chunked(parts));
+    expect(chunks.filter((chunk) => chunk.type === "text_delta")).toHaveLength(9 * 1024);
   });
 });

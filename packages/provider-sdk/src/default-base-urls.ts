@@ -19,6 +19,71 @@ export function providerDefaultBaseUrl(providerId: string, env: Record<string, s
   return PROVIDER_DEFAULT_BASE_URLS[providerId];
 }
 
+/** The origin (scheme, host, port) of a URL, lower-cased with the default port dropped, or undefined if it cannot be read. */
+function originOf(value: string | undefined): string | undefined {
+  if (!value || !value.trim()) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return url.origin.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+/** A URL as origin plus path (no query, fragment or trailing slash), for prefix matching; undefined if unreadable. */
+function originAndPath(value: string | undefined): { origin: string; path: string } | undefined {
+  if (!value || !value.trim()) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return { origin: url.origin.toLowerCase(), path: url.pathname.replace(/\/+$/, "") };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Base URLs the operator allows a deployment env key to go to besides each provider's own default (for example a
+ * corporate gateway): `PROVIDER_ENV_KEY_BASE_URLS` (comma-separated), and `EVAL_JUDGE_BASE_URL` when
+ * `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS` is on. A base URL matches an entry on the same origin whose path starts with the
+ * entry's path at a segment boundary, so an entry on a shared multi-tenant host only covers its own path.
+ */
+export function envKeyAllowedBaseUrls(env: Record<string, string | undefined> = process.env): string[] {
+  const entries = (env.PROVIDER_ENV_KEY_BASE_URLS ?? "").split(",");
+  if (/^(true|1|yes)$/i.test((env.EVAL_JUDGE_ALLOW_ENV_CREDENTIALS ?? "").trim()) && env.EVAL_JUDGE_BASE_URL) entries.push(env.EVAL_JUDGE_BASE_URL);
+  return entries.map((entry) => entry.trim()).filter((entry) => Boolean(originAndPath(entry)));
+}
+
+function underAllowedBaseUrl(target: { origin: string; path: string }, entry: string): boolean {
+  const allowed = originAndPath(entry);
+  if (!allowed || allowed.origin !== target.origin) return false;
+  return allowed.path === "" || target.path === allowed.path || target.path.startsWith(`${allowed.path}/`);
+}
+
+/**
+ * Whether a deployment env key (OPENAI_API_KEY, ANTHROPIC_API_KEY, AZURE_OPENAI_API_KEY, ...) may be sent to
+ * `baseUrl` for `providerId`. Only to the provider's own default base URL (Azure: AZURE_OPENAI_ENDPOINT), to a URL in
+ * `PROVIDER_ENV_KEY_BASE_URLS`, or when no base URL is set (the default is used). A base URL a node or a request
+ * names anywhere else gets no env key: it must use a secret, or no key. Compared by origin, so a path on the same
+ * host is fine and a look-alike host is not.
+ */
+export function envKeyMayGoTo(providerId: string, baseUrl: string | undefined, env: Record<string, string | undefined> = process.env): boolean {
+  if (!baseUrl || !baseUrl.trim()) return true;
+  const target = originOf(baseUrl);
+  const targetPath = originAndPath(baseUrl);
+  if (!target || !targetPath) return false;
+  if (envKeyAllowedBaseUrls(env).some((entry) => underAllowedBaseUrl(targetPath, entry))) return true;
+  const allowed = new Set<string>();
+  const own = originOf(PROVIDER_DEFAULT_BASE_URLS[providerId]);
+  if (own) allowed.add(own);
+  if (providerId === "azure_openai") {
+    const endpoint = originOf(env.AZURE_OPENAI_ENDPOINT);
+    if (endpoint) allowed.add(endpoint);
+  }
+  return allowed.has(target);
+}
+
 /** Providers that send nothing over the network (the echo test provider): they are no destination. */
 export const PROVIDERS_WITHOUT_NETWORK: ReadonlySet<string> = new Set(["echo"]);
 

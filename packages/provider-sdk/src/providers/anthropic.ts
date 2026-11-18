@@ -1,6 +1,6 @@
 import type { LLMCallResponse, LLMFinishReason, LLMUsage, ProviderDefinition, ToolCall, ChatMessage } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallOptions, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { PROVIDER_DEFAULT_BASE_URLS } from "../default-base-urls";
+import { PROVIDER_DEFAULT_BASE_URLS, envKeyMayGoTo } from "../default-base-urls";
 import { providerHttpError, readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
 
 const ANTHROPIC_TIMEOUT_MS = 60_000;
@@ -128,9 +128,16 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
   };
 
   async generate(request: ProviderCallRequest, context: ProviderExecutionContext): Promise<LLMCallResponse> {
-    const apiKey = (await context.resolveSecret(request.provider.secretRef)) || process.env.ANTHROPIC_API_KEY;
+    // ANTHROPIC_API_KEY only goes to Anthropic's own endpoint (or one the operator allows), never to a base URL a node
+    // or a request chose.
+    const envKeyAllowed = envKeyMayGoTo("anthropic", request.provider.baseUrl);
+    const apiKey = (await context.resolveSecret(request.provider.secretRef)) || (envKeyAllowed ? process.env.ANTHROPIC_API_KEY : undefined);
     if (!apiKey) {
-      throw new Error("Anthropic requires API key via secretRef or ANTHROPIC_API_KEY env var");
+      throw new Error(
+        envKeyAllowed
+          ? "Anthropic requires API key via secretRef or ANTHROPIC_API_KEY env var"
+          : "Anthropic requires an API key secret for a custom base URL: ANTHROPIC_API_KEY is only sent to Anthropic's own endpoint"
+      );
     }
 
     const model = request.provider.model || DEFAULT_ANTHROPIC_MODEL;

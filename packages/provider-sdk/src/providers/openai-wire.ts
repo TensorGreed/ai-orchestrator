@@ -170,9 +170,10 @@ function parseSSEEventPayload(rawEvent: string): string | null {
   return dataLines.length ? dataLines.join("\n") : null;
 }
 
-function findSSEBoundary(buffer: string): { index: number; separatorLength: number } | null {
-  const unixBoundary = buffer.indexOf("\n\n");
-  const windowsBoundary = buffer.indexOf("\r\n\r\n");
+/** The first event boundary at or after `from` (callers pass where the unscanned text starts, so a long event is not rescanned on every chunk). */
+function findSSEBoundary(buffer: string, from = 0): { index: number; separatorLength: number } | null {
+  const unixBoundary = buffer.indexOf("\n\n", from);
+  const windowsBoundary = buffer.indexOf("\r\n\r\n", from);
   if (unixBoundary < 0 && windowsBoundary < 0) return null;
   if (unixBoundary < 0) return { index: windowsBoundary, separatorLength: 4 };
   if (windowsBoundary < 0) return { index: unixBoundary, separatorLength: 2 };
@@ -287,10 +288,17 @@ export async function* readOpenAIStream(
         break;
       }
       const text = decoder.decode(value, { stream: true });
+      // A boundary can straddle the old end of the buffer by up to 3 characters ("\r\n\r" + "\n").
+      let scanFrom = Math.max(0, buffer.length - 3);
       buffer += text;
-      if (plainBody !== null) plainBody = plainBody.length + text.length > PLAIN_BODY_MAX_CHARS ? null : plainBody + text;
+      // A body that is not a stream is kept to be read as one JSON answer, up to the cap: past it, it fails.
+      if (plainBody !== null) {
+        if (plainBody.length + text.length > STREAM_BUFFER_MAX_CHARS) throw streamFailure(input.provider, "sent a response larger than 8 MB without a stream event");
+        plainBody += text;
+      }
       while (true) {
-        const boundary = findSSEBoundary(buffer);
+        const boundary = findSSEBoundary(buffer, scanFrom);
+        scanFrom = 0;
         if (!boundary) break;
         const rawEvent = buffer.slice(0, boundary.index);
         buffer = buffer.slice(boundary.index + boundary.separatorLength);
@@ -302,6 +310,8 @@ export async function* readOpenAIStream(
           yield chunk;
         }
       }
+      // What is left is one event still arriving: one larger than the cap is not a model stream.
+      if (buffer.length > STREAM_BUFFER_MAX_CHARS) throw streamFailure(input.provider, "sent a stream event larger than 8 MB");
     }
   } finally {
     if (!finished) {
@@ -339,8 +349,11 @@ function hasFinishReason(payload: string): boolean {
   }
 }
 
-/** The most of a body kept while looking for a plain JSON answer instead of a stream. */
-const PLAIN_BODY_MAX_CHARS = 8 * 1024 * 1024;
+/**
+ * The most of a response held in memory at once: a plain JSON answer sent in place of a stream, or one SSE event
+ * still arriving. Past it the call fails (8 MB of text; a model answer is far smaller).
+ */
+export const STREAM_BUFFER_MAX_CHARS = 8 * 1024 * 1024;
 
 /**
  * The chunks of a plain chat completion sent in place of a stream, as a stream of it would have carried them. Throws
@@ -348,7 +361,7 @@ const PLAIN_BODY_MAX_CHARS = 8 * 1024 * 1024;
  */
 function chunksOfPlainCompletion(body: string | null, provider: string): LLMStreamChunk[] {
   const text = body?.trim() ?? "";
-  if (body !== null && text.length === 0) throw streamFailure(provider, "returned an empty stream (no events and no answer)");
+  if (text.length === 0) throw streamFailure(provider, "returned an empty stream (no events and no answer)");
   let parsed: (OpenAIWireResponse & { error?: unknown; object?: unknown }) | null = null;
   try {
     parsed = text ? (JSON.parse(text) as OpenAIWireResponse & { error?: unknown; object?: unknown }) : null;
