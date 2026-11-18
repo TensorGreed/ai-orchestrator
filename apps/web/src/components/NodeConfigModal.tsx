@@ -14,8 +14,12 @@ import {
   BUILT_IN_TOOL_PROVIDERS,
   BUILT_IN_TOOL_PROVIDER_INFO,
   BUILT_IN_TOOLS_ADAPTER_ID,
+  DEFAULT_HTTP_RETRY_ON_STATUS,
+  DEFAULT_RETRY_MAX_DELAY_MS,
   WORKFLOW_TOOL_ADAPTER_ID,
   builtInToolProviderOf,
+  httpFailsOnErrorStatus,
+  parseStatusList,
   deriveWorkflowToolDescriptor,
   getNodeDefinition,
   nodeEmbeddingModelTarget,
@@ -632,6 +636,52 @@ function ToggleField({
         <span className="cfg-toggle-knob" />
       </button>
     </label>
+  );
+}
+
+/**
+ * HTTP Request: fail on a status outside 200–299 (so retries and the Error
+ * output apply), and which statuses are retried. New nodes have it on; a node
+ * saved before the option shows what it does now (on only if it asks for retries).
+ */
+function HttpErrorStatusFields({
+  config,
+  setConfig
+}: {
+  config: Record<string, unknown>;
+  setConfig: React.Dispatch<React.SetStateAction<Record<string, unknown>>>;
+}) {
+  const failOn = httpFailsOnErrorStatus(config);
+  const retryOn = typeof config.retryOnStatus === "string" ? config.retryOnStatus : Array.isArray(config.retryOnStatus) ? config.retryOnStatus.join(", ") : "";
+  const invalid = parseStatusList(retryOn).invalid;
+  return (
+    <>
+      <ToggleField
+        label="Fail on HTTP error status"
+        checked={failOn}
+        onChange={(next) => setConfig((current) => ({ ...current, failOnHttpError: next }))}
+        help="On a status outside 200–299 the node fails, so Retries on Failure and the Error output apply. Off: the response is returned with ok: false and the run goes on."
+      />
+      {failOn && (
+        <label className="cfg-field">
+          <FieldLabel
+            label="Retry on status"
+            help="Statuses that are retried (codes, classes such as 5xx, or ranges such as 500-504). Others fail at once. Empty: 429 and 5xx."
+          />
+          <input
+            value={retryOn}
+            placeholder={DEFAULT_HTTP_RETRY_ON_STATUS}
+            aria-invalid={invalid.length > 0}
+            onChange={(event) => setConfig((current) => ({ ...current, retryOnStatus: event.target.value }))}
+          />
+          {invalid.length > 0 && (
+            <span className="cfg-field-error" role="alert">
+              Not a status code: {invalid.join(", ")}
+            </span>
+          )}
+        </label>
+      )}
+    </>
   );
 }
 
@@ -6477,6 +6527,7 @@ export function NodeInspector({
               />
             </div>
             </AdvancedFields>
+            <HttpErrorStatusFields config={config} setConfig={setConfig} />
           </>
         );
       case "set_node": {
@@ -9585,6 +9636,7 @@ export function NodeInspector({
               min={0}
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, retryCount: next }))}
+              help="How many times to try again after a failure. Left unset, nodes that call a model, a tool or the network try once more."
             />
             <NumberField
               label="Delay between Retries (ms)"
@@ -9592,8 +9644,17 @@ export function NodeInspector({
               min={0}
               step={500}
               onChange={(next) => setConfig((current) => ({ ...current, retryDelayMs: next }))}
+              help="The first wait. Each later wait doubles, varied by up to 20% so retries do not arrive together."
             />
           </div>
+          <NumberField
+            label="Max delay between Retries (ms)"
+            value={toNumberValue(config.retryMaxDelayMs, DEFAULT_RETRY_MAX_DELAY_MS)}
+            min={0}
+            step={1000}
+            onChange={(next) => setConfig((current) => ({ ...current, retryMaxDelayMs: next }))}
+            help="No wait is longer than this. A server's Retry-After is honoured; if it asks for longer than this, the node fails at once."
+          />
           <SelectField
             label="On Error Behavior"
             value={toStringValue(config.onError, "stop")}
@@ -9602,9 +9663,16 @@ export function NodeInspector({
               { value: "stop", label: "Stop Execution" },
               // A gate or approval that continued past a failure would run the next step with no decision.
               ...(node.data.nodeType === "approval_gate" || node.data.nodeType === "human_approval" ? [] : [{ value: "continue", label: "Continue Anyway" }]),
-              { value: "branch", label: "Execute Fallback Branch" }
+              ...(node.data.nodeType === "try_catch" ? [] : [{ value: "branch", label: "Execute Fallback Branch" }])
             ]}
           />
+          {toStringValue(config.onError, "stop") === "branch" && node.data.nodeType !== "try_catch" && (
+            <div className="cfg-tip" data-testid="error-output-tip">
+              The node now has a red <strong>Error</strong> output on the canvas. Connect it to the steps that handle a failure: they get the
+              failed item&apos;s fields plus <code>error</code>, <code>errorCategory</code>, <code>failedNodeId</code> and, for HTTP, <code>status</code>.
+              The node&apos;s other outputs are skipped when it fails.
+            </div>
+          )}
         </section>
         <section className="insp-settings-group" aria-label="Input mapping">
           <div className="cfg-field-label">
@@ -9685,6 +9753,7 @@ export function NodeInspector({
     inputMappingRows.length > 0 ||
     toNumberValue(config.retryCount, 0) > 0 ||
     (typeof config.retryDelayMs === "number" && config.retryDelayMs !== 1000) ||
+    (typeof config.retryMaxDelayMs === "number" && config.retryMaxDelayMs !== DEFAULT_RETRY_MAX_DELAY_MS) ||
     toStringValue(config.onError, "stop") !== "stop" ||
     config.sensitiveOutput === true;
 

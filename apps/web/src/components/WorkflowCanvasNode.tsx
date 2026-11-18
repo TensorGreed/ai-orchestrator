@@ -6,6 +6,7 @@ import { AGENT_ATTACHMENT_STYLES, type AgentAttachmentHandle } from "../lib/agen
 import { ORBIT, emptySlots, isHubType, ringGeometry, summarizeNode } from "../lib/stages";
 import type { McpCanvasMarker, McpNavTarget } from "../lib/mcp-control-plane";
 import { NodeTypeIcon } from "./node-icons";
+import { ERROR_OUTPUT_HANDLE, showsErrorOutput } from "../lib/error-output";
 
 const TERMINAL_TYPES = new Set([
   "schedule_trigger",
@@ -215,9 +216,31 @@ function CardNode({ data, selected }: VariantProps) {
       </div>
       <span className={`wf-status-ring wf-status-${status ?? "idle"}`} title={statusTitle(status)} aria-label={statusTitle(status)} />
       <StructuralPorts data={data} />
+      <ErrorOutputPort data={data} placement="card" />
       <DebugPreview data={data} />
       <RunningPill data={data} />
       <Telemetry data={data} />
+    </div>
+  );
+}
+
+/**
+ * The Error output: a failed node sends its item and the error here when its
+ * On Error is "Execute Fallback Branch". Cards show it under the right edge,
+ * hubs on their right side below the main output.
+ */
+function ErrorOutputPort({ data, placement }: { data: EditorNodeData; placement: "card" | "hub" }) {
+  if (!showsErrorOutput(data.nodeType, data.config, data.errorOutputConnected)) return null;
+  return (
+    <div className={`wf-error-output wf-error-output-${placement}`} data-testid="node-error-output">
+      <span className="port-label">Error</span>
+      <Handle
+        id={ERROR_OUTPUT_HANDLE}
+        type="source"
+        position={placement === "card" ? Position.Bottom : Position.Right}
+        className="wf-handle wf-handle-main wf-handle-err"
+        title="Error output: the failed item and its error"
+      />
     </div>
   );
 }
@@ -393,6 +416,7 @@ function HubNode({ data, selected }: VariantProps) {
       <Badges data={data} />
       <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />
       <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />
+      <ErrorOutputPort data={data} placement="hub" />
       <Handle id="chat_model" type="source" position={Position.Bottom} className="wf-handle-hidden" />
       <Handle id="memory" type="source" position={Position.Bottom} className="wf-handle-hidden" />
       <Handle id="tool" type="source" position={Position.Bottom} className="wf-handle-hidden" />

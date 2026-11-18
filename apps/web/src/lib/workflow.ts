@@ -85,6 +85,8 @@ export interface EditorNodeData {
    */
   mcpMarker?: McpCanvasMarker;
   onOpenMcpTarget?: (target: McpNavTarget) => void;
+  /** Render-time only: an edge leaves this node's Error output (so the handle stays visible even if On Error changed). */
+  errorOutputConnected?: boolean;
 }
 
 export type EditorNode = Node<EditorNodeData>;

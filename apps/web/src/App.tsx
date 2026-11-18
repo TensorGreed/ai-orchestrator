@@ -858,7 +858,8 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
 
   const isAuxiliary = Boolean(attachmentStyle) || Boolean(isGenericAuxiliary);
   // Colours are tokens so both themes resolve them (see src/styles/tokens.css).
-  const stroke = attachmentStyle?.stroke ?? (isAuxiliary ? "var(--line-strong)" : "var(--edge)");
+  const isErrorOutputEdge = !isAuxiliary && edge.sourceHandle === "error";
+  const stroke = attachmentStyle?.stroke ?? (isAuxiliary ? "var(--line-strong)" : isErrorOutputEdge ? "var(--err)" : "var(--edge)");
 
   // Workers represent recursive Supervisor delegation — give them a slightly
   // thicker line so the hierarchy reads even in dense graphs.
@@ -877,7 +878,7 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
     if (edge.sourceHandle === "true") label = "True";
     else if (edge.sourceHandle === "false") label = "False";
     else if (edge.sourceHandle === "success") label = "Try (Success)";
-    else if (edge.sourceHandle === "error") label = "Catch (Error)";
+    else if (edge.sourceHandle === "error") label = source?.data.nodeType === "try_catch" ? "Catch (Error)" : "Error";
     else if (edge.sourceHandle === "default") label = "Default";
     else if (source?.data.nodeType === "chat_intent_router") {
       const routerLabels: Record<string, string> = {
