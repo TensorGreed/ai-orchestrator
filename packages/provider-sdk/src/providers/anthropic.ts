@@ -235,7 +235,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
         },
         body: JSON.stringify(body),
         signal: context.signal
-      }, { timeoutMs: ANTHROPIC_TIMEOUT_MS, maxRetries: 3, provider: "anthropic", onRetry: context.onRetry, traceHeaders: context.traceHeaders });
+      }, { timeoutMs: ANTHROPIC_TIMEOUT_MS, maxRetries: 3, provider: "anthropic", onRetry: context.onRetry, traceHeaders: context.traceHeaders, fetch: context.fetch });
     const bodyRead = { timeoutMs: ANTHROPIC_TIMEOUT_MS, signal: context.signal, provider: "anthropic" };
 
     let response = await send();

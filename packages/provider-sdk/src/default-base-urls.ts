@@ -43,16 +43,65 @@ function originAndPath(value: string | undefined): { origin: string; path: strin
   }
 }
 
+/** Provider ids that read a deployment env key, so a `PROVIDER_ENV_KEY_BASE_URLS` entry may name one. */
+export const PROVIDERS_WITH_ENV_KEYS: readonly string[] = ["openai", "anthropic", "azure_openai", "gemini"];
+
+export interface EnvKeyBaseUrlEntry {
+  /** The provider the entry is for; undefined for an unprefixed entry, which any provider's env key may go to. */
+  providerId?: string;
+  url: string;
+}
+
 /**
- * Base URLs the operator allows a deployment env key to go to besides each provider's own default (for example a
- * corporate gateway): `PROVIDER_ENV_KEY_BASE_URLS` (comma-separated), and `EVAL_JUDGE_BASE_URL` when
- * `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS` is on. A base URL matches an entry on the same origin whose path starts with the
- * entry's path at a segment boundary, so an entry on a shared multi-tenant host only covers its own path.
+ * Parses `PROVIDER_ENV_KEY_BASE_URLS`: comma-separated entries, each `<provider>=<base URL>` (that provider's env key
+ * only) or a bare base URL (any provider's env key: less strict). Entries that cannot be read are reported in
+ * `errors` and left out.
  */
-export function envKeyAllowedBaseUrls(env: Record<string, string | undefined> = process.env): string[] {
-  const entries = (env.PROVIDER_ENV_KEY_BASE_URLS ?? "").split(",");
-  if (/^(true|1|yes)$/i.test((env.EVAL_JUDGE_ALLOW_ENV_CREDENTIALS ?? "").trim()) && env.EVAL_JUDGE_BASE_URL) entries.push(env.EVAL_JUDGE_BASE_URL);
-  return entries.map((entry) => entry.trim()).filter((entry) => Boolean(originAndPath(entry)));
+export function parseEnvKeyBaseUrls(value: string | undefined): { entries: EnvKeyBaseUrlEntry[]; errors: string[] } {
+  const entries: EnvKeyBaseUrlEntry[] = [];
+  const errors: string[] = [];
+  for (const raw of (value ?? "").split(",")) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    const prefixed = /^([a-z][a-z0-9_]*)=(.*)$/i.exec(entry);
+    const providerId = prefixed ? prefixed[1]!.toLowerCase() : undefined;
+    const url = (prefixed ? prefixed[2]! : entry).trim();
+    if (providerId && !PROVIDERS_WITH_ENV_KEYS.includes(providerId)) {
+      errors.push(`'${entry}': unknown provider '${providerId}' (one of ${PROVIDERS_WITH_ENV_KEYS.join(", ")})`);
+      continue;
+    }
+    if (!originAndPath(url)) {
+      errors.push(`'${entry}': not an http(s) URL`);
+      continue;
+    }
+    entries.push(providerId ? { providerId, url } : { url });
+  }
+  // "openai=https://x,https://y" most likely meant both for OpenAI, but a bare entry would carry every provider's key:
+  // mixing the two forms is refused rather than read the less strict way.
+  if (entries.some((entry) => entry.providerId) && entries.some((entry) => !entry.providerId)) {
+    errors.push("mixes provider=url entries with bare URLs: prefix every entry (a bare URL gets any provider's key)");
+    return { entries: entries.filter((entry) => entry.providerId), errors };
+  }
+  return { entries, errors };
+}
+
+/**
+ * Base URLs the operator allows `providerId`'s deployment env key to go to besides the provider's own default (for
+ * example a corporate gateway): the `PROVIDER_ENV_KEY_BASE_URLS` entries for that provider or for any provider, and
+ * `EVAL_JUDGE_BASE_URL` when `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS` is on. A base URL matches an entry on the same origin
+ * whose path starts with the entry's path at a segment boundary, so an entry on a shared multi-tenant host only covers
+ * its own path.
+ */
+export function envKeyAllowedBaseUrls(providerId: string, env: Record<string, string | undefined> = process.env): string[] {
+  const urls = parseEnvKeyBaseUrls(env.PROVIDER_ENV_KEY_BASE_URLS)
+    .entries.filter((entry) => !entry.providerId || entry.providerId === providerId)
+    .map((entry) => entry.url);
+  // The judge's base URL carries only the judge provider's key (EVAL_JUDGE_PROVIDER_ID, default openai).
+  const judgeProvider = (env.EVAL_JUDGE_PROVIDER_ID ?? "").trim() || "openai";
+  if (/^(true|1|yes)$/i.test((env.EVAL_JUDGE_ALLOW_ENV_CREDENTIALS ?? "").trim()) && env.EVAL_JUDGE_BASE_URL && judgeProvider === providerId) {
+    urls.push(env.EVAL_JUDGE_BASE_URL.trim());
+  }
+  return urls;
 }
 
 function underAllowedBaseUrl(target: { origin: string; path: string }, entry: string): boolean {
@@ -73,7 +122,7 @@ export function envKeyMayGoTo(providerId: string, baseUrl: string | undefined, e
   const target = originOf(baseUrl);
   const targetPath = originAndPath(baseUrl);
   if (!target || !targetPath) return false;
-  if (envKeyAllowedBaseUrls(env).some((entry) => underAllowedBaseUrl(targetPath, entry))) return true;
+  if (envKeyAllowedBaseUrls(providerId, env).some((entry) => underAllowedBaseUrl(targetPath, entry))) return true;
   const allowed = new Set<string>();
   const own = originOf(PROVIDER_DEFAULT_BASE_URLS[providerId]);
   if (own) allowed.add(own);

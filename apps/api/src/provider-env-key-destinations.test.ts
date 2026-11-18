@@ -218,7 +218,80 @@ describe("a builder-chosen base URL never receives a deployment env key", () => 
   });
 });
 
+describe("PROVIDER_ENV_KEY_BASE_URLS per-provider entries", () => {
+  it("config accepts provider=url and bare entries and rejects unknown providers and bad URLs", () => {
+    const base = { SECRET_MASTER_KEY_BASE64: crypto.randomBytes(32).toString("base64") };
+    expect(parseConfig({ ...base, PROVIDER_ENV_KEY_BASE_URLS: "openai=https://gw.example/v1, anthropic=https://gw.example/a" }).PROVIDER_ENV_KEY_BASE_URLS).toBeTruthy();
+    expect(parseConfig({ ...base, PROVIDER_ENV_KEY_BASE_URLS: "https://any.example" }).PROVIDER_ENV_KEY_BASE_URLS).toBeTruthy();
+    expect(() => parseConfig({ ...base, PROVIDER_ENV_KEY_BASE_URLS: "opneai=https://gw.example/v1" })).toThrow(/unknown provider 'opneai'/);
+    expect(() => parseConfig({ ...base, PROVIDER_ENV_KEY_BASE_URLS: "openai=not-a-url" })).toThrow(/not an http\(s\) URL/);
+    expect(() => parseConfig({ ...base, PROVIDER_ENV_KEY_BASE_URLS: "openai=https://x.example,https://y.example" })).toThrow(/mixes provider=url entries/);
+  });
+
+  it("an openai= entry gives that host the OpenAI key only, not the Anthropic key", async () => {
+    const target = await captureServer();
+    process.env.PROVIDER_ENV_KEY_BASE_URLS = `openai=${target.baseUrl}`;
+    const context = await createTestContext({ PROVIDER_ENV_KEY_BASE_URLS: `openai=${target.baseUrl}` });
+    const cookie = await login(context, "builder");
+    await context.app.inject({ method: "POST", url: "/api/providers/models", headers: { cookie }, payload: { providerId: "anthropic", baseUrl: target.baseUrl } });
+    expect(target.seen).toEqual([]);
+    await context.app.inject({ method: "POST", url: "/api/providers/models", headers: { cookie }, payload: { providerId: "openai", baseUrl: target.baseUrl } });
+    expect(target.seen).toHaveLength(1);
+    expect(target.seen[0]?.headers.authorization).toBe(`Bearer ${ENV.OPENAI_API_KEY}`);
+  });
+});
+
 describe("a request-supplied base URL goes through the outbound URL checks", () => {
+  it("a knowledge base's custom embeddings endpoint is checked (private refused under OUTBOUND_DENY_PRIVATE)", async () => {
+    const context = await createTestContext({ OUTBOUND_DENY_PRIVATE: "true" });
+    const cookie = await login(context, "admin");
+    const target = await captureServer();
+    const created = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie },
+      payload: { name: "Private endpoint", embedderId: "openai-embedder", embedderConfig: { baseUrl: target.baseUrl } }
+    });
+    const kbId = (created.json() as { knowledgeBase: { id: string } }).knowledgeBase.id;
+    const ingest = await context.app.inject({ method: "POST", url: `/api/knowledge-bases/${kbId}/ingest`, headers: { cookie }, payload: { sourceId: "s", documents: [{ content: "hello" }] } });
+    expect(ingest.statusCode).toBe(400);
+    expect(ingest.body).toMatch(/OUTBOUND_DENY_PRIVATE/);
+    expect(target.seen).toEqual([]);
+  });
+
+  it("the same knowledge base endpoint is reached when private addresses are allowed (control)", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "admin");
+    const target = await captureServer();
+    const created = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie },
+      payload: { name: "Private endpoint", embedderId: "openai-embedder", embedderConfig: { baseUrl: target.baseUrl } }
+    });
+    const kbId = (created.json() as { knowledgeBase: { id: string } }).knowledgeBase.id;
+    await context.app.inject({ method: "POST", url: `/api/knowledge-bases/${kbId}/ingest`, headers: { cookie }, payload: { sourceId: "s", documents: [{ content: "hello" }] } });
+    expect(target.seen).toHaveLength(1);
+  });
+
+  it("an operator endpoint's redirect is not followed by model listing", async () => {
+    const redirectTarget = await captureServer();
+    const server = http.createServer((_request, response) => {
+      response.writeHead(307, { location: `${redirectTarget.baseUrl}/models` });
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    servers.push(server);
+    const operatorUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+    savedEnv.OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL;
+    process.env.OLLAMA_BASE_URL = operatorUrl;
+    const context = await createTestContext({ OLLAMA_BASE_URL: operatorUrl });
+    const cookie = await login(context, "builder");
+    const listed = await context.app.inject({ method: "POST", url: "/api/providers/models", headers: { cookie }, payload: { providerId: "ollama" } });
+    expect(listed.json().models).toEqual([]);
+    expect(redirectTarget.seen).toEqual([]);
+  });
+
   it("model listing to a private address is refused under OUTBOUND_DENY_PRIVATE", async () => {
     const context = await createTestContext({ OUTBOUND_DENY_PRIVATE: "true" });
     const cookie = await login(context, "builder");

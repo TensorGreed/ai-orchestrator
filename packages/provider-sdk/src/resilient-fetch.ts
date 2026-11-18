@@ -75,6 +75,8 @@ export interface ResilientFetchOptions {
    * propagation to model providers on; a header the request already sets is left as it is.
    */
   traceHeaders?: Readonly<Record<string, string>>;
+  /** The fetch to send with (default: the global fetch). See `ProviderExecutionContext.fetch`. */
+  fetch?: (url: string, init: RequestInit) => Promise<Response>;
 }
 
 export interface BoundedReadOptions {
@@ -353,7 +355,7 @@ export async function resilientFetch(
     const signal = existingSignal ? AbortSignal.any([controller.signal, existingSignal]) : controller.signal;
 
     try {
-      const response = await fetch(url, {
+      const response = await (options?.fetch ?? fetch)(String(url), {
         // Model calls never follow redirects: a redirect could lead past the outbound URL checks the base URL passed,
         // and undici only strips Authorization (not api-key or x-api-key) on a cross-origin hop. A 3xx is returned
         // as the (failed) response.

@@ -7,6 +7,7 @@ import {
   type ProviderDefinition
 } from "@ai-orchestrator/shared";
 import { ProviderRegistry } from "./registry";
+import { EmbeddingProviderRegistry, type EmbeddingProviderAdapter, type EmbeddingRequest, type EmbeddingResponse } from "./embeddings";
 import type { LLMProviderAdapter, ProviderExecutionContext } from "./types";
 
 /**
@@ -28,7 +29,14 @@ export interface GatedModelCall {
   operation: "generate" | "stream" | "test";
 }
 
-export type ModelCallGate = (call: GatedModelCall, context: ProviderExecutionContext | undefined) => void | Promise<void>;
+/**
+ * Refuses a call by throwing. It may also return the context the adapter is then called with (for example one whose
+ * `fetch` is pinned to vetted addresses); returning nothing keeps the caller's context.
+ */
+export type ModelCallGate = (
+  call: GatedModelCall,
+  context: ProviderExecutionContext | undefined
+) => void | ProviderExecutionContext | Promise<void | ProviderExecutionContext>;
 
 /** A model call the deployment's or the project's model allowlist refuses. Never retried. */
 export class ModelNotAllowedError extends WorkflowError {
@@ -66,22 +74,22 @@ export function gatedProviderAdapter(adapter: LLMProviderAdapter, gate: ModelCal
   const wrapped: LLMProviderAdapter = {
     definition: adapter.definition,
     generate: async (request, context) => {
-      await gate(callOf(request.provider, "generate"), context);
-      return await adapter.generate(request, context);
+      const gated = (await gate(callOf(request.provider, "generate"), context)) ?? context;
+      return await adapter.generate(request, gated);
     }
   };
   if (adapter.generateStream) {
     const stream = adapter.generateStream.bind(adapter);
     wrapped.generateStream = async function* (request, context) {
-      await gate(callOf(request.provider, "stream"), context);
-      yield* stream(request, context);
+      const gated = (await gate(callOf(request.provider, "stream"), context)) ?? context;
+      yield* stream(request, gated);
     };
   }
   if (adapter.testConnection) {
     const test = adapter.testConnection.bind(adapter);
     wrapped.testConnection = async (provider, context) => {
-      await gate(callOf(provider, "test"), context);
-      return await test(provider, context);
+      const gated = (await gate(callOf(provider, "test"), context)) ?? context;
+      return await test(provider, gated);
     };
   }
   return wrapped;
@@ -126,4 +134,75 @@ export class GatedProviderRegistry extends ProviderRegistry {
 /** A registry whose adapters are `base`'s, each call checked by `gate` first. `base` is left untouched. */
 export function createGatedProviderRegistry(base: ProviderRegistry, gate: ModelCallGate): ProviderRegistry {
   return new GatedProviderRegistry(base, gate);
+}
+
+/** An embedding call a gate is asked about: the same shape as a chat call, with operation "embed". */
+export interface GatedEmbeddingCall {
+  providerId: string;
+  model: string;
+  provider: LLMProviderConfig;
+  operation: "embed";
+}
+
+/** Refuses an embedding call by throwing, or returns the context the adapter is called with (nothing keeps the caller's). */
+export type EmbeddingCallGate = (
+  call: GatedEmbeddingCall,
+  context: ProviderExecutionContext
+) => void | ProviderExecutionContext | Promise<void | ProviderExecutionContext>;
+
+/**
+ * An embedding registry whose adapters ask `gate` before each call. Embedders that are not this registry's adapters
+ * (`embedWith`: knowledge base and RAG embedders with their own transport) are run as they are; their transport does
+ * its own checks.
+ */
+export class GatedEmbeddingRegistry extends EmbeddingProviderRegistry {
+  private readonly wrapped = new WeakMap<EmbeddingProviderAdapter, EmbeddingProviderAdapter>();
+
+  constructor(
+    private readonly base: EmbeddingProviderRegistry,
+    private readonly gate: EmbeddingCallGate
+  ) {
+    super();
+  }
+
+  override register(adapter: EmbeddingProviderAdapter): void {
+    this.base.register(adapter);
+  }
+
+  override get(providerId: string): EmbeddingProviderAdapter {
+    return this.wrap(this.base.get(providerId));
+  }
+
+  override tryGet(providerId: string): EmbeddingProviderAdapter | undefined {
+    const adapter = this.base.tryGet(providerId);
+    return adapter ? this.wrap(adapter) : undefined;
+  }
+
+  override ids(): string[] {
+    return this.base.ids();
+  }
+
+  override async embedWith(adapter: EmbeddingProviderAdapter, request: EmbeddingRequest, context: ProviderExecutionContext): Promise<EmbeddingResponse> {
+    return await this.base.embedWith(adapter, request, context);
+  }
+
+  private wrap(adapter: EmbeddingProviderAdapter): EmbeddingProviderAdapter {
+    const known = this.wrapped.get(adapter);
+    if (known) return known;
+    const gate = this.gate;
+    const gated: EmbeddingProviderAdapter = {
+      id: adapter.id,
+      embed: async (request, context) => {
+        const call: GatedEmbeddingCall = { providerId: adapter.id, model: String(request.provider.model ?? ""), provider: request.provider, operation: "embed" };
+        return await adapter.embed(request, (await gate(call, context)) ?? context);
+      }
+    };
+    this.wrapped.set(adapter, gated);
+    return gated;
+  }
+}
+
+/** An embedding registry whose adapters are `base`'s, each call checked by `gate` first. `base` is left untouched. */
+export function createGatedEmbeddingRegistry(base: EmbeddingProviderRegistry, gate: EmbeddingCallGate): EmbeddingProviderRegistry {
+  return new GatedEmbeddingRegistry(base, gate);
 }

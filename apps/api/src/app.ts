@@ -30,7 +30,18 @@ import {
   type MCPExecutionContext,
   type McpSandboxPolicy
 } from "@ai-orchestrator/mcp-sdk";
-import { createDefaultEmbeddingRegistry, createDefaultProviderRegistry, createGatedProviderRegistry, envKeyMayGoTo, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import {
+  createDefaultEmbeddingRegistry,
+  createDefaultProviderRegistry,
+  createGatedEmbeddingRegistry,
+  createGatedProviderRegistry,
+  envKeyMayGoTo,
+  isModelNotAllowedError,
+  type EmbeddingCallGate,
+  type ModelCallGate,
+  type ProviderRegistry
+} from "@ai-orchestrator/provider-sdk";
+import { createModelEgress, ModelRedirectRefusedError } from "./services/model-egress.js";
 import {
   agentWebhookPayloadSchema,
   CONTENT_RULES_TOOLS_ADAPTER_ID,
@@ -356,10 +367,10 @@ import {
   expressionSandboxLimits,
   nodeDnsResolver,
   guardedFetch,
-  checkOutboundUrl,
   OutboundUrlBlockedError,
   type CodeSandboxPlan,
   type OutboundGuardConfig,
+  type RagFetch,
   type SubWorkflowAdmission,
   type SubWorkflowAdmissionRequest,
   type SubWorkflowUsage,
@@ -951,7 +962,9 @@ function toDurationMs(startedAt: string, completedAt: string): number | undefine
 // Returns null if the embedderId is unknown or required config is missing.
 async function buildEmbedderFromKbConfig(
   kb: { embedderId: string; embedderConfig: Record<string, unknown> },
-  secretService: SecretService
+  secretService: SecretService,
+  /** The fetch its requests go through (checked and pinned for a URL the knowledge base names). */
+  fetcher?: RagFetch
 ): Promise<EmbeddingAdapter | null> {
   const cfg = kb.embedderConfig ?? {};
   const secretRef = (cfg.secretRef ?? cfg.embeddingSecretRef) as SecretReference | undefined;
@@ -964,10 +977,12 @@ async function buildEmbedderFromKbConfig(
         // The deployment key only goes to OpenAI's own endpoint (or one the operator allows), not to a KB's base URL.
         apiKey: apiKey ?? (envKeyMayGoTo("openai", typeof cfg.baseUrl === "string" ? cfg.baseUrl : undefined) ? process.env.OPENAI_API_KEY : undefined) ?? "",
         baseUrl: typeof cfg.baseUrl === "string" ? cfg.baseUrl : undefined,
-        model: typeof cfg.model === "string" ? cfg.model : undefined
+        model: typeof cfg.model === "string" ? cfg.model : undefined,
+        ...(fetcher ? { fetcher } : {})
       });
     case "azure-openai-embedder":
       return new AzureOpenAIEmbeddingAdapter({
+        ...(fetcher ? { fetcher } : {}),
         endpoint: typeof cfg.endpoint === "string" ? cfg.endpoint : process.env.AZURE_OPENAI_ENDPOINT ?? "",
         deployment:
           typeof cfg.deployment === "string" && cfg.deployment.trim()
@@ -1526,6 +1541,8 @@ export interface CreateAppOptions {
    * fetch that replaces the pinned one. The outbound checks still run on every URL and redirect.
    */
   documentScanNetwork?: { resolver?: DnsResolver; fetchImpl?: typeof fetch };
+  /** The resolver model and embedding calls' outbound checks and pinned connections use (tests). */
+  modelNetwork?: { resolver?: DnsResolver };
   /** The names and addresses service (CONTENT_RULES_NER_ENDPOINT): the DNS resolver and, for tests only, a fetch that replaces the pinned one. */
   nerEndpointNetwork?: { resolver?: DnsResolver; fetchImpl?: typeof fetch };
 }
@@ -1768,37 +1785,27 @@ export async function createApp(
   await modelAllowlistService.start();
   app.addHook("onClose", async () => modelAllowlistService.stop());
   // Instrumented at the base too, so a call through any other view (a tape miss, a recorded run) is recorded once.
-  // A base URL or endpoint a model node (or a provider test, or a /v1 route) names goes through the outbound URL
-  // checks before the call: metadata and link-local addresses always, private ones under OUTBOUND_DENY_PRIVATE. A
-  // provider's own default endpoint and the operator's env endpoints are not checked here (the operator chose them).
+  // A base URL or endpoint a model node, provider test, /v1 route or embedding call names is checked and the call is
+  // pinned to the checked addresses (services/model-egress.ts). Provider defaults and operator env endpoints are not.
   const providerOutboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
-  const urlOrigin = (value: string | undefined): string => {
-    try {
-      return value ? new URL(value.trim()).origin.toLowerCase() : "";
-    } catch {
-      return "";
+  const modelEgress = createModelEgress({ guard: providerOutboundGuard, resolver: options.modelNetwork?.resolver ?? nodeDnsResolver });
+  const providerEgressGate: ModelCallGate = async (call, context) => await modelEgress.contextFor(call.provider, context);
+  const embeddingEgressGate: EmbeddingCallGate = async (call, context) => await modelEgress.contextFor(call.provider, context);
+  /** The fetch for a knowledge base embedder's or a model listing's URL: pinned and checked unless the operator set it. */
+  const modelUrlFetch = async (url: string, init: RequestInit = {}): Promise<Response> => {
+    if (!modelEgress.isOperatorUrl(url)) return await modelEgress.fetch(url, init);
+    // Operator endpoints are not checked or pinned, but still never followed through a redirect (undici would carry
+    // api-key and x-api-key headers across origins).
+    const response = await fetch(url, { ...init, redirect: "manual" });
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ModelRedirectRefusedError();
     }
-  };
-  /** Model endpoints the operator set in the server's environment. */
-  const operatorModelOrigins = (): Set<string> =>
-    new Set(
-      [process.env.OLLAMA_BASE_URL, process.env.AZURE_OPENAI_ENDPOINT, process.env.EVAL_JUDGE_BASE_URL, ...(process.env.PROVIDER_ENV_KEY_BASE_URLS ?? "").split(",")]
-        .map((value) => urlOrigin(value))
-        .filter(Boolean)
-    );
-  const providerEgressGate = async (call: { provider: { baseUrl?: unknown; extra?: unknown } }) => {
-    const extra = call.provider.extra && typeof call.provider.extra === "object" ? (call.provider.extra as Record<string, unknown>) : {};
-    const target = [call.provider.baseUrl, extra.endpoint].find((value): value is string => typeof value === "string" && value.trim().length > 0);
-    if (!target) return;
-    if (operatorModelOrigins().has(urlOrigin(target))) return;
-    // Model base URLs are never templated, so "{{" is literal text: it is checked like any other URL. A name that
-    // does not resolve is refused here too, so the provider client's own lookup cannot get a different answer.
-    const check = await checkOutboundUrl(target.trim(), providerOutboundGuard, nodeDnsResolver);
-    if (!check.ok) throw new OutboundUrlBlockedError(check);
+    return response;
   };
   const baseProviderRegistry = modelTelemetry.providers(createGatedProviderRegistry(createDefaultProviderRegistry(), providerEgressGate));
   // The embedding adapters /v1 and the runs' output checks call (instrumented the same way).
-  const runEmbeddingRegistry = modelTelemetry.embeddings(createDefaultEmbeddingRegistry());
+  const runEmbeddingRegistry = modelTelemetry.embeddings(createGatedEmbeddingRegistry(createDefaultEmbeddingRegistry(), embeddingEgressGate));
   const providerRegistry = modelAllowlistService.registry(baseProviderRegistry, { projectId: null, source: "deployment" });
   /** The allowlist scope of a run of `workflow` (a workflow with no project uses the default project's list). */
   type ModelRun = { executionId?: string; runKey?: string; sourceExecutionId?: string };
@@ -2741,7 +2748,8 @@ export async function createApp(
           // 12.6 — checked against the model allowlist of the workflow's project (a tape replay: see above).
           providerRegistry: tapeReplay ? runModelRegistry : modelScopedRun(mergedWorkflow, runModelRegistry, runModelScope),
           checkEmbeddingModel: modelScopedEmbeddings(mergedWorkflow, runModelScope),
-          ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
+          // Always the gated registry (instrumented when telemetry is on), so content rule embeddings are checked and pinned.
+          embeddingProviderRegistry: runEmbeddingRegistry,
           connectorRegistry,
           mcpRegistry: runPlan?.registry ?? mcpRegistry,
           agentRuntime,
@@ -2947,7 +2955,8 @@ export async function createApp(
                   // 12.6 — the error handler's model calls are checked for its own project, audited once per failed run.
                   providerRegistry: modelScopedRun(errorWf, baseProviderRegistry, errorModelRun),
                   checkEmbeddingModel: modelScopedEmbeddings(errorWf, errorModelRun),
-                  ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
+                  // Always the gated registry (instrumented when telemetry is on), so content rule embeddings are checked and pinned.
+                  embeddingProviderRegistry: runEmbeddingRegistry,
                   scopeSubWorkflow: modelScopedSubWorkflows(errorScoped.scopeSubWorkflow, baseProviderRegistry, errorModelRun),
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({
@@ -7776,7 +7785,7 @@ export async function createApp(
    * registry (an `embeddings` span and the token and duration metrics); the embedder itself is unchanged.
    */
   const kbEmbedder = async (kb: { embedderId: string; embedderConfig: Record<string, unknown> }): Promise<EmbeddingAdapter | null> => {
-    const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+    const embedder = await buildEmbedderFromKbConfig(kb, secretService, modelUrlFetch);
     if (!embedder || !modelTelemetry.active) return embedder;
     return registryEmbeddingAdapter(embedder, {
       registry: runEmbeddingRegistry,
@@ -12023,7 +12032,7 @@ export async function createApp(
     // A base URL from the request is the caller's choice: it goes through the outbound URL checks (pinned, and auth
     // headers are dropped on a cross-origin redirect), and a deployment env key is never sent to it unless it is the
     // provider's own endpoint or one the operator allows (envKeyMayGoTo).
-    const listFetch = (url: string, init: RequestInit = {}) => guardedFetch(url, init, { config: outboundGuard, resolver: nodeDnsResolver });
+    const listFetch = modelUrlFetch;
     const envKeyFor = (envName: string, target: string | undefined) =>
       envKeyMayGoTo(providerId, target) ? process.env[envName] : undefined;
 
@@ -16871,6 +16880,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         error: "Request body is too large",
         limitBytes: config.API_BODY_LIMIT_BYTES
       });
+      return;
+    }
+
+    // A model or embedding endpoint the outbound URL checks refuse, or a redirect a model call will not follow: the
+    // caller's configuration, not a server fault.
+    if (error instanceof OutboundUrlBlockedError || error instanceof ModelRedirectRefusedError) {
+      reply.code(400).send({ error: secretService.redact(error.message) });
       return;
     }
 

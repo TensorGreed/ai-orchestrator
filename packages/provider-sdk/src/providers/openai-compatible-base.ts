@@ -107,7 +107,7 @@ export async function callOpenAICompatible(
       body: JSON.stringify(connection.payload),
       signal: context.signal
     },
-    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry, traceHeaders: context.traceHeaders }
+    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry, traceHeaders: context.traceHeaders, fetch: context.fetch }
   );
 
   const bodyRead = { timeoutMs, signal: context.signal, provider: options.id };
@@ -150,7 +150,7 @@ export async function* callOpenAICompatibleStream(
       }),
       signal: context.signal
     },
-    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry, traceHeaders: context.traceHeaders }
+    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry, traceHeaders: context.traceHeaders, fetch: context.fetch }
   );
 
   if (!response.ok) {

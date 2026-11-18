@@ -163,7 +163,7 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
         body: JSON.stringify(payload),
         signal: context.signal
       },
-      { timeoutMs, maxRetries, provider: "azure_openai", onRetry: context.onRetry, traceHeaders: context.traceHeaders }
+      { timeoutMs, maxRetries, provider: "azure_openai", onRetry: context.onRetry, traceHeaders: context.traceHeaders, fetch: context.fetch }
     );
 
     const bodyRead = { timeoutMs, signal: context.signal, provider: "azure_openai" };
@@ -213,7 +213,7 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
         body: JSON.stringify(payload),
         signal: context.signal
       },
-      { timeoutMs, maxRetries, provider: "azure_openai", onRetry: context.onRetry, traceHeaders: context.traceHeaders }
+      { timeoutMs, maxRetries, provider: "azure_openai", onRetry: context.onRetry, traceHeaders: context.traceHeaders, fetch: context.fetch }
     );
 
     if (!response.ok) {

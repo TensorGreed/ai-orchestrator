@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "@ai-orchestrator/shared";
-import { envKeyMayGoTo } from "./default-base-urls";
+import { envKeyMayGoTo, parseEnvKeyBaseUrls } from "./default-base-urls";
+import { createGatedEmbeddingRegistry } from "./gated-registry";
 import { createDefaultEmbeddingRegistry } from "./embeddings";
 import { createDefaultProviderRegistry } from "./index";
 import type { LLMStreamChunk } from "./types";
@@ -208,5 +209,91 @@ describe("model calls do not follow redirects", () => {
       target.close();
       redirector.close();
     }
+  });
+});
+
+describe("per-provider PROVIDER_ENV_KEY_BASE_URLS entries", () => {
+  it("parse prefixed and bare entries, and report unknown providers and bad URLs", () => {
+    expect(parseEnvKeyBaseUrls(" openai=https://gw.example/v1 ,Anthropic=https://gw.example/anthropic")).toEqual({
+      entries: [{ providerId: "openai", url: "https://gw.example/v1" }, { providerId: "anthropic", url: "https://gw.example/anthropic" }],
+      errors: []
+    });
+    expect(parseEnvKeyBaseUrls("https://any.example, https://other.example/v1?a=b")).toEqual({
+      entries: [{ url: "https://any.example" }, { url: "https://other.example/v1?a=b" }],
+      errors: []
+    });
+    const bad = parseEnvKeyBaseUrls("opneai=https://gw.example/v1,openai=ftp://x,not a url");
+    expect(bad.entries).toEqual([]);
+    expect(bad.errors).toHaveLength(3);
+    expect(bad.errors[0]).toMatch(/unknown provider 'opneai'/);
+  });
+
+  it("refuses mixing prefixed and bare entries, keeping only the prefixed ones", () => {
+    const mixed = parseEnvKeyBaseUrls("openai=https://x.example,https://y.example");
+    expect(mixed.entries).toEqual([{ providerId: "openai", url: "https://x.example" }]);
+    expect(mixed.errors[0]).toMatch(/mixes provider=url entries with bare URLs/);
+    expect(envKeyMayGoTo("anthropic", "https://y.example", { PROVIDER_ENV_KEY_BASE_URLS: "openai=https://x.example,https://y.example" })).toBe(false);
+  });
+
+  it("EVAL_JUDGE_BASE_URL carries only the judge provider's key", () => {
+    const env = { EVAL_JUDGE_BASE_URL: "https://judge.example.com/v1", EVAL_JUDGE_ALLOW_ENV_CREDENTIALS: "true" };
+    expect(envKeyMayGoTo("openai", "https://judge.example.com/v1", env)).toBe(true);
+    expect(envKeyMayGoTo("anthropic", "https://judge.example.com/v1", env)).toBe(false);
+    expect(envKeyMayGoTo("anthropic", "https://judge.example.com/v1", { ...env, EVAL_JUDGE_PROVIDER_ID: "anthropic" })).toBe(true);
+  });
+
+  it("a prefixed entry carries only that provider's key; a bare entry any provider's", () => {
+    const env = { PROVIDER_ENV_KEY_BASE_URLS: "openai=https://gw.example/v1" };
+    expect(envKeyMayGoTo("openai", "https://gw.example/v1", env)).toBe(true);
+    expect(envKeyMayGoTo("anthropic", "https://gw.example/v1", env)).toBe(false);
+    expect(envKeyMayGoTo("azure_openai", "https://gw.example/v1", env)).toBe(false);
+    const bare = { PROVIDER_ENV_KEY_BASE_URLS: "https://gw.example/v1" };
+    expect(envKeyMayGoTo("anthropic", "https://gw.example/v1", bare)).toBe(true);
+  });
+});
+
+describe("a context fetch carries every adapter request", () => {
+  it("chat (generate, stream, every provider family) and embeddings use context.fetch, not the global fetch", async () => {
+    const global = stubFetch();
+    const seen: string[] = [];
+    const contextFetch = async (url: string) => {
+      seen.push(url);
+      const body = url.includes("/embeddings")
+        ? { data: [{ embedding: [0.1], index: 0 }] }
+        : url.includes("/messages")
+          ? { content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }
+          : { choices: [{ message: { content: "ok" }, finish_reason: "stop" }] };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const context = { resolveSecret: async () => "sk-user", fetch: contextFetch };
+    const registry = createDefaultProviderRegistry();
+    const secretRef = { secretId: "s" };
+    await registry.get("openai_compatible").generate({ provider: { providerId: "openai_compatible", model: "m", baseUrl: "https://a.example/v1", secretRef }, messages }, context);
+    await collect(registry.get("openai_compatible").generateStream!({ provider: { providerId: "openai_compatible", model: "m", baseUrl: "https://b.example/v1", secretRef }, messages }, context));
+    await registry.get("anthropic").generate({ provider: { providerId: "anthropic", model: "c", baseUrl: "https://c.example/v1", secretRef }, messages }, context);
+    await registry.get("azure_openai").generate({ provider: { providerId: "azure_openai", model: "d", baseUrl: "https://d.example", secretRef }, messages }, context);
+    await registry.get("ollama").generate({ provider: { providerId: "ollama", model: "e", baseUrl: "https://e.example/v1" }, messages }, context);
+    await createDefaultEmbeddingRegistry().get("openai_compatible").embed({ provider: { providerId: "openai_compatible", model: "f", baseUrl: "https://f.example/v1", secretRef }, input: ["x"] }, context);
+    expect(seen.map((url) => new URL(url).host)).toEqual(["a.example", "b.example", "c.example", "d.example", "e.example", "f.example"]);
+    expect(global).toEqual([]);
+  });
+});
+
+describe("gated embedding registry", () => {
+  it("asks the gate first, runs the adapter with the context it returns, and a refusal stops the call", async () => {
+    const calls: string[] = [];
+    const base = createDefaultEmbeddingRegistry();
+    const gated = createGatedEmbeddingRegistry(base, async (call, context) => {
+      calls.push(`${call.providerId}:${call.operation}`);
+      if (call.provider.baseUrl?.includes("blocked")) throw new Error("blocked by policy");
+      return { ...context, fetch: async () => new Response(JSON.stringify({ data: [{ embedding: [1], index: 0 }] }), { status: 200 }) };
+    });
+    const global = stubFetch();
+    const answer = await gated.get("ollama").embed({ provider: { providerId: "ollama", model: "m", baseUrl: "https://ok.example/v1" }, input: ["x"] }, noSecret);
+    expect(answer.embeddings).toEqual([[1]]);
+    await expect(gated.get("ollama").embed({ provider: { providerId: "ollama", model: "m", baseUrl: "https://blocked.example/v1" }, input: ["x"] }, noSecret)).rejects.toThrow(/blocked by policy/);
+    expect(calls).toEqual(["ollama:embed", "ollama:embed"]);
+    expect(global).toEqual([]);
+    expect(gated.ids()).toEqual(base.ids());
   });
 });
