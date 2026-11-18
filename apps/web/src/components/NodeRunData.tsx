@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { NodeExecutionResult } from "@ai-orchestrator/shared";
 import {
   attachmentUse,
@@ -21,7 +21,47 @@ const CELL_MAX_CHARS = 300;
 /** Rows read to find the table's columns. */
 const COLUMN_SCAN_ROWS = 500;
 
-type DataViewMode = "table" | "json" | "schema";
+export type DataViewMode = "table" | "json" | "schema";
+
+/**
+ * One view choice for a whole data pane (Input or Output): the pane header holds the switch, so the blocks inside
+ * it show no switch of their own (a Code node's test result in the Output pane follows it too). Outside a pane each view
+ * keeps its own switch.
+ */
+export interface RunDataPaneView {
+  mode: DataViewMode;
+  /** Show the runtime's own keys (`_telemetry`, `_branchHandle`, ...) in tables. JSON always shows them. */
+  showInternal: boolean;
+  setShowInternal: (next: boolean) => void;
+}
+
+export const RunDataPaneContext = createContext<RunDataPaneView | null>(null);
+
+/**
+ * Keys the runtime adds to a node's data for its own bookkeeping. Only these are hidden: other keys that start with "_"
+ * (`_id`, `_source`, `_score` from a database or search index) are the user's data and always show.
+ */
+const RUNTIME_INTERNAL_KEYS = new Set([
+  "_telemetry",
+  "_childTelemetry",
+  "_branchHandle",
+  "_branchHandleFallback",
+  "_provider",
+  "_toolPolicy",
+  "_guard",
+  "_mcpTools",
+  "_mcpSampling",
+  "_mcpProgress",
+  "_mcpElicitations",
+  "_serverPrompt",
+  "_toolCallLabels",
+  "_trace",
+  "_selectedParentId"
+]);
+
+export function isInternalKey(key: string): boolean {
+  return RUNTIME_INTERNAL_KEYS.has(key);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -71,6 +111,10 @@ function defaultMode(value: unknown): DataViewMode {
 }
 
 function DataTable({ value }: { value: unknown }) {
+  const pane = useContext(RunDataPaneContext);
+  const [localShowInternal, setLocalShowInternal] = useState(false);
+  const showInternal = pane ? pane.showInternal : localShowInternal;
+  const setShowInternal = pane ? pane.setShowInternal : setLocalShowInternal;
   const itemsSplit = useMemo(() => {
     if (!isRecord(value) || !Array.isArray(value.items)) return null;
     const { items, ...rest } = value;
@@ -105,9 +149,25 @@ function DataTable({ value }: { value: unknown }) {
         </>
       );
     }
-    const entries = Object.entries(record);
-    if (entries.length === 0) return <div className="run-data-empty">Empty object</div>;
+    const allEntries = Object.entries(record);
+    if (allEntries.length === 0) return <div className="run-data-empty">Empty object</div>;
+    const hiddenCount = showInternal ? 0 : allEntries.filter(([key]) => isInternalKey(key)).length;
+    const entries = hiddenCount > 0 ? allEntries.filter(([key]) => !isInternalKey(key)) : allEntries;
     const visible = entries.slice(0, shown);
+    const internalToggle =
+      hiddenCount > 0 || (showInternal && allEntries.some(([key]) => isInternalKey(key))) ? (
+        <button type="button" className="run-data-internal" onClick={() => setShowInternal(!showInternal)} aria-pressed={showInternal}>
+          {showInternal ? "Hide internal fields" : `Show ${hiddenCount} internal field${hiddenCount === 1 ? "" : "s"}`}
+        </button>
+      ) : null;
+    if (entries.length === 0) {
+      return (
+        <>
+          <div className="run-data-empty">Only internal fields</div>
+          {internalToggle}
+        </>
+      );
+    }
     return (
       <>
         <table className="run-data-table">
@@ -133,19 +193,22 @@ function DataTable({ value }: { value: unknown }) {
             Show {Math.min(RUN_DATA_ROW_PAGE, entries.length - shown)} more of {entries.length} fields
           </button>
         ) : null}
+        {internalToggle}
       </>
     );
   }
 
   if (rows.length === 0) return <div className="run-data-empty">No items</div>;
   const visible = rows.slice(0, shown);
+  const internalColumns = columns.filter((column) => isInternalKey(column)).length;
+  const shownColumns = showInternal ? columns : columns.filter((column) => !isInternalKey(column));
   return (
     <>
       <table className="run-data-table">
         <thead>
           <tr>
             <th scope="col">#</th>
-            {recordRows ? columns.map((column) => <th key={column} scope="col">{column}</th>) : <th scope="col">Value</th>}
+            {recordRows ? shownColumns.map((column) => <th key={column} scope="col">{column}</th>) : <th scope="col">Value</th>}
           </tr>
         </thead>
         <tbody>
@@ -153,7 +216,7 @@ function DataTable({ value }: { value: unknown }) {
             <tr key={index}>
               <td className="run-data-index">{index + 1}</td>
               {recordRows ? (
-                columns.map((column) => <Cell key={column} value={(row as Record<string, unknown>)[column]} className="run-data-value" />)
+                shownColumns.map((column) => <Cell key={column} value={(row as Record<string, unknown>)[column]} className="run-data-value" />)
               ) : (
                 <Cell value={row} className="run-data-value" />
               )}
@@ -164,6 +227,11 @@ function DataTable({ value }: { value: unknown }) {
       {rows.length > shown ? (
         <button type="button" className="insp-btn run-data-more" onClick={() => setShown((count) => count + RUN_DATA_ROW_PAGE)}>
           Show {Math.min(RUN_DATA_ROW_PAGE, rows.length - shown)} more of {rows.length} items
+        </button>
+      ) : null}
+      {internalColumns > 0 ? (
+        <button type="button" className="run-data-internal" onClick={() => setShowInternal(!showInternal)} aria-pressed={showInternal}>
+          {showInternal ? "Hide internal fields" : `Show ${internalColumns} internal field${internalColumns === 1 ? "" : "s"}`}
         </button>
       ) : null}
     </>
@@ -196,9 +264,11 @@ function JsonBlock({ value }: { value: unknown }) {
 
 /** One value of a run, as a table, JSON or inferred schema. */
 export function RunDataView({ value, label }: { value: unknown; label: string }) {
-  const [mode, setMode] = useState<DataViewMode>(() => defaultMode(value));
+  const pane = useContext(RunDataPaneContext);
+  const [localMode, setMode] = useState<DataViewMode>(() => defaultMode(value));
+  const mode = pane ? pane.mode : localMode;
   const structured = value !== null && typeof value === "object";
-  const modes: Array<{ key: DataViewMode; text: string }> = structured
+  const modes: Array<{ key: DataViewMode; text: string }> = structured && !pane
     ? [
         { key: "table", text: "Table" },
         { key: "json", text: "JSON" },
@@ -265,7 +335,7 @@ function AttachmentNote({
   );
 }
 
-export function RunStatusLine({ result }: { result: RunNodeResult }) {
+export function RunStatusLine({ result, title }: { result: RunNodeResult; title?: string }) {
   const parts: string[] = [];
   if (result.status === "success" || (result.status === "error" && result.output !== undefined)) {
     parts.push(formatItemCount(outputItemCount(result.output)));
@@ -273,12 +343,13 @@ export function RunStatusLine({ result }: { result: RunNodeResult }) {
   const duration = result.status === "running" || result.status === "skipped" ? undefined : formatRunDuration(result.durationMs);
   if (duration) parts.push(duration);
   return (
-    <div className={`run-data-status run-data-status-${result.status}`} data-testid="run-data-status">
+    <div className={`run-data-status run-data-status-${result.status}`} data-testid="run-data-status" title={title}>
       <span className="run-data-status-dot" aria-hidden="true" />
       <strong>{result.status}</strong>
       {parts.map((part) => (
         <span key={part}> · {part}</span>
       ))}
+      {title ? <span className="sr-only">. {title}</span> : null}
     </div>
   );
 }
@@ -407,7 +478,6 @@ export function NodeRunOutput({ result, labelFor, onOpenNode, nodeExists = ALWAY
   return (
     <div className="run-data-output">
       {notFromRunBlock}
-      <RunStatusLine result={result} />
       {usedPinnedData(result) ? (
         <p className="run-data-label run-data-label-pinned" data-testid="run-data-pinned">
           This run reused the node's pinned data: the node did not run.
@@ -454,7 +524,6 @@ interface RunStepBarProps {
   currentId: string;
   labelFor: (nodeId: string) => string;
   onStep: (nodeId: string) => void;
-  runLabel?: string;
   /** False while something else holds the keyboard (for example the unsaved-changes prompt). */
   keysEnabled?: boolean;
 }
@@ -466,7 +535,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 /** Previous / next node of the run, without closing the inspector (Alt+[ and Alt+]). */
-export function RunStepBar({ steps, currentId, labelFor, onStep, runLabel, keysEnabled = true }: RunStepBarProps) {
+export function RunStepBar({ steps, currentId, labelFor, onStep, keysEnabled = true }: RunStepBarProps) {
   const index = steps.indexOf(currentId);
   const previous = index > 0 ? steps[index - 1] : undefined;
   const next = index >= 0 && index < steps.length - 1 ? steps[index + 1] : undefined;
@@ -495,11 +564,10 @@ export function RunStepBar({ steps, currentId, labelFor, onStep, runLabel, keysE
         title="Previous step (Alt+[)"
         aria-label={previous ? `Previous step: ${labelFor(previous)}` : "Previous step"}
       >
-        ‹ Prev
+        <span aria-hidden="true">‹</span>
       </button>
       <span className="run-steps-pos" aria-live="polite">
-        {index >= 0 ? `Step ${index + 1} of ${steps.length}` : `Not a step of this run (${steps.length} steps)`}
-        {runLabel ? <span className="run-steps-run"> · {runLabel}</span> : null}
+        {index >= 0 ? `Step ${index + 1} of ${steps.length}` : `Not in this run`}
       </span>
       <button
         type="button"
@@ -512,7 +580,7 @@ export function RunStepBar({ steps, currentId, labelFor, onStep, runLabel, keysE
         title="Next step (Alt+])"
         aria-label={next ? `Next step: ${labelFor(next)}` : index < 0 ? `First step: ${labelFor(steps[0]!)}` : "Next step"}
       >
-        Next ›
+        <span aria-hidden="true">›</span>
       </button>
     </nav>
   );

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ReactFlowProvider, type NodeProps } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
-import { NodeRunInput, NodeRunOutput, RUN_DATA_JSON_LIMIT, RUN_DATA_ROW_PAGE, RunDataView, RunStepBar, type RunNodeResult } from "./NodeRunData";
+import { NodeRunInput, NodeRunOutput, RUN_DATA_JSON_LIMIT, RUN_DATA_ROW_PAGE, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
 import { WorkflowCanvasNode } from "./WorkflowCanvasNode";
 
 const T0 = "2026-01-01T00:00:00.000Z";
@@ -26,6 +26,22 @@ const sortResult: RunNodeResult = {
 };
 
 describe("RunDataView", () => {
+  it("hides only the runtime's own keys; other keys that start with _ are data", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<RunDataView value={{ _id: "a1", _score: 2, name: "Ada", _telemetry: { ms: 3 } }} label="Output" />);
+    const rowNames = () => within(screen.getByRole("table")).getAllByRole("rowheader").map((cell) => cell.textContent);
+    expect(rowNames()).toEqual(["_id", "_score", "name"]);
+    await user.click(screen.getByRole("button", { name: "Show 1 internal field" }));
+    expect(rowNames()).toContain("_telemetry");
+    unmount();
+
+    render(<RunDataView value={[{ _id: 1, sku: "A", _branchHandle: "x" }]} label="Rows" />);
+    const headers = () => within(screen.getByRole("table")).getAllByRole("columnheader").map((cell) => cell.textContent);
+    expect(headers()).toEqual(["#", "_id", "sku"]);
+    await user.click(screen.getByRole("button", { name: "Show 1 internal field" }));
+    expect(headers()).toEqual(["#", "_id", "sku", "_branchHandle"]);
+  });
+
   it("shows arrays of records as a table and switches to JSON and schema", async () => {
     const user = userEvent.setup();
     render(<RunDataView value={[{ id: 1, sku: "A" }, { id: 2, sku: "B" }]} label="Output" />);
@@ -123,10 +139,16 @@ describe("NodeRunInput", () => {
 });
 
 describe("NodeRunOutput", () => {
-  it("shows status, item count and duration with the real output", () => {
+  it("shows the real output, and leaves the status to the inspector header", () => {
     render(<NodeRunOutput result={sortResult} labelFor={labelFor} />);
-    expect(screen.getByTestId("run-data-status")).toHaveTextContent("success · 2 items · 12 ms");
     expect(screen.getByText("items (2)")).toBeInTheDocument();
+    expect(screen.queryByTestId("run-data-status")).toBeNull();
+  });
+
+  it("sums up status, item count and duration in one line", () => {
+    render(<RunStatusLine result={sortResult} title="Run success" />);
+    expect(screen.getByTestId("run-data-status")).toHaveTextContent("success · 2 items · 12 ms");
+    expect(screen.getByTestId("run-data-status")).toHaveAttribute("title", "Run success");
   });
 
   it("shows an error with the input it failed on", () => {
@@ -153,7 +175,7 @@ describe("NodeRunOutput", () => {
     render(<NodeRunOutput result={sortResult} labelFor={labelFor} notFromRun={{ label: "Code test result, not from a workflow run.", content: <span>test value</span> }} />);
     expect(screen.getByTestId("run-data-not-from-run")).toBeInTheDocument();
     expect(screen.getByText("test value")).toBeInTheDocument();
-    expect(screen.getByTestId("run-data-status")).toHaveTextContent("success · 2 items");
+    expect(screen.getByText("items (2)")).toBeInTheDocument();
   });
 
   it("says when the run reused pinned data", () => {
@@ -170,8 +192,8 @@ describe("NodeRunOutput", () => {
 describe("RunStepBar", () => {
   it("steps to the previous and next node of the run by button and Alt+[ / Alt+]", async () => {
     const onStep = vi.fn();
-    render(<RunStepBar steps={["start", "sort", "fail"]} currentId="sort" labelFor={labelFor} onStep={onStep} runLabel="run success" />);
-    expect(screen.getByRole("navigation", { name: "Run steps" })).toHaveTextContent("Step 2 of 3 · run success");
+    render(<RunStepBar steps={["start", "sort", "fail"]} currentId="sort" labelFor={labelFor} onStep={onStep} />);
+    expect(screen.getByRole("navigation", { name: "Run steps" })).toHaveTextContent("Step 2 of 3");
     await userEvent.click(screen.getByRole("button", { name: "Previous step: Orders in" }));
     expect(onStep).toHaveBeenLastCalledWith("start");
     await userEvent.click(screen.getByRole("button", { name: "Next step: fail" }));

@@ -27,8 +27,10 @@ import { isNumberOrTemplateSchema, numberOrTemplateText, parseNumberOrTemplate }
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
-import { NodeRunInput, NodeRunOutput, RunDataView, RunStepBar, type RunNodeResult } from "./NodeRunData";
-import { hasTestData, runStepOrder } from "../lib/run-data";
+import { NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
+import { DataPane, PaneSeparator, type PaneMenuItem } from "./InspectorPane";
+import { AdvancedFields, HelpHint, countSet } from "./InspectorDisclosure";
+import { attachmentUse, hasTestData, runStepOrder } from "../lib/run-data";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields, GuardRevealFields } from "./GuardNodeConfigFields";
@@ -158,8 +160,57 @@ export interface NodeInspectorProps {
 
 type NodeConfigModalProps = NodeInspectorProps;
 
-type InspectorTab = "parameters" | "input" | "output" | "trace";
+type InspectorTab = "parameters" | "input" | "output" | "settings" | "trace";
 type InspectorLayout = "split" | "tabs";
+
+/** Widths (px) and collapsed state of the Input and Output panes in the side-by-side layout, remembered per browser. */
+interface PaneLayout {
+  inputWidth: number;
+  outputWidth: number;
+  inputCollapsed: boolean;
+  outputCollapsed: boolean;
+}
+
+const PANE_LAYOUT_STORAGE_KEY = "l2m:inspector-panes";
+const PANE_MIN_WIDTH = 240;
+const PANE_MAX_WIDTH = 720;
+/** The Parameters column never gets narrower than this; the data panes give way first. */
+const MIDDLE_MIN_WIDTH = 320;
+/** Matches --overlay-dur, the inspector's leave animation (tokens.css). */
+const INSPECTOR_CLOSE_MS = 160;
+/** Layers that open above the inspector and keep their own focus. */
+const INSPECTOR_UPPER_LAYERS =
+  '[aria-modal="true"]:not(.insp), [role="alertdialog"], .pg-modal-backdrop, .mcp-drawer, .cmdk-overlay, .shortcuts-overlay, .idle-warning-backdrop';
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])';
+const PANE_SEPARATOR_WIDTH = 5;
+const PANE_RAIL_WIDTH = 34;
+const DEFAULT_PANE_LAYOUT: PaneLayout = { inputWidth: 360, outputWidth: 380, inputCollapsed: false, outputCollapsed: false };
+
+function readStoredPaneLayout(): PaneLayout {
+  try {
+    const raw = window.localStorage.getItem(PANE_LAYOUT_STORAGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Partial<PaneLayout>) : {};
+    const width = (value: unknown, fallback: number) =>
+      typeof value === "number" && Number.isFinite(value) ? Math.min(PANE_MAX_WIDTH, Math.max(PANE_MIN_WIDTH, value)) : fallback;
+    return {
+      inputWidth: width(parsed.inputWidth, DEFAULT_PANE_LAYOUT.inputWidth),
+      outputWidth: width(parsed.outputWidth, DEFAULT_PANE_LAYOUT.outputWidth),
+      inputCollapsed: parsed.inputCollapsed === true,
+      outputCollapsed: parsed.outputCollapsed === true
+    };
+  } catch {
+    return DEFAULT_PANE_LAYOUT;
+  }
+}
+
+function storePaneLayout(layout: PaneLayout): void {
+  try {
+    window.localStorage.setItem(PANE_LAYOUT_STORAGE_KEY, JSON.stringify(layout));
+  } catch {
+    // Storage can be unavailable (private mode); the layout then lasts for this session only.
+  }
+}
 
 const INSPECTOR_LAYOUT_STORAGE_KEY = "l2m:inspector-layout";
 /** Narrowest window that gets the side-by-side Input | Parameters | Output layout by default. */
@@ -233,6 +284,52 @@ function stableStringify(value: unknown): string {
     }
     return inner;
   });
+}
+
+/**
+ * The config the inspector starts from: the stored config plus the defaults its fields show. An MCP Tool node with an
+ * inline connection gets its server, tool and connection defaults; an Agent Orchestrator gets the max-iterations value
+ * the field shows (validation requires one). The saved workflow changes only on Save, and the fill alone does not mark
+ * the node as edited: isDirty compares against this same fill.
+ */
+export function withOpenDefaults(
+  nodeType: string,
+  initialConfig: Record<string, unknown>,
+  firstServerId: string | undefined
+): Record<string, unknown> {
+  const usesRegisteredServer =
+    typeof initialConfig.registryServerId === "string" && initialConfig.registryServerId.trim().length > 0;
+  // A registered server owns its connection, so don't fill in inline defaults for it.
+  if (nodeType === "mcp_tool" && !usesRegisteredServer) {
+    const baseConnection = asRecord(initialConfig.connection);
+    return {
+      ...initialConfig,
+      serverId:
+        typeof initialConfig.serverId === "string" && initialConfig.serverId.trim()
+          ? initialConfig.serverId
+          : (firstServerId ?? "mock-mcp"),
+      toolName:
+        typeof initialConfig.toolName === "string" && initialConfig.toolName.trim() ? initialConfig.toolName : "__all__",
+      connection: {
+        endpoint:
+          typeof baseConnection.endpoint === "string" && baseConnection.endpoint.trim()
+            ? baseConnection.endpoint
+            : "http://127.0.0.1:7001/mcp",
+        transport:
+          typeof baseConnection.transport === "string" && baseConnection.transport.trim()
+            ? baseConnection.transport
+            : "http_streamable",
+        authType:
+          typeof baseConnection.authType === "string" && baseConnection.authType.trim() ? baseConnection.authType : "none",
+        ...baseConnection
+      }
+    };
+  }
+  if (nodeType === "agent_orchestrator" && typeof initialConfig.maxIterations !== "number") {
+    // Also in place of a stored non-number, which the field cannot show either.
+    return { ...initialConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS };
+  }
+  return initialConfig;
 }
 
 function stripAgentOnlyKeys(nodeType: string, value: Record<string, unknown>): Record<string, unknown> {
@@ -462,17 +559,6 @@ function withCurrentModelOption(options: ModelOption[], currentValue: string, em
  * (a `cfg-tip`-styled card). Built on `<details>` so it stays accessible
  * (keyboard + screen reader) without any local state.
  */
-function HelpHint({ children }: { children: React.ReactNode }) {
-  return (
-    <details className="cfg-help">
-      <summary aria-label="Show help" title="Show help">
-        ?
-      </summary>
-      <div className="cfg-help-body cfg-tip">{children}</div>
-    </details>
-  );
-}
-
 function FieldLabel({ label, help }: { label: string; help?: React.ReactNode }) {
   return (
     <span className="cfg-field-label">
@@ -769,7 +855,8 @@ function ExpressionField({
   onChange,
   rows = 3,
   mode = "expression",
-  previewContext
+  previewContext,
+  help
 }: {
   label: string;
   value: string;
@@ -777,12 +864,17 @@ function ExpressionField({
   rows?: number;
   mode?: "expression" | "template";
   previewContext?: ExpressionPreviewContext;
+  help?: React.ReactNode;
 }) {
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [formatError, setFormatError] = useState("");
   // The scope tip shows under the template field being edited only, not under every field of the node.
   const [editing, setEditing] = useState(false);
+  // The helper chips show only while the field (or one of its chips) has focus.
+  const [focusWithin, setFocusWithin] = useState(false);
+  // A preview that only repeats the text typed adds nothing; it shows when the template resolved to something else.
+  const showPreview = Boolean(previewError) || (Boolean(previewText) && previewText.trim() !== value.trim());
   const showJsonFormat = shouldOfferJsonFormatting(label);
 
   useEffect(() => {
@@ -825,9 +917,15 @@ function ExpressionField({
   }, [mode, previewContext, value]);
 
   return (
-    <div className="cfg-field expression-field">
+    <div
+      className="cfg-field expression-field"
+      onFocus={() => setFocusWithin(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusWithin(false);
+      }}
+    >
       <div className="cfg-field-header">
-        <span>{label}</span>
+        <FieldLabel label={label} help={help} />
         {showJsonFormat && (
           <button
             type="button"
@@ -855,25 +953,29 @@ function ExpressionField({
         rows={rows}
       />
       {formatError && <div className="cfg-field-error">{formatError}</div>}
-      <div className="expression-suggestions" aria-label={`${label} suggestions`}>
-        {EXPRESSION_SUGGESTIONS.map((item) => (
-          <button
-            key={item.label}
-            type="button"
-            className="mini-btn"
-            onClick={() => onChange(value ? `${value} ${item.value}` : item.value)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
+      {focusWithin ? (
+        <div className="expression-suggestions" aria-label={`${label} suggestions`}>
+          {EXPRESSION_SUGGESTIONS.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              className="mini-btn"
+              // Keeps the focus in the field, so the chips stay while clicked.
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => onChange(value ? `${value} ${item.value}` : item.value)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {mode === "template" && editing && (
         <div className="cfg-tip" data-testid="template-scope-tip">
           <code>{"{{field}}"}</code> reads the steps connected straight into this one. For an earlier step, use{" "}
           <code>{"{{results.<nodeId>.field}}"}</code>.
         </div>
       )}
-      {(previewText || previewError) && (
+      {showPreview && (
         <div className={previewError ? "expression-preview error" : "expression-preview"}>
           <strong>Preview</strong>
           <pre>{previewError || previewText}</pre>
@@ -949,7 +1051,33 @@ export function NodeInspector({
   const [nodeDisabled, setNodeDisabled] = useState<boolean>(Boolean(node.data.disabled));
   const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
   const [activeTab, setActiveTab] = useState<InspectorTab>("parameters");
+  // A new node starts from its definition's sample config: those values count as defaults on the Advanced sections.
+  const sampleConfig = useMemo(() => asRecord(getNodeDefinition(node.data.nodeType)?.sampleConfig), [node.data.nodeType]);
+  const sampleProvider = asRecord(sampleConfig.provider);
   const [layout, setLayout] = useState<InspectorLayout>("tabs");
+  const [panes, setPanesState] = useState<PaneLayout>(() => (typeof window === "undefined" ? DEFAULT_PANE_LAYOUT : readStoredPaneLayout()));
+  const panesRef = useRef(panes);
+  const setPanes = useCallback((update: (current: PaneLayout) => PaneLayout) => {
+    panesRef.current = update(panesRef.current);
+    setPanesState(panesRef.current);
+  }, []);
+  const commitPanes = useCallback(() => storePaneLayout(panesRef.current), []);
+  // The split body's width, so the panes (stored in px) never push the Parameters column or the Output pane out of view.
+  const [splitBodyWidth, setSplitBodyWidth] = useState(0);
+  const splitBodyObserver = useRef<ResizeObserver | null>(null);
+  const splitBodyRef = useCallback((element: HTMLDivElement | null) => {
+    splitBodyObserver.current?.disconnect();
+    splitBodyObserver.current = null;
+    if (!element) return;
+    setSplitBodyWidth(element.clientWidth);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setSplitBodyWidth(element.clientWidth));
+    observer.observe(element);
+    splitBodyObserver.current = observer;
+  }, []);
+  // Before any run, the empty Input and Output panes stay rails so the form gets the room; opening one keeps it open
+  // for this node. Nothing about this is stored.
+  const [emptyPanesOpen, setEmptyPanesOpen] = useState(false);
   const [inspectorWidth, setInspectorWidth] = useState<number | null>(() =>
     typeof window === "undefined" ? null : readStoredInspectorWidth()
   );
@@ -961,15 +1089,83 @@ export function NodeInspector({
   const unsavedDialogTitleId = useId();
   const keepEditingButtonRef = useRef<HTMLButtonElement | null>(null);
 
+  // Closing fades the panel and the scrim out first (not under reduced motion, and not where the browser runs no
+  // animations), then hands over to onClose.
+  const asideRef = useRef<HTMLElement | null>(null);
+  const [closing, setClosing] = useState(false);
+  const closeTimer = useRef<number | null>(null);
+  const closeWithTransition = useCallback(() => {
+    if (closeTimer.current !== null) return;
+    const aside = asideRef.current;
+    const reduceMotion =
+      typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!aside || reduceMotion || typeof aside.getAnimations !== "function") {
+      onClose();
+      return;
+    }
+    setClosing(true);
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = null;
+      onClose();
+    }, INSPECTOR_CLOSE_MS);
+  }, [onClose]);
+  useEffect(
+    () => () => {
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    },
+    []
+  );
+
+  // The panel takes focus when it opens and gives it back to the node (the last one shown) when it closes.
+  const lastInputWasKeyboard = useRef(true);
+  const nodeIdRef = useRef(node.id);
+  nodeIdRef.current = node.id;
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    asideRef.current?.focus({ preventScroll: true });
+    // Whether the last input was the keyboard: only a keyboard close puts focus (and its ring) back on the node.
+    const markKeyboard = () => {
+      lastInputWasKeyboard.current = true;
+    };
+    const markPointer = () => {
+      lastInputWasKeyboard.current = false;
+    };
+    document.addEventListener("keydown", markKeyboard, true);
+    document.addEventListener("pointerdown", markPointer, true);
+    // Focus that lands on the dimmed page (say a Tab after the focused control went away) comes back to the panel.
+    // Layers above the inspector (dialogs, the command palette) keep theirs.
+    const keepFocusInside = (event: FocusEvent) => {
+      const aside = asideRef.current;
+      const target = event.target;
+      if (!aside || !(target instanceof Element) || aside.contains(target)) return;
+      if (target.closest(INSPECTOR_UPPER_LAYERS)) return;
+      aside.focus({ preventScroll: true });
+    };
+    document.addEventListener("focusin", keepFocusInside);
+    return () => {
+      document.removeEventListener("focusin", keepFocusInside);
+      document.removeEventListener("keydown", markKeyboard, true);
+      document.removeEventListener("pointerdown", markPointer, true);
+      // A mouse or touch close leaves focus alone (the closed panel's focus falls to the page), so the node gets no
+      // focus ring; a keyboard close puts focus back on the node.
+      if (!lastInputWasKeyboard.current) return;
+      const nodeElement = document.querySelector<HTMLElement>(
+        `.react-flow__node[data-id="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(nodeIdRef.current) : nodeIdRef.current}"]`
+      );
+      const target = nodeElement ?? opener;
+      if (target && target.isConnected) target.focus({ preventScroll: true });
+    };
+  }, []);
+
   const requestClose = useCallback(
     (next?: () => void) => {
       if (!isDirtyRef.current) {
-        (next ?? onClose)();
+        (next ?? closeWithTransition)();
         return;
       }
       setPendingClose({ next });
     },
-    [onClose]
+    [closeWithTransition]
   );
 
   useImperativeHandle(controlRef, () => ({ isDirty: () => isDirtyRef.current, requestClose }), [requestClose]);
@@ -1205,46 +1401,8 @@ export function NodeInspector({
   }, [modelLookup]);
 
   useEffect(() => {
-    const initialConfig = asRecord(node.data.config);
-    const usesRegisteredServer =
-      typeof initialConfig.registryServerId === "string" && initialConfig.registryServerId.trim().length > 0;
-    // A registered server owns its connection, so don't fill in inline defaults for it.
-    if (node.data.nodeType === "mcp_tool" && !usesRegisteredServer) {
-      const baseConnection = asRecord(initialConfig.connection);
-      setConfig({
-        ...initialConfig,
-        serverId:
-          typeof initialConfig.serverId === "string" && initialConfig.serverId.trim()
-            ? initialConfig.serverId
-            : (mcpServerDefinitions[0]?.id ?? "mock-mcp"),
-        toolName:
-          typeof initialConfig.toolName === "string" && initialConfig.toolName.trim()
-            ? initialConfig.toolName
-            : "__all__",
-        connection: {
-          endpoint:
-            typeof baseConnection.endpoint === "string" && baseConnection.endpoint.trim()
-              ? baseConnection.endpoint
-              : "http://127.0.0.1:7001/mcp",
-          transport:
-            typeof baseConnection.transport === "string" && baseConnection.transport.trim()
-              ? baseConnection.transport
-              : "http_streamable",
-          authType:
-            typeof baseConnection.authType === "string" && baseConnection.authType.trim()
-              ? baseConnection.authType
-              : "none",
-          ...baseConnection
-        }
-      });
-    } else if (node.data.nodeType === "agent_orchestrator" && typeof initialConfig.maxIterations !== "number") {
-      // Validation requires maxIterations on an Agent Orchestrator: start from the value the field shows (also in place of
-      // a stored non-number, which the field cannot show either), so what the editor shows also validates once saved.
-      // The saved workflow changes only on Save, and the fill alone does not mark the node as edited (see isDirty).
-      setConfig({ ...initialConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS });
-    } else {
-      setConfig(initialConfig);
-    }
+    // The defaults filled in on open are not edits of the user's: isDirty compares against the same fill.
+    setConfig(withOpenDefaults(node.data.nodeType, asRecord(node.data.config), mcpServerDefinitions[0]?.id));
 
     setLabel(node.data.label);
     setNodeDisabled(Boolean(node.data.disabled));
@@ -1430,18 +1588,27 @@ export function NodeInspector({
   hasRunDataRef.current = hasRunData;
 
   // Opening a node that has data from the run shows that data first; the layout follows the stored choice, else
-  // side by side on a wide window when there is run data. Stepping to another node keeps the layout, and keeps the
-  // Input or Output tab when the next node has run data too.
+  // side by side on a wide window (for every node, so the panel does not change shape between nodes). Stepping to
+  // another node keeps the layout, and keeps the Input or Output tab when the next node has run data too.
   const openedRef = useRef(false);
   useEffect(() => {
+    setEmptyPanesOpen(false);
     const hasData = hasRunDataRef.current;
     if (!openedRef.current) {
       openedRef.current = true;
-      setLayout(readStoredInspectorLayout() ?? (hasData && isWideWindow() ? "split" : "tabs"));
+      setLayout(readStoredInspectorLayout() ?? (isWideWindow() ? "split" : "tabs"));
       setActiveTab(hasData ? "output" : "parameters");
       return;
     }
-    setActiveTab((current) => (hasData ? (current === "input" || current === "output" ? current : "output") : "parameters"));
+    setActiveTab((current) =>
+      current === "settings" || current === "trace"
+        ? current
+        : hasData
+          ? current === "input" || current === "output"
+            ? current
+            : "output"
+          : "parameters"
+    );
   }, [node.id]);
 
   const setProvider = (patch: Record<string, unknown>) => {
@@ -2292,7 +2459,11 @@ export function NodeInspector({
     );
   };
 
-  const renderProviderSection = () => {
+  /**
+   * The model a node calls. Provider, model, the base URL a provider needs, and the key show; an optional base URL,
+   * temperature, max tokens and the node's own rarely used fields (`advanced`) sit under Advanced.
+   */
+  const renderProviderSection = (advanced?: { content: React.ReactNode; setCount: number }) => {
     const providerId = toStringValue(provider.providerId, "ollama");
     const providerExtra = asRecord(provider.extra);
     const isAzureOpenAI = providerId === "azure_openai";
@@ -2312,6 +2483,15 @@ export function NodeInspector({
             ? "https://api.openai.com/v1"
             : "http://localhost:11434/v1";
 
+    const optionalBaseUrl = providerId === "openai" || providerId === "anthropic";
+    const baseUrlField = (
+      <TextField
+        label={baseUrlLabel}
+        value={toStringValue(provider.baseUrl)}
+        onChange={(next) => setProvider({ baseUrl: next })}
+        placeholder={baseUrlPlaceholder}
+      />
+    );
     return (
       <div className="cfg-group">
         <h4>Model</h4>
@@ -2342,14 +2522,7 @@ export function NodeInspector({
             placeholder="gpt-4o-mini"
           />
         )}
-        {!hideBaseUrl && (
-          <TextField
-            label={baseUrlLabel}
-            value={toStringValue(provider.baseUrl)}
-            onChange={(next) => setProvider({ baseUrl: next })}
-            placeholder={baseUrlPlaceholder}
-          />
-        )}
+        {!hideBaseUrl && !optionalBaseUrl && baseUrlField}
         {isAzureOpenAI && (
           <TextField
             label="API Version"
@@ -2369,6 +2542,29 @@ export function NodeInspector({
               secretRef: next ? { secretId: next } : undefined
             })
         })}
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="insp-btn"
+            onClick={() => void handleProviderTestRun()}
+            disabled={providerTestBusy}
+          >
+            {providerTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
+        </div>
+        {providerTestError && <div className="error-banner">{providerTestError}</div>}
+        <ModelAllowlistWarning message={modelAllowlistWarning} />
+        <AdvancedFields
+          setCount={
+            countSet([
+              [optionalBaseUrl ? provider.baseUrl : undefined, ""],
+              [provider.temperature, 0.2, sampleProvider.temperature],
+              [provider.maxTokens, 1024, sampleProvider.maxTokens]
+            ]) + (advanced?.setCount ?? 0)
+          }
+        >
+        {!hideBaseUrl && optionalBaseUrl && baseUrlField}
         <div className="cfg-grid-2">
           {toStringValue(provider.providerId) === "anthropic" ? (
             <OptionalNumberField
@@ -2399,19 +2595,8 @@ export function NodeInspector({
             onChange={(next) => setProvider({ maxTokens: next })}
           />
         </div>
-        <div className="cfg-inline-actions">
-          <button
-            type="button"
-            className="insp-btn"
-            onClick={() => void handleProviderTestRun()}
-            disabled={providerTestBusy}
-          >
-            {providerTestBusy ? "Testing..." : "Test Connection"}
-          </button>
-          {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
-        </div>
-        {providerTestError && <div className="error-banner">{providerTestError}</div>}
-        <ModelAllowlistWarning message={modelAllowlistWarning} />
+        {advanced?.content}
+        </AdvancedFields>
       </div>
     );
   };
@@ -2547,10 +2732,41 @@ export function NodeInspector({
   const renderAgentParameters = () => {
     return (
       <>
-        <div className="cfg-tip">
-          Tip: Attach a Chat Model on the <code>chat_model</code> port. Optionally attach Memory and one or more MCP Tool nodes on their dedicated ports.
-        </div>
+        <ExpressionField
+          label="Prompt (User Message)"
+          value={toStringValue(config.userPromptTemplate, "{{user_prompt}}")}
+          onChange={(next) => setConfig((current) => ({ ...current, userPromptTemplate: next }))}
+          rows={3}
+          mode="template"
+          previewContext={expressionPreviewContext}
+        />
 
+        <ExpressionField
+          label="System Message"
+          value={toStringValue(config.systemPromptTemplate, "{{system_prompt}}")}
+          onChange={(next) => setConfig((current) => ({ ...current, systemPromptTemplate: next }))}
+          rows={4}
+          mode="template"
+          previewContext={expressionPreviewContext}
+        />
+
+        <AdvancedFields
+          setCount={countSet([
+            [config.agentType, "tools", sampleConfig.agentType],
+            [config.serverPrompt, undefined, sampleConfig.serverPrompt],
+            [config.sessionIdTemplate, "{{session_id}}", sampleConfig.sessionIdTemplate],
+            [config.requireSpecificOutputFormat, false, sampleConfig.requireSpecificOutputFormat],
+            [config.enableFallbackModel, false, sampleConfig.enableFallbackModel],
+            [config.maxIterations, AGENT_DEFAULT_MAX_ITERATIONS, sampleConfig.maxIterations],
+            [config.toolCallingEnabled, true, sampleConfig.toolCallingEnabled],
+            [config.thinkTool, false, sampleConfig.thinkTool],
+            [config.toolMessageMaxChars, 6000, sampleConfig.toolMessageMaxChars],
+            [config.toolPayloadMaxStringChars, 400, sampleConfig.toolPayloadMaxStringChars],
+            [config.toolPayloadMaxObjectKeys, 32, sampleConfig.toolPayloadMaxObjectKeys],
+            [config.toolPayloadMaxArrayItems, 8, sampleConfig.toolPayloadMaxArrayItems],
+            [config.toolPayloadMaxDepth, 4, sampleConfig.toolPayloadMaxDepth]
+          ])}
+        >
         <SelectField
           label="Agent Type"
           value={toStringValue(config.agentType, "tools")}
@@ -2572,24 +2788,6 @@ export function NodeInspector({
               forces read-only SELECT queries and prohibits DML — pair with a Postgres MCP server.
             </>
           }
-        />
-
-        <ExpressionField
-          label="Prompt (User Message)"
-          value={toStringValue(config.userPromptTemplate, "{{user_prompt}}")}
-          onChange={(next) => setConfig((current) => ({ ...current, userPromptTemplate: next }))}
-          rows={3}
-          mode="template"
-          previewContext={expressionPreviewContext}
-        />
-
-        <ExpressionField
-          label="System Message"
-          value={toStringValue(config.systemPromptTemplate, "{{system_prompt}}")}
-          onChange={(next) => setConfig((current) => ({ ...current, systemPromptTemplate: next }))}
-          rows={4}
-          mode="template"
-          previewContext={expressionPreviewContext}
         />
 
         {renderServerPromptPicker()}
@@ -2658,7 +2856,7 @@ export function NodeInspector({
         </div>
 
         <div className="cfg-group">
-          <h4>Tool Output Limits (Advanced)</h4>
+          <h4>Tool Output Limits</h4>
           <div className="cfg-tip">
             Increase these when your MCP responses are large (for example 90k+ context flows). Higher values increase
             model context usage and can hit provider limits faster.
@@ -2742,6 +2940,7 @@ export function NodeInspector({
             />
           </div>
         </div>
+        </AdvancedFields>
       </>
     );
   };
@@ -2894,10 +3093,12 @@ export function NodeInspector({
 
     return (
       <>
-        <div className="cfg-tip">
-          Attach this MCP Tool node to an AI Agent <code>Tool</code> port to expose it. Pick a registered server to share one
-          governed connection across workflows, or configure the connection on this node.
-        </div>
+        {!(registryServerId || (registeredMcpServers?.length ?? 0) > 0) && (
+          <div className="cfg-tip">
+            Attach this MCP Tool node to an AI Agent <code>Tool</code> port to expose it. Pick a registered server to share one
+            governed connection across workflows, or configure the connection on this node.
+          </div>
+        )}
 
         {(registryServerId || (registeredMcpServers?.length ?? 0) > 0) && (
           <SelectField
@@ -2926,6 +3127,8 @@ export function NodeInspector({
             options={registryOptions}
             help={
               <>
+                Attach this MCP Tool node to an AI Agent <code>Tool</code> port to expose it. Pick a registered server to share
+                one governed connection across workflows, or configure the connection on this node.{" "}
                 Servers registered on the <strong>MCP servers</strong> page are probed on a schedule and keep their tool
                 schema history. The node uses the registry's adapter, connection and secret at run time, so editing the
                 server there updates every workflow that picks it.
@@ -3637,9 +3840,21 @@ export function NodeInspector({
           );
         })()}
 
+        <ExpressionField
+          label="Tool Args Template"
+          value={toStringValue(config.argsTemplate, "{}")}
+          onChange={(next) => setConfig((current) => ({ ...current, argsTemplate: next }))}
+          rows={3}
+          mode="template"
+          previewContext={expressionPreviewContext}
+        />
+
         {toolSelectionMode === "single" && selectedTool && (
-          <div className="cfg-group">
-            <h4>Discovered Tool Metadata</h4>
+          <details className="cfg-advanced cfg-fold" data-testid="mcp-tool-metadata">
+            <summary>
+              Tool schema: <code>{selectedTool.name}</code>
+            </summary>
+            <div className="cfg-advanced-body">
             <div className="cfg-tip">{selectedTool.description || "No description provided."}</div>
             {selectedTool.annotations && (
               <div className="cfg-tip" data-testid="mcp-tool-annotations">
@@ -3662,8 +3877,12 @@ export function NodeInspector({
               ) : null}
               <McpOutputSchema schema={selectedTool.outputSchema} />
             </div>
-          </div>
+            </div>
+          </details>
         )}
+
+        {discoveredTools.length > 0 && (
+        <AdvancedFields>
 
         {discoveredTools.length > 0 && (() => {
           const probeTool =
@@ -3761,15 +3980,8 @@ export function NodeInspector({
             </div>
           );
         })()}
-
-        <ExpressionField
-          label="Tool Args Template"
-          value={toStringValue(config.argsTemplate, "{}")}
-          onChange={(next) => setConfig((current) => ({ ...current, argsTemplate: next }))}
-          rows={3}
-          mode="template"
-          previewContext={expressionPreviewContext}
-        />
+        </AdvancedFields>
+        )}
           </>
         )}
       </>
@@ -3779,18 +3991,29 @@ export function NodeInspector({
   const renderLlmParameters = () => {
     return (
       <>
-        {renderProviderSection()}
-        <TextField
-          label="Prompt Key"
-          value={toStringValue(config.promptKey, "prompt")}
-          onChange={(next) => setConfig((current) => ({ ...current, promptKey: next }))}
-        />
-        <TextField
-          label="System Prompt Key"
-          value={toStringValue(config.systemPromptKey, "system_prompt")}
-          onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
-        />
-        {renderServerPromptPicker()}
+        {renderProviderSection({
+          setCount: countSet([
+            [config.promptKey, "prompt", sampleConfig.promptKey],
+            [config.systemPromptKey, "system_prompt", sampleConfig.systemPromptKey],
+            [config.serverPrompt, undefined, sampleConfig.serverPrompt]
+          ]),
+          content: (
+            <>
+              <TextField
+                label="Prompt Key"
+                value={toStringValue(config.promptKey, "prompt")}
+                onChange={(next) => setConfig((current) => ({ ...current, promptKey: next }))}
+                help="The input field the prompt is read from."
+              />
+              <TextField
+                label="System Prompt Key"
+                value={toStringValue(config.systemPromptKey, "system_prompt")}
+                onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
+              />
+              {renderServerPromptPicker()}
+            </>
+          )
+        })}
       </>
     );
   };
@@ -3994,25 +4217,6 @@ export function NodeInspector({
           />
         </label>
 
-        <NumberField
-          label="Timeout (ms)"
-          value={toNumberValue(config.timeout, 1500)}
-          min={1}
-          step={100}
-          onChange={(next) => setConfig((current) => ({ ...current, timeout: next }))}
-        />
-
-        <label className="cfg-field">
-          <span>Test Input (JSON Object)</span>
-          <textarea
-            className="cfg-code-editor cfg-code-editor-secondary"
-            value={codeTestInput}
-            onChange={(event) => setCodeTestInput(event.target.value)}
-            rows={7}
-            spellCheck={false}
-          />
-        </label>
-
         <div className="cfg-inline-actions">
           <button type="button" className="insp-btn" onClick={() => void handleCodeNodeTestRun()} disabled={codeTestBusy}>
             {codeTestBusy ? "Testing..." : "Test Run"}
@@ -4020,6 +4224,32 @@ export function NodeInspector({
           {codeTestResult && <span className="muted">Test completed. The result is under Output, labelled as a test.</span>}
         </div>
         {codeTestError && <div className="error-banner">{codeTestError}</div>}
+
+        <details className="cfg-advanced cfg-fold" data-testid="code-test-input">
+          <summary>Test input</summary>
+          <div className="cfg-advanced-body">
+          <label className="cfg-field">
+            <span>Test Input (JSON Object)</span>
+            <textarea
+              className="cfg-code-editor cfg-code-editor-secondary"
+              value={codeTestInput}
+              onChange={(event) => setCodeTestInput(event.target.value)}
+              rows={7}
+              spellCheck={false}
+            />
+          </label>
+          </div>
+        </details>
+
+        <AdvancedFields setCount={countSet([[config.timeout, 1500, sampleConfig.timeout]])}>
+          <NumberField
+            label="Timeout (ms)"
+            value={toNumberValue(config.timeout, 1500)}
+            min={1}
+            step={100}
+            onChange={(next) => setConfig((current) => ({ ...current, timeout: next }))}
+          />
+        </AdvancedFields>
       </>
     );
   };
@@ -4114,19 +4344,27 @@ export function NodeInspector({
           onChange={(next) => setConfig((current) => ({ ...current, path: next }))}
           placeholder="agent-demo"
         />
-        <TextField
-          label="Pass-through Fields (comma-separated)"
-          value={passThroughCsv}
-          onChange={(next) =>
-            setConfig((current) => ({
-              ...current,
-              passThroughFields: next
-                .split(",")
-                .map((item) => item.trim())
-                .filter(Boolean)
-            }))
-          }
-        />
+        <div className="cfg-tip">
+          <div>
+            <strong>Test URL</strong>
+          </div>
+          <code>{`${method} ${testUrl}`}</code>
+          <div style={{ marginTop: "8px" }}>
+            <strong>Production URL</strong>
+          </div>
+          <code>{`${method} ${productionUrl}`}</code>
+          {suggestedTestUrl && suggestedProductionUrl ? (
+            <div style={{ marginTop: "8px" }}>
+              <div><strong>Direct API URL (fallback)</strong></div>
+              <code>{`${method} ${suggestedTestUrl}`}</code>
+              <div style={{ marginTop: "6px" }} />
+              <code>{`${method} ${suggestedProductionUrl}`}</code>
+              <div style={{ marginTop: "6px" }}>
+                If app-origin URL returns 404, call direct API URL or set <code>VITE_API_BASE_URL</code>.
+              </div>
+            </div>
+          ) : null}
+        </div>
 
         <SelectField
           label="Auth Mode"
@@ -4138,25 +4376,6 @@ export function NodeInspector({
             { value: "hmac_sha256", label: "HMAC SHA256" }
           ]}
         />
-        {renderTriggerTrustField(authMode)}
-
-        <TextAreaField
-          label="Allowed Addresses (one IP or CIDR range per line; empty = any address)"
-          value={allowedIpsText}
-          rows={2}
-          onChange={(next) =>
-            setConfig((current) => {
-              const { allowedIps: _previous, ...rest } = current;
-              return next.trim() ? { ...rest, allowedIps: next.split("\n") } : rest;
-            })
-          }
-        />
-        {allowedIpsInvalid.length > 0 && (
-          <p className="cfg-tip" role="alert" data-testid="webhook-allowed-ips-invalid">
-            &apos;{allowedIpsInvalid[0]}&apos; is not an IP address or CIDR range. A list with no valid entry admits nobody.
-          </p>
-        )}
-
         {authMode === "bearer_token" && (
           <>
             <TextField
@@ -4216,6 +4435,51 @@ export function NodeInspector({
           </>
         )}
 
+        <AdvancedFields
+          setCount={countSet([
+            [config.passThroughFields, ["system_prompt", "user_prompt", "session_id", "variables"], sampleConfig.passThroughFields],
+            [config.inputTrust, undefined, sampleConfig.inputTrust],
+            [config.allowedIps, undefined, sampleConfig.allowedIps],
+            [config.idempotencyEnabled, false, sampleConfig.idempotencyEnabled],
+            [config.responseMode, "lastNode", sampleConfig.responseMode],
+            [config.responseCode, 200, sampleConfig.responseCode],
+            [config.responseBody, "", sampleConfig.responseBody]
+          ])}
+          defaultOpen={allowedIpsInvalid.length > 0 || (config.inputTrustFor !== undefined && triggerTrustState({ type: node.data.nodeType, config }) === "reset")}
+        >
+        <TextField
+          label="Pass-through Fields (comma-separated)"
+          value={passThroughCsv}
+          onChange={(next) =>
+            setConfig((current) => ({
+              ...current,
+              passThroughFields: next
+                .split(",")
+                .map((item) => item.trim())
+                .filter(Boolean)
+            }))
+          }
+        />
+
+        {renderTriggerTrustField(authMode)}
+
+        <TextAreaField
+          label="Allowed Addresses (one IP or CIDR range per line; empty = any address)"
+          value={allowedIpsText}
+          rows={2}
+          onChange={(next) =>
+            setConfig((current) => {
+              const { allowedIps: _previous, ...rest } = current;
+              return next.trim() ? { ...rest, allowedIps: next.split("\n") } : rest;
+            })
+          }
+        />
+        {allowedIpsInvalid.length > 0 && (
+          <p className="cfg-tip" role="alert" data-testid="webhook-allowed-ips-invalid">
+            &apos;{allowedIpsInvalid[0]}&apos; is not an IP address or CIDR range. A list with no valid entry admits nobody.
+          </p>
+        )}
+
         <ToggleField
           label="Idempotency Enabled"
           checked={idempotencyEnabled}
@@ -4257,28 +4521,6 @@ export function NodeInspector({
         />
 
         <div className="cfg-tip">
-          <div>
-            <strong>Test URL</strong>
-          </div>
-          <code>{`${method} ${testUrl}`}</code>
-          <div style={{ marginTop: "8px" }}>
-            <strong>Production URL</strong>
-          </div>
-          <code>{`${method} ${productionUrl}`}</code>
-          {suggestedTestUrl && suggestedProductionUrl ? (
-            <div style={{ marginTop: "8px" }}>
-              <div><strong>Direct API URL (fallback)</strong></div>
-              <code>{`${method} ${suggestedTestUrl}`}</code>
-              <div style={{ marginTop: "6px" }} />
-              <code>{`${method} ${suggestedProductionUrl}`}</code>
-              <div style={{ marginTop: "6px" }}>
-                If app-origin URL returns 404, call direct API URL or set <code>VITE_API_BASE_URL</code>.
-              </div>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="cfg-tip">
           Send JSON body with event data. Common fields: <code>user_prompt</code> (or <code>prompt</code>),
           <code>system_prompt</code>, <code>session_id</code>, <code>variables</code>.
           {authMode === "bearer_token" ? (
@@ -4298,6 +4540,7 @@ export function NodeInspector({
             </div>
           ) : null}
         </div>
+        </AdvancedFields>
       </>
     );
   };
@@ -4548,7 +4791,8 @@ export function NodeInspector({
     help: string;
   }) => {
     const showSecret = options.providerId !== "ollama";
-    const showBaseUrl = true;
+    // OpenAI and Anthropic have a default endpoint, so their base URL is an advanced override.
+    const optionalBaseUrl = options.providerId === "openai" || options.providerId === "anthropic";
     const defaultBaseUrlLabel =
       options.providerId === "openai" || options.providerId === "anthropic"
         ? "Custom Base URL (optional)"
@@ -4559,6 +4803,15 @@ export function NodeInspector({
         : options.providerId === "anthropic"
           ? "https://api.anthropic.com/v1"
           : options.baseUrlPlaceholder;
+    const baseUrlField = (
+      <TextField
+        label={options.baseUrlLabel ?? defaultBaseUrlLabel}
+        value={toStringValue(config.baseUrl)}
+        onChange={(next) => setConfig((current) => ({ ...current, baseUrl: next }))}
+        placeholder={defaultBaseUrlPlaceholder}
+        help={optionalBaseUrl ? undefined : options.help}
+      />
+    );
     return (
       <>
         {showSecret && (
@@ -4575,20 +4828,37 @@ export function NodeInspector({
               }))
           })
         )}
-        {showBaseUrl && (
-          <TextField
-            label={options.baseUrlLabel ?? defaultBaseUrlLabel}
-            value={toStringValue(config.baseUrl)}
-            onChange={(next) => setConfig((current) => ({ ...current, baseUrl: next }))}
-            placeholder={defaultBaseUrlPlaceholder}
-          />
-        )}
+        {!optionalBaseUrl && baseUrlField}
         {renderModelChoiceField({
           value: toStringValue(config.model),
           fallbackValue: options.defaultModel,
           placeholder: options.modelPlaceholder,
           onChange: (next) => setConfig((current) => ({ ...current, model: next }))
         })}
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="insp-btn"
+            onClick={() => void handleProviderTestRun()}
+            disabled={providerTestBusy}
+          >
+            {providerTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
+        </div>
+        {providerTestError && <div className="error-banner">{providerTestError}</div>}
+        <ModelAllowlistWarning message={modelAllowlistWarning} />
+        <AdvancedFields
+          setCount={countSet([
+            [optionalBaseUrl ? config.baseUrl : undefined, ""],
+            [config.temperature, 0.2, sampleConfig.temperature],
+            [config.maxTokens, 1024, sampleConfig.maxTokens],
+            [config.promptKey, "prompt", sampleConfig.promptKey],
+            [config.systemPromptKey, "system_prompt", sampleConfig.systemPromptKey],
+            [config.serverPrompt, undefined, sampleConfig.serverPrompt]
+          ])}
+        >
+        {optionalBaseUrl && baseUrlField}
         <div className="cfg-grid-2">
           {options.providerId === "anthropic" ? (
             <OptionalNumberField
@@ -4630,20 +4900,8 @@ export function NodeInspector({
           onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
         />
         {renderServerPromptPicker()}
-        <div className="cfg-tip">{options.help}</div>
-        <div className="cfg-inline-actions">
-          <button
-            type="button"
-            className="insp-btn"
-            onClick={() => void handleProviderTestRun()}
-            disabled={providerTestBusy}
-          >
-            {providerTestBusy ? "Testing..." : "Test Connection"}
-          </button>
-          {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
-        </div>
-        {providerTestError && <div className="error-banner">{providerTestError}</div>}
-        <ModelAllowlistWarning message={modelAllowlistWarning} />
+        {optionalBaseUrl ? <div className="cfg-tip">{options.help}</div> : null}
+        </AdvancedFields>
       </>
     );
   };
@@ -5714,10 +5972,8 @@ export function NodeInspector({
                 { value: "true", label: "Enabled" },
                 { value: "false", label: "Disabled" }
               ]}
+              help="The scheduler only runs this workflow when this node is an entry point and connected to downstream execution nodes."
             />
-            <div className="cfg-tip">
-              The scheduler only runs this workflow when this node is an entry point and connected to downstream execution nodes.
-            </div>
           </>
         );
       case "webhook_input":
@@ -6043,6 +6299,11 @@ export function NodeInspector({
               rows={2}
               mode="template"
               previewContext={expressionPreviewContext}
+              help={
+                <>
+                  Templates support handlebars syntax like <code>{`{{user_prompt}}`}</code> and <code>{`{{vars.API_URL}}`}</code>.
+                </>
+              }
             />
             {renderCredentialSecretField({
               fieldKey: "http_request_secret",
@@ -6056,6 +6317,14 @@ export function NodeInspector({
                   secretRef: next ? { secretId: next } : undefined
                 }))
             })}
+            <AdvancedFields
+              setCount={countSet([
+                [config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}", sampleConfig.headersTemplate],
+                [config.bodyTemplate, "", sampleConfig.bodyTemplate],
+                [config.responseType, "json", sampleConfig.responseType],
+                [config.timeoutMs, 15000, sampleConfig.timeoutMs]
+              ])}
+            >
             <ExpressionField
               label="Headers Template (JSON)"
               value={toStringValue(config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}")}
@@ -6090,9 +6359,7 @@ export function NodeInspector({
                 onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
               />
             </div>
-            <div className="cfg-tip">
-              Templates support handlebars syntax like <code>{`{{user_prompt}}`}</code> and <code>{`{{vars.API_URL}}`}</code>.
-            </div>
+            </AdvancedFields>
           </>
         );
       case "set_node": {
@@ -6549,8 +6816,12 @@ export function NodeInspector({
               rows={2}
               mode="expression"
               previewContext={expressionPreviewContext}
+              help={
+                <>
+                  A javascript expression that returns true or false. Example: <code>{`{{userScore}} > 90`}</code>
+                </>
+              }
             />
-            <div className="cfg-tip">A javascript expression that returns true or false. Example: <code>{`{{userScore}} > 90`}</code></div>
           </>
         );
       case "switch_node":
@@ -6564,6 +6835,10 @@ export function NodeInspector({
               mode="template"
               previewContext={expressionPreviewContext}
             />
+            <div className="cfg-tip">
+              Cases as a JSON array, for example{" "}
+              <code>[{`{\"value\":\"complete\",\"label\":\"complete\"}`}]</code>. Branch handles use each case <code>label</code>.
+            </div>
             <TextAreaField
               label="Cases array (JSON)"
               value={JSON.stringify(Array.isArray(config.cases) ? config.cases : [], null, 2)}
@@ -6577,16 +6852,13 @@ export function NodeInspector({
               }}
               rows={5}
             />
-            <TextField
-              label="Default Output Label"
-              value={toStringValue(config.defaultLabel, "default")}
-              onChange={(next) => setConfig((current) => ({ ...current, defaultLabel: next }))}
-            />
-            <div className="cfg-tip">
-              Define JSON array entries like
-              <code>[{`{\"value\":\"complete\",\"label\":\"complete\"}`}, {`{\"value\":\"needs_more_info\",\"label\":\"needs_more_info\"}`}]</code>.
-              Branch handles use each case <code>label</code>.
-            </div>
+            <AdvancedFields setCount={countSet([[config.defaultLabel, "default", sampleConfig.defaultLabel]])}>
+              <TextField
+                label="Default Output Label"
+                value={toStringValue(config.defaultLabel, "default")}
+                onChange={(next) => setConfig((current) => ({ ...current, defaultLabel: next }))}
+              />
+            </AdvancedFields>
           </>
         );
       case "chat_intent_router":
@@ -6708,11 +6980,13 @@ export function NodeInspector({
               mode="template"
               previewContext={expressionPreviewContext}
             />
-            <TextField
-              label="Output Key"
-              value={toStringValue(config.outputKey, "result")}
-              onChange={(next) => setConfig((current) => ({ ...current, outputKey: next }))}
-            />
+            <AdvancedFields setCount={countSet([[config.outputKey, "result", sampleConfig.outputKey]])}>
+              <TextField
+                label="Output Key"
+                value={toStringValue(config.outputKey, "result")}
+                onChange={(next) => setConfig((current) => ({ ...current, outputKey: next }))}
+              />
+            </AdvancedFields>
           </>
         );
       case "pdf_output":
@@ -8500,11 +8774,6 @@ export function NodeInspector({
       case "manual_trigger":
         return (
           <>
-            <TextField
-              label="Label"
-              value={toStringValue(config.label, "Run manually")}
-              onChange={(next) => setConfig((current) => ({ ...current, label: next }))}
-            />
             <TextAreaField
               label="Test Data (JSON)"
               value={toStringValue(
@@ -8523,9 +8792,18 @@ export function NodeInspector({
               }}
               rows={4}
             />
-            <div className="cfg-tip">
-              Trigger from the editor or POST to <code>/api/triggers/manual/&lt;workflowId&gt;</code> (builder role).
-            </div>
+            <AdvancedFields setCount={countSet([[config.label, "Run manually", sampleConfig.label]])}>
+              <TextField
+                label="Label"
+                value={toStringValue(config.label, "Run manually")}
+                onChange={(next) => setConfig((current) => ({ ...current, label: next }))}
+                help={
+                  <>
+                    Trigger from the editor or POST to <code>/api/triggers/manual/&lt;workflowId&gt;</code> (builder role).
+                  </>
+                }
+              />
+            </AdvancedFields>
           </>
         );
       case "form_trigger":
@@ -9016,16 +9294,16 @@ export function NodeInspector({
 
     return (
       <>
-        <div>
+        <section className="insp-settings-group" aria-label="Node">
+          <h4>Node</h4>
           <ToggleField
-            label="Disabled (executor skips this node and passes parent outputs through)"
+            label="Disabled"
             checked={nodeDisabled}
             onChange={setNodeDisabled}
+            help="A disabled node is skipped: the run passes its parents' output straight through."
           />
-        </div>
-        <div style={{ marginTop: 14 }}>
-          <label className="cfg-field">
-            <span>Accent color</span>
+          <div className="cfg-field">
+            <span className="cfg-field-label">Accent color</span>
             <div className="wf-color-swatch-row">
               {COLOR_OPTIONS.map((option) => (
                 <button
@@ -9035,34 +9313,55 @@ export function NodeInspector({
                   style={{ background: option.swatch === "transparent" ? undefined : option.swatch }}
                   title={option.label}
                   aria-label={`Set color ${option.label}`}
+                  aria-pressed={nodeColor === option.key}
                   onClick={() => setNodeColor(option.key)}
                 >
                   {option.swatch === "transparent" ? "∅" : ""}
                 </button>
               ))}
             </div>
-          </label>
-        </div>
-        <div style={{ marginTop: 14 }}>
-          <h3>Input Mapping</h3>
-          <div className="cfg-tip">
-            Map output keys from a previous node to input keys this node expects.
-            Example: mapping <code>answer</code> to <code>user_prompt</code> means
-            the upstream <code>answer</code> becomes <code>{"{{user_prompt}}"}</code>.
           </div>
-          {availableUpstreamKeys.length > 0 && (
-            <div className="cfg-tip" style={{ marginTop: 6 }}>
-              Available keys from last run:{" "}
-              {availableUpstreamKeys.slice(0, 20).map((key, index) => (
-                <span key={key}>{index > 0 ? ", " : ""}<code>{key}</code></span>
-              ))}
-            </div>
-          )}
-          {inputMappingRows.length === 0 && (
-            <div className="cfg-tip" style={{ opacity: 0.7, fontStyle: "italic" }}>
-              No mappings configured. Parent node outputs are merged into context as-is.
-            </div>
-          )}
+        </section>
+        <section className="insp-settings-group" aria-label="Error handling">
+          <h4>Error handling</h4>
+          <div className="cfg-grid-2">
+            <NumberField
+              label="Retries on Failure"
+              value={toNumberValue(config.retryCount, 0)}
+              min={0}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, retryCount: next }))}
+            />
+            <NumberField
+              label="Delay between Retries (ms)"
+              value={toNumberValue(config.retryDelayMs, 1000)}
+              min={0}
+              step={500}
+              onChange={(next) => setConfig((current) => ({ ...current, retryDelayMs: next }))}
+            />
+          </div>
+          <SelectField
+            label="On Error Behavior"
+            value={toStringValue(config.onError, "stop")}
+            onChange={(next) => setConfig((current) => ({ ...current, onError: next }))}
+            options={[
+              { value: "stop", label: "Stop Execution" },
+              // A gate or approval that continued past a failure would run the next step with no decision.
+              ...(node.data.nodeType === "approval_gate" || node.data.nodeType === "human_approval" ? [] : [{ value: "continue", label: "Continue Anyway" }]),
+              { value: "branch", label: "Execute Fallback Branch" }
+            ]}
+          />
+        </section>
+        <section className="insp-settings-group" aria-label="Input mapping">
+          <div className="cfg-field-label">
+            <h4>Input mapping</h4>
+            <HelpHint topic="Input mapping">
+              Map output keys from a previous node to input keys this node expects. Example: mapping <code>answer</code>{" "}
+              to <code>user_prompt</code> means the upstream <code>answer</code> becomes <code>{"{{user_prompt}}"}</code>.
+              Without mappings, parent node outputs are merged into context as-is.
+            </HelpHint>
+          </div>
+          {inputMappingRows.length === 0 && <div className="cfg-tip insp-settings-none">No mappings.</div>}
           {inputMappingRows.map((row) => (
             <div key={row.id} className="cfg-assignment-row">
               <div className="cfg-grid-2">
@@ -9098,50 +9397,42 @@ export function NodeInspector({
               </div>
             </div>
           ))}
-          <div className="cfg-inline-actions" style={{ marginTop: 6 }}>
+          <div className="cfg-inline-actions">
             <button type="button" className="header-btn" onClick={handleAddInputMapping}>Add Mapping</button>
           </div>
-        </div>
-        <div style={{ marginTop: 14 }}>
-            <h3>Advanced Resiliency</h3>
-            <NumberField
-               label="Retries on Failure"
-               value={toNumberValue(config.retryCount, 0)}
-               min={0}
-               step={1}
-               onChange={(next) => setConfig(current => ({ ...current, retryCount: next }))}
-            />
-            <NumberField
-               label="Delay between Retries (ms)"
-               value={toNumberValue(config.retryDelayMs, 1000)}
-               min={0}
-               step={500}
-               onChange={(next) => setConfig(current => ({ ...current, retryDelayMs: next }))}
-            />
-            <SelectField
-              label="On Error Behavior"
-              value={toStringValue(config.onError, "stop")}
-              onChange={(next) => setConfig((current) => ({ ...current, onError: next }))}
-              options={[
-                { value: "stop", label: "Stop Execution" },
-                // A gate or approval that continued past a failure would run the next step with no decision.
-                ...(node.data.nodeType === "approval_gate" || node.data.nodeType === "human_approval" ? [] : [{ value: "continue", label: "Continue Anyway" }]),
-                { value: "branch", label: "Execute Fallback Branch" }
-              ]}
-            />
-        </div>
-        <div style={{ marginTop: 14 }} data-testid="sensitive-output-field">
-          <h3>Data labels</h3>
+          {availableUpstreamKeys.length > 0 && (
+            <details className="run-data-context">
+              <summary>Keys available from the last run ({availableUpstreamKeys.length})</summary>
+              <div className="cfg-tip">
+                {availableUpstreamKeys.slice(0, 40).map((key, index) => (
+                  <span key={key}>{index > 0 ? ", " : ""}<code>{key}</code></span>
+                ))}
+              </div>
+            </details>
+          )}
+        </section>
+        <section className="insp-settings-group" aria-label="Data labels" data-testid="sensitive-output-field">
+          <h4>Data labels</h4>
           <ToggleField
             label="Sensitive output"
             checked={config.sensitiveOutput === true}
             onChange={(next) => setConfig((current) => withSensitiveOutput(current, next))}
             help="Mark this node's output sensitive on every run (HR records, payroll, customer data). Content rules can then keep it from leaving, without scanning the content."
           />
-        </div>
+        </section>
       </>
     );
   };
+
+  /** Settings that differ from their defaults, for the dot on the Settings tab. */
+  const settingsChanged =
+    nodeDisabled ||
+    Boolean(nodeColor) ||
+    inputMappingRows.length > 0 ||
+    toNumberValue(config.retryCount, 0) > 0 ||
+    (typeof config.retryDelayMs === "number" && config.retryDelayMs !== 1000) ||
+    toStringValue(config.onError, "stop") !== "stop" ||
+    config.sensitiveOutput === true;
 
   const getConfigForSave = () => {
     const nextConfig: Record<string, unknown> = { ...config };
@@ -9153,17 +9444,13 @@ export function NodeInspector({
   };
 
   const isDirty = useMemo(() => {
-    const storedConfig = asRecord(node.data.config);
-    // The default filled in on open is not an edit of the user's.
-    const savedConfig =
-      node.data.nodeType === "agent_orchestrator" && typeof storedConfig.maxIterations !== "number"
-        ? { ...storedConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS }
-        : storedConfig;
+    // The defaults filled in on open are not edits of the user's.
+    const savedConfig = withOpenDefaults(node.data.nodeType, asRecord(node.data.config), mcpServerDefinitions[0]?.id);
     if (label !== node.data.label) return true;
     if (nodeDisabled !== Boolean(node.data.disabled)) return true;
     if ((nodeColor ?? undefined) !== (node.data.color ?? undefined)) return true;
     return stableStringify(getConfigForSave()) !== stableStringify(stripAgentOnlyKeys(node.data.nodeType, savedConfig));
-  }, [config, label, node.data, nodeColor, nodeDisabled]);
+  }, [config, label, mcpServerDefinitions, node.data, nodeColor, nodeDisabled]);
   isDirtyRef.current = isDirty;
 
   const handleSave = () =>
@@ -9179,7 +9466,7 @@ export function NodeInspector({
     setPendingClose(null);
     if (!pending || choice === "keep") return;
     if (choice === "save") handleSave();
-    (pending.next ?? (choice === "discard" ? onClose : undefined))?.();
+    (pending.next ?? (choice === "discard" ? closeWithTransition : undefined))?.();
   };
 
   const renderSlots = () => {
@@ -9188,8 +9475,13 @@ export function NodeInspector({
     return (
       <section className="insp-section insp-slots" aria-label="Slots">
         <div className="insp-section-head">
-          <h3>Slots</h3>
-          <span className="insp-section-hint">Attached via the agent ports</span>
+          <div className="cfg-field-label">
+            <h3>Slots</h3>
+            <HelpHint topic="Slots">
+              Attach a Chat Model on the <code>chat_model</code> port. Optionally attach Memory and one or more MCP Tool nodes on
+              their dedicated ports.
+            </HelpHint>
+          </div>
         </div>
         {visibleSlots.map((slot) => {
           const attached = slots?.[slot.handle] ?? [];
@@ -9246,76 +9538,70 @@ export function NodeInspector({
         nodeExists={nodeExists}
         before={
           resolvedThisRun ? (
-            <div className="insp-resolved">
-              <strong className="insp-resolved-title">Resolved this run</strong>
+            <details className="run-data-context insp-resolved">
+              <summary>Resolved this run</summary>
               <ResolvedFieldsTable fields={resolvedThisRun} />
-            </div>
+            </details>
           ) : undefined
         }
       />
     );
   };
 
+  const pinMenuItems: PaneMenuItem[] = currentNodePinned
+    ? [{ key: "unpin", label: "Unpin output", onSelect: () => void onUnpinNodeOutput?.(node.id) }]
+    : node.data.nodeType === "approval_gate"
+      ? [
+          {
+            key: "pin",
+            label: "Pin output",
+            disabled: true,
+            note: "An Approval Gate cannot be pinned: its output only comes from a person's decision.",
+            onSelect: () => undefined
+          }
+        ]
+      : [
+          {
+            key: "pin",
+            label: "Pin output",
+            disabled: !currentNodeResult || currentNodeResult.output === undefined,
+            note: "Runs reuse pinned output instead of running this node.",
+            onSelect: () => void onPinNodeOutput?.(node.id)
+          }
+        ];
+
   const renderOutputTab = (options?: { inputBeside?: boolean }) => {
-    const pinControls = (
-      <div className="insp-row-actions">
-        {currentNodePinned ? (
-          <button className="insp-btn" type="button" onClick={() => void onUnpinNodeOutput?.(node.id)}>
-            Unpin output
-          </button>
-        ) : node.data.nodeType === "approval_gate" ? (
-          <span className="insp-note">An Approval Gate cannot be pinned: its output only comes from a person's decision.</span>
-        ) : (
-          <button
-            className="insp-btn"
-            type="button"
-            onClick={() => void onPinNodeOutput?.(node.id)}
-            disabled={!currentNodeResult || currentNodeResult.output === undefined}
-          >
-            Pin output
-          </button>
-        )}
-      </div>
-    );
     if (!showRuntimeInspection) {
-      return (
-        <>
-          <div className="insp-empty">Turn on Debug in the canvas toolbar and run the workflow to see this node's output.</div>
-          {pinControls}
-        </>
-      );
+      return <div className="insp-empty">Turn on Debug in the canvas toolbar and run the workflow to see this node's output.</div>;
     }
     return (
-      <>
-        <NodeRunOutput
-          result={currentRunResult}
-          labelFor={labelFor}
-          onOpenNode={onNavigateNode}
-          nodeExists={nodeExists}
-          pinnedOutput={currentNodePinned ? { value: currentPinnedOutput } : undefined}
-          notFromRun={
-            node.data.nodeType === "code_node" && codeTestResult
-              ? {
-                  label: "Code test result, not from a workflow run.",
-                  content: (
-                    <>
-                      <RunDataView value={codeTestResult.result} label="Code test result" />
-                      <TextAreaField
-                        label="Console Logs"
-                        value={codeTestResult.logs.length ? codeTestResult.logs.join("\n") : "No logs"}
-                        onChange={() => undefined}
-                        rows={6}
-                        readOnly
-                      />
-                    </>
-                  )
-                }
-              : undefined
-          }
-          failingInput={options?.inputBeside ? undefined : renderRunInput({ compact: true })}
-        />
-        {pinControls}
-      </>
+      <NodeRunOutput
+        result={currentRunResult}
+        labelFor={labelFor}
+        onOpenNode={onNavigateNode}
+        nodeExists={nodeExists}
+        pinnedOutput={currentNodePinned ? { value: currentPinnedOutput } : undefined}
+        notFromRun={
+          node.data.nodeType === "code_node" && codeTestResult
+            ? {
+                label: "Code test result, not from a workflow run.",
+                content: (
+                  <>
+                    <RunDataView value={codeTestResult.result} label="Code test result" />
+                    <TextAreaField
+                      label="Console Logs"
+                      value={codeTestResult.logs.length ? codeTestResult.logs.join("\n") : "No logs"}
+                      onChange={() => undefined}
+                      rows={6}
+                      readOnly
+                    />
+                  </>
+                )
+              }
+            : undefined
+        }
+        failingInput={options?.inputBeside ? undefined : renderRunInput({ compact: true })}
+      />
     );
   };
 
@@ -9466,43 +9752,167 @@ export function NodeInspector({
   const tabs: Array<{ key: InspectorTab; label: string }> = split
     ? [
         { key: "parameters", label: "Parameters" },
+        { key: "settings", label: "Settings" },
         { key: "trace", label: "Trace" }
       ]
     : [
-        { key: "parameters", label: "Parameters" },
         { key: "input", label: "Input" },
+        { key: "parameters", label: "Parameters" },
         { key: "output", label: "Output" },
+        { key: "settings", label: "Settings" },
         { key: "trace", label: "Trace" }
       ];
-  const middleTab: InspectorTab = activeTab === "trace" ? "trace" : "parameters";
+  const middleTab: InspectorTab = activeTab === "trace" || activeTab === "settings" ? activeTab : "parameters";
   const selectedTab: InspectorTab = split ? middleTab : activeTab;
   const changeLayout = (next: InspectorLayout) => {
     setLayout(next);
     storeInspectorLayout(next);
   };
   const runLabel = executionResult && showRuntimeInspection
-    ? `run ${executionResult.status === "partial" ? "in progress" : executionResult.status}${
-        executionResult.startedAt ? ` · ${new Date(executionResult.startedAt).toLocaleTimeString()}` : ""
+    ? `Run ${executionResult.status === "partial" ? "in progress" : executionResult.status}${
+        executionResult.startedAt ? `, started ${new Date(executionResult.startedAt).toLocaleTimeString()}` : ""
       }`
     : undefined;
-  const renderParametersSection = () => (
-    <>
-      {renderSlots()}
-      <section className="insp-section">{renderParameters()}</section>
-      <section className="insp-section insp-settings">
-        <div className="insp-section-head">
-          <h3>Settings</h3>
-        </div>
-        {renderSettings()}
-      </section>
-    </>
+  // The node's run status shows once, in the header. Attached nodes do not run as a step of their own.
+  const headerStatus =
+    showRuntimeInspection && currentRunResult && !attachmentUse(currentRunResult) ? (
+      <RunStatusLine result={currentRunResult} title={runLabel} />
+    ) : null;
+
+  const tabBar = (
+    <div className="insp-tabs" role="tablist" aria-label="Inspector sections">
+      {tabs.map((tab) => (
+        <button
+          key={tab.key}
+          type="button"
+          role="tab"
+          aria-selected={selectedTab === tab.key}
+          className={selectedTab === tab.key ? "insp-tab active" : "insp-tab"}
+          onClick={() => setActiveTab(tab.key)}
+        >
+          {tab.label}
+          {tab.key === "settings" && settingsChanged ? (
+            <span className="insp-tab-dot" title="Some settings differ from the defaults">
+              <span className="sr-only"> (changed)</span>
+            </span>
+          ) : null}
+        </button>
+      ))}
+    </div>
   );
 
+  const renderMiddle = (tab: InspectorTab) => {
+    if (tab === "settings") {
+      return <section className="insp-section insp-settings">{renderSettings()}</section>;
+    }
+    if (tab === "trace") {
+      return <section className="insp-section">{renderTraceTab()}</section>;
+    }
+    return (
+      <>
+        {renderSlots()}
+        <section className="insp-section insp-params">{renderParameters()}</section>
+      </>
+    );
+  };
+
+  const panesQuiet = !hasRunData && !currentNodePinned && !codeTestResult && !emptyPanesOpen;
+  const inputCollapsed = panes.inputCollapsed || panesQuiet;
+  const outputCollapsed = panes.outputCollapsed || panesQuiet;
+  const togglePane = (key: "inputCollapsed" | "outputCollapsed") => {
+    if (panesQuiet) {
+      setEmptyPanesOpen(true);
+      if (panes[key]) setPanes((current) => ({ ...current, [key]: false }));
+    } else {
+      setPanes((current) => ({ ...current, [key]: !current[key] }));
+    }
+    commitPanes();
+  };
+
+  // Pane widths that fit the body: when the stored widths leave the Parameters column less than its minimum, both panes
+  // shrink in proportion (not below their own minimum). The stored widths stay, for a wider window later.
+  const paneBudget =
+    splitBodyWidth -
+    MIDDLE_MIN_WIDTH -
+    (inputCollapsed ? PANE_RAIL_WIDTH : PANE_SEPARATOR_WIDTH) -
+    (outputCollapsed ? PANE_RAIL_WIDTH : PANE_SEPARATOR_WIDTH);
+  const requestedInput = inputCollapsed ? 0 : panes.inputWidth;
+  const requestedOutput = outputCollapsed ? 0 : panes.outputWidth;
+  const paneScale =
+    splitBodyWidth > 0 && requestedInput + requestedOutput > paneBudget ? Math.max(0, paneBudget) / (requestedInput + requestedOutput) : 1;
+  const inputWidth = Math.max(PANE_MIN_WIDTH, Math.floor(panes.inputWidth * paneScale));
+  const outputWidth = Math.max(PANE_MIN_WIDTH, Math.floor(panes.outputWidth * paneScale));
+  const paneMax = (otherWidth: number) =>
+    splitBodyWidth > 0 ? Math.min(PANE_MAX_WIDTH, Math.max(PANE_MIN_WIDTH, paneBudget - otherWidth)) : PANE_MAX_WIDTH;
+  const inputMax = paneMax(outputCollapsed ? 0 : outputWidth);
+  const outputMax = paneMax(inputCollapsed ? 0 : inputWidth);
+
+  const inputPane = (collapsible: boolean) => (
+    <DataPane
+      title="Input"
+      collapsed={collapsible && inputCollapsed}
+      onToggleCollapsed={collapsible ? () => togglePane("inputCollapsed") : undefined}
+    >
+      {renderRunInput()}
+    </DataPane>
+  );
+  const outputPane = (collapsible: boolean) => (
+    <DataPane
+      title="Output"
+      collapsed={collapsible && outputCollapsed}
+      onToggleCollapsed={collapsible ? () => togglePane("outputCollapsed") : undefined}
+      meta={currentNodePinned ? <span className="insp-pane-pinned">Pinned</span> : undefined}
+      actions={pinMenuItems}
+    >
+      {renderOutputTab({ inputBeside: collapsible && !inputCollapsed })}
+    </DataPane>
+  );
+
+  // Tab and Shift+Tab stay inside the panel (inside the unsaved-changes prompt while it is open).
+  const trapFocus = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Tab" || event.defaultPrevented) return;
+    const aside = asideRef.current;
+    if (!aside) return;
+    const scope = aside.querySelector<HTMLElement>(".insp-unsaved") ?? aside;
+    const focusable = Array.from(scope.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+      (element) => !element.closest("[hidden], details:not([open]) > :not(summary)")
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || active === aside || !scope.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !scope.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  const splitColumns = [
+    inputCollapsed ? "var(--insp-rail-w)" : `${Math.min(inputWidth, inputMax)}px`,
+    inputCollapsed ? "0px" : "var(--insp-sep-w)",
+    `minmax(${MIDDLE_MIN_WIDTH}px, 1fr)`,
+    outputCollapsed ? "0px" : "var(--insp-sep-w)",
+    outputCollapsed ? "var(--insp-rail-w)" : `${Math.min(outputWidth, outputMax)}px`
+  ].join(" ");
+
   return (
+    <>
+    {/* The dimmed page behind the panel: a click closes the inspector (unsaved edits are confirmed first). */}
+    <div className={closing ? "insp-scrim closing" : "insp-scrim"} aria-hidden="true" data-testid="insp-scrim" onClick={() => requestClose()} />
     <aside
-      className={`insp${isAgentNode ? " insp-agent" : ""}${split ? " insp-split" : ""}`}
+      ref={asideRef}
+      className={`insp${isAgentNode ? " insp-agent" : ""}${split ? " insp-split" : ""}${closing ? " closing" : ""}`}
       role="dialog"
+      aria-modal="true"
       aria-label={`Inspect ${label || node.data.label}`}
+      tabIndex={-1}
+      onKeyDown={trapFocus}
       style={inspectorWidth !== null && !split ? { width: inspectorWidth } : undefined}
     >
       {split ? null : (
@@ -9528,78 +9938,83 @@ export function NodeInspector({
           />
           <div className="insp-sub">
             <span>{node.data.nodeType}</span>
-            <span className="insp-sub-sep" aria-hidden="true">
-              ·
+            <span className="insp-node-id" title="Node id">
+              <span className="sr-only">Node id </span>
+              {node.id}
             </span>
-            <span>{node.id}</span>
           </div>
+        </div>
+        <div className="insp-head-run">
+          {headerStatus}
+          {showRuntimeInspection && onNavigateNode && runSteps.length > 0 ? (
+            <RunStepBar steps={runSteps} currentId={node.id} labelFor={labelFor} onStep={onNavigateNode} keysEnabled={!pendingClose} />
+          ) : null}
         </div>
         <button
           type="button"
-          className="insp-btn insp-layout-toggle"
+          className="insp-icon-btn insp-layout-toggle"
           aria-pressed={split}
           onClick={() => changeLayout(split ? "tabs" : "split")}
           aria-label="Show Input, Parameters and Output side by side"
-          title={split ? "Showing Input, Parameters and Output side by side. Click for tabs." : "Show Input, Parameters and Output side by side"}
+          title={split ? "Side by side. Click for tabs." : "Show Input, Parameters and Output side by side"}
         >
-          Split
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" />
+            <path d="M6 3v10M10 3v10" stroke="currentColor" />
+          </svg>
         </button>
-        <button className="insp-btn accent insp-run" type="button" onClick={onExecuteStep}>
-          Run this node
+        <button className="insp-btn accent insp-run" type="button" onClick={onExecuteStep} title="Run this node with the data it received">
+          Run node
         </button>
         <button type="button" className="insp-close" aria-label="Close inspector" onClick={() => requestClose()}>
           ×
         </button>
       </header>
 
-      <div className="insp-tabbar">
-        <div className="insp-tabs" role="tablist" aria-label="Inspector sections">
-          {tabs.map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              role="tab"
-              aria-selected={selectedTab === tab.key}
-              className={selectedTab === tab.key ? "insp-tab active" : "insp-tab"}
-              onClick={() => setActiveTab(tab.key)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-        {showRuntimeInspection && onNavigateNode && runSteps.length > 0 ? (
-          <RunStepBar
-            steps={runSteps}
-            currentId={node.id}
-            labelFor={labelFor}
-            onStep={onNavigateNode}
-            runLabel={runLabel}
-            keysEnabled={!pendingClose}
-          />
-        ) : null}
-      </div>
-
       {split ? (
-        <div className="insp-body insp-split-body">
-          <section className="insp-section insp-split-col insp-split-input" aria-label="Input">
-            <h3 className="insp-split-title">Input</h3>
-            {renderRunInput()}
-          </section>
-          <div className="insp-split-col insp-split-middle">
-            {middleTab === "parameters" ? renderParametersSection() : <section className="insp-section">{renderTraceTab()}</section>}
+        <div ref={splitBodyRef} className="insp-body insp-split-body" style={{ gridTemplateColumns: splitColumns }}>
+          {inputPane(true)}
+          {inputCollapsed ? (
+            <span aria-hidden="true" />
+          ) : (
+            <PaneSeparator
+              label="Resize input"
+              value={Math.min(inputWidth, inputMax)}
+              min={PANE_MIN_WIDTH}
+              max={inputMax}
+              direction={1}
+              onChange={(next) => setPanes((current) => ({ ...current, inputWidth: next }))}
+              onCommit={commitPanes}
+            />
+          )}
+          <div className="insp-split-middle">
+            <div className="insp-tabbar">{tabBar}</div>
+            <div className="insp-split-middle-body">{renderMiddle(middleTab)}</div>
           </div>
-          <section className="insp-section insp-split-col insp-split-output" aria-label="Output">
-            <h3 className="insp-split-title">Output</h3>
-            {renderOutputTab({ inputBeside: true })}
-          </section>
+          {outputCollapsed ? (
+            <span aria-hidden="true" />
+          ) : (
+            <PaneSeparator
+              label="Resize output"
+              value={Math.min(outputWidth, outputMax)}
+              min={PANE_MIN_WIDTH}
+              max={outputMax}
+              direction={-1}
+              onChange={(next) => setPanes((current) => ({ ...current, outputWidth: next }))}
+              onCommit={commitPanes}
+            />
+          )}
+          {outputPane(true)}
         </div>
       ) : (
-        <div className="insp-body">
-          {activeTab === "parameters" && renderParametersSection()}
-          {activeTab === "input" && <section className="insp-section">{renderRunInput()}</section>}
-          {activeTab === "output" && <section className="insp-section">{renderOutputTab()}</section>}
-          {activeTab === "trace" && <section className="insp-section">{renderTraceTab()}</section>}
-        </div>
+        <>
+          <div className="insp-tabbar">{tabBar}</div>
+          <div className="insp-body">
+            {activeTab === "input" && inputPane(false)}
+            {activeTab === "output" && outputPane(false)}
+            {(activeTab === "parameters" || activeTab === "settings" || activeTab === "trace") && renderMiddle(activeTab)}
+          </div>
+        </>
       )}
 
       <footer className="insp-foot">
@@ -9640,6 +10055,7 @@ export function NodeInspector({
         </div>
       ) : null}
     </aside>
+    </>
   );
 }
 

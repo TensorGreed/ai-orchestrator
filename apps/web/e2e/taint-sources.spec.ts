@@ -62,6 +62,8 @@ test.describe("provenance sources", () => {
       // The webhook: with no auth its input is outside content; an admin can fix it either way.
       await page.locator(".react-flow__node").filter({ hasText: "Partner hook" }).first().dblclick();
       const inspector = page.getByRole("dialog", { name: /^Inspect / });
+      // The trust setting is one of the webhook's advanced fields.
+      await inspector.getByTestId("advanced-fields").getByText("Advanced", { exact: true }).click();
       const trust = inspector.getByTestId("trigger-trust-field");
       await expect(trust.getByText(/With no auth, input counts as outside content/)).toBeVisible();
       const select = trust.getByRole("combobox", { name: "Input counts as" });
@@ -74,6 +76,8 @@ test.describe("provenance sources", () => {
 
       // The lookup node: "Sensitive output" in its settings.
       await page.locator(".react-flow__node").filter({ hasText: "Payroll lookup" }).first().dblclick();
+      // Node settings (the same for every node) are on the Settings tab.
+      await inspector.getByRole("tab", { name: "Settings" }).click();
       const sensitive = inspector.getByTestId("sensitive-output-field");
       await sensitive.scrollIntoViewIfNeeded();
       const toggle = sensitive.getByRole("button");

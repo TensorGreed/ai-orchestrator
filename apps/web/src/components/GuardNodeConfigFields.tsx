@@ -5,11 +5,12 @@
  * `keySecretRef.secretId`, never a key.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { GuardProfileSummary, GuardResolutionView } from "@ai-orchestrator/shared";
 import { fetchGuardProfiles, fetchGuardWorkflowBinding, type SecretListItem } from "../lib/api";
 import { GUARD_EDITOR_CHANNELS } from "../lib/guard-profile-edit";
 import { channelLabel } from "../lib/guard-trace";
+import { AdvancedFields, HelpHint, countSet } from "./InspectorDisclosure";
 
 type Config = Record<string, unknown>;
 type SetConfig = (update: (current: Config) => Config) => void;
@@ -19,6 +20,18 @@ const num = (value: unknown, fallback: number): number => (typeof value === "num
 const bool = (value: unknown, fallback: boolean): boolean => (typeof value === "boolean" ? value : fallback);
 
 const LABELS = ["trusted", "user", "untrusted_external", "sensitive"] as const;
+
+/** A field label with its explanation behind a `?`. */
+function LabelWithHelp({ htmlFor, label, help }: { htmlFor: string; label: string; help: ReactNode }) {
+  return (
+    <span className="cfg-field-label">
+      <label className="cfg-label" htmlFor={htmlFor}>
+        {label}
+      </label>
+      <HelpHint>{help}</HelpHint>
+    </span>
+  );
+}
 
 /**
  * `unavailable`: a provider the shared enum knows (stored configs validate)
@@ -112,9 +125,7 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
             </select>
           </div>
           <div className="cfg-field">
-            <label className="cfg-label" htmlFor="guard-input-field">
-              Input field
-            </label>
+            <LabelWithHelp htmlFor="guard-input-field" label="Input field" help="The field of the incoming item to check. Empty checks the whole item." />
             <input
               id="guard-input-field"
               className="cfg-input"
@@ -122,8 +133,19 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
               placeholder="user_prompt"
               onChange={(event) => setConfig((current) => ({ ...current, inputField: event.target.value }))}
             />
-            <div className="cfg-help">The field of the incoming item to check. Empty checks the whole item.</div>
           </div>
+        </>
+      )}
+      <AdvancedFields
+        setCount={countSet([
+          [attachedAsPort ? undefined : config.labels, []],
+          [config.approvalMessage, ""],
+          [config.timeoutMinutes, 1440],
+          [config.profileOverride, undefined]
+        ])}
+      >
+      {!attachedAsPort && (
+        <>
           <fieldset className="cfg-field">
             <legend className="cfg-label">Trust labels</legend>
             {LABELS.map((label) => (
@@ -146,9 +168,11 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
         </>
       )}
       <div className="cfg-field">
-        <label className="cfg-label" htmlFor="guard-approval-message">
-          Approval message
-        </label>
+        <LabelWithHelp
+          htmlFor="guard-approval-message"
+          label="Approval message"
+          help="Used when a rule asks for approval. The approver sees masked evidence only."
+        />
         <textarea
           id="guard-approval-message"
           className="cfg-input"
@@ -157,7 +181,6 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
           placeholder="A content rule needs approval before this content is used."
           onChange={(event) => setConfig((current) => ({ ...current, approvalMessage: event.target.value }))}
         />
-        <div className="cfg-help">Used when a rule asks for approval. The approver sees masked evidence only.</div>
       </div>
       <div className="cfg-field">
         <label className="cfg-label" htmlFor="guard-timeout">
@@ -173,9 +196,11 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
         />
       </div>
       <div className="cfg-field">
-        <label className="cfg-label" htmlFor="guard-override">
-          Rule set override (JSON, optional)
-        </label>
+        <LabelWithHelp
+          htmlFor="guard-override"
+          label="Rule set override (JSON, optional)"
+          help="Merged over the chosen rule set for this node only. An enforced project rule set still runs first."
+        />
         <textarea
           id="guard-override"
           className="cfg-input cfg-code"
@@ -204,8 +229,9 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
             }
           }}
         />
-        {overrideError ? <div className="cfg-error">{overrideError}</div> : <div className="cfg-help">Merged over the chosen rule set for this node only. An enforced project rule set still runs first.</div>}
+        {overrideError ? <div className="cfg-error">{overrideError}</div> : null}
       </div>
+      </AdvancedFields>
     </>
   );
 }
@@ -330,16 +356,23 @@ export function GuardRevealFields({ config, setConfig, secrets }: { config: Conf
 
   return (
     <>
-      <div className="cfg-tip">
-        Turns protected tokens in one field back into the original values, only for the data classes the rule set&apos;s reveal rules allow whoever started
-        the run. Nobody may reveal unless a rule says so. Webhook, chat and schedule runs never match role or user rules. Revealed values count as sensitive
-        again, so destination rules decide where they may go. Only the following steps of this run see the values: run history keeps the tokens.
-        Replays never reveal.
-      </div>
       <div className="cfg-field">
-        <label className="cfg-label" htmlFor="guard-reveal-profile">
-          Rule set
-        </label>
+        <LabelWithHelp
+          htmlFor="guard-reveal-profile"
+          label="Rule set"
+          help={
+            <>
+              Turns protected tokens in one field back into the original values, only for the data classes the rule set&apos;s reveal rules allow
+              whoever started the run. Nobody may reveal unless a rule says so. Webhook, chat and schedule runs never match role or user rules. Revealed
+              values count as sensitive again, so destination rules decide where they may go. Only the following steps of this run see the values: run
+              history keeps the tokens. Replays never reveal.
+              <br />
+              <br />
+              Only rule sets bound to this workflow or its project count: a rule set chosen here reveals nothing unless it is bound. Its reveal rules decide
+              who may reveal which data classes. Only an admin can write reveal rules.
+            </>
+          }
+        />
         <select id="guard-reveal-profile" className="cfg-input" value={profileId} onChange={(event) => setConfig((current) => ({ ...current, profileId: event.target.value }))}>
           <option value="effective">Effective rule set (workflow / project binding)</option>
           {profiles.map((profile) => (
@@ -349,18 +382,28 @@ export function GuardRevealFields({ config, setConfig, secrets }: { config: Conf
           ))}
           {profileId !== "effective" && !profiles.some((profile) => profile.id === profileId) && <option value={profileId}>{profileId}</option>}
         </select>
-        <div className="cfg-help">
-          Only rule sets bound to this workflow or its project count: a rule set chosen here reveals nothing unless it is bound. Its reveal rules
-          decide who may reveal which data classes. Only an admin can write reveal rules.
-        </div>
       </div>
       <div className="cfg-field">
-        <label className="cfg-label" htmlFor="guard-reveal-field">
-          Field to reveal
-        </label>
+        <LabelWithHelp htmlFor="guard-reveal-field" label="Field to reveal" help="The field of the incoming item. Tokens in nested values are revealed too." />
         <input id="guard-reveal-field" className="cfg-input" value={str(config.inputField, "text")} placeholder="text" onChange={(event) => setConfig((current) => ({ ...current, inputField: event.target.value }))} />
-        <div className="cfg-help">The field of the incoming item. Tokens in nested values are revealed too.</div>
       </div>
+      <div className="cfg-field">
+        <label className="cfg-label" htmlFor="guard-reveal-refused">
+          When a token may not be revealed
+        </label>
+        <select id="guard-reveal-refused" className="cfg-input" value={str(config.onRefused, "keep")} onChange={(event) => setConfig((current) => ({ ...current, onRefused: event.target.value }))}>
+          <option value="keep">Keep it protected and continue</option>
+          <option value="fail">Fail the step (nothing is revealed)</option>
+        </select>
+      </div>
+      <AdvancedFields
+        setCount={countSet([
+          [config.keySecretRefs, []],
+          [config.formatPreservingClasses, []],
+          [config.approvalMessage, ""],
+          [config.timeoutMinutes, 1440]
+        ])}
+      >
       <fieldset className="cfg-field">
         <legend className="cfg-label">Encryption keys it may use</legend>
         {secrets.length === 0 && <div className="cfg-help">No secrets yet. Token vault tokens need no key.</div>}
@@ -402,18 +445,11 @@ export function GuardRevealFields({ config, setConfig, secrets }: { config: Conf
         <div className="cfg-help">Format-preserving tokens look like real values; list their classes to look them up in the vault. Empty finds tok_ tokens only.</div>
       </div>
       <div className="cfg-field">
-        <label className="cfg-label" htmlFor="guard-reveal-refused">
-          When a token may not be revealed
-        </label>
-        <select id="guard-reveal-refused" className="cfg-input" value={str(config.onRefused, "keep")} onChange={(event) => setConfig((current) => ({ ...current, onRefused: event.target.value }))}>
-          <option value="keep">Keep it protected and continue</option>
-          <option value="fail">Fail the step (nothing is revealed)</option>
-        </select>
-      </div>
-      <div className="cfg-field">
-        <label className="cfg-label" htmlFor="guard-reveal-approval">
-          Approval message
-        </label>
+        <LabelWithHelp
+          htmlFor="guard-reveal-approval"
+          label="Approval message"
+          help="Used when a reveal rule asks for approval. The approver sees data classes and counts, never values."
+        />
         <textarea
           id="guard-reveal-approval"
           className="cfg-input"
@@ -422,7 +458,6 @@ export function GuardRevealFields({ config, setConfig, secrets }: { config: Conf
           placeholder="Approve revealing these values?"
           onChange={(event) => setConfig((current) => ({ ...current, approvalMessage: event.target.value }))}
         />
-        <div className="cfg-help">Used when a reveal rule asks for approval. The approver sees data classes and counts, never values.</div>
       </div>
       <div className="cfg-field">
         <label className="cfg-label" htmlFor="guard-reveal-timeout">
@@ -437,6 +472,7 @@ export function GuardRevealFields({ config, setConfig, secrets }: { config: Conf
           onChange={(event) => setConfig((current) => ({ ...current, timeoutMinutes: Math.max(1, Number(event.target.value) || 1) }))}
         />
       </div>
+      </AdvancedFields>
     </>
   );
 }

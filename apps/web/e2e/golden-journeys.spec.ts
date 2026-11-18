@@ -104,8 +104,9 @@ test.describe("golden journeys", () => {
     await expect(runPreview).toContainText(/item/);
     await userPromptNode.dblclick();
     await expect(inspector).toBeVisible();
-    const outputPane = inspector.getByTestId("run-data-status");
-    await expect(outputPane).toContainText("success");
+    // The status shows once, in the inspector header; the output pane shows the data.
+    await expect(inspector.getByTestId("run-data-status")).toContainText("success");
+    await expect(inspector.getByRole("region", { name: "Output" })).toContainText("E2E configured prompt");
     await expect(inspector.getByRole("navigation", { name: "Run steps" })).toContainText(/Step \d+ of \d+/);
     await page.keyboard.press("Escape");
     await expect(inspector).toBeHidden();

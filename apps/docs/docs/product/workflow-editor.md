@@ -12,7 +12,7 @@ Concepts: [Workflows vs agents](/learn/agents/workflows-vs-agents) explains when
 - Drag/drop node palette
 - Node-to-node edge connections
 - Curved edges
-- Node configuration via modal
+- Node configuration in the docked inspector
 - Node delete (`Delete` key)
 - Save/import/export workflows
 - Execution logs pane and run-inputs pane
@@ -35,20 +35,42 @@ While the run is going the cards update live (running time, the step a node is o
 
 ### The node inspector
 
-Open a node to see the data of that run. With run data, the inspector opens on **Output**. **Split** shows
-**Input | Parameters | Output** side by side (the default on wide windows when the node ran); the choice is
-remembered in this browser.
+Double-click a node to open it. The inspector opens as a panel over the dimmed editor; click the dimmed area, press
+`Esc` or use the close button to return to the canvas (unsaved edits are confirmed first). On a wide window the
+inspector shows **Input | Parameters | Output** side by side,
+for every node, so it keeps its shape while you move between nodes; on a narrow window the same parts are tabs
+(the layout button in the header switches between the two, and the choice is remembered in this browser).
 
+- **The header** holds the node's name (edit it in place), its type and node id, the node's run
+  status with its item count and duration, **Previous** / **Next** step buttons and **Run node**. The status shows
+  only here.
 - **Input** is what the node received: one section per upstream node (**From** and the node's name), then the run's own
-  input fields. The run context (the editor's prompt fields, variables, webhook body, trigger) is
-  folded away underneath: it is the same for every node of the run.
-- **Output** shows the status line, then the data as a **Table** (lists become rows and columns), **JSON** or
-  **Schema**. On an error it shows the error and the input the node failed on.
+  input fields. What the node resolved in this run and the run context (the editor's prompt fields, variables,
+  webhook body, trigger) are folded away underneath: the run context is the same for every node of the run.
+- **Output** shows the data, or the error with a suggested fix when the node failed (in the tab layout the input it
+  failed on is repeated under it).
+- Each data pane has one **Table / JSON** switch. Its **⋯** menu holds the **Schema** view, **Show internal fields**
+  (the run's own bookkeeping fields, such as `_telemetry` and `_branchHandle`, are left out of tables until you ask;
+  JSON always shows them; your data's own fields, such as `_id`, always show) and, on Output, **Pin output** /
+  **Unpin output**.
+- Hide a data pane with the arrow in its header (it becomes a thin rail; click it to bring the pane back) and drag the
+  line between panes, or focus it and use the arrow keys, to resize. Both are remembered. The panes give way when the
+  window is narrow, so the parameters and the Output pane stay in view. Before a node has run, its empty Input and
+  Output panes start as rails so the parameters get the room.
+- **Parameters** shows the fields you set most. A node type's rarely used fields (for example an HTTP request's
+  headers, body and timeout, a model's temperature and max tokens, an agent's iteration and tool output limits, a
+  content rules node's approval settings) are under **Advanced**, closed by default; its title counts the fields
+  that differ from their defaults. Help for a field is behind the **?** next to its label. The expression helpers
+  under a template field show while you edit it, and its preview shows when the result differs from what you typed
+  (or the expression has an error). A code node's **Test Run** stays in view, with its test input folded under it.
+- **Settings** holds what every node has: disabled, accent colour, error handling (retries, delay, on error), input
+  mapping and data labels. A dot on the tab means one of them differs from the default.
+- **Trace** shows timing, token use, the agent's activity and tool policy decisions for the run.
 - Large values stay fast: tables show 50 rows at a time and JSON over 20,000 characters is cut until you ask for all
   of it.
 - Data that did not come from a run is labelled: pinned data says **Pinned data, not from a run**, and a code
   node's test result says so too. With no run, the inspector says there is none.
-- **Prev** and **Next** (or `Alt+[` and `Alt+]`) step through the nodes of the run in the order they started,
+- **Previous** and **Next** (or `Alt+[` and `Alt+]`) step through the nodes of the run in the order they started,
   without closing the inspector. Unsaved edits are kept or confirmed first.
 
 ### Picking a run

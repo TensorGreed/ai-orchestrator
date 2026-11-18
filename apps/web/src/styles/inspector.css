@@ -3,38 +3,75 @@
    Tokens only; see src/styles/tokens.css. Both themes come from the tokens.
    --------------------------------------------------------------------------- */
 
-/* ---- Drawer frame -------------------------------------------------------- */
-.insp {
+/* ---- Layer frame --------------------------------------------------------- */
+/* The inspector is a layer above the editor: the page behind it (canvas, toolbar, sidebar) is dimmed by a scrim,
+   and the panel is inset from the viewport edges with its own border, corners and shadow. */
+.insp-scrim {
   position: fixed;
-  top: var(--hud-h);
-  right: 0;
-  bottom: 0;
-  z-index: 24;
+  inset: 0;
+  z-index: 30;
+  background: var(--overlay-scrim);
+  animation: insp-scrim-in var(--overlay-dur) var(--ease);
+}
+.insp-scrim.closing {
+  animation: insp-scrim-out var(--overlay-dur) var(--ease) forwards;
+}
+
+.insp {
+  /* Dividers stay visible on the raised surface, and faint text stays readable (AA) on it. */
+  --line: var(--overlay-line);
+  --fg-faint: var(--overlay-fg-faint);
+  position: fixed;
+  top: var(--overlay-inset);
+  right: var(--overlay-inset);
+  bottom: var(--overlay-inset);
+  z-index: 31;
   width: var(--inspector-w);
   min-width: 320px;
-  max-width: 60vw;
+  max-width: min(60vw, calc(100vw - 2 * var(--overlay-inset)));
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   grid-template-columns: minmax(0, 1fr);
-  background: var(--bg-elev);
-  border-left: 1px solid var(--line);
-  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  background: var(--surface-overlay);
+  border: 1px solid var(--overlay-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-overlay);
   color: var(--fg);
   font-family: var(--font-body);
   font-size: var(--fs-sm);
-  animation: insp-enter var(--dur) var(--ease);
+  animation: insp-enter var(--overlay-dur) var(--ease);
+}
+.insp:focus {
+  outline: none;
+}
+.insp.closing {
+  animation: insp-leave var(--overlay-dur) var(--ease) forwards;
+  pointer-events: none;
 }
 
 @keyframes insp-enter {
-  from { transform: translateX(16px); opacity: 0; }
+  from { transform: translateY(8px) scale(0.985); opacity: 0; }
   to { transform: none; opacity: 1; }
+}
+@keyframes insp-leave {
+  from { transform: none; opacity: 1; }
+  to { transform: translateY(8px) scale(0.985); opacity: 0; }
+}
+@keyframes insp-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes insp-scrim-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 .insp-resizer {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -4px;
+  left: 0;
   width: 8px;
   cursor: col-resize;
   touch-action: none;
@@ -64,11 +101,38 @@
 /* ---- Header -------------------------------------------------------------- */
 .insp-head {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  grid-template-columns: auto minmax(120px, 1fr) auto auto auto auto;
   align-items: center;
   gap: 10px;
-  padding: 14px 14px 12px 16px;
+  padding: 10px 12px 10px 14px;
   border-bottom: 1px solid var(--line);
+  background: var(--surface-overlay-chrome);
+}
+.insp-head-run {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+/* The narrow drawer (tabs layout): the run status and steps get a row of their own under the name. */
+.insp:not(.insp-split) .insp-head {
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  row-gap: 6px;
+}
+.insp:not(.insp-split) .insp-head-run {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  justify-content: space-between;
+}
+.insp:not(.insp-split) .insp-head-run:empty {
+  display: none;
+}
+.insp-head-run .run-data-status {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--bg-elev-2);
+  white-space: nowrap;
 }
 
 .insp-glyph {
@@ -139,6 +203,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.insp-node-id {
+  color: var(--fg-faint);
+  user-select: all;
+}
+.insp-node-id::before {
+  content: "·";
+  margin-right: 6px;
+}
 .insp-sub-sep {
   color: var(--fg-faint);
   flex-shrink: 0;
@@ -147,9 +219,9 @@
 .insp-close {
   width: 30px;
   height: 30px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-sm);
-  background: transparent;
+  background: var(--overlay-control-bg);
   color: var(--fg-muted);
   font-size: 18px;
   line-height: 1;
@@ -158,8 +230,8 @@
 }
 .insp-close:hover {
   color: var(--fg);
-  border-color: var(--line-strong);
-  background: var(--bg-elev-2);
+  border-color: var(--fg-muted);
+  background: var(--overlay-control-bg-hover);
 }
 
 /* ---- Tabs ---------------------------------------------------------------- */
@@ -168,7 +240,7 @@
   gap: 2px;
   padding: 0 12px;
   border-bottom: 1px solid var(--line);
-  background: var(--bg-elev);
+  background: var(--surface-overlay);
 }
 
 .insp-tab {
@@ -491,7 +563,7 @@
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--line);
-  background: var(--bg-elev);
+  background: var(--surface-overlay-chrome);
 }
 
 /* ---- Buttons ------------------------------------------------------------- */
@@ -500,9 +572,9 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-pill);
-  background: var(--bg-elev-2);
+  background: var(--overlay-control-bg);
   color: var(--fg);
   font: 600 var(--fs-sm) / 1 var(--font-body);
   padding: 8px 14px;
@@ -511,8 +583,8 @@
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .insp-btn:hover:not(:disabled) {
-  background: var(--bg-elev-3);
-  border-color: var(--line-strong);
+  background: var(--overlay-control-bg-hover);
+  border-color: var(--fg-muted);
 }
 .insp-btn:disabled {
   opacity: 0.5;
@@ -564,9 +636,9 @@
   display: grid;
   gap: 10px;
   padding: 18px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-lg);
-  background: var(--bg-elev-2);
+  background: var(--overlay-raised);
   box-shadow: var(--shadow-md);
   color: var(--fg);
 }
@@ -592,16 +664,16 @@
   height: 7px;
   border-radius: 50%;
   background: var(--warn);
-  box-shadow: 0 0 0 2px var(--bg-elev);
+  box-shadow: 0 0 0 2px var(--surface-overlay-chrome);
 }
 
 /* Shared legacy button classes used inside the parameter forms, put on tokens here. */
 .insp .header-btn,
 .insp .mini-btn {
   appearance: none;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-pill);
-  background: var(--bg-elev-2);
+  background: var(--overlay-control-bg);
   color: var(--fg);
   font: 500 var(--fs-xs) / 1 var(--font-body);
   padding: 6px 10px;
@@ -1019,87 +1091,283 @@
 /* ---- Run data (Input / Output) ------------------------------------------- */
 .insp-tabbar {
   display: flex;
-  flex-wrap: wrap;
   align-items: stretch;
-  justify-content: space-between;
-  gap: 8px;
   border-bottom: 1px solid var(--line);
-  background: var(--bg-elev);
+  background: var(--surface-overlay);
 }
 .insp-tabbar .insp-tabs {
   border-bottom: 0;
+}
+.insp-tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  vertical-align: middle;
+  border-radius: var(--r-pill);
+  background: var(--accent);
 }
 
 .run-steps {
   display: flex;
   align-items: center;
-  margin-left: auto;
-  gap: 6px;
-  padding: 4px 12px;
+  gap: 4px;
   min-width: 0;
   font-size: var(--fs-xs);
   color: var(--fg-muted);
 }
 .run-steps-pos {
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   font-family: var(--font-mono);
 }
-.run-steps-run {
-  color: var(--fg-faint);
-}
 .run-steps-btn {
-  padding: 3px 8px;
-  font-size: var(--fs-xs);
+  min-width: 26px;
+  padding: 3px 7px;
+  font-size: var(--fs-sm);
+  line-height: 1;
 }
 
-.insp-layout-toggle {
-  padding: 7px 10px;
+/* Small square icon buttons: layout toggle, pane menu, pane collapse. */
+.insp-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font: 600 var(--fs-md) / 1 var(--font-body);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.insp-icon-btn:hover {
+  color: var(--fg);
+  background: var(--bg-elev-2);
+}
+.insp-icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.insp-icon-btn[aria-expanded="true"][aria-haspopup="menu"] {
+  color: var(--fg);
+  border-color: var(--line-strong);
 }
 .insp-layout-toggle[aria-pressed="true"] {
-  border-color: var(--accent-line);
   color: var(--accent);
 }
 
+/* ---- Side by side: Input | Parameters | Output ---------------------------- */
+.insp {
+  --insp-rail-w: 34px;
+  --insp-sep-w: 5px;
+}
 .insp.insp-split {
-  width: min(1320px, calc(100vw - 72px));
-  max-width: calc(100vw - 72px);
+  /* Centred over the editor, with the dimmed page showing all round. */
+  left: var(--overlay-inset);
+  margin-inline: auto;
+  width: min(1600px, calc(100vw - 2 * var(--overlay-inset)));
+  max-width: calc(100vw - 2 * var(--overlay-inset));
+  /* No tab row of its own: the tabs sit at the top of the middle column. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 .insp-split-body {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr) minmax(0, 1fr);
-  align-items: start;
+  /* Columns are set inline from the remembered pane widths. */
+  grid-template-rows: minmax(0, 1fr);
+  align-content: stretch;
+  align-items: stretch;
   gap: 0;
   padding: 0;
   overflow: hidden;
 }
-.insp-split-col {
-  min-height: 0;
-  max-height: 100%;
-  height: 100%;
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding: 14px 16px 20px;
-  align-content: start;
-}
 .insp-split-middle {
   display: grid;
-  gap: 18px;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
   border-left: 1px solid var(--line);
   border-right: 1px solid var(--line);
 }
-.insp-split-input,
-.insp-split-output {
-  background: var(--bg);
+.insp-split-middle-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 14px 18px 24px;
+  display: grid;
+  align-content: start;
+  gap: 18px;
 }
+
+.insp-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface-overlay-well);
+}
+.insp-body:not(.insp-split-body) > .insp-pane {
+  background: transparent;
+}
+.insp-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 37px;
+  padding: 4px 8px 4px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-overlay-chrome);
+}
+.insp-body:not(.insp-split-body) > .insp-pane .insp-pane-head {
+  padding-left: 0;
+  border-bottom: 0;
+  background: transparent;
+}
+.insp-pane-output .insp-pane-head {
+  padding-left: 14px;
+}
+.insp-pane-title {
+  margin: 0;
+}
+.insp-pane-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.insp-pane-pinned {
+  padding: 1px 7px;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-pill);
+  background: var(--warn-soft);
+  color: var(--fg);
+}
+.insp-pane-modes {
+  margin-left: auto;
+}
+.insp-pane-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 12px 14px 20px;
+}
+.insp-body:not(.insp-split-body) > .insp-pane .insp-pane-body {
+  padding: 4px 0 0;
+  overflow: visible;
+}
+.insp-pane.collapsed {
+  grid-template-rows: minmax(0, 1fr);
+}
+.insp-pane-rail {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
+  border: 0;
+  background: var(--surface-overlay-chrome);
+  color: var(--fg-muted);
+  font: 600 var(--fs-xs) / 1 var(--font-body);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.insp-pane-rail span {
+  writing-mode: vertical-rl;
+}
+.insp-pane-input .insp-pane-rail span {
+  transform: rotate(180deg);
+}
+.insp-pane-rail:hover {
+  color: var(--fg);
+  background: var(--bg-elev-2);
+}
+.insp-pane-rail:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.insp-pane-sep {
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.insp-pane-sep::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: var(--line);
+  transition: background var(--dur) var(--ease);
+}
+.insp-pane-sep:hover::after,
+.insp-pane-sep.active::after,
+.insp-pane-sep:focus-visible::after {
+  left: 1px;
+  width: 3px;
+  background: var(--accent);
+}
+.insp-pane-sep:focus-visible {
+  outline: none;
+}
+
+/* The pane "⋯" menu. */
+.insp-menu {
+  position: relative;
+}
+.insp-menu-list {
+  position: absolute;
+  z-index: 8;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 190px;
+  display: grid;
+  padding: 4px;
+  border: 1px solid var(--overlay-control-border);
+  border-radius: var(--r-md);
+  background: var(--overlay-raised);
+  box-shadow: var(--shadow-md);
+}
+.insp-menu-list button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg);
+  font: 500 var(--fs-sm) / 1.2 var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+.insp-menu-list button:hover:not(:disabled),
+.insp-menu-list button:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+.insp-menu-list button:disabled {
+  color: var(--fg-faint);
+  cursor: not-allowed;
+}
+.insp-menu-check {
+  width: 12px;
+  color: var(--accent);
+}
+
 @media (max-width: 1099px) {
   .insp-split-body {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) !important;
     overflow: auto;
   }
-  .insp-split-col {
-    height: auto;
-    max-height: none;
+  .insp-pane-sep,
+  .insp-split-body > span[aria-hidden="true"] {
+    display: none;
+  }
+  .insp-pane-body,
+  .insp-split-middle-body {
     overflow: visible;
   }
   .insp-split-middle {
@@ -1107,6 +1375,97 @@
     border-top: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
   }
+}
+
+/* ---- Settings tab and the per-node Advanced section ----------------------- */
+.insp-settings {
+  gap: 20px;
+}
+.insp-settings-group {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.insp-settings-group + .insp-settings-group {
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.insp-settings-none {
+  font-style: italic;
+}
+.cfg-advanced {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.cfg-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--fg-muted);
+  font: 600 var(--fs-xs) / 1.3 var(--font-body);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cfg-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+.cfg-advanced > summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin: 0 2px 0 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--dur) var(--ease);
+}
+.cfg-advanced[open] > summary::before {
+  transform: rotate(45deg);
+}
+.cfg-advanced > summary:hover {
+  color: var(--fg);
+}
+.cfg-advanced > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.cfg-advanced-count {
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  letter-spacing: 0;
+  text-transform: none;
+  font-weight: 500;
+}
+.cfg-advanced-body {
+  display: grid;
+  gap: 12px;
+  padding-top: 12px;
+}
+
+.run-data-internal {
+  justify-self: start;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  font: 500 var(--fs-xs) / 1.3 var(--font-body);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.run-data-internal:hover {
+  color: var(--fg);
+}
+.run-data-internal:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
 }
 
 .run-data-input,
@@ -1233,7 +1592,7 @@
 .run-data-modes {
   display: inline-flex;
   justify-self: start;
-  border: 1px solid var(--line);
+  border: 1px solid var(--overlay-control-border);
   border-radius: var(--r-sm);
   overflow: hidden;
   background: var(--bg-input);
@@ -1371,12 +1730,16 @@
 
 /* ---- Narrow viewports ---------------------------------------------------- */
 @media (max-width: 880px) {
-  .insp {
-    width: 100vw !important;
-    max-width: 100vw;
+  /* A full-screen sheet: no room for the inset. */
+  .insp,
+  .insp.insp-split {
+    inset: 0;
+    width: auto !important;
+    max-width: none;
     min-width: 0;
-    top: 0;
-    border-left: 0;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
   }
   .insp-resizer {
     display: none;
@@ -1385,7 +1748,10 @@
 
 /* ---- Reduced motion ------------------------------------------------------ */
 @media (prefers-reduced-motion: reduce) {
-  .insp {
+  .insp,
+  .insp.closing,
+  .insp-scrim,
+  .insp-scrim.closing {
     animation: none;
   }
   .insp-status-dot.running {

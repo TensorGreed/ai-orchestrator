@@ -21,6 +21,21 @@
   --line: #1c2230;
   --line-strong: #2a3344;
   --scrim: rgba(3, 5, 10, 0.72);
+  /* overlay panels (the node inspector): a raised layer above the page, over a dimmed page */
+  --surface-overlay: #121826;
+  --surface-overlay-chrome: #171f30;
+  --surface-overlay-well: #0d121d;
+  --overlay-border: #2e3a52;
+  --overlay-line: #27314a;
+  /* text and controls on an overlay panel: faint text at 4.5:1 or more and control edges at 3:1 or more against
+     every overlay surface (WCAG AA) */
+  --overlay-fg-faint: #7f89a0;
+  --overlay-control-bg: #1a2234;
+  --overlay-control-bg-hover: #222c42;
+  --overlay-control-border: #606c85;
+  --overlay-raised: #1a2234;
+  --overlay-scrim: rgba(2, 4, 8, 0.64);
+  --shadow-overlay: 0 32px 80px rgba(0, 0, 0, 0.7), 0 8px 24px rgba(0, 0, 0, 0.45);
 
   /* text */
   --fg: #e9ecf3;
@@ -108,6 +123,10 @@
   --sidebar-w-drawer: min(288px, calc(100vw - 56px));
   --hud-h: 56px;
   --inspector-w: 380px;
+  /* the gap between an overlay panel and the viewport edges, where the dimmed page shows */
+  --overlay-inset: 16px;
+  /* how long an overlay panel and its scrim take to fade in or out (the inspector's close waits for it) */
+  --overlay-dur: 160ms;
   --strip-h: 112px;
 }
 
@@ -123,6 +142,18 @@
   --line: #dde2ec;
   --line-strong: #c3cad8;
   --scrim: rgba(17, 22, 37, 0.45);
+  --surface-overlay: #ffffff;
+  --surface-overlay-chrome: #f4f6fa;
+  --surface-overlay-well: #fafbfd;
+  --overlay-border: #cbd3e1;
+  --overlay-line: #dde2ec;
+  --overlay-fg-faint: #687083;
+  --overlay-control-bg: #ffffff;
+  --overlay-control-bg-hover: #eef1f7;
+  --overlay-control-border: #878fa1;
+  --overlay-raised: #ffffff;
+  --overlay-scrim: rgba(17, 22, 37, 0.4);
+  --shadow-overlay: 0 28px 72px rgba(17, 22, 37, 0.22), 0 6px 16px rgba(17, 22, 37, 0.08);
 
   --fg: #111625;
   --fg-muted: #5c6577;
