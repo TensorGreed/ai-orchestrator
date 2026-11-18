@@ -202,7 +202,7 @@ run("MCP 2026-07-28 gateway callers across replicas", () => {
     // B's session calls twice: both writes are held, read from A's raise.
     for (const id of [2, 3]) {
       const call = await legacy(sessionId, { id, method: "tools/call", params: { name: "mock__calculator", arguments: { expression: "2+2" } } });
-      expect(call.json().error, call.body).toMatchObject({ code: -32030 });
+      expect(call.json().error, call.body).toMatchObject({ code: -31030 });
     }
     // The reads did not renew the client's mark: B's panel still shows the stateless caller as seen ten minutes ago.
     const [stored] = await b.store.listMcpGatewayLabelMarks({ clientId: client.id }, new Date().toISOString());

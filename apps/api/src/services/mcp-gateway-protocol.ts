@@ -39,30 +39,52 @@ export const JSON_RPC_ERRORS = {
   /** Implementation-defined server error used for "request cancelled". */
   requestCancelled: -32800,
   /**
-   * Phase 10.7 — implementation-defined server error: the call was refused
-   * before it reached the upstream server (rate limit, concurrency cap or an
-   * open circuit breaker). `data.retryAfterMs` says when to try again.
+   * Phase 10.7 — the gateway's own error: the call was refused before it reached the upstream server (rate limit,
+   * concurrency cap or an open circuit breaker). `data.retryAfterMs` says when to try again.
    */
-  retryLater: -32029,
+  retryLater: -31029,
   /**
-   * Phase 12.4 — implementation-defined server error: a tool policy rule requires a person to approve this call.
+   * Phase 12.4 — the gateway's own error: a tool policy rule requires a person to approve this call.
    * `data.approvalRequestId` names the request; once it is approved the identical call (same tool, same arguments)
    * can be retried once within the approval window.
    */
-  approvalPending: -32030,
+  approvalPending: -31030,
   /**
-   * Phase 12.4 — implementation-defined server error: an admin rejected this exact call (same client, tool and
-   * arguments). Identical retries are refused until `data.retryAfter` (the decision time plus the approval window)
-   * and open no new request.
+   * Phase 12.4 — the gateway's own error: an admin rejected this exact call (same client, tool and arguments).
+   * Identical retries are refused until `data.retryAfter` (the decision time plus the approval window) and open no
+   * new request.
    */
-  approvalRejected: -32031,
+  approvalRejected: -31031,
   /**
-   * 12.6 — implementation-defined server error: a `block` budget that applies to this call (the client's, the
-   * toolset's project's, the workflow's or the global one) is used up for its period. `data.budgetId` names it and
+   * 12.6 — the gateway's own error: a `block` budget that applies to this call (the client's, the toolset's
+   * project's, the workflow's or the global one) is used up for its period. `data.budgetId` names it and
    * `data.retryAfterSeconds` says when its period ends.
    */
-  budgetExceeded: -32032
+  budgetExceeded: -31032
 } as const;
+
+/**
+ * The gateway's own error codes and their stable names.
+ *
+ * MCP 2026-07-28, Base Protocol, "Error Codes": `-32020` to `-32099` are "reserved for the MCP specification", and
+ * implementations "MUST NOT emit any code from this sub-range that is not defined by this specification"; new codes
+ * for other purposes "SHOULD be allocated outside the JSON-RPC reserved range (`-32768` to `-32000`)". The gateway's
+ * codes were `-32029` to `-32032` until 2026-11; they are now `-31029` to `-31032` (same last digits) for every
+ * client. Each such error's `data` also carries `gatewayError` (the name below, stable across releases; match on it)
+ * and `legacyCode` (the code earlier releases sent). MCP_GATEWAY_LEGACY_ERROR_CODES=true keeps the old codes for
+ * session (initialize-based) clients during a migration; 2026-07-28 clients always get the new ones.
+ */
+export const GATEWAY_ERROR_NAMES: ReadonlyMap<number, string> = new Map([
+  [JSON_RPC_ERRORS.retryLater, "retry_later"],
+  [JSON_RPC_ERRORS.approvalPending, "approval_pending"],
+  [JSON_RPC_ERRORS.approvalRejected, "approval_rejected"],
+  [JSON_RPC_ERRORS.budgetExceeded, "budget_exceeded"]
+]);
+
+/** The code earlier releases sent for each of the gateway's own errors (`-32029` to `-32032`). */
+export function legacyGatewayErrorCode(code: number): number | undefined {
+  return GATEWAY_ERROR_NAMES.has(code) ? code - 1000 : undefined;
+}
 
 export type JsonRpcId = string | number;
 
@@ -138,7 +160,22 @@ export function rpcResult(id: JsonRpcId, result: Record<string, unknown>): JsonR
 }
 
 export function rpcError(id: JsonRpcId | null, code: number, message: string, data?: unknown): JsonRpcFailure {
+  const name = GATEWAY_ERROR_NAMES.get(code);
+  if (name !== undefined && (data === undefined || (data !== null && typeof data === "object" && !Array.isArray(data)))) {
+    // The gateway's own errors name themselves, so clients need not match on the numeric code (see GATEWAY_ERROR_NAMES).
+    data = { ...(data as Record<string, unknown> | undefined), gatewayError: name, legacyCode: legacyGatewayErrorCode(code) };
+  }
   return { jsonrpc: "2.0", id, error: { code, message, ...(data !== undefined ? { data } : {}) } };
+}
+
+/**
+ * A response as a session client receives it when MCP_GATEWAY_LEGACY_ERROR_CODES is on: the gateway's own errors
+ * carry their pre-2026-11 codes (`-32029` to `-32032`); `data` is unchanged. Every other response is returned as is.
+ */
+export function withLegacyGatewayErrorCode<T extends JsonRpcResponse>(response: T): T {
+  if (!("error" in response)) return response;
+  const legacy = legacyGatewayErrorCode(response.error.code);
+  return legacy === undefined ? response : { ...response, error: { ...response.error, code: legacy } };
 }
 
 /** Key for in-flight bookkeeping; `1` and `"1"` are different JSON-RPC ids. */

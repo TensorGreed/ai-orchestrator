@@ -22,8 +22,8 @@ import { GatewaySessionLimitError, GatewaySessionManager } from "./services/mcp-
 
 const MODERN = "2026-07-28";
 const APPROVAL_PENDING = -31030;
-/** The same refusal for a legacy session (the pre-2026-07-28 code range). */
-const LEGACY_APPROVAL_PENDING = -32030;
+/** The same refusal for a legacy session: since 2026-11 the same code (MCP_GATEWAY_LEGACY_ERROR_CODES off). */
+const LEGACY_APPROVAL_PENDING = -31030;
 
 interface Instance {
   app: FastifyInstance;

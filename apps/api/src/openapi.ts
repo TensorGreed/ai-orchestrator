@@ -3406,7 +3406,7 @@ export const openApiSpec = {
           "With MCP_GATEWAY_MODERN_PROTOCOL=on the endpoint also serves protocol version 2026-07-28 without sessions: a single request whose params._meta carries io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities, with the MCP-Protocol-Version, Mcp-Method and (tools/call) Mcp-Name headers matching the body. " +
           "Failed checks answer HTTP 400 with -32022 (unsupported version; data.supported lists every version), -32020 (header mismatch) or -32602 (missing _meta keys); other methods answer 404 with -32601. " +
           "Results carry resultType and _meta[\"io.modelcontextprotocol/serverInfo\"]; tools/list and server/discover also carry ttlMs and cacheScope \"private\". Mcp-Session-Id is ignored for these requests and never returned; closing the connection cancels the call. " +
-          "The gateway's own errors use -31029 (retry later), -31030 (approval pending), -31031 (approval rejected) and -31032 (budget exceeded) for 2026-07-28 callers, and -32029 to -32032 for sessions. " +
+          "The gateway's own errors use -31029 (retry later), -31030 (approval pending), -31031 (approval rejected) and -31032 (budget exceeded), outside the range MCP 2026-07-28 reserves; data.gatewayError names each one (retry_later, approval_pending, approval_rejected, budget_exceeded) and data.legacyCode is the code releases before 2026-11 sent (-32029 to -32032), which MCP_GATEWAY_LEGACY_ERROR_CODES=true keeps for session clients. " +
           "subscriptions/listen (Accept: text/event-stream) answers with an SSE stream: first notifications/subscriptions/acknowledged (notifications echoes toolsListChanged: true when asked for; prompts and resources are not served), then notifications/tools/list_changed whenever the client's tool list changes (server/discover declares tools.listChanged: true; MCP_GATEWAY_LISTEN_CHECK_MS is the fallback re-check) and keep-alive comments until the client closes the stream, MCP_GATEWAY_LISTEN_MAX_MS passes or the server shuts down; the last two end with a complete result. Streams count only against MCP_GATEWAY_LISTEN_MAX_PER_CLIENT (HTTP 429, -31029), not against the client's rate or concurrency limits. " +
           "In cluster mode a toolset that tracks outside content per session answers 2026-07-28 requests like a request without a session.",
         parameters: [
@@ -3710,7 +3710,7 @@ export const openApiSpec = {
       patch: {
         tags: ["MCP"],
         summary:
-          "Rename a client or set its rate limit (admin, audited as mcp_client.updated). Nothing else changes. rateLimit null removes the client's own limit (its toolsets' defaults then apply). Calls over the limit get JSON-RPC -32029.",
+          "Rename a client or set its rate limit (admin, audited as mcp_client.updated). Nothing else changes. rateLimit null removes the client's own limit (its toolsets' defaults then apply). Calls over the limit get JSON-RPC -31029.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           required: true,
@@ -3803,7 +3803,7 @@ export const openApiSpec = {
       get: {
         tags: ["MCP"],
         summary:
-          "Gateway calls a require_approval tool policy rule held back, newest first (admin). A client has at most 20 pending requests; past that its calls get JSON-RPC -32029. Decided requests are deleted 30 days after they were made.",
+          "Gateway calls a require_approval tool policy rule held back, newest first (admin). A client has at most 20 pending requests; past that its calls get JSON-RPC -31029. Decided requests are deleted 30 days after they were made.",
         parameters: [
           { name: "status", in: "query", required: false, schema: { type: "string", enum: ["pending", "approved", "rejected", "expired", "used"] } },
           { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500 } }
@@ -3825,7 +3825,7 @@ export const openApiSpec = {
       post: {
         tags: ["MCP"],
         summary:
-          "Reject a pending gateway call (admin). Identical retries (same client, tool, arguments) are refused at once with JSON-RPC error -32031 until MCP_GATEWAY_APPROVAL_WINDOW_MS after the decision (the request's new expiresAt), and open no new request",
+          "Reject a pending gateway call (admin). Identical retries (same client, tool, arguments) are refused at once with JSON-RPC error -31031 until MCP_GATEWAY_APPROVAL_WINDOW_MS after the decision (the request's new expiresAt), and open no new request",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: { reason: { type: "string" } } } } } },
         responses: { "200": { description: "The decided request" }, "404": { description: "Not found" }, "409": { description: "Already decided or expired" } }

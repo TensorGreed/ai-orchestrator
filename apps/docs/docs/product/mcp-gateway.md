@@ -90,7 +90,7 @@ Tool policy evaluates a gateway call as:
 - **Project**: the toolset's policy project.
 - **Source**: `client`, with the client's name. Policy traces show "Evaluated as builder — MCP client Team IDE".
 
-Tools that policy denies are absent from `tools/list`. A call to one anyway returns a tool error with the policy message, and is audited as `mcp_gateway.tool_denied`. Rules can also name the client (gateway clients on the rule) and match the call's arguments: a call whose arguments a deny rule matches returns the same tool error, though the tool stays listed. A call a require-approval rule matches returns the JSON-RPC error `-32030` "approval pending" with the request id; once an admin approves it, the client retries the identical call once within `MCP_GATEWAY_APPROVAL_WINDOW_MS`. After a rejection the identical call gets `-32031` "rejected" for the same window, and a client with 20 requests waiting gets `-32029` "retry later" instead of a new one. Sampling a server asks for during a gateway call follows sampling rules scoped to the calling client. See [Gateway: approval by retry](./mcp-tool-policy.md#gateway-approval-by-retry). The per-workflow **No write tools** setting does not apply to gateway calls; it belongs to workflows. Calls to a server whose pending breaking change blocks runs fail the same way they fail for agents.
+Tools that policy denies are absent from `tools/list`. A call to one anyway returns a tool error with the policy message, and is audited as `mcp_gateway.tool_denied`. Rules can also name the client (gateway clients on the rule) and match the call's arguments: a call whose arguments a deny rule matches returns the same tool error, though the tool stays listed. A call a require-approval rule matches returns the JSON-RPC error `-31030` "approval pending" with the request id; once an admin approves it, the client retries the identical call once within `MCP_GATEWAY_APPROVAL_WINDOW_MS`. After a rejection the identical call gets `-31031` "rejected" for the same window, and a client with 20 requests waiting gets `-31029` "retry later" instead of a new one. Sampling a server asks for during a gateway call follows sampling rules scoped to the calling client. See [Gateway: approval by retry](./mcp-tool-policy.md#gateway-approval-by-retry). The per-workflow **No write tools** setting does not apply to gateway calls; it belongs to workflows. Calls to a server whose pending breaking change blocks runs fail the same way they fail for agents.
 
 Workflow tools run as the workflow does for any trigger: the run is recorded in execution history with trigger type `mcp_gateway` and triggered by `mcp-client:<name>`, and agents inside the workflow evaluate tool policy with the client's capped role. The workflow trigger's own `authMode` and secret apply only to the legacy REST routes; on the gateway the client token is the credential.
 
@@ -106,7 +106,20 @@ Workflow tools run as the workflow does for any trigger: the run is recorded in 
 | Responses | `application/json`, or a `text/event-stream` response when the request carries `_meta.progressToken` and the `Accept` header allows SSE. The stream carries `notifications/progress` messages and then the response. |
 | Batches | Only in protocol version `2025-03-26`, which allowed them. Later versions get 400. |
 | `GET` | 405. The gateway offers no server-initiated stream. |
-| Errors | A tool that fails returns a result with `isError: true`. Protocol problems (unknown method, unknown tool, bad params) are JSON-RPC errors. |
+| Errors | A tool that fails returns a result with `isError: true`. Protocol problems (unknown method, unknown tool, bad params) are JSON-RPC errors. The gateway's own refusals use the codes under [Gateway error codes](#gateway-error-codes). |
+
+### Gateway error codes
+
+The gateway refuses some calls with JSON-RPC errors of its own. Each one's `data` names it in `gatewayError`, which stays the same across releases, so match on that rather than on the number.
+
+| Code | `data.gatewayError` | Meaning |
+|---|---|---|
+| `-31029` | `retry_later` | A rate limit, concurrency cap, open circuit breaker, too many pending approvals or too many listen streams. `data.reason` says which, and `data.retryAfterMs` when to try again. |
+| `-31030` | `approval_pending` | A tool policy rule holds the call for an admin. See [Gateway: approval by retry](./mcp-tool-policy.md#gateway-approval-by-retry). |
+| `-31031` | `approval_rejected` | An admin rejected this exact call. |
+| `-31032` | `budget_exceeded` | A `block` budget is used up. See [Budgets](#budgets). |
+
+Before November 2026 these were `-32029` to `-32032`. MCP 2026-07-28 reserves `-32020` to `-32099` for codes the specification defines, and says implementations must not send others from that range. New codes for other purposes should sit outside JSON-RPC's reserved range (`-32768` to `-32000`) ([Base Protocol, Error Codes](https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes)). So every client now gets `-31029` to `-31032`, and `data.legacyCode` carries the old number. If a session-based client checks the old numbers and cannot change yet, set `MCP_GATEWAY_LEGACY_ERROR_CODES=true`: session clients then get `-32029` to `-32032` again, with the same `data`. MCP 2026-07-28 clients always get the new codes.
 
 **Progress.** A workflow tool reports one progress step per completed node. **Cancellation.** `notifications/cancelled` for an in-flight `tools/call` cancels the workflow run (it ends as `canceled` in execution history) or, for a gateway tool, closes the upstream connection of that session; for a stdio server that stops the child process, and the next call starts a new one.
 
@@ -173,7 +186,7 @@ Both are optional. With no budget and no rate limit, the gateway answers as befo
 - **Per project.** A toolset's gateway usage also counts toward the budget of the toolset's **policy project**, even when its workflows live in other projects.
 - **Global.** A global budget counts every run and all gateway sampling.
 
-Before the tool policy runs, each `tools/call` is checked against the `block` budgets of the client, the toolset's project and the deployment, and for a workflow tool also the budgets of the workflow and its project. A workflow tool's run is not checked again when it starts. When one is used up, the call is refused with JSON-RPC error `-32032` and a message such as `Budget "IDE agents" exceeded for the current month.` Its `data` carries the `budgetId`, the `period`, its start and `retryAfterSeconds` (until the period ends). The server is not called and no run starts. A `warn` budget never refuses a call; it sends its alerts as for runs.
+Before the tool policy runs, each `tools/call` is checked against the `block` budgets of the client, the toolset's project and the deployment, and for a workflow tool also the budgets of the workflow and its project. A workflow tool's run is not checked again when it starts. When one is used up, the call is refused with JSON-RPC error `-31032` and a message such as `Budget "IDE agents" exceeded for the current month.` Its `data` carries the `budgetId`, the `period`, its start and `retryAfterSeconds` (until the period ends). The server is not called and no run starts. A `warn` budget never refuses a call; it sends its alerts as for runs.
 
 A call that starts under the cap may take it over, and calls sent together (one batch, or several sessions at once) are checked before any of them ends, so usage can pass a budget by about one batch. The next call is refused. Budgets are read from a copy each instance refreshes every 2 seconds and right after an edit on that instance, so a budget created on another instance applies within 2 seconds. If the budgets cannot be read at all, calls are refused with a tool error rather than sent unchecked.
 
@@ -188,7 +201,7 @@ An admin can cap how fast a client calls tools:
 
 Set a client's own limit in its **Governance** section, or a **Default rate limit** in a toolset's detail. A toolset's default applies to each of its clients separately, for its calls through that toolset. A client's own limit replaces the toolset default as a whole (fields are not mixed) and is one allowance across all its toolsets. Leave a field empty for no limit there.
 
-Every `tools/call` counts, including each call of a batch. A call over the limit is refused at once, never queued, with JSON-RPC error `-32029` (retry later). Its `data` has the `reason` (`rate_limited` or `concurrency_limited`) and `retryAfterMs`. Refusals are audited as `mcp_gateway.rate_limited` at most once per session per minute, and write no telemetry row.
+Every `tools/call` counts, including each call of a batch. A call over the limit is refused at once, never queued, with JSON-RPC error `-31029` (retry later). Its `data` has the `reason` (`rate_limited` or `concurrency_limited`) and `retryAfterMs`. Refusals are audited as `mcp_gateway.rate_limited` at most once per session per minute, and write no telemetry row.
 
 In [cluster mode](../operations/cluster.md) the per-minute count is shared by all instances through the database, the same way as the sign-in and webhook rate limits: a client gets its allowance once, not once per instance. The shared count uses fixed windows: with a burst up to the per-minute rate, a window of `60 s × burst / calls per minute` holding the burst; with a larger burst, one minute holding the per-minute number (so a burst above one minute's calls applies on a single instance only, and a client that used its allowance waits at most a minute). The window is rounded up to a whole millisecond, so at extreme rates (above about 60,000 calls a minute with a burst of 1) the shared limit is lower than the one you set, and the database round trip is longer than the window anyway. As with any fixed window, up to twice a window's calls can pass around a window boundary. If the database cannot be reached, each instance counts on its own until it can. **Calls at once** is counted per instance, because a session's calls run on the instance that holds the session.
 
@@ -239,6 +252,7 @@ Audit events:
 | `MCP_GATEWAY_AUDIT_READ_ONLY_CALLS` | `first_per_session` | `all`, `first_per_session` or `none`. |
 | `MCP_GATEWAY_LISTEN_CHECK_MS` | `30000` | MCP 2026-07-28: how often a stream that asked for `toolsListChanged` has its tool list re-checked, besides the change hints; `0` = hints only. |
 | `MCP_GATEWAY_APPROVAL_WINDOW_MS` | `900000` | How long after an approval the client can retry the identical call, once; also how long after a rejection the identical call is refused (10000 to 604800000). |
+| `MCP_GATEWAY_LEGACY_ERROR_CODES` | `false` | `true` sends the gateway's own errors to session-based clients with their pre-November 2026 codes (`-32029` to `-32032`). See [Gateway error codes](#gateway-error-codes). |
 | `MCP_GATEWAY_MODERN_PROTOCOL` | `off` | `on` also serves MCP `2026-07-28` clients, without sessions. See [MCP 2026-07-28 support](./mcp-2026-07-28.md#the-mcp-gateway). |
 | `MCP_GATEWAY_LIST_TTL_MS` | `60000` | With modern mode on: how long `2026-07-28` clients may cache `tools/list` and `server/discover` results (0 to 86400000). |
 | `MCP_GATEWAY_LISTEN_MAX_MS` | `600000` | With modern mode on: a `subscriptions/listen` stream ends gracefully after this long (1000 to 86400000). |

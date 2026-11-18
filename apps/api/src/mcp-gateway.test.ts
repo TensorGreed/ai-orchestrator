@@ -847,7 +847,7 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
     expect((await call(1, "mock_tools__calculator", { expression: "2+2" })).json().result.isError).toBeUndefined();
 
     const pending = (await call(2, "mock_tools__calculator", { expression: "1000*3" })).json();
-    expect(pending.error.code).toBe(-32030);
+    expect(pending.error.code).toBe(-31030);
     expect(pending.error.message).toMatch(/^Approval pending: .*Big sums need a person/);
     const requestId = pending.error.data.approvalRequestId as string;
     expect(pending.error.data).toMatchObject({ status: "pending", ruleId: rule.body.rule.id, approvalWindowMs: 900_000 });
@@ -867,7 +867,7 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
 
     // Different arguments are not covered by the approval.
     const differentArgs = (await call(4, "mock_tools__calculator", { expression: "1000*4" })).json();
-    expect(differentArgs.error.code).toBe(-32030);
+    expect(differentArgs.error.code).toBe(-31030);
     expect(differentArgs.error.data.approvalRequestId).not.toBe(requestId);
 
     // The identical call (key order does not matter) goes through once.
@@ -875,7 +875,7 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
     expect(retried.result.isError).toBeUndefined();
     expect(retried.result.content[0].text).toContain("3000");
     const again = (await call(6, "mock_tools__calculator", { expression: "1000*3" })).json();
-    expect(again.error.code).toBe(-32030);
+    expect(again.error.code).toBe(-31030);
     expect(again.error.data.approvalRequestId).not.toBe(requestId);
 
     const rows = await context.store.listMcpToolCallsForClient(client.id, new Date(Date.now() - 60_000).toISOString());
@@ -906,7 +906,7 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
     expect((await api(context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${first}/approve`, {})).status).toBe(200);
     vi.setSystemTime(Date.now() + 61_000);
     const expired = (await call(2, "mock_tools__calculator", { expression: "1+1" })).json();
-    expect(expired.error.code).toBe(-32030);
+    expect(expired.error.code).toBe(-31030);
     expect(expired.error.data.approvalRequestId).not.toBe(first);
 
     const second = expired.error.data.approvalRequestId as string;
@@ -917,12 +917,12 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
     // The rejection's expiry is when it stops blocking: the decision plus the approval window.
     expect(Date.parse((rejected.body.approval as { expiresAt?: string }).expiresAt!)).toBe(Date.now() + 60_000);
     const refused = (await call(3, "mock_tools__calculator", { expression: "1+1" })).json();
-    expect(refused.error.code).toBe(-32031);
+    expect(refused.error.code).toBe(-31031);
     expect(refused.error.message).toMatch(/^Rejected: an admin rejected this exact call .*: Not today Identical calls are refused until/);
     expect(refused.error.data).toMatchObject({ approvalRequestId: second, status: "rejected", reason: "Not today", retryAfterSeconds: 60 });
-    expect((await call(4, "mock_tools__calculator", { expression: "1+1" })).json().error.code).toBe(-32031);
+    expect((await call(4, "mock_tools__calculator", { expression: "1+1" })).json().error.code).toBe(-31031);
     // Other arguments are another call: they ask as usual.
-    expect((await call(5, "mock_tools__calculator", { expression: "2+2" })).json().error.code).toBe(-32030);
+    expect((await call(5, "mock_tools__calculator", { expression: "2+2" })).json().error.code).toBe(-31030);
     const events = async (eventType: string) => (await context.store.listAuditLogs({ eventType, pageSize: 100 })).items;
     // Refusals are audited once per rejected request, and open no new request.
     expect(await events("mcp_gateway.approval_refused_rejected")).toHaveLength(1);
@@ -931,7 +931,7 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
     // Once the window has passed, the identical call asks again.
     vi.setSystemTime(Date.now() + 61_000);
     const afterReject = (await call(6, "mock_tools__calculator", { expression: "1+1" })).json();
-    expect(afterReject.error.code).toBe(-32030);
+    expect(afterReject.error.code).toBe(-31030);
     expect(afterReject.error.data.approvalRequestId).not.toBe(second);
 
     // A pending request past its 24h expiry can no longer be approved.
@@ -946,16 +946,43 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
     const sessionId = await openSession(context, toolset.slug, token);
     const call = gatewayCall(fixture, { authorization: `Bearer ${token}`, "mcp-session-id": sessionId });
     for (let index = 0; index < GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT; index += 1) {
-      expect((await call(index + 1, "mock_tools__calculator", { expression: `${index}+1` })).json().error.code).toBe(-32030);
+      expect((await call(index + 1, "mock_tools__calculator", { expression: `${index}+1` })).json().error.code).toBe(-31030);
     }
     const capped = (await call(100, "mock_tools__calculator", { expression: "99+1" })).json();
-    expect(capped.error.code).toBe(-32029);
+    expect(capped.error.code).toBe(-31029);
     expect(capped.error.data).toMatchObject({ reason: "approval_requests_pending", maxPending: GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT, retryAfterSeconds: 60 });
-    expect((await call(101, "mock_tools__calculator", { expression: "98+1" })).json().error.code).toBe(-32029);
+    expect((await call(101, "mock_tools__calculator", { expression: "98+1" })).json().error.code).toBe(-31029);
     // A call that already has a pending request still gets it back.
-    expect((await call(102, "mock_tools__calculator", { expression: "0+1" })).json().error.code).toBe(-32030);
+    expect((await call(102, "mock_tools__calculator", { expression: "0+1" })).json().error.code).toBe(-31030);
     expect((await context.store.listAuditLogs({ eventType: "mcp_gateway.approval_capped", pageSize: 100 })).items).toHaveLength(1);
     expect(await context.store.listMcpGatewayApprovals({ status: "pending" }, new Date().toISOString())).toHaveLength(GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT);
+  });
+
+  // MCP 2026-07-28, Base Protocol, "Error Codes": -32020..-32099 are reserved for codes the specification defines, and
+  // implementations "MUST NOT emit any code from this sub-range that is not defined by this specification".
+  it("answers session clients with its own error codes outside the range MCP reserves, naming each one in data", async () => {
+    const fixture = await setupFixture();
+    const { context, admin, toolset, token, mockServerId } = fixture;
+    await api(context, admin.cookie, "POST", "/api/mcp/policies", { effect: "require_approval", serverId: mockServerId, toolPattern: "calculator" });
+    const sessionId = await openSession(context, toolset.slug, token);
+    const call = gatewayCall(fixture, { authorization: `Bearer ${token}`, "mcp-session-id": sessionId });
+    const pending = (await call(1, "mock_tools__calculator", { expression: "1+1" })).json();
+    expect(pending.error).toMatchObject({ code: -31030, data: { status: "pending", gatewayError: "approval_pending", legacyCode: -32030 } });
+    expect(pending.error.code >= -32099 && pending.error.code <= -32000).toBe(false);
+    const requestId = pending.error.data.approvalRequestId as string;
+    expect((await api(context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${requestId}/reject`, {})).status).toBe(200);
+    const rejected = (await call(2, "mock_tools__calculator", { expression: "1+1" })).json();
+    expect(rejected.error).toMatchObject({ code: -31031, data: { gatewayError: "approval_rejected", legacyCode: -32031 } });
+  });
+
+  it("keeps the pre-2026-11 codes for session clients when MCP_GATEWAY_LEGACY_ERROR_CODES is on", async () => {
+    const fixture = await setupFixture({ MCP_GATEWAY_LEGACY_ERROR_CODES: "true" });
+    const { context, admin, toolset, token, mockServerId } = fixture;
+    await api(context, admin.cookie, "POST", "/api/mcp/policies", { effect: "require_approval", serverId: mockServerId, toolPattern: "calculator" });
+    const sessionId = await openSession(context, toolset.slug, token);
+    const call = gatewayCall(fixture, { authorization: `Bearer ${token}`, "mcp-session-id": sessionId });
+    const pending = (await call(1, "mock_tools__calculator", { expression: "1+1" })).json();
+    expect(pending.error).toMatchObject({ code: -32030, data: { status: "pending", gatewayError: "approval_pending", legacyCode: -32030 } });
   });
 
   it("gives an approval back when the call is refused before reaching the server, and says so when a race used it", async () => {
@@ -975,14 +1002,14 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
     // Spend the server's one call a minute, so the approved retry is rate limited before it reaches the server.
     expect((await call(2, "mock_tools__calculator", { expression: "2+2" })).json().result.isError).toBeUndefined();
     const limited = (await call(3, "mock_tools__calculator", { expression: "1000*3" })).json();
-    expect(limited.error.code).toBe(-32029);
+    expect(limited.error.code).toBe(-31029);
     expect(await context.store.getMcpGatewayApproval(requestId)).toMatchObject({ status: "approved", usedAt: null });
 
     // Another identical call used the approval between the lookup and the claim: no new request.
     const consume = vi.spyOn(context.store, "consumeMcpGatewayApproval").mockResolvedValueOnce(false);
     const raced = (await call(4, "mock_tools__calculator", { expression: "1000*3" })).json();
     consume.mockRestore();
-    expect(raced.error.code).toBe(-32030);
+    expect(raced.error.code).toBe(-31030);
     expect(raced.error.message).toMatch(/^Approval already used:/);
     expect(raced.error.data).toMatchObject({ approvalRequestId: requestId, status: "used" });
     expect((await context.store.listAuditLogs({ eventType: "mcp_gateway.approval_requested", pageSize: 100 })).items).toHaveLength(1);
