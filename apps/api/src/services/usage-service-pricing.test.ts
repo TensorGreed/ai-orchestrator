@@ -10,14 +10,14 @@ function service(pricingOverridesJson?: string) {
 }
 
 describe("Anthropic cached tokens", () => {
-  // claude-sonnet-5-5: $2 input, $0.20 cache read, $10 output per 1M tokens.
+  // claude-sonnet-5-5: $2 input, $0.10 cache read, $10 output per 1M tokens.
   it("bills cache reads at the cached rate and the rest of the prompt at the input rate", () => {
     const { usage } = service();
     const tokens = extractAnthropicUsage({ input_tokens: 100_000, cache_read_input_tokens: 900_000, output_tokens: 10_000 })!;
     expect(tokens).toEqual({ inputTokens: 1_000_000, outputTokens: 10_000, totalTokens: 1_010_000, cachedInputTokens: 900_000 });
     const cost = usage.estimateCostUsd("anthropic", "claude-sonnet-5-5", tokens.inputTokens!, tokens.outputTokens!, tokens.cachedInputTokens!);
-    // 0.1M × $2 + 0.9M × $0.20 + 0.01M × $10
-    expect(cost).toBeCloseTo(0.2 + 0.18 + 0.1, 6);
+    // 0.1M × $2 + 0.9M × $0.10 + 0.01M × $10
+    expect(cost).toBeCloseTo(0.2 + 0.09 + 0.1, 6);
   });
 
   it("bills cache writes as input", () => {
@@ -29,7 +29,25 @@ describe("Anthropic cached tokens", () => {
   it("never bills more cached tokens than the prompt has", () => {
     const { usage } = service();
     // A count where the cache reads exceed the prompt (Anthropic's raw shape before conversion) costs the prompt only.
-    expect(usage.estimateCostUsd("anthropic", "claude-sonnet-5-5", 100, 0, 900_000)).toBeCloseTo((100 / 1_000_000) * 0.2, 9);
+    expect(usage.estimateCostUsd("anthropic", "claude-sonnet-5-5", 100, 0, 900_000)).toBeCloseTo((100 / 1_000_000) * 0.1, 9);
+  });
+});
+
+describe("published cache-read prices", () => {
+  it("prices cache reads for every current Claude model, at the published rate", () => {
+    const anthropic = DEFAULT_PRICING.anthropic!;
+    for (const model of ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-5-5", "claude-haiku-4-5"]) {
+      expect(anthropic[model]?.cachedInputUsdPer1M, model).toBeCloseTo(anthropic[model]!.inputUsdPer1M * 0.1, 9);
+    }
+    expect(anthropic["claude-sonnet-5-5"]?.cachedInputUsdPer1M).toBe(0.1);
+    expect(anthropic["claude-opus-5-5"]?.cachedInputUsdPer1M).toBe(0.2);
+  });
+
+  it("prices Gemini 2.5 models out of the box, thinking at the output rate", () => {
+    const { usage } = service();
+    expect(usage.estimateCostUsd("gemini", "gemini-2.5-flash", 1_000_000, 1_000_000, 500_000)).toBeCloseTo(0.15 + 0.015 + 2.5, 6);
+    expect(usage.estimateCostUsd("gemini", "gemini-2.5-pro", 1_000_000, 0, 0)).toBe(1.25);
+    expect(usage.estimateCostUsd("gemini", "gemini-2.5-flash-lite", 0, 1_000_000, 0)).toBe(0.4);
   });
 });
 

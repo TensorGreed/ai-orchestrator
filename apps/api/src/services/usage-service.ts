@@ -54,23 +54,24 @@ export const DEFAULT_PRICING: PricingTable = {
     "o3-mini": { inputUsdPer1M: 1.1, outputUsdPer1M: 4.4 }
   },
   anthropic: {
-    // Current Claude models (first-party API list prices). A cache-read rate is
-    // set only where one is listed; without it cached input is costed at the input rate.
+    // First-party API list prices; cache reads ("cache hits and refreshes") per
+    // https://platform.claude.com/docs/en/about-claude/pricing (read 2026-11-18). Cache writes are not priced
+    // separately (L2M sends no cache_control). Models below without a cache-read rate are not on that page.
     "claude-fable-5-1": { inputUsdPer1M: 10, outputUsdPer1M: 50, cachedInputUsdPer1M: 0.25 },
     "claude-mythos-5-1": { inputUsdPer1M: 10, outputUsdPer1M: 50, cachedInputUsdPer1M: 0.25 },
     "claude-fable-5": { inputUsdPer1M: 10, outputUsdPer1M: 50, cachedInputUsdPer1M: 1 },
     "claude-opus-5-5": { inputUsdPer1M: 4, outputUsdPer1M: 20, cachedInputUsdPer1M: 0.2 },
-    "claude-opus-5": { inputUsdPer1M: 5, outputUsdPer1M: 25 },
-    "claude-opus-4-8": { inputUsdPer1M: 5, outputUsdPer1M: 25 },
-    "claude-opus-4-7": { inputUsdPer1M: 5, outputUsdPer1M: 25 },
-    "claude-opus-4-6": { inputUsdPer1M: 5, outputUsdPer1M: 25 },
-    "claude-sonnet-5-5": { inputUsdPer1M: 2, outputUsdPer1M: 10, cachedInputUsdPer1M: 0.2 },
-    "claude-sonnet-5": { inputUsdPer1M: 2, outputUsdPer1M: 10 },
-    "claude-sonnet-4-6": { inputUsdPer1M: 3, outputUsdPer1M: 15 },
+    "claude-opus-5": { inputUsdPer1M: 5, outputUsdPer1M: 25, cachedInputUsdPer1M: 0.5 },
+    "claude-opus-4-8": { inputUsdPer1M: 5, outputUsdPer1M: 25, cachedInputUsdPer1M: 0.5 },
+    "claude-opus-4-7": { inputUsdPer1M: 5, outputUsdPer1M: 25, cachedInputUsdPer1M: 0.5 },
+    "claude-opus-4-6": { inputUsdPer1M: 5, outputUsdPer1M: 25, cachedInputUsdPer1M: 0.5 },
+    "claude-sonnet-5-5": { inputUsdPer1M: 2, outputUsdPer1M: 10, cachedInputUsdPer1M: 0.1 },
+    "claude-sonnet-5": { inputUsdPer1M: 2, outputUsdPer1M: 10, cachedInputUsdPer1M: 0.2 },
+    "claude-sonnet-4-6": { inputUsdPer1M: 3, outputUsdPer1M: 15, cachedInputUsdPer1M: 0.3 },
     // Haiku 5.5 list price is for prompts up to 100K tokens.
-    "claude-haiku-5-5": { inputUsdPer1M: 0.1, outputUsdPer1M: 0.5 },
-    "claude-haiku-4-5": { inputUsdPer1M: 1, outputUsdPer1M: 5 },
-    "claude-haiku-4-5-20251001": { inputUsdPer1M: 1, outputUsdPer1M: 5 },
+    "claude-haiku-5-5": { inputUsdPer1M: 0.1, outputUsdPer1M: 0.5, cachedInputUsdPer1M: 0.01 },
+    "claude-haiku-4-5": { inputUsdPer1M: 1, outputUsdPer1M: 5, cachedInputUsdPer1M: 0.1 },
+    "claude-haiku-4-5-20251001": { inputUsdPer1M: 1, outputUsdPer1M: 5, cachedInputUsdPer1M: 0.1 },
     // Older and retired models, kept so historical usage keeps its cost.
     "claude-opus-4": { inputUsdPer1M: 15, outputUsdPer1M: 75, cachedInputUsdPer1M: 1.5 },
     "claude-sonnet-4": { inputUsdPer1M: 3, outputUsdPer1M: 15, cachedInputUsdPer1M: 0.3 },
@@ -80,6 +81,12 @@ export const DEFAULT_PRICING: PricingTable = {
     "claude-3-opus": { inputUsdPer1M: 15, outputUsdPer1M: 75 }
   },
   gemini: {
+    // Gemini 2.5 paid-tier standard prices for text, image and video input, per
+    // https://aistudio.google.com/docs/pricing (read 2026-11-18); output includes thinking. 2.5 Pro is the price for
+    // prompts up to 200K tokens (longer prompts cost more). The page marks these models deprecated.
+    "gemini-2.5-pro": { inputUsdPer1M: 1.25, outputUsdPer1M: 10, cachedInputUsdPer1M: 0.125 },
+    "gemini-2.5-flash": { inputUsdPer1M: 0.3, outputUsdPer1M: 2.5, cachedInputUsdPer1M: 0.03 },
+    "gemini-2.5-flash-lite": { inputUsdPer1M: 0.1, outputUsdPer1M: 0.4, cachedInputUsdPer1M: 0.01 },
     "gemini-2.0-flash": { inputUsdPer1M: 0.1, outputUsdPer1M: 0.4 },
     "gemini-2.0-flash-lite": { inputUsdPer1M: 0.075, outputUsdPer1M: 0.3 },
     "gemini-1.5-pro": { inputUsdPer1M: 1.25, outputUsdPer1M: 5 },

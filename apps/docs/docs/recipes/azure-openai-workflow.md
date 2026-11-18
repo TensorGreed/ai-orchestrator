@@ -75,7 +75,7 @@ A real Azure endpoint was not called, so this page does not show Azure's own err
 
 ## Costs
 
-Workflow runs record tokens for Azure calls but no cost: the built-in price list has no Azure prices for runs, so Azure spend does not count toward a USD [budget](/product/budgets). To price it, add your deployment to `LLM_PRICING_OVERRIDES_JSON` under the provider id `azure_openai` (`azure-openai` is read the same way), keyed by the deployment name, for example `{"azure_openai":{"gpt-4o-mini":{"inputUsdPer1M":0.15,"outputUsdPer1M":0.6}}}` (use your contract's prices).
+Workflow runs record tokens for Azure calls but no cost: the built-in price list has no Azure prices for runs, so Azure spend does not count toward a USD [budget](/product/budgets). To price it, add your deployment to `LLM_PRICING_OVERRIDES_JSON` under the provider id `azure_openai` (`azure-openai` is read the same way), keyed by the deployment name, for example `{"azure_openai":{"gpt-4o-mini":{"inputUsdPer1M":0.15,"outputUsdPer1M":0.6}}}` (use your contract's prices). Known limit: a [replay](/product/replay-and-release-gate)'s live Azure calls are recorded under the node's `model` field, not the deployment name, so price them under that name too if the two differ.
 
 ## Serve the deployment to other apps (optional)
 
