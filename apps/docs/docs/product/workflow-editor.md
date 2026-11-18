@@ -19,6 +19,19 @@ Concepts: [Workflows vs agents](/learn/agents/workflows-vs-agents) explains when
 - Per-node run data on the canvas and in the node inspector (see [Run data](#run-data))
 - Agent port `+` buttons that open filtered drawers for Language Models, Memory, Tools, and Workers
 
+## Workflow settings
+
+The **⋯** menu in the editor's top bar holds the settings of the whole workflow (they are saved with it):
+**No write tools**, **Ask before write tools…**, **Subject references…** and **Error workflow…**. A tick shows the ones
+that are on.
+
+**Error workflow…** picks another workflow of the project that starts when a run of this one fails, for alerts or
+clean-up (`settings.errorWorkflowId` in the workflow JSON). Start it with an **Error Trigger**, which outputs the failed
+run's `source_workflow_id`, `source_workflow_name`, `execution_id`, `error`, `error_stack` and `timestamp`. The failed
+run's caller still gets the error, replays never start it, and an error workflow in another project runs only when
+that project shared it with execute access (see [what a running workflow can reach](../security/auth-rbac.md#what-a-running-workflow-can-reach)). Pick **None** to turn it
+off.
+
 ## Run data
 
 Run a workflow from the editor with **Debug** on (the default) and the canvas shows that run on every node, with
@@ -67,7 +80,8 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
   mapping and data labels. A dot on the tab means one of them differs from the default.
 - **Trace** shows timing, token use, the agent's activity and tool policy decisions for the run.
 - Large values stay fast: tables show 50 rows at a time and JSON over 20,000 characters is cut until you ask for all
-  of it.
+  of it. A nested object or list in a table cell whose JSON is longer than 80 characters shows as one line (its first
+  keys and short values, or a list's length and first items); click it to open the full value as JSON.
 - Data that did not come from a run is labelled: pinned data says **Pinned data, not from a run**, and a code
   node's test result says so too. With no run, the inspector says there is none.
 - **Previous** and **Next** (or `Alt+[` and `Alt+]`) step through the nodes of the run in the order they started,

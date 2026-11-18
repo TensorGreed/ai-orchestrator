@@ -138,6 +138,8 @@ Configure a `rag_retrieve` node with `vectorStoreId: "knowledge-base"` and pass 
 }
 ```
 
+In the editor, set **Vector Store** to **Knowledge Base (built in)** and pick the knowledge base under **Knowledge Base**: the list shows the knowledge bases of the workflow's project, and picking one also sets the node's **Embedder** to the one the knowledge base was built with. The editor saves the id as `knowledgeBaseId` on the node; a `vectorStoreConfig.knowledgeBaseId` takes precedence when both are set. **Search Mode** and the hybrid settings below show there too (the hybrid ones under **Advanced**).
+
 The full sample is at [samples/workflows/rag-knowledge-base-flow.json](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-knowledge-base-flow.json).
 
 Each retrieved document carries provenance metadata:

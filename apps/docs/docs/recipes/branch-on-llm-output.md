@@ -75,7 +75,7 @@ So the false branch catches an empty answer, which is rare with a working model.
 
 The If node renders its condition as a template and reads the result as text. It is false when the text is empty, `false`, `0`, `null` or `undefined`, and true otherwise. That is why <span v-pre>`{{answer}}`</span> means "the model said something".
 
-Keep the whole expression inside the braces. Text outside them is not evaluated: a condition such as <span v-pre>`{{answer}} === 'true'`</span> renders as text such as `Yes === 'true'`, which is never empty, so it is always true.
+A condition with text outside its braces is one JavaScript expression: each <span v-pre>`{{ }}`</span> is replaced by its value, so <span v-pre>`{{score}} > 90`</span> compares a number and <span v-pre>`{{answer}} === 'yes'`</span> compares text. Quote text you compare with, since <span v-pre>`{{status}} == done`</span> is not an expression and fails the If node. The editor's preview under the condition shows `true` or `false` for the last run's data.
 
 A condition can also be a JavaScript expression, run in a sandbox. With <span v-pre>`{{ answer.toLowerCase().includes("late") }}`</span>, "Is order 1042 late?" took the true branch and "Where is order 1042?" the false one. Two habits make conditions sturdier:
 
@@ -84,7 +84,7 @@ A condition can also be a JavaScript expression, run in a sandbox. With <span v-
 
 ## Handle failures with an error workflow
 
-Build a second workflow that starts with an **Error Trigger** and import it. Then add `"settings": { "errorWorkflowId": "<its id>" }` to this workflow's JSON, inside `workflow`, and import it again; the editor has no field for this setting. When a run fails, L2M starts it with the failed run's details: `source_workflow_id`, `source_workflow_name`, `execution_id`, `error`, `error_stack` and `timestamp`.
+Build a second workflow that starts with an **Error Trigger**. Then open this workflow, choose **Error workflow…** in the editor's **⋯** menu, pick the second workflow and save (in JSON this is `"settings": { "errorWorkflowId": "<its id>" }`). When a run fails, L2M starts it with the failed run's details: `source_workflow_id`, `source_workflow_name`, `execution_id`, `error`, `error_stack` and `timestamp`.
 
 We tested it with an error workflow whose HTTP Request step posts those fields to a local server. With the model down, it received `{"wf":"Conditional Branching Flow","err":"openai_compatible request failed after 4 attempt(s): fetch failed","exec":"..."}`. The caller of the webhook still gets the 400 error; the error workflow runs on the side, for alerts or clean-up.
 

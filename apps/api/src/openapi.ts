@@ -3088,7 +3088,7 @@ export const openApiSpec = {
         summary: "Preview an expression or template evaluation",
         requestBody: {
           required: true,
-          content: { "application/json": { schema: { type: "object", required: ["expression"], properties: { expression: { type: "string" }, mode: { type: "string", enum: ["expression", "template"] }, context: { type: "object" } } } } }
+          content: { "application/json": { schema: { type: "object", required: ["expression"], properties: { expression: { type: "string" }, mode: { type: "string", enum: ["expression", "template", "condition"] }, context: { type: "object" } } } } }
         },
         responses: { "200": { description: "Expression result" } }
       }

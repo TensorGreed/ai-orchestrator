@@ -555,7 +555,7 @@ Pauses execution and waits for a human approve/reject action before resuming.
 
 ### `if_node` — IF
 
-Evaluates a condition and routes execution to the true or false branch.
+Evaluates a condition and routes execution to the true or false branch. A condition with text outside its template braces is one JavaScript expression with each template replaced by its value.
 
 **Config fields**
 

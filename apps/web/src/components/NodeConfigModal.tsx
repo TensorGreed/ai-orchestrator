@@ -55,6 +55,7 @@ import {
   fetchMcpServerPrompts,
   fetchMcpServerResources,
   fetchMcpServers,
+  fetchKnowledgeBases,
   fetchMcpServerTools,
   fetchProviderModels,
   fetchWorkflow,
@@ -64,6 +65,7 @@ import {
   testConnector,
   testMcpTool,
   testProvider,
+  type KnowledgeBase,
   type McpCatalogPrompt,
   type McpCatalogResource,
   type McpCatalogResourceTemplate,
@@ -733,6 +735,34 @@ const WORKFLOW_READ_ONLY_HELP =
 const ANTHROPIC_TEMPERATURE_HELP =
   "Optional. Leave blank to use the model's default. Newer Claude models ignore or reject temperature, so it is only sent to models that accept it.";
 
+/** The rag_retrieve engine's defaults when the node does not set them. */
+const RAG_DEFAULT_EMBEDDER = "token-embedder";
+const RAG_DEFAULT_VECTOR_STORE = "in-memory-vector-store";
+
+/** Every embedder the rag_retrieve node can run. */
+const RAG_EMBEDDER_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "token-embedder", label: "Token Based (Local Demo)" },
+  { value: "openai-embedder", label: "OpenAI Embeddings" },
+  { value: "azure-openai-embedder", label: "Azure OpenAI Embeddings" },
+  { value: "cohere-embedder", label: "Cohere Embeddings" },
+  { value: "mistral-embedder", label: "Mistral Embeddings" },
+  { value: "google-vertex-embedder", label: "Google Embeddings" },
+  { value: "huggingface-embedder", label: "Hugging Face Embeddings" }
+];
+
+/** Every vector store in the rag_retrieve node's schema. */
+const RAG_VECTOR_STORE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "in-memory-vector-store", label: "In Memory (Local Demo)" },
+  { value: "knowledge-base", label: "Knowledge Base (built in)" },
+  { value: "pinecone-vector-store", label: "Pinecone Vector Store" },
+  { value: "azure-ai-search-vector-store", label: "Azure AI Search Vector Store" },
+  { value: "qdrant-vector-store", label: "Qdrant Vector Store" },
+  { value: "pgvector-store", label: "Postgres PGVector Store" },
+  { value: "chroma-vector-store", label: "Chroma Vector Store" },
+  { value: "weaviate-vector-store", label: "Weaviate Vector Store" },
+  { value: "redis-vector-store", label: "Redis Vector Store" }
+];
+
 function readOptionalNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
@@ -819,6 +849,69 @@ function TextAreaField({
   );
 }
 
+/**
+ * A JSON field that keeps what is typed while it is not valid JSON yet: the config changes only when the text parses
+ * (and `accept` takes it), and the field says why it has not changed. A config change from elsewhere replaces the text.
+ */
+function JsonDraftField<T>({
+  label,
+  value,
+  onCommit,
+  accept,
+  invalidMessage,
+  rows = 3
+}: {
+  label: string;
+  /** The config value the field shows. */
+  value: T;
+  onCommit: (next: T) => void;
+  /** Returns the value to store, or undefined when the parsed JSON is not acceptable. */
+  accept: (parsed: unknown) => T | undefined;
+  invalidMessage: string;
+  rows?: number;
+}) {
+  const shown = JSON.stringify(value ?? null, null, 2);
+  const [draft, setDraft] = useState(shown);
+  const [error, setError] = useState("");
+  const lastCommitted = useRef(shown);
+  useEffect(() => {
+    // A change that did not come from this field (another field, a reset) replaces the draft.
+    if (shown !== lastCommitted.current) {
+      lastCommitted.current = shown;
+      setDraft(shown);
+      setError("");
+    }
+  }, [shown]);
+  return (
+    <>
+      <TextAreaField
+        label={label}
+        value={draft}
+        rows={rows}
+        onChange={(next) => {
+          setDraft(next);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(next);
+          } catch {
+            setError("Not valid JSON yet; the node keeps its last valid value.");
+            return;
+          }
+          const accepted = accept(parsed);
+          if (accepted === undefined) {
+            setError(invalidMessage);
+            return;
+          }
+          setError("");
+          lastCommitted.current = JSON.stringify(accepted ?? null, null, 2);
+          onCommit(accepted);
+        }}
+      />
+      {error ? <div className="cfg-field-error">{error}</div> : null}
+    </>
+  );
+}
+
 interface ExpressionPreviewContext {
   input?: unknown;
   vars?: Record<string, unknown>;
@@ -862,7 +955,8 @@ function ExpressionField({
   value: string;
   onChange: (next: string) => void;
   rows?: number;
-  mode?: "expression" | "template";
+  /** `condition`: the preview shows true or false, judged as an IF node judges the text. */
+  mode?: "expression" | "template" | "condition";
   previewContext?: ExpressionPreviewContext;
   help?: React.ReactNode;
 }) {
@@ -1260,6 +1354,8 @@ export function NodeInspector({
   const [providerTestMessage, setProviderTestMessage] = useState<string | null>(null);
   const [workflowOptions, setWorkflowOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [workflowOptionsError, setWorkflowOptionsError] = useState<string | null>(null);
+  const [knowledgeBaseOptions, setKnowledgeBaseOptions] = useState<KnowledgeBase[]>([]);
+  const [knowledgeBaseOptionsError, setKnowledgeBaseOptionsError] = useState<string | null>(null);
   // Phase 6.4 — the workflow a Workflow Tool node calls, to show the tool the agent will see.
   const [workflowToolChild, setWorkflowToolChild] = useState<{ id: string; workflow: Workflow | null; error?: string } | null>(null);
   const workflowToolChildId = node.data.nodeType === "workflow_tool" ? toStringValue(config.workflowId).trim() : "";
@@ -1484,6 +1580,27 @@ export function NodeInspector({
       cancelled = true;
     };
   }, [node.data.nodeType]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (node.data.nodeType !== "rag_retrieve") {
+      return () => {
+        cancelled = true;
+      };
+    }
+    setKnowledgeBaseOptions([]);
+    setKnowledgeBaseOptionsError(null);
+    fetchKnowledgeBases(workflowContext?.projectId ?? undefined)
+      .then(({ knowledgeBases }) => {
+        if (!cancelled) setKnowledgeBaseOptions(knowledgeBases);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setKnowledgeBaseOptionsError(error instanceof Error ? error.message : "Failed to load knowledge bases");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [node.data.nodeType, workflowContext?.projectId]);
 
   const discoveredToolByName = useMemo(
     () => new Map(discoveredTools.map((tool) => [tool.name, tool])),
@@ -6528,8 +6645,13 @@ export function NodeInspector({
         );
       case "rag_retrieve":
         {
-          const embedderId = toStringValue(config.embedderId, "openai-embedder");
-          const vectorStoreId = toStringValue(config.vectorStoreId, "pinecone-vector-store");
+          // Defaults are the engine's: a node without these keys runs with the token embedder on the in-memory store.
+          const embedderId = toStringValue(config.embedderId, RAG_DEFAULT_EMBEDDER);
+          const vectorStoreId = toStringValue(config.vectorStoreId, RAG_DEFAULT_VECTOR_STORE);
+          const usesKnowledgeBase = vectorStoreId === "knowledge-base";
+          const searchMode = toStringValue(config.searchMode, "vector");
+          const knowledgeBaseId = toStringValue(asRecord(config.vectorStoreConfig).knowledgeBaseId) || toStringValue(config.knowledgeBaseId);
+          const selectedKnowledgeBase = knowledgeBaseOptions.find((kb) => kb.id === knowledgeBaseId);
           const preferredProvider =
             embedderId === "openai-embedder"
               ? "openai"
@@ -6544,6 +6666,13 @@ export function NodeInspector({
                     : vectorStoreId === "qdrant-vector-store"
                       ? "qdrant"
                     : "custom";
+          const embedderOptions = RAG_EMBEDDER_OPTIONS.some((option) => option.value === embedderId)
+            ? RAG_EMBEDDER_OPTIONS
+            : [...RAG_EMBEDDER_OPTIONS, { value: embedderId, label: embedderId }];
+          const vectorStoreOptions = RAG_VECTOR_STORE_OPTIONS.some((option) => option.value === vectorStoreId)
+            ? RAG_VECTOR_STORE_OPTIONS
+            : [...RAG_VECTOR_STORE_OPTIONS, { value: vectorStoreId, label: vectorStoreId }];
+          const inlineDocuments = Array.isArray(config.documents) ? config.documents : [];
 
         return (
           <>
@@ -6563,28 +6692,78 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, topK: next }))}
             />
             <SelectField
+              label="Vector Store"
+              value={vectorStoreId}
+              onChange={(next) =>
+                setConfig((current) => {
+                  if (next === "knowledge-base") return { ...current, vectorStoreId: next };
+                  // Knowledge-base search settings mean nothing to another store: they are not kept out of sight.
+                  const { knowledgeBaseId: _kb, searchMode: _mode, candidatesPerRanker: _c, bm25Weight: _b, vectorWeight: _v, rrfK: _k, ...rest } = current;
+                  const { knowledgeBaseId: _storeKb, ...storeConfig } = asRecord(current.vectorStoreConfig);
+                  return { ...rest, vectorStoreId: next, vectorStoreConfig: Object.keys(storeConfig).length > 0 ? storeConfig : undefined };
+                })
+              }
+              options={vectorStoreOptions}
+            />
+            {usesKnowledgeBase ? (
+              <>
+                <SelectField
+                  label="Knowledge Base"
+                  value={knowledgeBaseId}
+                  onChange={(next) =>
+                    setConfig((current) => {
+                      const { knowledgeBaseId: _stale, ...storeConfig } = asRecord(current.vectorStoreConfig);
+                      const picked = knowledgeBaseOptions.find((kb) => kb.id === next);
+                      return {
+                        ...current,
+                        knowledgeBaseId: next || undefined,
+                        vectorStoreConfig: Object.keys(storeConfig).length > 0 ? storeConfig : undefined,
+                        // Searches embed the query with the node's embedder, so it follows the knowledge base's.
+                        ...(picked ? { embedderId: picked.embedderId } : {})
+                      };
+                    })
+                  }
+                  options={[
+                    {
+                      value: "",
+                      label: knowledgeBaseOptionsError
+                        ? "Knowledge bases could not be loaded"
+                        : knowledgeBaseOptions.length
+                          ? "Select a knowledge base"
+                          : "No knowledge bases yet"
+                    },
+                    ...(knowledgeBaseId && !selectedKnowledgeBase ? [{ value: knowledgeBaseId, label: knowledgeBaseId }] : []),
+                    ...knowledgeBaseOptions.map((kb) => ({ value: kb.id, label: `${kb.name} (${kb.chunkCount} chunks)` }))
+                  ]}
+                  help="A knowledge base built on the Knowledge Bases page. The node searches it; documents that reach the node are added to it first."
+                />
+                {knowledgeBaseOptionsError ? <div className="cfg-tip">Failed to load knowledge bases: {knowledgeBaseOptionsError}</div> : null}
+                {selectedKnowledgeBase && selectedKnowledgeBase.embedderId !== embedderId ? (
+                  <div className="cfg-tip" role="note">
+                    This knowledge base was built with {selectedKnowledgeBase.embedderId}; use the same embedder so the query
+                    is embedded the way its chunks were.
+                  </div>
+                ) : null}
+                <SelectField
+                  label="Search Mode"
+                  value={searchMode}
+                  onChange={(next) => setConfig((current) => ({ ...current, searchMode: next === "vector" ? undefined : next }))}
+                  options={[
+                    { value: "vector", label: "Vector (meaning)" },
+                    { value: "bm25", label: "Keyword (BM25)" },
+                    { value: "hybrid", label: "Hybrid (vector and keyword, fused)" }
+                  ]}
+                  help="Keyword and hybrid search need a knowledge base. Hybrid returns the vector results unchanged when the keyword search finds nothing."
+                />
+              </>
+            ) : null}
+            <SelectField
               label="Embedder"
-              value={toStringValue(config.embedderId, "openai-embedder")}
+              value={embedderId}
               onChange={(next) => setConfig((current) => ({ ...current, embedderId: next }))}
-              options={[
-                { value: "openai-embedder", label: "OpenAI Embeddings" },
-                { value: "azure-openai-embedder", label: "Azure OpenAI Embeddings" },
-                { value: "token-embedder", label: "Token Based (Local Demo)" }
-              ]}
+              options={embedderOptions}
             />
             <ModelAllowlistWarning message={modelAllowlistWarning} />
-            <SelectField
-              label="Vector Store"
-              value={toStringValue(config.vectorStoreId, "pinecone-vector-store")}
-              onChange={(next) => setConfig((current) => ({ ...current, vectorStoreId: next }))}
-              options={[
-                { value: "pinecone-vector-store", label: "Pinecone Vector Store" },
-                { value: "azure-ai-search-vector-store", label: "Azure AI Search Vector Store" },
-                { value: "qdrant-vector-store", label: "Qdrant Vector Store" },
-                { value: "pgvector-store", label: "Postgres PGVector Store" },
-                { value: "in-memory-vector-store", label: "In Memory (Local Demo)" }
-              ]}
-            />
             {renderCredentialSecretField({
               fieldKey: "rag_embedding_secret",
               label: "API Key / Connection String Secret",
@@ -6594,17 +6773,81 @@ export function NodeInspector({
               onSelect: (next) =>
                 setConfig((current) => ({ ...current, embeddingSecretRef: next ? { secretId: next } : undefined }))
             })}
-            <TextAreaField
-              label="Vector Store Extra Config (JSON)"
-              value={JSON.stringify(asRecord(config.vectorStoreConfig), null, 2)}
-              onChange={(next) => {
-                try {
-                   const parsed = JSON.parse(next);
-                   setConfig(current => ({...current, vectorStoreConfig: parsed}));
-                } catch { /* ignore typing errors */ }
-              }}
-              rows={3}
-            />
+            <AdvancedFields
+              setCount={countSet([
+                [usesKnowledgeBase && searchMode === "hybrid" ? config.candidatesPerRanker : undefined, undefined],
+                [usesKnowledgeBase && searchMode === "hybrid" ? config.bm25Weight : undefined, 1],
+                [usesKnowledgeBase && searchMode === "hybrid" ? config.vectorWeight : undefined, 1],
+                [usesKnowledgeBase && searchMode === "hybrid" ? config.rrfK : undefined, 60],
+                [config.vectorStoreConfig, undefined],
+                [config.documents, undefined]
+              ])}
+            >
+              {usesKnowledgeBase && searchMode === "hybrid" ? (
+                <div className="cfg-grid-2">
+                  <OptionalNumberField
+                    label="Candidates per Ranker"
+                    value={readOptionalNumber(config.candidatesPerRanker)}
+                    min={1}
+                    step={1}
+                    placeholder="max(20, 4 × Top K)"
+                    onChange={(next) => setConfig((current) => ({ ...current, candidatesPerRanker: next }))}
+                    help="How many results the vector and keyword searches each return before they are fused. Blank uses the larger of 20 and 4 × Top K."
+                  />
+                  <OptionalNumberField
+                    label="RRF k"
+                    value={readOptionalNumber(config.rrfK)}
+                    min={1}
+                    step={1}
+                    placeholder="60"
+                    onChange={(next) => setConfig((current) => ({ ...current, rrfK: next }))}
+                    help="The reciprocal rank fusion constant. Higher values flatten the difference between top and lower ranks. Blank is 60."
+                  />
+                  <OptionalNumberField
+                    label="Vector Weight"
+                    value={readOptionalNumber(config.vectorWeight)}
+                    min={0}
+                    step={0.1}
+                    placeholder="1"
+                    onChange={(next) => setConfig((current) => ({ ...current, vectorWeight: next }))}
+                    help="How much the vector ranking counts in the fusion. Blank is 1."
+                  />
+                  <OptionalNumberField
+                    label="Keyword Weight"
+                    value={readOptionalNumber(config.bm25Weight)}
+                    min={0}
+                    step={0.1}
+                    placeholder="1"
+                    onChange={(next) => setConfig((current) => ({ ...current, bm25Weight: next }))}
+                    help="How much the keyword (BM25) ranking counts in the fusion. Blank is 1."
+                  />
+                </div>
+              ) : null}
+              <JsonDraftField<Record<string, unknown> | undefined>
+                key={`${node.id}:vectorStoreConfig`}
+                label="Vector Store Extra Config (JSON)"
+                value={asRecord(config.vectorStoreConfig)}
+                accept={(parsed) =>
+                  parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                    ? Object.keys(parsed).length > 0
+                      ? (parsed as Record<string, unknown>)
+                      : {}
+                    : undefined
+                }
+                invalidMessage="Use a JSON object."
+                onCommit={(next) =>
+                  setConfig((current) => ({ ...current, vectorStoreConfig: next && Object.keys(next).length > 0 ? next : undefined }))
+                }
+              />
+              <JsonDraftField<unknown[]>
+                key={`${node.id}:documents`}
+                label="Inline Documents (JSON array)"
+                value={inlineDocuments}
+                accept={(parsed) => (Array.isArray(parsed) ? parsed : undefined)}
+                invalidMessage="Use a JSON array of documents (text, or objects with text)."
+                onCommit={(next) => setConfig((current) => ({ ...current, documents: next.length > 0 ? next : undefined }))}
+              />
+            </AdvancedFields>
           </>
         );
         }
@@ -6711,6 +6954,7 @@ export function NodeInspector({
                   value={toNumberValue(config.maxRetries, 2)}
                   min={0}
                   step={1}
+                  help="How many times the parser asks the upstream model to fix output that does not parse. 0 fails at once without asking."
                   onChange={(next) => setConfig((current) => ({ ...current, maxRetries: next }))}
                 />
                 <TextAreaField
@@ -6811,14 +7055,17 @@ export function NodeInspector({
           <>
             <ExpressionField
               label="Condition Statement"
-              value={toStringValue(config.condition, "{{answer}} === 'true'")}
+              value={toStringValue(config.condition)}
               onChange={(next) => setConfig((current) => ({ ...current, condition: next }))}
               rows={2}
-              mode="expression"
+              mode="condition"
               previewContext={expressionPreviewContext}
               help={
                 <>
-                  A javascript expression that returns true or false. Example: <code>{`{{userScore}} > 90`}</code>
+                  A JavaScript expression that is true or false, with values in <code>{"{{ }}"}</code>, for example{" "}
+                  <code>{`{{userScore}} > 90`}</code> or <code>{`{{status}} === 'done'`}</code> (quote text). A condition
+                  that is only one <code>{"{{ }}"}</code> is true unless it is empty, <code>false</code>, <code>0</code>,{" "}
+                  <code>null</code> or <code>undefined</code>. Text without any <code>{"{{ }}"}</code> is not evaluated.
                 </>
               }
             />

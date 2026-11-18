@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ReactFlowProvider, type NodeProps } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
-import { NodeRunInput, NodeRunOutput, RUN_DATA_JSON_LIMIT, RUN_DATA_ROW_PAGE, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
+import { NodeRunInput, NodeRunOutput, previewNestedValue, RUN_DATA_JSON_LIMIT, RUN_DATA_ROW_PAGE, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
 import { WorkflowCanvasNode } from "./WorkflowCanvasNode";
 
 const T0 = "2026-01-01T00:00:00.000Z";
@@ -86,6 +86,36 @@ describe("RunDataView", () => {
     render(<RunDataView value={sortResult.output} label="Output" />);
     expect(screen.getByText("items (2)")).toBeInTheDocument();
     expect(screen.getAllByRole("table")).toHaveLength(2);
+  });
+
+  it("shows a big nested value as one line that expands to its JSON", async () => {
+    const user = userEvent.setup();
+    const body = { customer: { id: "c-1", name: "Ada Lovelace", email: "ada@example.com" }, lines: [{ sku: "A", qty: 2 }, { sku: "B", qty: 1 }], note: "x".repeat(60) };
+    render(<RunDataView value={{ status: 200, body, small: { ok: true } }} label="Output" />);
+    const table = screen.getByRole("table");
+    // A small nested value stays inline JSON.
+    expect(within(table).getByText('{"ok":true}')).toBeInTheDocument();
+    // The big one is a one-line preview of its first keys, closed.
+    const summary = within(table).getByText(/^\{ customer: \{…\}, lines: \[2\], note: "x+…"/);
+    const details = summary.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(within(table).queryByText(/"email": "ada@example.com"/)).not.toBeInTheDocument();
+    await user.click(summary);
+    expect(details).toHaveAttribute("open");
+    expect(within(table).getByText(/"email": "ada@example.com"/)).toBeInTheDocument();
+    await user.click(summary);
+    expect(within(table).queryByText(/"email": "ada@example.com"/)).not.toBeInTheDocument();
+  });
+
+  it("previews a long list in a table row by its length and first items", () => {
+    const rows = [{ id: 1, tags: Array.from({ length: 40 }, (_, index) => `tag-${index}`) }];
+    render(<RunDataView value={rows} label="Rows" />);
+    expect(screen.getByText(/^40 items \[ "tag-0", "tag-1", .*, … \]$/)).toBeInTheDocument();
+  });
+
+  it("previewNestedValue summarises children without expanding them", () => {
+    expect(previewNestedValue({ a: 1, b: "two", c: { d: 1 }, e: [], f: {} , g: null })).toBe('{ a: 1, b: "two", c: {…}, e: [], f: {}, g: null }');
+    expect(previewNestedValue([{ a: 1 }])).toBe("1 item [ {…} ]");
   });
 });
 

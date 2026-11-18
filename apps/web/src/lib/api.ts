@@ -1336,7 +1336,7 @@ export async function fetchProviderModels(payload: {
 
 export async function previewExpression(payload: {
   expression: string;
-  mode?: "expression" | "template";
+  mode?: "expression" | "template" | "condition";
   context?: {
     input?: unknown;
     vars?: Record<string, unknown>;
