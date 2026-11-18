@@ -1,0 +1,26 @@
+{
+  "name": "@ai-orchestrator/ner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "l2m-ner: an optional HTTP service that finds person names, places and street addresses with a local model (no weights included).",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./models": "./src/models/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "compile": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js serve",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@huggingface/tokenizers": "0.2.0",
+    "onnxruntime-node": "1.31.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}

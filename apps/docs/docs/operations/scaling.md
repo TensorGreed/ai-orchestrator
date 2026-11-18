@@ -108,6 +108,9 @@ pooler in front for more; transaction-mode pooling breaks the leader lock and th
   workers past what it can absorb.
 - **Sandboxes.** Code nodes in container mode and stdio MCP servers start on the instance that runs the run. Give
   those workers the container runtime and put them in a pool ([Pools](./queue-and-workers.md#pools)).
+- **Names and addresses model.** The optional [l2m-ner](./entity-service.md) service runs on CPU and is shared by
+  every API replica and worker; its [sizing table](./entity-service.md#sizing) gives memory and latency per thread
+  count.
 
 ## Metrics to watch
 

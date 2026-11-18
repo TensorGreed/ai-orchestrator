@@ -1,0 +1,162 @@
+name: l2m-ner model benchmark
+
+# Opt-in: pulls the pinned l2m-ner model from its publisher (the only workflow that downloads model weights), runs the
+# service, and measures it through the entity endpoint with the names-and-addresses benchmark: precision and recall
+# per class against the floors in apps/ner/models.json (benchmarkFloors), plus x86 timings. Results go to the run
+# summary and an artifact.
+#
+# Runs by hand (Actions -> l2m-ner model benchmark -> Run workflow), or weekly when the repository variable
+# L2M_NER_MODEL_WEEKLY is "true". Never on pull requests or pushes. Floors and how to raise them:
+# apps/docs/docs/operations/entity-service.md.
+on:
+  workflow_dispatch:
+    inputs:
+      threads:
+        description: ONNX Runtime threads per worker (NER_THREADS)
+        default: "2"
+  schedule:
+    - cron: "17 5 * * 2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ner-model
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Pull the model and benchmark it through l2m-ner (x86)
+    if: github.event_name == 'workflow_dispatch' || vars.L2M_NER_MODEL_WEEKLY == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      NER_THREADS: ${{ inputs.threads || '2' }}
+      NER_WORKERS: "1"
+      NER_PORT: "8000"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Before setup-node: its pnpm cache needs pnpm on PATH.
+      - name: Enable Corepack (pnpm)
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Folders
+        run: |
+          echo "NER_MODEL_DIR=$RUNNER_TEMP/ner-models" >> "$GITHUB_ENV"
+          echo "RESULTS=$RUNNER_TEMP/ner-results" >> "$GITHUB_ENV"
+
+      # Keyed by the manifest: a new pin (URL or SHA-256) downloads again; `models pull` re-checks every file anyway.
+      - name: Model cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ner-models
+          key: ner-model-${{ hashFiles('apps/ner/models.json') }}
+
+      # Running this workflow is the licence acceptance: the licence is printed in the log.
+      - name: Pull and verify the model
+        run: |
+          node packages/cli/bin/l2m.mjs models pull --accept-licence --dir "$NER_MODEL_DIR"
+          node packages/cli/bin/l2m.mjs models verify --dir "$NER_MODEL_DIR"
+
+      - name: Start l2m-ner
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS"
+          pnpm --filter @ai-orchestrator/ner compile
+          nohup node apps/ner/dist/main.js serve > "$RESULTS/ner.log" 2>&1 &
+          for _ in $(seq 1 120); do
+            if curl -fsS "http://127.0.0.1:$NER_PORT/health" | jq -e '.ready == true' > /dev/null 2>&1; then
+              curl -fsS "http://127.0.0.1:$NER_PORT/health" | jq .
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::l2m-ner did not load the model within 120 s"
+          cat "$RESULTS/ner.log"
+          exit 1
+
+      # Fails when a class drops below the model's floors (benchmarkFloors in apps/ner/models.json).
+      - name: Names and addresses benchmark through the endpoint
+        run: |
+          set -euo pipefail
+          node packages/cli/bin/l2m.mjs guard benchmark --entities --endpoint "http://127.0.0.1:$NER_PORT" \
+            --out "$RESULTS/entities.json" --junit "$RESULTS/entities.xml" | tee "$RESULTS/benchmark.txt"
+
+      # One long document (about 760 words) and the request size the docs suggest, sequentially.
+      - name: Timings
+        if: always()
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/ner-timing.mjs" <<'JS'
+          const url = `http://127.0.0.1:${process.env.NER_PORT}/v1/entities`;
+          const sentence = "Please ship the order to Maria Gonzalez at 1209 Oak Avenue, Springfield, IL 62704, and copy the Denver office. ";
+          const measure = async (chars, runs) => {
+            const text = sentence.repeat(Math.ceil(chars / sentence.length)).slice(0, chars);
+            const body = JSON.stringify({ texts: [text], labels: ["person_name", "location", "street_address"], language: "en" });
+            const times = [];
+            for (let i = 0; i <= runs; i++) {
+              const started = performance.now();
+              const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+              if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
+              await response.json();
+              if (i > 0) times.push(performance.now() - started);
+            }
+            times.sort((a, b) => a - b);
+            return { chars, p50Ms: Math.round(times[Math.floor(times.length / 2)]), p95Ms: Math.round(times[Math.floor(times.length * 0.95)] ?? times.at(-1)) };
+          };
+          const rows = [];
+          for (const chars of [500, 2000, 6000]) rows.push(await measure(chars, 15));
+          console.log(JSON.stringify(rows));
+          JS
+          node "$RUNNER_TEMP/ner-timing.mjs" > "$RESULTS/timings.json"
+          cat "$RESULTS/timings.json"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### l2m-ner model benchmark (x86, NER_THREADS=$NER_THREADS)"
+            echo
+            echo "CPU: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) vCPU)"
+            if [ -f "$RESULTS/entities.json" ]; then
+              echo
+              echo "| Class | Split | Precision | Recall | Strict precision |"
+              echo "| --- | --- | --- | --- | --- |"
+              jq -r 'def r: . * 1000 | round / 1000; .results[] | "| \(.dataClass) | \(.split) | \(.overlap.precision | r) | \(.overlap.recall | r) | \(.strict.precision | r) |"' "$RESULTS/entities.json"
+              echo
+              jq -r '"Per item: p50 \(.latency.p50Ms) ms, p95 \(.latency.p95Ms) ms, max \(.latency.maxMs) ms"' "$RESULTS/entities.json"
+            fi
+            if [ -f "$RESULTS/timings.json" ]; then
+              echo
+              echo "| One text of | p50 | p95 |"
+              echo "| --- | --- | --- |"
+              jq -r '.[] | "| \(.chars) chars | \(.p50Ms) ms | \(.p95Ms) ms |"' "$RESULTS/timings.json"
+            fi
+            if [ -f "$RESULTS/benchmark.txt" ]; then
+              echo
+              echo "~~~"
+              cat "$RESULTS/benchmark.txt"
+              echo "~~~"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ner-model-benchmark
+          path: ${{ runner.temp }}/ner-results
+          if-no-files-found: ignore
