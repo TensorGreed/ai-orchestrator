@@ -198,7 +198,7 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.93.0",
-    "@vscode/vsce": "^3.2.1",
+    "@vscode/vsce": "^4.1.1",
     "ovsx": "^0.10.1"
   }
 }
