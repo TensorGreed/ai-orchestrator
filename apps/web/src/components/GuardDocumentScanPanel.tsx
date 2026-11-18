@@ -191,6 +191,11 @@ function DocumentScanResultView({ result, showRedacted, onShowRedacted }: { resu
               }; the rest was not read.`}
         </p>
       )}
+      {result.sniffedType === "pdf" && (
+        <p className="kb-subtle" role="note">
+          Never read in a PDF: form field values without a widget on a page, pop-up notes, outlines (bookmarks), earlier revisions and attached files.
+        </p>
+      )}
       {result.attachmentsNotChecked ? (
         <p className="kb-subtle" role="note">
           {result.attachmentsNotChecked} attached file{result.attachmentsNotChecked === 1 ? " was" : "s were"} not checked.

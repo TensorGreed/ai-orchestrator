@@ -1,11 +1,13 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { DocumentError } from "./errors.js";
 import { extractDocument, extractDocumentAsync } from "./extract.js";
-import { checkedAnswer, configurePdfExtraction, DEFAULT_PDF_LIMITS, isPdf, pdfExtractionLimits, readPdf } from "./pdf.js";
+import { checkedAnswer, configurePdfExtraction, DEFAULT_PDF_LIMITS, isPdf, pdfExtractionLimits, readPdf, spawnPdfChild, stopPdfReaders } from "./pdf.js";
 import { extractPdfForNode } from "./pdf-node.js";
 import {
   deepNestingPdf,
@@ -59,6 +61,7 @@ const sample = () =>
   });
 
 afterEach(() => configurePdfExtraction(DEFAULT_PDF_LIMITS));
+afterAll(() => stopPdfReaders());
 
 describe("reading a PDF", () => {
   it("reads page text as lines, comments and their authors, form fields, links and properties", async () => {
@@ -221,6 +224,16 @@ describe("reading a PDF", () => {
     expect(checkedAnswer(null, 200, 100)).toBeNull();
   });
 
+  it("keeps one slot for interactive scans that workflow runs cannot take", async () => {
+    configurePdfExtraction({ maxConcurrent: 2 });
+    const slowWorkflow = readPdf(endlessContentPdf(), { maxChars: 100_000, reader: "workflow", limits: { timeoutMs: 2_000 } }).catch((error: unknown) => error);
+    // A second workflow read waits for the first (the other slot is kept), and gives up as busy.
+    await expectDocumentError(readPdf(sample(), { maxChars: 100_000, reader: "workflow", limits: { timeoutMs: 400 } }), "busy");
+    // An interactive scan still runs at once.
+    expect((await readPdf(sample(), { maxChars: 100_000 })).numPages).toBe(2);
+    expect(((await slowWorkflow) as DocumentError).code).toBe("too_large");
+  });
+
   it("keeps the configured limits within their floors", () => {
     configurePdfExtraction({ memoryMb: 1, maxPages: 0, timeoutMs: Number.NaN });
     expect(pdfExtractionLimits()).toMatchObject({ memoryMb: 64, maxPages: DEFAULT_PDF_LIMITS.maxPages, timeoutMs: DEFAULT_PDF_LIMITS.timeoutMs });
@@ -286,6 +299,33 @@ describe("malicious PDF shapes stay inside the limits", () => {
 
   it("the process still reads ordinary documents afterwards", async () => {
     expect((await readPdf(sample(), { maxChars: 100_000 })).numPages).toBe(2);
+  });
+});
+
+describe("the reader child process", () => {
+  it("cannot read files outside pdf.js, write, start processes or threads, compile strings, see the environment or (Node 25+) use the network", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "l2m-pdf-perm-"));
+    const secretFile = join(dir, "secret.txt");
+    writeFileSync(secretFile, "SECRET_MASTER_KEY");
+    const server = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    const child = spawnPdfChild(64, fileURLToPath(new URL("./pdf-child-probe.fixture.mjs", import.meta.url)));
+    try {
+      await new Promise<void>((resolve) => child.once("message", () => resolve()));
+      const report = await new Promise<Record<string, unknown>>((resolve) => {
+        child.once("message", (message) => resolve(message as Record<string, unknown>));
+        child.send({ secretFile, writeFile: join(dir, "written.txt"), port });
+      });
+      expect(report).toMatchObject({ readOutside: "denied", readEnviron: "denied", readPackage: "allowed", write: "denied", childProcess: "denied", worker: "denied", evalCode: "denied", envKeys: 0 });
+      expect(existsSync(join(dir, "written.txt"))).toBe(false);
+      // The permission model covers sockets from Node 25 on (the API image runs Node 26).
+      if (process.allowedNodeEnvironmentFlags.has("--allow-net")) expect(report.network).toBe("denied");
+    } finally {
+      child.kill("SIGKILL");
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

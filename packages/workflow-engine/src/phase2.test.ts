@@ -402,6 +402,11 @@ describe("extract_from_file_node pdf format", () => {
     expect(node?.error).toMatch(/not a PDF/);
     expect(node?.error).not.toMatch(/optional dependency/);
   });
+  it("fails the node for a damaged PDF, saying nothing was read", async () => {
+    const { node } = await runNode("extract_from_file_node", { format: "pdf", encoding: "base64", data: Buffer.from("%PDF-1.7\nbroken").toString("base64") });
+    expect(node?.status).toBe("error");
+    expect(node?.error).toMatch(/could not be read \(it may be damaged\), so nothing in it was checked/);
+  });
 });
 
 // =========================================================================

@@ -1,6 +1,6 @@
 /**
  * Scanning documents with content rules: the bytes of an upload or a URL fetched through the outbound URL checks,
- * extracted to text segments with locations (workflow-engine `documents/`; a PDF in a worker with memory and time
+ * extracted to text segments with locations (workflow-engine `documents/`; a PDF in a child process with memory and time
  * limits), then checked with a rule set's data scan.
  *
  * Two callers:
@@ -193,7 +193,7 @@ export class ContentDocumentScanService {
   }
 
   /**
-   * The document's text segments. A PDF is read in a worker under the deployment's PDF limits (configurePdfExtraction:
+   * The document's text segments. A PDF is read in a child process under the deployment's PDF limits (configurePdfExtraction:
    * CONTENT_SCAN_MAX_PAGES, CONTENT_SCAN_PDF_TIMEOUT_MS, CONTENT_SCAN_PDF_MEMORY_MB); `signal` stops it.
    */
   async extract(document: LoadedDocument, signal?: AbortSignal): Promise<ExtractedDocument> {
@@ -256,6 +256,9 @@ export class ContentDocumentScanService {
   }
 }
 
+/** Parts of any PDF the reader never reads. */
+export const PDF_NOT_READ = "Never read in a PDF: form field values without a widget on a page, pop-up notes, outlines (bookmarks), earlier revisions of the document, and attached files";
+
 /**
  * What a scan did not check, in words, or undefined when it checked everything: a PDF without a text layer, scanned
  * pages, pages or text past the limits, attached files. Clients that read only text see it next to the counts.
@@ -268,6 +271,7 @@ export function documentScanNotice(result: Omit<DocumentScanResult, "notice">): 
   else if (result.pages && result.pages.checked < result.pages.total) notes.push(`only ${result.pages.checked} of ${result.pages.total} pages were checked`);
   else if (result.truncated) notes.push("only part of the text was checked");
   if (result.attachmentsNotChecked) notes.push(`${result.attachmentsNotChecked} attached file${result.attachmentsNotChecked === 1 ? " was" : "s were"} not checked`);
+  if (result.sniffedType === "pdf") notes.push(PDF_NOT_READ);
   return notes.length > 0 ? `${notes.join("; ")}.` : undefined;
 }
 

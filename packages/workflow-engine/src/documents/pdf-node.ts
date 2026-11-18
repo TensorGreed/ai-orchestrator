@@ -4,7 +4,7 @@ import { isPdf, pdfExtractionLimits, readPdf, textLayerOf, type PdfItem } from "
 
 /**
  * Extract from File's `pdf` format: the PDF's text, per page with its comments, form field values and links, and the
- * document properties, read in a worker under the deployment's limits (CONTENT_SCAN_MAX_BYTES, CONTENT_SCAN_MAX_CHARS,
+ * document properties, read in a child process under the deployment's limits (CONTENT_SCAN_MAX_BYTES, CONTENT_SCAN_MAX_CHARS,
  * CONTENT_SCAN_MAX_PAGES, CONTENT_SCAN_PDF_TIMEOUT_MS, CONTENT_SCAN_PDF_MEMORY_MB). Pages that are images of text
  * (scanned) have no text layer: `textLayer` and `pagesWithoutText` say so, since there is no text recognition.
  */
@@ -54,7 +54,8 @@ export async function extractPdfForNode(raw: string, encoding: string, signal?: 
   const bytes = pdfBytes(raw, encoding, limits.maxBytes);
   let read: Awaited<ReturnType<typeof readPdf>>;
   try {
-    read = await readPdf(bytes, { maxChars: limits.maxChars, ...(signal ? { signal } : {}) });
+    // A workflow run never takes the slot kept for interactive scans.
+    read = await readPdf(bytes, { maxChars: limits.maxChars, reader: "workflow", ...(signal ? { signal } : {}) });
   } catch (error) {
     if (!(error instanceof DocumentError)) throw error;
     // Too busy is worth a retry; everything else is about this document.

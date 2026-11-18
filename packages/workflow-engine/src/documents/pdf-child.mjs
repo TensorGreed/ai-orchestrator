@@ -1,22 +1,37 @@
-// Reads a PDF's text in a worker thread (started by pdf.ts with memory limits, a kill timer and an empty environment).
+// Reads a PDF's text in a child process that pdf.ts starts with Node's permission model: it may read only this
+// script and the pdfjs-dist package folder, and may not write files, start processes or threads, load addons or (on
+// Node 25 and later) use the network; string compilation (eval, new Function) is switched off; the heap is capped and
+// the environment is empty. pdf.ts also stops it on a timer and when its memory passes the limit.
 //
-// Plain JavaScript on purpose: the worker runs without the TypeScript loader. It reads, for each page up to
-// `maxPages`, the text layer (as lines), the text of comments and their authors, form field values and link
-// addresses, and the document properties. It never renders, never loads system fonts, never fetches anything (the
-// character maps and standard font data are read from the pdfjs-dist package folder), and stops reading once
-// `maxChars` characters of text are collected. Nothing is logged: the console is silenced before pdf.js loads, so no
-// warning can carry document text into the logs.
+// Plain JavaScript on purpose: it runs without the TypeScript loader. It loads pdf.js first and says `{ ready: true }`
+// over the IPC channel; then it reads one document, sent as `{ bytes, maxPages, maxChars }`, and answers once. One
+// process reads one document: pdf.ts stops it after the answer and never reuses it.
 //
-// Answer (posted once): { ok: true, numPages, pages: [{ text, items: [{ part, item, text }] }], properties: [{ name, text }],
+// It reads, for each page up to `maxPages`, the text layer (as lines), the text of comments and their authors, form
+// field values and link addresses, and the document properties. It never renders, never loads system fonts, never
+// fetches anything (the character maps and standard font data are read from the pdfjs-dist package folder), and stops
+// reading once `maxChars` characters of text are collected. Nothing is logged: the console is silenced, and the
+// parent discards the process's output.
+//
+// Answer: { ok: true, numPages, pages: [{ text, items: [{ part, item, text }] }], properties: [{ name, text }],
 // stoppedAtChars, attachments } or { ok: false, code: "password" | "invalid" | "nesting" }.
 
-import { parentPort, workerData } from "node:worker_threads";
+import { pathToFileURL } from "node:url";
 
 for (const method of ["log", "info", "warn", "error", "debug", "trace", "dir", "table"]) {
   console[method] = () => {};
 }
+// No way out over the web APIs either (the permission model covers sockets from Node 25 on).
+for (const name of ["fetch", "WebSocket", "EventSource", "XMLHttpRequest"]) {
+  try {
+    delete globalThis[name];
+  } catch {
+    globalThis[name] = undefined;
+  }
+}
 
-const { bytes, maxPages, maxChars, assetRoot } = workerData;
+/** The pdfjs-dist package folder, with a trailing slash. */
+const assetRoot = process.argv[2];
 
 const PROPERTY_NAMES = ["Title", "Author", "Subject", "Keywords", "Creator", "Producer"];
 
@@ -92,10 +107,14 @@ function propertyItems(metadata) {
   return items;
 }
 
-async function read() {
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  // The parser runs in this thread (no nested worker): pdf.js uses a handler already on globalThis.
-  globalThis.pdfjsWorker = await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
+async function load() {
+  const pdfjs = await import(pathToFileURL(`${assetRoot}legacy/build/pdf.mjs`).href);
+  // The parser runs in this thread (no worker): pdf.js uses a handler already on globalThis.
+  globalThis.pdfjsWorker = await import(pathToFileURL(`${assetRoot}legacy/build/pdf.worker.mjs`).href);
+  return pdfjs;
+}
+
+async function read(pdfjs, { bytes, maxPages, maxChars }) {
   const task = pdfjs.getDocument({
     data: bytes,
     // Fonts are never compiled to JavaScript (CVE-2024-4367; the option is gone from current pdf.js, which no longer
@@ -122,8 +141,8 @@ async function read() {
   });
   // An encrypted document opens only with the empty password (pdf.js tries it first); asked for another, it is refused.
   task.onPassword = () => {
-    // The parent stops this worker on the first answer.
-    parentPort.postMessage({ ok: false, code: "password" });
+    // The parent stops this process on the first answer.
+    process.send({ ok: false, code: "password" });
   };
   const doc = await task.promise;
   let chars = 0;
@@ -171,8 +190,19 @@ function failure(error) {
   return { ok: false, code: "invalid" };
 }
 
-// The parent stops this worker once it has the answer (pdf.js may keep message ports open).
-read().then(
-  (answer) => parentPort.postMessage(answer),
-  (error) => parentPort.postMessage(failure(error))
+// A child whose parent has gone away stops at once.
+process.once("disconnect", () => process.exit(0));
+
+// Loaded and waiting: the parent sends one document, takes the one answer and stops this process.
+load().then(
+  (pdfjs) => {
+    process.once("message", (job) => {
+      read(pdfjs, job).then(
+        (answer) => process.send(answer),
+        (error) => process.send(failure(error))
+      );
+    });
+    process.send({ ready: true });
+  },
+  () => process.send({ ok: false, code: "invalid" })
 );

@@ -298,7 +298,7 @@ describe("the rule set page's document scan", () => {
     const builder = await login(context, "builder");
     const broken = await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: b64("%PDF-1.7 ..."), mediaType: "application/pdf" } });
     expect(broken.statusCode).toBe(400);
-    expect(broken.json()).toMatchObject({ code: "invalid_document" });
+    expect(broken.json()).toMatchObject({ code: "invalid_document", error: expect.stringMatching(/could not be read .*nothing in it was checked/) });
     const viewer = await login(context, "viewer");
     expect((await call(viewer, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: b64("x") } })).statusCode).toBe(403);
     expect((await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "ftp" } })).statusCode).toBe(400);
@@ -444,6 +444,11 @@ describe("the scan_document gateway tool", () => {
     const scanned = await client.call("scan_document", { content_base64: pdf([[]]).toString("base64") });
     expect(scanned.data).toMatchObject({ textLayer: "empty", findings: [] });
     expect(scanned.text).toMatch(/NOT CHECKED: the PDF has no text layer/);
+    expect(document.data.notice).toMatch(/^Never read in a PDF: form field values without a widget on a page, pop-up notes, outlines/);
+    // A damaged PDF is an error that says nothing was checked, never a clean result.
+    const damaged = await client.call("scan_document", { content_base64: b64("%PDF-1.7\nnot a real document") });
+    expect(damaged.error).toBe(true);
+    expect(damaged.text).toMatch(/could not be read \(it may be damaged\), so nothing in it was checked/);
     expect(result.data.notice).toBeUndefined();
   });
 

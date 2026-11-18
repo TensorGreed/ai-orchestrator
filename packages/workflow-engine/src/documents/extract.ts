@@ -286,7 +286,7 @@ export interface ExtractAsyncInput extends ExtractInput {
 
 /**
  * Like extractDocument, and also reads PDF documents (sniffed by their `%PDF-` header, whatever the declared type),
- * in a worker with memory and time limits. Throws DocumentError as extractDocument does, and as readPdf does for PDFs.
+ * in a child process with memory and time limits. Throws DocumentError as extractDocument does, and as readPdf does for PDFs.
  */
 export async function extractDocumentAsync(input: ExtractAsyncInput): Promise<ExtractedDocument> {
   const limits: DocumentLimits = { ...DEFAULT_DOCUMENT_LIMITS, ...input.limits };

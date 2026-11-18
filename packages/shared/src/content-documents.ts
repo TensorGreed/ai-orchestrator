@@ -5,7 +5,7 @@ import { dataClassNameSchema } from "./data-labels";
  * Scanning documents with content rules: a text, Markdown, HTML, JSON, CSV or PDF document, uploaded or fetched from a
  * URL, turned into text segments with locations (line:column, row:column, a JSON pointer, the part of an HTML page, or
  * a PDF page and line) and checked with a rule set's data scan. A PDF's text layer, comments, form field values, links
- * and document properties are read in a worker thread with memory and time limits; scanned pages (images of text) have
+ * and document properties are read in a child process with memory and time limits; scanned pages (images of text) have
  * no text layer and are reported as such, since there is no text recognition.
  *
  * - The rule set page's "Scan a document" panel (`POST /api/guard/profiles/:id/scan-document`): a test, like a

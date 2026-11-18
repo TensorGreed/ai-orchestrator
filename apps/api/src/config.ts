@@ -520,8 +520,9 @@ const envSchema = z.object({
   CONTENT_SCAN_MAX_CONCURRENT: z.coerce.number().int().min(1).max(32).default(2),
   /**
    * PDF documents (the scan panel, the gateway's `scan_document` and Extract from File's `pdf` format) are read in a
-   * worker thread, one per document: pages read per document, the wall-clock time one PDF may take (the worker is
-   * stopped then), and the memory it may use (its heap, and separately its decoded buffers).
+   * child process under Node's permission model, one per document: pages read per document, the wall-clock time one
+   * PDF may take (the child is stopped then), and the memory it may use (its heap; its resident memory may exceed that
+   * by 128 MB).
    */
   CONTENT_SCAN_MAX_PAGES: z.coerce.number().int().min(1).max(5_000).default(200),
   CONTENT_SCAN_PDF_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(20_000),
