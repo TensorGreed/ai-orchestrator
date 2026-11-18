@@ -64,6 +64,25 @@ describe("a workflow without an Output node", () => {
   });
 });
 
+describe("a workflow whose Output node is on a skipped branch", () => {
+  it("returns nothing, not an intermediate node's output", async () => {
+    const workflow = workflowOf(
+      [
+        { id: "start", type: "text_input", name: "Start", position, config: { text: "hello" } },
+        { id: "check", type: "if_node", name: "Check", position, config: { condition: "{{ text === 'nope' }}" } },
+        { id: "out", type: "output", name: "Out", position, config: { responseTemplate: "{{text}}" } }
+      ],
+      [
+        { id: "e1", source: "start", target: "check" },
+        { id: "e2", source: "check", target: "out", sourceHandle: "true" }
+      ]
+    );
+    const result = await executeWorkflow({ workflow }, dependencies());
+    expect(result.nodeResults.find((node) => node.nodeId === "out")?.status).toBe("skipped");
+    expect(result.output).toBeUndefined();
+  });
+});
+
 describe("an Output node without a template", () => {
   it("passes on its parent's output in a flow with no prompt or answer, not an empty string", async () => {
     const workflow = workflowOf(

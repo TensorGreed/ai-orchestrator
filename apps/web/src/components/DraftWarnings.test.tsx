@@ -46,7 +46,7 @@ describe("DraftWarnings", () => {
     const onDismiss = vi.fn();
     render(<DraftWarnings issues={issues} nodeLabel={(id) => (id === "http-1" ? "Post order" : undefined)} onSelectNode={onSelectNode} onDismiss={onDismiss} />);
     const banner = screen.getByTestId("draft-warnings");
-    expect(banner).toHaveTextContent("Saved as a draft. One setting needs finishing before this workflow can run");
+    expect(banner).toHaveTextContent("Unfinished draft. One setting needs finishing before this workflow can run or be published");
     expect(banner).toHaveTextContent("HTTP Request node requires a non-empty urlTemplate.");
     expect(banner).toHaveTextContent("No Output node");
     await userEvent.click(screen.getByRole("button", { name: "Post order" }));
@@ -57,6 +57,6 @@ describe("DraftWarnings", () => {
 
   it("shows notes alone without the draft heading", () => {
     render(<DraftWarnings issues={[issues[1]!]} nodeLabel={() => undefined} onDismiss={() => undefined} />);
-    expect(screen.getByTestId("draft-warnings")).not.toHaveTextContent("Saved as a draft");
+    expect(screen.getByTestId("draft-warnings")).not.toHaveTextContent("Unfinished draft");
   });
 });

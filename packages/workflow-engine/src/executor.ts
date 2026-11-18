@@ -10680,7 +10680,9 @@ async function executeWorkflowRun(
   // No Output node ran: the result is the output of the last node, in run order, that produced one (a skipped branch has none).
   if (finalOutput === undefined && nodeOrder.length > 0) {
     let lastNodeId = nodeOrder[nodeOrder.length - 1];
-    for (let position = nodeOrder.length - 1; position >= 0; position -= 1) {
+    // Only a workflow without an Output node looks further back: one whose Output was skipped keeps returning nothing.
+    const hasOutputNode = workflow.nodes.some((candidate) => candidate.type === "output");
+    for (let position = nodeOrder.length - 1; position >= 0 && !hasOutputNode; position -= 1) {
       if (nodeOutputs.get(nodeOrder[position]!) !== undefined) {
         lastNodeId = nodeOrder[position]!;
         break;

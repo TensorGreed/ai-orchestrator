@@ -207,7 +207,8 @@ export const QUEUE_POOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 export const TEST_WEBHOOK_PAYLOAD_MAX_CHARS = 64 * 1024;
 
 /** Field names that hold credentials. A test payload is stored with the workflow and shown to its readers, so it refuses them. */
-const CREDENTIAL_FIELD_NAME = /^(?:.*[_-])?(?:password|passwd|secret|token|api[_-]?key|apikey|authorization|cookie|private[_-]?key|client[_-]?secret|access[_-]?key)(?:[_-].*)?$/i;
+const CREDENTIAL_FIELD_NAME =
+  /^(?:.*[_.-])?(?:password|passwd|pwd|passphrase|secret|token|api[_.-]?key|apikey|auth|authorization|credentials?|cookie|bearer|jwt|private[_-]?key|client[_-]?secret|access[_-]?key)s?(?:[_.-].*)?$/i;
 
 /** The field paths of a test payload whose names look like credentials (nested objects and arrays included). */
 export function testWebhookPayloadCredentialFields(value: unknown, path: string[] = []): string[] {

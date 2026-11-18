@@ -76,7 +76,7 @@ test.describe("editor drafts and run feedback", () => {
       await openEditor(page, id);
 
       const notice = page.getByTestId("draft-warnings");
-      await expect(notice).toContainText("Saved as a draft");
+      await expect(notice).toContainText("Unfinished draft");
       await expect(notice).toContainText("HTTP Request node requires a non-empty urlTemplate.");
 
       const saved = page.waitForResponse((response) => response.url().includes(`/api/workflows`) && response.request().method() === "POST");

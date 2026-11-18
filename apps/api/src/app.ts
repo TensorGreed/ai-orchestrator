@@ -11344,11 +11344,12 @@ export async function createApp(
     };
 
     const validation = validateWorkflowGraph(workflow);
-    if (!validation.valid) {
+    const blocking = saveBlockingIssues(validation);
+    if (blocking.length > 0) {
       reply.code(400);
       return {
-        error: `Converted workflow failed validation: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-        validation,
+        error: `Converted workflow failed validation: ${blocking.map((issue) => issue.message).join("; ")}`,
+        validation: { ...validation, issues: blocking },
         report: conversion.report
       };
     }

@@ -40,8 +40,8 @@ export function DraftWarnings({ issues, nodeLabel, onSelectNode, onDismiss }: Dr
       {toFix.length > 0 ? (
         <>
           <p>
-            <strong>Saved as a draft.</strong> {toFix.length === 1 ? "One setting needs" : `${toFix.length} settings need`} finishing before
-            this workflow can run:
+            <strong>Unfinished draft.</strong> {toFix.length === 1 ? "One setting needs" : `${toFix.length} settings need`} finishing before
+            this workflow can run or be published:
           </p>
           <ul>
             {toFix.map((issue, index) => (

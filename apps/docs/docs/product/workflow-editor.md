@@ -52,7 +52,7 @@ Request followed by an Output, runs with no prompt, so the test prompt does not 
 The chat panel sends the message you type, and its system prompt on the same rule.
 
 **Webhook run** (canvas toolbar) asks for the request body first: a JSON object that the run receives as a call to the
-webhook URL would send it, so nodes read its fields as `{{webhook.customer}}`. The body is saved with the workflow
+webhook URL would send it, so nodes read its fields as <span v-pre>`{{webhook.customer}}`</span>. The body is saved with the workflow
 (`settings.testWebhookPayload`, at most 64 KB) and filled in the next time. Everyone who can read the workflow sees it,
 so a field named like a credential (`password`, `token`, `api_key`, `authorization`, `secret` and the like) is refused:
 put credentials in a secret instead.
@@ -153,7 +153,9 @@ lists it as a note, not an error.
 
 Saving keeps a draft: node settings you have not filled in yet (an HTTP Request URL, an IF condition, a model, a
 Set node's fields and the like) do not stop a save. The editor lists them above the canvas after the save, with a
-link to each node, and a run stops at them until they are fixed. A save is still refused for a broken graph (a
+link to each node, and a run stops at them until they are fixed. Such a version cannot be published either. A
+saved workflow's production webhooks and schedules are live, so each trigger of an unfinished draft records a failed
+run until it is finished. A save is still refused for a broken graph (a
 cycle, an edge to a missing node, a repeated node id) and for settings that are live as soon as the workflow is
 saved: trigger and webhook authentication settings, approval and content-rule rules, and attachment rules.
 

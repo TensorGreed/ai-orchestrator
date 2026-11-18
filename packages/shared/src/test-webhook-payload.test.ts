@@ -24,6 +24,7 @@ describe("a workflow's test webhook payload", () => {
 
   it("does not mistake ordinary names for credentials", () => {
     expect(testWebhookPayloadCredentialFields({ tokenizer: "bpe", secretary: "Bo", keyboard: "us", author: "Al", passage: "p" })).toEqual([]);
+    expect(testWebhookPayloadCredentialFields({ auth: "a", apiKeys: ["k"], passwords: "p", credentials: {}, jwt: "j", pwd: "p" })).toEqual(["auth", "apiKeys", "passwords", "credentials", "jwt", "pwd"]);
     expect(testWebhookPayloadCredentialFields({ access_token: "t", client_secret: "s", "x-api-key": "k", session_cookie: "c" })).toEqual([
       "access_token",
       "client_secret",

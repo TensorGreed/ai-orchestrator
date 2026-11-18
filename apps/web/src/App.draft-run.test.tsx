@@ -154,7 +154,7 @@ describe("editor drafts and run feedback", () => {
     openEditorOn("wf-hook");
     render(<App />);
     const notice = await screen.findByTestId("draft-warnings");
-    expect(notice).toHaveTextContent("Saved as a draft");
+    expect(notice).toHaveTextContent("Unfinished draft");
     expect(within(notice).getByRole("button", { name: "Order line" })).toBeInTheDocument();
   });
 });

@@ -120,6 +120,38 @@ describe("saving a draft", () => {
     expect(JSON.stringify(run.json())).toContain("requires a non-empty urlTemplate");
   });
 
+  it("does not publish an unfinished draft, and publishes it once finished", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const nodes = (url?: string) => [
+      ...hookFlow().nodes,
+      { id: "http", type: "http_request" as const, name: "HTTP", position, config: { method: "POST", ...(url ? { urlTemplate: url } : {}) } }
+    ];
+    const edges = [...hookFlow().edges, { id: "e2", source: "set", target: "http" }];
+    const draft = await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: hookFlow({ nodes: nodes(), edges }) });
+    expect(draft.statusCode).toBe(200);
+    // Each save is a new version: 1 is the draft, 2 the finished workflow.
+    const draftVersion = 1;
+    const refused = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/publish", headers: { cookie }, payload: { version: draftVersion } });
+    expect(refused.statusCode).toBe(409);
+    expect(JSON.stringify(refused.json())).toContain("cannot be published");
+
+    const finished = await context.app.inject({
+      method: "PUT",
+      url: "/api/workflows/wf-hook-draft",
+      headers: { cookie },
+      payload: hookFlow({ nodes: nodes("http://127.0.0.1:9/orders"), edges })
+    });
+    const published = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows/wf-hook-draft/publish",
+      headers: { cookie },
+      payload: { version: 2 }
+    });
+    expect(finished.statusCode).toBe(200);
+    expect(published.statusCode, JSON.stringify(published.json())).toBe(200);
+  });
+
   it("refuses a broken graph and says why once", async () => {
     const context = await createTestContext();
     const cookie = await login(context);

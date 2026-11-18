@@ -129,6 +129,7 @@ import type { Store } from "../db/store.js";
 import { ReleaseGateEnforcedError } from "../db/store-errors.js";
 import { mapAsync } from "../async-array.js";
 import { triggerTrustChanges } from "./trigger-trust.js";
+import { validateWorkflowGraph } from "@ai-orchestrator/workflow-engine";
 
 /** The gate's sets as they are now (see `ReleaseService.gateSets`). */
 interface GateSets {
@@ -1468,6 +1469,15 @@ export class ReleaseService {
     }
     if (input.override && user.role !== "admin") throw new ReleaseError("Only admins can override the release gate", 403);
     const candidate = (await this.versionCandidate(workflowId, input.version)).workflow;
+    // A draft saves with unfinished node settings; production runs only a version that can run.
+    const unfinished = validateWorkflowGraph(candidate).issues.filter((issue) => issue.severity !== "warning");
+    if (unfinished.length > 0) {
+      throw new ReleaseError(
+        `Version ${input.version} cannot run yet, so it cannot be published: ${unfinished.map((issue) => issue.message).join("; ")}`,
+        409,
+        { code: "workflow_invalid" }
+      );
+    }
     if (user.role !== "admin") {
       const changed = await this.trustChangesFromProduction(workflowId, candidate, previous);
       if (changed.length > 0) {
