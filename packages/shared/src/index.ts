@@ -50,3 +50,4 @@ export * from "./retention-policy";
 export * from "./pinned-data-marks";
 export * from "./read-capped";
 export * from "./content-documents";
+export * from "./run-prompts";
