@@ -75,17 +75,18 @@ const MAX_WORD_CHARS = 100;
 const ENCODE_CACHE_LIMIT = 50_000;
 
 export class GlinerCore {
+  /** Prompt encodings only; words are cached per text, so no request's words outlive it. */
   private readonly cache = new Map<string, number[]>();
 
   constructor(private readonly options: GlinerCoreOptions) {}
 
-  private encodeCached(text: string, limit: number): number[] {
+  private encodeCached(text: string, limit: number, cache: Map<string, number[]> = this.cache): number[] {
     const key = text.length > MAX_WORD_CHARS ? text.slice(0, MAX_WORD_CHARS) : text;
-    let ids = this.cache.get(key);
+    let ids = cache.get(key);
     if (!ids) {
       ids = this.options.encode(key);
-      if (this.cache.size >= ENCODE_CACHE_LIMIT) this.cache.clear();
-      this.cache.set(key, ids);
+      if (cache.size >= ENCODE_CACHE_LIMIT) cache.clear();
+      cache.set(key, ids);
     }
     return ids.length > limit ? ids.slice(0, limit) : ids;
   }
@@ -109,7 +110,8 @@ export class GlinerCore {
       promptIds.push(special.ent, ...this.encodeCached(prompt.prompt, 32));
     }
     promptIds.push(special.promptSep);
-    const wordIds = words.map((word) => this.encodeCached(word.text, settings.maxWordTokens));
+    const textCache = new Map<string, number[]>();
+    const wordIds = words.map((word) => this.encodeCached(word.text, settings.maxWordTokens, textCache));
     // Room for the words: the window budget less the prompt and the closing [SEP].
     const budget = Math.max(settings.maxWordTokens, settings.maxTokens - promptIds.length - 1);
     const windows = wordWindows(words.length, settings.words, settings.overlap, budget, (index) => Math.max(1, wordIds[index]!.length));
@@ -195,7 +197,14 @@ export function resolveCandidates(candidates: readonly GlinerCandidate[], window
   const kept = candidates.filter((candidate) => {
     if (!candidate.edge) return true;
     // Dropped when another window saw the same words away from its own inner edges (that window decides on its own).
-    return !windows.some((window, index) => index !== candidate.window && window.first <= candidate.first && candidate.last < window.end && !touchesInnerEdge(candidate, window, words.length));
+    // Windows start and end in increasing order, so only the run of windows next to this one can hold the span.
+    const holds = (index: number) => {
+      const window = windows[index]!;
+      return window.first <= candidate.first && candidate.last < window.end && !touchesInnerEdge(candidate, window, words.length);
+    };
+    for (let index = candidate.window - 1; index >= 0 && windows[index]!.end > candidate.last; index -= 1) if (holds(index)) return false;
+    for (let index = candidate.window + 1; index < windows.length && windows[index]!.first <= candidate.first; index += 1) if (holds(index)) return false;
+    return true;
   });
   const best = new Map<string, GlinerCandidate>();
   for (const candidate of kept) {
@@ -204,9 +213,19 @@ export function resolveCandidates(candidates: readonly GlinerCandidate[], window
     if (!seen || candidate.score > seen.score) best.set(key, candidate);
   }
   const sorted = [...best.values()].sort((a, b) => b.score - a.score || a.first - b.first || a.last - b.last || a.prompt - b.prompt);
+  // Words already taken: each candidate costs its width (at most max_width words), not the number chosen so far.
+  const taken = new Uint8Array(words.length);
   const chosen: GlinerCandidate[] = [];
   for (const candidate of sorted) {
-    if (chosen.some((other) => !(candidate.last < other.first || candidate.first > other.last))) continue;
+    let free = true;
+    for (let word = candidate.first; word <= candidate.last; word += 1) {
+      if (taken[word]) {
+        free = false;
+        break;
+      }
+    }
+    if (!free) continue;
+    taken.fill(1, candidate.first, candidate.last + 1);
     chosen.push(candidate);
   }
   return chosen

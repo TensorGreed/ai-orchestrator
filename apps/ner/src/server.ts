@@ -40,8 +40,13 @@ function sendError(res: ServerResponse, error: NerHttpError): void {
   send(res, error.status, { error: { code: error.code, message: error.message } }, error.headers);
 }
 
-/** Reads the body up to `limit` bytes; past it, 413 (the rest is not read). */
-function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
+/** Time to send the whole body, separate from (and much shorter than) the time allowed for the model. */
+export const NER_BODY_DEADLINE_MS = 15_000;
+/** Open connections at once; a slow client cannot hold more. */
+export const NER_MAX_CONNECTIONS = 256;
+
+/** Reads the body up to `limit` bytes within `deadlineMs`; past either, an error (the rest is not read). */
+function readBody(req: IncomingMessage, limit: number, deadlineMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const declared = Number(req.headers["content-length"] ?? Number.NaN);
     if (Number.isFinite(declared) && declared > limit) {
@@ -51,11 +56,22 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
     const chunks: Buffer[] = [];
     let size = 0;
     let done = false;
+    const deadline = setTimeout(() => {
+      if (done) return;
+      done = true;
+      chunks.length = 0;
+      reject(new NerHttpError(400, "bad_request", `The body did not arrive within ${deadlineMs / 1000} s`, { connection: "close" }));
+      req.pause();
+    }, deadlineMs);
+    deadline.unref();
+    req.on("close", () => clearTimeout(deadline));
     req.on("data", (chunk: Buffer) => {
       if (done) return;
       size += chunk.length;
       if (size > limit) {
         done = true;
+        clearTimeout(deadline);
+        chunks.length = 0;
         reject(new NerHttpError(413, "too_large", `The body is larger than ${limit} bytes`, { connection: "close" }));
         req.pause();
         return;
@@ -63,11 +79,13 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
       chunks.push(chunk);
     });
     req.on("end", () => {
+      clearTimeout(deadline);
       if (done) return;
       done = true;
       resolve(Buffer.concat(chunks));
     });
     req.on("error", () => {
+      clearTimeout(deadline);
       if (done) return;
       done = true;
       reject(new NerHttpError(400, "bad_request", "The body could not be read"));
@@ -77,6 +95,8 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
 
 export function createNerServer(service: NerService, config: NerConfig, logger: NerServerLogger = { info: () => undefined }): Server {
   const expectedToken = config.token ? digest(config.token) : undefined;
+  // Bodies being read right now: each can hold up to maxBodyBytes, so they are capped like the queue.
+  let reading = 0;
 
   const handle = async (req: IncomingMessage, res: ServerResponse, note: Record<string, unknown>): Promise<void> => {
     const path = (req.url ?? "/").split("?")[0];
@@ -98,7 +118,17 @@ export function createNerServer(service: NerService, config: NerConfig, logger: 
     }
     const type = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
     if (type !== "application/json") throw new NerHttpError(415, "unsupported_media_type", "Send application/json");
-    const body = await readBody(req, config.maxBodyBytes);
+    // Refused before the body is read, so a full queue does not also buffer bodies it cannot run.
+    if (service.atCapacity() || reading >= config.maxQueue) {
+      throw new NerHttpError(429, "busy", "Too many requests in progress; try again shortly", { "retry-after": "1", connection: "close" });
+    }
+    reading += 1;
+    let body: Buffer;
+    try {
+      body = await readBody(req, config.maxBodyBytes, NER_BODY_DEADLINE_MS);
+    } finally {
+      reading -= 1;
+    }
     let raw: unknown;
     try {
       raw = JSON.parse(body.toString("utf8"));
@@ -139,7 +169,8 @@ export function createNerServer(service: NerService, config: NerConfig, logger: 
       });
   });
   server.headersTimeout = 10_000;
-  server.requestTimeout = config.requestTimeoutMs + 10_000;
+  server.requestTimeout = config.requestTimeoutMs + NER_BODY_DEADLINE_MS;
+  server.maxConnections = NER_MAX_CONNECTIONS;
   server.keepAliveTimeout = 5_000;
   return server;
 }

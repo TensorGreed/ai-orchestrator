@@ -34,12 +34,15 @@ on it. [Accuracy](#accuracy) has the benchmark numbers and their weak spots.
 
 ## Run it with Docker Compose
 
-The root `docker-compose.yml` has a `ner` profile. Pull the model into the `l2m-ner-models` volume first (it prints the
-licence; `--accept-licence` accepts it):
+The root `docker-compose.yml` has a `ner` profile. Pull the model into the `l2m-ner-models` volume first with the
+`ner-models` service (it prints the licence; `--accept-licence` accepts it):
 
 ```bash
-docker compose --profile ner run --rm ner models pull --accept-licence
+docker compose run --rm ner-models pull --accept-licence
 ```
+
+`ner-models` runs `l2m-ner models …` (`list`, `pull`, `verify`) and is the only service that writes the volume or
+reaches the internet.
 
 Then start the stack with the profile and point the API at the service:
 
@@ -47,9 +50,12 @@ Then start the stack with the profile and point the API at the service:
 CONTENT_RULES_NER_ENDPOINT=http://ner:8000 docker compose --profile ner up -d --build
 ```
 
-The `ner` service publishes no port: only containers on the compose network reach it. To require a bearer token, set
+The `ner` service publishes no port and sits on an internal network (`ner-internal`) shared only with the API
+services, so it can neither be reached from outside nor connect out. It mounts the model volume read-only, has a
+read-only root filesystem, and runs with no capabilities and `no-new-privileges`. To require a bearer token, set
 `L2M_NER_TOKEN` (16 or more printable characters) for both commands; the compose file passes it to l2m-ner as
-`NER_TOKEN` and to the API as the endpoint token. Without the profile, nothing changes.
+`NER_TOKEN` and to the API as the endpoint token (an environment value shows in `docker inspect`; outside compose,
+prefer `NER_TOKEN_FILE`). Without the profile, nothing starts.
 
 Until a model is in the volume, the service starts anyway: `GET /health` reports `ready: false` with the pull
 command, entity requests get `503 not_ready`, and the service looks for the model again every 15 seconds. A pull
@@ -60,7 +66,7 @@ into a running stack is picked up without a restart.
 ```bash
 docker volume create l2m-ner-models
 docker run --rm -v l2m-ner-models:/models ghcr.io/tensorgreed/ai-orchestrator-ner:<tag> models pull --accept-licence
-docker run -d --name l2m-ner -v l2m-ner-models:/models -e NER_TOKEN_FILE=/run/secrets/ner-token \
+docker run -d --name l2m-ner --read-only --tmpfs /tmp --cap-drop ALL -v l2m-ner-models:/models:ro -e NER_TOKEN_FILE=/run/secrets/ner-token \
   -v "$PWD/ner-token:/run/secrets/ner-token:ro" -p 127.0.0.1:8000:8000 ghcr.io/tensorgreed/ai-orchestrator-ner:<tag>
 ```
 
@@ -112,20 +118,21 @@ itself).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `NER_HOST` | `127.0.0.1` (`0.0.0.0` in the image) | Address to listen on |
+| `NER_HOST` | `127.0.0.1` (`0.0.0.0` in the image) | Address to listen on; the service logs a warning at start when it listens beyond loopback without a token |
 | `NER_PORT` | `8000` | Port |
 | `NER_MODEL_DIR` | `./ner-models` (`/models` in the image) | Folder that holds the pulled models |
 | `NER_MODEL` | the manifest's default | Model id to load |
 | `NER_TOKEN` / `NER_TOKEN_FILE` | none | Bearer token for `POST /v1/entities` (16 to 4096 printable characters, no spaces); set one, not both |
 | `NER_WORKERS` | `1` | Worker threads, each with its own copy of the model (0 runs on the main thread; at most 16) |
 | `NER_THREADS` | `2` | ONNX Runtime threads per worker |
-| `NER_MAX_QUEUE` | `16` | Texts waiting or running before new requests get `429` |
+| `NER_MAX_QUEUE` | `16` | Requests in progress (and, separately, request bodies being read) before new ones get `429` |
 | `NER_REQUEST_TIMEOUT_MS` | `60000` | Time limit per request; a slower one gets `503 timeout` and its work is stopped |
 | `NER_MAX_TEXT_CHARS` | `20000` | Longest text accepted |
 | `NER_MAX_REQUEST_CHARS` | `200000` | All texts of one request together |
 | `NER_MAX_BODY_BYTES` | `2097152` | Largest request body |
 | `NER_MODEL_RETRY_MS` | `15000` | How often to look for a missing or refused model |
 
+Fixed limits: a request body must arrive within 15 seconds, and at most 256 connections are open at once.
 A blank value counts as unset. A value that does not parse stops the service at start with the variable's name (never
 its value).
 
@@ -164,7 +171,12 @@ Content-Type: application/json
 
 `GET /health` needs no token and answers `{ "ok": true, "ready": true, "model": {…} }` once the model is loaded, or
 `ready: false`, `model: null` and a `message` while it is missing or loading. It answers 503 with `ok: false` only when
-the model folder was refused (a checksum that does not match) or failed to load.
+the model folder was refused (a checksum that does not match) or failed to load. Messages name the files at fault but
+not paths or loader errors; those are in the service log.
+
+The service checks the model files once more before it starts each model worker, including a replacement for a worker
+that stopped: if any file changed since it was hashed, the service stops the model and hashes the folder again.
+Mount the folder read-only for the service (as the compose file does) so only `models pull` can change it.
 
 Errors are `{ "error": { "code", "message" } }`: `400 bad_request` (the message names the field and the rule, never
 a value), `401 unauthorized`, `404`, `405`, `413 too_large`, `415`, `429 busy` (with `Retry-After`),
@@ -176,7 +188,7 @@ the route, status, duration, and the counts of texts, characters and entities.
 Scores are calibrated per class: **0.8 is the score at which each class reached its benchmark cut-off**, whatever
 the model's raw score there was, and scores above it spread up to 1. So one threshold means the same for names, places
 and addresses, and a check's per-class minimum scores apply directly. Asking for a lower `threshold` returns more
-findings below the calibrated cut, down to 0.05 of the raw score.
+findings below the calibrated cut, down to a raw score of 0.15.
 
 ### How text is read
 
@@ -235,6 +247,7 @@ L2M_NER_TOKEN=… l2m guard benchmark --entities --endpoint http://localhost:800
 ```
 
 It reads the model from `/health`, gates on that model's floors when the manifest lists it (same id and ONNX
-checksum), and otherwise only reports. The workflow `.github/workflows/ner-model.yml` does the same on x86 in CI: it
+checksum). For a model the manifest does not list it exits 1, since there is nothing to gate on; add `--report-only` to
+measure it anyway. A token is sent only over https or to `localhost`. The workflow `.github/workflows/ner-model.yml` does the same on x86 in CI: it
 runs only by hand, or weekly when the repository variable `L2M_NER_MODEL_WEEKLY` is `true`, and is the only workflow
 that downloads the model. Change the floors in a pull request with the run that measured them.

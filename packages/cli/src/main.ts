@@ -114,7 +114,7 @@ const USAGE = `Usage:
                       [--split main|heldout]... [--category <name>]...
                       [--baseline <report.json>] [--tolerance <0-1>]
                       [--out <report.json>] [--junit <file>] [--json]
-  l2m guard benchmark --entities [--profile <file>] [--endpoint <url>]
+  l2m guard benchmark --entities [--profile <file>] [--endpoint <url> [--report-only]]
                       [--split main|heldout]...
                       [--out <report.json>] [--junit <file>] [--json]
   l2m models list   [--dir <folder>] [--manifest <file>]
@@ -156,7 +156,8 @@ floors, on a class without a floor, or when the check did not run on an
 item; with --profile it only reports. --endpoint <url> measures an entity
 endpoint instead of the rules (l2m-ner or your own; a token comes from
 L2M_NER_TOKEN) and gates on that model's floors in the l2m-ner model
-manifest when it lists them; 1 also when the endpoint is not ready.
+manifest; 1 also when the endpoint is not ready, or runs a model the manifest
+does not list (unless --report-only).
 models list, pull and verify manage the l2m-ner model folder (default
 NER_MODEL_DIR, then ./ner-models). pull downloads from the model's
 publisher, checks every file's SHA-256 and needs --accept-licence (or a

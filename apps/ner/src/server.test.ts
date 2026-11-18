@@ -38,7 +38,7 @@ afterEach(async () => {
   for (const server of servers.splice(0)) await server.close();
 });
 
-async function start(options: { env?: NodeJS.ProcessEnv; corrupt?: string; missing?: boolean; core?: ReturnType<typeof standInCore> } = {}) {
+async function start(options: { env?: NodeJS.ProcessEnv; corrupt?: string; missing?: boolean; core?: ReturnType<typeof standInCore>; crash?: { trigger?: () => void } } = {}) {
   const fake = fakeModel(options.corrupt ? { corrupt: options.corrupt } : {});
   if (options.missing) rmSync(path.join(fake.modelsDir, "example__fake-gliner"), { recursive: true, force: true });
   const config: NerConfig = loadNerConfig({ NER_MODEL_DIR: fake.modelsDir, NER_MODEL_RETRY_MS: "1000", ...options.env });
@@ -47,7 +47,16 @@ async function start(options: { env?: NodeJS.ProcessEnv; corrupt?: string; missi
     config,
     manifest: fake.manifest,
     logger: { info: (message) => logs.push(message), warn: (message) => logs.push(message) },
-    executorFactory: () => async () => inlineExecutor(options.core ?? standInCore())
+    executorFactory: () => async () => {
+      const executor = inlineExecutor(options.core ?? standInCore());
+      if (!options.crash) return executor;
+      return {
+        ...executor,
+        onExit: (listener: (reason: string) => void) => {
+          options.crash!.trigger = () => listener("test crash");
+        }
+      };
+    }
   });
   await service.start();
   const server = createNerServer(service, config, { info: (entry) => logs.push(JSON.stringify(entry)) });
@@ -206,5 +215,22 @@ describe("the model lifecycle and GET /health", () => {
     const body = (await response.json()) as Record<string, unknown>;
     expect(body).toMatchObject({ ok: false, ready: false, model: null });
     expect(body.message).toMatch(/tokenizer\.json/);
+  });
+
+  it("checks the folder again when its files change under a loaded model, before a worker restarts", async () => {
+    const crash: { trigger?: () => void } = {};
+    const { url, service, fake } = await start({ crash });
+    expect(service.modelState).toBe("ready");
+    // Same size, other content: only the checksum can tell.
+    const file = path.join(fake.modelsDir, "example__fake-gliner", "tokenizer.json");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(file, "[]");
+    crash.trigger!();
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    expect(service.modelState).toBe("invalid");
+    const health = (await (await fetch(`${url}/health`)).json()) as Record<string, unknown>;
+    expect(health).toMatchObject({ ok: false, ready: false, model: null });
+    expect(health.message).toMatch(/tokenizer\.json/);
+    expect(JSON.stringify(health)).not.toContain(fake.modelsDir);
   });
 });

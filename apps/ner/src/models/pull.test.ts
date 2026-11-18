@@ -98,6 +98,20 @@ describe("pullNerModel", () => {
     await expect(pullNerModel({ modelsDir: emptyDir(), model, fetchImpl: serving(bodies, { finalUrl: "http://cdn.example.test/file" }) })).rejects.toThrow(/away from https/);
   });
 
+  it("follows https redirects and refuses a hop to plain http", async () => {
+    const { model, contents } = fakeModel();
+    const inner = serving(Object.fromEntries(model.files.map((file) => [`https://cdn.example.test/${file.path}`, contents[file.path]!])));
+    const redirecting = (target: (path: string) => string) =>
+      (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const file = model.files.find((entry) => entry.url === url);
+        if (file) return new Response(null, { status: 302, headers: { location: target(file.path) } });
+        return inner(input, init);
+      }) as typeof fetch;
+    await pullNerModel({ modelsDir: emptyDir(), model, fetchImpl: redirecting((path) => `https://cdn.example.test/${path}`) });
+    await expect(pullNerModel({ modelsDir: emptyDir(), model, fetchImpl: redirecting((path) => `http://cdn.example.test/${path}`) })).rejects.toThrow(/away from https/);
+  });
+
   it("gives up on a download that stalls", async () => {
     const { model, contents } = fakeModel();
     await expect(pullNerModel({ modelsDir: emptyDir(), model, fetchImpl: serving(bodiesOf(model, contents), { stall: true }), idleTimeoutMs: 50 })).rejects.toThrow(/no data for/);

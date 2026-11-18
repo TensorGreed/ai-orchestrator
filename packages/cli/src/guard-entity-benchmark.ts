@@ -5,7 +5,8 @@
  *   --entities                 the built-in options (every class), gated on ENTITY_RULES_BENCHMARK_FLOORS
  *   --entities --profile <f>   the rule set's own `data.entities` options and threshold; reports only
  *   --endpoint <url>           through an entity endpoint (l2m-ner or your own service; token from L2M_NER_TOKEN),
- *                              gated on the model's floors in the l2m-ner model manifest when it lists them
+ *                              gated on the model's floors in the l2m-ner model manifest; a model the manifest
+ *                              does not list fails (exit 1) unless --report-only says to only report
  *   --split main|heldout       one split (repeatable)
  *   --out <report.json> --junit <file> --json
  *
@@ -91,6 +92,8 @@ export async function runGuardEntityBenchmarkCommand(args: ParsedArgs, io: CliIo
   const profileFile = oneFlag(args, "profile");
   const profile = profileFile ? loadProfile(profileFile) : undefined;
   const endpoint = oneFlag(args, "endpoint");
+  const reportOnly = args.booleans.has("report-only");
+  if (reportOnly && !endpoint) throw new UsageError("--report-only only applies to --entities --endpoint");
   let registry = entityBenchmarkRegistry();
   let gate: EntityGate | undefined = {
     floors: ENTITY_RULES_BENCHMARK_FLOORS,
@@ -114,6 +117,11 @@ export async function runGuardEntityBenchmarkCommand(args: ParsedArgs, io: CliIo
     }
     registry = createDefaultGuardRegistry({ entityRecognizer: createNerEndpointRecognizer(options, model) });
     gate = modelGate(model);
+    // The model is the endpoint's own claim: an unlisted one must not pass a CI gate silently.
+    if (!gate && !profile && !reportOnly) {
+      write(io.stderr, `The entity endpoint runs ${model.id}, which the l2m-ner model manifest does not list with floors (or with this checksum); nothing to gate on. Pass --report-only to measure it anyway.`);
+      return 1;
+    }
     measured = `${model.id} (${model.version}) through ${new URL(endpoint).host}`;
   }
   if (profile) gate = undefined;

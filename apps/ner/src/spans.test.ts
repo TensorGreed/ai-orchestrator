@@ -151,6 +151,13 @@ describe("entitiesFromRaw", () => {
     ).toEqual([]);
   });
 
+  it("trims a name suffix in linear time, even across a long run of whitespace", () => {
+    const text = `Alice${" ".repeat(100_000)}Smith Jr.`;
+    const started = performance.now();
+    expect(run(text, [[text, "name", 0.9]], ["person_name"])[0]!.text.endsWith("Smith")).toBe(true);
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+
   it("does not run away on a long run of separators or text after an address", () => {
     const text = `12 Main Street${",".repeat(50_000)} Springfield`;
     const started = performance.now();

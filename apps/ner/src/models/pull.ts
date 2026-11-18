@@ -21,6 +21,7 @@ export interface PullNerModelResult {
   alreadyPresent: string[];
 }
 
+const MAX_REDIRECTS = 5;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 
 /**
@@ -70,11 +71,23 @@ async function downloadFile(folder: string, file: NerModelFile, options: PullNer
   let ok = false;
   try {
     touch();
-    const response = await (options.fetchImpl ?? fetch)(file.url, {
-      redirect: "follow",
-      signal: controller.signal,
-      headers: { accept: "application/octet-stream", "user-agent": "l2m-ner-models" }
-    });
+    // Redirects are followed by hand so that every hop, not only the last, has to be https.
+    let url = file.url;
+    let response: Response;
+    for (let hop = 0; ; hop += 1) {
+      response = await (options.fetchImpl ?? fetch)(url, {
+        redirect: "manual",
+        signal: controller.signal,
+        headers: { accept: "application/octet-stream", "user-agent": "l2m-ner-models" }
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      await response.body?.cancel().catch(() => undefined);
+      const location = response.headers.get("location");
+      if (!location || hop >= MAX_REDIRECTS) throw new Error(`${file.path}: the download redirected ${location ? "too many times" : "without a location"}`);
+      const next = new URL(location, url);
+      if (next.protocol !== "https:") throw new Error(`${file.path}: the download was redirected away from https`);
+      url = next.toString();
+    }
     if (!response.ok || !response.body) throw new Error(`${file.path}: the download answered HTTP ${response.status}`);
     if (response.url && !response.url.startsWith("https:")) throw new Error(`${file.path}: the download was redirected away from https`);
     const declared = Number(response.headers.get("content-length") ?? Number.NaN);

@@ -64,11 +64,28 @@ describe("the entity endpoint recognizer", () => {
     expect(fake.calls).toEqual([]);
   });
 
+  it("sends the token only over https or to this machine", async () => {
+    const fake = endpoint();
+    await expect(nerEndpointModel({ ...options(fake), token: "a-long-enough-token-1234" })).rejects.toThrow(/only sent over https/);
+    expect(fake.calls).toEqual([]);
+    expect(await nerEndpointModel({ ...options(fake), url: "http://localhost:8000", token: "a-long-enough-token-1234" })).toEqual(bundledModel);
+    expect(await nerEndpointModel({ ...options(fake), url: "https://ner.test", token: "a-long-enough-token-1234" })).toEqual(bundledModel);
+  });
+
+  it("refuses an oversized answer and strips control characters from what it prints", async () => {
+    const huge = (async () => new Response(new ReadableStream({ pull: (controller) => controller.enqueue(new Uint8Array(1024 * 1024)) }))) as unknown as typeof fetch;
+    await expect(nerEndpointModel({ url: "http://ner.test", timeoutMs: 5_000, fetch: huge })).rejects.toThrow(/too large/);
+    const escape = (async () => Response.json({ ok: true, ready: false, model: null, message: "\u001b]0;pwned\u0007 pull it" })) as unknown as typeof fetch;
+    const error = await nerEndpointModel({ url: "http://ner.test", timeoutMs: 1_000, fetch: escape }).catch((caught: Error) => caught);
+    expect((error as Error).message).not.toMatch(/[\u0000-\u001f]/);
+    expect((error as Error).message).toContain("pull it");
+  });
+
   it("sends batches of at most 64 texts with the token and maps the spans", async () => {
     const fake = endpoint({
       answer: (body) => ({ status: 200, json: { model: bundledModel, results: body.texts.map((text) => ({ entities: [{ start: 0, end: Math.min(4, text.length), label: "person_name", score: 0.9 }] })) } })
     });
-    const recognizer = createNerEndpointRecognizer({ ...options(fake), token: "a-long-enough-token-1234" }, bundledModel);
+    const recognizer = createNerEndpointRecognizer({ ...options(fake), url: "https://ner.test:8000/", token: "a-long-enough-token-1234" }, bundledModel);
     const texts = Array.from({ length: 130 }, (_, i) => `Anna ${i}`);
     const spans = await recognizer.recognize(texts, { classes: ["person_name", "email"], language: "en" });
     expect(spans).toHaveLength(130);
@@ -76,7 +93,7 @@ describe("the entity endpoint recognizer", () => {
     const posts = fake.calls.filter((call) => call.body);
     expect(posts.map((call) => call.body!.texts.length)).toEqual([64, 64, 2]);
     expect(posts[0]!.body!.labels).toEqual(["person_name"]);
-    expect(posts[0]!.url).toBe("http://ner.test:8000/v1/entities");
+    expect(posts[0]!.url).toBe("https://ner.test:8000/v1/entities");
     expect(posts[0]!.authorization).toBe("Bearer a-long-enough-token-1234");
   });
 
@@ -102,16 +119,20 @@ describe("l2m guard benchmark --entities --endpoint", () => {
   it("gates a listed model on its manifest floors, with the token from L2M_NER_TOKEN", async () => {
     const fake = endpoint();
     const run = io(fake.fetch, { L2M_NER_TOKEN: "a-long-enough-token-1234" });
-    expect(await main(["guard", "benchmark", "--entities", "--endpoint", "http://ner.test:8000"], run)).toBe(0);
+    expect(await main(["guard", "benchmark", "--entities", "--endpoint", "https://ner.test:8000"], run)).toBe(0);
     expect(run.out()).toContain(`Measured: ${bundledModel.id} (test) through ner.test:8000`);
     expect(run.out()).toContain(`PASS: every class is at or above ${bundledModel.id}'s floors`);
     expect(fake.calls.every((call) => call.authorization === "Bearer a-long-enough-token-1234")).toBe(true);
   });
 
-  it("only reports for a model the manifest does not list", async () => {
+  it("fails for a model the manifest does not list, unless told to only report", async () => {
+    const refused = io(endpoint({ model: otherModel }).fetch);
+    expect(await main(["guard", "benchmark", "--entities", "--endpoint", "http://ner.test:8000"], refused)).toBe(1);
+    expect(refused.err()).toContain("--report-only");
     const run = io(endpoint({ model: otherModel }).fetch);
-    expect(await main(["guard", "benchmark", "--entities", "--endpoint", "http://ner.test:8000"], run)).toBe(0);
+    expect(await main(["guard", "benchmark", "--entities", "--endpoint", "http://ner.test:8000", "--report-only"], run)).toBe(0);
     expect(run.out()).toContain("No floors are listed for this model");
+    expect(await main(["guard", "benchmark", "--entities", "--report-only"], io(endpoint().fetch))).toBe(EXIT_USAGE);
   });
 
   it("fails with the reason when the endpoint is not ready, and refuses --endpoint without --entities", async () => {

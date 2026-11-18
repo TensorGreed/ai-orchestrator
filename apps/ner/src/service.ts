@@ -84,7 +84,7 @@ export class NerService {
     for (const file of this.model.files) {
       try {
         const info = await stat(nerModelFilePath(this.folder, file.path));
-        parts.push(`${file.path}:${info.size}:${info.mtimeMs}`);
+        parts.push(`${file.path}:${info.size}:${info.mtimeMs}:${info.ino}:${info.ctimeMs}`);
       } catch {
         parts.push(`${file.path}:-`);
       }
@@ -96,7 +96,7 @@ export class NerService {
     if (this.closed || this.state === "ready" || this.state === "checking" || this.state === "loading") return;
     const sizes = await verifyNerModel(this.folder, this.model, { sizesOnly: true });
     if (sizes.files.every((file) => file.status === "missing")) {
-      this.setState("missing", `No model in ${this.folder}. Pull it with: models pull ${this.model.id} --accept-licence`);
+      this.setState("missing", `The model is not in the models folder (NER_MODEL_DIR). Pull it with: models pull ${this.model.id} --accept-licence`);
       this.scheduleRetry();
       return;
     }
@@ -128,13 +128,21 @@ export class NerService {
       (config.workers === 0
         ? async () => inlineExecutor(await loadGlinerEngine(this.folder, this.model, { intraOpThreads: config.threads }))
         : workerExecutorFactory({ folder: this.folder, model: this.model, intraOpThreads: config.threads }));
-    const pool = new NerPool(Math.max(1, config.workers), factory, this.logger);
+    // Every start, the first ones and a respawn after a worker stopped, loads only the files as they were checked.
+    const guarded = async () => {
+      if ((await this.signature()) !== signature) {
+        this.modelChanged();
+        throw new Error("The model files changed after they were checked");
+      }
+      return factory();
+    };
+    const pool = new NerPool(Math.max(1, config.workers), guarded, this.logger);
     try {
       await pool.start();
     } catch (error) {
       this.failedSignature = signature;
-      this.setState("failed", `The model did not load: ${error instanceof Error ? error.message.slice(0, 300) : "unknown error"}`);
-      this.logger.warn(`l2m-ner: ${this.message}`);
+      this.setState("failed", "The model did not load; the service log has the reason");
+      this.logger.warn(`l2m-ner: the model did not load: ${error instanceof Error ? error.message.slice(0, 300) : "unknown error"}`);
       this.scheduleRetry();
       return;
     }
@@ -153,9 +161,24 @@ export class NerService {
     this.message = message;
   }
 
+  /** The files changed under a loaded model: stop it and check the folder again before loading anything from it. */
+  private modelChanged(): void {
+    if (this.closed || this.state !== "ready") return;
+    const pool = this.pool;
+    this.pool = undefined;
+    this.setState("invalid", "The model files changed after they were checked; checking them again");
+    this.logger.warn(`l2m-ner: ${this.message}`);
+    void (pool ? pool.close() : Promise.resolve()).finally(() => void this.tryLoad());
+  }
+
+  /** True when no more requests can be queued (checked before a body is read, and again once it is parsed). */
+  atCapacity(): boolean {
+    return this.inFlight >= this.options.config.maxQueue;
+  }
+
   health(): NerHealthResponse {
     const ready = this.state === "ready" && this.pool !== undefined && this.pool.liveExecutors > 0;
-    const poolError = this.state === "ready" ? this.pool?.error : undefined;
+    const poolError = this.state === "ready" && this.pool?.error ? "The model worker stopped; a new one is starting (the service log has the reason)" : undefined;
     const ok = this.state !== "invalid" && this.state !== "failed";
     const message = ready ? undefined : poolError ?? this.message;
     return { ok, ready, model: ready ? this.modelInfo : null, ...(message ? { message } : {}) };

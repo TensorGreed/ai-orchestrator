@@ -37,6 +37,9 @@ async function serve(): Promise<number> {
     threads: config.threads,
     token: config.token ? "required" : "not set"
   });
+  if (!config.token && !["127.0.0.1", "::1", "localhost"].includes(config.host)) {
+    log("warn", { msg: "No token is set (NER_TOKEN or NER_TOKEN_FILE): anyone who can reach this address can send text to the model. Keep the port private or set a token." });
+  }
   void service.start().catch((error: unknown) => log("error", { msg: `model start failed: ${error instanceof Error ? error.message : "unknown"}` }));
   await new Promise<void>((resolve) => {
     const stop = (signal: string) => {

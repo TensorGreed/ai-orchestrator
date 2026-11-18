@@ -19,7 +19,7 @@ import type { NerEntityClass, NerModel, NerPrompt } from "./models/manifest.js";
 
 export const NER_CALIBRATED_CUT = 0.8;
 /** Raw scores under this are never decoded, whatever the request's threshold (it bounds the work per window). */
-export const NER_MIN_RAW_CUTOFF = 0.05;
+export const NER_MIN_RAW_CUTOFF = 0.15;
 
 /** Characters of a unit designator ("Apt 4B, ") allowed between or before address parts, on top of the plain gap. */
 const UNIT_GAP_CHARS = 24;
@@ -104,11 +104,14 @@ const TITLE_BEFORE = /^(?:Mr|Mrs|Ms|Miss|Mx|Dr|Prof|Professor|Sir|Dame|Rev|Herr|
 const SUFFIX_AFTER = /,?\s+(?:Jr|Sr|II|III|IV|PhD|MD)\.?$/;
 
 /** A name without a leading title ("Dr. Okafor" → "Okafor") or a trailing suffix ("Jr."): the title is the cue, not the name. */
+const SUFFIX_TAIL_CHARS = 24;
+
 function trimName(text: string, start: number, end: number): { start: number; end: number } | undefined {
   const value = text.slice(start, end);
   const title = TITLE_BEFORE.exec(value);
   const from = title ? start + title[0].length : start;
-  const suffix = SUFFIX_AFTER.exec(text.slice(from, end));
+  // Only the tail is tried: the pattern is unanchored at the start, and a span can hold a long run of whitespace.
+  const suffix = SUFFIX_AFTER.exec(text.slice(Math.max(from, end - SUFFIX_TAIL_CHARS), end));
   const to = suffix ? end - suffix[0].length : end;
   return to > from ? { start: from, end: to } : undefined;
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { GlinerCancelled, GlinerCore, type GlinerSession, type MakeTensor } from "./gliner.js";
+import { GlinerCancelled, GlinerCore, resolveCandidates, type GlinerCandidate, type GlinerSession, type MakeTensor } from "./gliner.js";
+import { splitWords, wordWindows } from "./words.js";
 
 /**
  * A mocked ONNX session: no model. It checks the inputs the decoder builds and answers logits from a function of
@@ -160,5 +161,23 @@ describe("GlinerCore", () => {
     });
     await gliner.recognize(`${"a".repeat(5_000)} b`, [{ prompt: "x", cutoff: 0.5 }]);
     expect(Math.max(...seen.map((text) => text.length))).toBe(100);
+  });
+
+  it("resolves many overlapping candidates in about linear time", () => {
+    const text = Array.from({ length: 20_000 }, (_, i) => `w${i}`).join(" ");
+    const words = splitWords(text);
+    const windows = wordWindows(words.length, 128, 16, 10_000, () => 1);
+    const candidates: GlinerCandidate[] = [];
+    windows.forEach((window, index) => {
+      for (let first = window.first; first < window.end; first += 1) {
+        for (let last = first; last < Math.min(window.end, first + 12); last += 1) {
+          candidates.push({ first, last, prompt: 0, score: 0.5 + ((first * 7 + last) % 50) / 100, window: index, edge: first === window.first || last === window.end - 1 });
+        }
+      }
+    });
+    const started = performance.now();
+    const spans = resolveCandidates(candidates, windows, words);
+    expect(performance.now() - started).toBeLessThan(3_000);
+    for (let i = 1; i < spans.length; i += 1) expect(spans[i]!.start).toBeGreaterThanOrEqual(spans[i - 1]!.end);
   });
 });

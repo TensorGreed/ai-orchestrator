@@ -7,6 +7,9 @@ import type { GuardEntityRecognizer, GuardEntitySpan } from "@ai-orchestrator/gu
 
 export const NER_ENDPOINT_LABELS = ["person_name", "location", "street_address"] as const;
 const MAX_TEXTS_PER_REQUEST = 64;
+/** Largest answer read from the endpoint; a larger one is refused rather than buffered. */
+const MAX_ANSWER_BYTES = 16 * 1024 * 1024;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 export interface NerEndpointModel {
   id: string;
@@ -26,7 +29,12 @@ export class NerEndpointError extends Error {}
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
-function base(url: string): string {
+/** Text from the endpoint, for the terminal: control characters (escape sequences) removed, length capped. */
+function printable(value: string, max: number): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, max);
+}
+
+function base(url: string, token: string | undefined): string {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -35,6 +43,9 @@ function base(url: string): string {
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new NerEndpointError("--endpoint must be an http or https URL");
   if (parsed.username || parsed.password) throw new NerEndpointError("--endpoint must not carry credentials; set L2M_NER_TOKEN");
+  if (token && parsed.protocol === "http:" && !LOOPBACK_HOSTS.has(parsed.hostname)) {
+    throw new NerEndpointError("L2M_NER_TOKEN is only sent over https, or over http to this machine (localhost)");
+  }
   return parsed.toString().replace(/\/+$/, "");
 }
 
@@ -42,7 +53,7 @@ function parseModel(value: unknown): NerEndpointModel | null {
   if (!isObject(value)) return null;
   const { id, version, sha256 } = value;
   if (typeof id !== "string" || typeof version !== "string" || typeof sha256 !== "string" || id.length > 200 || version.length > 200 || !/^[0-9a-f]{64}$/.test(sha256)) return null;
-  return { id, version, sha256 };
+  return { id: printable(id, 200), version: printable(version, 200), sha256 };
 }
 
 async function call(options: NerEndpointOptions, path: string, init: RequestInit): Promise<{ status: number; body: unknown }> {
@@ -50,12 +61,12 @@ async function call(options: NerEndpointOptions, path: string, init: RequestInit
   if (options.token) headers.authorization = `Bearer ${options.token}`;
   let response: Response;
   try {
-    response = await (options.fetch ?? fetch)(`${base(options.url)}${path}`, { ...init, headers, signal: AbortSignal.timeout(options.timeoutMs), redirect: "error" });
+    response = await (options.fetch ?? fetch)(`${base(options.url, options.token)}${path}`, { ...init, headers, signal: AbortSignal.timeout(options.timeoutMs), redirect: "error" });
   } catch (error) {
     if (error instanceof NerEndpointError) throw error;
     throw new NerEndpointError(`The entity endpoint did not answer (${error instanceof Error ? error.name : "error"})`);
   }
-  const text = await response.text();
+  const text = await readCapped(response);
   let body: unknown = null;
   try {
     body = text ? JSON.parse(text) : null;
@@ -65,10 +76,38 @@ async function call(options: NerEndpointOptions, path: string, init: RequestInit
   return { status: response.status, body };
 }
 
+async function readCapped(response: Response): Promise<string> {
+  const declared = Number(response.headers.get("content-length") ?? Number.NaN);
+  if (Number.isFinite(declared) && declared > MAX_ANSWER_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new NerEndpointError("The entity endpoint's answer is too large");
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_ANSWER_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new NerEndpointError("The entity endpoint's answer is too large");
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof NerEndpointError) throw error;
+    throw new NerEndpointError(`The entity endpoint's answer could not be read (${error instanceof Error ? error.name : "error"})`);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 function errorOf(status: number, body: unknown): string {
   const error = isObject(body) && isObject(body.error) ? body.error : undefined;
-  const code = typeof error?.code === "string" ? error.code.slice(0, 40) : "error";
-  const message = typeof error?.message === "string" ? error.message.slice(0, 200) : "";
+  const code = typeof error?.code === "string" ? printable(error.code, 40) : "error";
+  const message = typeof error?.message === "string" ? printable(error.message, 200) : "";
   return `HTTP ${status} ${code}${message ? `: ${message}` : ""}`;
 }
 
@@ -77,7 +116,7 @@ export async function nerEndpointModel(options: NerEndpointOptions): Promise<Ner
   const { status, body } = await call(options, "/health", { method: "GET" });
   if (!isObject(body)) throw new NerEndpointError(`The entity endpoint's /health answered HTTP ${status} without JSON`);
   if (body.ready !== true) {
-    const message = typeof body.message === "string" ? body.message.slice(0, 300) : "no message";
+    const message = typeof body.message === "string" ? printable(body.message, 300) : "no message";
     throw new NerEndpointError(`The entity endpoint is not ready: ${message}`);
   }
   const model = parseModel(body.model);
