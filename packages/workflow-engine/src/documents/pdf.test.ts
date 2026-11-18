@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { DocumentError } from "./errors.js";
 import { extractDocument, extractDocumentAsync } from "./extract.js";
-import { configurePdfExtraction, DEFAULT_PDF_LIMITS, isPdf, pdfExtractionLimits, readPdf } from "./pdf.js";
+import { checkedAnswer, configurePdfExtraction, DEFAULT_PDF_LIMITS, isPdf, pdfExtractionLimits, readPdf } from "./pdf.js";
 import { extractPdfForNode } from "./pdf-node.js";
 import {
   deepNestingPdf,
@@ -83,7 +83,7 @@ describe("reading a PDF", () => {
     expect(isPdf(new TextEncoder().encode("PDF-1.7"))).toBe(false);
     expect(() => extractDocument({ bytes: sample(), mediaType: "application/pdf" })).toThrow(DocumentError);
     const extracted = await extractDocumentAsync({ bytes: sample(), mediaType: "text/plain" });
-    expect(extracted).toMatchObject({ kind: "pdf", typeMismatch: true, encoding: "pdf", truncated: false, pdf: { pages: { total: 2, checked: 2 }, textLayer: "present", pagesWithoutText: 0 } });
+    expect(extracted).toMatchObject({ kind: "pdf", typeMismatch: true, encoding: "pdf", truncated: false, pdf: { pages: { total: 2, checked: 2 }, textLayer: "present", pagesWithoutText: 0, attachments: 0 } });
     const declared = await extractDocumentAsync({ bytes: sample(), mediaType: "application/pdf" });
     expect(declared.typeMismatch).toBe(false);
   });
@@ -94,17 +94,20 @@ describe("reading a PDF", () => {
     const outcome = await scanExtractedDocument(extracted, bytes, { scanner, protect: async (_value, dataClass) => `[${dataClass.toUpperCase()}]` });
     const labels = outcome.findings.map((finding) => `${finding.dataClass} @ ${finding.location.label}`);
     expect(labels).toEqual([
+      "email @ document properties (Author)",
       "email @ page 1, line 2, column 9",
       "email @ page 1, comment 1",
       "email @ page 1, form field 1",
       "card_number @ page 2, line 1, column 6",
-      "email @ page 2, link 1",
-      "email @ document properties (Author)"
+      "email @ page 2, link 1"
     ]);
-    expect(outcome.findings[0]!.location).toMatchObject({ kind: "pdf", page: 1, part: "text", line: 2, column: 9 });
+    expect(outcome.findings[1]!.location).toMatchObject({ kind: "pdf", page: 1, part: "text", line: 2, column: 9 });
     for (const finding of outcome.findings) expect(JSON.stringify(finding)).not.toMatch(/jane\.doe@|4111 1111 1111 1111|bob@example/);
     expect(outcome.redactedText).toBe(
       [
+        "--- document properties ---",
+        "Title: Invoice",
+        "Author: [EMAIL]",
         "--- page 1 ---",
         "Invoice for Jane\nContact [EMAIL]",
         "[comment 1] Call [EMAIL]",
@@ -112,21 +115,18 @@ describe("reading a PDF", () => {
         "[form field 1] [EMAIL]",
         "--- page 2 ---",
         "Card [CARD_NUMBER]",
-        "[link 1] mailto:[EMAIL]",
-        "--- document properties ---",
-        "Title: Invoice",
-        "Author: [EMAIL]"
+        "[link 1] mailto:[EMAIL]"
       ].join("\n")
     );
   });
 
   it("reports a scanned document (no text layer) instead of a clean one, and a partly scanned one", async () => {
     const scanned = await extractDocumentAsync({ bytes: scannedPdf(3), mediaType: "application/pdf" });
-    expect(scanned.pdf).toEqual({ pages: { total: 3, checked: 3 }, textLayer: "empty", pagesWithoutText: 3 });
+    expect(scanned.pdf).toEqual({ pages: { total: 3, checked: 3 }, textLayer: "empty", pagesWithoutText: 3, attachments: 0 });
     expect(scanned.segments).toEqual([]);
 
     const mixed = await extractDocumentAsync({ bytes: textPdf([["has text"], [], ["more text"]]), mediaType: "application/pdf" });
-    expect(mixed.pdf).toEqual({ pages: { total: 3, checked: 3 }, textLayer: "partial", pagesWithoutText: 1 });
+    expect(mixed.pdf).toEqual({ pages: { total: 3, checked: 3 }, textLayer: "partial", pagesWithoutText: 1, attachments: 0 });
   });
 
   it("reads at most maxPages pages and says how many it checked", async () => {
@@ -141,16 +141,39 @@ describe("reading a PDF", () => {
     expect((await readPdf(bytes, { maxChars: 100_000 })).pages).toHaveLength(3);
   });
 
-  it("stops reading at the character limit and never returns text past it", async () => {
-    const bytes = textPdf(Array.from({ length: 10 }, (_, index) => [`page ${index + 1} ${"x".repeat(50)}`]));
+  it("stops reading at the character limit, reads the properties first, and never claims a total it did not read", async () => {
+    const bytes = textPdf(Array.from({ length: 10 }, (_, index) => [`page ${index + 1} ${"x".repeat(50)}`]), { info: { Title: "SSN 123-45-6789" } });
     const read = await readPdf(bytes, { maxChars: 120 });
-    expect(read.pages).toHaveLength(3);
+    expect(read.properties).toEqual([{ name: "Title", text: "SSN 123-45-6789" }]);
+    expect(read.pages).toHaveLength(2);
     expect(read.stoppedAtChars).toBe(true);
-    expect(read.pages.reduce((sum, page) => sum + page.text.length, 0)).toBe(121);
+    expect(read.pages.reduce((sum, page) => sum + page.text.length, 0) + 15).toBe(121);
     const extracted = await extractDocumentAsync({ bytes, mediaType: "application/pdf", limits: { maxChars: 120 } });
     expect(extracted.truncated).toBe(true);
-    expect(extracted.covered).toEqual({ chars: 120, of: 121 });
-    expect(extracted.pdf?.pages).toEqual({ total: 10, checked: 3 });
+    expect(extracted.covered).toEqual({ chars: 120 });
+    expect(extracted.pdf?.pages).toEqual({ total: 10, checked: 2, cutAt: 2 });
+    expect(extracted.render(extracted.segments.map((segment) => segment.text))).toMatch(/\[not checked: past the size limit: the rest of page 2 and pages 3 to 10\]$/);
+    // A limit reached exactly at the end of the last page still says so.
+    const exact = await readPdf(textPdf([["abc"]]), { maxChars: 2 });
+    expect(exact.stoppedAtChars).toBe(true);
+  });
+
+  it("finds the header in the first 1024 bytes, and refuses a document sent as a PDF without one", async () => {
+    const prefixed = new Uint8Array([...new TextEncoder().encode("\n\n"), ...sample()]);
+    expect(isPdf(prefixed)).toBe(true);
+    expect((await extractDocumentAsync({ bytes: prefixed, mediaType: "text/plain" })).kind).toBe("pdf");
+    expect(isPdf(new Uint8Array([...new Uint8Array(1100).fill(0x20), ...sample()]))).toBe(false);
+    await expectDocumentError(extractDocumentAsync({ bytes: new TextEncoder().encode("SSN 123-45-6789"), mediaType: "application/pdf" }), "invalid_document");
+  });
+
+  it("counts attached files, which are not read", async () => {
+    const bytes = textPdf([["body"]], { attachments: [{ name: "data.csv", content: "ssn\n123-45-6789" }] });
+    const read = await readPdf(bytes, { maxChars: 100_000 });
+    expect(read.attachments).toBe(1);
+    const extracted = await extractDocumentAsync({ bytes, mediaType: "application/pdf" });
+    expect(extracted.pdf?.attachments).toBe(1);
+    expect(extracted.render(extracted.segments.map((segment) => segment.text))).toMatch(/\[not checked: 1 attached file\]$/);
+    expect((await readPdf(sample(), { maxChars: 100_000 })).attachments).toBe(0);
   });
 
   it("opens an encrypted document whose user password is empty, and refuses one that needs a password", async () => {
@@ -185,6 +208,17 @@ describe("reading a PDF", () => {
     expect(((await slow) as DocumentError).code).toBe("too_large");
     // The slot is given back: the next read runs.
     expect((await readPdf(sample(), { maxChars: 100_000 })).numPages).toBe(2);
+  });
+
+  it("uses the worker's answer only when its shape and size are within the limits", () => {
+    const good = { ok: true, numPages: 2, pages: [{ text: "abc", items: [{ part: "comment", item: 1, text: "d" }] }], properties: [{ name: "Title", text: "t" }], stoppedAtChars: false, attachments: 0 };
+    expect(checkedAnswer(good, 200, 100)).toMatchObject({ numPages: 2, attachments: 0 });
+    expect(checkedAnswer({ ...good, pages: [good.pages[0], good.pages[0], good.pages[0]] }, 200, 100)).toBeNull();
+    expect(checkedAnswer(good, 200, 3)).toBeNull();
+    expect(checkedAnswer({ ...good, pages: [{ text: "abc", items: [{ part: "script", item: 1, text: "d" }] }] }, 200, 100)).toBeNull();
+    expect(checkedAnswer({ ...good, properties: [{ name: 1, text: "t" }] }, 200, 100)).toBeNull();
+    expect(checkedAnswer({ ...good, attachments: "1" }, 200, 100)).toBeNull();
+    expect(checkedAnswer(null, 200, 100)).toBeNull();
   });
 
   it("keeps the configured limits within their floors", () => {

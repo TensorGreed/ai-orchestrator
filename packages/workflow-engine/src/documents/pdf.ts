@@ -13,7 +13,11 @@ import { DocumentError } from "./errors.js";
  *   broken document instead of half-recovering it (see pdf-worker.mjs);
  * - at most `maxPages` pages are read, and reading stops once the text passes the character limit;
  * - an encrypted document is opened only when the empty password opens it;
- * - at most `maxConcurrent` PDFs are read at once in this process; more wait their turn (up to `timeoutMs`).
+ * - at most `maxConcurrent` PDFs are read at once in this process; more wait their turn (up to `timeoutMs`);
+ * - the worker's answer is checked (shape, page count, characters) before it is used.
+ *
+ * The worker limits resources, not privileges: it runs in the API process with its rights. What keeps a document from
+ * running code is pdf.js itself (no eval path, no font compilation, no fetches), pinned and updated on its own.
  *
  * Read are the page's text layer (as lines), comments and their authors, text and choice form field values, link
  * addresses, and the document properties (information dictionary and XMP). A page whose text layer is empty is an
@@ -64,9 +68,13 @@ export function pdfExtractionLimits(): PdfLimits {
   return { ...configured };
 }
 
-/** True when the bytes start like a PDF (`%PDF-`). */
+/** True when `%PDF-` appears in the first 1024 bytes (where PDF readers look for the header). */
 export function isPdf(bytes: Uint8Array): boolean {
-  return bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
+  const end = Math.min(bytes.length, 1024 + 5) - 5;
+  for (let index = 0; index <= end; index += 1) {
+    if (bytes[index] === 0x25 && bytes[index + 1] === 0x50 && bytes[index + 2] === 0x44 && bytes[index + 3] === 0x46 && bytes[index + 4] === 0x2d) return true;
+  }
+  return false;
 }
 
 export interface PdfItem {
@@ -86,8 +94,13 @@ export interface PdfRead {
   numPages: number;
   pages: PdfPage[];
   properties: Array<{ name: string; text: string }>;
-  /** Reading stopped before the page limit because the text passed the character limit. */
+  /**
+   * The text passed the character limit: the last page read was cut there, and later pages were not read (`pages`
+   * holds the pages read, the last one partly).
+   */
   stoppedAtChars: boolean;
+  /** Files embedded in the document (not read). */
+  attachments: number;
 }
 
 /** Whether the pages read had a text layer: none of them (a scanned document), some, or all; and how many had none. */
@@ -171,6 +184,7 @@ export async function readPdf(bytes: Uint8Array, options: ReadPdfOptions): Promi
   if (options.signal?.aborted) throw new DocumentError("cancelled", "The scan was cancelled");
   await acquire(limits, options.signal);
   try {
+    if (options.signal?.aborted) throw new DocumentError("cancelled", "The scan was cancelled");
     return await runWorker(bytes, limits, options);
   } finally {
     release();
@@ -201,9 +215,14 @@ async function runWorker(bytes: Uint8Array, limits: PdfLimits, options: ReadPdfO
       clearTimeout(timer);
       clearInterval(poll);
       options.signal?.removeEventListener("abort", onAbort);
-      void worker.terminate().catch(() => undefined);
-      if ("value" in outcome) resolve(outcome.value);
-      else reject(outcome.error);
+      // The slot is given back only once the worker has stopped, so the concurrency cap holds.
+      void worker
+        .terminate()
+        .catch(() => undefined)
+        .then(() => {
+          if ("value" in outcome) resolve(outcome.value);
+          else reject(outcome.error);
+        });
     };
     const tooLarge = () => finish({ error: new DocumentError("too_large", `The PDF needs more than ${limits.memoryMb} MB of memory to read`) });
     const timer = setTimeout(() => finish({ error: new DocumentError("too_large", `Reading the PDF took longer than ${Math.round(limits.timeoutMs / 100) / 10} s`) }), limits.timeoutMs);
@@ -226,7 +245,8 @@ async function runWorker(bytes: Uint8Array, limits: PdfLimits, options: ReadPdfO
     }, MEMORY_POLL_MS);
     worker.once("message", (answer: WorkerAnswer) => {
       if (answer.ok) {
-        finish({ value: { numPages: answer.numPages, pages: answer.pages, properties: answer.properties, stoppedAtChars: answer.stoppedAtChars } });
+        const value = checkedAnswer(answer, limits.maxPages, options.maxChars);
+        finish(value ? { value } : { error: new DocumentError("invalid_document", "The PDF could not be read; it may be damaged") });
       } else if (answer.code === "password") {
         finish({ error: new DocumentError("unsupported_type", "The PDF is password-protected; remove the password and send it again") });
       } else if (answer.code === "nesting") {
@@ -241,4 +261,33 @@ async function runWorker(bytes: Uint8Array, limits: PdfLimits, options: ReadPdfO
     });
     worker.once("exit", () => finish({ error: new DocumentError("invalid_document", "The PDF could not be read; it may be damaged") }));
   });
+}
+
+const isText = (value: unknown): value is string => typeof value === "string";
+const ITEM_PARTS = new Set(["comment", "comment_author", "form_field", "link"]);
+
+/** The worker's answer when it has the expected shape and stays within the page and character limits; else null. */
+export function checkedAnswer(answer: unknown, maxPages: number, maxChars: number): PdfRead | null {
+  if (!answer || typeof answer !== "object") return null;
+  const { numPages, pages, properties, stoppedAtChars, attachments } = answer as Record<string, unknown>;
+  if (!Number.isInteger(numPages) || (numPages as number) < 0 || !Array.isArray(pages) || !Array.isArray(properties)) return null;
+  if (pages.length > Math.min(maxPages, numPages as number) || typeof stoppedAtChars !== "boolean" || !Number.isInteger(attachments)) return null;
+  let chars = 0;
+  for (const property of properties as unknown[]) {
+    const entry = property as { name?: unknown; text?: unknown } | null;
+    if (!entry || !isText(entry.name) || !isText(entry.text)) return null;
+    chars += entry.text.length;
+  }
+  for (const page of pages as unknown[]) {
+    const entry = page as { text?: unknown; items?: unknown } | null;
+    if (!entry || !isText(entry.text) || !Array.isArray(entry.items)) return null;
+    chars += entry.text.length;
+    for (const item of entry.items as unknown[]) {
+      const value = item as { part?: unknown; item?: unknown; text?: unknown } | null;
+      if (!value || !ITEM_PARTS.has(value.part as string) || !Number.isInteger(value.item) || !isText(value.text)) return null;
+      chars += value.text.length;
+    }
+  }
+  if (chars > maxChars + 1) return null;
+  return { numPages: numPages as number, pages: pages as PdfPage[], properties: properties as PdfRead["properties"], stoppedAtChars, attachments: attachments as number };
 }

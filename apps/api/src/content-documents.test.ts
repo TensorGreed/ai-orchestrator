@@ -19,6 +19,7 @@ import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
 import { DEFAULT_GUARD_PROFILE_DOCUMENT, parseGuardProfile } from "@ai-orchestrator/guard-sdk";
 import { ContentDocumentScanService } from "./services/content-document-scan-service.js";
+import { pdfExtractionLimits } from "@ai-orchestrator/workflow-engine";
 import { testSql } from "./test-support/test-sql.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
@@ -287,6 +288,8 @@ describe("the rule set page's document scan", () => {
     const blank = await call(builder, "POST", "/api/guard/profiles/default/scan-document", { source: { kind: "upload", contentBase64: pdf([[]]).toString("base64") } });
     expect(blank.statusCode, blank.body).toBe(200);
     expect(blank.json<{ result: Record<string, unknown> }>().result).toMatchObject({ sniffedType: "pdf", textLayer: "empty", pagesWithoutText: 1, findings: [] });
+    // Extract from File gets the deployment's byte and character limits too.
+    expect(pdfExtractionLimits()).toMatchObject({ maxPages: 2, maxBytes: context.config.CONTENT_SCAN_MAX_BYTES, maxChars: context.config.CONTENT_SCAN_MAX_CHARS });
   });
 
   it("refuses unsupported files, viewers, and more than 10 scans a minute", async () => {
@@ -437,6 +440,11 @@ describe("the scan_document gateway tool", () => {
     expect(document.data).toMatchObject({ sniffedType: "pdf", pages: { total: 1, checked: 1 }, textLayer: "present", countsByClass: { email: 1 } });
     expect(document.data.findings[0].location).toMatchObject({ kind: "pdf", page: 1, line: 1, column: 7, label: "page 1, line 1, column 7" });
     expect(document.text).not.toContain(EMAIL);
+    // A scanned PDF's summary says it was not checked, not just "0 findings".
+    const scanned = await client.call("scan_document", { content_base64: pdf([[]]).toString("base64") });
+    expect(scanned.data).toMatchObject({ textLayer: "empty", findings: [] });
+    expect(scanned.text).toMatch(/NOT CHECKED: the PDF has no text layer/);
+    expect(result.data.notice).toBeUndefined();
   });
 
   it("fetches only from listed hosts, through the outbound checks, and never from private addresses", async () => {

@@ -20,6 +20,8 @@ export interface PdfNodeOutput {
   pagesWithoutText: number;
   /** Pages past CONTENT_SCAN_MAX_PAGES, or text past CONTENT_SCAN_MAX_CHARS, were not read. */
   truncated: boolean;
+  /** Files embedded in the PDF (not read). */
+  attachments: number;
   notice?: string;
 }
 
@@ -62,7 +64,6 @@ export async function extractPdfForNode(raw: string, encoding: string, signal?: 
   const { textLayer, pagesWithoutText } = textLayerOf(read.pages);
   const properties: Record<string, string> = {};
   for (const property of read.properties) properties[property.name] = properties[property.name] ? `${properties[property.name]}\n${property.text}` : property.text;
-  const chars = read.pages.reduce((sum, page) => sum + page.text.length + page.items.reduce((total, item) => total + item.text.length, 0), 0) + read.properties.reduce((sum, property) => sum + property.text.length, 0);
   return {
     text: pages.map((page) => page.text).join("\n\n"),
     pages,
@@ -71,7 +72,8 @@ export async function extractPdfForNode(raw: string, encoding: string, signal?: 
     pagesRead: read.pages.length,
     textLayer,
     pagesWithoutText,
-    truncated: read.pages.length < read.numPages || chars > limits.maxChars,
+    truncated: read.pages.length < read.numPages || read.stoppedAtChars,
+    attachments: read.attachments,
     ...(textLayer === "empty"
       ? { notice: "No text layer: this looks like a scanned PDF. Text recognition (OCR) is not supported, so there is no text." }
       : textLayer === "partial"

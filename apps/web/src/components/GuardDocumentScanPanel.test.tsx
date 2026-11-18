@@ -86,8 +86,9 @@ describe("Scan a document", () => {
       typeMismatch: false,
       encoding: "pdf",
       truncated: true,
-      covered: { chars: 1000, of: 1001 },
-      pages: { total: 300, checked: 200 },
+      covered: { chars: 1000 },
+      pages: { total: 300, checked: 200, cutAt: 200 },
+      attachmentsNotChecked: 1,
       textLayer: "partial",
       pagesWithoutText: 2,
       findings: [{ dataClass: "email", score: 0.95, location: { kind: "pdf", page: 3, part: "text", line: 4, column: 9, label: "page 3, line 4, column 9" }, maskedPreview: "j•••@e••••.com" }],
@@ -99,12 +100,13 @@ describe("Scan a document", () => {
     await user.click(screen.getByRole("button", { name: "Scan document" }));
     const view = await screen.findByRole("status", { name: "Scan result" });
     expect(view).toHaveTextContent("PDF, 2.0 KB · 300 pages");
-    expect(view).toHaveTextContent("Only 200 of 300 pages were read.");
+    expect(view).not.toHaveTextContent("Only 200 of 300 pages were read.");
+    expect(view).toHaveTextContent("Only the first 1,000 characters were checked: reading stopped in page 200 of 300; the rest was not read.");
+    expect(view).toHaveTextContent("1 attached file was not checked.");
     expect(view).toHaveTextContent("2 of the pages read have no text layer (scanned) and were not checked");
-    expect(view).toHaveTextContent("Text past the first 1,000 characters was not checked.");
     expect(within(view).getAllByRole("row")[1]).toHaveTextContent("page 3, line 4, column 9");
 
-    vi.mocked(api.scanGuardDocument).mockResolvedValue({ result: { ...pdf, truncated: false, pages: { total: 2, checked: 2 }, textLayer: "empty", pagesWithoutText: 2, findings: [], countsByClass: {}, riskLevel: "none" } });
+    vi.mocked(api.scanGuardDocument).mockResolvedValue({ result: { ...pdf, truncated: false, pages: { total: 2, checked: 2 }, attachmentsNotChecked: 0, textLayer: "empty", pagesWithoutText: 2, findings: [], countsByClass: {}, riskLevel: "none" } });
     await user.click(screen.getByRole("button", { name: "Scan document" }));
     expect(await screen.findByText(/No text layer: this looks like a scanned PDF/)).toBeInTheDocument();
   });

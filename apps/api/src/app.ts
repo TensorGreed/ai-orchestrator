@@ -1851,7 +1851,10 @@ export async function createApp(
     maxPages: config.CONTENT_SCAN_MAX_PAGES,
     timeoutMs: config.CONTENT_SCAN_PDF_TIMEOUT_MS,
     memoryMb: config.CONTENT_SCAN_PDF_MEMORY_MB,
-    maxConcurrent: config.CONTENT_SCAN_MAX_CONCURRENT
+    maxConcurrent: config.CONTENT_SCAN_MAX_CONCURRENT,
+    // Extract from File's pdf format (document scans pass their own).
+    maxBytes: config.CONTENT_SCAN_MAX_BYTES,
+    maxChars: config.CONTENT_SCAN_MAX_CHARS
   });
   // Document scans with content rules: the rule set test follows the outbound policy; the gateway tool always refuses private ranges.
   const contentDocumentScans = new ContentDocumentScanService({

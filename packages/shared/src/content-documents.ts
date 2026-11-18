@@ -116,19 +116,30 @@ export interface DocumentScanResult {
   bytes: number;
   /** Characters of extracted text. */
   chars: number;
-  /** Only part of the text was checked (`covered` says how much). */
+  /** Only part of the document was checked (`covered` says how much text; for a PDF, `pages` says which pages). */
   truncated: boolean;
-  covered?: { chars: number; of: number };
+  /**
+   * Characters checked, and of how many. A PDF whose text passed CONTENT_SCAN_MAX_CHARS was not read further, so `of`
+   * is absent (unknown) and `pages.cutAt` names the page read only in part.
+   */
+  covered?: { chars: number; of?: number };
   riskLevel: DocumentRiskLevel;
   countsByClass: Record<string, number>;
   findings: DocumentFinding[];
   /** More findings than CONTENT_SCAN_LIMITS.maxFindings: `findings` lists the first ones, the counts cover all. */
   findingsTruncated: boolean;
-  /** PDF: pages in the document and pages read (fewer when the document has more than CONTENT_SCAN_MAX_PAGES). */
-  pages?: { total: number; checked: number };
+  /**
+   * PDF: pages in the document and pages read (fewer past CONTENT_SCAN_MAX_PAGES, or when the text passed
+   * CONTENT_SCAN_MAX_CHARS: then `cutAt` is the last page read, read only in part).
+   */
+  pages?: { total: number; checked: number; cutAt?: number };
   /** PDF: whether the pages read had a text layer, and how many had none (scanned pages are not checked). */
   textLayer?: PdfTextLayer;
   pagesWithoutText?: number;
+  /** PDF: files embedded in the document; they are not checked. */
+  attachmentsNotChecked?: number;
+  /** What was not checked, in words (a PDF without a text layer, parts past the limits, attached files); absent when nothing. */
+  notice?: string;
   /** Plain text with the findings replaced, when asked for. Never a document file. */
   redacted?: { style: string; text: string; redaction_id?: string; expires_at?: string };
   ruleSet: { id: string; version: number } | null;

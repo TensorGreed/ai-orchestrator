@@ -8,7 +8,7 @@
 // warning can carry document text into the logs.
 //
 // Answer (posted once): { ok: true, numPages, pages: [{ text, items: [{ part, item, text }] }], properties: [{ name, text }],
-// stoppedAtChars } or { ok: false, code: "password" | "invalid" | "nesting" }.
+// stoppedAtChars, attachments } or { ok: false, code: "password" | "invalid" | "nesting" }.
 
 import { parentPort, workerData } from "node:worker_threads";
 
@@ -126,39 +126,40 @@ async function read() {
     parentPort.postMessage({ ok: false, code: "password" });
   };
   const doc = await task.promise;
-  const pages = [];
   let chars = 0;
-  let stoppedAtChars = false;
+  // Text past the character limit (plus one, so the caller sees it was passed) is never sent back.
   const budget = () => Math.max(0, maxChars + 1 - chars);
-  const last = Math.min(doc.numPages, maxPages);
-  for (let number = 1; number <= last; number += 1) {
-    const page = await doc.getPage(number);
-    const content = await page.getTextContent({ includeMarkedContent: false, disableNormalization: false });
-    // Text past the character limit (plus one, so the caller sees it was passed) is never sent back.
-    const text = pageText(content.items).slice(0, budget());
-    chars += text.length;
-    const items = [];
-    for (const item of annotationItems(await page.getAnnotations({ intent: "display" }))) {
-      if (budget() === 0) break;
-      const kept = { ...item, text: item.text.slice(0, budget()) };
-      chars += kept.text.length;
-      items.push(kept);
-    }
-    pages.push({ text, items });
-    page.cleanup();
-    if (chars > maxChars) {
-      stoppedAtChars = number < doc.numPages;
-      break;
-    }
-  }
+  const take = (text) => {
+    const kept = text.slice(0, budget());
+    chars += kept.length;
+    return kept;
+  };
+  // The properties first: they are short and often name people, so the character limit never leaves them out.
   const properties = [];
   for (const property of propertyItems(await doc.getMetadata().catch(() => null))) {
     if (budget() === 0) break;
-    const text = property.text.slice(0, budget());
-    chars += text.length;
-    properties.push({ name: property.name, text });
+    properties.push({ name: property.name, text: take(property.text) });
   }
-  return { ok: true, numPages: doc.numPages, pages, properties, stoppedAtChars };
+  const pages = [];
+  const last = Math.min(doc.numPages, maxPages);
+  for (let number = 1; number <= last && budget() > 0; number += 1) {
+    const page = await doc.getPage(number);
+    const content = await page.getTextContent({ includeMarkedContent: false, disableNormalization: false });
+    const text = take(pageText(content.items));
+    const items = [];
+    for (const item of annotationItems(await page.getAnnotations({ intent: "display" }))) {
+      if (budget() === 0) break;
+      items.push({ ...item, text: take(item.text) });
+    }
+    pages.push({ text, items });
+    page.cleanup();
+  }
+  // Embedded files are not read; the caller is told how many there are.
+  const attachments = await doc
+    .getAttachments()
+    .then((found) => (found instanceof Map ? found.size : found && typeof found === "object" ? Object.keys(found).length : 0))
+    .catch(() => 0);
+  return { ok: true, numPages: doc.numPages, pages, properties, stoppedAtChars: chars > maxChars, attachments };
 }
 
 function failure(error) {

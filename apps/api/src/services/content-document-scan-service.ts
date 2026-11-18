@@ -256,6 +256,21 @@ export class ContentDocumentScanService {
   }
 }
 
+/**
+ * What a scan did not check, in words, or undefined when it checked everything: a PDF without a text layer, scanned
+ * pages, pages or text past the limits, attached files. Clients that read only text see it next to the counts.
+ */
+export function documentScanNotice(result: Omit<DocumentScanResult, "notice">): string | undefined {
+  const notes: string[] = [];
+  if (result.textLayer === "empty") notes.push("NOT CHECKED: the PDF has no text layer (a scanned document; there is no text recognition)");
+  else if (result.textLayer === "partial") notes.push(`${result.pagesWithoutText} page${result.pagesWithoutText === 1 ? " has" : "s have"} no text layer and ${result.pagesWithoutText === 1 ? "was" : "were"} not checked`);
+  if (result.pages?.cutAt) notes.push(`only part of the text was checked: reading stopped in page ${result.pages.cutAt} of ${result.pages.total}`);
+  else if (result.pages && result.pages.checked < result.pages.total) notes.push(`only ${result.pages.checked} of ${result.pages.total} pages were checked`);
+  else if (result.truncated) notes.push("only part of the text was checked");
+  if (result.attachmentsNotChecked) notes.push(`${result.attachmentsNotChecked} attached file${result.attachmentsNotChecked === 1 ? " was" : "s were"} not checked`);
+  return notes.length > 0 ? `${notes.join("; ")}.` : undefined;
+}
+
 /** The result shape both callers return. */
 export function documentScanResult(
   extracted: ExtractedDocument,
@@ -264,7 +279,7 @@ export function documentScanResult(
   ruleSet: { id: string; version: number } | null,
   redacted?: DocumentScanResult["redacted"]
 ): DocumentScanResult {
-  return {
+  const result: DocumentScanResult = {
     documentId: outcome.documentId,
     source: loaded.source,
     mediaType: extracted.mediaType,
@@ -275,7 +290,14 @@ export function documentScanResult(
     chars: extracted.chars,
     truncated: extracted.truncated,
     ...(extracted.covered ? { covered: extracted.covered } : {}),
-    ...(extracted.pdf ? { pages: extracted.pdf.pages, textLayer: extracted.pdf.textLayer, pagesWithoutText: extracted.pdf.pagesWithoutText } : {}),
+    ...(extracted.pdf
+      ? {
+          pages: extracted.pdf.pages,
+          textLayer: extracted.pdf.textLayer,
+          pagesWithoutText: extracted.pdf.pagesWithoutText,
+          ...(extracted.pdf.attachments > 0 ? { attachmentsNotChecked: extracted.pdf.attachments } : {})
+        }
+      : {}),
     riskLevel: outcome.riskLevel,
     countsByClass: outcome.countsByClass,
     findings: outcome.findings,
@@ -283,4 +305,6 @@ export function documentScanResult(
     ...(redacted ? { redacted } : {}),
     ruleSet
   };
+  const notice = documentScanNotice(result);
+  return notice ? { ...result, notice } : result;
 }

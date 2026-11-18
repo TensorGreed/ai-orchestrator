@@ -53,6 +53,8 @@ export interface TextPdfOptions {
   links?: string[][];
   /** Document information dictionary entries. */
   info?: Record<string, string>;
+  /** Embedded files (name and content). */
+  attachments?: Array<{ name: string; content: string }>;
 }
 
 /** A PDF with one page per entry of `pages` (each a list of lines), and optional comments, fields, links and properties. */
@@ -85,7 +87,14 @@ export function textPdf(pages: ReadonlyArray<readonly string[]>, options: TextPd
       `${annots.length > 0 ? ` /Annots [${annots.map((ref) => `${ref} 0 R`).join(" ")}]` : ""} >>`;
     pageRefs.push(pageNumber);
   });
-  objects[0] = `<< /Type /Catalog /Pages 2 0 R${fieldRefs.length > 0 ? ` /AcroForm << /Fields [${fieldRefs.map((ref) => `${ref} 0 R`).join(" ")}] >>` : ""} >>`;
+  const files: string[] = [];
+  for (const attachment of options.attachments ?? []) {
+    objects.push(stream(attachment.content, " /Type /EmbeddedFile"));
+    objects.push(`<< /Type /Filespec /F ${pdfString(attachment.name)} /EF << /F ${objects.length} 0 R >> >>`);
+    files.push(`${pdfString(attachment.name)} ${objects.length} 0 R`);
+  }
+  const names = files.length > 0 ? ` /Names << /EmbeddedFiles << /Names [${files.join(" ")}] >> >>` : "";
+  objects[0] = `<< /Type /Catalog /Pages 2 0 R${fieldRefs.length > 0 ? ` /AcroForm << /Fields [${fieldRefs.map((ref) => `${ref} 0 R`).join(" ")}] >>` : ""}${names} >>`;
   objects[1] = `<< /Type /Pages /Kids [${pageRefs.map((ref) => `${ref} 0 R`).join(" ")}] /Count ${pageRefs.length} >>`;
   let info: number | undefined;
   if (options.info) {

@@ -177,18 +177,25 @@ function DocumentScanResultView({ result, showRedacted, onShowRedacted }: { resu
           recognition (OCR) is not supported.
         </p>
       )}
-      {result.pages && result.pages.checked < result.pages.total && (
+      {result.pages && result.pages.checked < result.pages.total && !result.pages.cutAt && (
         <p className="kb-subtle" role="note">
           Only {result.pages.checked.toLocaleString()} of {result.pages.total.toLocaleString()} pages were read.
         </p>
       )}
       {result.truncated && result.covered && (
         <p className="kb-subtle" role="note">
-          {result.sniffedType === "pdf"
-            ? `Text past the first ${result.covered.chars.toLocaleString()} characters was not checked.`
-            : `Only the first ${result.covered.chars.toLocaleString()} of ${result.covered.of.toLocaleString()} characters were checked.`}
+          {result.covered.of !== undefined
+            ? `Only the first ${result.covered.chars.toLocaleString()} of ${result.covered.of.toLocaleString()} characters were checked.`
+            : `Only the first ${result.covered.chars.toLocaleString()} characters were checked${
+                result.pages?.cutAt ? `: reading stopped in page ${result.pages.cutAt} of ${result.pages.total}` : ""
+              }; the rest was not read.`}
         </p>
       )}
+      {result.attachmentsNotChecked ? (
+        <p className="kb-subtle" role="note">
+          {result.attachmentsNotChecked} attached file{result.attachmentsNotChecked === 1 ? " was" : "s were"} not checked.
+        </p>
+      ) : null}
       {result.findings.length > 0 && (
         <div className="mcp-table-scroll">
           <table className="kb-table">
