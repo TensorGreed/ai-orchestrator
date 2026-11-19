@@ -723,12 +723,15 @@ export function WorkflowCanvasArea({
               onConnectEnd={onConnectEnd}
               onEdgeDoubleClick={(event, edge) => {
                 event.preventDefault();
-                onDeleteEdge(edge.id);
+                if (!editDisabledReason) onDeleteEdge(edge.id);
               }}
               onEdgeContextMenu={(event, edge) => {
                 event.preventDefault();
-                onDeleteEdge(edge.id);
+                if (!editDisabledReason) onDeleteEdge(edge.id);
               }}
+              // A view-only workflow: nodes can be selected and opened, not moved or connected.
+              nodesDraggable={!editDisabledReason}
+              nodesConnectable={!editDisabledReason}
               onInit={onInit}
               onNodeDoubleClick={(_event, node) => onOpenNodeConfig(node.id)}
               fitView

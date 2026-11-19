@@ -1685,6 +1685,8 @@ function StudioApp() {
     const handler = (event: KeyboardEvent) => {
       if (activeMode !== "editor") return;
       if (isCanvasShortcutBlocked(event.target)) return;
+      // A view-only workflow: undo, redo and duplicate would change a canvas that cannot be saved.
+      if (editDisabledReason) return;
 
       const isModifier = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
@@ -1780,7 +1782,7 @@ function StudioApp() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeMode, edges, nodes, pushHistorySnapshot, redo, setEdges, setNodes, undo]);
+  }, [activeMode, editDisabledReason, edges, nodes, pushHistorySnapshot, redo, setEdges, setNodes, undo]);
 
   useEffect(() => {
     latestDebugExecutionIdRef.current = null;
@@ -2043,6 +2045,9 @@ function StudioApp() {
       if (event.key !== "Delete" && event.key !== "Backspace") {
         return;
       }
+      if (editDisabledReason) {
+        return;
+      }
 
       if (isCanvasShortcutBlocked(event.target)) {
         return;
@@ -2073,7 +2078,7 @@ function StudioApp() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [activeMode, editingNodeId, edges, nodes, pushHistorySnapshot, setEdges, setNodes]);
+  }, [activeMode, editDisabledReason, editingNodeId, edges, nodes, pushHistorySnapshot, setEdges, setNodes]);
 
   useEffect(() => {
     const handleCopyPaste = (event: KeyboardEvent) => {
@@ -2139,6 +2144,7 @@ function StudioApp() {
       }
 
       if (key === "v") {
+        if (editDisabledReason) return;
         let raw: string | null = null;
         try {
           raw = localStorage.getItem(NODE_CLIPBOARD_STORAGE_KEY);
@@ -2230,7 +2236,7 @@ function StudioApp() {
     return () => {
       window.removeEventListener("keydown", handleCopyPaste);
     };
-  }, [activeMode, edges, nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]);
+  }, [activeMode, editDisabledReason, edges, nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]);
 
   const handleDeleteEdgeById = useCallback(
     (edgeId: string) => {
@@ -6229,6 +6235,7 @@ function StudioApp() {
           importedName={importConflict.preview.workflow.name.replace(/ \(imported\)$/, "")}
           existing={importConflict.preview.existing}
           diff={importConflict.preview.diff}
+          canReplace={importConflict.preview.canReplace !== false}
           busy={busy}
           error={importConflict.error}
           onConfirm={(choice) => void confirmImportConflict(choice)}
@@ -6344,6 +6351,7 @@ function StudioApp() {
           mcpServerDefinitions={mcpServerDefinitions}
           onClose={() => setEditingNodeId(null)}
           onSave={saveNodeConfig}
+          readOnlyReason={editDisabledReason}
           onExecuteStep={() => {
             void handleExecute({ startNodeId: editingNode.id, runMode: "single_node" });
           }}

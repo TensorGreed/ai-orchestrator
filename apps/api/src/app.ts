@@ -10728,7 +10728,7 @@ export async function createApp(
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
     // v78 — the people it is shared with are listed to whoever may manage its shares.
-    const manages = user.role === "admin" || (await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:write"));
+    const manages = user.role === "admin" || (await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"));
     return {
       shares: await rbacService.listWorkflowShares(workflow.id),
       ...(manages ? { userShares: await workflowUserShareViews(workflow.id) } : {})
@@ -10830,12 +10830,13 @@ export async function createApp(
     }));
 
   const workflowShareManager = async (user: SafeUser, workflowId: string): Promise<{ ok: true; workflow: Workflow } | { ok: false; status: number; error: string }> => {
-    // Unreadable reads as missing; managing shares needs write on the owning project.
+    // Unreadable reads as missing. A share is a membership for one workflow, so managing them takes what adding a
+    // project member takes: project:invite on the owning project (and the same step-up for changes).
     const access = await runAccess.workflow(user, workflowId, "workflow:read");
     if (!access.ok) return access;
     const owningProject = access.workflow.projectId ?? DEFAULT_PROJECT_ID;
-    if (user.role !== "admin" && !(await rbacService.can(user, owningProject, "workflow:write"))) {
-      return { ok: false, status: 403, error: "Only users with workflow:write on the owning project can manage who the workflow is shared with" };
+    if (user.role !== "admin" && !(await rbacService.can(user, owningProject, "project:invite"))) {
+      return { ok: false, status: 403, error: "Only users who may invite members to the workflow's project can share it with people" };
     }
     return { ok: true, workflow: access.workflow };
   };
@@ -10874,6 +10875,7 @@ export async function createApp(
     if (!user) return;
     const managed = await workflowShareManager(user, request.params.id);
     if (!managed.ok) return denyRunAccess(reply, managed);
+    if (!await requireStepUp(request, reply, "project_member.change")) return;
     const workflow = managed.workflow;
     const parsed = workflowUserShareSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -10914,6 +10916,7 @@ export async function createApp(
     if (!user) return;
     const managed = await workflowShareManager(user, request.params.id);
     if (!managed.ok) return denyRunAccess(reply, managed);
+    if (!await requireStepUp(request, reply, "project_member.change")) return;
     const workflow = managed.workflow;
     const removed = await rbacService.unshareWorkflowWithUser(workflow.id, request.params.userId);
     if (!removed) {
@@ -11436,13 +11439,15 @@ export async function createApp(
     workflow.projectId = parsed.data.targetProjectId;
     workflow.folderId = undefined;
     await store.upsertWorkflow(workflow);
+    // Shares with people go with the workflow; the audit says how many moved with it.
+    const userShareCount = (await store.listWorkflowUserShares(request.params.id)).length;
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.transfer",
       action: "update",
       resourceType: "workflow",
       resourceId: request.params.id,
-      metadata: { previousProjectId, targetProjectId: parsed.data.targetProjectId }
+      metadata: { previousProjectId, targetProjectId: parsed.data.targetProjectId, userShareCount }
     });
     return { ok: true, workflowId: request.params.id, projectId: parsed.data.targetProjectId };
   });
@@ -11478,7 +11483,7 @@ export async function createApp(
       const mode = parsed.data.mode;
       const sourceId = workflow.id;
       const stored = await store.getWorkflow(sourceId);
-      // Only a workflow the user can read is named back (or diffed); an unreadable one still keeps its id from the import.
+      // Only a workflow the user can read is named back (or diffed). An import never touches an unreadable one: it gets a new id.
       const readableStored = stored && (await runAccess.workflow(user, stored.id, "workflow:read")).ok ? stored : null;
       if (mode === "replace" && !readableStored) {
         reply.code(404);
@@ -11504,6 +11509,10 @@ export async function createApp(
       }
 
       if (parsed.data.dryRun === true) {
+        // What a replace would save (the stored trust settings kept for a non-admin), so the summary and canReplace
+        // describe that save. The checks run on a copy: workflowSaveDenial binds an admin's trust settings in place.
+        const replacement = readableStored ? (user.role === "admin" ? workflow : withStoredTriggerTrust(readableStored, workflow)) : null;
+        const canReplace = replacement ? !(await workflowSaveDenial(user, { ...replacement, nodes: [...replacement.nodes] })) : false;
         return {
           dryRun: true,
           mode,
@@ -11511,7 +11520,8 @@ export async function createApp(
           existing: readableStored
             ? { id: readableStored.id, name: readableStored.name, updatedAt: readableStored.updatedAt ?? null, projectId: readableStored.projectId ?? null }
             : null,
-          diff: readableStored ? diffWorkflows(readableStored, workflow, { defaultProjectId: DEFAULT_PROJECT_ID }) : null
+          canReplace,
+          diff: readableStored && replacement ? diffWorkflows(readableStored, replacement, { defaultProjectId: DEFAULT_PROJECT_ID }) : null
         };
       }
 
@@ -11519,6 +11529,11 @@ export async function createApp(
       if (saveDenial) return denyRunAccess(reply, saveDenial);
 
       const replacing = mode === "replace" && stored !== null;
+      // The replaced content goes into the history first: a workflow saved without a version (a seeded sample, a
+      // duplicate) would otherwise be lost.
+      if (replacing && stored) {
+        await workflowVersionService.snapshot({ workflow: stored, createdBy: user.id, changeNote: "before replace by import" });
+      }
       const savedWorkflow = await store.upsertWorkflow(importedWorkflow, { createdBy: user.id });
       await workflowVersionService.snapshot({
         workflow: savedWorkflow,

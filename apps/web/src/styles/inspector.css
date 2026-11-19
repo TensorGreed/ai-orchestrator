@@ -586,7 +586,8 @@
   background: var(--overlay-control-bg-hover);
   border-color: var(--fg-muted);
 }
-.insp-btn:disabled {
+.insp-btn:disabled,
+.insp-btn[aria-disabled="true"] {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -596,7 +597,7 @@
   border-color: var(--accent);
   color: var(--fg-on-accent);
 }
-.insp-btn.primary:hover:not(:disabled) {
+.insp-btn.primary:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
 }

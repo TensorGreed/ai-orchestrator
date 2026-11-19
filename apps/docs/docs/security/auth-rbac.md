@@ -188,16 +188,20 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
 Besides sharing a workflow with another project, a workflow can be shared with a person, from **Share…** in the editor
 or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": "read" | "execute" }`.
 
-- **Who shares.** Users with `workflow:write` in the workflow's own project, and admins. The person must have an
-  account (invite them first); service accounts and yourself are refused.
+- **Who shares.** Whoever may add members to the workflow's own project (`project:invite`: project admins, builders
+  without a membership there in `role` isolation, and admins), with the same step-up as adding a member
+  (`project_member.change`). A project editor may change the workflow but not open it to people. The person must have
+  an account (invite them first); service accounts and yourself are refused.
 - **What it gives.** `read`: they find it under **Shared with you** on the Workflows page, open it and read its runs.
-  `execute`: they may also run it, when their role may run workflows: an execute share with a viewer reads only, and
-  running from the editor still needs the builder role. A share never gives write, delete, publish or the right to
+  `execute`: they may also act on its runs (approve, cancel, answer a tool's question) when their role may run
+  workflows; an execute share with a viewer reads only. Starting a run (from the editor, a webhook test or the API)
+  still needs the builder role, so an operator's execute share does not start runs. A share never gives write, delete, publish or the right to
   share it on. Their runs may use the workflow's secrets, as runs of its own project do.
 - **Limits.** An API key limited to projects gets nothing from a share outside them. A deactivated user's shares stay
   but give nothing while they cannot sign in; enabling the user again brings them back, as with project memberships.
 - **Lifecycle.** Shares go with the workflow when it is deleted (a workflow created later with the same id starts
-  unshared) and with the user. Moving the workflow to another project keeps them.
+  unshared) and with the user. Moving the workflow to another project keeps them; the `workflow.transfer` audit event
+  counts them (`userShareCount`).
 - **Who sees them.** Managers of the workflow's shares see the list (`GET /api/workflows/:id/user-shares`, and
   `userShares` in `GET /api/workflows/:id/shares`), with each person's role and `effectiveAccess`.
 - **Audit.** `workflow.user_share` (with `targetUserId`, `targetEmail`, `accessLevel`, `effectiveAccess`) and

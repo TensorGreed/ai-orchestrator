@@ -633,6 +633,8 @@ export interface WorkflowImportPreview {
   existing: { id: string; name: string; updatedAt: string | null; projectId: string | null } | null;
   /** What replacing `existing` with the file changes. */
   diff: WorkflowDiff | null;
+  /** Whether you may replace `existing` (false when you can only view it). Older servers leave it out. */
+  canReplace?: boolean;
 }
 
 /** Previews a workflow JSON import without storing anything. */

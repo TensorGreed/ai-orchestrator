@@ -46,7 +46,7 @@ async function expectUpgraded(store: Store): Promise<void> {
   expect((await store.listWorkflowShares("wf-keep")).map((share) => [share.projectId, share.accessLevel])).toEqual([["p2", "execute"]]);
   expect(await store.listWorkflowUserShares("wf-keep")).toEqual([]);
   expect(await store.upsertWorkflowUserShare({ workflowId: "wf-keep", userId: "u1", accessLevel: "execute" })).toBe(true);
-  expect(await store.listWorkflowsSharedToUser("u1")).toEqual([{ workflowId: "wf-keep", accessLevel: "execute" }]);
+  expect(await store.listWorkflowsSharedToUser("u1")).toMatchObject([{ workflowId: "wf-keep", accessLevel: "execute" }]);
 }
 
 describe("v78 on SQLite", () => {

@@ -8721,7 +8721,7 @@ export class SqliteStore implements Store {
         `INSERT INTO workflow_user_shares (workflow_id, user_id, access_level, shared_by, created_at)
          SELECT ?, ?, ?, ?, ?
           WHERE EXISTS (SELECT 1 FROM workflows WHERE id = ?) AND EXISTS (SELECT 1 FROM users WHERE id = ?)
-         ON CONFLICT(workflow_id, user_id) DO UPDATE SET access_level = excluded.access_level`
+         ON CONFLICT(workflow_id, user_id) DO UPDATE SET access_level = excluded.access_level, shared_by = excluded.shared_by`
       )
       .run(input.workflowId, input.userId, input.accessLevel, input.sharedBy ?? null, new Date().toISOString(), input.workflowId, input.userId).changes;
     this.persist();

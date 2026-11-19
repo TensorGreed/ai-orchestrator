@@ -850,7 +850,7 @@ export async function upsertWorkflowUserShare(ctx: PgContext, input: Parameters<
     `INSERT INTO workflow_user_shares (workflow_id, user_id, access_level, shared_by, created_at)
      SELECT $1, $2, $3, $4, $5
       WHERE EXISTS (SELECT 1 FROM workflows WHERE id = $1 FOR SHARE) AND EXISTS (SELECT 1 FROM users WHERE id = $2 FOR SHARE)
-     ON CONFLICT (workflow_id, user_id) DO UPDATE SET access_level = EXCLUDED.access_level`,
+     ON CONFLICT (workflow_id, user_id) DO UPDATE SET access_level = EXCLUDED.access_level, shared_by = EXCLUDED.shared_by`,
     [input.workflowId, input.userId, input.accessLevel, input.sharedBy ?? null, new Date().toISOString()]
   );
   return (result.rowCount ?? 0) > 0;

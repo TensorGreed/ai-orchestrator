@@ -146,6 +146,36 @@ describe("workflow JSON import", () => {
     expect(audit.items.find((entry) => entry.eventType === "workflow.import")).toMatchObject({ resourceId: "wf-orders", metadata: { mode: "replace" } });
   });
 
+  it("keeps the replaced content in the history even when it had no version (a seeded or duplicated workflow)", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    await context.store.upsertWorkflow(hookFlow());
+    expect(await context.store.listWorkflowVersions("wf-orders", 10)).toEqual([]);
+    const replaced = await post(context, cookie, "/api/workflows/import", { workflow: edited(), mode: "replace" });
+    expect(replaced.statusCode, replaced.body).toBe(200);
+    const versions = await context.store.listWorkflowVersions("wf-orders", 10);
+    expect(versions.map((version) => version.changeNote).sort()).toEqual(["before replace by import", "replaced by import"]);
+    const before = versions.find((version) => version.changeNote === "before replace by import")!;
+    const restored = await context.store.getWorkflowVersion("wf-orders", before.version);
+    expect((JSON.parse(restored!.workflowJson) as Workflow).name).toBe("Orders");
+  });
+
+  it("says on a dry run whether the caller may replace the workflow", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    expect((await post(context, cookie, "/api/workflows", hookFlow())).statusCode).toBe(200);
+    const writable = await post(context, cookie, "/api/workflows/import", { workflow: edited(), dryRun: true });
+    expect(writable.json()).toMatchObject({ canReplace: true });
+
+    // In a project where the builder may only view, the preview still names the workflow but offers no replace.
+    const builder = await context.store.getUserByEmail("builder@example.com");
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    await context.store.upsertProjectRole({ userId: builder!.id, projectId: "team", role: "viewer" });
+    await context.store.upsertWorkflow(hookFlow({ id: "wf-team", projectId: "team" }));
+    const readOnly = await post(context, cookie, "/api/workflows/import", { workflow: { ...edited(), id: "wf-team", projectId: "team" }, dryRun: true });
+    expect(readOnly.json()).toMatchObject({ canReplace: false, existing: { id: "wf-team" } });
+  });
+
   it("refuses mode replace when no workflow has the id", async () => {
     const context = await createTestContext();
     const cookie = await login(context);

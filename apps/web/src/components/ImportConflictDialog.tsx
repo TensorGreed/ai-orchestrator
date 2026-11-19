@@ -13,6 +13,8 @@ interface ImportConflictDialogProps {
   importedName: string;
   existing: { id: string; name: string; updatedAt: string | null };
   diff: WorkflowDiff | null;
+  /** False when you may only view the stored workflow: replacing it is not offered. */
+  canReplace?: boolean;
   busy?: boolean;
   error?: string | null;
   onConfirm: (choice: ImportConflictChoice) => void;
@@ -41,7 +43,7 @@ export function diffSummaryLines(diff: WorkflowDiff): string[] {
   return lines;
 }
 
-export function ImportConflictDialog({ fileName, importedName, existing, diff, busy, error, onConfirm, onClose }: ImportConflictDialogProps) {
+export function ImportConflictDialog({ fileName, importedName, existing, diff, canReplace = true, busy, error, onConfirm, onClose }: ImportConflictDialogProps) {
   const [choice, setChoice] = useState<ImportConflictChoice>("new");
   const firstRef = useRef<HTMLInputElement>(null);
   const onCloseRef = useRef(onClose);
@@ -102,13 +104,17 @@ export function ImportConflictDialog({ fileName, importedName, existing, diff, b
                 </span>
               </span>
             </label>
-            <label className="import-conflict-choice">
-              <input type="radio" name="import-conflict" value="replace" checked={choice === "replace"} onChange={() => setChoice("replace")} />
-              <span>
-                <strong>Replace {existing.name}</strong>
-                <span className="settings-help">Overwrites it with the file. Its current version stays in the version history.</span>
-              </span>
-            </label>
+            {canReplace ? (
+              <label className="import-conflict-choice">
+                <input type="radio" name="import-conflict" value="replace" checked={choice === "replace"} onChange={() => setChoice("replace")} />
+                <span>
+                  <strong>Replace {existing.name}</strong>
+                  <span className="settings-help">Overwrites it with the file. Its current version stays in the version history.</span>
+                </span>
+              </label>
+            ) : (
+              <p className="settings-muted">You can view {existing.name} but not change it, so the file can only be imported as a new workflow.</p>
+            )}
           </fieldset>
           {choice === "replace" ? (
             <div className="import-conflict-diff" aria-live="polite">

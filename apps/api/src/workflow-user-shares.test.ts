@@ -95,17 +95,19 @@ function flow(id: string, projectId: string): Workflow {
   };
 }
 
-/** Strict isolation: nobody but the owner (a project editor) and admins reaches project "team" without a share. */
+/** Strict isolation: nobody but the owner (project admin), an editor and admins reaches project "team" without a share. */
 async function seed() {
   const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
   const owner = await login(context, "builder", "owner");
   const operator = await login(context, "operator", "olivia");
   const viewer = await login(context, "viewer", "victor");
   const outsider = await login(context, "builder", "oscar");
+  const editor = await login(context, "builder", "edith");
   await context.store.upsertProject({ id: "team", name: "Team" });
-  await context.store.upsertProjectRole({ userId: owner.id, projectId: "team", role: "editor" });
+  await context.store.upsertProjectRole({ userId: owner.id, projectId: "team", role: "project_admin" });
+  await context.store.upsertProjectRole({ userId: editor.id, projectId: "team", role: "editor" });
   await context.store.upsertWorkflow(flow("wf-team", "team"));
-  return { context, owner, operator, viewer, outsider };
+  return { context, owner, operator, viewer, outsider, editor };
 }
 
 describe("workflow shares with people", () => {
@@ -150,8 +152,13 @@ describe("workflow shares with people", () => {
     expect(operatorShare.json()).toMatchObject({ share: { effectiveAccess: "execute" } });
   });
 
-  it("a share never lets a builder edit, and only writers of the project manage shares", async () => {
-    const { context, owner, outsider, operator } = await seed();
+  it("a share never lets a builder edit, and only those who may invite project members manage shares", async () => {
+    const { context, owner, outsider, operator, editor } = await seed();
+    // A project editor may change the workflow but not open it to people, as they may not add members.
+    const byEditor = await call(context, "POST", "/api/workflows/wf-team/user-shares", editor.cookie, { email: outsider.email });
+    expect(byEditor.statusCode).toBe(403);
+    expect((await call(context, "GET", "/api/workflows/wf-team/user-shares", editor.cookie)).statusCode).toBe(403);
+    expect((await call(context, "GET", "/api/workflows/wf-team/shares", editor.cookie)).json()).not.toHaveProperty("userShares");
     expect((await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: outsider.email, accessLevel: "execute" })).statusCode).toBe(200);
     expect((await call(context, "GET", "/api/workflows/wf-team", outsider.cookie)).statusCode).toBe(200);
     const edit = await call(context, "PUT", "/api/workflows/wf-team", outsider.cookie, { ...flow("wf-team", "team"), name: "Mine now" });
@@ -205,6 +212,18 @@ describe("workflow shares with people", () => {
       effectiveAccess: "read",
       targetEmail: viewer.email
     });
+  });
+
+  it("a move to another project keeps the shares, and the move's audit counts them", async () => {
+    const { context, owner, operator } = await seed();
+    const admin = await login(context, "admin", "ada");
+    await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: operator.email, accessLevel: "read" });
+    await context.store.upsertProject({ id: "other", name: "Other" });
+    const moved = await call(context, "POST", "/api/workflows/wf-team/transfer", admin.cookie, { targetProjectId: "other" });
+    expect(moved.statusCode, moved.body).toBe(200);
+    expect((await call(context, "GET", "/api/workflows/wf-team", operator.cookie)).statusCode).toBe(200);
+    const audit = await context.store.listAuditLogs({ category: "workflow", pageSize: 50 });
+    expect(audit.items.find((entry) => entry.eventType === "workflow.transfer")?.metadata).toMatchObject({ targetProjectId: "other", userShareCount: 1 });
   });
 
   it("a deleted workflow or user takes its shares along", async () => {

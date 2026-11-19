@@ -39,6 +39,22 @@ describe("ImportConflictDialog", () => {
     expect(onConfirm).toHaveBeenCalledWith("new");
   });
 
+  it("offers no replace when the stored workflow is view-only for you", () => {
+    render(
+      <ImportConflictDialog
+        importedName="RAG Flow"
+        existing={{ id: "wf-rag-flow", name: "RAG Flow", updatedAt: null }}
+        diff={diffWorkflows(stored, file)}
+        canReplace={false}
+        onConfirm={() => undefined}
+        onClose={() => undefined}
+      />
+    );
+    expect(screen.queryByRole("radio", { name: /Replace/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/can view RAG Flow but not change it/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Import as new" })).toBeEnabled();
+  });
+
   it("shows what a replace changes and needs the replace button", async () => {
     const onConfirm = vi.fn();
     render(
