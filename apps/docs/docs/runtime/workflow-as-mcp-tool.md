@@ -39,7 +39,7 @@ Downstream nodes read the tool arguments with the standard <span v-pre>`{{ ... }
 | `toolDescription` | recommended | Description shown to LLMs deciding whether to call this tool. Keep it concise but specific. |
 | `inputSchema` | recommended | JSON Schema describing the tool's arguments. Without one, callers can pass any object; with one, `tools/list` tells LLMs exactly what to send. |
 | `path` | legacy routes only | URL slug for the legacy REST routes, `/api/mcp-server/<path>/...`. Must be unique per instance. |
-| `authMode` | legacy routes only | `public` or `bearer` for the legacy REST routes. The gateway always requires a client token. |
+| `authMode` | legacy routes only | `public` or `bearer` for the legacy REST routes. The gateway always requires a client token. A node added in the editor starts at `bearer`; a node saved without it is `public`, and saving it shows a warning. |
 | `secretRef.secretId` | when `authMode: bearer` | Stored secret holding the bearer token of the legacy routes. |
 
 ## Recipe: knowledge-base tool

@@ -424,16 +424,19 @@ body {
   width: 220px;
   background: transparent;
   border: 0;
-  border-bottom: 1px solid transparent;
+  /* A dashed underline and a text cursor: the name reads as a field you can type in, not a breadcrumb label. */
+  border-bottom: 1px dashed var(--line-strong);
   padding: 2px 2px;
   color: var(--fg);
   font: inherit;
   font-weight: 600;
   text-overflow: ellipsis;
+  cursor: text;
 }
 
 .hud-workflow-name:hover {
-  border-bottom-color: var(--line-strong);
+  border-bottom-style: solid;
+  border-bottom-color: var(--fg-muted);
 }
 
 .hud-workflow-name:focus {

@@ -135,6 +135,14 @@ describe("starter templates", () => {
     expect(runnable.every((template) => template.dependencies.length === 0)).toBe(true);
   });
 
+  it("the Featured template runs without setup", async () => {
+    const featured = (await call("GET", "/api/templates")).json<{ templates: TemplateRow[] }>().templates.filter((template) => template.featured);
+    expect(featured.length).toBeGreaterThan(0);
+    for (const template of featured) expect(template.dependencies, template.id).toEqual([]);
+    const runnable = (await call("GET", "/api/templates?setup=none")).json<{ templates: TemplateRow[] }>().templates;
+    expect(runnable[0]?.featured).toBe(true);
+  });
+
   it("the gallery lists the starters right after the featured templates", async () => {
     const all = (await call("GET", "/api/templates")).json<{ templates: TemplateRow[] }>().templates;
     const firstOther = all.findIndex((template) => !template.featured && template.category !== STARTER_TEMPLATE_CATEGORY);

@@ -263,6 +263,11 @@ test.describe("opening shared workflows (strict isolation)", () => {
         const projects = (await (await as.page.request.get("/api/projects")).json()) as { projects: unknown[] };
         test.skip(projects.projects.length > 0, "Needs a server with PROJECT_ISOLATION=strict");
 
+        // They are in no project, so the page never asks what is shared with one (no 404s in the console).
+        const projectShareRequests: string[] = [];
+        as.page.on("request", (request) => {
+          if (/\/api\/projects\/[^/]+\/shared-workflows/.test(request.url())) projectShareRequests.push(request.url());
+        });
         await as.page.goto("/");
         const sharedWithYou = as.page.getByRole("region", { name: "Shared with you" });
         await expect(sharedWithYou).toBeVisible({ timeout: 60_000 });
@@ -277,6 +282,7 @@ test.describe("opening shared workflows (strict isolation)", () => {
 
         await sharedWithYou.getByRole("button", { name: /E2E No-member shared/ }).click();
         await expect(as.page.getByLabel("Workflow name")).toHaveValue("E2E No-member shared", { timeout: 60_000 });
+        expect(projectShareRequests).toEqual([]);
         expect(as.ollama).toEqual([]);
       } finally {
         await as.context.close();

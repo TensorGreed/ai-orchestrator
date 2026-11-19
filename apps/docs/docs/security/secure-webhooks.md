@@ -20,6 +20,18 @@ Compatibility API route:
 - `bearer_token`
 - `hmac_sha256`
 
+## Public triggers get a warning on save
+
+A webhook with auth mode `none`, a Form Trigger with auth mode `public` and an Expose as MCP Tool trigger with auth
+mode `public` can be called by anyone who can reach the API. When you save a workflow with one that is on, the editor
+lists it in one line under the save notes (for example "Public webhook: anyone who can reach this server can call
+it."). The warning never blocks a save or a run, and a trigger that is switched off gets none. The same notes come from
+`POST /api/workflows/:id/validate` as warnings with the code `public_entry`.
+
+A new Expose as MCP Tool trigger starts with auth mode **Bearer token**: its REST route refuses every call until you
+pick the secret that holds the token. MCP clients reach the tool through a toolset with their own client token either
+way. A trigger saved without an auth mode stays public.
+
 ## Switched off (`active: false`)
 
 A webhook, form, chat or MCP trigger whose node has `active: false` takes no production calls: `/webhook/:path`,

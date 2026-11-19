@@ -10,3 +10,6 @@ export interface CanvasInsertActions {
 
 /** Null outside the editor canvas (previews, tests): no `+` is drawn. */
 export const CanvasInsertContext = createContext<CanvasInsertActions | null>(null);
+
+/** Opens a node's settings from a control drawn on its card (such as the "Off" badge of a switched-off trigger). */
+export const CanvasOpenNodeContext = createContext<((nodeId: string) => void) | null>(null);

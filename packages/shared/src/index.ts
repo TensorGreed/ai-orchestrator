@@ -60,3 +60,4 @@ export * from "./integration-catalog";
 export * from "./legacy-behaviour";
 export * from "./node-ids";
 export * from "./workflow-builder";
+export * from "./public-entry";

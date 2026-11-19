@@ -7,6 +7,7 @@ import {
   type CSSProperties,
   type DragEvent,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject
 } from "react";
@@ -43,7 +44,7 @@ import {
 } from "../lib/stages";
 import { NodePalette, paletteKey, type PaletteDefinition, type PaletteSection } from "./NodePalette";
 import { INTEGRATION_CATALOG_CATEGORY } from "../lib/integration-catalog";
-import { CanvasInsertContext, type CanvasInsertActions } from "./canvas-insert-context";
+import { CanvasInsertContext, CanvasOpenNodeContext, type CanvasInsertActions } from "./canvas-insert-context";
 import { RunTape } from "./RunTape";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import type { LiveNodeResult } from "../lib/run-trace";
@@ -638,6 +639,25 @@ export function WorkflowCanvasArea({
   );
 
   const pendingConnectionRef = useRef<{ nodeId: string; handle: string | null } | null>(null);
+
+  /**
+   * Click-to-open: a press on the card of the node that is already the only one selected (not on one of its buttons or
+   * handles, and without a selection key) arms it; the click that follows, if the pointer did not move, opens it.
+   */
+  const clickToOpenRef = useRef<{ id: string; x: number; y: number } | null>(null);
+  const armClickToOpen = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      clickToOpenRef.current = null;
+      const target = event.target as Element | null;
+      if (!target?.closest || event.button !== 0 || event.shiftKey || event.metaKey || event.ctrlKey) return;
+      const card = target.closest(".react-flow__node");
+      if (!card || target.closest("button, input, textarea, select, a, .react-flow__handle")) return;
+      const id = card.getAttribute("data-id");
+      const selected = nodes.filter((node) => node.selected);
+      if (id && selected.length === 1 && selected[0]!.id === id) clickToOpenRef.current = { id, x: event.clientX, y: event.clientY };
+    },
+    [nodes]
+  );
   const onConnectStart = useCallback((_event: unknown, params: { nodeId: string | null; handleId: string | null; handleType: string | null }) => {
     pendingConnectionRef.current =
       params.nodeId &&
@@ -700,6 +720,7 @@ export function WorkflowCanvasArea({
               if (!next || !event.currentTarget.contains(next)) setFileDragActive(false);
             }}
             onDoubleClick={onStageDoubleClick}
+            onPointerDownCapture={armClickToOpen}
           >
             {fileDragActive && (
               <div className="canvas-file-drop" aria-hidden="true">
@@ -728,6 +749,7 @@ export function WorkflowCanvasArea({
               </div>
             )}
 
+            <CanvasOpenNodeContext.Provider value={onOpenNodeConfig}>
             <CanvasInsertContext.Provider value={insertActions}>
             <ReactFlow
               nodes={renderNodes}
@@ -756,6 +778,12 @@ export function WorkflowCanvasArea({
               nodesConnectable={!editDisabledReason}
               onInit={onInit}
               onNodeDoubleClick={(_event, node) => onOpenNodeConfig(node.id)}
+              onNodeClick={(event, node) => {
+                // A click on the node that was already the only one selected opens its settings (as a double-click does).
+                const armed = clickToOpenRef.current;
+                clickToOpenRef.current = null;
+                if (armed && armed.id === node.id && Math.hypot(event.clientX - armed.x, event.clientY - armed.y) < 5) onOpenNodeConfig(node.id);
+              }}
               fitView
               fitViewOptions={{ padding: 0.18 }}
               zoomOnDoubleClick={false}
@@ -781,6 +809,7 @@ export function WorkflowCanvasArea({
               <Controls showInteractive={false} position="bottom-left" />
             </ReactFlow>
             </CanvasInsertContext.Provider>
+            </CanvasOpenNodeContext.Provider>
 
             {nodes.length === 0 && onDescribeWorkflow && !editDisabledReason && !showNodeDrawer ? (
               <div className="canvas-empty-start" data-testid="canvas-empty-start">

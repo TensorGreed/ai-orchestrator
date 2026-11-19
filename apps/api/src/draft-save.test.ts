@@ -108,6 +108,44 @@ describe("saving a draft", () => {
     expect(body.issues.find((issue) => issue.code === "missing_output_node")?.severity).toBe("warning");
   });
 
+  it("notes a public webhook, form or MCP tool after a save, and nothing once it asks for a token or is off", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const open = hookFlow({
+      nodes: [
+        ...hookFlow().nodes,
+        { id: "form", type: "form_trigger", name: "Form", position, config: { path: "draft-form", fields: [{ name: "q", type: "text" }] } },
+        { id: "tool", type: "mcp_server_trigger", name: "Tool", position, config: { path: "draft-tool", toolName: "lookup", authMode: "public" } }
+      ]
+    });
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: open })).statusCode).toBe(200);
+    const validate = async () =>
+      (await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/validate", headers: { cookie }, payload: {} })).json() as {
+        valid: boolean;
+        issues: Array<{ code: string; nodeId?: string; severity?: string; message: string }>;
+      };
+    const body = await validate();
+    expect(body.valid).toBe(true);
+    const notes = body.issues.filter((issue) => issue.code === "public_entry");
+    expect(notes.map((issue) => issue.nodeId).sort()).toEqual(["form", "hook", "tool"]);
+    for (const note of notes) expect(note.severity).toBe("warning");
+    expect(notes.find((issue) => issue.nodeId === "tool")?.message).toMatch(/^Public MCP tool/);
+
+    const secret = await context.secretService.createSecret({ name: "tool token", provider: "mcp_server", value: "tok-123456789" });
+    const closed = structuredClone(open);
+    closed.nodes = closed.nodes.map((node) =>
+      node.id === "tool"
+        ? { ...node, config: { ...node.config, authMode: "bearer", secretRef: { secretId: secret.secretId } } }
+        : node.id === "form"
+          ? { ...node, config: { ...node.config, active: false } }
+          : node.id === "hook"
+            ? { ...node, config: { ...node.config, authMode: "bearer_token", authHeaderName: "authorization", secretRef: { secretId: secret.secretId } } }
+            : node
+    );
+    expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: closed })).statusCode).toBe(200);
+    expect((await validate()).issues.filter((issue) => issue.code === "public_entry")).toEqual([]);
+  });
+
   it("saves unfinished node settings, which validate still lists and a run still refuses", async () => {
     const context = await createTestContext();
     const cookie = await login(context);
