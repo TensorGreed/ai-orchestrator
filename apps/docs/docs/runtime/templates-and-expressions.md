@@ -1,6 +1,6 @@
 ---
 title: "Templates and expressions: reading data between steps"
-description: "What a {{ }} template in an L2M node can read: direct parents, any earlier step with results or $node(), run input, variables, loops, empty values, autocomplete and strict templates."
+description: "What a {{ }} template in an L2M node can read (parents, earlier steps, input, variables, loops), how autocomplete helps and what strict templates do."
 ---
 
 # Templates and expressions
