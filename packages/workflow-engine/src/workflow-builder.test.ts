@@ -55,6 +55,16 @@ describe("builder catalog", () => {
     expect(http.exampleConfig).toMatchObject({ method: "GET" });
   });
 
+  it("describes the settings the editor's forms edit (Switch cases, form fields, sub-workflow mappings) in their saved shape", () => {
+    const { nodeTypes } = builderNodeDetails(["switch_node", "form_trigger", "execute_workflow", "rag_retrieve"]);
+    const schemaOf = (type: string) => (nodeTypes.find((entry) => entry.type === type)!.configSchema as { properties: Record<string, any> }).properties;
+    expect(schemaOf("switch_node").cases.items.properties).toMatchObject({ value: { type: "string" }, label: { type: "string" } });
+    expect(schemaOf("form_trigger").fields.items.properties.type.enum).toEqual(["text", "textarea", "email", "number", "select", "checkbox"]); // the Form Trigger editor's types
+    expect(schemaOf("execute_workflow").inputMapping).toMatchObject({ type: "object", additionalProperties: { type: "string" } });
+    expect(schemaOf("execute_workflow").outputMapping).toMatchObject({ type: "object", additionalProperties: { type: "string" } });
+    expect(schemaOf("rag_retrieve").vectorStoreConfig).toMatchObject({ type: "object" });
+  });
+
   it("keeps the system prompt under the runtime's system message cap", () => {
     expect(workflowBuilderSystemPrompt(3).length).toBeLessThan(8000);
   });
