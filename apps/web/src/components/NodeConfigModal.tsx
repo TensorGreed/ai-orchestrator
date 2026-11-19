@@ -40,7 +40,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import { isNumberOrTemplateSchema, numberOrTemplateText, parseNumberOrTemplate } from "../lib/number-or-template";
-import type { LiveNodeResult } from "../lib/run-trace";
+import { isLiveExecutionResult, type LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
 import { isInternalKey, NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
@@ -5007,7 +5007,7 @@ export function NodeInspector({
             [config.inputTrust, undefined, sampleConfig.inputTrust],
             [config.allowedIps, undefined, sampleConfig.allowedIps],
             [config.idempotencyEnabled, false, sampleConfig.idempotencyEnabled],
-            [config.responseMode, "lastNode", sampleConfig.responseMode],
+            [config.responseMode, "auto", sampleConfig.responseMode],
             [config.responseCode, 200, sampleConfig.responseCode],
             [config.responseBody, "", sampleConfig.responseBody]
           ])}
@@ -5063,12 +5063,20 @@ export function NodeInspector({
 
         <SelectField
           label="Response Mode"
-          value={toStringValue(config.responseMode, "lastNode")}
-          onChange={(next) => setConfig((current) => ({ ...current, responseMode: next }))}
+          value={toStringValue(config.responseMode, "auto")}
+          onChange={(next) =>
+            setConfig((current) => {
+              // Automatic is the default: left unset, as on a new node.
+              if (next !== "auto") return { ...current, responseMode: next };
+              const { responseMode: _unset, ...rest } = current;
+              return rest;
+            })
+          }
           options={[
-            { value: "onReceived", label: "On Received (immediate 200)" },
+            { value: "auto", label: "Automatic (the Webhook Response if one ran, else the last node)" },
             { value: "lastNode", label: "Last Node Output" },
-            { value: "responseNode", label: "Wait for Response Node" }
+            { value: "responseNode", label: "Wait for Response Node" },
+            { value: "onReceived", label: "On Received (immediate 200)" }
           ]}
         />
         <NumberField
@@ -10783,7 +10791,7 @@ export function NodeInspector({
     storeInspectorLayout(next);
   };
   const runLabel = executionResult && showRuntimeInspection
-    ? `Run ${executionResult.status === "partial" ? "in progress" : executionResult.status}${
+    ? `Run ${isLiveExecutionResult(executionResult) ? "in progress" : executionResult.status}${
         executionResult.startedAt ? `, started ${new Date(executionResult.startedAt).toLocaleTimeString()}` : ""
       }`
     : undefined;

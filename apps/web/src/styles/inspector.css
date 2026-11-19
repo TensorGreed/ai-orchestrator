@@ -1623,6 +1623,7 @@
 }
 .run-data-status-success .run-data-status-dot { background: var(--ok); }
 .run-data-status-error .run-data-status-dot { background: var(--err); }
+.run-data-status-handled .run-data-status-dot { background: var(--warn); }
 .run-data-status-running .run-data-status-dot { background: var(--running); }
 .run-data-error {
   display: grid;

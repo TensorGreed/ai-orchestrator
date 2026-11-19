@@ -742,8 +742,11 @@ function scoreStatus(spec: Extract<EvalScorerSpec, { type: "status" }>, ctx: Sco
   const expect = spec.expect ?? "success";
   const status = ctx.candidate?.status ?? null;
   if (!status) return { pass: false, score: 0, reason: "this run's status is not available" };
-  return status === expect
-    ? { pass: true, score: 1, reason: `finished with ${status}` }
+  // A run whose failures were all handled ended "partial" before it ended "success": a case that expects "partial"
+  // passes on a success with a failed node in it, so gates set up before the change keep their verdicts.
+  const handledPartial = expect === "partial" && status === "success" && (ctx.candidate?.nodes ?? []).some((node) => node.status === "error");
+  return status === expect || handledPartial
+    ? { pass: true, score: 1, reason: `finished with ${status}${handledPartial ? " (its failures were handled)" : ""}` }
     : { pass: false, score: 0, reason: `finished with ${status}, expected ${expect}${ctx.candidate?.error ? `: ${truncate(ctx.candidate.error, 80)}` : ""}` };
 }
 

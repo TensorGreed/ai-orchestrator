@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultReleaseGate } from "@ai-orchestrator/shared";
-import { gateAdmissionBanner, gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone, workflowDeleteDenial } from "./release";
+import { gateAdmissionBanner, gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone, workflowDeleteDenial, workflowExportPayload } from "./release";
 
 describe("release helpers", () => {
   it("labels the version pill by what production triggers run today", () => {
@@ -126,5 +126,18 @@ describe("workflowDeleteDenial", () => {
     expect(workflowDeleteDenial({ gateEnabled: false, gateEnforced: true }, false)).toBeNull();
     expect(workflowDeleteDenial({ gateEnabled: true, gateEnforced: true }, true)).toBeNull();
     expect(workflowDeleteDenial(null, false)).toBeNull();
+  });
+});
+
+describe("workflowExportPayload", () => {
+  const workflow = { id: "wf", name: "Orders", workflowVersion: 1 };
+
+  it("numbers the export with the newest saved version (the validation's export said 1 while version 2 was live)", () => {
+    const payload = workflowExportPayload(workflow, "1.0.0", 2, "2026-11-19T00:00:00.000Z");
+    expect(payload).toEqual({ schemaVersion: "1.0.0", workflowVersion: 2, workflow: { ...workflow, workflowVersion: 2 }, exportedAt: "2026-11-19T00:00:00.000Z" });
+  });
+
+  it("keeps the workflow's own number when the server gave none (never saved, or no release store)", () => {
+    for (const saved of [null, undefined, 0]) expect(workflowExportPayload(workflow, "1.0.0", saved).workflowVersion).toBe(1);
   });
 });

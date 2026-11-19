@@ -365,6 +365,7 @@ import { DeliveryDedupe } from "./services/delivery-dedupe.js";
 import { acceptSlackEvent } from "./services/slack-intake.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
 import { runStarterId, type RedactedNodeEvent, type RunWorkflowExecutionInput, type WorkflowExecutionEventHooks } from "./run-types.js";
+import { ERROR_WORKFLOW_TRIGGER_TYPE, claimErrorWorkflowRun, errorWorkflowRunId, type ErrorWorkflowInput } from "./error-workflow-run.js";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
@@ -2730,7 +2731,11 @@ export async function createApp(
     const executionTimeoutMs = normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS);
     // 12.6 — a recorded run's recorder wraps the base registry; the run's own allowlist view goes in front of it.
     const runModelRegistry = input.providerRegistry ?? runPlan?.providerRegistry ?? baseProviderRegistry;
-    const runModelScope: ModelRun = input.executionId ? { executionId: input.executionId } : {};
+    const runModelScope: ModelRun = {
+      ...(input.executionId ? { executionId: input.executionId } : {}),
+      // An error workflow's model calls name the failed run they handle.
+      ...(input.errorSourceExecutionId ? { sourceExecutionId: input.errorSourceExecutionId } : {})
+    };
     // A replay answering from a model tape makes no request for a recorded answer (what the allowlist says about
     // those is reported afterwards); its lenient live calls go through the enforcing registry the tape was given.
     const tapeReplay = Boolean(input.replay && input.providerRegistry);
@@ -2775,6 +2780,7 @@ export async function createApp(
           executionTimeoutMs,
           triggerType: input.triggerType,
           ...(input.inputTriggerType ? { inputTriggerType: input.inputTriggerType } : {}),
+          ...(input.outputTriggerType ? { outputTriggerType: input.outputTriggerType } : {}),
           triggeredBy: input.triggeredBy,
           toolPolicySubject: input.policySubject ?? await resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
@@ -2952,8 +2958,15 @@ export async function createApp(
             }
           },
           // Phase 15.1 — a replay never fires the error workflow or its notifications.
-          triggerErrorWorkflow: input.replay ? undefined : async (payload) => {
-            // Fire-and-forget: execute the error workflow + send notifications
+          // An error workflow's own failure starts no other error workflow.
+          triggerErrorWorkflow: input.replay || input.triggerType === ERROR_WORKFLOW_TRIGGER_TYPE ? undefined : async (payload) => {
+            // Fire-and-forget: execute the error workflow + send notifications.
+            // At most once per failed run: the same run executed again (a lost lease, a re-run job) starts no second
+            // error workflow run and sends no second failure notification.
+            if (payload.executionId && !(await claimErrorWorkflowRun(store, payload.executionId))) {
+              app.log.info({ executionId: payload.executionId, errorWorkflowId: payload.errorWorkflowId }, "Error workflow already ran for this run");
+              return;
+            }
             notificationService.notify({
               type: "execution.failure",
               workflowId: payload.sourceWorkflowId,
@@ -2979,71 +2992,42 @@ export async function createApp(
             const errorWf = errorTarget.workflow;
             // Like a sub-workflow: the run's user carries over only within the same project.
             const sameProject = (errorWf.projectId ?? DEFAULT_PROJECT_ID) === (failingWorkflow.projectId ?? DEFAULT_PROJECT_ID);
-            // A run kept to one person's sessions keeps its error workflow to them too.
-            const errorScoped = runScope.dependenciesFor(errorWf, {
-              actor: sameProject ? input.policyActor : null,
-              channel,
-              ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
-            });
-            const errorModelRun: ModelRun = { runKey: `error:${payload.executionId}:${errorWf.id}`, sourceExecutionId: payload.executionId };
+            const errorInput: ErrorWorkflowInput = {
+              error: payload.error,
+              ...(payload.errorStack !== undefined ? { errorStack: payload.errorStack } : {}),
+              sourceWorkflowId: payload.sourceWorkflowId,
+              sourceWorkflowName: payload.sourceWorkflowName,
+              ...(payload.executionId ? { executionId: payload.executionId } : {}),
+              timestamp: payload.timestamp
+            };
+            // Recorded like any other run (Runs, budgets, the queue), under an id the failed run's record can name.
+            // It belongs to whoever owns the failed run: their own-runs view and their sessions.
+            const errorExecutionId = payload.executionId ? errorWorkflowRunId(payload.executionId) : crypto.randomUUID();
             try {
-              const errorToolPolicySubject = await resolveToolPolicySubject(errorWf.id);
-              const runErrorWorkflow = () => executeWorkflow(
+              await runDispatcher.fire(
                 {
-                  workflow: errorWf,
-                  input: {
-                    error: payload.error,
-                    errorStack: payload.errorStack,
-                    sourceWorkflowId: payload.sourceWorkflowId,
-                    sourceWorkflowName: payload.sourceWorkflowName,
-                    executionId: payload.executionId,
-                    timestamp: payload.timestamp
-                  },
-                  triggerType: "error",
-                  toolPolicySubject: errorToolPolicySubject,
-                  executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
-                  // v74 — the failed run was sensitive work: its error is that run's content.
-                  ...(payload.sensitive === true ? { sensitiveInput: true } : {})
-                },
-                {
-                  connectorRegistry,
-                  mcpRegistry,
-                  agentRuntime,
-                  ...errorScoped,
-                  // 12.6 — the error handler's model calls are checked for its own project, audited once per failed run.
-                  providerRegistry: modelScopedRun(errorWf, baseProviderRegistry, errorModelRun),
-                  checkEmbeddingModel: modelScopedEmbeddings(errorWf, errorModelRun),
-                  // Always the gated registry (instrumented when telemetry is on), so content rule embeddings are checked and pinned.
-                  embeddingProviderRegistry: runEmbeddingRegistry,
-                  scopeSubWorkflow: modelScopedSubWorkflows(errorScoped.scopeSubWorkflow, baseProviderRegistry, errorModelRun),
-                  // The error handler is guarded under its own bindings, like any other run.
-                  guard: guardService.runtimeFor({
-                    workflowId: errorWf.id,
-                    projectId: errorWf.projectId ?? "default",
+                  v: DISPATCH_SPEC_VERSION,
+                  run: {
+                    workflow: errorWf,
+                    directInput: { ...errorInput },
+                    executionId: errorExecutionId,
+                    triggerType: ERROR_WORKFLOW_TRIGGER_TYPE,
+                    ...(input.triggeredBy !== undefined ? { triggeredBy: input.triggeredBy } : {}),
+                    triggeredByUserId: runStarterId(input),
+                    ...(sameProject && input.policyActor ? { policyActor: input.policyActor } : {}),
+                    ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {}),
+                    ...(payload.executionId ? { errorSourceExecutionId: payload.executionId } : {}),
+                    // As the failed run ran: a production failure runs the error workflow's published version.
+                    channel: channel,
+                    executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
+                    // v74 — the failed run was sensitive work: its error is that run's content.
                     ...(payload.sensitive === true ? { sensitiveInput: true } : {})
-                  }),
-                  loadMcpToolPolicy,
-                  codeSandbox: codeSandboxPlan,
-                  outboundGuard,
-                  outboundDnsResolver: nodeDnsResolver,
-                  ...(verifySensitiveValues ? { verifySensitiveValues } : {}),
-                  ...(runInstrumentation.enabled ? { instrument: runInstrumentation } : {}),
-                  ...(metricsService.isEnabled() ? { onNodeComplete: (event: { status: string; durationMs: number; output?: unknown }) => recordNodeMetric(input, event) } : {})
-                }
+                  },
+                  progress: { requestInput: errorInput },
+                  history: { requestInput: errorInput }
+                },
+                { pool: dispatchPoolOf(errorWf), queueItemId: errorExecutionId }
               );
-              // The error workflow's run is its own span, a child of the failed run's.
-              if (runInstrumentation.enabled) {
-                await runInstrumentation.run(
-                  { workflowId: errorWf.id, ...(errorWf.name ? { workflowName: errorWf.name } : {}), projectId: errorWf.projectId ?? DEFAULT_PROJECT_ID, triggerType: "error" },
-                  async (span) => {
-                    const errorResult = await runErrorWorkflow();
-                    describeRunResult(span, errorResult);
-                    return errorResult;
-                  }
-                );
-              } else {
-                await runErrorWorkflow();
-              }
             } catch (err) {
               app.log.warn({ err: err instanceof Error ? err.message : String(err), errorWorkflowId: payload.errorWorkflowId }, "Error workflow execution failed");
             }
@@ -6041,6 +6025,11 @@ export async function createApp(
         // resumed run's triggered_by, also of the paused row when it paused again), else as the paused row records it.
         const [firstRequest] = await store.listApprovalRequestsForExecution(job.executionId);
         const startedBy = firstRequest?.requestedBy ?? pending.triggeredBy ?? resumeHistory?.triggeredBy ?? undefined;
+        // An error workflow's run that paused stays one when it resumes: listed under the trigger `error`, linked to the
+        // failed run (its stored input names it), and its own failure starts no other error workflow.
+        const resumedErrorRun = asRecord(state.globals).trigger_type === ERROR_WORKFLOW_TRIGGER_TYPE;
+        const resumeTriggerType = resumedErrorRun ? ERROR_WORKFLOW_TRIGGER_TYPE : "approval_resume";
+        const errorRunInput = resumedErrorRun ? asRecord(resumeHistory?.input) : {};
         const gatewayGuard =
           parseGatewayGuardStack(state.gatewayGuard) ?? parseGatewayGuardStack(asRecord(resumeHistory?.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
         // 12.6 — and its usage stays the gateway client's and counts toward the toolset's project (not the approver's).
@@ -6076,7 +6065,7 @@ export async function createApp(
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
-          triggerType: "approval_resume",
+          triggerType: resumeTriggerType,
           // "Started by" stays who started the run; the approver is recorded on the decision (approval_requests).
           triggeredBy: startedBy,
           // The resumed run is its own span, linked (not parented) to the node that paused, hours or days earlier.
@@ -6095,11 +6084,12 @@ export async function createApp(
           executionId: job.executionId,
           workflow: state.workflow,
           result,
-          triggerType: "approval_resume",
+          triggerType: resumeTriggerType,
           triggeredBy: startedBy,
           ...(resumeCustomData ? { customData: { ...(result.customData ?? {}), ...resumeCustomData } } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           requestInput: {
+            ...errorRunInput,
             decision: decided,
             approvalId: job.executionId,
             requestId: job.requestId,
@@ -11899,7 +11889,10 @@ export async function createApp(
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
-    const workflow = access.workflow;
+    // Numbered as the version history numbers the saved workflow (what the Publish dialog shows), not by the
+    // workflow's own field, which only counts its creation.
+    const savedVersion = await store.maxWorkflowVersionNumber(access.workflow.id);
+    const workflow = savedVersion > 0 ? { ...access.workflow, workflowVersion: savedVersion } : access.workflow;
 
     return {
       json: exportWorkflowToJson(workflow)
@@ -16110,6 +16103,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ...(replay.recording.sourceTriggerType && replay.recording.capabilities.origin !== "imported"
           ? { inputTriggerType: replay.recording.sourceTriggerType }
           : {}),
+        // The output rule follows the recorded trigger, an imported file's too, so the replay's output compares like
+        // for like with the recorded one (a webhook run's output is its reply).
+        ...(replay.recording.sourceTriggerType ? { outputTriggerType: replay.recording.sourceTriggerType } : {}),
         // Phase 16 (Q7) — the recording's input origin (replays, gate cases and simulations alike), not the starter's.
         // A golden run imported from a file always counts as outside content as well (its trigger is the file's claim).
         inputLabels: recordedInputLabels({

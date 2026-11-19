@@ -751,6 +751,8 @@ export interface StreamNodeCompleteEvent {
   errorCategory?: string;
   errorRemediation?: string;
   retryable?: boolean;
+  /** The failure was handled (routed to the Error output, caught or continued past). */
+  handled?: boolean;
 }
 
 export interface StreamLlmDeltaEvent {
@@ -1441,6 +1443,18 @@ export interface ExecutionHistoryDetail extends ExecutionHistorySummary {
   traceId?: string | null;
   /** A link to the run's trace in the operator's backend (L2M_OTEL_TRACE_URL_TEMPLATE); absent unless set. */
   traceUrl?: string;
+  /** A failed run: the run its error workflow made, when there is one you may see. */
+  errorWorkflowRun?: ExecutionRunLink;
+  /** An error workflow's run (trigger type `error`): the failed run it handled, when you may see it. */
+  errorWorkflowSource?: ExecutionRunLink;
+}
+
+/** Another run named from a run's record. */
+export interface ExecutionRunLink {
+  executionId: string;
+  workflowId: string;
+  workflowName: string;
+  status: string;
 }
 
 export async function fetchExecutions(input?: {

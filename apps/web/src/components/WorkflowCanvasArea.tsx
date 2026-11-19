@@ -52,6 +52,7 @@ import type { PaletteCategoryIconKey } from "./node-icons";
 import { ImportReportPanel, type ImportReportPanelProps } from "./ImportReportPanel";
 import type { ImportChecklistNode } from "../lib/external-import";
 import type { McpCanvasMarker, McpNavTarget } from "../lib/mcp-control-plane";
+import { displayNodeStatus } from "../lib/run-data";
 
 type DefinitionNode = PaletteDefinition;
 
@@ -979,8 +980,8 @@ export function WorkflowCanvasArea({
                                   ) : result.durationMs !== undefined ? (
                                     <span>{result.durationMs}ms</span>
                                   ) : null}
-                                  <strong className={`node-status-value node-status-${result.status}`} style={{ color: statusColors[result.status] }}>
-                                    {result.status}
+                                  <strong className={`node-status-value node-status-${displayNodeStatus(result)}`} style={{ color: statusColors[displayNodeStatus(result)] }}>
+                                    {displayNodeStatus(result)}
                                   </strong>
                                   <span className="node-status-chevron" aria-hidden="true">
                                     {isExpanded ? "▾" : "▸"}

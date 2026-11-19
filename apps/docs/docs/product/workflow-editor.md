@@ -129,7 +129,10 @@ clean-up (`settings.errorWorkflowId` in the workflow JSON). Start it with an **E
 run's `source_workflow_id`, `source_workflow_name`, `execution_id`, `error`, `error_stack` and `timestamp`. The failed
 run's caller still gets the error, replays never start it, and an error workflow in another project runs only when
 that project shared it with execute access (see [what a running workflow can reach](../security/auth-rbac.md#what-a-running-workflow-can-reach)). Pick **None** to turn it
-off.
+off. Its runs are listed in **Runs** like any other, with the trigger `error`: the failed run's details say
+**Error workflow ran → run …**, and the error workflow's run says which failed run it handled. Each belongs to the
+person who started the failed run, so someone who sees only their own runs sees the error runs of their runs. An
+error workflow that fails does not start another one, and a failed run starts its error workflow once, even if it runs again.
 
 ## Running from the editor
 
@@ -248,6 +251,16 @@ history keeps masked or as placeholders (see [content rules](/product/content-ru
      - `tool`: one or more `mcp_tool` or `workflow_tool` nodes
 3. RAG:
    - `text_input -> rag_retrieve -> prompt_template -> llm_call -> output`
+
+### What a webhook's caller gets
+
+A run started by a webhook (its URL, `/webhook-test/`, `POST /api/webhooks/execute` and its stream) answers with the
+reply of the last **Webhook Response** node that ran, even when other nodes (an Output node, a notification) run after
+it. The run's output in Runs is that reply too, so it shows what the caller got; replays and golden sets of a webhook run
+follow the same rule. That is the webhook trigger's default **Response Mode**, **Automatic** (under More): the last
+Webhook Response that ran, else the last node's output. **Last Node Output** always answers with the last node's output.
+A run that fails after its Webhook Response answers with the error. Runs that no webhook started (the editor's **Run**,
+sub-workflows, schedules) keep their Output node's result.
 
 ## Validation behavior
 

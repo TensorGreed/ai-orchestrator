@@ -105,7 +105,7 @@ test.describe("Human Approval in a Loop body", () => {
         await expect(page.locator(".approvals-notice")).toContainText(step.decision === "Approve" ? "Approved" : "Rejected");
       }
 
-      await expect.poll(async () => (await runDetail(page, executionId)).status, { timeout: 30_000 }).toBe("partial");
+      await expect.poll(async () => (await runDetail(page, executionId)).status, { timeout: 30_000 }).toBe("success");
       const run = await runDetail(page, executionId);
       const ran = (id: string, key: string) => run.nodeResults.filter((entry) => entry.nodeId === id && entry.status === "success").map((entry) => entry.output?.[key]);
       expect(ran("order", "ordered")).toEqual(["pen", "desk"]);

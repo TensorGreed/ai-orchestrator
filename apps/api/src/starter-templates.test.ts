@@ -151,6 +151,24 @@ describe("starter templates", () => {
     expect(outputOf(result, "reply").__webhookResponse).toMatchObject({ statusCode: 200, body: { customer: "Ada Lovelace", email: "ada@example.com", vip: true } });
   });
 
+  it("Webhook: reshape and reply answers a request to its URL with the Webhook Response, though a node runs after it", async () => {
+    const { workflow } = await useStarter("Webhook: reshape and reply");
+    const nodes = workflow.nodes.map((node) => (node.type === "webhook_input" ? { ...node, config: { ...node.config, active: true } } : node));
+    const saved = await context.app.inject({ method: "PUT", url: `/api/workflows/${workflow.id}`, headers: { cookie: context.cookie }, payload: { ...workflow, nodes } });
+    expect(saved.statusCode).toBe(200);
+    const path = String(workflow.nodes.find((node) => node.type === "webhook_input")?.config.path);
+    // The validation's repro: a curl to the starter's URL got the trailing Run result node's output instead.
+    const payload = { first_name: "Grace", last_name: "Hopper", email: "G@x.com", orders: 12 };
+    for (const route of ["webhook", "webhook-test"]) {
+      const answered = await context.app.inject({ method: "POST", url: `/${route}/${path}`, payload });
+      expect(answered.statusCode, route).toBe(200);
+      expect(answered.json(), route).toEqual({ customer: "Grace Hopper", email: "g@x.com", vip: true });
+    }
+    // The compat entry point (the editor's Webhook run) returns the run, whose output is the reply.
+    const result = await webhookRun(workflow);
+    expect(result.output.__webhookResponse).toMatchObject({ statusCode: 200, body: { customer: "Ada Lovelace", email: "ada@example.com", vip: true } });
+  });
+
   it("Schedule: fetch, filter and notify fetches the sample orders and notifies about the pending ones", async () => {
     const { workflow } = await useStarter("Schedule: fetch, filter and notify");
     // The schedule is off until the user turns it on.
@@ -210,7 +228,12 @@ describe("starter templates", () => {
     expect(statusOf(result, "ok")).toBe("skipped");
     expect(outputOf(result, "fallback")).toMatchObject({ path: "fallback" });
     expect(String(outputOf(result, "fallback").reason)).toContain("503");
-    expect(result.status).not.toBe("error");
+    // The failure went to the connected Error output: handled, so the run succeeded and the hint does not say to
+    // connect it (the validation saw "partial", a red node and that hint).
+    expect(result.status).toBe("success");
+    const call = result.nodeResults.filter((entry) => entry.nodeId === "call").at(-1) as NodeResult & { handled?: boolean; errorRemediation?: string };
+    expect(call.handled).toBe(true);
+    expect(call.errorRemediation ?? "").not.toMatch(/connect the node's Error output/);
   });
 
   it("Loop over items and collect works out each line total and collects them", async () => {

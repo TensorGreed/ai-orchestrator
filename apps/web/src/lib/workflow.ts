@@ -35,7 +35,7 @@ export interface EditorNodeData {
   label: string;
   nodeType: WorkflowNodeType;
   config: Record<string, unknown>;
-  executionStatus?: "pending" | "running" | "success" | "error" | "skipped" | "canceled";
+  executionStatus?: "pending" | "running" | "success" | "error" | "handled" | "skipped" | "canceled";
   executionPreview?: {
     /** Run status, item count and duration on one line ("success · 1 item · 28 ms"). */
     meta?: string;

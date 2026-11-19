@@ -234,6 +234,48 @@ describe("golden-set files", () => {
     expect(again.name).toBe("From git");
   }, 60_000);
 
+  it("a golden run captured from a webhook replays with the webhook's reply rule, also once exported and imported", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const position = { x: 0, y: 0 };
+    await context.store.upsertWorkflow({
+      id: "wf-set",
+      name: "Workflow wf-set",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        { id: "hook", type: "webhook_input", name: "Hook", position, config: { path: "golden-reply", method: "POST" } },
+        { id: "reply", type: "webhook_response", name: "Reply", position, config: { statusCode: 200, bodyTemplate: "{\"customer\": \"{{name}}\"}" } },
+        { id: "out", type: "output", name: "Run result", position, config: { responseTemplate: "not the reply", outputKey: "result" } }
+      ],
+      edges: [
+        { id: "e1", source: "hook", target: "reply" },
+        { id: "e2", source: "reply", target: "out" }
+      ]
+    } as Workflow);
+    const answered = await context.app.inject({ method: "POST", url: "/webhook/golden-reply", payload: { name: "Grace" } });
+    expect(answered.json()).toEqual({ customer: "Grace" });
+    const runs = (await call(context, "GET", "/api/executions?workflowId=wf-set", builder.cookie)).json<{ items: Array<{ id: string }> }>().items;
+    const saved = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: runs[0]!.id, name: "Webhook golden" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    const created = await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Webhook suite", workflowId: "wf-set" });
+    const setId = created.json<{ dataset: { id: string } }>().dataset.id;
+    expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId: saved.json<{ recording: ReplayRecordingSummary }>().recording.id })).statusCode).toBe(201);
+
+    const replay = async (datasetId: string) => {
+      const started = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [datasetId] });
+      expect(started.statusCode, started.body).toBe(202);
+      return await waitForJob(context, builder.cookie, started.json<{ run: EvalRunView }>().run.id);
+    };
+    const own = await replay(setId);
+    expect(own.summary, JSON.stringify(own)).toMatchObject({ total: 1, pass: 1 });
+    const imported = await importFile(context, builder.cookie, await exportFile(context, builder.cookie, setId), { name: "Imported webhook suite" });
+    expect(imported.statusCode, imported.body).toBe(201);
+    const fromFile = await replay(imported.json<{ dataset: { id: string } }>().dataset.id);
+    expect(fromFile.summary, JSON.stringify(fromFile)).toMatchObject({ total: 1, pass: 1 });
+  }, 60_000);
+
   it("scrubs a file it does not trust: planted secret values are replaced and secret references are dropped", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");

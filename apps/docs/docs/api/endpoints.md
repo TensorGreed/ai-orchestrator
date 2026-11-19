@@ -78,7 +78,7 @@ the envelope `GET /api/executions` uses:
 ## Execution history
 
 - `GET /api/executions` (runs of the workflows you can read; of a workflow shared only with you, your own runs; recorded runs carry `mcpCassette: { id, callCount, truncated }`; runs saved as golden runs carry `goldenRuns: { count, latestId }`)
-- `GET /api/executions/:id`
+- `GET /api/executions/:id` (a failed run whose error workflow ran adds `errorWorkflowRun`, and an error workflow's run (trigger `error`) adds `errorWorkflowSource`: `{ executionId, workflowId, workflowName, status }`, each only when you may open that run)
 - `POST /api/executions/:id/replay` (builder; `{ mode?: "strict" | "lenient", cassetteId? }`; 404 without a cassette; see [MCP testing](#mcp-testing))
 
 ## Definitions and integrations

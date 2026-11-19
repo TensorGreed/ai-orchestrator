@@ -596,6 +596,8 @@ export interface WorkflowExecutionDependencies {
     errorCategory?: string;
     errorRemediation?: string;
     retryable?: boolean;
+    /** The failure was handled (NodeExecutionResult.handled). */
+    handled?: boolean;
   }) => Promise<void> | void;
   onLLMDelta?: (event: {
     nodeId: string;
@@ -756,6 +758,12 @@ export interface ExecuteWorkflowRequest {
    * recorded run gives the recording's trigger). Decides whether the input is a caller's own words at the model boundary.
    */
   inputTriggerType?: string;
+  /**
+   * The trigger whose output rule the run follows when it is not the run's own (a replay of a webhook recording,
+   * imported ones included): a webhook run's output is its last Webhook Response's reply, with that node's data labels.
+   * It decides nothing about the input's trust.
+   */
+  outputTriggerType?: string;
   triggeredBy?: string;
   /**
    * Phase 10.2 — whose role the MCP tool policy is evaluated with. Absent →
@@ -1281,6 +1289,34 @@ function categorizedProviderError(
     provider: typeof fields.provider === "string" ? fields.provider : undefined,
     retryable: typeof fields.retryable === "boolean" ? fields.retryable : undefined
   };
+}
+
+/** Whether a webhook started the run (or the recorded run a replay replays): its caller is answered with a reply. */
+function runAnswersWebhook(request: { triggerType?: string; inputTriggerType?: string; outputTriggerType?: string }): boolean {
+  const triggerType = (request.outputTriggerType ?? request.inputTriggerType ?? request.triggerType ?? "").trim().toLowerCase();
+  return triggerType.startsWith("webhook");
+}
+
+/** The last Webhook Response node that ran successfully in this run, with its output (the reply), or undefined. */
+function lastWebhookReply(workflow: Workflow, nodeResults: NodeExecutionResult[]): { nodeId: string; output: unknown } | undefined {
+  // A webhook trigger set to answer with the last node's output (Response Mode "Last Node Output") keeps that answer;
+  // Automatic (unset or "auto", the default) and "Wait for Response Node" answer with the reply.
+  const ranIds = new Set(nodeResults.filter((entry) => entry.status === "success").map((entry) => entry.nodeId));
+  const startedBy = workflow.nodes.filter((node) => node.type === "webhook_input" && ranIds.has(node.id));
+  if (startedBy.length > 0 && startedBy.every((node) => (node.config as Record<string, unknown> | undefined)?.responseMode === "lastNode")) {
+    return undefined;
+  }
+  const replyNodes = new Set(workflow.nodes.filter((node) => node.type === "webhook_response").map((node) => node.id));
+  if (replyNodes.size === 0) return undefined;
+  for (let index = nodeResults.length - 1; index >= 0; index -= 1) {
+    const entry = nodeResults[index]!;
+    if (!replyNodes.has(entry.nodeId) || entry.status !== "success") continue;
+    const output = entry.output;
+    if (output && typeof output === "object" && !Array.isArray(output) && "__webhookResponse" in output) {
+      return { nodeId: entry.nodeId, output };
+    }
+  }
+  return undefined;
 }
 
 function isWebhookTrigger(globals: Record<string, unknown>): boolean {
@@ -10264,7 +10300,7 @@ async function executeWorkflowRun(
             input: childInput,
             ...(rejection ? { output: rejection.decisionPayload } : {}),
             error: childErrorMessage,
-            ...(handledOnError ? { errorCategory } : {}),
+            ...(handledOnError ? { errorCategory, handled: true } : {}),
             ...(childNode.type === "human_approval" ? { loopPass } : {})
           });
           if (!decided) {
@@ -10275,7 +10311,8 @@ async function executeWorkflowRun(
               completedAt: nowIso(),
               durationMs: Date.now() - childStarted,
               input: childInput,
-              error: childErrorMessage
+              error: childErrorMessage,
+              ...(handledOnError ? { handled: true } : {})
             });
           }
           if (handledOnError) {
@@ -10309,6 +10346,11 @@ async function executeWorkflowRun(
             // Loops around it continues past it.
             if (rejection) nodeOutputs.set(childNode.id, { ...rejection.decisionPayload, error: rejection.message });
             throw new LoopApprovalStop(loopFailure);
+          }
+          // The Loop fails with its child's category, code and hint (a strict template names the template it could not
+          // fill), not as an unknown error whose hint is to report a bug.
+          if (caughtChildError instanceof WorkflowError) {
+            throw new WorkflowError(loopFailure, caughtChildError.category, caughtChildError.retryable, caughtChildError.metadata, caughtChildError.remediation);
           }
           throw new Error(loopFailure);
         } finally {
@@ -10532,7 +10574,7 @@ async function executeWorkflowRun(
     } else {
       const rejectionError = request.approvalDecision.reason?.trim() || (timedOut ? "Human approval timed out" : "Human approval rejected");
       labelState.set(waitingNode.id, unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]));
-      nodeResults.push({
+      const rejectionResult: NodeExecutionResult = {
         nodeId: waitingNode.id,
         status: "error",
         startedAt: decidedAt,
@@ -10541,7 +10583,8 @@ async function executeWorkflowRun(
         input: decisionInput,
         output: decisionPayload,
         error: rejectionError
-      });
+      };
+      nodeResults.push(rejectionResult);
 
       let caughtByTryCatch = false;
       for (const [tryCatchId, scope] of tryCatchScopes.entries()) {
@@ -10566,6 +10609,7 @@ async function executeWorkflowRun(
           });
           labelState.set(tryCatchId, unionLabels([labelState.get(tryCatchId), labelState.get(waitingNode.id)]));
           hadContinuedErrors = true;
+          rejectionResult.handled = true;
           caughtByTryCatch = true;
           break;
         }
@@ -10581,6 +10625,7 @@ async function executeWorkflowRun(
             error: rejectionError
           });
           hadContinuedErrors = true;
+          rejectionResult.handled = true;
         } else if (onError === "branch" && branchTargets.has(waitingNode.id)) {
           if (routeFailureToErrorOutput(waitingNode.id, { clearSkips: true })) {
             nodeOutputs.set(waitingNode.id, {
@@ -10588,6 +10633,7 @@ async function executeWorkflowRun(
               error: rejectionError
             });
             hadContinuedErrors = true;
+            rejectionResult.handled = true;
           } else {
             appendSkippedNodes(nodeOrder, startIndex, nodeResults);
             return {
@@ -11292,6 +11338,16 @@ async function executeWorkflowRun(
         ...(nodeCheckUsage.length > 0 ? { output: withRecordedCheckUsage({}, nodeCheckUsage) } : {})
       };
 
+      // A failure that is caught, continued past or routed to the Error output was handled (NodeExecutionResult.handled).
+      // An HTTP status failure's hint no longer says to connect the Error output.
+      const handledErrorFields = {
+        ...errorFields,
+        ...(errorCategoryName === ErrorCategory.HTTP_STATUS
+          ? { errorRemediation: remediationForCategory(ErrorCategory.HTTP_STATUS, { ...(error instanceof WorkflowError ? error.metadata : {}), handled: true }) }
+          : {}),
+        handled: true
+      };
+
       // Check if this node is inside a try_catch scope (a node's own connected Error output wins over an enclosing Try/Catch)
       let caughtByTryCatch = false;
       const ownErrorOutput = onError === "branch" && (branchTargets.get(node.id)?.get(ERROR_OUTPUT_HANDLE)?.length ?? 0) > 0;
@@ -11329,7 +11385,7 @@ async function executeWorkflowRun(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            ...errorFields
+            ...handledErrorFields
           });
           await dependencies.onNodeComplete?.({
             nodeId: node.id,
@@ -11338,7 +11394,7 @@ async function executeWorkflowRun(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            ...errorFields
+            ...handledErrorFields
           });
           hadContinuedErrors = true;
           break;
@@ -11356,7 +11412,7 @@ async function executeWorkflowRun(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            ...errorFields
+            ...handledErrorFields
           });
           await dependencies.onNodeComplete?.({
             nodeId: node.id,
@@ -11365,7 +11421,7 @@ async function executeWorkflowRun(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            ...errorFields
+            ...handledErrorFields
           });
           hadContinuedErrors = true;
           continue;
@@ -11391,7 +11447,7 @@ async function executeWorkflowRun(
               completedAt: nowIso(),
               durationMs: Date.now() - started,
               input: nodeInput,
-              ...errorFields
+              ...handledErrorFields
             });
             await dependencies.onNodeComplete?.({
               nodeId: node.id,
@@ -11400,7 +11456,7 @@ async function executeWorkflowRun(
               completedAt: nowIso(),
               durationMs: Date.now() - started,
               input: nodeInput,
-              ...errorFields
+              ...handledErrorFields
             });
             hadContinuedErrors = true;
             continue;
@@ -11481,6 +11537,21 @@ async function executeWorkflowRun(
     }
   }
 
+  // A webhook's caller gets the reply of the last Webhook Response node that ran, even when nodes ran after it, so the
+  // run records what the caller got. Runs no webhook started (the editor's Run, sub-workflows) keep their Output node's.
+  // A resumed run is answered as the run that paused: its trigger is in the restored globals.
+  const answersWebhook = request.resumeState
+    ? runAnswersWebhook({
+        triggerType: typeof globals.trigger_type === "string" ? globals.trigger_type : undefined,
+        inputTriggerType: typeof globals.input_trigger_type === "string" ? globals.input_trigger_type : undefined
+      })
+    : runAnswersWebhook(request);
+  const webhookReply = answersWebhook ? lastWebhookReply(workflow, nodeResults) : undefined;
+  if (webhookReply) {
+    finalOutput = webhookReply.output;
+    labelState.outputNodeId = webhookReply.nodeId;
+  }
+
   // No Output node ran: the result is the output of the last node, in run order, that produced one (a skipped branch has none).
   if (finalOutput === undefined && nodeOrder.length > 0) {
     let lastNodeId = nodeOrder[nodeOrder.length - 1];
@@ -11505,7 +11576,9 @@ async function executeWorkflowRun(
 
   const completedResult: WorkflowExecutionResult = {
     workflowId: workflow.id,
-    status: hadContinuedErrors ? "partial" : "success",
+    // Every failure the run went on past was handled (caught, continued or routed to an Error output), so the run
+    // succeeded; the handled nodes say so on their results (`handled`). Runs before this change ended "partial".
+    status: "success",
     startedAt,
     completedAt: nowIso(),
     executionId: request.executionId,

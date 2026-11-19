@@ -2587,8 +2587,9 @@ describe("workflow engine", () => {
       }
     );
 
-    expect(result.status).toBe("partial");
-    expect(result.nodeResults.find((entry) => entry.nodeId === "n2")?.status).toBe("error");
+    // The failure was handled (continued past): the run succeeded, the node failed and says it was handled.
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n2")).toMatchObject({ status: "error", handled: true });
     expect(result.nodeResults.find((entry) => entry.nodeId === "n3")?.status).toBe("success");
   });
 

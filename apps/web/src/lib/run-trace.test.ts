@@ -9,6 +9,7 @@ import {
   buildStreamFailureResult,
   createPartialExecutionResult,
   createTraceStreamHandlers,
+  isLiveExecutionResult,
   pickStreamFailureMessage,
   runningElapsedMs,
   tailPreview,
@@ -183,5 +184,34 @@ describe("createTraceStreamHandlers", () => {
     const { handlers, get } = setup(false);
     handlers.onNodeStart({ nodeId: "llm", nodeType: "llm_call", startedAt: T0 });
     expect(get().result).toBeNull();
+  });
+});
+
+describe("a run followed live and a finished one", () => {
+  it("only the run being followed counts as in progress, not a finished run that ended partial", () => {
+    const live = createPartialExecutionResult("wf", T0);
+    expect(isLiveExecutionResult(live)).toBe(true);
+    const started = applyNodeStartToExecutionResult(live, { nodeId: "a", nodeType: "set_node", startedAt: T0 });
+    const completed = applyNodeCompleteToExecutionResult(started, { nodeId: "a", nodeType: "set_node", status: "success", completedAt: T0, durationMs: 1 });
+    expect(isLiveExecutionResult(started)).toBe(true);
+    expect(isLiveExecutionResult(completed)).toBe(true);
+    // The validation's case: a run reopened after it finished "partial" (a handled error, before handled runs ended success).
+    const finished: WorkflowExecutionResult = { workflowId: "wf", status: "partial", startedAt: T0, completedAt: T0, nodeResults: [] };
+    expect(isLiveExecutionResult(finished)).toBe(false);
+    expect(isLiveExecutionResult(null)).toBe(false);
+  });
+
+  it("a handled failure's live status is handled", () => {
+    const statuses: Record<string, string> = {};
+    const handlers = createTraceStreamHandlers({
+      workflowId: "wf",
+      enabled: true,
+      setExecutionResult: () => undefined,
+      setLiveNodeStatuses: (update) => Object.assign(statuses, update(statuses)),
+      normalizeStatus: (value: string) => value
+    });
+    handlers.onNodeComplete({ nodeId: "call", nodeType: "http_request", status: "error", handled: true, completedAt: T0, durationMs: 3 });
+    handlers.onNodeComplete({ nodeId: "other", nodeType: "http_request", status: "error", completedAt: T0, durationMs: 3 });
+    expect(statuses).toEqual({ call: "handled", other: "error" });
   });
 });

@@ -130,7 +130,7 @@ import {
 } from "./lib/run-trace";
 import { ORBIT, attachedNodeIds, computeAttachmentSlots, orbitPositions } from "./lib/stages";
 import { chooseSourceHandle, findFreePosition, insertPositionAfter, planInsertConnection } from "./lib/canvas-insert";
-import { canvasRunPreview, hasTestData, loopPassResults } from "./lib/run-data";
+import { canvasRunPreview, displayNodeStatus, hasTestData, loopPassResults } from "./lib/run-data";
 import { newNodeConfig } from "./lib/trigger-paths";
 import {
   deleteTabWipWorkflow,
@@ -171,7 +171,7 @@ import { McpMyConnectionsPage } from "./components/McpRuntimeSafety";
 import { GuardSecurityPage } from "./components/GuardSecurityPage";
 import { EvaluationsPage, type EvaluationsTab } from "./components/EvaluationsPage";
 import { ReleasePill } from "./components/ReleaseControls";
-import { workflowDeleteDenial } from "./lib/release";
+import { workflowDeleteDenial, workflowExportPayload } from "./lib/release";
 import { ApprovalsPage } from "./components/ApprovalsPage";
 import { McpToolsPage } from "./components/McpToolsPage";
 import { McpChangesPage } from "./components/McpChangesPage";
@@ -816,7 +816,7 @@ function getNodeStatusMap(result: WorkflowExecutionResult | null) {
   }
 
   for (const nodeResult of result.nodeResults) {
-    map.set(nodeResult.nodeId, nodeResult.status);
+    map.set(nodeResult.nodeId, displayNodeStatus(nodeResult));
   }
   return map;
 }
@@ -846,6 +846,7 @@ function normalizeEditorExecutionStatus(value: unknown): EditorNodeData["executi
     value === "running" ||
     value === "success" ||
     value === "error" ||
+    value === "handled" ||
     value === "skipped" ||
     value === "canceled"
   ) {
@@ -4160,14 +4161,11 @@ function StudioApp() {
     [handleChatSend]
   );
 
-  const handleExport = useCallback(() => {
+  const handleExport = useCallback(async () => {
     const workflow = buildCurrentWorkflow();
-    const payload = {
-      schemaVersion: WORKFLOW_SCHEMA_VERSION,
-      workflowVersion: workflow.workflowVersion,
-      workflow,
-      exportedAt: new Date().toISOString()
-    };
+    // The version number the history gives the saved workflow (none for a workflow never saved, or no release store).
+    const release = await fetchReleaseState(workflow.id).catch(() => null);
+    const payload = workflowExportPayload(workflow, WORKFLOW_SCHEMA_VERSION, release?.state.draftVersion);
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const href = URL.createObjectURL(blob);
@@ -5497,7 +5495,7 @@ function StudioApp() {
           onSave={handleSave}
           saveDisabledReason={editDisabledReason}
           runDisabledReason={runDisabledReason}
-          onExport={handleExport}
+          onExport={() => void handleExport()}
           onImportClick={() => importFileRef.current?.click()}
           onImportFileChange={handleImportFile}
           onImportExternal={canManageWorkflows ? () => openExternalImport() : undefined}
@@ -6188,6 +6186,10 @@ function StudioApp() {
               canDeleteCassettes={authUser?.role === "admin"}
               canManageGoldenRuns={canManageWorkflows}
               mayEditWorkflow={mayEditRunWorkflow}
+              onOpenExecution={(executionId, workflowId) => {
+                setExecutionHistoryFilters({ status: "", workflowId, startedFrom: "", startedTo: "" });
+                if (!expandedExecutionIds.includes(executionId)) void toggleExecutionRow(executionId);
+              }}
               onReviewApproval={(executionId) => {
                 setApprovalFocusExecutionId(executionId);
                 setActiveMode("approvals");

@@ -44,6 +44,7 @@ import {
 import { editorRunOptionsError, editorRunOptionsRefused, roleMayEdit, savedRunLimits } from "./run-editor-options.js";
 import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
 import { traceUrlFor } from "./telemetry/trace-url.js";
+import { ERROR_WORKFLOW_TRIGGER_TYPE, errorWorkflowRunId, errorWorkflowSourceOf, type ErrorWorkflowRunLink } from "./error-workflow-run.js";
 import { maskRunEvent, maskRunNodeData, runViewHidesNodeData } from "./response-run-view.js";
 import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispatch.js";
 import { onceEachElicitationEvent, type RunEventName, type RunRelay } from "./services/run-event-relay.js";
@@ -569,7 +570,35 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const view = runViewHidesNodeData(user.role, access.run.triggerType, await responseRulesExist()) ? maskRunNodeData(access.run) : access.run;
     // v72 — a link to the run's trace, only when an operator set L2M_OTEL_TRACE_URL_TEMPLATE and the run has a trace id.
     const traceUrl = traceUrlFor(config.L2M_OTEL_TRACE_URL_TEMPLATE, access.run.traceId);
-    return traceUrl ? { ...view, traceUrl } : view;
+    const links = await errorWorkflowLinks(user, access.run);
+    return { ...view, ...(traceUrl ? { traceUrl } : {}), ...links };
+  });
+
+  /**
+   * The links between a failed run and the run its error workflow made, both ways, each only when the reader may see
+   * the run it names (the same check as opening it).
+   */
+  const errorWorkflowLinks = async (
+    user: SafeUser,
+    run: { id: string; triggerType: string | null; input: unknown; status: string }
+  ): Promise<{ errorWorkflowRun?: ErrorWorkflowRunLink; errorWorkflowSource?: ErrorWorkflowRunLink }> => {
+    const source = errorWorkflowSourceOf(run);
+    if (source) {
+      const sourceRun = await store.getExecutionHistory(source.executionId);
+      if (!sourceRun || !(await runAccess.run(user, sourceRun, "workflow:read")).ok) return {};
+      return { errorWorkflowSource: linkOf(sourceRun) };
+    }
+    if (run.triggerType === ERROR_WORKFLOW_TRIGGER_TYPE || (run.status !== "error" && run.status !== "partial")) return {};
+    const handled = await store.getExecutionHistory(errorWorkflowRunId(run.id));
+    if (!handled || handled.triggerType !== ERROR_WORKFLOW_TRIGGER_TYPE) return {};
+    if (!(await runAccess.run(user, handled, "workflow:read")).ok) return {};
+    return { errorWorkflowRun: linkOf(handled) };
+  };
+  const linkOf = (run: { id: string; workflowId: string; workflowName: string | null; status: string }): ErrorWorkflowRunLink => ({
+    executionId: run.id,
+    workflowId: run.workflowId,
+    workflowName: run.workflowName ?? run.workflowId,
+    status: run.status
   });
 
   /**

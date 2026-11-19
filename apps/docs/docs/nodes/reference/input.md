@@ -733,7 +733,7 @@ Injects webhook payload into workflow context.
 | `replayToleranceSeconds` | `number` | no | — |
 | `idempotencyEnabled` | `boolean` | no | — |
 | `idempotencyHeaderName` | `string` | no | — |
-| `responseMode` | `string` | no | `onReceived` \| `lastNode` \| `responseNode` |
+| `responseMode` | `string` | no | `auto` \| `onReceived` \| `lastNode` \| `responseNode` |
 | `responseCode` | `number` | no | — |
 | `responseHeaders` | `object` | no | — |
 | `responseBody` | `string` | no | — |
@@ -760,7 +760,6 @@ Injects webhook payload into workflow context.
   "replayToleranceSeconds": 300,
   "idempotencyEnabled": false,
   "idempotencyHeaderName": "idempotency-key",
-  "responseMode": "lastNode",
   "responseCode": 200
 }
 ```

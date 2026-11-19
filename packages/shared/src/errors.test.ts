@@ -39,6 +39,12 @@ describe("remediationForCategory", () => {
     expect(hint).toMatch(/WORKFLOW_EXECUTION_TIMEOUT_MS|executionTimeoutMs/);
   });
 
+  it("an HTTP status failure that was handled does not say to connect the Error output", () => {
+    expect(remediationForCategory(ErrorCategory.HTTP_STATUS, { status: 503 })).toMatch(/connect the node's Error output/);
+    expect(remediationForCategory(ErrorCategory.HTTP_STATUS, { status: 503, handled: true })).not.toMatch(/Error output/);
+    expect(remediationForCategory(ErrorCategory.HTTP_STATUS, { status: 404, handled: true })).not.toMatch(/Error output/);
+  });
+
   it("includes the OPENAI_API_KEY hint for PROVIDER_AUTH with openai provider", () => {
     const hint = remediationForCategory(ErrorCategory.PROVIDER_AUTH, { providerId: "openai" });
     expect(hint).toMatch(/OPENAI_API_KEY/);
@@ -46,7 +52,9 @@ describe("remediationForCategory", () => {
 
   it("returns the unknown-category fallback for UNKNOWN", () => {
     const hint = remediationForCategory(ErrorCategory.UNKNOWN);
-    expect(hint).toMatch(/issues|github\.com|stack trace/i);
+    // An ordinary setting to fix (the validation saw it on a missing value): no bug report, no link out.
+    expect(hint).toMatch(/names what to change/);
+    expect(hint).not.toMatch(/issue|github/i);
   });
 });
 

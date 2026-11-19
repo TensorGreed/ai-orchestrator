@@ -386,6 +386,12 @@ export interface NodeExecutionResult {
    *  below the raw error message so users don't have to read source. */
   errorRemediation?: string;
   retryable?: boolean;
+  /**
+   * The node failed and its failure was handled: routed to its connected Error output, caught by a Try/Catch, or
+   * passed on by On Error "continue" (a rejected approval routed the same ways too). The run goes on, and a run whose
+   * every failure was handled ends `success`. The status stays `error`: the node did fail.
+   */
+  handled?: boolean;
   attempts?: number;
   /** Phase 10.5 — latest MCP tool progress reported while the node ran. */
   progress?: NodeProgressSnapshot;
