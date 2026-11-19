@@ -148,6 +148,21 @@ export function StudioHud({
 }: StudioHudProps) {
   const [accountOpen, setAccountOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
+  // The workflow's rarely changed settings sit together under "More settings" in the More actions menu, closed each
+  // time the menu opens.
+  const [workflowSettingsOpen, setWorkflowSettingsOpen] = useState(false);
+  useEffect(() => {
+    if (!overflowOpen) setWorkflowSettingsOpen(false);
+  }, [overflowOpen]);
+  const workflowSettings: Array<[available: boolean, on: boolean]> = [
+    [Boolean(onToggleNoWriteTools), noWriteTools],
+    [Boolean(onToggleStrictTemplates), strictTemplates],
+    [Boolean(onEditWriteToolApproval), writeToolApproval],
+    [Boolean(onEditSubjectRefs), subjectRefsSet],
+    [Boolean(onEditErrorWorkflow), errorWorkflowSet]
+  ];
+  const workflowSettingsCount = workflowSettings.filter(([available]) => available).length;
+  const workflowSettingsOn = workflowSettings.filter(([available, on]) => available && on).length;
   const [paletteOpen, setPaletteOpen] = useState(false);
   const accountRef = useRef<HTMLDivElement>(null);
   const overflowRef = useRef<HTMLDivElement>(null);
@@ -496,95 +511,115 @@ export function StudioHud({
                     Share…
                   </button>
                 )}
-                {onToggleNoWriteTools && (
+                {workflowSettingsCount > 0 && (
                   <button
                     type="button"
-                    className="hud-dropdown-item hud-dropdown-check"
-                    role="menuitemcheckbox"
-                    aria-checked={noWriteTools}
-                    title="Block MCP tools that are not marked read-only, for agents and MCP Tool nodes in this workflow"
-                    onClick={() => {
-                      setOverflowOpen(false);
-                      onToggleNoWriteTools();
-                    }}
+                    className="hud-dropdown-item hud-dropdown-group"
+                    role="menuitem"
+                    aria-expanded={workflowSettingsOpen}
+                    title="Settings of this workflow that most workflows leave as they are"
+                    onClick={() => setWorkflowSettingsOpen((value) => !value)}
                   >
-                    <span className="hud-check-box" aria-hidden="true">
-                      {noWriteTools ? "✓" : ""}
+                    <span>More settings</span>
+                    {workflowSettingsOn > 0 && <span className="hud-dropdown-count">{workflowSettingsOn} on</span>}
+                    <span className="hud-dropdown-caret" aria-hidden="true">
+                      {workflowSettingsOpen ? "▾" : "▸"}
                     </span>
-                    No write tools
                   </button>
                 )}
-                {onToggleStrictTemplates && (
-                  <button
-                    type="button"
-                    className="hud-dropdown-item hud-dropdown-check"
-                    role="menuitemcheckbox"
-                    aria-checked={strictTemplates}
-                    title="A {{ }} without a value fails its node instead of rendering empty"
-                    onClick={() => {
-                      setOverflowOpen(false);
-                      onToggleStrictTemplates();
-                    }}
-                  >
-                    <span className="hud-check-box" aria-hidden="true">
-                      {strictTemplates ? "✓" : ""}
-                    </span>
-                    Strict templates
-                  </button>
-                )}
-                {onEditWriteToolApproval && (
-                  <button
-                    type="button"
-                    className="hud-dropdown-item hud-dropdown-check"
-                    role="menuitemcheckbox"
-                    aria-checked={writeToolApproval}
-                    title="Agents in this workflow pause for an approval in Approvals before they call an MCP tool an admin has not marked read-only"
-                    onClick={() => {
-                      setOverflowOpen(false);
-                      onEditWriteToolApproval();
-                    }}
-                  >
-                    <span className="hud-check-box" aria-hidden="true">
-                      {writeToolApproval ? "✓" : ""}
-                    </span>
-                    Ask before write tools…
-                  </button>
-                )}
-                {onEditSubjectRefs && (
-                  <button
-                    type="button"
-                    className="hud-dropdown-item hud-dropdown-check"
-                    role="menuitemcheckbox"
-                    aria-checked={subjectRefsSet}
-                    title="Store keyed hashes of the values that identify the person a run is about, so data-subject requests can find its runs"
-                    onClick={() => {
-                      setOverflowOpen(false);
-                      onEditSubjectRefs();
-                    }}
-                  >
-                    <span className="hud-check-box" aria-hidden="true">
-                      {subjectRefsSet ? "✓" : ""}
-                    </span>
-                    Subject references…
-                  </button>
-                )}
-                {onEditErrorWorkflow && (
-                  <button
-                    type="button"
-                    className="hud-dropdown-item hud-dropdown-check"
-                    role="menuitemcheckbox"
-                    aria-checked={errorWorkflowSet}
-                    title="Pick a workflow that starts when a run of this one fails, for alerts or clean-up"
-                    onClick={() => {
-                      setOverflowOpen(false);
-                      onEditErrorWorkflow();
-                    }}
-                  >
-                    <span className="hud-check-box" aria-hidden="true">
-                      {errorWorkflowSet ? "✓" : ""}
-                    </span>
-                    Error workflow…
-                  </button>
+                {workflowSettingsOpen && workflowSettingsCount > 0 && (
+                  <div className="hud-dropdown-sub" role="group" aria-label="More settings">
+                  {onToggleNoWriteTools && (
+                    <button
+                      type="button"
+                      className="hud-dropdown-item hud-dropdown-check"
+                      role="menuitemcheckbox"
+                      aria-checked={noWriteTools}
+                      title="Block MCP tools that are not marked read-only, for agents and MCP Tool nodes in this workflow"
+                      onClick={() => {
+                        setOverflowOpen(false);
+                        onToggleNoWriteTools();
+                      }}
+                    >
+                      <span className="hud-check-box" aria-hidden="true">
+                        {noWriteTools ? "✓" : ""}
+                      </span>
+                      No write tools
+                    </button>
+                  )}
+                  {onToggleStrictTemplates && (
+                    <button
+                      type="button"
+                      className="hud-dropdown-item hud-dropdown-check"
+                      role="menuitemcheckbox"
+                      aria-checked={strictTemplates}
+                      title="A {{ }} without a value fails its node instead of rendering empty"
+                      onClick={() => {
+                        setOverflowOpen(false);
+                        onToggleStrictTemplates();
+                      }}
+                    >
+                      <span className="hud-check-box" aria-hidden="true">
+                        {strictTemplates ? "✓" : ""}
+                      </span>
+                      Strict templates
+                    </button>
+                  )}
+                  {onEditWriteToolApproval && (
+                    <button
+                      type="button"
+                      className="hud-dropdown-item hud-dropdown-check"
+                      role="menuitemcheckbox"
+                      aria-checked={writeToolApproval}
+                      title="Agents in this workflow pause for an approval in Approvals before they call an MCP tool an admin has not marked read-only"
+                      onClick={() => {
+                        setOverflowOpen(false);
+                        onEditWriteToolApproval();
+                      }}
+                    >
+                      <span className="hud-check-box" aria-hidden="true">
+                        {writeToolApproval ? "✓" : ""}
+                      </span>
+                      Ask before write tools…
+                    </button>
+                  )}
+                  {onEditSubjectRefs && (
+                    <button
+                      type="button"
+                      className="hud-dropdown-item hud-dropdown-check"
+                      role="menuitemcheckbox"
+                      aria-checked={subjectRefsSet}
+                      title="Store keyed hashes of the values that identify the person a run is about, so data-subject requests can find its runs"
+                      onClick={() => {
+                        setOverflowOpen(false);
+                        onEditSubjectRefs();
+                      }}
+                    >
+                      <span className="hud-check-box" aria-hidden="true">
+                        {subjectRefsSet ? "✓" : ""}
+                      </span>
+                      Subject references…
+                    </button>
+                  )}
+                  {onEditErrorWorkflow && (
+                    <button
+                      type="button"
+                      className="hud-dropdown-item hud-dropdown-check"
+                      role="menuitemcheckbox"
+                      aria-checked={errorWorkflowSet}
+                      title="Pick a workflow that starts when a run of this one fails, for alerts or clean-up"
+                      onClick={() => {
+                        setOverflowOpen(false);
+                        onEditErrorWorkflow();
+                      }}
+                    >
+                      <span className="hud-check-box" aria-hidden="true">
+                        {errorWorkflowSet ? "✓" : ""}
+                      </span>
+                      Error workflow…
+                    </button>
+                  )}
+                  </div>
                 )}
                 {onToggleRecordMcp && (
                   <button
