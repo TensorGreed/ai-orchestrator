@@ -9,6 +9,10 @@ import { filterModeOf, httpErrorStatusMode, isSetValueType } from "@ai-orchestra
  * - `http_fail`: an HTTP Request that does not fail on every HTTP error status.
  * - `filter_gate`: a Filter that passes or stops its whole input instead of keeping the matching items of a list.
  * - `set_text`: a Set node with fields saved without a type (their values become text).
+ *
+ * `behavioursOffDefault` lists the ones a node uses, whether stored before the option existed or chosen on purpose
+ * (an explicit `false`, a Filter's `mode: "gate"`, as an import may set): the switch is shown for each. Only the ones
+ * stored without the option (`legacyBehaviours`) get the "earlier behaviour" notice and its upgrade.
  */
 export type LegacyBehaviour = "loop_collect" | "loop_route" | "http_fail" | "filter_gate" | "set_text";
 
@@ -23,8 +27,8 @@ function assignmentsOf(config: Record<string, unknown>): Array<Record<string, un
     : [];
 }
 
-/** The older behaviours this node uses, in the order they are listed to the user. */
-export function legacyBehaviours(nodeType: string, config: Record<string, unknown>, errorConfig?: RetrySettings): LegacyBehaviour[] {
+/** The older behaviours this node uses, chosen or not, in the order they are listed to the user. */
+export function behavioursOffDefault(nodeType: string, config: Record<string, unknown>, errorConfig?: RetrySettings): LegacyBehaviour[] {
   switch (nodeType) {
     case "loop_node":
       return [
@@ -42,11 +46,38 @@ export function legacyBehaviours(nodeType: string, config: Record<string, unknow
   }
 }
 
-/** The config with every older behaviour switched to the newer one. Other settings are kept. */
-export function upgradeToNewBehaviour(nodeType: string, config: Record<string, unknown>): Record<string, unknown> {
+/** True when the node's config names the older behaviour on purpose rather than lacking the option. */
+function chosen(behaviour: LegacyBehaviour, config: Record<string, unknown>): boolean {
+  switch (behaviour) {
+    case "loop_collect":
+      return typeof config.collectResults === "boolean";
+    case "loop_route":
+      return typeof config.routeBranches === "boolean";
+    case "http_fail":
+      return typeof config.failOnHttpError === "boolean";
+    case "filter_gate":
+      return config.mode === "gate";
+    case "set_text":
+      return false;
+  }
+}
+
+/** The older behaviours this node keeps only because it was stored before the option existed. */
+export function legacyBehaviours(nodeType: string, config: Record<string, unknown>, errorConfig?: RetrySettings): LegacyBehaviour[] {
+  return behavioursOffDefault(nodeType, config, errorConfig).filter((behaviour) => !chosen(behaviour, config));
+}
+
+/**
+ * The config with every older behaviour switched to the newer one (or only those in `only`). Other settings are kept.
+ */
+export function upgradeToNewBehaviour(nodeType: string, config: Record<string, unknown>, only?: LegacyBehaviour[]): Record<string, unknown> {
   switch (nodeType) {
     case "loop_node":
-      return { ...config, collectResults: true, routeBranches: true };
+      return {
+        ...config,
+        ...(!only || only.includes("loop_collect") ? { collectResults: true } : {}),
+        ...(!only || only.includes("loop_route") ? { routeBranches: true } : {})
+      };
     case "http_request":
       return { ...config, failOnHttpError: true };
     case "filter_node":

@@ -517,6 +517,7 @@ export function StudioHud({
                     className="hud-dropdown-item hud-dropdown-group"
                     role="menuitem"
                     aria-expanded={workflowSettingsOpen}
+                    aria-controls="hud-more-settings"
                     title="Settings of this workflow that most workflows leave as they are"
                     onClick={() => setWorkflowSettingsOpen((value) => !value)}
                   >
@@ -528,7 +529,7 @@ export function StudioHud({
                   </button>
                 )}
                 {workflowSettingsOpen && workflowSettingsCount > 0 && (
-                  <div className="hud-dropdown-sub" role="group" aria-label="More settings">
+                  <div id="hud-more-settings" className="hud-dropdown-sub" role="group" aria-label="More settings">
                   {onToggleNoWriteTools && (
                     <button
                       type="button"

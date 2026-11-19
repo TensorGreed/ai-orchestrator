@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getNodeDefinition } from "@ai-orchestrator/shared";
 import type { EditorNodeData } from "../lib/workflow";
 import * as api from "../lib/api";
-import { NodeInspector } from "./NodeConfigModal";
+import { NodeInspector, type NodeInspectorHandle } from "./NodeConfigModal";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -148,5 +148,41 @@ describe("Schedule Trigger", () => {
     unmount();
     render(<NodeInspector {...props("schedule_trigger", { ...sample("schedule_trigger"), active: false })} />);
     expect(screen.getByLabelText(/^Active/)).toBeVisible();
+  });
+});
+
+describe("an older behaviour chosen on purpose", () => {
+  it("shows the switch but no earlier-behaviour notice (an imported pass-or-stop Filter, an HTTP Request set never to fail)", () => {
+    const { unmount } = render(<NodeInspector {...props("filter_node", { mode: "gate", conditions: [] })} />);
+    expect(screen.getByLabelText(/^Mode/)).toHaveValue("gate");
+    expect(screen.queryByTestId("legacy-behaviour")).toBeNull();
+    unmount();
+    render(<NodeInspector {...props("http_request", { method: "GET", urlTemplate: "https://x.test", failOnHttpError: false })} />);
+    expect(toggle("Fail on HTTP error status")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByTestId("legacy-behaviour")).toBeNull();
+  });
+
+  it("upgrades only what the node lacks: a Loop that chose not to collect keeps that", async () => {
+    const user = userEvent.setup();
+    const view = props("loop_node", { inputKey: "items", itemVariable: "item", collectResults: false });
+    render(<NodeInspector {...view} />);
+    expect(screen.getByTestId("legacy-behaviour")).toHaveTextContent("IF, Switch and Filter in its body do not route on each pass");
+    expect(screen.getByTestId("legacy-behaviour")).not.toHaveTextContent("collect");
+    await user.click(screen.getByRole("button", { name: "Upgrade to the new behaviour" }));
+    expect(toggle("Collect results")).toHaveAttribute("aria-pressed", "false");
+    expect(toggle("Branches route in the loop")).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
+describe("opening and taking back", () => {
+  it("opening a node on an older behaviour is not an edit, and Keep the earlier behaviour leaves it unedited", async () => {
+    const user = userEvent.setup();
+    const handle: { current: NodeInspectorHandle | null } = { current: null };
+    render(<NodeInspector {...props("loop_node", { inputKey: "items", itemVariable: "item" })} controlRef={handle} />);
+    expect(handle.current?.isDirty()).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Upgrade to the new behaviour" }));
+    expect(handle.current?.isDirty()).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Keep the earlier behaviour" }));
+    expect(handle.current?.isDirty()).toBe(false);
   });
 });

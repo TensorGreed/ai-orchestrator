@@ -215,7 +215,7 @@ Every node has the same error settings, under **More** in its inspector.
 - **Fail on HTTP error status** (`failOnHttpError`): a status outside 200–299 fails the node, so retries and the Error
   output apply. The error names the status, the method and the URL (without user name, password, query or fragment).
   Off, the response is returned as before, with `status` and `ok: false`. New HTTP Request nodes have it on and do
-  not show the switch; a node saved with it off (or without it) shows it, with **Upgrade to the new behaviour**.
+  not show the switch; a node saved without it shows it with **Upgrade to the new behaviour**, and one set off shows it.
   `304 Not Modified` is not an error.
 - **Retry on status** (`retryOnStatus`): the statuses that are retried, as codes (`503`), classes (`5xx`) or ranges
   (`500-504`). Empty means `429, 5xx`. Any other status fails at once, without retrying.

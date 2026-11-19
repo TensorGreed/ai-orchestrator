@@ -43,7 +43,7 @@ import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./N
 import { isInternalKey, NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
 import { DataPane, PaneSeparator, type PaneMenuItem } from "./InspectorPane";
 import { AdvancedFields, FormWithMore, HelpHint, countSet } from "./InspectorDisclosure";
-import { legacyBehaviours, legacySummary, restoreOldBehaviour, upgradeNotes, upgradeToNewBehaviour } from "../lib/legacy-behaviour";
+import { behavioursOffDefault, legacyBehaviours, legacySummary, restoreOldBehaviour, upgradeNotes, upgradeToNewBehaviour } from "../lib/legacy-behaviour";
 import { runAfterPointerRelease } from "../lib/pointer-release";
 import {
   applyTemplateSuggestion,
@@ -734,8 +734,8 @@ function HttpErrorStatusFields({
       )}
       {showSwitch && mode === "retry_list" && (
         <div className="cfg-tip" data-testid="http-retry-list-only-tip">
-          This node was saved before this option. Because it retries, it retries the statuses below and fails if they
-          persist; other error statuses are returned with <code>ok: false</code>. Turn the option on to fail on every error status.
+          This node was saved before this option. Because it retries, it retries the statuses under More (Retry on
+          status) and fails if they persist; other error statuses are returned with <code>ok: false</code>. Turn the option on to fail on every error status.
         </div>
       )}
       {mode !== "none" && (
@@ -1479,6 +1479,12 @@ export function NodeInspector({
   const [removeInvalidErrorConfig, setRemoveInvalidErrorConfig] = useState(false);
   // Older behaviours the saved node keeps (new nodes have none): their switches are shown only then, with an upgrade.
   const savedNodeConfig = useMemo(() => asRecord(node.data.config), [node.data.config]);
+  // Switches are shown for every older behaviour the saved node uses; the notice and upgrade only for the ones it keeps
+  // because it was stored before the option (not for one chosen on purpose, as an import may set it).
+  const switchesAtOpen = useMemo(
+    () => behavioursOffDefault(node.data.nodeType, savedNodeConfig, nodeErrorConfig),
+    [node.data.nodeType, nodeErrorConfig, savedNodeConfig]
+  );
   const legacyAtOpen = useMemo(
     () => legacyBehaviours(node.data.nodeType, savedNodeConfig, nodeErrorConfig),
     [node.data.nodeType, nodeErrorConfig, savedNodeConfig]
@@ -2984,7 +2990,7 @@ export function NodeInspector({
 
   /**
    * The model a node calls. Provider, model, the base URL a provider needs, and the key show; an optional base URL,
-   * temperature, max tokens and the node's own rarely used fields (`advanced`) sit under Advanced.
+   * temperature, max tokens and the node's own rarely used fields (`advanced`) sit under More.
    */
   const renderProviderSection = (advanced?: { content: React.ReactNode; setCount: number }) => {
     const providerId = toStringValue(provider.providerId).trim();
@@ -6611,7 +6617,7 @@ export function NodeInspector({
               placeholder="items"
             />
             {/* New Loops collect and route; the switches are offered only on a Loop saved without them. */}
-            {legacyAtOpen.includes("loop_collect") && (
+            {switchesAtOpen.includes("loop_collect") && (
               <ToggleField
                 label="Collect results"
                 checked={config.collectResults === true}
@@ -6619,7 +6625,7 @@ export function NodeInspector({
                 help="Adds collected to the Loop's output: one entry per pass, the body node's output (or each body node's output by id when the body has several). Read it after the loop as {{results.<loop id>.collected}}."
               />
             )}
-            {legacyAtOpen.includes("loop_route") && (
+            {switchesAtOpen.includes("loop_route") && (
               <ToggleField
                 label="Branches route in the loop"
                 checked={config.routeBranches === true}
@@ -6864,7 +6870,7 @@ export function NodeInspector({
       }
       case "http_request": {
         const httpMethod = toStringValue(config.method, "GET").toUpperCase();
-        // A request with a body shows its headers and body up front; for GET and DELETE they stay under Advanced.
+        // A request with a body shows its headers and body up front; for GET and DELETE they stay under More.
         const sendsBody = httpMethod === "POST" || httpMethod === "PUT" || httpMethod === "PATCH";
         const defaultHeaders = "{\n  \"Accept\": \"application/json\"\n}";
         const headersField = (
@@ -6971,7 +6977,7 @@ export function NodeInspector({
               config={config}
               errorConfig={nodeErrorConfig}
               setConfig={setConfig}
-              showSwitch={legacyAtOpen.includes("http_fail")}
+              showSwitch={switchesAtOpen.includes("http_fail")}
             />
           </>
         );
@@ -7944,7 +7950,7 @@ export function NodeInspector({
         return (
           <>
             {/* New Filters keep the matching items of a list; the mode is offered only on a Filter saved as pass or stop. */}
-            {legacyAtOpen.includes("filter_gate") && (
+            {switchesAtOpen.includes("filter_gate") && (
               <SelectField
                 label="Mode"
                 value={filterMode}
@@ -10297,7 +10303,7 @@ export function NodeInspector({
     toStringValue(config.onError, "stop") !== "stop",
     config.sensitiveOutput === true
   ].filter(Boolean).length;
-  // Invalid error settings and a fallback branch that is set need to be seen: More opens for them.
+  // Invalid error settings need to be seen: More opens for them.
   const settingsNeedAttention = errorConfigRepair.invalidFields.length > 0;
 
   const getConfigForSave = () => {
@@ -10345,17 +10351,18 @@ export function NodeInspector({
   /** The one-line notice on a node saved with an older behaviour, with its upgrade (and, before saving, its undo). */
   const renderLegacyNotice = () => {
     if (legacyAtOpen.length === 0) return null;
-    const legacyNow = legacyBehaviours(node.data.nodeType, config, nodeErrorConfig);
-    if (legacyNow.length > 0) {
+    // Still on an older behaviour it had when opened: the notice and the upgrade.
+    const remaining = behavioursOffDefault(node.data.nodeType, config, nodeErrorConfig).filter((behaviour) => legacyAtOpen.includes(behaviour));
+    if (remaining.length > 0) {
       return (
         <div className="cfg-tip cfg-legacy" data-testid="legacy-behaviour">
-          {legacySummary(legacyNow)}{" "}
+          {legacySummary(remaining)}{" "}
           {readOnlyReason ? null : (
             <button
               type="button"
               className="auth-link-btn"
-              title={upgradeNotes(legacyNow)}
-              onClick={() => setConfig((current) => upgradeToNewBehaviour(node.data.nodeType, current))}
+              title={upgradeNotes(remaining)}
+              onClick={() => setConfig((current) => upgradeToNewBehaviour(node.data.nodeType, current, remaining))}
             >
               Upgrade to the new behaviour
             </button>
@@ -10366,13 +10373,15 @@ export function NodeInspector({
     return (
       <div className="cfg-tip cfg-legacy" data-testid="legacy-behaviour">
         Upgraded to the new behaviour when you save. {upgradeNotes(legacyAtOpen)}{" "}
-        <button
-          type="button"
-          className="auth-link-btn"
-          onClick={() => setConfig((current) => restoreOldBehaviour(node.data.nodeType, current, savedNodeConfig))}
-        >
-          Keep the earlier behaviour
-        </button>
+        {readOnlyReason ? null : (
+          <button
+            type="button"
+            className="auth-link-btn"
+            onClick={() => setConfig((current) => restoreOldBehaviour(node.data.nodeType, current, savedNodeConfig))}
+          >
+            Keep the earlier behaviour
+          </button>
+        )}
       </div>
     );
   };

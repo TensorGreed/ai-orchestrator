@@ -1924,6 +1924,19 @@ function StudioApp() {
       current ? { ...current, issues: current.issues.filter((issue) => issue.code !== "invalid_error_config") } : current
     );
   }, [pushHistorySnapshot, setNodes]);
+  // A publish or unpublish changes which version production runs, and so whether its live triggers are paused.
+  const refreshLiveTriggersPaused = useCallback(() => {
+    const workflowId = currentWorkflow.id;
+    inBackground(() => validateStoredWorkflow(workflowId))
+      .then((validation) => {
+        setDraftIssues((current) =>
+          current && current.workflowId === workflowId ? { ...current, liveTriggersPaused: validation.liveTriggersPaused === true } : current
+        );
+      })
+      .catch(() => {
+        // The pill keeps its last answer; the next save or open checks again.
+      });
+  }, [currentWorkflow.id]);
   const draftIssuesWorkflowIdRef = useRef<string | null>(null);
   useEffect(() => {
     setDraftIssues((current) => (current && current.workflowId !== currentWorkflow.id ? null : current));
@@ -5417,6 +5430,7 @@ function StudioApp() {
                 canPublish={canManageWorkflows}
                 isAdmin={authUser.role === "admin"}
                 livePaused={draftIssues?.workflowId === currentWorkflow.id && draftIssues.liveTriggersPaused}
+                onReleaseChanged={refreshLiveTriggersPaused}
                 onOpenGates={() => {
                   setEvaluationsTab("gates");
                   setActiveMode("evaluations");

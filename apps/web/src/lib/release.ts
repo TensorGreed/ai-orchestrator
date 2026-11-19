@@ -13,21 +13,25 @@ const LIVE_TRIGGERS = "Production triggers (webhooks, schedules, forms, chat and
  */
 export function releasePillLabel(state: ReleaseStateView | null, livePaused = false): { text: string; tone: PillTone; title: string } {
   if (!state) return { text: "Publish", tone: "unknown", title: "Publish a saved version to production" };
-  if (state.productionRefused) {
-    return {
-      text: "Live: off",
-      tone: "draft",
-      title: "The release gate is on and no version is published: production refuses runs until a version passes the gate, is approved or an admin overrides"
-    };
-  }
   if (state.publishedVersion === null && state.draftVersion === null) {
     return { text: "Not saved", tone: "draft", title: "Save the workflow; production triggers then run the latest save until a version is published" };
   }
+  // Paused comes first: on a gated workflow, production also refuses runs of an unfinished version.
   if (livePaused) {
     return {
       text: "Live: paused",
       tone: "draft",
       title: `${LIVE_TRIGGERS} start no run: the version production runs has unfinished settings. Finish them and save${state.publishedVersion === null ? "" : ", then publish"}.`
+    };
+  }
+  if (state.productionRefused) {
+    return {
+      text: "Live: off",
+      tone: "draft",
+      title:
+        state.publishedVersion === null
+          ? "The release gate is on and no version is published: production refuses runs until a version passes the gate, is approved or an admin overrides"
+          : "The release gate is on and production cannot load the published version: production refuses runs until a version is published again"
     };
   }
   if (state.publishedVersion === null) {
@@ -36,7 +40,7 @@ export function releasePillLabel(state: ReleaseStateView | null, livePaused = fa
       text: "Live: draft",
       tone: "draft",
       title: state.unpublishedAt
-        ? `Unpublished: ${LIVE_TRIGGERS.toLowerCase()} run ${draft}${state.gateEnabled ? ", which the release gate does not check," : ""} until a version is published again`
+        ? `Unpublished: production triggers (webhooks, schedules, forms, chat and MCP calls) run ${draft}${state.gateEnabled ? ", which the release gate does not check," : ""} until a version is published again`
         : `${LIVE_TRIGGERS} run ${draft} until a version is published`
     };
   }

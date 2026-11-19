@@ -23,6 +23,13 @@ describe("release helpers", () => {
     expect(pausedDraft.text).toBe("Live: paused");
     expect(pausedDraft.title).toMatch(/unfinished settings\. Finish them and save\.$/);
     expect(releasePillLabel({ draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: false, gateEnforced: false } as never, true).title).toMatch(/save, then publish\.$/);
+    // On a gated, published workflow production also refuses an unfinished version: paused says why.
+    expect(
+      releasePillLabel({ draftVersion: 3, publishedVersion: 3, aheadBy: 0, gateEnabled: true, gateEnforced: false, productionRefused: true } as never, true).text
+    ).toBe("Live: paused");
+    expect(
+      releasePillLabel({ draftVersion: 3, publishedVersion: 3, aheadBy: 0, gateEnabled: true, gateEnforced: false, productionRefused: true } as never).title
+    ).toMatch(/cannot load the published version/);
     // Paused is only said of a saved workflow.
     expect(releasePillLabel({ draftVersion: null, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false } as never, true).text).toBe("Not saved");
   });

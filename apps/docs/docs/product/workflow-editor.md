@@ -167,7 +167,8 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
   behaviour** (until you save, **Keep the earlier behaviour** takes the upgrade back). New nodes start on the new
   behaviour and show neither. This covers a Loop's **Collect results** and **Branches route in the loop**, an HTTP
   Request's **Fail on HTTP error status**, a Filter's **Pass or stop** mode and a Set field's **Text (as before)**
-  type. Nothing changes for a saved node until you upgrade it.
+  type. Nothing changes for a saved node until you upgrade it. A node set to the earlier behaviour on purpose (for
+  example by an import) shows the switch without the note.
 - **Trace** shows timing, token use, the agent's activity and tool policy decisions for the run.
 - Large values stay fast: tables show 50 rows at a time and JSON over 20,000 characters is cut until you ask for all
   of it. A nested object or list in a table cell whose JSON is longer than 80 characters shows as one line (its first

@@ -1,6 +1,6 @@
 import { getNodeDefinition } from "@ai-orchestrator/shared";
 import { describe, expect, it } from "vitest";
-import { legacyBehaviours, legacySummary, restoreOldBehaviour, upgradeNotes, upgradeToNewBehaviour } from "./legacy-behaviour";
+import { behavioursOffDefault, legacyBehaviours, legacySummary, restoreOldBehaviour, upgradeNotes, upgradeToNewBehaviour } from "./legacy-behaviour";
 
 const sample = (type: string) => ({ ...(getNodeDefinition(type as never)?.sampleConfig as Record<string, unknown>) });
 
@@ -15,14 +15,23 @@ describe("legacy behaviours", () => {
     expect(legacyBehaviours("loop_node", { inputKey: "items" })).toEqual(["loop_collect", "loop_route"]);
     expect(legacyBehaviours("loop_node", { collectResults: true })).toEqual(["loop_route"]);
     expect(legacyBehaviours("http_request", { method: "GET" })).toEqual(["http_fail"]);
-    expect(legacyBehaviours("http_request", { failOnHttpError: false })).toEqual(["http_fail"]);
+    expect(behavioursOffDefault("http_request", { failOnHttpError: false })).toEqual(["http_fail"]);
     // A saved node that retries fails only on its retried statuses: still the older behaviour.
     expect(legacyBehaviours("http_request", { retryCount: 2 })).toEqual(["http_fail"]);
     expect(legacyBehaviours("http_request", {}, { retryOnFail: true })).toEqual(["http_fail"]);
     expect(legacyBehaviours("filter_node", { conditions: [] })).toEqual(["filter_gate"]);
-    expect(legacyBehaviours("filter_node", { mode: "gate" })).toEqual(["filter_gate"]);
+    expect(behavioursOffDefault("filter_node", { mode: "gate" })).toEqual(["filter_gate"]);
     expect(legacyBehaviours("set_node", { assignments: [{ key: "a", valueTemplate: "1", type: "auto" }, { key: "b", valueTemplate: "2" }] })).toEqual(["set_text"]);
     expect(legacyBehaviours("set_node", { assignments: [{ key: "a", valueTemplate: "1", type: "number" }] })).toEqual([]);
+  });
+
+  it("does not call an older behaviour chosen on purpose (as an import sets it) an earlier one", () => {
+    expect(legacyBehaviours("http_request", { failOnHttpError: false })).toEqual([]);
+    expect(legacyBehaviours("filter_node", { mode: "gate" })).toEqual([]);
+    expect(legacyBehaviours("loop_node", { collectResults: false })).toEqual(["loop_route"]);
+    expect(behavioursOffDefault("loop_node", { collectResults: false })).toEqual(["loop_collect", "loop_route"]);
+    // The upgrade leaves a chosen behaviour alone.
+    expect(upgradeToNewBehaviour("loop_node", { collectResults: false }, ["loop_route"])).toEqual({ collectResults: false, routeBranches: true });
   });
 
   it("upgrades to the newer behaviour and keeps the other settings", () => {
