@@ -137,7 +137,8 @@ export function remediationForCategory(
       return "An admin limited which models this deployment or project may call, and this model is not on the list. Pick an allowed model on the node, or ask an admin to add it under Security → Models.";
     case ErrorCategory.UNKNOWN:
     default:
-      return "Open the execution log for the full error and stack trace. If the message looks like a bug, please file an issue at github.com/TensorGreed/ai-orchestrator/issues with the workflow JSON and the failing node ID.";
+      // Most unknown errors are an ordinary setting to fix (a missing sub-workflow, a wrong id): no bug report.
+      return "The error above usually names what to change: open the node and fix that field or value. Runs keeps the full error of every step.";
   }
 }
 

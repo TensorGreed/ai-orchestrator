@@ -228,7 +228,12 @@ describe("starter templates", () => {
     expect(statusOf(result, "ok")).toBe("skipped");
     expect(outputOf(result, "fallback")).toMatchObject({ path: "fallback" });
     expect(String(outputOf(result, "fallback").reason)).toContain("503");
-    expect(result.status).not.toBe("error");
+    // The failure went to the connected Error output: handled, so the run succeeded and the hint does not say to
+    // connect it (the validation saw "partial", a red node and that hint).
+    expect(result.status).toBe("success");
+    const call = result.nodeResults.filter((entry) => entry.nodeId === "call").at(-1) as NodeResult & { handled?: boolean; errorRemediation?: string };
+    expect(call.handled).toBe(true);
+    expect(call.errorRemediation ?? "").not.toMatch(/connect the node's Error output/);
   });
 
   it("Loop over items and collect works out each line total and collects them", async () => {

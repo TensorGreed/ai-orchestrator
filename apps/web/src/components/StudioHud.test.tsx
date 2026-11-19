@@ -370,6 +370,18 @@ describe("deriveRunStatus", () => {
     expect(status).toEqual({ state: "ok", label: "last run 1.0 s · 4 of 4 ok · 1 handled" });
   });
 
+  it("counts a Loop body node once, however many passes it ran", () => {
+    const at = "2026-01-01T00:00:00.000Z";
+    const status = deriveRunStatus(false, {
+      workflowId: "wf-1",
+      status: "success",
+      startedAt: at,
+      completedAt: "2026-01-01T00:00:01.000Z",
+      nodeResults: ["schedule", "http", "filter", "set", "set", "loop", "merge"].map((nodeId) => ({ nodeId, status: "success" as const, startedAt: at }))
+    });
+    expect(status.label).toBe("last run 1.0 s · 6 ok");
+  });
+
   it("ignores skipped attachment nodes in the summary", () => {
     const status = deriveRunStatus(false, {
       workflowId: "wf-1",
