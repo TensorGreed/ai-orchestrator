@@ -269,9 +269,10 @@ project member keeps the full view, and so does anyone who also has the workflow
   (`sourceExecutionId`).
 - **Approvals and questions.** The approvals inbox and the tool questions (`/api/mcp/elicitations`, and the count in the
   MCP overview) list only those of their own runs, and they can decide only those; anyone else's answers `404`.
-- **Data from many people's runs.** Golden runs, captured runs, recorded MCP cassettes (their own run's cassette still
-  opens from the run), eval and replay runs, content rule events and statistics, simulations of content rules,
-  recent tool calls in the MCP catalog and the dead-letter queue leave such a workflow out.
+- **Data from many people's runs.** Golden runs, golden sets (their cases, export, and evaluations or replay jobs
+  over them), release gate cases and release requests, captured runs, recorded MCP cassettes (their own run's
+  cassette still opens from the run), eval and replay runs, content rule events and statistics, simulations of content
+  rules, recent tool calls in the MCP catalog and the dead-letter queue leave such a workflow out or answer `404`.
 - **The editor.** `GET /api/workflows/:id/access` answers `ownRunsOnly: true` for them.
 
 ## Project access

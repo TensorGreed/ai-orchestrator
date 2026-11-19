@@ -147,7 +147,11 @@ export async function elicitationVisibleTo(
   const own = !record.createdBy || record.createdBy === user.id;
   const permission = own ? "workflow:read" : "workflow:execute";
   // Someone who sees only their own runs of the workflow sees only the questions of those runs.
-  if (record.executionId) return (await runAccess.run(user, { id: record.executionId, workflowId: record.workflowId }, permission)).ok;
+  if (record.executionId) {
+    const access = await runAccess.run(user, { id: record.executionId, workflowId: record.workflowId }, permission);
+    // A deleted workflow's questions stay hidden, also from admins (they cannot be answered).
+    return access.ok && access.workflow !== null;
+  }
   const access = await runAccess.workflow(user, record.workflowId, permission);
   return access.ok && await runAccess.seesAllRuns(user, access.workflow);
 }

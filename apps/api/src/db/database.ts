@@ -7076,12 +7076,17 @@ export class SqliteStore implements Store {
       }
       if (own) {
         // Of a workflow shared only with the person: the requests of runs they started or that ran in their sessions.
+        const ids = own.workflowIds.map(() => "?").join(", ");
         anyOf.push(
-          `(workflow_id IN (${own.workflowIds.map(() => "?").join(", ")}) AND (` +
-            `execution_id IN (SELECT id FROM execution_history WHERE LOWER(triggered_by) = ? OR triggered_by = ? OR session_owner = ?) OR ` +
-            `execution_id IN (SELECT id FROM workflow_executions WHERE LOWER(triggered_by) = ? OR triggered_by = ?)))`
+          `(workflow_id IN (${ids}) AND (` +
+            `execution_id IN (SELECT id FROM execution_history WHERE workflow_id IN (${ids}) AND (LOWER(triggered_by) = ? OR triggered_by = ? OR session_owner = ?)) OR ` +
+            `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id IN (${ids}) AND (LOWER(triggered_by) = ? OR triggered_by = ?))))`
         );
-        params.push(...own.workflowIds, own.email.toLowerCase(), own.userId, own.userId, own.email.toLowerCase(), own.userId);
+        params.push(
+          ...own.workflowIds,
+          ...own.workflowIds, own.email.toLowerCase(), own.userId, own.userId,
+          ...own.workflowIds, own.email.toLowerCase(), own.userId
+        );
       }
       clauses.push(`(${anyOf.join(" OR ")})`);
       // A deleted workflow's requests stay admin-only, also when a new workflow reuses its id.

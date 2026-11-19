@@ -17,7 +17,7 @@ import type { Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
-import { createRunAccess, runOwnedBy, type RunOwner } from "./run-access.js";
+import { createRunAccess, elicitationVisibleTo, runOwnedBy, type RunOwner } from "./run-access.js";
 import { AuthService, type SafeUser } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
 import { strictIsolationStartupWarning } from "./services/rbac-service.js";
@@ -302,6 +302,14 @@ describe("run-access helper", () => {
         { id: "x", executionId: "run-session", workflowId: "b" }
       ];
       expect(await shareOnly.filterRuns(viewer, rows)).toEqual([rows[0], rows[2], rows[3]]);
+    });
+
+    it("shows a tool's question of a run only to who may see the run; a deleted workflow's to nobody", async () => {
+      const question = (executionId: string, workflowId = "b") => ({ createdBy: "u-someone", workflowId, executionId });
+      expect(await elicitationVisibleTo(shareOnly, viewer, question("run-mine"))).toBe(true);
+      expect(await elicitationVisibleTo(shareOnly, viewer, question("run-other"))).toBe(false);
+      expect(await elicitationVisibleTo(shareOnly, user("admin"), question("run-other"))).toBe(true);
+      expect(await elicitationVisibleTo(shareOnly, user("admin"), question("run-other", "gone"))).toBe(false);
     });
 
     it("judges ownership by email (any case), user id or session owner", () => {

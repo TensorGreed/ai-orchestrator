@@ -29,7 +29,7 @@ interface TestContext {
 
 const contexts: TestContext[] = [];
 
-async function createTestContext(): Promise<TestContext> {
+async function createTestContext(options: { queue?: boolean } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-own-runs-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
@@ -46,7 +46,7 @@ async function createTestContext(): Promise<TestContext> {
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
   // A queue that never polls: the dead-letter route is registered, and nothing runs from it.
-  const queue = new QueueService(store, { pollIntervalMs: 3_600_000 });
+  const queue = options.queue === false ? undefined : new QueueService(store, { pollIntervalMs: 3_600_000 });
   const app = await createApp(config, store, secretService, authService, undefined, queue);
   await app.ready();
   const context: TestContext = { app, store, authService, config, tempDir };
@@ -129,8 +129,8 @@ function gatedWorkflow(id: string): Workflow {
  * Project "team" with wf-team and wf-gated. Owen administers the project and Mia is a viewer member there. Olivia
  * (operator) and Gus (builder) have both workflows only through a share with them (can view and run).
  */
-async function seed() {
-  const context = await createTestContext();
+async function seed(options: { queue?: boolean } = {}) {
+  const context = await createTestContext(options);
   const admin = await login(context, "admin", "ada");
   const owner = await login(context, "builder", "owen");
   const member = await login(context, "viewer", "mia");
@@ -161,6 +161,9 @@ const listRuns = async (context: TestContext, person: Person, query = "") => {
   const body = response.json<{ items: Array<{ id: string }>; total: number }>();
   return { ids: body.items.map((item) => item.id).sort(), total: body.total };
 };
+
+const inboxIds = async (context: TestContext, person: Person, query = "") =>
+  (await call(context, "GET", `/api/approvals${query}`, person.cookie)).json<{ items: Array<{ executionId: string }> }>().items.map((item) => item.executionId).sort();
 
 describe("a person who has a workflow only through a share with them sees only their own runs", () => {
   it("run lists and the run picker hold only their own runs, counted before paging; project members and admins see all", async () => {
@@ -330,6 +333,43 @@ describe("a person who has a workflow only through a share with them sees only t
     expect(await ruleEvents(olivia)).toBe(0);
     expect(await ruleEvents(member)).toBe(1);
     expect((await call(context, "GET", `/api/executions/${ownerRun}/guard-events`, olivia.cookie)).statusCode).toBe(404);
+  });
+
+  it("a run approved by a project member stays theirs (the resume records the approver as who acted)", async () => {
+    const { context, owner, olivia } = await seed({ queue: false });
+    const paused = await call(context, "POST", "/api/workflows/wf-gated/execute", olivia.cookie, { input: {} });
+    expect(paused.json<{ status: string }>().status, paused.body).toBe("waiting_approval");
+    const executionId = paused.json<{ executionId: string }>().executionId;
+    const approved = await call(context, "POST", `/api/approvals/${executionId}/approve`, owner.cookie, {});
+    expect(approved.statusCode, approved.body).toBe(200);
+    expect((await call(context, "GET", `/api/executions/${executionId}`, olivia.cookie)).statusCode).toBe(200);
+    expect((await listRuns(context, olivia)).ids).toEqual([executionId]);
+    expect(await inboxIds(context, olivia, "?status=all")).toEqual([executionId]);
+  });
+
+  it("golden sets, evaluations, replay jobs and release gate cases of the workflow answer 404 to them", async () => {
+    const { context, owner, gus, run } = await seed();
+    const ownerRun = await run(owner);
+    const saved = await call(context, "POST", "/api/replay/recordings", owner.cookie, { executionId: ownerRun, name: "golden" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    const recordingId = saved.json<{ recording: { id: string } }>().recording.id;
+    const created = await call(context, "POST", "/api/eval/datasets", owner.cookie, { name: "Golden set", workflowId: "wf-team" });
+    expect(created.statusCode, created.body).toBeLessThan(300);
+    const datasetId = created.json<{ dataset: { id: string } }>().dataset.id;
+    const added = await call(context, "POST", `/api/eval/datasets/${datasetId}/recordings`, owner.cookie, { recordingId });
+    expect(added.statusCode, added.body).toBeLessThan(300);
+
+    const listed = (await call(context, "GET", "/api/eval/datasets?workflowId=wf-team", gus.cookie)).json<{ datasets: Array<{ id: string }> }>().datasets;
+    expect(listed).toEqual([]);
+    expect((await call(context, "GET", `/api/eval/datasets/${datasetId}/fixtures`, gus.cookie)).statusCode).toBe(404);
+    expect((await call(context, "GET", `/api/eval/datasets/${datasetId}/export`, gus.cookie)).statusCode).toBe(404);
+    expect((await call(context, "POST", "/api/eval/runs?wait=true", gus.cookie, { datasetId, workflowId: "wf-team" })).statusCode).toBe(404);
+    expect((await call(context, "POST", "/api/replay/runs", gus.cookie, { datasetIds: [datasetId] })).statusCode).toBe(404);
+    expect((await call(context, "POST", "/api/replay/estimate", gus.cookie, { datasetIds: [datasetId] })).statusCode).toBe(404);
+    expect((await call(context, "GET", "/api/workflows/wf-team/release-gate/cases", gus.cookie)).statusCode).toBe(404);
+    // The project's people keep them.
+    expect((await call(context, "GET", `/api/eval/datasets/${datasetId}/fixtures`, owner.cookie)).statusCode).toBe(200);
+    expect((await call(context, "GET", "/api/workflows/wf-team/release-gate/cases", owner.cookie)).statusCode).toBe(200);
   });
 
   it("someone who also reads the workflow through their project, or through a share to it, sees every run", async () => {

@@ -202,8 +202,8 @@ export async function listApprovalRequests(ctx: PgContext, filter: {
       const [ids, email, userId] = [params.length - 2, params.length - 1, params.length];
       anyOf.push(
         `(workflow_id = ANY($${ids}::text[]) AND (` +
-          `execution_id IN (SELECT id FROM execution_history WHERE LOWER(triggered_by) = $${email} OR triggered_by = $${userId} OR session_owner = $${userId}) OR ` +
-          `execution_id IN (SELECT id FROM workflow_executions WHERE LOWER(triggered_by) = $${email} OR triggered_by = $${userId})))`
+          `execution_id IN (SELECT id FROM execution_history WHERE workflow_id = ANY($${ids}::text[]) AND (LOWER(triggered_by) = $${email} OR triggered_by = $${userId} OR session_owner = $${userId})) OR ` +
+          `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id = ANY($${ids}::text[]) AND (LOWER(triggered_by) = $${email} OR triggered_by = $${userId}))))`
       );
     }
     clauses.push(`(${anyOf.join(" OR ")})`);

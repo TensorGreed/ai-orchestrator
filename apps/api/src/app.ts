@@ -4757,9 +4757,14 @@ export async function createApp(
     readsOnlyThroughUserShare: async (user, workflow) => await rbacService.readsOnlyThroughUserShare(user, workflow),
     // Who started a run (its history, or the paused state of a run that has none yet) and whose sessions it used.
     getRunOwner: async (executionId) => {
-      const started = (await store.getExecutionHistory(executionId)) ?? (await store.getWorkflowExecutionState(executionId));
+      const history = await store.getExecutionHistory(executionId);
+      const paused = history ? null : await store.getWorkflowExecutionState(executionId);
+      const started = history ?? paused;
       if (!started) return null;
-      return { triggeredBy: started.triggeredBy ?? null, sessionOwner: await store.getExecutionSessionOwner(executionId) };
+      // A paused run keeps whose sessions it uses in its state until its history records it.
+      const pausedOwner = paused ? asRecord(paused.state).sessionOwner : undefined;
+      const sessionOwner = (await store.getExecutionSessionOwner(executionId)) ?? (typeof pausedOwner === "string" ? pausedOwner : null);
+      return { triggeredBy: started.triggeredBy ?? null, sessionOwner };
     }
   });
   // Phase 9.1 — built-in persistent vector store. A run sees the knowledge
@@ -6109,7 +6114,8 @@ export async function createApp(
     loadCase: async (runId, resultId) => await evalService.getCase(runId, resultId),
     recordingCreatedAt: async (recordingId) => (await store.getReplayRecordingSummary(recordingId))?.createdAt ?? null,
     access: async (user, workflowId, permission) => await runAccess.workflow(user, workflowId, permission),
-    readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
+    // Release requests carry replay results of other people's runs: not for someone who sees only their own runs.
+    readableWorkflowIds: async (user) => await runAccess.runVisibleWorkflowIds(user),
     audit: async (event) => {
       await auditService.record(event);
     },
@@ -6130,7 +6136,12 @@ export async function createApp(
   const gateAdmissionService = new GateAdmissionService({
     store,
     access: async (user, workflowId, permission) => await runAccess.workflow(user, workflowId, permission),
-    readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
+    // Gate case requests and cases come from other people's runs: not for someone who sees only their own runs.
+    readableWorkflowIds: async (user) => await runAccess.runVisibleWorkflowIds(user),
+    seesAllRuns: async (user, workflowId) => {
+      const gatedWorkflow = await store.getWorkflow(workflowId);
+      return !gatedWorkflow || await runAccess.seesAllRuns(user, gatedWorkflow);
+    },
     audit: async (event) => {
       await auditService.record(event);
     },
