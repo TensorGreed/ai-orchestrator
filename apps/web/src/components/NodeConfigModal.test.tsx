@@ -136,7 +136,7 @@ describe("NodeInspector", () => {
     expect(drawer.querySelector(".insp-node-id")).toHaveTextContent("Node id node-1");
     expect(screen.getByRole("button", { name: "Run node" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Parameters" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Input", "Parameters", "Output", "Settings", "Trace"]);
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Input", "Parameters", "Output", "Trace"]);
     expect(screen.getByRole("separator", { name: "Resize inspector" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
@@ -158,7 +158,6 @@ describe("NodeInspector", () => {
     const options = (select: HTMLElement) => Array.from(select.querySelectorAll("option")).map((option) => option.getAttribute("value"));
     const onErrorOptions = async (node?: Node<EditorNodeData>) => {
       const view = render(<NodeInspector {...makeProps(node ? { node } : {})} />);
-      await user.click(screen.getByRole("tab", { name: "Settings" }));
       const values = options(screen.getByLabelText("On Error Behavior"));
       view.unmount();
       return values;

@@ -112,11 +112,37 @@ describe("HTTP Request: fail on HTTP error status", () => {
     vi.mocked(api.previewExpression).mockResolvedValue({ ok: true, result: "" });
   });
 
-  it("is on for a new node", () => {
+  it("is on for a new node, which shows no switch: the retried statuses sit under More", async () => {
+    const user = userEvent.setup();
     expect(getNodeDefinition("http_request")?.sampleConfig.failOnHttpError).toBe(true);
     render(<NodeInspector {...inspectorProps({ ...getNodeDefinition("http_request")!.sampleConfig })} />);
-    expect(failToggle()).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: /Fail on HTTP error status/ })).toBeNull();
+    expect(screen.queryByTestId("legacy-behaviour")).toBeNull();
+    expect(screen.getByLabelText(/Retry on status/)).not.toBeVisible();
+    await user.click(within(screen.getByTestId("advanced-fields")).getByText("More"));
     expect(screen.getByLabelText(/Retry on status/)).toHaveAttribute("placeholder", "429, 5xx");
+  });
+
+  it("offers an older node the switch and a one-click upgrade, which can be taken back before saving", async () => {
+    const user = userEvent.setup();
+    const props = inspectorProps({ method: "GET", urlTemplate: "https://x.test" });
+    render(<NodeInspector {...props} />);
+    const notice = screen.getByTestId("legacy-behaviour");
+    expect(notice).toHaveTextContent("Saved with an earlier behaviour: an HTTP error status does not always fail it.");
+    await user.click(within(notice).getByRole("button", { name: "Upgrade to the new behaviour" }));
+    expect(failToggle()).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("legacy-behaviour")).toHaveTextContent(/Upgraded to the new behaviour when you save/);
+    await user.click(screen.getByRole("button", { name: "Keep the earlier behaviour" }));
+    expect(failToggle()).toHaveAttribute("aria-pressed", "false");
+    await user.click(within(screen.getByTestId("legacy-behaviour")).getByRole("button", { name: "Upgrade to the new behaviour" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(props.onSave).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ failOnHttpError: true }) }));
+  });
+
+  it("offers no upgrade to someone who may only view the workflow", () => {
+    render(<NodeInspector {...inspectorProps({ method: "GET", urlTemplate: "https://x.test" })} readOnlyReason="You may only view this workflow" />);
+    expect(screen.getByTestId("legacy-behaviour")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Upgrade to the new behaviour" })).toBeNull();
   });
 
   it("shows an older node without retries as off", () => {
@@ -128,6 +154,7 @@ describe("HTTP Request: fail on HTTP error status", () => {
   it("flags entries that are not status codes", async () => {
     const user = userEvent.setup();
     render(<NodeInspector {...inspectorProps({ method: "GET", urlTemplate: "https://x.test", failOnHttpError: true })} />);
+    await user.click(within(screen.getByTestId("advanced-fields")).getByText("More"));
     await user.type(screen.getByLabelText(/Retry on status/), "429, teapot");
     expect(screen.getByRole("alert")).toHaveTextContent("Not a status code: teapot");
   });
@@ -135,7 +162,7 @@ describe("HTTP Request: fail on HTTP error status", () => {
   it("explains the Error output once the fallback branch is chosen", async () => {
     const user = userEvent.setup();
     render(<NodeInspector {...inspectorProps({ method: "GET", urlTemplate: "https://x.test", failOnHttpError: true })} />);
-    await user.click(screen.getByRole("tab", { name: /Settings/ }));
+    await user.click(within(screen.getByTestId("advanced-fields")).getByText("More"));
     const group = screen.getByRole("region", { name: "Error handling" });
     expect(within(group).getByLabelText(/Max delay between Retries/)).toHaveValue(30000);
     await user.selectOptions(within(group).getByLabelText("On Error Behavior"), "branch");
@@ -156,13 +183,13 @@ describe("HTTP Request saved before the option", () => {
     expect(screen.getByLabelText(/Retry on status/)).toBeInTheDocument();
   });
 
-  it("reads retries from the node's errorConfig and shows them in Settings", async () => {
+  it("reads retries from the node's errorConfig and shows them under More", async () => {
     const user = userEvent.setup();
     const props = inspectorProps({ method: "GET", urlTemplate: "https://x.test" });
     props.node = { ...props.node, data: { ...props.node.data, nodeExtras: { errorConfig: { retryOnFail: true, maxRetries: 3, retryIntervalMs: 250 } } } };
     render(<NodeInspector {...props} />);
     expect(screen.getByTestId("http-retry-list-only-tip")).toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: /Settings/ }));
+    await user.click(within(screen.getByTestId("advanced-fields")).getByText("More"));
     expect(screen.getByTestId("node-error-config-tip")).toHaveTextContent("3 retries, first wait 250 ms");
   });
 });
@@ -219,7 +246,7 @@ describe("an errorConfig stored with invalid values", () => {
     vi.mocked(api.previewExpression).mockResolvedValue({ ok: true, result: "" });
   });
 
-  it("is named in Settings, and Remove invalid values saves the node without them", async () => {
+  it("is named under More, which opens for it, and Remove invalid values saves the node without them", async () => {
     const user = userEvent.setup();
     const props = inspectorProps({ method: "GET", urlTemplate: "https://x.test" });
     props.node = {
@@ -227,7 +254,7 @@ describe("an errorConfig stored with invalid values", () => {
       data: { ...props.node.data, nodeExtras: { errorConfig: { continueOnFail: true, maxRetries: -1, retryIntervalMs: "soon" }, notes: "kept" } }
     };
     render(<NodeInspector {...props} />);
-    await user.click(screen.getByRole("tab", { name: /Settings/ }));
+    expect(screen.getByTestId("advanced-fields")).toHaveAttribute("open");
     const warning = screen.getByTestId("node-error-config-invalid");
     expect(warning).toHaveTextContent("invalid values (maxRetries, retryIntervalMs)");
     // The valid part still shows as the node's error handling.

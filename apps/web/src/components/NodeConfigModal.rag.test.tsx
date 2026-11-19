@@ -91,7 +91,7 @@ describe("RAG Retrieve fields", () => {
     expect(screen.queryByLabelText(/RRF k/)).toBeNull();
     await user.selectOptions(mode, "hybrid");
     const advanced = screen.getByTestId("advanced-fields");
-    await user.click(within(advanced).getByText("Advanced"));
+    await user.click(within(advanced).getByText("More"));
     await user.type(screen.getByLabelText(/Keyword Weight/), "2");
     await user.type(screen.getByLabelText(/RRF k/), "30");
     expect(within(advanced).getByText("2 set")).toBeInTheDocument();
@@ -124,7 +124,7 @@ describe("RAG Retrieve fields", () => {
     const user = userEvent.setup();
     const onSave = vi.fn();
     render(<NodeInspector {...props(node("rag_retrieve", {}), { onSave })} />);
-    await user.click(within(screen.getByTestId("advanced-fields")).getByText("Advanced"));
+    await user.click(within(screen.getByTestId("advanced-fields")).getByText("More"));
     const field = screen.getByLabelText(/Inline Documents/);
     await user.clear(field);
     await user.type(field, '[["Refunds take 5 days."]');
@@ -136,7 +136,7 @@ describe("RAG Retrieve fields", () => {
   it("says why a JSON field has not changed the node", async () => {
     const user = userEvent.setup();
     render(<NodeInspector {...props(node("rag_retrieve", {}))} />);
-    await user.click(within(screen.getByTestId("advanced-fields")).getByText("Advanced"));
+    await user.click(within(screen.getByTestId("advanced-fields")).getByText("More"));
     const field = screen.getByLabelText(/Inline Documents/);
     await user.clear(field);
     await user.type(field, "{{");

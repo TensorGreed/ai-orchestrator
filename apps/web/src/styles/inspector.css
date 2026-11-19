@@ -1162,15 +1162,6 @@
 .insp-tabbar .insp-tabs {
   border-bottom: 0;
 }
-.insp-tab-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-left: 6px;
-  vertical-align: middle;
-  border-radius: var(--r-pill);
-  background: var(--accent);
-}
 
 .run-steps {
   display: flex;
@@ -1441,7 +1432,7 @@
   }
 }
 
-/* ---- Settings tab and the per-node Advanced section ----------------------- */
+/* ---- The inspector's More section ------------------------------------------ */
 .insp-settings {
   gap: 20px;
 }
@@ -1509,6 +1500,24 @@
   display: grid;
   gap: 12px;
   padding-top: 12px;
+}
+/* The inspector's one More section: the node's rarely used fields, then the settings every node has. */
+.cfg-more-fields {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.cfg-more-fields:empty {
+  display: none;
+}
+.cfg-more .insp-settings {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.cfg-more-fields:not(:empty) + .insp-settings {
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
 }
 
 .run-data-internal {

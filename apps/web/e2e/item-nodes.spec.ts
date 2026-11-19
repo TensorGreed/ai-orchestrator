@@ -114,10 +114,11 @@ test.describe("lists of items", () => {
       await expect(canvasNode(page, "Pricey only")).toContainText("Rejected");
       await expect(page.locator(".react-flow__edge")).toHaveCount(6);
 
-      // The Filter's form: items mode with Items from.
+      // The Filter's form: an items-mode Filter has no Mode to choose, and Items from sits under More.
       await canvasNode(page, "Pricey only").dblclick();
       let inspector = page.getByRole("dialog", { name: /^Inspect / });
-      await expect(inspector.getByLabel(/^Mode/)).toHaveValue("items");
+      await expect(inspector.getByLabel(/^Mode/)).toHaveCount(0);
+      await inspector.getByTestId("advanced-fields").getByText("More", { exact: true }).click();
       await expect(inspector.getByLabel(/^Items from/)).toBeVisible();
       await page.screenshot({ path: path.join(SHOT_DIR, "after-01-filter-items-mode.png") });
       await page.keyboard.press("Escape");
