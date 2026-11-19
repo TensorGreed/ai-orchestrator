@@ -596,7 +596,7 @@ describe("guard policy simulation", () => {
       store: context.store,
       guard: {} as never,
       evals: { isActive: () => false, wait: async () => undefined } as never,
-      runAccess: { readableWorkflowIds: () => null } as never,
+      runAccess: { readableWorkflowIds: () => null, runVisibleWorkflowIds: () => null } as never,
       maxCases: 50,
       maxCasesPerJob: 50
     });
@@ -782,7 +782,7 @@ describe("guard policy simulation", () => {
       store: context.store,
       guard: new GuardService(context.store, context.secretService, { autoApply: false }),
       evals: {} as never,
-      runAccess: { readableWorkflowIds: () => null } as never,
+      runAccess: { readableWorkflowIds: () => null, runVisibleWorkflowIds: () => null } as never,
       maxCases: 50,
       maxCasesPerJob: 50,
       scanBatch: 1

@@ -15,12 +15,22 @@
  * List endpoints are narrowed to the workflows (or projects) the user can
  * read before paging, so totals never count rows from other projects.
  *
+ * Someone who can read a workflow only through a share with them (not as a
+ * member of its project, not through a project share, not an admin) sees only
+ * their own runs of it: the runs they started and the runs whose sessions are
+ * theirs (`session_owner`). Anyone else's run answers 404, as a missing one.
+ * Run lists apply the same rule before paging (`runListScope`), and data built
+ * from many people's runs (golden runs, captures, cassettes, eval and replay
+ * runs, content-rule events, the dead-letter queue) leaves such workflows out
+ * (`runVisibleWorkflowIds`).
+ *
  * New routes that touch run or project data should use this helper rather
  * than calling the RBAC service directly, so the 404/403 rules stay the same.
  */
 
 import { DEFAULT_PROJECT_ID, type Workflow } from "@ai-orchestrator/shared";
 import type { SafeUser } from "./services/auth-service.js";
+import type { OwnRunsFilter } from "./db/database.js";
 import { filterAsync } from "./async-array.js";
 
 export type RunPermission = "workflow:read" | "workflow:write" | "workflow:execute" | "workflow:delete" | "workflow:publish";
@@ -31,6 +41,26 @@ export type RunAccessResult<T> = ({ ok: true } & T) | RunAccessDenial;
 interface ExecutionLike {
   id: string;
   workflowId: string;
+  /** The run this record belongs to, when `id` is not a run id (a cassette, a captured run). */
+  executionId?: string | null;
+}
+
+/** Who a run belongs to: who started it (an email, or a user id) and whose sessions it used. */
+export interface RunOwner {
+  triggeredBy: string | null;
+  sessionOwner: string | null;
+}
+
+/** Runs of these workflows are the person's own only: they started them, or the runs used their sessions. */
+export type OwnRunsOnly = OwnRunsFilter;
+
+/**
+ * Which runs a list may show: every run of `workflowIds`, and the person's own runs of `ownRunsOnly.workflowIds`
+ * (null when there are none).
+ */
+export interface RunListScope {
+  workflowIds: string[];
+  ownRunsOnly: OwnRunsOnly | null;
 }
 
 export interface RunAccessDeps {
@@ -45,17 +75,37 @@ export interface RunAccessDeps {
   projectExists: (projectId: string) => Promise<boolean>;
   /** v78 — workflow ids shared with this person (read or execute), from one indexed read. */
   listWorkflowIdsSharedToUser?: (userId: string) => Promise<string[]>;
+  /** Does the person read this workflow only through a share with them? Then they see only their own runs of it. */
+  readsOnlyThroughUserShare: (user: SafeUser, workflow: { id: string; projectId?: string | null }) => Promise<boolean>;
+  /** Who a run belongs to; null when there is no such run. */
+  getRunOwner: (executionId: string) => Promise<RunOwner | null>;
 }
 
 export interface RunAccess {
   /** May the user act on this workflow with `permission`? `what` names the thing in the 404 message. */
   workflow(user: SafeUser, workflowId: string, permission: RunPermission, what?: string): Promise<RunAccessResult<{ workflow: Workflow }>>;
+  /**
+   * The workflow-level check for runs of a workflow, as `run` makes it but for no run in particular: admins pass also
+   * when the workflow was deleted. It does not judge whose run it is: use `run` for that.
+   */
+  runsOfWorkflow(user: SafeUser, workflowId: string, permission: RunPermission, what?: string): Promise<RunAccessResult<{ workflow: Workflow | null }>>;
   /** The same check for a run: resolves the run's workflow first. */
   run<T extends ExecutionLike>(user: SafeUser, run: T | null | undefined, permission: RunPermission, what?: string): Promise<RunAccessResult<{ run: T; workflow: Workflow | null }>>;
   /** Workflow ids the user can read, or `null` when the user can read everything (admins). */
   readableWorkflowIds(user: SafeUser): Promise<string[] | null>;
-  /** Keeps the rows whose workflow the user can read. */
-  filterRuns<T extends { workflowId: string }>(user: SafeUser, rows: T[]): Promise<T[]>;
+  /** The runs a run list may show the user, or `null` for every run (admins). */
+  runListScope(user: SafeUser): Promise<RunListScope | null>;
+  /**
+   * Workflow ids whose runs the user sees all of, or `null` for admins: readable workflows except those shared only
+   * with the person. For data built from many people's runs.
+   */
+  runVisibleWorkflowIds(user: SafeUser): Promise<string[] | null>;
+  /** Does the user see every run of this workflow (true), or only their own (false)? */
+  seesAllRuns(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean>;
+  /** Is this run the user's own: started by them, or run in their sessions? */
+  ownsRun(user: SafeUser, executionId: string): Promise<boolean>;
+  /** Keeps the rows the user may see: of readable workflows, and only their own runs where that is all they see. */
+  filterRuns<T extends { workflowId: string; id?: string; executionId?: string | null }>(user: SafeUser, rows: T[]): Promise<T[]>;
   /** May the user act in this project? A missing project id means the default project. */
   project(user: SafeUser, projectId: string | null | undefined, permission: RunPermission, what?: string): Promise<RunAccessResult<Record<never, never>>>;
   /** Project ids the user can read, or `null` for admins. */
@@ -67,6 +117,16 @@ export interface RunAccess {
  * at builder already; this keeps the shortcut closed should that cap ever change.
  */
 const globalAdmin = (user: SafeUser): boolean => user.role === "admin" && !user.projectScope;
+
+/** Is the run the person's: started by them (by email or user id) or run in their sessions? */
+export function runOwnedBy(owner: RunOwner, user: { id: string; email: string }): boolean {
+  if (owner.sessionOwner && owner.sessionOwner === user.id) return true;
+  const by = owner.triggeredBy;
+  if (!by) return false;
+  return by === user.id || by.toLowerCase() === user.email.toLowerCase();
+}
+
+const executionIdOf = (run: ExecutionLike): string => (typeof run.executionId === "string" && run.executionId ? run.executionId : run.id);
 
 const notFound = (what: string): RunAccessDenial => ({ ok: false, status: 404, error: `${what} not found` });
 const forbidden = (permission: RunPermission): RunAccessDenial => ({ ok: false, status: 403, error: `Permission '${permission}' required for this workflow` });
@@ -82,10 +142,18 @@ const forbidden = (permission: RunPermission): RunAccessDenial => ({ ok: false, 
 export async function elicitationVisibleTo(
   runAccess: RunAccess,
   user: SafeUser,
-  record: { createdBy: string | null; workflowId: string }
+  record: { createdBy: string | null; workflowId: string; executionId?: string | null }
 ): Promise<boolean> {
   const own = !record.createdBy || record.createdBy === user.id;
-  return (await runAccess.workflow(user, record.workflowId, own ? "workflow:read" : "workflow:execute")).ok;
+  const permission = own ? "workflow:read" : "workflow:execute";
+  // Someone who sees only their own runs of the workflow sees only the questions of those runs.
+  if (record.executionId) {
+    const access = await runAccess.run(user, { id: record.executionId, workflowId: record.workflowId }, permission);
+    // A deleted workflow's questions stay hidden, also from admins (they cannot be answered).
+    return access.ok && access.workflow !== null;
+  }
+  const access = await runAccess.workflow(user, record.workflowId, permission);
+  return access.ok && await runAccess.seesAllRuns(user, access.workflow);
 }
 
 export function createRunAccess(deps: RunAccessDeps): RunAccess {
@@ -101,8 +169,8 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
   // One membership lookup per project instead of one (or two) per workflow:
   // a workflow is readable when its project is, or when it is shared to a
   // project the user can read. Same rule as `canAccessWorkflow`, batched.
-  const readableWorkflowIds = async (user: SafeUser): Promise<string[] | null> => {
-    if (globalAdmin(user)) return null;
+  // `ownOnly` holds the readable workflows the user reads only through a share with them.
+  const classifyWorkflows = async (user: SafeUser): Promise<{ full: string[]; ownOnly: string[] }> => {
     const verdicts = new Map<string, boolean>();
     const canRead = async (projectId: string) => {
       let verdict = verdicts.get(projectId);
@@ -120,12 +188,35 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
     // v78 — shared with the person: readable, unless an API key limits the request to other projects.
     const sharedToUser = new Set(deps.listWorkflowIdsSharedToUser ? await deps.listWorkflowIdsSharedToUser(user.id) : []);
     const scopeAllows = (projectId: string) => !user.projectScope || user.projectScope.includes(projectId);
-    const readable: string[] = [];
+    const full: string[] = [];
+    const ownOnly: string[] = [];
     for (const workflow of await deps.listWorkflows()) {
       const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
-      if (shared.has(workflow.id) || (sharedToUser.has(workflow.id) && scopeAllows(projectId)) || await canRead(projectId)) readable.push(workflow.id);
+      if (shared.has(workflow.id) || await canRead(projectId)) full.push(workflow.id);
+      else if (sharedToUser.has(workflow.id) && scopeAllows(projectId)) ownOnly.push(workflow.id);
     }
-    return readable;
+    return { full, ownOnly };
+  };
+
+  const readableWorkflowIds = async (user: SafeUser): Promise<string[] | null> => {
+    if (globalAdmin(user)) return null;
+    const { full, ownOnly } = await classifyWorkflows(user);
+    return [...full, ...ownOnly];
+  };
+
+  const seesAllRuns = async (user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean> =>
+    globalAdmin(user) || !await deps.readsOnlyThroughUserShare(user, workflow);
+
+  const ownsRun = async (user: SafeUser, executionId: string): Promise<boolean> => {
+    const owner = await deps.getRunOwner(executionId);
+    return owner !== null && runOwnedBy(owner, user);
+  };
+
+  /** A readable run the user still may not see: someone else's run of a workflow they see only their own runs of. */
+  const hiddenRun = async (user: SafeUser, run: ExecutionLike, workflow: Workflow | null): Promise<boolean> => {
+    if (globalAdmin(user) || !workflow) return false;
+    if (await seesAllRuns(user, workflow)) return false;
+    return !await ownsRun(user, executionIdOf(run));
   };
 
   const projectKnown = async (projectId: string) => projectId === DEFAULT_PROJECT_ID || await deps.projectExists(projectId);
@@ -138,20 +229,50 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
       return denial ?? { ok: true, workflow };
     },
 
+    async runsOfWorkflow(user, workflowId, permission, what = "Workflow") {
+      const workflow = await deps.getWorkflow(workflowId) ?? null;
+      const denial = await workflowVerdict(user, workflow, permission, what);
+      return denial ?? { ok: true, workflow };
+    },
+
     async run(user, run, permission, what = "Execution") {
       if (!run) return notFound(what);
       const workflow = await deps.getWorkflow(run.workflowId) ?? null;
       const denial = await workflowVerdict(user, workflow, permission, what);
-      return denial ?? { ok: true, run, workflow };
+      if (denial) return denial;
+      // Someone else's run, for a person who sees only their own: answered as missing, so run ids reveal nothing.
+      if (await hiddenRun(user, run, workflow)) return notFound(what);
+      return { ok: true, run, workflow };
     },
 
     readableWorkflowIds,
 
+    async runListScope(user) {
+      if (globalAdmin(user)) return null;
+      const { full, ownOnly } = await classifyWorkflows(user);
+      return { workflowIds: full, ownRunsOnly: ownOnly.length > 0 ? { workflowIds: ownOnly, userId: user.id, email: user.email } : null };
+    },
+
+    async runVisibleWorkflowIds(user) {
+      if (globalAdmin(user)) return null;
+      return (await classifyWorkflows(user)).full;
+    },
+
+    seesAllRuns,
+
+    ownsRun,
+
     async filterRuns(user, rows) {
-      const readable = await readableWorkflowIds(user);
-      if (readable === null) return rows;
-      const ids = new Set(readable);
-      return rows.filter((row) => ids.has(row.workflowId));
+      if (globalAdmin(user)) return rows;
+      const { full, ownOnly } = await classifyWorkflows(user);
+      const all = new Set(full);
+      const own = new Set(ownOnly);
+      const kept: typeof rows = [];
+      for (const row of rows) {
+        const runId = row.executionId || row.id;
+        if (all.has(row.workflowId) || (own.has(row.workflowId) && runId && await ownsRun(user, runId))) kept.push(row);
+      }
+      return kept;
     },
 
     async project(user, projectId, permission, what = "Project") {

@@ -188,7 +188,8 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   no `+`, the inspector offers no <span v-pre>`{{`</span> suggestions, helper chips, Input fields to drag in or
   **Run node**, and the workflow settings in **More actions** are not offered.
   `GET /api/workflows/:id/access` answers what the signed-in user may do: `canEdit`, `canRun`, `canShare` (share with
-  people, as the share routes allow) and `canShareWithProjects`.
+  people, as the share routes allow), `canShareWithProjects`, and `ownRunsOnly` (they see only their own runs: see
+  [Own runs only](#own-runs-only)).
 - **Shared with this project.** The Workflows page lists the workflows other projects share to the active one, with
   the access members get there (`GET /api/projects/:id/shared-workflows`).
 
@@ -237,12 +238,12 @@ or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": 
   without a membership there in `role` isolation, and admins), with the same step-up as adding a member
   (`project_member.change`). A project editor may change the workflow but not open it to people. The person must have
   an account (invite them first); service accounts and yourself are refused.
-- **What it gives.** `read`: they find it under **Shared with you** on the Workflows page, open it and read its runs,
-  all of them (other people's runs, their inputs and outputs included), as a viewer of its project would.
-  `execute`: they may also run it (see [Running workflows by role](#running-workflows-by-role)) and act on its runs
-  (approve, cancel, answer a tool's question) when their role may run workflows; an execute share with a viewer reads
-  only. Their runs use the released version and their own session memory. A share never gives write, delete, publish or the right to
-  share it on. Their runs may use the workflow's secrets, as runs of its own project do.
+- **What it gives.** `read`: they find it under **Shared with you** on the Workflows page, open it and read their own
+  runs of it (see [Own runs only](#own-runs-only)).
+  `execute`: they may also run it (see [Running workflows by role](#running-workflows-by-role)) and act on their own runs
+  (approve, cancel, retry, answer a tool's question) when their role may run workflows; an execute share with a viewer
+  reads only. Their runs use the released version and their own session memory. A share never gives write, delete,
+  publish or the right to share it on. Their runs may use the workflow's secrets, as runs of its own project do.
 - **Limits.** An API key limited to projects gets nothing from a share outside them. A deactivated user's shares stay
   but give nothing while they cannot sign in; enabling the user again brings them back, as with project memberships.
 - **Lifecycle.** Shares go with the workflow when it is deleted (a workflow created later with the same id starts
@@ -252,6 +253,33 @@ or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": 
   `userShares` in `GET /api/workflows/:id/shares`), with each person's role and `effectiveAccess`.
 - **Audit.** `workflow.user_share` (with `targetUserId`, `targetEmail`, `accessLevel`, `effectiveAccess`) and
   `workflow.user_unshare`, in the `sharing` category.
+
+### Own runs only
+
+Someone who has a workflow only through a share with them sees only their own runs of it: the runs they started and
+the runs that used their session memory (a retry of their run by someone else, for example). Other people's runs, with
+their inputs, outputs and node data, stay hidden. This applies when the share is all they have: not a member of the
+workflow's project with a role that reads it, not through a share to a project they can read, and not an admin. A
+project member keeps the full view, and so does anyone who also has the workflow through their project.
+
+- **Lists.** The run history, the editor's run picker (it reads **Your runs** then) and the restored run data show only
+  their runs, filtered before paging, so totals count only those.
+- **Single runs.** Someone else's run answers `404`, the same answer as a run that does not exist: its detail, its live
+  events, its manifest and bundle export, its rule events, retry, replay, cancel, and using its data for a new run
+  (`sourceExecutionId`).
+- **Approvals and questions.** The approvals inbox and the tool questions (`/api/mcp/elicitations`, and the count in the
+  MCP overview) list only those of their own runs, and they can decide only those; anyone else's answers `404`.
+- **Data from many people's runs.** Golden runs, golden sets (their cases, export, and evaluations or replay jobs
+  over them), release gate cases and release requests, captured runs, recorded MCP cassettes (their own run's
+  cassette still opens from the run), eval and replay runs, content rule events and statistics, simulations of content
+  rules, recent tool calls in the MCP catalog and the dead-letter queue leave such a workflow out or answer `404`.
+- **The editor.** `GET /api/workflows/:id/access` answers `ownRunsOnly: true` for them.
+
+**Opening shared workflows.** A link to a workflow (`?workflowId=`) opens it for anyone who can read it, through their
+project, a share to a project or a share with them, whichever project is active. A workflow they cannot read answers
+"Workflow not found", as one that does not exist. Someone who is a member of no project (with
+`PROJECT_ISOLATION=strict`) lands on Home with the workflows shared with them. Only people who may create projects
+(builders and admins) are offered **New project**.
 
 ## Project access
 

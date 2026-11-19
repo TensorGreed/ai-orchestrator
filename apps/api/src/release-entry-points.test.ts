@@ -88,6 +88,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
 
   { file: "app.ts", match: "const stored = await store.getWorkflow(sourceId);", kind: "not_run", why: "a JSON import reads the stored workflow with the file's id: to name and diff it, and (12.2) to keep its trigger trust settings on a replace; nothing runs" },
   { file: "app.ts", match: "if (!await store.getWorkflow(workflowId)) {", kind: "not_run", why: "a tool policy rule's workflow principal must exist when the rule is saved; nothing runs" },
+  { file: "app.ts", match: "const gatedWorkflow = await store.getWorkflow(workflowId);", kind: "not_run", why: "whether the reader of a release gate's cases sees every run of the workflow; nothing runs" },
 
   // app.ts: production traffic.
   { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram, Discord app webhooks and chat", count: 6 },
@@ -149,11 +150,12 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "run-scope.ts", match: 'deps.getRunnableWorkflow(targetId, "production") : deps.getWorkflow(targetId)', kind: "production", why: "sub-workflows: the child's published version in a production run, its draft in a draft run" },
   { file: "run-access.ts", match: "const workflow = deps.getWorkflow(workflowId);", kind: "draft", why: "access checks; any run they feed names its channel (checked below)" },
   { file: "run-access.ts", match: "const workflow = deps.getWorkflow(run.workflowId) ?? null;", kind: "not_run", why: "run access checks" },
+  { file: "run-access.ts", match: "const workflow = deps.getWorkflow(workflowId) ?? null;", kind: "not_run", why: "run access checks for a workflow's runs (approvals)" },
   { file: "mcp-testing-routes.ts", match: "store.getWorkflow(usage.workflowId)", kind: "not_run", why: "MCP server usages" },
   { file: "mcp-control-plane-routes.ts", match: "const workflow = store.getWorkflow(summary.id);", kind: "not_run", why: "MCP server usages" },
   { file: "guard-routes.ts", match: "const workflow = store.getWorkflow(binding.scopeId);", kind: "not_run", why: "guard binding project" },
   { file: "guard-routes.ts", match: "store.getWorkflow(event.workflowId)?.name", kind: "not_run", why: "guard event names" },
-  { file: "golden-set-file-routes.ts", match: "store.getWorkflow(", kind: "not_run", why: "the exported file names the golden set's workflow (id and name); nothing runs", count: 1 },
+  { file: "golden-set-file-routes.ts", match: "store.getWorkflow(", kind: "not_run", why: "the exported file names the golden set's workflow (id and name), and whether its reader sees every run of it; nothing runs", count: 2 },
   { file: "eval-routes.ts", match: "store.getWorkflow(", kind: "not_run", why: "golden set and run projects, judge and model-override secret scope, the replay job audit's project", count: 5 },
   { file: "services/approval-service.ts", match: "this.store.getWorkflow(record.workflowId)?.projectId", kind: "not_run", why: "a paused run's current project" },
   { file: "services/eval-service.ts", match: "const workflow = this.store.getWorkflow(request.workflowId);", kind: "draft", why: "an eval run runs the draft" },

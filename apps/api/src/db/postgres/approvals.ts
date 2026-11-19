@@ -189,9 +189,24 @@ export async function listApprovalRequests(ctx: PgContext, filter: {
   if (filter.scope && !filter.scope.all) {
     // By workflow, not the stored project_id: a workflow moved to another project takes its requests with it.
     const { workflowIds } = filter.scope;
-    if (workflowIds.length === 0) return [];
-    params.push(workflowIds);
-    clauses.push(`workflow_id = ANY($${params.length}::text[])`);
+    const own = filter.scope.ownRunsOnly && filter.scope.ownRunsOnly.workflowIds.length > 0 ? filter.scope.ownRunsOnly : null;
+    if (workflowIds.length === 0 && !own) return [];
+    const anyOf: string[] = [];
+    if (workflowIds.length > 0) {
+      params.push(workflowIds);
+      anyOf.push(`workflow_id = ANY($${params.length}::text[])`);
+    }
+    if (own) {
+      // Of a workflow shared only with the person: the requests of runs they started or that ran in their sessions.
+      params.push(own.workflowIds, own.email.toLowerCase(), own.userId);
+      const [ids, email, userId] = [params.length - 2, params.length - 1, params.length];
+      anyOf.push(
+        `(workflow_id = ANY($${ids}::text[]) AND (` +
+          `execution_id IN (SELECT id FROM execution_history WHERE workflow_id = ANY($${ids}::text[]) AND (LOWER(triggered_by) = $${email} OR triggered_by = $${userId} OR session_owner = $${userId})) OR ` +
+          `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id = ANY($${ids}::text[]) AND (LOWER(triggered_by) = $${email} OR triggered_by = $${userId}))))`
+      );
+    }
+    clauses.push(`(${anyOf.join(" OR ")})`);
     // A deleted workflow's requests stay admin-only, also when a new workflow reuses its id.
     clauses.push(`workflow_deleted_at IS NULL`);
   }

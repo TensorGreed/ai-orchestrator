@@ -96,7 +96,8 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     const offset = Number(request.query.offset);
     const paging = { limit: Number.isFinite(limit) ? limit : 50, offset: Number.isFinite(offset) ? offset : 0 };
     // Admins also see golden runs of a workflow id that is gone; everyone else only readable workflows.
-    const readable = await runAccess.readableWorkflowIds(user);
+    // Not of workflows shared only with the person: golden runs are other people's runs.
+    const readable = await runAccess.runVisibleWorkflowIds(user);
     // Phase 15.6 — golden runs only; captured candidates are listed by the inbox.
     if (workflowId) {
       if (readable !== null && !readable.includes(workflowId)) return { items: [], total: 0 };

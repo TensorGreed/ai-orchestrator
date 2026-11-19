@@ -177,7 +177,11 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     if (user.role === "admin") return { ok: true, dataset };
     if (dataset.workflowId) {
       const access = await runAccess.workflow(user, dataset.workflowId, permission, what);
-      return access.ok ? { ok: true, dataset } : access;
+      if (!access.ok) return access;
+      // A golden set holds other people's runs (their inputs and recordings): none of it for someone who sees only
+      // their own runs of the workflow, also not to evaluate or replay.
+      if (!await runAccess.seesAllRuns(user, access.workflow)) return { ok: false, status: 404, error: `${what} not found` };
+      return { ok: true, dataset };
     }
     if (!dataset.projectId && permission === "workflow:read" && !deps.strictIsolation) {
       return user.role === "builder" ? { ok: true, dataset } : { ok: false, status: 404, error: `${what} not found` };
@@ -192,9 +196,12 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
 
   const notFound = (reply: FastifyReply, what: string) => denyRunAccess(reply, { status: 404, error: `${what} not found` });
 
-  /** The run filter for the user: runs of readable workflows only (`undefined` for admins). */
+  /**
+   * The run filter for the user: runs of readable workflows only (`undefined` for admins), and not of workflows shared
+   * only with the person, who sees only their own runs.
+   */
   const readableWorkflowFilter = async (user: SafeUser): Promise<{ workflowIds?: string[] }> => {
-    const ids = await runAccess.readableWorkflowIds(user);
+    const ids = await runAccess.runVisibleWorkflowIds(user);
     return ids ? { workflowIds: ids } : {};
   };
 
@@ -240,7 +247,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     if (!user) return reply;
     const projectId = typeof request.query.projectId === "string" && request.query.projectId ? request.query.projectId : undefined;
     const workflowId = typeof request.query.workflowId === "string" && request.query.workflowId ? request.query.workflowId : undefined;
-    const workflows = await runAccess.readableWorkflowIds(user);
+    // Golden sets of a workflow hold its runs: not listed to someone who sees only their own runs of it.
+    const workflows = await runAccess.runVisibleWorkflowIds(user);
     const projects = await runAccess.readableProjectIds(user);
     const readableWorkflows = workflows && new Set(workflows);
     const readableProjects = projects && new Set(projects);
@@ -500,7 +508,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const replaySource = mcpOptions.data.replay;
     if (replaySource?.cassetteId) {
       const summary = await store.getMcpCassetteSummary(replaySource.cassetteId);
-      const access = await runAccess.run(user, summary && { id: summary.id, workflowId: summary.workflowId ?? "" }, "workflow:read", "Cassette");
+      const access = await runAccess.run(user, summary && { id: summary.id, workflowId: summary.workflowId ?? "", executionId: summary.executionId }, "workflow:read", "Cassette");
       if (!access.ok) return denyRunAccess(reply, access);
       if (summary?.workflowId !== workflowId) {
         reply.code(409);

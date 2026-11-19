@@ -214,7 +214,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   };
 
   /** Workflows a non-admin may read, for scoping guard events; undefined for admins (no filter). */
-  const readableWorkflowIds = async (user: SafeUser): Promise<string[] | undefined> => await deps.runAccess.readableWorkflowIds(user) ?? undefined;
+  // Rule events come from many people's runs: not of workflows shared only with the person, who sees only their own runs.
+  const readableWorkflowIds = async (user: SafeUser): Promise<string[] | undefined> => await deps.runAccess.runVisibleWorkflowIds(user) ?? undefined;
 
   // ---------------------------------------------------------------------------
   // Profiles

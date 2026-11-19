@@ -446,7 +446,8 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
       const calls = detail ? await store.listMcpToolCalls({ registryServerId: server.id, since }) : [];
       const telemetry = detail ? new Map(rollupMcpToolCalls(calls).tools.map((entry) => [entry.toolName, entry])) : null;
       const recentByTool = new Map<string, unknown[]>();
-      const readable = detail ? await deps.runAccess.readableWorkflowIds(user) : null;
+      // Calls of workflows shared only with the person are other people's runs: shown without detail.
+      const readable = detail ? await deps.runAccess.runVisibleWorkflowIds(user) : null;
       const readableIds = readable && new Set(readable);
       for (const call of [...calls].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))) {
         const list = recentByTool.get(call.toolName) ?? [];
@@ -640,11 +641,12 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
       .sort((a, b) => b.errorRate - a.errorRate || b.errors - a.errors || a.toolName.localeCompare(b.toolName))
       .slice(0, 5);
 
-    // Counted as the elicitation list shows them: per workflow, by the user's role in its project.
+    // Counted as the elicitation list shows them: per run, by the user's role in its workflow's project (someone who
+    // sees only their own runs of a workflow counts only the questions of those runs).
     const verdicts = new Map<string, Promise<boolean>>();
-    const visibleElicitation = async (record: { createdBy: string | null; workflowId: string }) => {
+    const visibleElicitation = async (record: { createdBy: string | null; workflowId: string; executionId?: string | null }) => {
       const own = !record.createdBy || record.createdBy === user.id;
-      const key = `${own ? "own" : "other"}:${record.workflowId}`;
+      const key = `${own ? "own" : "other"}:${record.workflowId}:${record.executionId ?? ""}`;
       let verdict = verdicts.get(key);
       if (!verdict) {
         verdict = elicitationVisibleTo(deps.runAccess, user, record);
