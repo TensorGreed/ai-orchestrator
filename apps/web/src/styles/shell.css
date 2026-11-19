@@ -623,6 +623,33 @@ body {
   gap: 8px;
 }
 
+/* "More settings" in the More actions menu: the workflow's rarely changed settings, one click away. */
+.hud-dropdown-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-dropdown-count {
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--fs-xs);
+}
+
+.hud-dropdown-caret {
+  margin-left: auto;
+  color: var(--fg-muted);
+}
+
+.hud-dropdown-sub {
+  display: grid;
+  margin: 2px 0 4px 10px;
+  padding-left: 6px;
+  border-left: 1px solid var(--line);
+}
+
 .hud-check-box {
   display: inline-flex;
   align-items: center;

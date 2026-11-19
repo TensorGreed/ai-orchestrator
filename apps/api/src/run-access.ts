@@ -34,6 +34,7 @@ import { DEFAULT_PROJECT_ID, type Workflow } from "@ai-orchestrator/shared";
 import type { SafeUser } from "./services/auth-service.js";
 import type { OwnRunsFilter } from "./db/database.js";
 import { filterAsync } from "./async-array.js";
+import { roleMayEdit } from "./run-editor-options.js";
 
 export type RunPermission = "workflow:read" | "workflow:write" | "workflow:execute" | "workflow:delete" | "workflow:publish";
 
@@ -103,6 +104,12 @@ export interface RunAccess {
    * with the person. For data built from many people's runs.
    */
   runVisibleWorkflowIds(user: SafeUser): Promise<string[] | null>;
+  /**
+   * May the user edit this workflow? A builder role or higher and `workflow:write` on it, one rule for everything that
+   * is the editor's: the draft channel, the editor's run options, the workflow's sessions and the editor's controls.
+   * An operator with an editor membership may not: they run the released version, as anyone who may only run it.
+   */
+  mayEdit(user: SafeUser, workflow: Workflow): Promise<boolean>;
   /** Does the user see every run of this workflow (true), or only their own (false)? */
   seesAllRuns(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean>;
   /** Is this run the user's own: started by them, or run in their sessions? */
@@ -230,6 +237,11 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
       if (!workflow) return notFound(what);
       const denial = await workflowVerdict(user, workflow, permission, what);
       return denial ?? { ok: true, workflow };
+    },
+
+    async mayEdit(user, workflow) {
+      if (!roleMayEdit(user.role)) return false;
+      return (await workflowVerdict(user, workflow, "workflow:write", "Workflow")) === null;
     },
 
     async runsOfWorkflow(user, workflowId, permission, what = "Workflow") {

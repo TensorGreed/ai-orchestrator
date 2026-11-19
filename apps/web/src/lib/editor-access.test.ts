@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { editorAccess, roleMayUseEditorRunOptions } from "./editor-access";
+import { editorAccess, mayUseEditorRunOptions, roleMayUseEditorRunOptions } from "./editor-access";
 
 const full = { workflowId: "wf", canEdit: true, canRun: true, canShare: true };
 
@@ -22,5 +22,13 @@ describe("editorAccess", () => {
     expect(shared.editDisabledReason).toMatch(/shared with you/);
     expect(shared.runDisabledReason).toBeNull();
     expect(editorAccess("builder", { ...full, canEdit: false, canRun: false }).runDisabledReason).toMatch(/permission to run/);
+  });
+
+  it("keeps the editor's run options to someone who may edit the open workflow", () => {
+    expect(mayUseEditorRunOptions("builder", full)).toBe(true);
+    expect(mayUseEditorRunOptions("admin", null)).toBe(true);
+    // A builder who may only run it (a share) runs the saved workflow, as an operator does: the server refuses the options.
+    expect(mayUseEditorRunOptions("builder", { ...full, canEdit: false })).toBe(false);
+    expect(mayUseEditorRunOptions("operator", full)).toBe(false);
   });
 });

@@ -28,7 +28,7 @@ Scripts and CI that call `/execute` with an API key therefore get production beh
 
 A run paused on an approval resumes on the version it started with, even when another version is published meanwhile. A production webhook routes by the published version's path: a path you changed in the draft answers only on `/webhook-test/` until you publish. Schedules and app triggers re-register from the published version when you publish or roll back.
 
-If the published version can no longer be loaded, production refuses the run instead of falling back to the draft. The same holds when a gate is on and nothing is published: the pill shows **production off**, and production refuses runs (`409`, "No published version of this workflow can be loaded") until a version passes, is approved, or an admin overrides.
+If the published version can no longer be loaded, production refuses the run instead of falling back to the draft. The same holds when a gate is on and nothing is published: the pill shows **Live: off**, and production refuses runs (`409`, "No published version of this workflow can be loaded") until a version passes, is approved, or an admin overrides.
 
 ### Deactivating a workflow
 
@@ -54,7 +54,15 @@ A save (create, update, import, external import, restore, move, activate) is ref
 
 ## The version pill
 
-In the editor, the pill next to the run status shows what production runs: **v3 live**, **v3 live · draft +2** (two saved versions are newer), **v4 · not published**, or **v4 · unpublished** (the published version was [taken down](#unpublish) and production runs the draft). **gate** marks a workflow with a gate on, **gate · enforced** one an admin enforced. Click it to publish.
+In the editor, the pill next to the run status shows what production triggers (webhooks, schedules, forms, chat and MCP calls) run today:
+
+- **Live: version 3**: the published version.
+- **Live: version 3 · draft +2**: the published version, and two saved versions are newer.
+- **Live: draft**: nothing is published (or the published version was [taken down](#unpublish)), so production runs the latest save.
+- **Live: paused**: the version production runs has unfinished settings, so its triggers start no run until they are finished.
+- **Live: off**: the gate is on and no version is published, so production refuses runs.
+
+Its tooltip says the same in words. **gate** marks a workflow with a gate on, **gate · enforced** one an admin enforced. Click it to publish.
 
 ## Publishing
 

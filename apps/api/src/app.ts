@@ -208,7 +208,7 @@ import {
   oidcUserErrorCode,
   type FetchLike as OidcFetch
 } from "./services/oidc-service.js";
-import { editorRunOptionsError, editorRunOptionsRefused, personalSessionOwner, savedRunLimits } from "./run-editor-options.js";
+import { editorRunOptionsError, editorRunOptionsRefused, personalSessionOwner, roleMayEdit, savedRunLimits } from "./run-editor-options.js";
 import {
   ALL_PERMISSIONS,
   RbacService,
@@ -4081,17 +4081,17 @@ export async function createApp(
    * toolset's project.
    */
   /** A run's budget user from its trigger's name (paused states written before the subject was kept). */
-  // Whose sessions a run by this person uses, when they are kept to the person: operators, and anyone who runs the
-  // workflow only through a share with them, also with a key of their own (run-editor-options.ts personalSessionOwner).
-  // Other API keys and service accounts keep the workflow's sessions.
+  // Whose sessions a run by this person uses, when they are kept to the person: anyone who runs or reads the workflow
+  // only through a share with them (any role, also with a key of their own), and a signed-in person who may not edit
+  // it (run-editor-options.ts personalSessionOwner). Other API keys and service accounts keep the workflow's sessions.
   const sessionOwnerFor = async (user: SafeUser, workflow: Workflow): Promise<string | undefined> => {
-    // A builder who reads the workflow only through a share with them (a read share too: a signed-in chat needs only
-    // read) is kept to their own sessions, as are those who may run it only through such a share.
+    if (user.serviceAccount) return undefined;
+    // A read share counts too: a signed-in chat needs only read.
     const shareOnly =
-      user.role === "builder" && !user.serviceAccount
-        ? (await rbacService.runsOnlyThroughUserShare(user, workflow)) || (await rbacService.readsOnlyThroughUserShare(user, workflow))
-        : false;
-    return personalSessionOwner(user, shareOnly);
+      (await rbacService.onlyThroughUserShare(user, workflow, "workflow:execute")) ||
+      (await rbacService.onlyThroughUserShare(user, workflow, "workflow:read"));
+    const mayEdit = shareOnly ? false : await runAccess.mayEdit(user, workflow);
+    return personalSessionOwner(user, { shareOnly, mayEdit });
   };
   const sessionOwnerOptionFor = async (user: SafeUser, workflow: Workflow): Promise<{ sessionOwner?: string }> => {
     const owner = await sessionOwnerFor(user, workflow);
@@ -4785,7 +4785,7 @@ export async function createApp(
     listWorkflowIdsSharedToProject: async (projectId) => (await store.listWorkflowsSharedToProject(projectId)).map((share) => share.workflowId),
     projectExists: async (projectId) => Boolean(await store.getProject(projectId)),
     listWorkflowIdsSharedToUser: async (userId) => (await store.listWorkflowsSharedToUser(userId)).map((share) => share.workflowId),
-    readsOnlyThroughUserShare: async (user, workflow) => await rbacService.readsOnlyThroughUserShare(user, workflow),
+    readsOnlyThroughUserShare: async (user, workflow) => await rbacService.onlyThroughUserShare(user, workflow, "workflow:read"),
     // Who started a run (its history, or the paused state of a run that has none yet) and whose sessions it used.
     getRunOwner: async (executionId) => {
       const history = await store.getExecutionHistory(executionId);
@@ -6259,17 +6259,23 @@ export async function createApp(
       return { ok: false, status: 400, error: "channel can only be draft" };
     }
     const viaKey = (await resolveRequestAuth(request))?.credential === "api_key";
-    if (!viaKey) {
-      // A signed-in person who may edit the workflow runs what they see (the draft). One who may only run it (an
-      // operator, a share-only runner) runs the released version, as an API key does: never a draft nobody released.
-      if ((await runAccess.workflow(user, workflowId, "workflow:write")).ok) return { channel: "draft" };
-      if (asked === "draft") return { ok: false, status: 403, error: "Running the draft needs workflow:write on the workflow." };
-      return { channel: "production" };
+    if (viaKey && asked === undefined) return { channel: "production" };
+    const read = await runAccess.workflow(user, workflowId, "workflow:read");
+    if (!read.ok) return { ok: false, status: read.status, error: read.error };
+    // Someone who may edit the workflow (a builder role and workflow:write: runAccess.mayEdit) runs what they see in
+    // the editor (the draft), and may ask for it with a key. One who may only run it (an operator, also with an editor
+    // membership; a share-only runner) runs the released version, as an API key does: never a draft nobody released.
+    if (await runAccess.mayEdit(user, read.workflow)) return { channel: "draft" };
+    if (asked === "draft") {
+      return {
+        ok: false,
+        status: 403,
+        error: viaKey
+          ? "Running the draft with an API key (channel=draft) needs a builder role and workflow:write on the workflow."
+          : "Running the draft needs a builder role and workflow:write on the workflow."
+      };
     }
-    if (asked === undefined) return { channel: "production" };
-    const write = await runAccess.workflow(user, workflowId, "workflow:write");
-    if (!write.ok) return { ok: false, status: write.status, error: "Running the draft with an API key (channel=draft) needs workflow:write on the workflow." };
-    return { channel: "draft" };
+    return { channel: "production" };
   };
 
   // 13.3 — the leader prunes (every instance did before); HA off, every instance is its own leader, as before.
@@ -10898,15 +10904,13 @@ export async function createApp(
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    // Unreadable reads as missing; sharing needs write on the owning project.
-    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
-    if (!access.ok) return denyRunAccess(reply, access);
-    const workflow = access.workflow;
-    const owningProject = workflow.projectId ?? "default";
-    if (!await rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
-      reply.code(403);
-      return { error: "Only users with workflow:write on the owning project can share the workflow" };
-    }
+    // Unreadable reads as missing; sharing with another project takes what sharing with people takes: project:invite on
+    // the owning project and the member-change step-up (workflowShareManager).
+    const managed = await workflowShareManager(user, request.params.id);
+    if (!managed.ok) return denyRunAccess(reply, managed);
+    if (!await requireStepUp(request, reply, "project_member.change")) return;
+    const workflow = managed.workflow;
+    const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
     const parsed = workflowShareSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -10943,14 +10947,10 @@ export async function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["viewer"]);
       if (!user) return;
-      const access = await runAccess.workflow(user, request.params.id, "workflow:read");
-      if (!access.ok) return denyRunAccess(reply, access);
-      const workflow = access.workflow;
-      const owningProject = workflow.projectId ?? "default";
-      if (!await rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
-        reply.code(403);
-        return { error: "Insufficient permissions" };
-      }
+      const managed = await workflowShareManager(user, request.params.id);
+      if (!managed.ok) return denyRunAccess(reply, managed);
+      if (!await requireStepUp(request, reply, "project_member.change")) return;
+      const workflow = managed.workflow;
       const ok = await rbacService.unshareWorkflow(workflow.id, request.params.projectId);
       if (!ok) {
         reply.code(404);
@@ -10972,8 +10972,9 @@ export async function createApp(
   // ---------------------------------------------------------------------------
   // v78 — Workflow shares with people
   // ---------------------------------------------------------------------------
-  // Who may manage them: users with workflow:write on the workflow's own project (or admins), as for project shares.
-  // A share gives read or execute, never write, and never more than the person's role (`effectiveAccess`).
+  // Who may manage them: users with project:invite on the workflow's own project (or admins), as for adding a project
+  // member (workflowShareManager). A share gives read or execute, never write, and never more than the person's role
+  // (`effectiveAccess`).
 
   const workflowUserShareSchema = z
     .object({
@@ -10996,7 +10997,7 @@ export async function createApp(
     if (!access.ok) return access;
     const owningProject = access.workflow.projectId ?? DEFAULT_PROJECT_ID;
     if (user.role !== "admin" && !(await rbacService.can(user, owningProject, "project:invite"))) {
-      return { ok: false, status: 403, error: "Only users who may invite members to the workflow's project can share it with people" };
+      return { ok: false, status: 403, error: "Only users who may invite members to the workflow's project can share it with people or other projects" };
     }
     return { ok: true, workflow: access.workflow };
   };
@@ -11301,25 +11302,23 @@ export async function createApp(
   });
 
   // What the signed-in user may do with a workflow, so the editor shows only the controls that work: edit (save,
-  // add or remove nodes), run (operator and up, with workflow:execute: operators run the saved workflow), and manage
-  // its shares.
+  // add or remove nodes: runAccess.mayEdit, a builder role and workflow:write), run (operator and up, with
+  // workflow:execute: operators run the saved workflow), and manage its shares.
   app.get<{ Params: { id: string } }>("/api/workflows/:id/access", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
-    const isBuilder = hasRequiredRole(user, ["builder"]);
-    const canWrite = isBuilder && (await runAccess.workflow(user, workflow.id, "workflow:write")).ok;
+    const canWrite = await runAccess.mayEdit(user, workflow);
     const canExecute = hasRequiredRole(user, ["operator"]) && (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok;
     const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
-    // The same checks as the share routes: sharing with people takes project:invite (workflowShareManager); sharing
-    // with another project takes workflow:write on the owning project.
+    // The same check as the share routes: sharing with people or with another project takes project:invite on the
+    // owning project (workflowShareManager).
     const canShare = user.role === "admin" || (await rbacService.can(user, owningProject, "project:invite"));
-    const canShareWithProjects = user.role === "admin" || (await rbacService.can(user, owningProject, "workflow:write"));
     // A share with the person is all they have: they see only their own runs of it.
     const ownRunsOnly = !(await runAccess.seesAllRuns(user, workflow));
-    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare, canShareWithProjects, ownRunsOnly };
+    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare, ownRunsOnly };
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id/variables", async (request, reply) => {
@@ -12712,10 +12711,12 @@ export async function createApp(
         details: parsed.error.issues
       };
     }
-    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
-    if (refusedOptions.length > 0) {
+    // The editor's options: refused below builder at once, and below once the workflow is known unless the person may
+    // edit it.
+    const roleRefused = editorRunOptionsRefused(roleMayEdit(user.role), request.body);
+    if (roleRefused.length > 0) {
       reply.code(403);
-      return editorRunOptionsError(refusedOptions);
+      return editorRunOptionsError(roleRefused);
     }
 
     const workflow = await selectWebhookWorkflow(
@@ -12735,6 +12736,12 @@ export async function createApp(
     }
     const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
+    const mayEdit = await runAccess.mayEdit(user, executeAccess.workflow);
+    const refusedOptions = editorRunOptionsRefused(mayEdit, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
+    }
 
     const executionId = crypto.randomUUID();
     const result = await runDispatcher.run(
@@ -12757,7 +12764,7 @@ export async function createApp(
           triggeredBy: user.email,
           // Operators run the selected workflow: no pinned data, and no longer than the deployment's timeout.
           ...savedRunLimits(
-            user.role,
+            mayEdit,
             normalizeExecutionTimeoutMs(parsed.data.executionTimeoutMs, parsed.data.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
             config.WORKFLOW_EXECUTION_TIMEOUT_MS
           )
@@ -13189,7 +13196,14 @@ export async function createApp(
       if (!user) return;
       const access = await runAccess.workflow(user, request.params.workflowId, "workflow:execute");
       if (!access.ok) return denyRunAccess(reply, access);
-      const workflow = access.workflow;
+      // Someone who may edit the workflow runs the draft, as in the editor; anyone else (a builder who may only run
+      // it) runs the released version without pinned data, within the deployment's timeout, as on /execute.
+      const mayEdit = await runAccess.mayEdit(user, access.workflow);
+      const workflow = mayEdit ? access.workflow : await productionWorkflow(access.workflow.id);
+      if (!workflow) {
+        reply.code(409);
+        return productionRefusalBody(await releaseService.productionRefusal(access.workflow.id), "Workflow not found");
+      }
       const manualNode = workflow.nodes.find((n) => n.type === "manual_trigger");
       if (!manualNode) {
         reply.code(400);
@@ -13201,8 +13215,8 @@ export async function createApp(
         {
           v: DISPATCH_SPEC_VERSION,
           run: {
-            // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
-            channel: "draft",
+            // Phase 15.4: not production traffic, so an editor's run is the draft.
+            channel: mayEdit ? "draft" : "production",
             policyActor: user,
             workflow,
             directInput: { trigger_type: "manual", trigger_node_id: manualNode.id, ...body },
@@ -13210,7 +13224,8 @@ export async function createApp(
             ...await sessionOwnerOptionFor(user, workflow),
             executionId,
             triggerType: "manual",
-            triggeredBy: user.email
+            triggeredBy: user.email,
+            ...(mayEdit ? {} : savedRunLimits(false, config.WORKFLOW_EXECUTION_TIMEOUT_MS, config.WORKFLOW_EXECUTION_TIMEOUT_MS))
           },
           progress: { requestInput: body },
           history: { requestInput: body }
@@ -13796,10 +13811,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         details: parsed.error.issues
       };
     }
-    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
-    if (refusedOptions.length > 0) {
+    // The editor's options: refused below builder at once, and below once the workflow is known unless the person may
+    // edit it.
+    const roleRefused = editorRunOptionsRefused(roleMayEdit(user.role), request.body);
+    if (roleRefused.length > 0) {
       reply.code(403);
-      return editorRunOptionsError(refusedOptions);
+      return editorRunOptionsError(roleRefused);
     }
 
     const workflow = await selectWebhookWorkflow(
@@ -13819,6 +13836,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
+    const mayEdit = await runAccess.mayEdit(user, executeAccess.workflow);
+    const refusedOptions = editorRunOptionsRefused(mayEdit, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
+    }
     // 12.6 (D8) — a used-up block budget refuses the run with a 402 before the stream starts.
     await admitRunBudget({ workflow, triggerType: "webhook_api_stream", triggeredBy: user.email, policyActor: user });
 
@@ -13893,7 +13916,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             triggeredBy: user.email,
             // Operators run the selected workflow: no pinned data, and no longer than the deployment's timeout.
             ...savedRunLimits(
-              user.role,
+              mayEdit,
               normalizeExecutionTimeoutMs(parsed.data.executionTimeoutMs, parsed.data.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
               config.WORKFLOW_EXECUTION_TIMEOUT_MS
             )
@@ -16485,14 +16508,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       systemPrompt: payload.systemPrompt,
       userPrompt: payload.userPrompt,
       sessionId: payload.sessionId,
-      // Decided when the job runs, as the run routes decide it: an operator's (or share-only runner's) queued run keeps
-      // session memory to them, uses no pinned data and runs no longer than the deployment's timeout.
+      // Decided when the job runs, as the run routes decide it: the queued run of someone who may not edit the workflow
+      // (an operator, a share-only runner) keeps session memory to them, uses no pinned data and runs no longer than
+      // the deployment's timeout.
       ...(enqueuedBy ? await sessionOwnerOptionFor(enqueuedBy, workflow) : {}),
       triggerType: payload.triggerType ?? "queue",
       triggeredBy: payload.triggeredBy,
       ...(enqueuedBy
         ? savedRunLimits(
-            enqueuedBy.role,
+            await runAccess.mayEdit(enqueuedBy, workflow),
             normalizeExecutionTimeoutMs(payload.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
             config.WORKFLOW_EXECUTION_TIMEOUT_MS
           )
@@ -16649,13 +16673,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // keeps no queue routes, as before.
   if (queueService || store instanceof PostgresStore) {
     app.get("/api/queue/depth", async (request, reply) => {
-      const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+      const user = await requireRole(request, reply, ["operator"]);
       if (!user) return;
       return await queueProducer.getDepth();
     });
 
     app.get("/api/queue/dlq", async (request, reply) => {
-      const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+      const user = await requireRole(request, reply, ["operator"]);
       if (!user) return;
       const limit = typeof (request.query as Record<string, unknown>).limit === "string"
         ? Math.min(200, Math.max(1, Number((request.query as Record<string, unknown>).limit)))
@@ -16667,7 +16691,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     app.post<{ Params: { id: string }; Body: unknown }>(
       "/api/workflows/:id/enqueue",
       async (request, reply) => {
-        const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+        const user = await requireRole(request, reply, ["operator"]);
         if (!user) return;
 
         const access = await runAccess.workflow(user, request.params.id, "workflow:execute");

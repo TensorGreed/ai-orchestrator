@@ -69,6 +69,12 @@ function makeProps(overrides: Partial<Parameters<typeof StudioHud>[0]> = {}): Pa
   };
 }
 
+/** Opens the More actions menu and its "More settings" group. */
+async function openMoreSettings(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "More actions" }));
+  await user.click(screen.getByRole("menuitem", { name: /^More settings/ }));
+}
+
 describe("StudioHud", () => {
   it("disables Save and Run with the reason as tooltip when you cannot use them", async () => {
     const onSave = vi.fn();
@@ -136,19 +142,42 @@ describe("StudioHud", () => {
     expect(onExport).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the workflow's settings under one closed More settings group that counts those on", async () => {
+    const user = userEvent.setup();
+    render(
+      <StudioHud
+        {...makeProps({ onToggleNoWriteTools: vi.fn(), onToggleStrictTemplates: vi.fn(), strictTemplates: true, onEditErrorWorkflow: vi.fn(), onExport: vi.fn() })}
+      />
+    );
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menuitem", { name: "Export JSON" })).toBeInTheDocument();
+    const group = screen.getByRole("menuitem", { name: /^More settings/ });
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    expect(group).toHaveTextContent("1 on");
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Strict templates" })).not.toBeInTheDocument();
+    await user.click(group);
+    expect(group).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("menuitemcheckbox", { name: "Strict templates" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("menuitemcheckbox", { name: "No write tools" })).toBeInTheDocument();
+    // Closing the menu closes the group too.
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menuitem", { name: /^More settings/ })).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("toggles the workflow's No write tools setting from the overflow menu", async () => {
     const user = userEvent.setup();
     const onToggleNoWriteTools = vi.fn();
     const { rerender } = render(<StudioHud {...makeProps({ onToggleNoWriteTools, noWriteTools: false })} />);
 
-    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await openMoreSettings(user);
     const item = screen.getByRole("menuitemcheckbox", { name: "No write tools" });
     expect(item).toHaveAttribute("aria-checked", "false");
     await user.click(item);
     expect(onToggleNoWriteTools).toHaveBeenCalledTimes(1);
 
     rerender(<StudioHud {...makeProps({ onToggleNoWriteTools, noWriteTools: true })} />);
-    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await openMoreSettings(user);
     expect(screen.getByRole("menuitemcheckbox", { name: "No write tools" })).toHaveAttribute("aria-checked", "true");
   });
 
@@ -157,14 +186,14 @@ describe("StudioHud", () => {
     const onToggleStrictTemplates = vi.fn();
     const { rerender } = render(<StudioHud {...makeProps({ onToggleStrictTemplates, strictTemplates: false })} />);
 
-    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await openMoreSettings(user);
     const item = screen.getByRole("menuitemcheckbox", { name: "Strict templates" });
     expect(item).toHaveAttribute("aria-checked", "false");
     await user.click(item);
     expect(onToggleStrictTemplates).toHaveBeenCalledTimes(1);
 
     rerender(<StudioHud {...makeProps({ onToggleStrictTemplates, strictTemplates: true })} />);
-    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await openMoreSettings(user);
     expect(screen.getByRole("menuitemcheckbox", { name: "Strict templates" })).toHaveAttribute("aria-checked", "true");
 
     rerender(<StudioHud {...makeProps()} />);
@@ -182,14 +211,14 @@ describe("StudioHud", () => {
     const user = userEvent.setup();
     const onEditErrorWorkflow = vi.fn();
     const { rerender } = render(<StudioHud {...makeProps({ onEditErrorWorkflow, errorWorkflowSet: false })} />);
-    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await openMoreSettings(user);
     const item = screen.getByRole("menuitemcheckbox", { name: "Error workflow…" });
     expect(item).toHaveAttribute("aria-checked", "false");
     await user.click(item);
     expect(onEditErrorWorkflow).toHaveBeenCalledTimes(1);
 
     rerender(<StudioHud {...makeProps({ onEditErrorWorkflow, errorWorkflowSet: true })} />);
-    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await openMoreSettings(user);
     expect(screen.getByRole("menuitemcheckbox", { name: "Error workflow…" })).toHaveAttribute("aria-checked", "true");
   });
 

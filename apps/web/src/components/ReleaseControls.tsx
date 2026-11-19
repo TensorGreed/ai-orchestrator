@@ -38,9 +38,13 @@ export interface ReleasePillProps {
   isAdmin: boolean;
   /** Opens the workflow's gate settings (Evaluations → Release gates). */
   onOpenGates?: () => void;
+  /** Production's version has unfinished settings, so its live triggers start no run ("Live: paused"). */
+  livePaused?: boolean;
+  /** Called after a publish or an unpublish from the pill, so the caller can check again whether live triggers are paused. */
+  onReleaseChanged?: () => void;
 }
 
-export function ReleasePill({ workflowId, refreshKey, canPublish, isAdmin, onOpenGates }: ReleasePillProps) {
+export function ReleasePill({ workflowId, refreshKey, canPublish, isAdmin, onOpenGates, livePaused = false, onReleaseChanged }: ReleasePillProps) {
   const [state, setState] = useState<ReleaseStateView | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [open, setOpen] = useState(false);
@@ -62,7 +66,7 @@ export function ReleasePill({ workflowId, refreshKey, canPublish, isAdmin, onOpe
   }, [load, refreshKey]);
 
   if (unavailable) return null;
-  const label = releasePillLabel(state);
+  const label = releasePillLabel(state, livePaused);
 
   return (
     <>
@@ -76,11 +80,6 @@ export function ReleasePill({ workflowId, refreshKey, canPublish, isAdmin, onOpe
       >
         <span className="hud-dot" aria-hidden="true" />
         <span className="hud-run-label">{label.text}</span>
-        {state?.productionRefused && (
-          <span className="hud-release-gate is-refused" title="The gate is on but no version is published: production refuses runs until one is">
-            production off
-          </span>
-        )}
         {state?.gateEnabled && (
           <span className="hud-release-gate" title={state.gateEnforced ? "Release gate on (enforced by an admin)" : "Release gate on"}>
             gate{state.gateEnforced ? " · enforced" : ""}
@@ -94,7 +93,10 @@ export function ReleasePill({ workflowId, refreshKey, canPublish, isAdmin, onOpe
           canPublish={state ? state.canPublish : canPublish}
           isAdmin={isAdmin}
           onClose={() => setOpen(false)}
-          onPublished={() => void load()}
+          onPublished={() => {
+            void load();
+            onReleaseChanged?.();
+          }}
           {...(onOpenGates
             ? {
                 onOpenGates: () => {

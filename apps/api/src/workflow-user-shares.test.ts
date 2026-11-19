@@ -287,10 +287,11 @@ describe("what the editor may show", () => {
   it("answers canEdit, canRun and canShare per user and workflow", async () => {
     const { context, owner, operator, viewer, outsider, editor } = await seed();
     const access = async (cookie: string) => (await call(context, "GET", "/api/workflows/wf-team/access", cookie)).json<Record<string, unknown>>();
-    expect(await access(owner.cookie)).toMatchObject({ canEdit: true, canRun: true, canShare: true, canShareWithProjects: true });
-    // A project editor may change the workflow and share it with projects, not with people: canShare follows the
+    expect(await access(owner.cookie)).toMatchObject({ canEdit: true, canRun: true, canShare: true });
+    expect(await access(owner.cookie)).not.toHaveProperty("canShareWithProjects");
+    // A project editor may change the workflow but not share it, with people or with projects: canShare follows the
     // share routes, which refuse the editor.
-    expect(await access(editor.cookie)).toMatchObject({ canEdit: true, canShare: false, canShareWithProjects: true });
+    expect(await access(editor.cookie)).toMatchObject({ canEdit: true, canShare: false });
     expect((await call(context, "POST", "/api/workflows/wf-team/user-shares", editor.cookie, { email: viewer.email, accessLevel: "read" })).statusCode).toBe(403);
     expect((await call(context, "GET", "/api/workflows/wf-team/access", viewer.cookie)).statusCode).toBe(404);
     await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: viewer.email, accessLevel: "execute" });
@@ -300,5 +301,22 @@ describe("what the editor may show", () => {
     // An operator with an execute share runs the saved workflow.
     expect(await access(operator.cookie)).toMatchObject({ role: "operator", canEdit: false, canRun: true, canShare: false });
     expect(await access(outsider.cookie)).toMatchObject({ role: "builder", canEdit: false, canRun: true, canShare: false });
+  });
+});
+
+describe("sharing with another project takes what sharing with people takes (project:invite)", () => {
+  it("refuses a project editor without project:invite; the project admin shares and unshares", async () => {
+    const { context, owner, editor } = await seed();
+    await context.store.upsertProject({ id: "ops", name: "Ops" });
+    const refused = await call(context, "POST", "/api/workflows/wf-team/shares", editor.cookie, { projectId: "ops", accessLevel: "execute" });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json<{ error: string }>().error).toMatch(/invite members/);
+    expect(await context.store.listWorkflowShares("wf-team")).toEqual([]);
+
+    expect((await call(context, "POST", "/api/workflows/wf-team/shares", owner.cookie, { projectId: "ops", accessLevel: "execute" })).statusCode).toBe(200);
+    // An existing share stays; the editor may not remove it either.
+    expect((await call(context, "DELETE", "/api/workflows/wf-team/shares/ops", editor.cookie)).statusCode).toBe(403);
+    expect((await context.store.listWorkflowShares("wf-team")).map((share) => share.projectId)).toEqual(["ops"]);
+    expect((await call(context, "DELETE", "/api/workflows/wf-team/shares/ops", owner.cookie)).statusCode).toBe(200);
   });
 });

@@ -186,7 +186,7 @@ import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
 import { ImportConflictDialog, type ImportConflictChoice } from "./components/ImportConflictDialog";
-import { editorAccess, roleMayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
+import { editorAccess, mayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
@@ -1589,10 +1589,10 @@ function StudioApp() {
       cancelled = true;
     };
   }, [authUser, currentWorkflow.id, currentWorkflowExists]);
-  const { editDisabledReason, runDisabledReason } = editorAccess(
-    authUser?.role,
-    workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null
-  );
+  const openWorkflowAccess = workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null;
+  const { editDisabledReason, runDisabledReason } = editorAccess(authUser?.role, openWorkflowAccess);
+  // The editor's run options (pinned data, recording, one node or from a node): for someone who may edit this workflow.
+  const editorRunOptions = mayUseEditorRunOptions(authUser?.role, openWorkflowAccess);
   // Workflow settings in the More actions menu are edits too: only for someone who may save this workflow.
   const canEditOpenWorkflow = canManageWorkflows && !editDisabledReason;
   // Phase 11.2 — pending approvals the user can decide, for the sidebar badge.
@@ -1896,7 +1896,13 @@ function StudioApp() {
   }, [currentWorkflow.id]);
 
   // What the saved workflow still lacks (a draft saves with unfinished node settings), for the editor's notice.
-  const [draftIssues, setDraftIssues] = useState<{ workflowId: string; issues: WorkflowValidationIssue[]; liveTriggersPaused: boolean } | null>(null);
+  // Dismissing hides the notice; the version pill still says when live triggers are paused.
+  const [draftIssues, setDraftIssues] = useState<{
+    workflowId: string;
+    issues: WorkflowValidationIssue[];
+    liveTriggersPaused: boolean;
+    dismissed?: boolean;
+  } | null>(null);
   // A workflow stored before error settings were checked can hold invalid values: runs ignore them, but a save (and so
   // the editor's Run) refuses them. One click strips them from every node, keeping each node's valid values.
   const removeInvalidErrorConfigs = useCallback(() => {
@@ -1918,6 +1924,19 @@ function StudioApp() {
       current ? { ...current, issues: current.issues.filter((issue) => issue.code !== "invalid_error_config") } : current
     );
   }, [pushHistorySnapshot, setNodes]);
+  // A publish or unpublish changes which version production runs, and so whether its live triggers are paused.
+  const refreshLiveTriggersPaused = useCallback(() => {
+    const workflowId = currentWorkflow.id;
+    inBackground(() => validateStoredWorkflow(workflowId))
+      .then((validation) => {
+        setDraftIssues((current) =>
+          current && current.workflowId === workflowId ? { ...current, liveTriggersPaused: validation.liveTriggersPaused === true } : current
+        );
+      })
+      .catch(() => {
+        // The pill keeps its last answer; the next save or open checks again.
+      });
+  }, [currentWorkflow.id]);
   const draftIssuesWorkflowIdRef = useRef<string | null>(null);
   useEffect(() => {
     setDraftIssues((current) => (current && current.workflowId !== currentWorkflow.id ? null : current));
@@ -3643,7 +3662,7 @@ function StudioApp() {
     };
 
     // Operators run the saved workflow with their input: pinned data, recording and partial runs are the editor's.
-    const editorOptions = roleMayUseEditorRunOptions(authUser?.role);
+    const editorOptions = editorRunOptions;
     if (editorOptions) {
       payload.usePinnedData = true;
     }
@@ -3672,7 +3691,7 @@ function StudioApp() {
     }
 
     return payload;
-  }, [authUser?.role, executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
+  }, [editorRunOptions, executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
 
   const buildWebhookExecutionPayload = useCallback(() => {
     const payload: {
@@ -3723,8 +3742,8 @@ function StudioApp() {
       return;
     }
     // Running one node or from a node is the editor's; operators run the whole saved workflow.
-    if ((options?.startNodeId || options?.runMode === "single_node") && !roleMayUseEditorRunOptions(authUser?.role)) {
-      setError("Running one node, or from a node, needs the builder role. Run the whole workflow instead.");
+    if ((options?.startNodeId || options?.runMode === "single_node") && !editorRunOptions) {
+      setError("Running one node, or from a node, needs a builder role and edit access to this workflow. Run the whole workflow instead.");
       return;
     }
     try {
@@ -3775,7 +3794,7 @@ function StudioApp() {
     persistForRun,
     refreshExecutionHistory,
     runDisabledReason,
-    authUser?.role,
+    editorRunOptions,
   ]);
 
   const handleWebhookExecute = useCallback(async (testPayload: Record<string, unknown>) => {
@@ -5410,6 +5429,8 @@ function StudioApp() {
                 refreshKey={releaseRefreshKey}
                 canPublish={canManageWorkflows}
                 isAdmin={authUser.role === "admin"}
+                livePaused={draftIssues?.workflowId === currentWorkflow.id && draftIssues.liveTriggersPaused}
+                onReleaseChanged={refreshLiveTriggersPaused}
                 onOpenGates={() => {
                   setEvaluationsTab("gates");
                   setActiveMode("evaluations");
@@ -5475,14 +5496,14 @@ function StudioApp() {
             </div>
           )}
           {error && <div className="error-banner global-banner">{error}</div>}
-          {activeMode === "editor" && draftIssues && draftIssues.workflowId === currentWorkflow.id ? (
+          {activeMode === "editor" && draftIssues && !draftIssues.dismissed && draftIssues.workflowId === currentWorkflow.id ? (
             <DraftWarnings
               issues={draftIssues.issues}
               liveTriggersPaused={draftIssues.liveTriggersPaused}
               nodeLabel={(nodeId) => (nodes as EditorNode[]).find((node) => node.id === nodeId)?.data.label}
               onSelectNode={openNodeConfig}
               onRemoveInvalidErrorConfig={removeInvalidErrorConfigs}
-              onDismiss={() => setDraftIssues(null)}
+              onDismiss={() => setDraftIssues((current) => (current ? { ...current, dismissed: true } : current))}
             />
           ) : null}
           {secretMessage && <div className="info-banner global-banner">{secretMessage}</div>}

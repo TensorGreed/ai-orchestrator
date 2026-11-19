@@ -77,7 +77,7 @@ describe("version pill and Publish dialog", () => {
   it("shows the live version and how far the draft is ahead", async () => {
     vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 5, publishedVersion: 3, aheadBy: 2, gateEnabled: true, gateEnforced: true, productionRefused: false, canPublish: true, canEditGate: true } });
     render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
-    const pill = await screen.findByRole("button", { name: /Release: v3 live · draft \+2/ });
+    const pill = await screen.findByRole("button", { name: /Release: Live: version 3 · draft \+2/ });
     expect(pill).toHaveTextContent("gate · enforced");
   });
 
@@ -149,8 +149,16 @@ describe("version pill and Publish dialog", () => {
   it("says production is off when the gate is on and nothing is published", async () => {
     vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 2, publishedVersion: null, aheadBy: 0, gateEnabled: true, gateEnforced: true, productionRefused: true, canPublish: true, canEditGate: false } });
     render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
-    const pill = await screen.findByRole("button", { name: /Release: v2 · not published/ });
-    expect(pill).toHaveTextContent("production off");
+    const pill = await screen.findByRole("button", { name: /Release: Live: off/ });
+    expect(pill).toHaveAttribute("title", expect.stringMatching(/production refuses runs/));
+  });
+
+  it("says Live: paused while live triggers are paused on unfinished settings", async () => {
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 2, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false, productionRefused: false, canPublish: true, canEditGate: true } });
+    const { rerender } = render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} livePaused />);
+    expect(await screen.findByRole("button", { name: "Release: Live: paused" })).toBeInTheDocument();
+    rerender(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
+    expect(await screen.findByRole("button", { name: "Release: Live: draft" })).toBeInTheDocument();
   });
 
   it("a viewer sees the verdict but no publish actions", async () => {
@@ -159,7 +167,7 @@ describe("version pill and Publish dialog", () => {
     vi.mocked(api.fetchWorkflowVersions).mockResolvedValue(versions());
     vi.mocked(api.fetchPublishPreview).mockResolvedValue({ preview: preview({ gateEnabled: false, replayRunId: null }) });
     render(<ReleasePill workflowId="wf-1" canPublish={false} isAdmin={false} />);
-    await user.click(await screen.findByRole("button", { name: "Release: v3 · not published" }));
+    await user.click(await screen.findByRole("button", { name: "Release: Live: draft" }));
     const dialog = await screen.findByRole("dialog");
     expect(await within(dialog).findByText("No release gate")).toBeInTheDocument();
     expect(within(dialog).getByText(/needs the workflow:publish permission/)).toBeInTheDocument();

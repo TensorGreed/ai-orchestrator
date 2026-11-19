@@ -69,9 +69,10 @@ The agent's **Language Models** drawer offers **LLM Call** too, so an agent can 
 
 ## Workflow settings
 
-The **⋯** menu in the editor's top bar holds the settings of the whole workflow (they are saved with it):
-**No write tools**, **Strict templates**, **Ask before write tools…**, **Subject references…** and **Error
-workflow…**. A tick shows the ones that are on.
+The **⋯** menu in the editor's top bar holds the settings of the whole workflow (they are saved with it), under
+**More settings**: **No write tools**, **Strict templates**, **Ask before write tools…**, **Subject references…** and
+**Error workflow…**. Most workflows leave them as they are. **More settings** says how many are on, and a tick shows
+which.
 
 **Strict templates** makes a <span v-pre>`{{ }}`</span> without a value fail its node instead of rendering empty
 (`settings.strictTemplates`; off by default). See [strict templates](../runtime/templates-and-expressions.md#strict-templates).
@@ -149,18 +150,25 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
   line between panes, or focus it and use the arrow keys, to resize. Both are remembered. The panes give way when the
   window is narrow, so the parameters and the Output pane stay in view. Before a node has run, its empty Input and
   Output panes start as rails so the parameters get the room.
-- **Parameters** shows the fields you set most. A node type's rarely used fields (for example a GET request's
-  headers and an HTTP request's timeout and response type, a model's temperature and max tokens, an agent's iteration and tool output limits, a
-  content rules node's approval settings) are under **Advanced**, closed by default; its title counts the fields
-  that differ from their defaults. A POST, PUT or PATCH request shows its **Body** and **Headers** next to the URL; a
+- **Parameters** shows the fields a first workflow needs. Everything else sits in one **More** section at the end of
+  the form, closed by default: first the node type's rarely used fields (for example a GET request's headers, an HTTP
+  request's timeout, response type and retried statuses, a Loop's item variable and maximum, a Filter's **Items
+  from**, a model's temperature and max tokens, an agent's iteration and tool output limits, a content rules node's
+  approval settings), then what every node has: error handling (retries, delays, on error), input mapping, data
+  labels, **Disabled** and the accent colour. Its title counts the settings that differ from their defaults, and it
+  opens by itself when one of them needs fixing. A POST, PUT or PATCH request shows its **Body** and **Headers** next to the URL; a
   body that is valid JSON is sent as `application/json` unless the headers set a `Content-Type`. Help for a field is
   behind the **?** next to its label. The expression helpers
   under a template field show while you edit it, and its preview shows when the result differs from what you typed
   (or the expression has an error). Typing <span v-pre>`{{`</span> in a template field lists the last run's fields, variables and steps
   to insert, and a field name dragged from the **Input** pane inserts its <span v-pre>`{{path}}`</span>; a note under the field names
   any <span v-pre>`{{ }}`</span> the last run had no value for (see [writing templates in the editor](../runtime/templates-and-expressions.md#writing-templates-in-the-editor)). A code node's **Test Run** stays in view, with its test input folded under it.
-- **Settings** holds what every node has: disabled, accent colour, error handling (retries, delay, on error), input
-  mapping and data labels. A dot on the tab means one of them differs from the default.
+- **A node saved with an earlier behaviour** shows the switch for it, with a one-line note and **Upgrade to the new
+  behaviour** (until you save, **Keep the earlier behaviour** takes the upgrade back). New nodes start on the new
+  behaviour and show neither. This covers a Loop's **Collect results** and **Branches route in the loop**, an HTTP
+  Request's **Fail on HTTP error status**, a Filter's **Pass or stop** mode and a Set field's **Text (as before)**
+  type. Nothing changes for a saved node until you upgrade it. A node set to the earlier behaviour on purpose (for
+  example by an import) shows the switch without the note.
 - **Trace** shows timing, token use, the agent's activity and tool policy decisions for the run.
 - Large values stay fast: tables show 50 rows at a time and JSON over 20,000 characters is cut until you ask for all
   of it. A nested object or list in a table cell whose JSON is longer than 80 characters shows as one line (its first

@@ -80,9 +80,9 @@ beforeEach(() => {
 
 describe("release helpers", () => {
   it("labels the unpublished state and history entry", () => {
-    expect(releasePillLabel(state({ publishedVersion: null, aheadBy: 0, unpublishedAt: "2026-10-27T10:00:00.000Z" }))).toMatchObject({ text: "v4 · unpublished", tone: "draft" });
-    expect(releasePillLabel(state({ publishedVersion: null, aheadBy: 0, unpublishedAt: "2026-10-27T10:00:00.000Z", gateEnabled: true })).title).toMatch(/release gate does not check/);
-    expect(releasePillLabel(state({ publishedVersion: null, aheadBy: 0 })).text).toBe("v4 · not published");
+    expect(releasePillLabel(state({ publishedVersion: null, aheadBy: 0, unpublishedAt: "2026-10-27T10:00:00.000Z" }))).toMatchObject({ text: "Live: draft", tone: "draft" });
+    expect(releasePillLabel(state({ publishedVersion: null, aheadBy: 0, unpublishedAt: "2026-10-27T10:00:00.000Z", gateEnabled: true })).title).toMatch(/^Unpublished: .*release gate does not check/);
+    expect(releasePillLabel(state({ publishedVersion: null, aheadBy: 0 })).text).toBe("Live: draft");
     expect(releaseVerdictLabel("unpublished")).toBe("Unpublished");
     expect(releaseVerdictTone("unpublished")).toBe("warn");
   });
@@ -96,7 +96,7 @@ describe("Unpublish in the Publish dialog", () => {
       .mockResolvedValue({ state: state({ publishedVersion: null, aheadBy: 0, unpublishedAt: "2026-10-27T10:00:00.000Z" }) });
     vi.mocked(api.unpublishWorkflowRelease).mockResolvedValue(unpublished(false, false));
     render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
-    await user.click(await screen.findByRole("button", { name: /Release: v3 live/ }));
+    await user.click(await screen.findByRole("button", { name: /Release: Live: version 3/ }));
     const dialog = await screen.findByRole("dialog", { name: "Publish to production" });
     await user.click(within(dialog).getByRole("button", { name: "Unpublish v3" }));
 
@@ -110,7 +110,7 @@ describe("Unpublish in the Publish dialog", () => {
     expect(api.unpublishWorkflowRelease).toHaveBeenCalledWith("wf-1", { expectedVersion: 3, reason: "Incident" });
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(within(dialog).getByRole("status")).toHaveTextContent(/Unpublished\. Production stops running v3/);
-    expect(await screen.findByRole("button", { name: /Release: v4 · unpublished/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Release: Live: draft/ })).toBeInTheDocument();
   });
 
   it("publishing in the same dialog ends the unpublish notice", async () => {
@@ -128,7 +128,7 @@ describe("Unpublish in the Publish dialog", () => {
     vi.mocked(api.unpublishWorkflowRelease).mockResolvedValue(unpublished(false, false));
     vi.mocked(api.publishWorkflowVersion).mockResolvedValue({ outcome: "published", release: release({ version: 4 }) });
     render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
-    await user.click(await screen.findByRole("button", { name: /Release: v3 live/ }));
+    await user.click(await screen.findByRole("button", { name: /Release: Live: version 3/ }));
     const dialog = await screen.findByRole("dialog", { name: "Publish to production" });
     await user.click(within(dialog).getByRole("button", { name: "Unpublish v3" }));
     await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Unpublish v3" }));

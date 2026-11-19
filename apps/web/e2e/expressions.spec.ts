@@ -142,6 +142,7 @@ test.describe("writing templates", () => {
 
     // Strict templates: the same template fails the node.
     await page.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: /^More settings/ }).click();
     await page.getByRole("menuitemcheckbox", { name: "Strict templates" }).click();
     await save(page);
     const storedWorkflow = (await (await page.request.get(`/api/workflows/${id}`)).json()) as { settings?: { strictTemplates?: boolean } };

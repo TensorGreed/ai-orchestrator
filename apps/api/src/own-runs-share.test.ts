@@ -212,11 +212,13 @@ describe("a person who has a workflow only through a share with them sees only t
     expect(replayed.statusCode, replayed.body).toBe(404);
     const canceled = await call(context, "POST", `/api/executions/${ownerRun}/cancel`, olivia.cookie, {});
     expect(canceled.statusCode, canceled.body).toBe(404);
-    // The editor's "run with this run's data" (pinned outputs, the run's input) reads the source run.
-    const copied = await call(context, "POST", "/api/workflows/wf-team/execute", gus.cookie, { sourceExecutionId: ownerRun });
-    expect(copied.statusCode, copied.body).toBe(404);
-    const own = await call(context, "POST", "/api/workflows/wf-team/execute", gus.cookie, { sourceExecutionId: gusRun });
-    expect(own.statusCode, own.body).toBe(200);
+    // The editor's "run with this run's data" (pinned outputs, the run's input) is for those who may edit the
+    // workflow; a share never gives that, so a share-only builder is refused before any run is read, whoever's it is.
+    for (const source of [ownerRun, gusRun]) {
+      const copied = await call(context, "POST", "/api/workflows/wf-team/execute", gus.cookie, { sourceExecutionId: source });
+      expect(copied.statusCode, copied.body).toBe(403);
+      expect(copied.json<{ refusedOptions: string[] }>().refusedOptions).toEqual(["sourceExecutionId"]);
+    }
     // A finished run cannot be canceled, but the answer is about the run, not about access.
     expect((await call(context, "POST", `/api/executions/${gusRun}/cancel`, gus.cookie, {})).statusCode).not.toBe(404);
   });
