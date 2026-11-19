@@ -84,12 +84,21 @@ test.describe("lists of items", () => {
                 ]
               }
             },
-            { id: "merge", type: "merge_node", name: "All rows", position: { x: 1340, y: 160 }, config: { mode: "collect_loop_passes" } }
+            { id: "merge", type: "merge_node", name: "All rows", position: { x: 1340, y: 160 }, config: { mode: "collect_loop_passes" } },
+            {
+              id: "cheap",
+              type: "set_node",
+              name: "Cheap ones",
+              position: { x: 820, y: 400 },
+              config: { assignments: [{ key: "cheap", valueTemplate: "{{count}}", type: "auto" }, { key: "names", valueTemplate: "{{ items.map(i => i.name) }}", type: "auto" }] }
+            }
           ],
           edges: [
             { id: "e1", source: "start", target: "fetch" },
             { id: "e2", source: "fetch", target: "filter" },
+            // Saved without a handle (as before Filters had two outputs): drawn from Kept, and it still always runs.
             { id: "e3", source: "filter", target: "loop" },
+            { id: "e6", source: "filter", sourceHandle: "filtered", target: "cheap" },
             { id: "e4", source: "loop", target: "body" },
             { id: "e5", source: "body", target: "merge" }
           ]
@@ -101,6 +110,9 @@ test.describe("lists of items", () => {
       await sidebarItem(page, "Editor").click();
       await expect(canvasNode(page, "Pricey only")).toBeVisible();
       await expect(canvasNode(page, "Pricey only")).toContainText("items of first list");
+      await expect(canvasNode(page, "Pricey only")).toContainText("Kept");
+      await expect(canvasNode(page, "Pricey only")).toContainText("Rejected");
+      await expect(page.locator(".react-flow__edge")).toHaveCount(6);
 
       // The Filter's form: items mode with Items from.
       await canvasNode(page, "Pricey only").dblclick();
@@ -125,6 +137,7 @@ test.describe("lists of items", () => {
       await expect(canvasNode(page, "Pricey only").getByTestId("node-run-preview")).toContainText("2 items");
       await expect(canvasNode(page, "Shape row").getByTestId("node-run-preview")).toContainText("2 passes · 2 items");
       await expect(canvasNode(page, "All rows").getByTestId("node-run-preview")).toContainText("2 items");
+      await expect(canvasNode(page, "Cheap ones").getByTestId("node-run-preview")).toContainText("success");
       await page.screenshot({ path: path.join(SHOT_DIR, "after-03-run.png") });
 
       const latest = (await (await page.request.get(`/api/executions?workflowId=${workflowId}&page=1&pageSize=1`)).json()) as { items: Array<{ id: string }> };
@@ -141,6 +154,7 @@ test.describe("lists of items", () => {
       ];
       expect(outputOf("loop")).toMatchObject({ count: 2, collected: rows });
       expect(outputOf("merge")).toEqual({ items: rows, count: 2 });
+      expect(outputOf("cheap")).toEqual({ cheap: 1, names: ["pen"] });
 
       // The body node's Run data says it shows the last pass.
       await canvasNode(page, "Shape row").dblclick();

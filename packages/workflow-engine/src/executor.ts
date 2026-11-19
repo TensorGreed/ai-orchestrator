@@ -164,7 +164,7 @@ import {
   type OutboundGuardConfig
 } from "./outbound-url-guard";
 import { bindCheckedRenderings, evaluateConditionTemplate, renderTemplate, tryParseJson, type TemplatePiece } from "./template";
-import { buildSetOutput, findFirstList, isRecordValue, loopPassResult, loopPassesOf, normalizeItemsFrom, singleInputItem } from "./item-nodes";
+import { buildSetOutput, filterOutputForHandles, findFirstList, isRecordValue, loopPassResult, loopPassesOf, normalizeItemsFrom, singleInputItem } from "./item-nodes";
 import {
   createMcpElicitationHandler,
   createMcpSamplingHandler,
@@ -5103,8 +5103,10 @@ async function executeNodeHandler(
         (matches(scope, { value }) ? kept : rejected).push(value);
       }
       return {
-        // Pass runs when an item matched; Filtered runs when none did. Edges without a handle always run.
-        _branchHandle: kept.length > 0 ? "pass" : "filtered",
+        // Kept (`pass`) runs when an item matched, Rejected (`filtered`) when an item did not: both can run. An empty
+        // list runs neither. Edges without a handle always run.
+        _branchHandle: kept.length > 0 ? "pass" : rejected.length > 0 ? "filtered" : "none",
+        ...(kept.length > 0 && rejected.length > 0 ? { _branchHandleFallback: "filtered" } : {}),
         items: kept,
         count: kept.length,
         rejected,
@@ -9589,6 +9591,23 @@ async function executeWorkflowRun(
     handleMap.set(edge.sourceHandle, targets);
   }
 
+  // The handles each execution edge leaves its source by, per source and target (a Filter's Rejected output passes on
+  // its rejected items).
+  const edgeHandles = new Map<string, Set<string | null>>();
+  for (const edge of workflow.edges) {
+    if (!isExecutionEdge(edge)) continue;
+    const key = `${edge.source}\u0000${edge.target}`;
+    const handles = edgeHandles.get(key) ?? new Set<string | null>();
+    handles.add(edge.sourceHandle ?? null);
+    edgeHandles.set(key, handles);
+  }
+  const parentOutputForEdge = (parentId: string, childId: string): unknown => {
+    const output = nodeOutputs.get(parentId);
+    const parent = graphIndexes.nodeById.get(parentId);
+    if (parent?.type !== "filter_node" || filterModeOf(toRecord(parent.config)) !== "items") return output;
+    return filterOutputForHandles(output, edgeHandles.get(`${parentId}\u0000${childId}`) ?? new Set());
+  };
+
   const applySuccessfulNodeRouting = (node: WorkflowNode, output: unknown) => {
     const outputRecord = toRecord(output);
     const activeBranch = typeof outputRecord._branchHandle === "string" ? outputRecord._branchHandle : undefined;
@@ -9606,6 +9625,13 @@ async function executeWorkflowRun(
       for (const takenHandle of takenHandles) {
         for (const target of handleMap.get(takenHandle) ?? []) {
           takenTargets.add(target);
+        }
+      }
+      if (node.type === "filter_node") {
+        // A Filter's edge saved without a handle (from before it had two outputs) always runs, and so does what it
+        // reaches.
+        for (const edge of workflow.edges) {
+          if (edge.source === node.id && !edge.sourceHandle && isExecutionEdge(edge)) takenTargets.add(edge.target);
         }
       }
       const protectedNodes = descendantCache.getReachableFromRoots(takenTargets);
@@ -10255,7 +10281,7 @@ async function executeWorkflowRun(
     const parentOutputs: Record<string, unknown> = {};
     for (const parentId of parentIds) {
       if (nodeOutputs.has(parentId)) {
-        parentOutputs[parentId] = nodeOutputs.get(parentId);
+        parentOutputs[parentId] = parentOutputForEdge(parentId, node.id);
       }
     }
     const merged = mergeParentOutputs(parentOutputs);
@@ -10395,7 +10421,7 @@ async function executeWorkflowRun(
               }
 
               if (nodeOutputs.has(parentId)) {
-                childParentOutputs[parentId] = nodeOutputs.get(parentId);
+                childParentOutputs[parentId] = parentOutputForEdge(parentId, childNode.id);
               }
             }
 

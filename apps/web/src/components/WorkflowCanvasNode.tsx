@@ -88,7 +88,9 @@ function SourceHandle({
   style,
   position = Position.Right,
   title,
-  noAdd = false
+  noAdd = false,
+  takesUnlabeledEdges = false,
+  addLabel
 }: {
   nodeId: string;
   id?: string;
@@ -98,11 +100,15 @@ function SourceHandle({
   title?: string;
   /** No `+`: a worker agent on a Supervisor's port has no step output. */
   noAdd?: boolean;
+  /** The node's first output: an edge saved without a handle is drawn from it, so it counts as connected. */
+  takesUnlabeledEdges?: boolean;
+  /** The output's name for the `+` (defaults to the handle id). */
+  addLabel?: string;
 }) {
   const insertActions = useContext(CanvasInsertContext);
   const actions = noAdd ? null : insertActions;
   const handle = id ?? null;
-  const connected = actions?.isConnected(nodeId, handle) ?? false;
+  const connected = (actions?.isConnected(nodeId, handle) || (takesUnlabeledEdges && actions?.isConnected(nodeId, null))) ?? false;
   return (
     <>
       <Handle id={id} type="source" position={position} className={className} style={style} title={title} />
@@ -112,7 +118,7 @@ function SourceHandle({
           className={`wf-handle-add nodrag nopan${connected ? " wf-handle-add-connected" : ""}`}
           style={style?.top !== undefined ? { top: style.top } : undefined}
           title="Add a node after this output"
-          aria-label={id ? `Add a node after the ${id} output` : "Add a node after this step"}
+          aria-label={id ? `Add a node after the ${addLabel ?? id} output` : "Add a node after this step"}
           onMouseDown={(event) => event.stopPropagation()}
           onPointerDown={(event) => event.stopPropagation()}
           onDoubleClick={(event) => event.stopPropagation()}
@@ -418,6 +424,39 @@ function StructuralPorts({ nodeId, data }: { nodeId: string; data: EditorNodeDat
               {port.label}
             </span>
             <SourceHandle nodeId={nodeId} id={port.id} className={`wf-handle wf-handle-main${port.className}`} style={{ top: port.top }} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (nodeType === "filter_node") {
+    // Same handle ids in both modes, so switching the mode keeps the edges. An edge saved before these outputs
+    // existed has no handle: it is drawn from Pass and, as before, runs whatever the Filter decides.
+    const items = data.config?.mode === "items";
+    const ports = [
+      { id: "pass", label: items ? "Kept" : "Pass", top: "32%", className: "", title: items ? "Kept: the items that match" : "Pass: the input, when it matches" },
+      {
+        id: "filtered",
+        label: items ? "Rejected" : "Stopped",
+        top: "68%",
+        className: " wf-handle-err",
+        title: items ? "Rejected: the items that do not match" : "Stopped: the input, when it does not match"
+      }
+    ];
+    return (
+      <div className="wf-structural-ports">
+        {ports.map((port, index) => (
+          <div key={port.id} className="wf-structural-port">
+            <span className="port-label">{port.label}</span>
+            <SourceHandle
+              nodeId={nodeId}
+              id={port.id}
+              className={`wf-handle wf-handle-main${port.className}`}
+              style={{ top: port.top }}
+              title={port.title}
+              takesUnlabeledEdges={index === 0}
+              addLabel={port.label}
+            />
           </div>
         ))}
       </div>

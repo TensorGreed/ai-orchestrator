@@ -96,11 +96,23 @@ items, and four nodes work on such lists.
   the node's input, except a path that starts at a template root (`results.<id>.…`, `vars.…`, `webhook.…`) or at a
   run value such as a Loop's item variable. A condition's value can use <span v-pre>`{{item.field}}`</span> and the
   item's fields, which never replace `results`, `vars` and the other roots. Inside a loop body, `item` is the
-  Filter's item: give the Loop another **Item variable** (`product`) to read the loop's item there. The editor draws a Filter with one output,
-  which always runs. In workflow JSON (and in imported workflows), an edge from the `pass` handle runs when at least
-  one item matches and one from the `filtered` handle when none does.
+  Filter's item: give the Loop another **Item variable** (`product`) to read the loop's item there.
 - **Pass or stop** (`mode: "gate"`). The conditions judge the whole input once: the output is the input plus
-  `passed`, and an edge from the `pass` or `filtered` handle runs accordingly. A Filter saved before modes existed (no `mode`) works this way.
+  `passed`. A Filter saved before modes existed (no `mode`) works this way.
+
+The Filter has two outputs, with the same handles in both modes (changing the mode keeps the edges):
+
+| Output (handle) | Keep matching items | Pass or stop |
+|---|---|---|
+| First (`pass`) | **Kept**: runs when at least one item matches, with the Filter's output (`items` holds the matches). | **Pass**: runs when the input matches. |
+| Second (`filtered`) | **Rejected**: runs when at least one item does not match. The next node receives the rejected items as `items` (with `count`, `total` and `items_from`). | **Stopped**: runs when the input does not match, with the input. |
+
+With a list that is empty, neither output runs. An edge saved before the Filter had two outputs has no handle: the
+editor draws it from the first output, and it still runs whatever the Filter decides, as it did before. Reconnect it
+to Pass or Kept to make it follow the Filter. A node such an edge reaches runs even when a skipped output also leads
+to it. Inside a Loop body the outputs do not route: the nodes after both run, so check `passed` or `count` there
+instead. A Filter imported from another builder uses Pass or stop, its kept output
+on Pass and its discarded output on Stopped.
 
 ### Set / Transform
 

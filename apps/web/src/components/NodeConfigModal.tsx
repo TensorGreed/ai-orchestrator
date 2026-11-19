@@ -7650,7 +7650,7 @@ export function NodeInspector({
                 { value: "items", label: "Keep matching items of a list" },
                 { value: "gate", label: "Pass or stop (judge the whole input)" }
               ]}
-              help="Keep matching items: each item of a list is checked, and the output's items holds the ones that match (rejected holds the others). Pass or stop: the whole input is checked once and passed on with passed true or false; a Filter saved before modes existed works this way."
+              help="Keep matching items: each item of a list is checked; the Kept output runs with the matches and the Rejected output with the others. Pass or stop: the whole input is checked once and goes to the Pass or the Stopped output; a Filter saved before modes existed works this way."
             />
             {filterMode === "items" && (
               <>
@@ -7663,7 +7663,8 @@ export function NodeInspector({
                 />
                 <div className="cfg-tip" data-testid="filter-items-tip">
                   A condition's field is read from each item (<code>price</code>, or <code>item.price</code>), and a value can
-                  use <code>{"{{item.field}}"}</code>. The output's <code>items</code> holds the matches and <code>rejected</code> the others.
+                  use <code>{"{{item.field}}"}</code>. The Kept output runs with the matching items (<code>items</code>), and the
+                  Rejected output, when connected, with the others as its <code>items</code>.
                 </div>
               </>
             )}

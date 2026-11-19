@@ -1703,7 +1703,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "filter_node",
     label: "Filter",
     category: "Utility",
-    description: "Keeps the items of a list that match its conditions (Items mode), or judges the whole input and routes to pass or filtered (Pass or stop mode).",
+    description: "Items mode sends the matching items of a list to Kept and the rest to Rejected; Pass or stop mode sends the whole input to Pass or Stopped.",
     configSchema: {
       type: "object",
       properties: {

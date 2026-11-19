@@ -381,7 +381,7 @@ Parse CSV, JSON, or XML strings/base64 into structured data, or read a PDF's tex
 
 ### `filter_node` — Filter
 
-Keeps the items of a list that match its conditions (Items mode), or judges the whole input and routes to pass or filtered (Pass or stop mode).
+Items mode sends the matching items of a list to Kept and the rest to Rejected; Pass or stop mode sends the whole input to Pass or Stopped.
 
 **Config fields**
 

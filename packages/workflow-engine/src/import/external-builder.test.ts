@@ -1369,6 +1369,34 @@ describe("external workflow import — Filter and Set item semantics", () => {
     expect(stopped.nodeResults.find((entry) => entry.nodeId === "stamp")?.status).toBe("skipped");
   });
 
+  it("maps the source Filter's kept and discarded outputs onto Pass and Stopped", async () => {
+    const build = (amount: number) =>
+      convertExternalWorkflow(
+        exportWith(
+          [
+            { name: "Start", type: "n8n-nodes-base.manualTrigger" },
+            { name: "Order", type: "n8n-nodes-base.set", parameters: { assignments: { assignments: [{ name: "amount", value: amount, type: "number" }] } } },
+            {
+              name: "Big",
+              type: "n8n-nodes-base.filter",
+              parameters: { conditions: { combinator: "and", conditions: [{ leftValue: "={{ $json.amount }}", rightValue: 100, operator: { type: "number", operation: "gt" } }] }, options: {} }
+            },
+            { name: "Kept", type: "n8n-nodes-base.noOp" },
+            { name: "Discarded", type: "n8n-nodes-base.noOp" }
+          ],
+          { Start: { main: [[{ node: "Order" }]] }, Order: { main: [[{ node: "Big" }]] }, Big: { main: [[{ node: "Kept" }], [{ node: "Discarded" }]] } }
+        )
+      );
+    const conversion = build(5);
+    const handles = conversion.workflow.edges.filter((edge) => edge.source === "big").map((edge) => [edge.target, edge.sourceHandle]);
+    expect(handles).toEqual(expect.arrayContaining([["kept", "pass"], ["discarded", "filtered"]]));
+    const small = await executeWorkflow({ workflow: conversion.workflow }, executionDependencies());
+    const status = (result: typeof small, id: string) => result.nodeResults.find((entry) => entry.nodeId === id)?.status;
+    expect([status(small, "kept"), status(small, "discarded")]).toEqual(["skipped", "success"]);
+    const big = await executeWorkflow({ workflow: build(500).workflow }, executionDependencies());
+    expect([status(big, "kept"), status(big, "discarded")]).toEqual(["success", "skipped"]);
+  });
+
   it("keeps a value that does not fit its type when the source ignores conversion errors", () => {
     const conversion = convertExternalWorkflow(
       exportWith([

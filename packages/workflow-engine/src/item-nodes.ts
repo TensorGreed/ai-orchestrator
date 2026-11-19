@@ -157,6 +157,16 @@ export function normalizeItemsFrom(value: unknown): string {
 }
 
 /**
+ * What a node connected only to an items-mode Filter's Rejected output (`filtered`) receives: the rejected items as
+ * `items`. Any other edge (Kept, or no handle) receives the Filter's whole output, as does a gate-mode Filter.
+ */
+export function filterOutputForHandles(output: unknown, handles: ReadonlySet<string | null>): unknown {
+  if (!isRecord(output) || !Array.isArray(output.rejected)) return output;
+  if (handles.size === 0 || [...handles].some((handle) => handle !== "filtered")) return output;
+  return { items: output.rejected, count: output.rejected.length, total: output.total, items_from: output.items_from };
+}
+
+/**
  * What a Loop's `results` holds for one pass: the body node's output when the body is one node, else the pass's
  * outputs keyed by body node id.
  */

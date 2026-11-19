@@ -343,6 +343,43 @@ describe("propagation through templates and the DAG", () => {
     expect(labelsOf(result, "loop")).toEqual(L(["untrusted_external"], ["email"]));
   });
 
+  it("a Merge collecting loop passes carries every pass's labels, not only the last pass's", async () => {
+    const wf = workflow(
+      [
+        node("in", "webhook_input"),
+        node("loop", "loop_node", { inputKey: "items", itemVariable: "item" }),
+        set("each", { line: "{{item}}@example.org" }),
+        node("collect", "merge_node", { mode: "collect_loop_passes" }),
+        node("out", "output")
+      ],
+      [{ source: "in", target: "loop" }, { source: "loop", target: "each" }, { source: "each", target: "collect" }, { source: "collect", target: "out" }]
+    );
+    const { guard } = guardDeps(["tracking"]);
+    // Only the first pass holds an email address; the last pass (what `each` reads as after the loop) does not.
+    const result = await executeWorkflow({ workflow: wf, executionId: "t7b", webhookPayload: { items: ["ana.lopez", ""] }, input: { items: ["ana.lopez", ""] } }, deps({ guard }));
+    expect(result.status).toBe("success");
+    expect(labelsOf(result, "each")).toEqual(L(["untrusted_external"]));
+    expect(labelsOf(result, "collect")).toEqual(L(["untrusted_external"], ["email"]));
+  });
+
+  it("a typed Set field records what it reads, as rendering does", async () => {
+    // pin (pinned, so it carries none of the run input's labels) → t (a typed Set field).
+    const typed = (template: string) =>
+      workflow(
+        [set("pin", {}), node("t", "set_node", { assignments: [{ key: "v", valueTemplate: template, type: "auto" }] }), node("out", "output")],
+        [{ source: "pin", target: "t" }, { source: "t", target: "out" }],
+        { pinnedData: { pin: { v: 1 } } }
+      );
+    const { guard } = guardDeps(["tracking"]);
+    const run = (template: string, id: string) =>
+      executeWorkflow({ workflow: typed(template), executionId: id, inputLabels: L(["user"], ["iban"]) as DataLabels, webhookPayload: { user_prompt: "x" } }, deps({ guard }));
+    const none = await run("{{ 1 + 1 }}", "t7c");
+    expect(none.status).toBe("success");
+    expect(labelsOf(none, "t")?.dataClasses ?? []).not.toContain("iban");
+    expect((await run("{{ user_prompt.length }}", "t7d")).nodeResults.find((entry) => entry.nodeId === "t")?.labels?.dataClasses).toContain("iban");
+    expect((await run("{{user_prompt}}", "t7e")).nodeResults.find((entry) => entry.nodeId === "t")?.labels?.dataClasses).toContain("iban");
+  });
+
   it("sub-workflows: the child's trigger takes the caller's input labels, the caller takes the child's output labels", async () => {
     const echo = workflow([node("start", "sub_workflow_trigger"), node("done", "output")], [{ source: "start", target: "done" }], { id: "child-echo", name: "Echo" });
     const pinned = workflow(
